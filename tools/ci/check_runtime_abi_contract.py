@@ -40,6 +40,9 @@ DESKTOP_INPUT_FRAME_HARNESS = Path("apps/stasis/tests/desktop_input_frame_seam.r
 DESKTOP_DISPLAY_METRICS_HARNESS = Path("apps/stasis/tests/desktop_display_metrics_seam.rs")
 GENERATED_MOBILE_AOT_C = Path("runtime/tests/stasis_generated_mobile_integration.c")
 GENERATED_MOBILE_AOT_RUST = Path("apps/stasis/tests/generated_mobile_aot_runtime_seam.rs")
+GENERATED_MOBILE_AOT_FIXTURE = Path(
+    "tests/stasis/seams/generated_mobile_aot_probe.stasis.fixture"
+)
 DESKTOP_RENDER_RECOVERY = Path("apps/stasis/tests/desktop_render_recovery_seam.rs")
 DESKTOP_ERROR_TOAST = Path("apps/stasis/tests/desktop_error_toast_seam.rs")
 DESKTOP_HOT_SWAP_HARNESS = Path("apps/stasis/tests/desktop_hot_swap_generation_seam.rs")
@@ -76,7 +79,7 @@ RENDER_DOWNSTREAM = (
     PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER, JNI, NATIVE_HOST,
     DESKTOP_MANIFEST_FIXTURE, DESKTOP_MANIFEST_HARNESS,
     DESKTOP_INPUT_FRAME_HARNESS, DESKTOP_DISPLAY_METRICS_HARNESS,
-    GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST,
+    GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST, GENERATED_MOBILE_AOT_FIXTURE,
     DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, DESKTOP_HOT_SWAP_HARNESS,
     MOBILE_PACKAGED_ASSETS_HARNESS, MOBILE_PACKAGED_ASSETS_NATIVE,
     PLAY_ERROR_TOASTS,
@@ -90,7 +93,8 @@ REQUIRED = (
     WORKSHOP, JNI, NATIVE_HOST, DESKTOP_MANIFEST_FIXTURE,
     DESKTOP_MANIFEST_HARNESS, DESKTOP_INPUT_FRAME_HARNESS,
     DESKTOP_DISPLAY_METRICS_HARNESS, GENERATED_MOBILE_AOT_C,
-    GENERATED_MOBILE_AOT_RUST, DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST,
+    GENERATED_MOBILE_AOT_RUST, GENERATED_MOBILE_AOT_FIXTURE,
+    DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST,
     DESKTOP_HOT_SWAP_HARNESS, MOBILE_PACKAGED_ASSETS_HARNESS,
     MOBILE_PACKAGED_ASSETS_NATIVE, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
@@ -848,9 +852,17 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             "PongHost.writer.reserve(4,",
             "PongHost.writer.finalize(4);",
         ),
+        GENERATED_MOBILE_AOT_FIXTURE: (
+            'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
+            "begin_frame();",
+            "clear(",
+            "fill_rect(",
+            "draw_text(",
+            "end_frame();",
+        ),
     }
     for fixture, required_calls in public_render_fixtures.items():
-        text = sources[fixture]
+        text = without_c_comments(sources[fixture])
         checks += 1
         if "stdlib/graphics.stasis\";" not in text or any(call not in text for call in required_calls):
             failures.append(Mismatch(
