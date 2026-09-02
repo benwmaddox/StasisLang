@@ -1096,11 +1096,13 @@ fn inspect_reports_compiler_state_memory_and_capacity_projection() {
     );
     fs::write(
         project.join("src/main.stasis"),
-        "import \"state.stasis\";\nfunction main(): i32 { return state.score; }\n",
+        "import \"../tests/stasis/seams/state.stasis\";\nfunction main(): i32 { return state.score; }\n",
     )
     .expect("write memory entry fixture");
+    fs::create_dir_all(project.join("tests/stasis/seams"))
+        .expect("create explicit graphics seam directory");
     fs::write(
-        project.join("src/state.stasis"),
+        project.join("tests/stasis/seams/state.stasis"),
         "struct Enemy { hp: i32; speed: f64; }\n\
          struct GameState { score: i32; enemies: Enemy[4]; }\n\
          global state: GameState;\n\
