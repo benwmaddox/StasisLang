@@ -7456,9 +7456,18 @@ mod tests {
                     .imported_symbols()
                     .contains("stasis_jit_text_run_replace_from")
                     && layout["byte_backed"].as_bool() == Some(true))));
+        let retained_dynamic_text_paths = release_memory
+            .iter()
+            .filter(|(_, layout)| layout["byte_backed"].as_bool() == Some(true))
+            .map(|(path, _)| path.as_str())
+            .collect::<BTreeSet<_>>();
         let release_globals = release["globals"].as_object().expect("release globals");
         assert!(release_globals.keys().all(|path| {
-            WEB_HOST_GLOBALS.contains(&path.as_str()) || retained_view_paths.contains(path.as_str())
+            WEB_HOST_GLOBALS.contains(&path.as_str())
+                || retained_view_paths.contains(path.as_str())
+                || path
+                    .strip_suffix(".length")
+                    .is_some_and(|collection| retained_dynamic_text_paths.contains(collection))
         }));
         for path in retained_view_paths {
             assert!(release_memory.contains_key(path) || release_globals.contains_key(path));
