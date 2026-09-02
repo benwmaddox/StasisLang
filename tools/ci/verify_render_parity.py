@@ -150,11 +150,80 @@ def read_capture(path: Path) -> tuple[int, int, bytes]:
     raise ValueError("capture must use .bmp or .png")
 
 
+def _function_body(source: str, name: str) -> str:
+    declaration = re.search(rf"\bfunction\s+{re.escape(name)}\s*\(", source)
+    if declaration is None:
+        raise ValueError(f"fixture is missing function {name}")
+    opening = source.find("{", declaration.end())
+    if opening < 0:
+        raise ValueError(f"fixture function {name} has no body")
+
+    depth = 0
+    index = opening
+    quote = False
+    escaped = False
+    line_comment = False
+    block_comment = False
+    while index < len(source):
+        character = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if line_comment:
+            if character == "\n":
+                line_comment = False
+        elif block_comment:
+            if character == "*" and following == "/":
+                block_comment = False
+                index += 1
+        elif quote:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quote = False
+        elif character == "/" and following == "/":
+            line_comment = True
+            index += 1
+        elif character == "/" and following == "*":
+            block_comment = True
+            index += 1
+        elif character == '"':
+            quote = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening + 1 : index]
+        index += 1
+    raise ValueError(f"fixture function {name} has an unterminated body")
+
+
+def _parity_command_counts(frame_source: str) -> dict[str, int]:
+    body = _function_body(frame_source, "build_parity_frame")
+
+    def count(pattern: str) -> int:
+        return len(re.findall(pattern, body))
+
+    return {
+        "clear": count(r"\bclear\s*\("),
+        "lines": count(r"\bdraw_line\s*\("),
+        "filled_rectangles": count(r"\bfill_rect\s*\("),
+        "sprites": count(r"\bparity_write_sprite\s*\("),
+        "direct_text": count(r"\bdraw_text\s*\("),
+        "cached_text": count(r"\bcached_label\s*\.\s*draw\s*\("),
+        "present": count(r"\bend_frame\s*\("),
+    }
+
+
 def _atlas_sprite_handles(frame_source: str) -> tuple[str, ...]:
-    return tuple(re.findall(
-        r"parity_add_sprite\(cmd_i32,\s*([A-Za-z_][A-Za-z0-9_]*)\s*,",
-        frame_source,
-    ))
+    body = _function_body(frame_source, "build_parity_frame")
+    return tuple(
+        re.findall(
+            r"\bparity_write_sprite\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,",
+            body,
+        )
+    )
 
 
 def validate_fixture(manifest_path: Path) -> dict:
@@ -166,15 +235,7 @@ def validate_fixture(manifest_path: Path) -> dict:
         raise ValueError(f"render parity fixture is missing: {fixture}")
     source = fixture.read_text(encoding="utf-8")
     frame_source = (fixture.parent / "frame.stasis").read_text(encoding="utf-8")
-    actual_commands = {
-        "clear": int("PARITY_GFX_FLAG_CLEAR + PARITY_GFX_FLAG_PRESENT" in frame_source),
-        "lines": 2 if "cmd_i32[3] = 2;" in frame_source else 0,
-        "filled_rectangles": 1 if "cmd_i32[24] = 1;" in frame_source else 0,
-        "sprites": frame_source.count("\n    parity_add_sprite("),
-        "direct_text": frame_source.count("\n    parity_add_direct_label("),
-        "cached_text": frame_source.count("\n    parity_add_cached_label("),
-        "present": int("PARITY_GFX_FLAG_CLEAR + PARITY_GFX_FLAG_PRESENT" in frame_source),
-    }
+    actual_commands = _parity_command_counts(frame_source)
     for command, actual in actual_commands.items():
         expected = int(manifest["required_commands"][command])
         if actual != expected:
@@ -194,8 +255,13 @@ def validate_fixture(manifest_path: Path) -> dict:
     if not trace_fixture.is_file():
         raise ValueError(f"render parity trace fixture is missing: {trace_fixture}")
     trace_source = trace_fixture.read_text(encoding="utf-8")
-    if "native_render_trace" not in trace_source or "build_parity_frame(" not in trace_source:
-        raise ValueError("trace fixture does not use the canonical parity frame builder")
+    trace_markers = (
+        "native_render_trace",
+        "cmd_i32[1] = 7;",
+        "native_render_trace(cmd_i32, 67888, cmd_f32, 146564, cmd_u8, 65536)",
+    )
+    if any(marker not in trace_source for marker in trace_markers):
+        raise ValueError("trace fixture does not use the current schema-7 renderer ABI seam")
     if "command_trace" in manifest:
         raise ValueError("render parity manifest must not freeze a current-ABI command trace")
 

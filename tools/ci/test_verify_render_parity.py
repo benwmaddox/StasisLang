@@ -8,6 +8,8 @@ from tools.ci.verify_render_parity import (
     ATLAS_SPRITE_HANDLES,
     DEFAULT_MANIFEST,
     _atlas_sprite_handles,
+    _function_body,
+    _parity_command_counts,
     read_capture,
     validate_fixture,
     verify_capture,
@@ -61,8 +63,49 @@ class RenderParityGateTest(unittest.TestCase):
     def test_fixture_uses_only_canonical_resolved_atlas_resources(self):
         frame = (DEFAULT_MANIFEST.parent / "frame.stasis").read_text(encoding="utf-8")
         self.assertEqual(_atlas_sprite_handles(frame), ATLAS_SPRITE_HANDLES)
-        mutated = frame.replace("canvas_sprite, 0, 96", "missing_sprite, 0, 96", 1)
+        mutated = frame.replace(
+            "parity_write_sprite(canvas_sprite, 0.0",
+            "parity_write_sprite(missing_sprite, 0.0",
+            1,
+        )
         self.assertNotEqual(_atlas_sprite_handles(mutated), ATLAS_SPRITE_HANDLES)
+
+    def test_builder_body_scopes_public_command_counts_and_handles(self):
+        source = '''
+function build_parity_frame(canvas_sprite: i32, cached_label: TextRun): void {
+    clear(0.0, 0.0, 0.0, 1.0);
+    if (true) { parity_write_sprite(canvas_sprite, 0.0, 0.0, 1.0, 1.0, 0, 255); }
+    fill_rect(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    draw_line(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    draw_text(1, "brace } text", 0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
+    cached_label.draw(0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
+    end_frame();
+}
+function append_marker(missing_sprite: i32): void {
+    fill_rect(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    parity_write_sprite(missing_sprite, 0.0, 0.0, 1.0, 1.0, 0, 255);
+}
+'''
+        self.assertEqual(
+            _parity_command_counts(source),
+            {
+                "clear": 1,
+                "lines": 1,
+                "filled_rectangles": 1,
+                "sprites": 1,
+                "direct_text": 1,
+                "cached_text": 1,
+                "present": 1,
+            },
+        )
+        self.assertEqual(_atlas_sprite_handles(source), ("canvas_sprite",))
+        self.assertIn("brace } text", _function_body(source, "build_parity_frame"))
+
+    def test_builder_body_reports_missing_and_malformed_functions(self):
+        with self.assertRaisesRegex(ValueError, "missing function build_parity_frame"):
+            _function_body("function other(): void {}", "build_parity_frame")
+        with self.assertRaisesRegex(ValueError, "unterminated body"):
+            _function_body("function build_parity_frame(): void {", "build_parity_frame")
 
     def test_bmp_reader_and_exact_capture_hash(self):
         with tempfile.TemporaryDirectory() as directory:
