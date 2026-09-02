@@ -266,7 +266,7 @@ function gfx_cmd_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a:
 
 // Reserve one unpublished semantic sprite run. Returns an opaque frame-local
 // token, or zero when any required capacity is unavailable.
-function gfx_cmd_sprite_run_reserve(max_count: i32, clip: i32, material: i32, blend: i32, filter: i32, pass: i32, flags: i32): i32 {
+function @effects(graphics) gfx_cmd_sprite_run_reserve(max_count: i32, clip: i32, material: i32, blend: i32, filter: i32, pass: i32, flags: i32): i32 {
     let start: i32 = gfx_cmd_i32[GFX_I_SPRITE_COUNT];
     let run: i32 = gfx_cmd_i32[GFX_I_SPRITE_RUN_COUNT];
     let order: i32 = gfx_cmd_i32[GFX_I_ORDER_COUNT];
@@ -373,7 +373,7 @@ function gfx_cmd_sprite_run_write(
     return true;
 }
 
-function gfx_cmd_sprite_run_finalize(token: i32, actual_count: i32): bool {
+function @effects(graphics) gfx_cmd_sprite_run_finalize(token: i32, actual_count: i32): bool {
     if (token <= 0 || token != gfx_sprite_writer_token || actual_count < 0 || actual_count > gfx_sprite_writer_written) {
         return false;
     }
@@ -404,7 +404,7 @@ function gfx_cmd_sprite_run_finalize(token: i32, actual_count: i32): bool {
     return true;
 }
 
-function gfx_cmd_sprite_run_cancel(token: i32): bool {
+function @effects(graphics) gfx_cmd_sprite_run_cancel(token: i32): bool {
     if (token <= 0 || token != gfx_sprite_writer_token) {
         return false;
     }
