@@ -406,6 +406,18 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return !pendingSpriteReleases.isEmpty();
     }
 
+    synchronized int rendererGeneration() {
+        return resourceLifecycle.rendererGeneration();
+    }
+
+    synchronized int surfaceGeneration() {
+        return resourceLifecycle.surfaceGeneration();
+    }
+
+    synchronized boolean resourcesReady() {
+        return resourceLifecycle.canPresent();
+    }
+
     synchronized boolean cancelPendingSpriteReleases(String message) {
         if (message == null || message.isEmpty()) return false;
         try {

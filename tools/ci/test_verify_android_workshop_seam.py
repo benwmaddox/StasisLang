@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 
 try:
-    from .verify_android_workshop_seam import SeamError, _read_json, verify_log
+    from .verify_android_workshop_seam import SeamError, _read_json, verify_files, verify_log
 except ImportError:
-    from verify_android_workshop_seam import SeamError, _read_json, verify_log
+    from verify_android_workshop_seam import SeamError, _read_json, verify_files, verify_log
 
 
 MANIFEST = {"state_checksum": 2500, "render_contract_version": 7}
@@ -57,6 +57,92 @@ Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-0
 """
 # Keep the fixture's IT-031 case evidence in separate bounded log records, as
 # the Android logcat line limit cannot carry five duplicated full cases.
+def _it029_case(phase, sequence, root, text_hash, capture_hash, generation,
+                stale_rejections, uploads):
+    resources = {
+        "project_root": root,
+        "surface_generation": generation,
+        "renderer_generation": generation,
+        "lifecycle_surface_generation": generation + 1,
+        "lifecycle_renderer_generation": generation,
+        "resources_ready": True,
+        "sprite_handles": [101, 102, 103],
+        "identities": [
+            "sprite:101:" + root + ":sprite-hash",
+            "font:201:" + root + ":font-hash:24",
+            "cached_text:301:" + root + ":" + text_hash,
+            "text:201:" + root + ":" + text_hash,
+        ],
+        "project_switches": sequence - 1,
+        "stale_generation_rejections": stale_rejections,
+        "restore_uploads": uploads,
+        "duplicate_restore_uploads": 0,
+        "atlas_pages": 1,
+        "atlas_live_regions": 3,
+        "text_textures": 2,
+        "font_entries": 1,
+        "maximum_atlas_pages": 1,
+        "maximum_live_regions": 3,
+        "maximum_text_textures": 2,
+        "maximum_font_entries": 1,
+    }
+    return {
+        "schema": "stasis.workshop_resource_scope.v1",
+        "test_id": "IT-029",
+        "event": "case",
+        "status": "passed",
+        "phase": phase,
+        "sequence": sequence,
+        "project_root": root,
+        "frame_token": 83 + sequence,
+        "gles_presented": True,
+        "sprite_handles": [101, 102, 103],
+        "font_handles": [201, 201],
+        "cached_text_handles": [301],
+        "direct_text_sha256": text_hash,
+        "capture_path": "/sdcard/Android/data/com.stasislang.workshop/files/it029/"
+                        + phase + ".png",
+        "capture_sha256": capture_hash,
+        "resources": resources,
+        "java_only": False,
+        "fallback": 0,
+        "stub": 0,
+    }
+
+
+_alpha_root = "/data/user/0/com.stasislang.workshop/files/workshop_projects/it029-alpha"
+_beta_root = "/data/user/0/com.stasislang.workshop/files/workshop_projects/it029-beta"
+_it029_cases = [
+    _it029_case("project_a_first", 1, _alpha_root, "1" * 64, "a" * 64, 1, 0, 4),
+    _it029_case("project_b_before_recreation", 2, _beta_root, "2" * 64, "b" * 64, 1, 0, 8),
+    _it029_case("project_b_after_recreation", 3, _beta_root, "2" * 64, "b" * 64, 2, 6, 5),
+    _it029_case("project_a_return", 4, _alpha_root, "1" * 64, "a" * 64, 2, 6, 10),
+]
+_it029_summary = {
+    "schema": "stasis.workshop_resource_scope.v1",
+    "test_id": "IT-029",
+    "event": "resource_scope",
+    "status": "passed",
+    "ordered": True,
+    "same_handles": True,
+    "distinct_projects": True,
+    "distinct_assets": True,
+    "surface_recreated": True,
+    "restore_once": True,
+    "bounded": True,
+    "cases": _it029_cases,
+    "captures": [case["capture_path"] for case in _it029_cases],
+    "cleanup": {"status": "Restored", "frame_status": "passed", "frame_token": 90},
+}
+_it029_lines = "\n".join(
+    "Stasis Workshop IT-029 case: " + json.dumps(case, separators=(",", ":"))
+    for case in _it029_cases
+) + "\nStasis Workshop IT-029: " + json.dumps(_it029_summary, separators=(",", ":"))
+_first_it031 = next(line for line in GOOD.splitlines()
+                    if line.startswith("Stasis Workshop IT-031: "))
+GOOD = GOOD.replace(_first_it031, _it029_lines + "\n" + _first_it031, 1)
+
+
 _full_it031_line = next(line for line in GOOD.splitlines()
                         if line.startswith("Stasis Workshop IT-031: "))
 _full_it031_marker = json.loads(_full_it031_line.split(": ", 1)[1])
@@ -338,6 +424,75 @@ class WorkshopSeamTests(unittest.TestCase):
         self.assertEqual(result["compile_functions"], 7)
         self.assertEqual(result["presented_frames"], 30)
         self.assertEqual(result["it028"]["test_id"], "IT-028")
+        self.assertEqual(result["it029"]["test_id"], "IT-029")
+
+    def test_rejects_missing_or_reordered_it029_evidence(self):
+        summary = next(line for line in GOOD.splitlines()
+                       if line.startswith("Stasis Workshop IT-029: "))
+        with self.assertRaisesRegex(SeamError, "IT-029"):
+            verify_log(GOOD.replace(summary + "\n", "", 1), MANIFEST)
+        cases = [line for line in GOOD.splitlines()
+                 if line.startswith("Stasis Workshop IT-029 case: ")]
+        swapped = GOOD.replace(cases[0] + "\n" + cases[1],
+                               cases[1] + "\n" + cases[0], 1)
+        with self.assertRaisesRegex(SeamError, "reordered"):
+            verify_log(swapped, MANIFEST)
+
+    def test_rejects_it029_cross_project_identity_reuse(self):
+        with self.assertRaisesRegex(SeamError, "identity was reused"):
+            verify_log(GOOD.replace('"capture_sha256":"b' + 'b' * 63 + '"',
+                                    '"capture_sha256":"a' + 'a' * 63 + '"'), MANIFEST)
+
+    def test_rejects_it029_stale_generation_or_duplicate_restore(self):
+        stale = GOOD.replace('"stale_generation_rejections":6',
+                             '"stale_generation_rejections":0')
+        with self.assertRaisesRegex(SeamError, "stale generation"):
+            verify_log(stale, MANIFEST)
+        duplicate = GOOD.replace('"duplicate_restore_uploads":0',
+                                 '"duplicate_restore_uploads":1')
+        with self.assertRaisesRegex(SeamError, "stale generation"):
+            verify_log(duplicate, MANIFEST)
+
+    def test_rejects_it029_unbounded_resources_or_reused_capture_path(self):
+        with self.assertRaisesRegex(SeamError, "unbounded"):
+            verify_log(GOOD.replace('"maximum_atlas_pages":1',
+                                    '"maximum_atlas_pages":3'), MANIFEST)
+        reused = GOOD.replace("project_b_before_recreation.png",
+                              "project_a_first.png")
+        with self.assertRaisesRegex(SeamError, "capture artifacts"):
+            verify_log(reused, MANIFEST)
+
+    def test_verify_files_binds_each_it029_png_to_its_case_hash(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            alpha_hash = hashlib.sha256(b"alpha-png").hexdigest()
+            beta_hash = hashlib.sha256(b"beta-png").hexdigest()
+            log = GOOD.replace("a" * 64, alpha_hash).replace("b" * 64, beta_hash)
+            log_path = root / "log.txt"
+            log_path.write_text(log, encoding="utf-8")
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps(MANIFEST), encoding="utf-8")
+            metadata = root / "metadata.json"
+            metadata.write_text('{"git_revision":"abc"}', encoding="utf-8")
+            capture = root / "capture.png"
+            apk = root / "app.apk"
+            capture.write_bytes(b"stable")
+            apk.write_bytes(b"apk")
+            it029 = []
+            for index, data in enumerate(
+                    (b"alpha-png", b"beta-png", b"beta-png", b"alpha-png")):
+                path = root / f"it029-{index}.png"
+                path.write_bytes(data)
+                it029.append(path)
+            result = verify_files(log_path, capture, manifest, apk, metadata,
+                                  root / "evidence.json", it029)
+            self.assertEqual(4, len(result["it029_capture_artifacts"]))
+
+            it029[2].write_bytes(b"wrong")
+            with self.assertRaisesRegex(SeamError, "capture hash"):
+                verify_files(log_path, capture, manifest, apk, metadata,
+                             root / "evidence.json", it029)
 
     def test_count30_edge_uses_it031_boundary_after_count1_predecessor(self):
         presentations = [

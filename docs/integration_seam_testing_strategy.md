@@ -251,6 +251,15 @@ in Maddox Tasks as Backlog children of the integration-test program.
 | IT-029 | 2 | Switch between two projects with colliding resource handles, then recreate the surface and verify resources remain project- and generation-scoped. | Resource identities, generations, captures | Emulator |
 | IT-030 | 2 | Run a real `.test.stasis` file through Java -> JNI -> Rust test runner after a source edit and verify pass/fail details and rollback behavior. | Structured test result and source checksum | Emulator |
 | IT-031 | 1 | Trigger parse, extern-resolution, runtime, render-schema, and resource errors and verify each crosses Rust/C/JNI/Java without losing its stage and detail. | UI diagnostic equal to structured native cause | Emulator |
+
+IT-029 runs in the Workshop acceptance build between IT-028 and IT-031. It creates
+two registered render-parity projects whose sprite, font, and text handles collide,
+but whose canonical roots, sprite bytes, and direct/cached text differ. The lane
+captures project A, project B, project B after a real EGL context recreation, and
+project A after switching back. `stasis.workshop_resource_scope.v1` binds each PNG
+hash to the native frame handles, exact resolver identities, renderer generation,
+stale-generation rejection count, restore uploads, and bounded atlas/text caches.
+Numeric GLES texture names are deliberately excluded because drivers may reuse them.
 | IT-032 | 3 | Run 300 Workshop frames while compiling edits and recreating the surface; prove bounded buffers/resources and no stale pointers or generation mixing. | Peak counts, generation/trace log, no crash | Device |
 
 ## Implementation order
