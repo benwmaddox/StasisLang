@@ -1,0 +1,11 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "IT-024",
+  "entry_failure": {
+    "entry": "tick",
+    "code": 42,
+    "main_calls": 1,
+    "tick_calls": 1,
+    "render_calls": 0
+  }
+}

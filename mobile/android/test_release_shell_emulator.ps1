@@ -81,6 +81,21 @@ $seams = @(
         TestId = "IT-023"
         Project = "samples/android_storage_seam"
         Output = "android_storage_persistence"
+    },
+    @{
+        TestId = "IT-024"
+        Project = "samples/android_lifecycle_failure_seam/main"
+        Output = "android_entry_failures/main"
+    },
+    @{
+        TestId = "IT-024"
+        Project = "samples/android_lifecycle_failure_seam/tick"
+        Output = "android_entry_failures/tick"
+    },
+    @{
+        TestId = "IT-024"
+        Project = "samples/android_lifecycle_failure_seam/render"
+        Output = "android_entry_failures/render"
     }
 )
 
@@ -97,6 +112,8 @@ $selectedSeams = if ($TestId) {
 foreach ($seam in $selectedSeams) {
     $seamTimeout = if ($seam.TestId -eq "IT-022") {
         900
+    } elseif ($seam.TestId -eq "IT-024") {
+        360
     } else {
         $PerSeamTimeoutSeconds
     }

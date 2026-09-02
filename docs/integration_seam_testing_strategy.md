@@ -238,7 +238,7 @@ in Maddox Tasks as Backlog children of the integration-test program.
 | IT-021 | 2 | Package and load real sprite/font/text/audio assets in the release shell. | Manifest identity, render regions, offline/queued audio evidence | Emulator |
 | IT-022 | 2 | Build controlled packages with missing, tampered, traversal, duplicate, oversized, and malformed-manifest assets; reject before game initialization and prove a valid package recovers afterward. | Stable code/path agreement between Java/native diagnostics, no partial staging, bounded process | Emulator |
 | IT-023 | 2 | Write a Stasis preference through the Android platform store, kill/relaunch the process, and read it through AOT. | Persisted value and scoped storage path | Emulator |
-| IT-024 | 2 | Return non-zero from each mobile lifecycle entry and verify the shell stops cleanly and surfaces the exact entry/result. | Runtime error and absence of crash loop | Emulator |
+| IT-024 | 2 | Return distinct non-zero codes from generated-AOT main, tick, and render variants; verify exact entry/code propagation and stop ordering. | Native log plus Java accessibility overlay, exact call counts, zero submit/present, stable PID, no fatal evidence | Emulator |
 
 ### Android Workshop JNI/JIT preview
 

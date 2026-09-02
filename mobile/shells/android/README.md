@@ -56,7 +56,13 @@ The generated shell also supports an opt-in integration-test launch extra,
 `stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for
 initialization, the first frame, stable frame 30, and fixture-owned probe
 sequence changes; ordinary app launches do not compile or enable the marker
-hooks. CI runs IT-017 through IT-023 on a hosted API 35 x86_64 emulator. The same driver can be
+hooks. CI runs IT-017 through IT-024 on a hosted API 35 x86_64 emulator. IT-024
+packages separate main, tick, and render failures, requires the exact entry and
+code in the native log and Java accessibility overlay, verifies zero submitted
+or presented frames, and holds the original process alive on the error surface.
+The shared mobile runtime ABI is version 2 because shells can now read both the
+last entry identity and its exact signed result before shutdown clears runtime state.
+The same driver can be
 run against an ARM64 device with the default target, or an x86_64 emulator with
 `-Target android-x86_64`:
 

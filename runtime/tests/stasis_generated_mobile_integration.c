@@ -343,6 +343,7 @@ int main(void) {
 
     CHECK(stasis_mobile_runtime_is_initialized() == 0);
     CHECK(stasis_mobile_runtime_last_entry_result() == 0);
+    CHECK(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_NONE);
     CHECK(shutdowns == 1);
     reset_frame_observations();
     CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
@@ -357,6 +358,7 @@ int main(void) {
     CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
     CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
     CHECK(stasis_mobile_runtime_last_entry_result() == 22);
+    CHECK(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_TICK);
     CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 12);
     CHECK(submitted_frames == 0);
     stasis_mobile_runtime_shutdown();
@@ -366,6 +368,7 @@ int main(void) {
     CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
     CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
     CHECK(stasis_mobile_runtime_last_entry_result() == 33);
+    CHECK(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_RENDER);
     CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 123);
     CHECK(submitted_frames == 0);
     stasis_mobile_runtime_shutdown();
@@ -374,6 +377,7 @@ int main(void) {
     reset_frame_observations();
     CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
     CHECK(stasis_mobile_runtime_last_entry_result() == 11);
+    CHECK(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_MAIN);
     CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 1);
     CHECK(submitted_frames == 0);
     stasis_mobile_runtime_shutdown();

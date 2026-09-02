@@ -260,22 +260,31 @@ static void report_runtime_status(const char *stage, int status) {
     stasis_host_report_runtime_error(message);
 }
 
-static void stasis_mobile_wait_for_asset_rejection_quit(void) {
+static void stasis_mobile_wait_for_error_surface_quit(void) {
 #if defined(__ANDROID__)
     SDL_Event event;
     if (!SDL_InitSubSystem(SDL_INIT_EVENTS) && !SDL_Init(SDL_INIT_EVENTS)) {
         stasis_pregraphics_info_log(
-            "Stasis asset rejection could not initialize events: %s", SDL_GetError()
+            "Stasis error surface could not initialize events: %s", SDL_GetError()
         );
         return;
     }
-    stasis_pregraphics_info_log("Stasis asset rejection waiting for quit");
+    stasis_pregraphics_info_log("Stasis error surface waiting for quit");
     while (SDL_WaitEvent(&event)) {
         if (event.type == SDL_EVENT_QUIT) {
             break;
         }
     }
 #endif
+}
+
+static const char *mobile_entry_name(int32_t entry) {
+    switch (entry) {
+        case STASIS_MOBILE_RUNTIME_ENTRY_MAIN: return "main";
+        case STASIS_MOBILE_RUNTIME_ENTRY_TICK: return "tick";
+        case STASIS_MOBILE_RUNTIME_ENTRY_RENDER: return "render";
+        default: return "unknown";
+    }
 }
 
 #if defined(STASIS_ENABLE_SEAM_TESTS)
@@ -311,6 +320,32 @@ static void log_asset_rejection_marker(const char *test_id, const char *diagnost
         "\"asset_error\":\"%s\"}",
         test_id,
         escaped
+    );
+}
+
+static void log_entry_failure_marker(
+    const char *test_id,
+    const char *entry,
+    int32_t code
+) {
+    int32_t render[7] = {0};
+    int has_render = stasis_test_get_render_submission_state(render, 7);
+    stasis_pregraphics_info_log(
+        "Stasis seam: {\"schema\":\"stasis.seam_test.v1\","
+        "\"test_id\":\"%s\",\"event\":\"entry_failure\",\"frame\":0,"
+        "\"entry\":\"%s\",\"code\":%d,\"main_calls\":%d,"
+        "\"tick_calls\":%d,\"render_calls\":%d,\"accepted\":%d,"
+        "\"rejected\":%d,\"presented\":%d,\"validation\":%d}",
+        test_id,
+        entry,
+        code,
+        seam_i32("seam_main_calls"),
+        seam_i32("seam_tick_calls"),
+        seam_i32("seam_render_calls"),
+        has_render ? render[0] : 0,
+        has_render ? render[1] : 0,
+        has_render ? render[2] : 0,
+        has_render ? render[3] : 0
     );
 }
 #endif
@@ -369,7 +404,7 @@ int SDL_main(int argc, char **argv) {
             log_asset_rejection_marker(seam_test_id, asset_error);
         }
 #endif
-        stasis_mobile_wait_for_asset_rejection_quit();
+        stasis_mobile_wait_for_error_surface_quit();
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
     SDL_Log(
@@ -394,8 +429,10 @@ int SDL_main(int argc, char **argv) {
 #endif
     int status = stasis_mobile_runtime_initialize(&config, &game);
     if (status != STASIS_MOBILE_RUNTIME_OK) {
-        report_runtime_status("Stasis mobile initialization", status);
-        SDL_Log("Stasis mobile initialization stopped with status %d", status);
+        if (stasis_mobile_runtime_last_entry_result() == 0) {
+            report_runtime_status("Stasis mobile initialization", status);
+            SDL_Log("Stasis mobile initialization stopped with status %d", status);
+        }
     } else {
 #if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
         stasis_mobile_network_present_join_url();
@@ -454,10 +491,30 @@ int SDL_main(int argc, char **argv) {
     }
     SDL_Log("Stasis mobile loop stopped with status %d", status);
     int32_t game_result = stasis_mobile_runtime_last_entry_result();
+    int32_t game_entry = stasis_mobile_runtime_last_entry();
+    if (game_result != 0) {
+        const char *entry_name = mobile_entry_name(game_entry);
+        char message[256];
+        snprintf(
+            message,
+            sizeof(message),
+            "Stasis %s entry failed with code %d",
+            entry_name,
+            game_result
+        );
+        stasis_host_report_runtime_error(message);
+        stasis_pregraphics_info_log("%s", message);
+#if defined(STASIS_ENABLE_SEAM_TESTS)
+        if (seam_test_id != NULL && strcmp(seam_test_id, "IT-024") == 0) {
+            log_entry_failure_marker(seam_test_id, entry_name, game_result);
+        }
+#endif
+    }
     stasis_mobile_runtime_shutdown();
     if (game_result != 0) {
-        report_runtime_status("Stasis game entry", game_result);
-        SDL_Log("Stasis game entry requested stop with code %d", game_result);
+#if defined(__ANDROID__)
+        stasis_mobile_wait_for_error_surface_quit();
+#endif
         return game_result;
     }
     if (status != STASIS_MOBILE_RUNTIME_STOP_REQUESTED) {

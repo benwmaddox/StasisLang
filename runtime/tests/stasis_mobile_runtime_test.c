@@ -474,6 +474,7 @@ static void test_stops_on_nonzero_game_entry_results(void) {
     main_result = 7;
     assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
         STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_MAIN);
     assert(stasis_mobile_runtime_last_entry_result() == 7);
     assert(tick_calls == 0 && render_calls == 0);
     stasis_mobile_runtime_shutdown();
@@ -483,6 +484,7 @@ static void test_stops_on_nonzero_game_entry_results(void) {
     assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
         STASIS_MOBILE_RUNTIME_OK);
     assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_TICK);
     assert(stasis_mobile_runtime_last_entry_result() == 8);
     assert(tick_calls == 1 && render_calls == 0);
     assert(begin_frame_calls == 0 && end_frame_calls == 0 && gfx_submit_calls == 0);
@@ -493,6 +495,7 @@ static void test_stops_on_nonzero_game_entry_results(void) {
     assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
         STASIS_MOBILE_RUNTIME_OK);
     assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_RENDER);
     assert(stasis_mobile_runtime_last_entry_result() == 9);
     assert(tick_calls == 1 && render_calls == 1);
     assert(begin_frame_calls == 0 && end_frame_calls == 0 && gfx_submit_calls == 0);

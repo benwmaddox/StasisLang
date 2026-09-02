@@ -9129,6 +9129,8 @@ mod tests {
             .expect("read shared mobile main")
             .replace("\r\n", "\n");
         assert!(mobile_main.contains("stasis_mobile_runtime_last_entry_result"));
+        assert!(mobile_main.contains("stasis_mobile_runtime_last_entry"));
+        assert!(mobile_main.contains("entry_failure"));
         assert!(mobile_main.contains("Stasis seam:"));
         assert!(mobile_main.contains("seam_state_checksum"));
         assert!(mobile_main.contains("resource_state"));
@@ -9218,6 +9220,8 @@ mod tests {
         let runtime_header = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.h"))
             .expect("read shared mobile runtime header");
         assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
+        assert!(runtime_header.contains("STASIS_MOBILE_RUNTIME_ABI_VERSION 2"));
+        assert!(runtime_header.contains("stasis_mobile_runtime_last_entry(void)"));
         assert!(android.join("runtime/stasis_display_scale.h").is_file());
         assert!(android.join("runtime/stasis_asset_path.h").is_file());
         assert!(android.join("runtime/stasis_platform_storage.c").is_file());
