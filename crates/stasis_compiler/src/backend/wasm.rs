@@ -1864,6 +1864,11 @@ fn encode_target_get(
                     return encode_local_collection_load(local, index, context, out);
                 }
             }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                encode_receiver_array_address(&binding, index, context, out)?;
+                encode_memory_load(binding.element_type, out)?;
+                return Ok(binding.element_type);
+            }
             let binding = memory_binding(context, collection_path, suffix)?;
             encode_memory_address(binding, index, context, out)?;
             encode_memory_load(binding.type_id, out)?;
@@ -1952,6 +1957,15 @@ fn encode_target_set(
                     uleb(temp, out);
                     return encode_local_collection_store(local, index, temp, context, out);
                 }
+            }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                let temp = scratch_local(context, binding.element_type)?;
+                out.push(0x21);
+                uleb(temp, out);
+                encode_receiver_array_address(&binding, index, context, out)?;
+                out.push(0x20);
+                uleb(temp, out);
+                return encode_memory_store(binding.element_type, out);
             }
             let binding = memory_binding(context, collection_path, suffix)?;
             let temp_index = scratch_local(context, binding.type_id)?;
@@ -2080,9 +2094,152 @@ fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<Typ
                         });
                 }
             }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                return Ok(binding.element_type);
+            }
             Ok(memory_binding(context, collection_path, suffix)?.type_id)
         }
     }
+}
+
+struct ReceiverArrayCandidate<'a> {
+    base: i32,
+    memory: &'a MemoryBinding,
+}
+
+struct ReceiverArrayBinding<'a> {
+    receiver: &'a LocalBinding,
+    element_type: TypeId,
+    candidates: Vec<ReceiverArrayCandidate<'a>>,
+}
+
+fn receiver_array_binding<'a>(
+    context: &'a EncodeContext<'_>,
+    collection_path: &str,
+    suffix: &str,
+) -> Result<Option<ReceiverArrayBinding<'a>>, String> {
+    if !suffix.is_empty() {
+        return Ok(None);
+    }
+    let Some((receiver_name, field_name)) = collection_path.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(receiver) = context
+        .locals
+        .get(receiver_name)
+        .filter(|binding| binding.struct_view.is_some())
+    else {
+        return Ok(None);
+    };
+    let field_type = context
+        .named_structs
+        .get(&receiver.type_id)
+        .and_then(|fields| fields.get(field_name))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "unknown web struct array field '{}.{field_name}'",
+                receiver.type_id
+            )
+        })?;
+    let element_type = context
+        .types
+        .indexed_element_type_id(field_type)
+        .ok_or_else(|| {
+            format!(
+                "web struct field '{}.{field_name}' is not indexable",
+                receiver.type_id
+            )
+        })?;
+
+    let mut candidates = Vec::new();
+    for (instance_path, instance_type) in context.global_types {
+        if *instance_type != receiver.type_id {
+            continue;
+        }
+        let memory_path = format!("{instance_path}.{field_name}");
+        let Some(memory) = context.memory.get(&memory_path) else {
+            continue;
+        };
+        if memory.scalar || memory.type_id != element_type {
+            return Err(format!(
+                "web struct array storage '{memory_path}' does not match field type {field_type}"
+            ));
+        }
+        let base = hash_global_path(instance_path);
+        if candidates
+            .iter()
+            .any(|candidate: &ReceiverArrayCandidate<'_>| candidate.base == base)
+        {
+            return Err(format!(
+                "web struct array field '{}.{field_name}' has ambiguous caller identity {base}",
+                receiver.type_id
+            ));
+        }
+        candidates.push(ReceiverArrayCandidate { base, memory });
+    }
+    if candidates.is_empty() {
+        return Err(format!(
+            "web struct array field '{}.{field_name}' has no caller-owned storage",
+            receiver.type_id
+        ));
+    }
+    Ok(Some(ReceiverArrayBinding {
+        receiver,
+        element_type,
+        candidates,
+    }))
+}
+
+fn encode_receiver_array_address(
+    binding: &ReceiverArrayBinding<'_>,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(index_type, context) {
+        return Err(format!(
+            "web collection index must be i32-compatible, found type {index_type}"
+        ));
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+
+    fn select(
+        receiver_base: u32,
+        index_local: u32,
+        candidates: &[ReceiverArrayCandidate<'_>],
+        out: &mut Vec<u8>,
+    ) {
+        let Some((candidate, rest)) = candidates.split_first() else {
+            out.push(0x00);
+            return;
+        };
+        out.push(0x20);
+        uleb(receiver_base, out);
+        out.push(0x41);
+        sleb(candidate.base, out);
+        out.extend([0x46, 0x04, I32]);
+        emit_index_bounds_check(index_local, candidate.memory.len, out);
+        out.push(0x41);
+        sleb(candidate.memory.offset as i32, out);
+        out.push(0x20);
+        uleb(index_local, out);
+        out.push(0x41);
+        sleb(candidate.memory.width as i32, out);
+        out.extend([0x6c, 0x6a, 0x05]);
+        select(receiver_base, index_local, rest, out);
+        out.push(0x0b);
+    }
+
+    select(
+        binding.receiver.index,
+        context.scratch_index,
+        &binding.candidates,
+        out,
+    );
+    Ok(())
 }
 
 fn memory_binding<'a>(
@@ -3417,6 +3574,11 @@ fn encode_expr_as(
                     return encode_local_collection_load(local, index, context, out);
                 }
             }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                encode_receiver_array_address(&binding, index, context, out)?;
+                encode_memory_load(binding.element_type, out)?;
+                return Ok(binding.element_type);
+            }
             let binding = memory_binding(context, collection_path, suffix)?;
             encode_memory_address(binding, index, context, out)?;
             encode_memory_load(binding.type_id, out)?;
@@ -4000,6 +4162,52 @@ function render(): i32 { return 0; }
         process.compile().expect("compile web struct views");
         assert_eq!(process.memory_layout()["items.value"].length, 4);
         assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+    }
+
+    #[test]
+    fn reads_and_writes_receiver_array_fields_across_struct_instances() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "receiver_arrays.stasis",
+            r#"
+struct Batch {
+    values: f32[4];
+    count: i32;
+}
+
+global first: Batch;
+global second: Batch;
+
+function write(self: Batch, index: i32, value: f32): void {
+    self.values[index] = value;
+    self.values[index] += 0.5;
+    self.count += 1;
+}
+
+function read(self: Batch, index: i32): f32 {
+    return self.values[index];
+}
+
+function main(): i32 {
+    first.write(1, 2.0);
+    second.write(2, 4.0);
+    return f32_to_i32(first.read(1) + second.read(2));
+}
+
+function tick(): i32 { return first.count + second.count; }
+function render(): i32 { return 0; }
+"#,
+        );
+        process
+            .compile()
+            .expect("compile receiver array field reads and writes for web");
+        assert_eq!(process.memory_layout()["first.values"].length, 4);
+        assert_eq!(process.memory_layout()["second.values"].length, 4);
+        assert_ne!(
+            process.memory_layout()["first.values"].offset,
+            process.memory_layout()["second.values"].offset
+        );
     }
 
     #[test]

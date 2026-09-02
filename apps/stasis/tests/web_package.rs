@@ -962,6 +962,80 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
 }
 
 #[test]
+fn brickout_line_batch_packages_with_canonical_repo_stdlib_for_web() {
+    let repository = repo_root();
+    let workspace = repository
+        .join("build")
+        .join(format!("web-brickout-line-batch-test-{}", stamp()));
+    let sample = repository.join("samples/brickout_revenge");
+    copy_tree(&sample, &workspace.join("samples/brickout_revenge"));
+    copy_tree(&repository.join("src"), &workspace.join("src"));
+    copy_tree(&sample.join("assets"), &workspace.join("assets"));
+    fs::write(
+        workspace.join("main.stasis"),
+        r#"import "samples/brickout_revenge/brickout_revenge.stasis";
+
+function render(): i32 { return 0; }
+"#,
+    )
+    .expect("write Brickout web entry adapter");
+    fs::write(
+        workspace.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"brickout_line_batch_web","entry":"main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("write Brickout web manifest");
+
+    let asset_shapes = [
+        ("paddle.svg", 128, 24),
+        ("ball.svg", 32, 32),
+        ("brick_basic.svg", 160, 64),
+        ("brick_basic_turret.svg", 160, 64),
+        ("brick_basic_fx.svg", 160, 64),
+        ("brick_armored.svg", 160, 64),
+        ("brick_armored_turret.svg", 160, 64),
+        ("brick_armored_fx.svg", 160, 64),
+        ("brick_reflector.svg", 160, 64),
+        ("brick_reflector_fx.svg", 160, 64),
+    ];
+    let assets = asset_shapes
+        .iter()
+        .map(|(name, width, height)| {
+            let bytes =
+                fs::read(workspace.join("assets").join(name)).expect("read Brickout sprite asset");
+            serde_json::json!({
+                "id": name.trim_end_matches(".svg"),
+                "path": format!("assets/{name}"),
+                "content_sha256": format!("{:x}", Sha256::digest(bytes)),
+                "format": {
+                    "kind": "sprite",
+                    "encoding": "svg",
+                    "width": width,
+                    "height": height
+                },
+                "dependencies": []
+            })
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        workspace.join("assets/manifest.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "stasis-assets",
+            "version": 1,
+            "assets": assets
+        }))
+        .expect("serialize Brickout asset manifest"),
+    )
+    .expect("write Brickout asset manifest");
+
+    let output = package(&workspace, Path::new("build/web-package"));
+    assert!(output.join("game.wasm").is_file());
+    assert!(output.join("game.js").is_file());
+    assert!(output.join("index.html").is_file());
+
+    fs::remove_dir_all(&workspace).expect("clean Brickout web fixture");
+}
+
+#[test]
 fn development_web_package_remains_readable_and_retains_asset_diagnostics() {
     let workspace = repo_root().join("samples/windows_launch_smoke");
     let relative_output = PathBuf::from(format!("build/web-development-test-{}", stamp()));

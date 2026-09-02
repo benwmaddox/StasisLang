@@ -8,6 +8,10 @@ final class WorkshopTemplateCatalog {
     static final String DEFAULT_TEMPLATE_ID = "exploration";
     static final String LEGACY_TEMPLATE_ID = "pong";
     static final String RENDER_ACCEPTANCE_TEMPLATE_ID = "render-parity";
+    private static final DirectoryMount VENDORED_STDLIB = new DirectoryMount(
+            "stasis_stdlib", "vendor/stasis/src/stdlib");
+    private static final DirectoryMount TOOLCHAIN_STDLIB = new DirectoryMount(
+            "stasis_stdlib", "src/.stasis_cache/toolchain/src/stdlib");
 
     private static final Template PONG = new Template(
             "pong",
@@ -25,6 +29,7 @@ final class WorkshopTemplateCatalog {
                     "src/systems/collision.stasis"
             },
             new String[] { "tests/enemy_paddle_speed_schedule.test.stasis" },
+            new DirectoryMount[] { VENDORED_STDLIB },
             new String[] {
                     "AGENTS.md",
                     "CLAUDE.md",
@@ -59,6 +64,7 @@ final class WorkshopTemplateCatalog {
                     "src/systems/schedule.stasis"
             },
             new String[] { "tests/exploration_gameplay.test.stasis" },
+            new DirectoryMount[] { VENDORED_STDLIB },
             new String[] {
                     "AGENTS.md",
                     "CLAUDE.md",
@@ -78,6 +84,7 @@ final class WorkshopTemplateCatalog {
             "render_parity_sample/",
             new String[] { "src/main.stasis", "src/frame.stasis", "src/trace.stasis" },
             new String[] {},
+            new DirectoryMount[] { TOOLCHAIN_STDLIB },
             new String[] {
                     "stasis.json",
                     "capture_manifest.json",
@@ -111,20 +118,32 @@ final class WorkshopTemplateCatalog {
         final String assetRoot;
         final String[] sourceFiles;
         final String[] testFiles;
+        final DirectoryMount[] directoryMounts;
         final String[] auxiliaryFiles;
 
         Template(String id, String name, String assetRoot, String[] sourceFiles, String[] testFiles,
-                String[] auxiliaryFiles) {
+                DirectoryMount[] directoryMounts, String[] auxiliaryFiles) {
             this.id = id;
             this.name = name;
             this.assetRoot = assetRoot;
             this.sourceFiles = sourceFiles.clone();
             this.testFiles = testFiles.clone();
+            this.directoryMounts = directoryMounts.clone();
             this.auxiliaryFiles = auxiliaryFiles.clone();
         }
 
         @Override public String toString() {
             return name;
+        }
+    }
+
+    static final class DirectoryMount {
+        final String assetDirectory;
+        final String projectDirectory;
+
+        DirectoryMount(String assetDirectory, String projectDirectory) {
+            this.assetDirectory = assetDirectory;
+            this.projectDirectory = projectDirectory;
         }
     }
 }

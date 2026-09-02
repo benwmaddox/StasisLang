@@ -10896,6 +10896,14 @@ public final class MainActivity extends Activity {
                         // The recursive load below includes files that were seeded successfully.
                     }
                 }
+                for (WorkshopTemplateCatalog.DirectoryMount mount : template.directoryMounts) {
+                    try {
+                        ensureProjectDirectory(assets, mount.assetDirectory,
+                                new File(projectRoot, mount.projectDirectory));
+                    } catch (IOException ignored) {
+                        // The recursive load below includes directory files that were seeded successfully.
+                    }
+                }
                 for (String file : template.auxiliaryFiles) {
                     try {
                         ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
@@ -11095,6 +11103,32 @@ public final class MainActivity extends Activity {
             }
         } finally {
             if (temporary.exists()) temporary.delete();
+        }
+    }
+
+    private void ensureProjectDirectory(AssetManager assets, String assetPath, File diskDirectory)
+            throws IOException {
+        if (diskDirectory.exists() && !diskDirectory.isDirectory()) {
+            throw new IOException("project directory path is a file: "
+                    + diskDirectory.getAbsolutePath());
+        }
+        if (!diskDirectory.isDirectory() && !diskDirectory.mkdirs()) {
+            throw new IOException("failed to create " + diskDirectory.getAbsolutePath());
+        }
+        String[] children = assets.list(assetPath);
+        if (children == null || children.length == 0) {
+            throw new IOException("packaged asset directory is empty: " + assetPath);
+        }
+        Arrays.sort(children);
+        for (String child : children) {
+            String childAssetPath = assetPath + "/" + child;
+            File childDiskPath = new File(diskDirectory, child);
+            String[] grandchildren = assets.list(childAssetPath);
+            if (grandchildren != null && grandchildren.length > 0) {
+                ensureProjectDirectory(assets, childAssetPath, childDiskPath);
+            } else {
+                ensureProjectFile(assets, childAssetPath, childDiskPath);
+            }
         }
     }
 
