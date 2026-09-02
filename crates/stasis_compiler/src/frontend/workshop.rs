@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::compiler::{source_workshop_items, Compiler};
 use crate::data_flow::CompilerLocalType;
-use crate::frontend::lexer::{lex, Token, TokenKind};
+use crate::frontend::lexer::{is_inside_backtick_literal, lex, Token, TokenKind};
 use crate::frontend::parser::{
     parse_local_declarations, parse_top_level_functions, parse_top_level_type_layout,
 };
@@ -3041,7 +3041,8 @@ fn parse_import_spans_with_depth(
             TokenKind::RBrace => depth = depth.saturating_sub(1),
             TokenKind::Identifier
                 if (!top_level_only || depth == 0)
-                    && token_text(source, tokens[cursor]) == "import" =>
+                    && token_text(source, tokens[cursor]) == "import"
+                    && !is_inside_backtick_literal(source, tokens[cursor].start) =>
             {
                 let literal = expect_token(&tokens, cursor + 1, TokenKind::StringLiteral)?;
                 let semicolon = expect_token(&tokens, cursor + 2, TokenKind::Semicolon)?;
@@ -5360,6 +5361,46 @@ mod workshop_contract_tests {
         assert!(update.source.starts_with("// Advances the player."));
         assert!(!update.source.contains("Unrelated note"));
         assert!(update.source.ends_with("}\n"));
+    }
+
+    #[test]
+    fn import_scanning_ignores_backtick_test_names_and_keeps_real_imports() {
+        let source = concat!(
+            "    import \"shared.stasis\";\n",
+            "test `legacy profile codes import into merged enemies`(): bool {\n",
+            "    return true;\n",
+            "}\n",
+        );
+
+        let spans = parse_import_spans(source).expect("top-level imports");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&source[spans[0].clone()], "import \"shared.stasis\";");
+        let items = workshop_source_items(&[WorkshopSourceFile {
+            path: "tests/legacy.test.stasis".to_string(),
+            source: source.to_string(),
+        }])
+        .expect("workshop source items");
+        assert!(items.iter().any(|item| {
+            item.kind == WorkshopSourceItemKind::Test
+                && item.name == "legacy profile codes import into merged enemies"
+        }));
+    }
+
+    #[test]
+    fn any_depth_import_scanning_keeps_nested_declarations() {
+        let source = concat!(
+            "function update(): void {\n",
+            "    import \"nested.stasis\";\n",
+            "    return;\n",
+            "}\n",
+        );
+
+        assert!(parse_import_spans(source)
+            .expect("top-level scan")
+            .is_empty());
+        let spans = parse_any_import_spans(source).expect("any-depth imports");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&source[spans[0].clone()], "import \"nested.stasis\";");
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use compiler_backend::sign_output_artifact_if_configured;
 pub use events::RunnerEvent;
-pub use live_workspace::LiveRunConfig;
+pub use live_workspace::{run_project_tests_bounded, LiveRunConfig};
 pub use mobile_aot_bindings::{
     audit_mobile_aot_bindings, escape_mobile_c_string_literal, mobile_aot_function_for,
     write_mobile_aot_bindings_source, write_mobile_aot_bindings_source_with_profile,

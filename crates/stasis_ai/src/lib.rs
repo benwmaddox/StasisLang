@@ -20,7 +20,7 @@ pub const MIN_COMPACTION_BYTES: usize = 256 * 1024;
 pub const MAX_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMPACTION_RETAINED_TURNS: usize = 16;
 const MAX_COMPLETION_REJECTIONS: usize = 3;
-const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. These are host-mediated virtual tools described by tool_specs in the immutable request header, not native Codex registry tools. Invoke them by returning mode=tool_calls with the requested calls in the structured response contract; never search for them in or reject them because of the native callable-tool registry. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection. Start with initial_context.initial_symbols, which is the completed compact default list_symbols result for the entry file and its direct imports. Also use initial_context.stdlib_api as the completed catalog of public standard-library signatures; add the listed canonical_import when a needed module is not already imported, and do not spend turns rediscovering stdlib implementation files unless the catalog is ambiguous. Treat every listed project function whose name directly contains the requested behavior noun as a candidate: batch read_symbol and find_references for all of them before editing. Do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. If relevant project symbols are missing, batch multiple narrow list_symbols searches directly suggested by the request, such as the behavior noun plus render or update terms; never enumerate the whole project. A reference lookup does not require a prior source read. Call find_references for behavior-bearing project symbols before writing. For collision or geometry changes, use rendered rectangle bounds as the coordinate source of truth and derive contact test inputs after the update function's movement order instead of copying old collision constants. Put all related source and requested durable-test changes in one contiguous atomic write batch. The write compiles the batch and runs project tests; if it succeeds, return done immediately without a separate test call. If it fails, correct only the reported defect and retry atomically. Return exactly one JSON object matching the response contract.";
+const AGENT_INSTRUCTION: &str = "Stasis is statically typed and C-like. Declarations use import, struct, global, function, and test `name`(): bool. Receivers put self first: function damage(self: Enemy, amount: i32): void; call enemy.damage(5). Read exact local syntax before editing. Use host-mediated tools through structured tool_calls, not native tools. Later JSONL records are completed; do not repeat them. initial_context start actions are lexical leads, not proof; refine them or use list_symbols. Its options expose stdlib discovery and optional baseline tests. Use canonical_import with read_imports/write_imports. Before behavior writes, batch relevant reads and find_references. Submit related symbols/imports/tests in one contiguous atomic tested write batch; its successful receipt proves completion. Tests are default evidence; get runtime/assets capability only when necessary. Return one response-contract object.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfile {
@@ -91,10 +91,21 @@ impl ToolObservation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub tool: String,
+    #[serde(rename = "use", alias = "purpose")]
     pub purpose: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "required",
+        alias = "required_args",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub required_args: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "optional",
+        alias = "optional_args",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub optional_args: Vec<String>,
 }
 
@@ -148,10 +159,10 @@ struct ModelRequestHeader<'a> {
     schema_version: u32,
     role: &'a str,
     instruction: &'a str,
-    user_prompt: &'a str,
-    initial_context: &'a Value,
     tool_specs: &'a [ToolSpec],
     response_contract: &'a Value,
+    user_prompt: &'a str,
+    initial_context: &'a Value,
 }
 
 pub trait ModelProvider {
@@ -247,20 +258,25 @@ where
             ));
         }
     }
-    let known_tools = tool_specs
+    let mut known_tools = tool_specs
         .iter()
-        .map(|spec| spec.tool.as_str())
+        .map(|spec| spec.tool.clone())
         .collect::<BTreeSet<_>>();
+    let mut validation_tool_specs = tool_specs.clone();
+    if known_tools.contains("get_capability") {
+        validation_tool_specs.extend(asset_tool_specs());
+        validation_tool_specs.extend(runtime_tool_specs());
+    }
     let response_contract = response_contract();
     let header = serde_json::to_string(&ModelRequestHeader {
         record: "request",
         schema_version: 1,
         role: &profile.role,
         instruction: &profile.instruction,
-        user_prompt,
-        initial_context: &initial_context,
         tool_specs: &tool_specs,
         response_contract: &response_contract,
+        user_prompt,
+        initial_context: &initial_context,
     })
     .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?;
     let mut transcript = AgentTranscript::new(header);
@@ -328,7 +344,9 @@ where
                 }
                 let validation_errors = tool_calls
                     .iter()
-                    .filter_map(|call| validate_tool_call(call, &tool_specs, &known_tools).err())
+                    .filter_map(|call| {
+                        validate_tool_call(call, &validation_tool_specs, &known_tools).err()
+                    })
                     .collect::<Vec<_>>();
                 if !validation_errors.is_empty() {
                     let detail = validation_errors.join("; ");
@@ -351,6 +369,19 @@ where
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
                 let observations = bound_observations(executor.execute(&tool_calls, canceled));
                 emit(AgentEvent::Observations(observations.clone()));
+                for (call, observation) in tool_calls.iter().zip(&observations) {
+                    if call.tool != "get_capability" || observation.error.is_some() {
+                        continue;
+                    }
+                    match call.args.get("name").and_then(Value::as_str) {
+                        Some("assets") => {
+                            known_tools.extend(asset_tool_specs().into_iter().map(|spec| spec.tool))
+                        }
+                        Some("runtime") => known_tools
+                            .extend(runtime_tool_specs().into_iter().map(|spec| spec.tool)),
+                        _ => {}
+                    }
+                }
                 if let Some(error) = executor.terminal_failure() {
                     return Err(error);
                 }
@@ -600,7 +631,7 @@ fn validate_working_notes(notes: &str) -> Result<(), String> {
 fn validate_tool_call(
     call: &ToolCall,
     specs: &[ToolSpec],
-    known_tools: &BTreeSet<&str>,
+    known_tools: &BTreeSet<String>,
 ) -> Result<(), String> {
     if !known_tools.contains(call.tool.as_str()) {
         return Err(format!("unsupported AI tool: {}", call.tool));
@@ -686,14 +717,15 @@ pub fn model_response_schema() -> Value {
 
 pub fn workshop_tool_specs() -> Vec<ToolSpec> {
     vec![
-        spec("list_symbols", "Search compact editable Stasis symbols within explicit starting files. Without files, the project entry file and its direct imports are searched. The response maps every searched file to its direct imports. Pass files as an array of up to 16 project-relative paths to choose a different scope. Symbol items exclude imports and empty global groups, default to 32 items, and never include source or source hashes.", &[], &["files", "query", "kind", "owner", "page", "limit"]),
-        spec("find_references", "Find compact compiler-owned definitions, reads, writes, and calls for a function, global, or dot-qualified field.", &["symbol"], &["limit"]),
+        spec("list_symbols", "List symbols. Defaults to entry plus direct imports; kind=test with no files selects known tests. files accepts 16 paths. Returns 32 items by default and a next action when more exist.", &[], &["files", "query", "kind", "owner", "page", "limit"]),
+        spec("get_stdlib_api", "No module lists valid modules; module returns filtered/paged public signatures, externs, and canonical_import (64 max).", &[], &["module", "query", "kind", "page", "limit"]),
+        spec("find_references", "Group compiler-owned definition/read/write/call uses by containing symbol.", &["symbol"], &["limit"]),
         spec("list_owner_symbols", "List compact symbols owned by one type or group.", &["owner"], &[]),
-        spec("read_symbol", "Read one Stasis symbol. Up to 50 deliberate symbol reads may be batched as separate tool calls in one turn.", &["name"], &["kind", "file", "owner", "signature"]),
-        spec("write_symbol", "Atomically add or replace a symbol; set operation=add for a new symbol. A write batch compiles and tests together.", &["file", "name", "new_source"], &["operation", "kind", "owner", "signature", "expected_source_hash"]),
+        spec("read_symbol", "Read one symbol's full source and reusable expected_source_hash.", &["name"], &["kind", "file", "owner", "signature"]),
+        spec("write_symbol", "Atomically add or replace a symbol; operation=add creates it. The batch compiles and tests.", &["file", "name", "new_source"], &["operation", "kind", "owner", "signature", "expected_source_hash"]),
         spec("delete_symbol", "Atomically delete a symbol.", &["name"], &["file", "kind", "owner", "signature", "expected_source_hash"]),
-        spec("read_imports", "Read one source file's imports.", &["file"], &[]),
-        spec("write_imports", "Atomically replace one source file's imports.", &["file", "imports"], &[]),
+        spec("read_imports", "Read one source file's imports group.", &["file"], &[]),
+        spec("write_imports", "Atomically replace imports from path strings, including canonical_import.", &["file", "imports"], &[]),
         spec("get_diagnostics", "Read the latest compiler diagnostics.", &[], &[]),
         spec("set_input_state", "Set simulated input state.", &[], &["x", "y", "active", "screen_w", "screen_h"]),
         spec("inspect_runtime_state", "Read bounded live scalar state.", &[], &[]),
@@ -703,24 +735,33 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("read_test_file", "Read one Stasis test file.", &["file"], &[]),
         spec("write_test_file", "Create or replace one Stasis test file.", &["file", "source"], &[]),
         spec("delete_test_file", "Delete one Stasis test file.", &["file"], &[]),
-        spec("run_tests", "Confirm the latest atomic write batch compiled and passed tests.", &[], &[]),
+        spec("run_tests", "Run the optional baseline/current suite; writes compile and test automatically.", &[], &[]),
     ]
 }
 
 pub fn live_tool_specs() -> Vec<ToolSpec> {
     const LIVE_TOOLS: &[&str] = &[
         "list_symbols",
+        "get_stdlib_api",
         "find_references",
         "read_symbol",
         "write_symbol",
         "delete_symbol",
-        "inspect_runtime_state",
-        "run_frame",
+        "read_imports",
+        "write_imports",
+        "run_tests",
     ];
-    workshop_tool_specs()
+    let mut tools = workshop_tool_specs()
         .into_iter()
         .filter(|spec| LIVE_TOOLS.contains(&spec.tool.as_str()))
-        .collect()
+        .collect::<Vec<_>>();
+    tools.push(spec(
+        "get_capability",
+        "Load tools and policy; name must be assets or runtime.",
+        &["name"],
+        &[],
+    ));
+    tools
 }
 
 fn spec(tool: &str, purpose: &str, required: &[&str], optional: &[&str]) -> ToolSpec {
@@ -768,22 +809,34 @@ impl Default for CodexExecProvider {
     }
 }
 
+pub fn asset_tool_specs() -> Vec<ToolSpec> {
+    vec![
+        spec("request_imagegen_asset", "Persist a host ImageGen request, wait for one PNG, and return source_path. Dimensions default to 1024x1024 and may be at most 2048x2048.", &["filename", "prompt", "purpose"], &["width", "height"]),
+        spec("write_svg_asset", "Stage one bounded SVG under assets/generated and derive its v2 manifest entry.", &["id", "path", "source", "width", "height"], &[]),
+        spec("write_png_asset", "Stage a deterministic filled-shape PNG and derive its v2 manifest entry. Colors are #RRGGBB or #RRGGBBAA. Shapes: rect: {kind,color,x,y,width,height}; circle: {kind,color,x,y,radius} with center x/y; line: {kind,color,x1,y1,x2,y2,thickness}. fill, stroke, stroke_width, cx/cy, and line width are not supported.", &["id", "path", "width", "height", "background", "shapes"], &[]),
+        spec("import_png_asset", "Validate and stage an ImageGen PNG under assets/generated and derive its v2 manifest entry. Supply all four crop fields together. transparent_color is #RRGGBB; tolerance defaults to 12. Background removal fails if the border stays opaque or the subject is nearly erased.", &["id", "path", "source_path"], &["crop_x", "crop_y", "crop_width", "crop_height", "transparent_color", "transparent_tolerance"]),
+        spec("delete_asset", "Stage deletion of a generated asset and matching manifest entry. id is required for sprites/audio and omitted for manifest-free JSON/CSV.", &["path"], &["id"]),
+        spec("write_data_asset", "Stage bounded JSON or CSV under assets/generated.", &["path", "source"], &[]),
+        spec("write_procedural_wav", "Stage deterministic mono PCM audio and derive its v2 manifest entry.", &["id", "path", "frequency_hz", "duration_ms"], &[]),
+    ]
+}
+
+pub fn runtime_tool_specs() -> Vec<ToolSpec> {
+    workshop_tool_specs()
+        .into_iter()
+        .filter(|spec| matches!(spec.tool.as_str(), "inspect_runtime_state" | "run_frame"))
+        .collect()
+}
+
 pub fn project_ai_tool_specs() -> Vec<ToolSpec> {
-    let mut tools = live_tool_specs();
-    tools.extend([
-        spec("request_imagegen_asset", "Request one host-generated PNG containing one isolated foreground asset or subject on a flat removable background, not an atlas. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art, including early versions; primitive shapes remain appropriate for basic UI and overlays. The current render contract preserves submission order; submit an opaque full-board background sprite before line-rendered gameplay and overlays. The master defaults to 1024x1024; request up to 2048x2048 only when extra detail or crop latitude is needed. Keep it in the controlled ImageGen inbox and derive the game copy later with import_png_asset crop/background-removal options. The host persists the prompt and this call waits for the PNG, then returns its source_path. Request before the atomic asset/source write batch.", &["filename", "prompt", "purpose"], &["width", "height"]),
-        spec("write_svg_asset", "Stage one bounded SVG under assets/generated and derive its v2 manifest entry. Prefer this for basic UI, simple icons, markers, and overlays; do not use primitive vector construction for characters or units by default. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "source", "width", "height"], &[]),
-        spec("write_png_asset", "Generate and stage one deterministic PNG from bounded filled shapes, then derive its v2 manifest entry. Each shape requires kind and color (#RRGGBB or #RRGGBBAA). The only supported shape objects are rect: {kind,color,x,y,width,height}; circle: {kind,color,x,y,radius}, where x/y are the center; and line: {kind,color,x1,y1,x2,y2,thickness}. Rectangles and circles are filled; fill, stroke, stroke_width, cx/cy, and line width are not supported. Prefer it for basic UI and deterministic overlays or a capability fallback; do not use primitive-shape characters or units by default. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "width", "height", "background", "shapes"], &[]),
-        spec("import_png_asset", "Copy a host-generated PNG from build/ai-assets/imagegen or build/gauntlet/imagegen into assets/generated, optionally crop it and remove a flat background color, validate the result, and derive its v2 manifest entry. Supply all four crop fields together. transparent_color is #RRGGBB; transparent_tolerance defaults to 12 and adapts to small provider color variation along the padded isolated-subject border. Removal fails atomically when that border remains opaque or the subject is nearly erased. The current render contract preserves submission order; submit opaque full-board background sprites before line-rendered gameplay and overlays. It must be in the same tool batch immediately before source writes that load and visibly draw it; importing an unused PNG does not satisfy an authored-art completion gate.", &["id", "path", "source_path"], &["crop_x", "crop_y", "crop_width", "crop_height", "transparent_color", "transparent_tolerance"]),
-        spec("delete_asset", "Delete one obsolete file under assets/generated and remove its matching manifest entry in the same rollback-safe transaction as source updates and replacement assets. Supply id for manifest-backed sprites or audio; omit it only for generated JSON/CSV files that have no manifest entry. Use deletion before a replacement that reuses the same id only when its old path differs. If a replacement keeps the same stable path, import or write it directly without delete_asset; the transaction overwrites the file and manifest entry.", &["path"], &["id"]),
-        spec("write_data_asset", "Stage bounded JSON or CSV data under assets/generated. It must be in the same tool batch immediately before related source writes.", &["path", "source"], &[]),
-        spec("write_procedural_wav", "Stage deterministic mono PCM audio under assets/generated and derive its v2 manifest entry. It must be in the same tool batch immediately before related source writes.", &["id", "path", "frequency_hz", "duration_ms"], &[]),
-    ]);
-    tools
+    live_tool_specs()
 }
 
 pub fn gauntlet_tool_specs() -> Vec<ToolSpec> {
-    let mut tools = project_ai_tool_specs();
+    let mut tools = live_tool_specs();
+    tools.retain(|spec| spec.tool != "get_capability");
+    tools.extend(runtime_tool_specs());
+    tools.extend(asset_tool_specs());
     tools.push(spec("record_decision", "Persist one concise Gauntlet decision, rationale, evidence summary, and next step for future fresh agents. Record conclusions and tradeoffs, never hidden chain-of-thought.", &["kind", "summary", "rationale", "evidence", "next_step"], &[]));
     tools.push(spec("report_blocked", "Immediately terminate this builder attempt when a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools. Do not use this for an ordinary code/test failure that can be corrected.", &["reason", "evidence", "next_step"], &[]));
     tools
@@ -1463,6 +1516,47 @@ mod tests {
     }
 
     #[test]
+    fn request_header_serializes_stable_fields_before_dynamic_content() {
+        struct RecordingProvider(Option<String>);
+        impl ModelProvider for RecordingProvider {
+            fn respond(
+                &mut self,
+                request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.0 = Some(request.to_string());
+                Ok(ModelResponse::Done {
+                    working_notes: "The request header order was captured.".to_string(),
+                    summary: "captured".to_string(),
+                })
+            }
+        }
+        let mut provider = RecordingProvider(None);
+        run_agent(
+            &mut provider,
+            &mut Tools::default(),
+            "dynamic user prompt",
+            json!({"dynamic": "initial context"}),
+            live_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("agent");
+
+        let header = provider.0.expect("request header");
+        let positions = [
+            "\"role\":",
+            "\"instruction\":",
+            "\"tool_specs\":",
+            "\"response_contract\":",
+            "\"user_prompt\":",
+            "\"initial_context\":",
+        ]
+        .map(|field| header.find(field).expect("serialized field"));
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
     fn compaction_replaces_old_payloads_with_deterministic_history() {
         struct RecordingResponses {
             responses: Vec<ModelResponse>,
@@ -1808,27 +1902,49 @@ mod tests {
     }
 
     #[test]
-    fn live_contract_is_a_strict_subset_of_the_workshop_contract() {
+    fn live_contract_is_compact_and_lazily_exposes_rare_tools() {
         let workshop = workshop_tool_specs();
         let live = live_tool_specs();
         assert!(!live.is_empty());
         assert!(live.len() < workshop.len());
         assert!(live
             .iter()
+            .filter(|tool| tool.tool != "get_capability")
             .all(|tool| workshop.iter().any(|candidate| candidate.tool == tool.tool)));
         assert!(live.iter().any(|tool| tool.tool == "write_symbol"));
         assert!(live.iter().any(|tool| tool.tool == "find_references"));
-        assert!(!live.iter().any(|tool| tool.tool == "run_tests"));
+        assert!(live.iter().any(|tool| tool.tool == "get_stdlib_api"));
+        assert!(live.iter().any(|tool| tool.tool == "run_tests"));
+        assert!(!live.iter().any(|tool| tool.tool == "inspect_runtime_state"));
+        assert!(!live.iter().any(|tool| tool.tool == "run_frame"));
+        assert!(live.iter().any(|tool| tool.tool == "get_capability"));
         assert!(!workshop
             .iter()
             .any(|tool| tool.tool == "validate_runtime_state"));
         assert!(!live.iter().any(|tool| tool.tool == "capture_screenshot"));
+        let instruction = AgentProfile::default().instruction;
+        assert!(instruction.contains("successful receipt proves completion"));
+        for syntax in [
+            "import",
+            "struct",
+            "global",
+            "function",
+            "test `name`(): bool",
+        ] {
+            assert!(instruction.contains(syntax));
+        }
+        assert!(instruction.contains("function damage(self: Enemy, amount: i32): void"));
+        assert!(instruction.contains("enemy.damage(5)"));
+        assert!(instruction.contains("runtime/assets capability only when necessary"));
+        assert!(instruction.len() <= 1_000);
     }
 
     #[test]
-    fn project_ai_gets_assets_without_gauntlet_decision_memory() {
+    fn project_ai_discovers_assets_while_gauntlet_gets_them_eagerly() {
+        let live = live_tool_specs();
         let project = project_ai_tool_specs();
-        for expected in [
+        assert!(project.iter().any(|tool| tool.tool == "get_capability"));
+        for hidden in [
             "request_imagegen_asset",
             "write_svg_asset",
             "write_png_asset",
@@ -1837,23 +1953,24 @@ mod tests {
             "write_data_asset",
             "write_procedural_wav",
         ] {
-            assert!(project.iter().any(|tool| tool.tool == expected));
+            assert!(!project.iter().any(|tool| tool.tool == hidden));
         }
         assert!(!project.iter().any(|tool| tool.tool == "record_decision"));
         assert!(!project.iter().any(|tool| tool.tool == "report_blocked"));
-        assert!(project
-            .iter()
-            .find(|tool| tool.tool == "request_imagegen_asset")
-            .is_some_and(|tool| tool.purpose.contains("including early versions")));
-        assert!(project
-            .iter()
-            .find(|tool| tool.tool == "request_imagegen_asset")
-            .is_some_and(|tool| tool.purpose.contains("preserves submission order")));
-        assert!(project
-            .iter()
-            .find(|tool| tool.tool == "import_png_asset")
-            .is_some_and(|tool| tool.purpose.contains("preserves submission order")));
-        let png = project
+        assert_eq!(project, live);
+        let assets = asset_tool_specs();
+        for shared_policy in [
+            "including early versions",
+            "preserves submission order",
+            "contiguous asset-tool",
+            "manifest directly",
+            "visibly drawn",
+        ] {
+            assert!(assets
+                .iter()
+                .all(|tool| !tool.purpose.contains(shared_policy)));
+        }
+        let png = assets
             .iter()
             .find(|tool| tool.tool == "write_png_asset")
             .expect("PNG tool");
@@ -1871,6 +1988,114 @@ mod tests {
         assert!(gauntlet_tool_specs()
             .iter()
             .any(|tool| tool.tool == "report_blocked"));
+        for asset in &assets {
+            assert!(gauntlet_tool_specs()
+                .iter()
+                .any(|tool| tool.tool == asset.tool));
+        }
+        for runtime in runtime_tool_specs() {
+            assert!(gauntlet_tool_specs()
+                .iter()
+                .any(|tool| tool.tool == runtime.tool));
+        }
+        assert!(!gauntlet_tool_specs()
+            .iter()
+            .any(|tool| tool.tool == "get_capability"));
+
+        let live_bytes = serde_json::to_vec(&live).expect("live specs JSON").len();
+        let project_bytes = serde_json::to_vec(&project)
+            .expect("project specs JSON")
+            .len();
+        eprintln!(
+            "serialized context contracts: instruction={} bytes, live_tools={live_bytes} bytes, project_tools={project_bytes} bytes",
+            AgentProfile::default().instruction.len()
+        );
+        assert!(
+            live_bytes <= 1_900,
+            "live tool specs grew to {live_bytes} bytes"
+        );
+        assert!(
+            project_bytes <= 2_500,
+            "project tool specs grew to {project_bytes} bytes"
+        );
+        let write = project
+            .iter()
+            .find(|spec| spec.tool == "write_symbol")
+            .expect("write spec");
+        let encoded = serde_json::to_value(write).expect("serialized tool spec");
+        assert!(encoded.get("use").is_some());
+        assert!(encoded.get("required").is_some());
+        assert!(encoded.get("optional").is_some());
+        assert!(encoded.get("purpose").is_none());
+        assert!(encoded.get("required_args").is_none());
+        let decoded: ToolSpec = serde_json::from_value(encoded).expect("compact tool spec");
+        assert_eq!(decoded, *write);
+        let capability = serde_json::to_value(
+            project
+                .iter()
+                .find(|spec| spec.tool == "get_capability")
+                .expect("capability spec"),
+        )
+        .expect("serialized capability");
+        assert!(capability.get("required").is_some());
+        assert!(capability.get("optional").is_none());
+    }
+
+    #[test]
+    fn rare_tools_activate_only_after_their_capability_discovery() {
+        let mut provider = Responses(vec![
+            ModelResponse::ToolCalls {
+                working_notes: "Discover the authored-presentation capability.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "get_capability".to_string(),
+                    args: json!({"name":"assets"}),
+                }],
+            },
+            ModelResponse::ToolCalls {
+                working_notes: "Use the discovered bounded SVG capability.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "write_svg_asset".to_string(),
+                    args: json!({
+                        "id":"marker", "path":"assets/generated/marker.svg",
+                        "source":"<svg/>", "width":16, "height":16
+                    }),
+                }],
+            },
+            ModelResponse::ToolCalls {
+                working_notes: "Load runtime observation only after asset work.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "get_capability".to_string(),
+                    args: json!({"name":"runtime"}),
+                }],
+            },
+            ModelResponse::ToolCalls {
+                working_notes: "Use the discovered bounded runtime capability.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "run_frame".to_string(),
+                    args: json!({}),
+                }],
+            },
+            ModelResponse::Done {
+                working_notes: "The discovered capability was accepted.".to_string(),
+                summary: "done".to_string(),
+            },
+        ]);
+        let mut tools = Tools::default();
+        run_agent(
+            &mut provider,
+            &mut tools,
+            "add authored marker art",
+            json!({}),
+            project_ai_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("discovered asset tool");
+        assert_eq!(tools.0, 4);
     }
 
     #[test]
