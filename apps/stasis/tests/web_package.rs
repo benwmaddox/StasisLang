@@ -26,19 +26,21 @@ fn stamp() -> u128 {
         .as_nanos()
 }
 
-fn package(workspace: &Path, relative_output: &Path) -> PathBuf {
+fn package_with_mode(workspace: &Path, relative_output: &Path, development: bool) -> PathBuf {
     let output = workspace.join(relative_output);
-    let result = Command::new(env!("CARGO_BIN_EXE_stasis"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stasis"));
+    command
         .arg("package")
         .arg("--workspace")
         .arg(workspace)
         .arg("--target")
         .arg("web")
         .arg("--out")
-        .arg(relative_output)
-        .arg("--json")
-        .output()
-        .expect("run web package");
+        .arg(relative_output);
+    if development {
+        command.arg("--development-build");
+    }
+    let result = command.arg("--json").output().expect("run web package");
     assert!(
         result.status.success(),
         "web package failed:\nstdout={}\nstderr={}",
@@ -46,17 +48,49 @@ fn package(workspace: &Path, relative_output: &Path) -> PathBuf {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&result.stdout).contains("\"development_build\":false"),
-        "source-built package did not select local release provenance: {}",
+        String::from_utf8_lossy(&result.stdout).contains(&format!(
+            "\"development_build\":{}",
+            if development { "true" } else { "false" }
+        )),
+        "package receipt did not report the selected development mode: {}",
         String::from_utf8_lossy(&result.stdout)
     );
     let provenance: serde_json::Value = serde_json::from_slice(
         &fs::read(output.join("stasis_provenance.json")).expect("read web provenance"),
     )
     .expect("parse web provenance");
-    assert_eq!(provenance["build_class"], "local_release");
-    assert_eq!(provenance["development_build"], false);
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&result.stdout).expect("parse Web package command receipt");
+    assert_eq!(
+        provenance["build_class"],
+        if development {
+            "development"
+        } else {
+            "local_release"
+        }
+    );
+    assert_eq!(provenance["development_build"], development);
+    assert_eq!(
+        receipt["result"]["web_size_metrics"],
+        provenance["web_package"]["size_metrics"]
+    );
     output
+}
+
+fn package(workspace: &Path, relative_output: &Path) -> PathBuf {
+    package_with_mode(workspace, relative_output, false)
+}
+
+fn package_development(workspace: &Path, relative_output: &Path) -> PathBuf {
+    package_with_mode(workspace, relative_output, true)
+}
+
+fn runtime_config(source: &str) -> serde_json::Value {
+    let json = source
+        .strip_prefix("window.STASIS_GAME = ")
+        .and_then(|source| source.split_once(";\n").map(|(json, _)| json))
+        .expect("runtime metadata prefix");
+    serde_json::from_str(json).expect("parse runtime metadata")
 }
 
 fn copy_tree(source: &Path, destination: &Path) {
@@ -479,7 +513,7 @@ function render(): i32 {
             "release metadata omitted byte-backed marker for {path}"
         );
     }
-    assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
+    assert!(runtime.contains("sysMemcpyU8"));
 
     let execution = execute_web_main_with_byte_memcpy(&output);
     assert!(
@@ -502,11 +536,38 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     let stamp = stamp();
     let relative_output = PathBuf::from(format!("build/web-package-test-{stamp}"));
     let output = package(&workspace, &relative_output);
+    let first_runtime = fs::read(output.join("game.js")).expect("first deterministic game.js");
+    let first_provenance: serde_json::Value = serde_json::from_slice(
+        &fs::read(output.join("stasis_provenance.json")).expect("first provenance"),
+    )
+    .expect("parse first provenance");
     fs::write(output.join("stale.txt"), "old package").expect("write stale package file");
     let output = package(&workspace, &relative_output);
     assert!(
         !output.join("stale.txt").exists(),
         "replacement retained a stale package file"
+    );
+    assert_eq!(
+        fs::read(output.join("game.js")).expect("second deterministic game.js"),
+        first_runtime
+    );
+    let provenance: serde_json::Value = serde_json::from_slice(
+        &fs::read(output.join("stasis_provenance.json")).expect("second provenance"),
+    )
+    .expect("parse second provenance");
+    assert_eq!(
+        provenance["web_package"]["size_metrics"],
+        first_provenance["web_package"]["size_metrics"]
+    );
+    let metrics = &provenance["web_package"]["size_metrics"];
+    assert_eq!(metrics["javascript_minified"], true);
+    assert!(
+        metrics["javascript"]["after"]["raw_bytes"].as_u64()
+            < metrics["javascript"]["before"]["raw_bytes"].as_u64()
+    );
+    assert!(
+        metrics["javascript"]["after"]["gzip_bytes"].as_u64()
+            < metrics["javascript"]["before"]["gzip_bytes"].as_u64()
     );
 
     let wasm = fs::read(output.join("game.wasm")).expect("game.wasm");
@@ -578,32 +639,25 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         "dataset.uploadedBytes",
         "PERF_ROLLING_CAPACITY",
         "performanceWorstTimes",
-        "if (hud) {\n      recordPerformanceWorst(",
+        "recordPerformanceWorst",
         "getGpuBatcher",
         "drawArraysInstanced",
         "drawSprites",
         "atlasByResource",
-        "ATLAS_MAX_PAGES",
-        "ATLAS_PAGE_MAX",
         "atlasPages",
         "atlasUploadBytes",
-        "performanceBackend = \"WebGL2\"",
-        "const target = canvas;",
-        "target.getContext(\"webgl2\"",
+        "performanceBackend",
+        "getContext",
         "WebGL2 is required by the Stasis Web renderer",
-        "\"host_i32\"",
-        "\"host_f32\"",
+        "host_i32",
+        "host_f32",
         "audio_push_f32_interleaved",
-        "function writeHostFrame",
-        "function applyWindowRequest",
-        "const enableWebAudio = () =>",
-        "addEventListener(\"pointerdown\", () => { void enableWebAudio(); }",
-        "void enableWebAudio();",
-        "function sdlScancode",
-        "const spriteStride = GFX_SPRITE_STRIDE_F32;",
-        "const GFX_CMD_VERSION = 7;",
-        "const GFX_ORDER_CLIP_PUSH = 5;",
-        "batcher.setClip(clip);",
+        "writeHostFrame",
+        "applyWindowRequest",
+        "enableWebAudio",
+        "pointerdown",
+        "sdlScancode",
+        ".setClip(",
         "drawPreparedText",
         "deterministicMissingSprite",
     ] {
@@ -706,8 +760,8 @@ fn network_web_package_embeds_retained_nested_assets_only() {
         )
     );
     let runtime = fs::read_to_string(output.join("game.js")).expect("packaged Web runtime");
-    assert!(runtime.contains("\"schema\":\"stasis.asset_package\""));
-    assert!(runtime.contains(&asset_identity.manifest_sha256));
+    assert!(!runtime.contains("\"schema\":\"stasis.asset_package\""));
+    assert!(!runtime.contains(&asset_identity.manifest_sha256));
     let bundle = StaticBundle::decode(
         &fs::read(output.join("network_guest.bundle")).expect("read network guest bundle"),
     )
@@ -718,6 +772,10 @@ fn network_web_package_embeds_retained_nested_assets_only() {
             "missing core bundle file {core}"
         );
     }
+    assert_eq!(
+        bundle.get("game.js").expect("bundled game.js").bytes,
+        fs::read(output.join("game.js")).expect("final game.js")
+    );
     let expected_font = fs::read(output.join("assets/fonts/ui.ttf")).expect("read staged font");
     let font = bundle
         .get("assets/fonts/ui.ttf")
@@ -776,10 +834,9 @@ fn pong_packages_the_single_webgl2_runtime_with_unused_features_stripped() {
         "dataset.gpuSubmitMs",
         "dataset.presentWaitMs",
         "PERF_ROLLING_CAPACITY",
-        "if (hud)",
+        "recordPerformanceWorst",
         "recordPerformanceWorst(",
-        "target.getContext(\"webgl2\"",
-        "const target = canvas;",
+        "getContext",
     ] {
         assert!(
             runtime.contains(expected),
@@ -834,15 +891,12 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
         "gfx_cmd_i32",
         "gfx_cmd_f32",
         "stasis_jit_gfx_cache_text",
-        "sys_memcpy_i32: sysMemcpyI32",
-        "sys_memcpy_f32: sysMemcpyF32",
-        "const pointerCount = pointer.hover || pointer.down || pointer.wentDown || pointer.wentUp ? 1 : 0;",
-        "const right = Number.isFinite(bounds.right) ? bounds.right : bounds.left + width;",
-        "const bottom = Number.isFinite(bounds.bottom) ? bounds.bottom : bounds.top + height;",
-        "pointer.hover = event.pointerType !== \"touch\" && inside;",
-        "canvas.addEventListener(\"pointerleave\", () => { pointer.hover = false; });",
-        "canvas.addEventListener(\"pointerup\", event => {\n    updatePointer(event);\n    pointer.down = false;\n    pointer.wentUp = true;\n  });",
-        "canvas.addEventListener(\"pointercancel\", () => { pointer.hover = false; pointer.down = false; pointer.wentUp = true; });",
+        "sysMemcpyI32",
+        "sysMemcpyF32",
+        "pointerCount",
+        "pointerleave",
+        "pointerup",
+        "pointercancel",
     ] {
         assert!(
             runtime.contains(expected),
@@ -853,14 +907,42 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     assert!(!runtime.contains("audio_init"));
     let index = fs::read_to_string(output.join("index.html")).expect("existing game index");
     assert!(!index.contains("Enable sound"));
-    assert!(runtime.contains(r#""assets":{}"#));
-    assert!(runtime.contains(r#""asset_metadata":{"assets/smoke.png""#));
-    assert!(runtime.contains(r#""prepared_width":64"#));
-    assert!(runtime.contains(r#""prepared_bytes":455"#));
-    assert!(runtime.contains(r#""source_bytes":455"#));
-    assert!(runtime.contains(
-        r#""source_sha256":"98d61197c8db539121336207a1cc722093a0d3e0acd5ef5196c1eda3e9b92d72""#
-    ));
+    let config = runtime_config(&runtime);
+    assert_eq!(config["assets"], serde_json::json!({}));
+    let smoke = config["asset_metadata"]["assets/smoke.png"]
+        .as_object()
+        .expect("release smoke metadata");
+    assert_eq!(smoke["prepared_width"], 64);
+    assert!(smoke.keys().all(|field| [
+        "encoding",
+        "prepared_width",
+        "prepared_height",
+        "logical_width",
+        "logical_height"
+    ]
+    .contains(&field.as_str())));
+    for removed in [
+        "path",
+        "prepared_bytes",
+        "source_bytes",
+        "source_sha256",
+        "prepared_sha256",
+    ] {
+        assert!(!smoke.contains_key(removed), "release retained {removed}");
+    }
+    assert!(config.get("asset_package").is_none());
+    let provenance: serde_json::Value = serde_json::from_slice(
+        &fs::read(output.join("stasis_provenance.json")).expect("asset provenance"),
+    )
+    .expect("parse asset provenance");
+    let audit = &provenance["web_package"]["asset_metadata_audit"]["assets/smoke.png"];
+    assert_eq!(audit["path"], "assets/smoke.png");
+    assert_eq!(audit["prepared_bytes"], 455);
+    assert_eq!(audit["source_bytes"], 455);
+    assert_eq!(
+        audit["source_sha256"],
+        "98d61197c8db539121336207a1cc722093a0d3e0acd5ef5196c1eda3e9b92d72"
+    );
     assert!(!runtime.contains("../assets/"));
     for expected in [
         "data:image/png;base64,",
@@ -877,6 +959,52 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     assert!(output.join("assets/smoke.ttf").is_file());
 
     fs::remove_dir_all(&output).expect("clean existing game web package");
+}
+
+#[test]
+fn development_web_package_remains_readable_and_retains_asset_diagnostics() {
+    let workspace = repo_root().join("samples/windows_launch_smoke");
+    let relative_output = PathBuf::from(format!("build/web-development-test-{}", stamp()));
+    let output = package_development(&workspace, &relative_output);
+    let runtime = fs::read_to_string(output.join("game.js")).expect("development game.js");
+    assert!(runtime.contains("const canvas = document.getElementById"));
+    assert!(runtime.contains("const rasterSprite = async request =>"));
+    assert!(runtime.lines().count() > 1000);
+
+    let config = runtime_config(&runtime);
+    let smoke = config["asset_metadata"]["assets/smoke.png"]
+        .as_object()
+        .expect("development smoke metadata");
+    for diagnostic in [
+        "path",
+        "prepared_bytes",
+        "source_bytes",
+        "source_sha256",
+        "prepared_sha256",
+    ] {
+        assert!(
+            smoke.contains_key(diagnostic),
+            "development omitted {diagnostic}"
+        );
+    }
+    assert_eq!(config["asset_package"]["schema"], "stasis.asset_package");
+
+    let provenance: serde_json::Value = serde_json::from_slice(
+        &fs::read(output.join("stasis_provenance.json")).expect("development provenance"),
+    )
+    .expect("parse development provenance");
+    let metrics = &provenance["web_package"]["size_metrics"];
+    assert_eq!(metrics["javascript_minified"], false);
+    assert_eq!(
+        metrics["javascript"]["before"],
+        metrics["javascript"]["after"]
+    );
+    assert_eq!(
+        metrics["asset_metadata"]["before"],
+        metrics["asset_metadata"]["after"]
+    );
+
+    fs::remove_dir_all(&output).expect("clean development Web package");
 }
 
 #[test]
@@ -991,8 +1119,9 @@ fn rooted_web_asset_paths_emit_package_relative_assets() {
         "rooted asset literal was not retained in runtime metadata"
     );
     assert!(
-        runtime.contains("value.startsWith(\"/assets/\")")
-            && runtime.contains("return value.slice(1)"),
+        runtime.contains("startsWith")
+            && runtime.contains("/assets/")
+            && runtime.contains("slice(1)"),
         "web runtime is missing the rooted-to-package-relative asset mapping"
     );
 
@@ -1014,25 +1143,21 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
         "stasis_jit_audio_load_music",
         "stasis_jit_audio_load_effect",
         "decodeAudioData",
-        "document.addEventListener(\"visibilitychange\"",
-        "addEventListener(\"pagehide\"",
-        "addEventListener(\"pageshow\"",
-        "if (event.persisted) suspendWebAudio()",
-        "else shutdownWebAudio()",
-        "pendingAudio.length = 0",
-        "pendingAudioFrames = 0",
-        "const queuedAudioFrames = () => scheduledAudioFrames() + pendingAudioFrames",
-        "PENDING_AUDIO_SECONDS = 0.1",
-        "PENDING_AUDIO_ENTRY_LIMIT = 32",
-        "MAX_AUDIO_VOICES = 32",
-        "const allocateAudioVoiceHandle",
-        "const setAudioVoiceVolumePan",
-        "audio_play: (handle, loop, volume, pan) => startAudio(handle, loop, volume, pan)",
+        "visibilitychange",
+        "pagehide",
+        "pageshow",
+        "suspendWebAudio",
+        "shutdownWebAudio",
+        "pendingAudio",
+        "pendingAudioFrames",
+        "queuedAudioFrames",
+        "allocateAudioVoiceHandle",
+        "setAudioVoiceVolumePan",
+        "startAudio",
         "createStereoPanner",
-        "audioContext.suspend()",
-        "resumingContext.resume()",
-        "resumingContext.suspend()",
-        "closingContext.close()",
+        ".suspend()",
+        ".resume()",
+        ".close()",
     ] {
         assert!(
             runtime.contains(expected),

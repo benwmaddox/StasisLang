@@ -18,6 +18,12 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+flate2 = "1.1"
+oxc_allocator = "=0.125.0"
+oxc_codegen = "=0.125.0"
+oxc_minifier = "=0.125.0"
+oxc_parser = "=0.125.0"
+oxc_span = "=0.125.0"
 crossterm = "0.28"
 stasis_dynload = { path = "../../crates/stasis_dynload", features = ["network"] }
 stasis_assets = { path = "../../crates/stasis_assets" }

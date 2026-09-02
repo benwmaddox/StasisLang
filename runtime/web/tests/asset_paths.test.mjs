@@ -162,6 +162,30 @@ test("web asset paths normalize fallback values and preserve explicit overrides"
   ]);
 });
 
+test("release metadata projection does not affect loading paths or fallback", async () => {
+  const base = {
+    memory: {}, strings: { "1": "/assets/sprite.svg" },
+    assets: { "assets/sprite.svg": "assets/prepared/sprite.svg" },
+  };
+  const retained = {
+    encoding: "svg", prepared_width: 64, prepared_height: 32,
+    logical_width: 16, logical_height: 8,
+  };
+  const auditOnly = {
+    path: "assets/sprite.svg", prepared_bytes: 455, source_bytes: 4096,
+    source_sha256: "source-master", prepared_sha256: "prepared-master",
+  };
+  const projected = await loadRuntime({ ...base, asset_metadata: { "assets/sprite.svg": retained } });
+  const diagnostic = await loadRuntime({
+    ...base, asset_metadata: { "assets/sprite.svg": { ...retained, ...auditOnly } }
+  });
+
+  projected.env.gfx_load_sprite(1);
+  diagnostic.env.gfx_load_sprite(1);
+  assert.deepEqual(projected.imageSources, diagnostic.imageSources);
+  assert.deepEqual(projected.imageSources, ["assets/prepared/sprite.svg"]);
+});
+
 test("web rooted sprite and font paths use package-relative asset keys", async () => {
   const game = {
     memory: {},

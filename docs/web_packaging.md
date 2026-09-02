@@ -126,12 +126,24 @@ PNG, SVG, TTF, WAV, and MP3 files are placed under `assets/` and loaded as exter
 WebAudio playback requested during `main()` is queued until the audio context starts or a user
 gesture unlocks it.
 
-When a staged asset manifest is present, `game.js` also carries a compact
-`asset_metadata` table containing package-relative paths, encodings, prepared
-dimensions, prepared byte lengths, and source/prepared hashes. `game.assets` remains the explicit
-source-to-package override table. The runtime uses this metadata to select the
-smallest useful density tier for a declared logical sprite extent; it does not
-package alternate tiers or upscale a PNG master without an inspectable fallback.
+When a staged asset manifest is present, a release `game.js` carries only the
+browser-consumed `asset_metadata` fields: encoding, prepared width and height,
+and logical width and height. Package-relative paths are already the table keys;
+byte lengths, hashes, the repeated per-item path, and the asset-package identity
+are audit data rather than browser runtime state. The complete prepared manifest
+remains in `assets/manifest.json`, its digest-bound identity remains in
+`stasis_asset_package.json`, and the complete derived metadata map is copied into
+`stasis_provenance.json`. Development packages retain the complete metadata and
+asset-package identity in readable `game.js` for inspection. `game.assets`
+remains the explicit source-to-package override table.
+
+After feature and import linking, release JavaScript is parsed, compressed, and
+printed deterministically by the pinned in-process Oxc minifier. Development
+JavaScript is left unminified and source-friendly. The provenance manifest and
+JSON command receipt report raw UTF-8 and deterministic gzip byte counts before
+and after JavaScript minification and metadata projection. Gzip measurements use
+level 9 with an mtime of zero. Network guest bundles embed the exact final
+`game.js` bytes written beside the bundle.
 
 The visible canvas is WebGL2-only. Sprites, host-private solid texels, lines,
 and prepared text textures use one instanced textured-quad path; logical clips

@@ -450,6 +450,44 @@ test("optimized sprite preparation resizes a Blob without constructing or decodi
   assert.equal(bitmaps[0].closed, false);
 });
 
+test("release metadata projection preserves Canvas2D preparation and WebGL2 upload", async () => {
+  const retained = {
+    encoding: "svg", prepared_width: 64, prepared_height: 32,
+    logical_width: 16, logical_height: 8,
+  };
+  const auditOnly = {
+    path: "assets/wide.svg", prepared_bytes: 455, source_bytes: 4096,
+    source_sha256: "source-master", prepared_sha256: "prepared-master",
+  };
+  const run = metadata => loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteSize: [16, 8], spriteUv: [0, 0, 1, 1],
+    assets: { "": "wide.svg" }, assetMetadata: { "": metadata },
+    createImageBitmap: (_source, options) => ({
+      width: options.resizeWidth, height: options.resizeHeight, close() {}
+    })
+  });
+  const projected = await run(retained);
+  const diagnostic = await run({ ...retained, ...auditOnly });
+  projected.frame();
+  diagnostic.frame();
+
+  for (const runtime of [projected, diagnostic]) {
+    assert.deepEqual([
+      runtime.stats.bitmapCalls[0].options.resizeWidth,
+      runtime.stats.bitmapCalls[0].options.resizeHeight,
+    ], [16, 8]);
+    assert.ok(runtime.rasterStats.draws > 0);
+    assert.ok(runtime.stats.instanced > 0);
+    assert.equal(runtime.body.dataset.assetFallback, "none");
+  }
+  assert.equal(projected.rasterStats.draws, diagnostic.rasterStats.draws);
+  assert.equal(projected.stats.instanced, diagnostic.stats.instanced);
+  assert.equal(projected.body.dataset.assetPreparedFileBytes, "0");
+  assert.equal(projected.body.dataset.assetSourceBytes, "0");
+  assert.equal(diagnostic.body.dataset.assetPreparedFileBytes, "455");
+  assert.equal(diagnostic.body.dataset.assetSourceBytes, "4096");
+});
+
 test("optimized sprite preparation preserves aspect ratio in a centered tier surface", async () => {
   const bitmaps = [];
   const runtime = await loadRuntime({
