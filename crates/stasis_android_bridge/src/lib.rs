@@ -4393,25 +4393,35 @@ function tick(): void {}
         }
     }
 
-    fn stage_android_sample(sample_name: &str, project_name: &str) -> PathBuf {
+    fn stage_project_with_stdlib(
+        source: &Path,
+        project_name: &str,
+        stdlib_mount: &Path,
+    ) -> PathBuf {
         let root = temp_project(project_name);
+        copy_tree(source, &root);
+        fs::remove_dir_all(root.join(".stasis_cache")).ok();
+        fs::remove_dir_all(root.join("build")).ok();
+        let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/stdlib")
+            .canonicalize()
+            .expect("canonical stdlib root");
+        copy_tree(&stdlib, &root.join(stdlib_mount));
+        root
+    }
+
+    fn stage_android_sample(sample_name: &str, project_name: &str) -> PathBuf {
         let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../samples")
             .join(sample_name)
             .canonicalize()
             .expect("Android seam sample root");
-        copy_tree(&sample, &root);
 
         // The packaged Android sample resolves its canonical graphics import
         // from the project-owned vendor mount.  Keep the test source and
         // renderer exactly the checked-in sample while staging that mount in
         // the temporary project used by the live bridge.
-        let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/stdlib")
-            .canonicalize()
-            .expect("canonical stdlib root");
-        copy_tree(&stdlib, &root.join("vendor/stasis/src/stdlib"));
-        root
+        stage_project_with_stdlib(&sample, project_name, Path::new("vendor/stasis/src/stdlib"))
     }
 
     fn stage_android_aot_sample() -> PathBuf {
@@ -4420,6 +4430,30 @@ function tick(): void {}
 
     fn stage_android_touch_sample() -> PathBuf {
         stage_android_sample("android_touch_seam", "it018_touch_sample")
+    }
+
+    fn stage_bundled_pong_sample() -> PathBuf {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/workshop_sample")
+            .canonicalize()
+            .expect("bundled sample root");
+        stage_project_with_stdlib(
+            &sample,
+            "bundled_touch_pong",
+            Path::new("vendor/stasis/src/stdlib"),
+        )
+    }
+
+    fn stage_render_parity_sample() -> PathBuf {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../samples/render_parity")
+            .canonicalize()
+            .expect("render parity sample root");
+        stage_project_with_stdlib(
+            &sample,
+            "render_parity",
+            Path::new(".stasis_cache/toolchain/src/stdlib"),
+        )
     }
 
     fn run_android_touch_slot_frame(
@@ -6010,10 +6044,7 @@ function tick(): void {}
     fn android_it027_render_parity_sample_real_jit_exports_marker_and_idle_trace() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../samples/render_parity")
-            .canonicalize()
-            .expect("render parity sample root");
+        let root = stage_render_parity_sample();
         let entry = Path::new("main.stasis");
         let capture_manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -6195,14 +6226,12 @@ function tick(): void {}
             "the same idle scene must have a stable current-build trace"
         );
         clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn android_bundled_touch_pong_sample_real_jit_is_runnable() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../mobile/android/app/src/main/assets/workshop_sample")
-            .canonicalize()
-            .expect("bundled sample root");
+        let root = stage_bundled_pong_sample();
 
         let result = compile_android_workshop_project(&root, Path::new("src/main.stasis"))
             .expect("compile bundled pong sample");
@@ -6211,16 +6240,14 @@ function tick(): void {}
 
         assert_eq!(result.status, 0, "{manifest}");
         assert!(result.compiled_function_count >= 5, "{manifest}");
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn android_bundled_touch_pong_sample_runs_and_exports_render_commands() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../mobile/android/app/src/main/assets/workshop_sample")
-            .canonicalize()
-            .expect("bundled sample root");
+        let root = stage_bundled_pong_sample();
 
         let result = run_android_workshop_tick(
             &root,
@@ -6248,6 +6275,8 @@ function tick(): void {}
         assert_eq!(result.render_commands[3].clip_w, 360);
         assert_eq!(result.render_commands[3].clip_h, 640);
         assert!(result.observed_game_tick_count >= 1);
+        clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -6290,10 +6319,7 @@ function tick(): void {}
     fn android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../mobile/android/app/src/main/assets/workshop_sample")
-            .canonicalize()
-            .expect("bundled sample root");
+        let root = stage_bundled_pong_sample();
         let entry = Path::new("src/main.stasis");
 
         let first = run_android_workshop_tick(
@@ -6365,15 +6391,13 @@ function tick(): void {}
         );
 
         clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
     }
     #[test]
     fn android_bridge_runs_bundled_stasis_tests() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../mobile/android/app/src/main/assets/workshop_sample")
-            .canonicalize()
-            .expect("bundled sample root");
+        let root = stage_bundled_pong_sample();
         let result = run_android_workshop_stasis_tests(&root).expect("run bundled Stasis tests");
         assert_eq!(result["passed"], 2, "{result}");
         assert_eq!(result["failed"], 0);
@@ -6384,6 +6408,7 @@ function tick(): void {}
         );
         assert_eq!(result["results"][0]["line"], 3);
         clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
