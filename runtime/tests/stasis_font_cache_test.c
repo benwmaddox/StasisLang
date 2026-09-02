@@ -17,6 +17,10 @@ int stasis_init_window(int width, int height, const char* title);
 void stasis_shutdown(void);
 int stasis_set_asset_root(const char* path);
 int stasis_load_font(const char* path, int font_size);
+int stasis_gfx_cache_text(int font, const char* text);
+int stasis_gfx_replace_text(int handle, int font, const char* text);
+float stasis_gfx_measure_text_cached(int handle);
+float stasis_gfx_measure_text_cached_height(int handle);
 
 static char g_temp_dir[512];
 static char g_identity_paths[10][768];
@@ -98,6 +102,39 @@ int main(void) {
     int second_size = stasis_load_font(STASIS_TEST_FONT_PATH, 20);
     CHECK(second_size > 0);
     CHECK(second_size != first);
+
+    int fixed_run = stasis_gfx_cache_text(first, "score 0");
+    CHECK(fixed_run > 0);
+    CHECK(stasis_gfx_cache_text(first, "score 0") == fixed_run);
+    int dynamic_run = stasis_gfx_replace_text(fixed_run, first, "score 0");
+    CHECK(dynamic_run > 0 && dynamic_run != fixed_run);
+    CHECK(stasis_gfx_cache_text(first, "score 0") == fixed_run);
+    char score[32];
+    for (int i = 1; i <= 5000; i++) {
+        int written = snprintf(score, sizeof(score), "score %d", i);
+        CHECK(written > 0 && (size_t)written < sizeof(score));
+        CHECK(stasis_gfx_replace_text(dynamic_run, first, score) == dynamic_run);
+    }
+    CHECK(stasis_gfx_replace_text(dynamic_run, first, "Punktzahl \xc3\xa4") == dynamic_run);
+    CHECK(stasis_gfx_replace_text(dynamic_run, second_size, "score 8") == dynamic_run);
+    float prior_width = stasis_gfx_measure_text_cached(dynamic_run);
+    float prior_height = stasis_gfx_measure_text_cached_height(dynamic_run);
+    const char malformed[] = {(char)0xc3, '(', 0};
+    CHECK(stasis_gfx_replace_text(dynamic_run, first, malformed) == 0);
+    CHECK(stasis_gfx_replace_text(dynamic_run, 0, "invalid font") == 0);
+    char oversized[1025];
+    memset(oversized, 'x', sizeof(oversized) - 1);
+    oversized[sizeof(oversized) - 1] = 0;
+    CHECK(stasis_gfx_replace_text(dynamic_run, first, oversized) == 0);
+    CHECK(stasis_gfx_measure_text_cached(dynamic_run) == prior_width);
+    CHECK(stasis_gfx_measure_text_cached_height(dynamic_run) == prior_height);
+    for (int i = 1; i < 16; i++) {
+        int written = snprintf(score, sizeof(score), "dynamic %d", i);
+        CHECK(written > 0 && (size_t)written < sizeof(score));
+        CHECK(stasis_gfx_replace_text(0, first, score) > 0);
+    }
+    CHECK(stasis_gfx_replace_text(0, first, "capacity failure") == 0);
+    CHECK(stasis_gfx_measure_text_cached(dynamic_run) == prior_width);
 
     int large = stasis_load_font(STASIS_TEST_FONT_PATH, 100);
     CHECK(large > 0);

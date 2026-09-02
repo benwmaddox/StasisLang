@@ -45,6 +45,7 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_gfx_measure_text_cached_height",
     "stasis_jit_sprite_load_from",
     "stasis_jit_text_run_load_from",
+    "stasis_jit_text_run_replace_from",
     "stasis_jit_upsert_string_literal",
     "stasis_jit_gfx_poll_reload",
     "stasis_jit_global_f32_array_load",

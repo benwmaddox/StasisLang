@@ -299,6 +299,7 @@ function finished(self: AnimationClip, elapsed_ticks: i32): bool {
 }
 
 function @effects(graphics)@extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
+function @effects(graphics)@extern("stasis_jit_text_run_replace_from") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool;
 
 function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     if (self.font <= 0 || self.handle <= 0) {

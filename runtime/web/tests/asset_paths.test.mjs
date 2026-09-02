@@ -6,7 +6,7 @@ import { fakeWebGL2 } from "./fake_webgl2.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
-async function loadRuntime(game, options = {}) {
+export async function loadRuntime(game, options = {}) {
   const imageSources = [];
   const measurements = [];
   const animationFrames = [];
@@ -63,7 +63,7 @@ async function loadRuntime(game, options = {}) {
   const instance = {
     exports: {
       memory,
-      main: () => { options.main?.(env); return 0; },
+      main: () => { options.main?.(env, memory); return 0; },
       tick: () => 0,
       render: () => 0,
     }

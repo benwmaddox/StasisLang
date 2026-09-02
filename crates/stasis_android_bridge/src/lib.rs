@@ -870,6 +870,8 @@ pub fn run_android_workshop_tick(
 
 const MAX_EMBEDDED_FONTS: usize = 64;
 const MAX_EMBEDDED_TEXT_RUNS: usize = 4096;
+const MAX_EMBEDDED_TEXT_BYTES: usize = 262_144;
+const MAX_EMBEDDED_DYNAMIC_TEXT_BYTES: usize = 4096;
 const MAX_EMBEDDED_SPRITES: usize = 4096;
 const MAX_PENDING_SPRITE_RELEASES: usize = 256;
 
@@ -887,6 +889,7 @@ struct EmbeddedTextRun {
     text: String,
     measured_width: f32,
     measured_height: f32,
+    replaceable: bool,
 }
 
 #[derive(Clone)]
@@ -928,6 +931,7 @@ fn install_embedded_resource_host(project_root: &Path) -> Result<(), String> {
         load_font: embedded_load_font,
         measure_text: embedded_measure_text,
         cache_text: embedded_cache_text,
+        replace_text: embedded_replace_text,
         measure_text_cached: embedded_measure_text_cached,
         measure_text_cached_height: embedded_measure_text_cached_height,
         poll_reload: |_| 0,
@@ -1322,9 +1326,20 @@ fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
     if let Some(run) = catalog
         .text_runs
         .iter()
-        .find(|run| run.font == font && run.text == text)
+        .find(|run| !run.replaceable && run.font == font && run.text == text)
     {
         return run.handle;
+    }
+    if catalog
+        .text_runs
+        .iter()
+        .map(|run| run.text.len())
+        .sum::<usize>()
+        + text.len()
+        > MAX_EMBEDDED_TEXT_BYTES
+    {
+        set_embedded_resource_error(catalog, "cached text byte capacity is full".to_string());
+        return 0;
     }
     if catalog.text_runs.len() >= MAX_EMBEDDED_TEXT_RUNS {
         set_embedded_resource_error(catalog, "cached text registry is full".to_string());
@@ -1338,6 +1353,75 @@ fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
         text: text.to_string(),
         measured_width,
         measured_height: font_entry.size as f32,
+        replaceable: false,
+    });
+    handle
+}
+
+fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
+    let Ok(mut slot) = embedded_resource_catalog().lock() else {
+        return 0;
+    };
+    let Some(catalog) = slot.as_mut() else {
+        return 0;
+    };
+    let Ok(text) = std::str::from_utf8(text) else {
+        set_embedded_resource_error(catalog, "dynamic text is not valid UTF-8".to_string());
+        return 0;
+    };
+    if text.is_empty() {
+        set_embedded_resource_error(catalog, "dynamic text must not be empty".to_string());
+        return 0;
+    }
+    if text.len() > MAX_EMBEDDED_DYNAMIC_TEXT_BYTES {
+        set_embedded_resource_error(
+            catalog,
+            "dynamic text exceeds per-run byte capacity".to_string(),
+        );
+        return 0;
+    }
+    let Some(font_entry) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
+        set_embedded_resource_error(catalog, format!("font handle {font} was not loaded"));
+        return 0;
+    };
+    let existing = catalog
+        .text_runs
+        .iter()
+        .position(|run| run.handle == handle);
+    let replace_index = existing.filter(|&index| catalog.text_runs[index].replaceable);
+    if replace_index.is_none() && catalog.text_runs.len() >= MAX_EMBEDDED_TEXT_RUNS {
+        set_embedded_resource_error(catalog, "cached text registry is full".to_string());
+        return 0;
+    }
+    let prior_len = replace_index.map_or(0, |index| catalog.text_runs[index].text.len());
+    let retained = catalog
+        .text_runs
+        .iter()
+        .map(|run| run.text.len())
+        .sum::<usize>();
+    if retained - prior_len + text.len() > MAX_EMBEDDED_TEXT_BYTES {
+        set_embedded_resource_error(catalog, "cached text byte capacity is full".to_string());
+        return 0;
+    }
+    let measured_width = text.len() as f32 * font_entry.size as f32 * 0.6;
+    let measured_height = font_entry.size as f32;
+    if let Some(index) = replace_index {
+        let replacement = text.to_string();
+        let run = &mut catalog.text_runs[index];
+        run.font = font;
+        run.text = replacement;
+        run.measured_width = measured_width;
+        run.measured_height = measured_height;
+        return run.handle;
+    }
+    let handle = catalog.text_runs.len() as i32 + 1;
+    catalog.text_runs.push(EmbeddedTextRun {
+        handle,
+        font,
+        text: text.to_string(),
+        measured_width,
+        measured_height,
+        replaceable: true,
     });
     handle
 }
@@ -7119,6 +7203,7 @@ function on_code_swap(): void {}\n";
                 text: "refresh".to_string(),
                 measured_width: 75.6,
                 measured_height: 18.0,
+                replaceable: false,
             });
         }
 
@@ -7133,6 +7218,87 @@ function on_code_swap(): void {}\n";
         assert_eq!(refreshed.text_runs.len(), 1);
         assert_eq!(refreshed.text_runs[0].text, "refresh");
         assert_eq!(refreshed.text_runs[0].measured_height, 18.0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn embedded_dynamic_text_churn_is_bounded_and_transactional() {
+        let _guard = bridge_runtime_test_guard();
+        let root = temp_project("embedded_dynamic_text_churn");
+        install_embedded_resource_host(&root).expect("install embedded resource host");
+        {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            let catalog = slot.as_mut().unwrap();
+            catalog.fonts.push(EmbeddedFont {
+                handle: 1,
+                path: root.join("assets/first.ttf"),
+                size: 18,
+            });
+            catalog.fonts.push(EmbeddedFont {
+                handle: 2,
+                path: root.join("assets/second.ttf"),
+                size: 30,
+            });
+        }
+
+        let fixed = embedded_cache_text(1, b"fixed");
+        assert_eq!(embedded_cache_text(1, b"fixed"), fixed);
+        let dynamic = embedded_replace_text(fixed, 1, b"score 0");
+        assert_ne!(dynamic, fixed);
+        assert_eq!(embedded_cache_text(1, b"fixed"), fixed);
+        for value in 1..=5000 {
+            let text = format!("score {value}");
+            assert_eq!(embedded_replace_text(dynamic, 1, text.as_bytes()), dynamic);
+        }
+        assert_eq!(
+            embedded_replace_text(dynamic, 1, "Punktzahl 7".as_bytes()),
+            dynamic
+        );
+        assert_eq!(
+            embedded_replace_text(dynamic, 2, "Punktzahl 8".as_bytes()),
+            dynamic
+        );
+        let before = {
+            let slot = embedded_resource_catalog().lock().unwrap();
+            let catalog = slot.as_ref().unwrap();
+            assert_eq!(catalog.text_runs.len(), 2);
+            catalog
+                .text_runs
+                .iter()
+                .find(|run| run.handle == dynamic)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(before.font, 2);
+        assert_eq!(before.measured_height, 30.0);
+        assert_eq!(embedded_replace_text(dynamic, 1, &[0xff]), 0);
+        assert_eq!(embedded_replace_text(dynamic, 99, b"invalid font"), 0);
+        assert_eq!(
+            embedded_replace_text(dynamic, 1, &vec![b'x'; MAX_EMBEDDED_DYNAMIC_TEXT_BYTES + 1]),
+            0
+        );
+        let after = {
+            let slot = embedded_resource_catalog().lock().unwrap();
+            slot.as_ref()
+                .unwrap()
+                .text_runs
+                .iter()
+                .find(|run| run.handle == dynamic)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(after.font, before.font);
+        assert_eq!(after.text, before.text);
+        assert_eq!(after.measured_width, before.measured_width);
+        assert_eq!(after.measured_height, before.measured_height);
+        let refreshed = prepare_embedded_resource_catalog(&root, true).unwrap();
+        let refreshed_run = refreshed
+            .text_runs
+            .iter()
+            .find(|run| run.handle == dynamic)
+            .unwrap();
+        assert!(refreshed_run.replaceable);
+        assert_eq!(refreshed_run.text, before.text);
         fs::remove_dir_all(&root).ok();
     }
 

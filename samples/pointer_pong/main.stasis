@@ -17,21 +17,15 @@ struct PongState {
     right_score: i32;
 }
 
-struct ScoreDigits {
-    zero: TextRun;
-    one: TextRun;
-    two: TextRun;
-    three: TextRun;
-    four: TextRun;
-    five: TextRun;
-    six: TextRun;
-    seven: TextRun;
-    eight: TextRun;
-    nine: TextRun;
-}
-
 global score_font: i32;
-global score_digits: ScoreDigits;
+global left_score_run: TextRun;
+global right_score_run: TextRun;
+global left_score_ascii: ascii[4];
+global right_score_ascii: ascii[4];
+global left_score_text: utf8[4];
+global right_score_text: utf8[4];
+global displayed_left_score: i32;
+global displayed_right_score: i32;
 global state: PongState;
 
 function score_for_display(score: i32): i32 {
@@ -41,48 +35,24 @@ function score_for_display(score: i32): i32 {
     return score % 100;
 }
 
-function score_digit(score: i32, place: i32): i32 {
-    let display_score: i32 = score_for_display(score);
-    if (place == 10) {
-        return display_score / 10;
+function build_score_text(scratch: ascii[], text: utf8[], score: i32): void {
+    ascii_clear(scratch);
+    ascii_push_i32(scratch, score_for_display(score));
+    utf8_from_ascii(text, scratch, 4);
+}
+
+function refresh_scores(): void {
+    if (state.left_score != displayed_left_score) {
+        build_score_text(left_score_ascii, left_score_text, state.left_score);
+        if (left_score_run.replace_text_from(score_font, left_score_text)) {
+            displayed_left_score = state.left_score;
+        }
     }
-    return display_score % 10;
-}
-
-function load_score_digits(): void {
-    score_digits.zero.load_text_from(score_font, "0");
-    score_digits.one.load_text_from(score_font, "1");
-    score_digits.two.load_text_from(score_font, "2");
-    score_digits.three.load_text_from(score_font, "3");
-    score_digits.four.load_text_from(score_font, "4");
-    score_digits.five.load_text_from(score_font, "5");
-    score_digits.six.load_text_from(score_font, "6");
-    score_digits.seven.load_text_from(score_font, "7");
-    score_digits.eight.load_text_from(score_font, "8");
-    score_digits.nine.load_text_from(score_font, "9");
-}
-
-function draw_score_digit(digit: i32, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
-    if (digit == 0) {
-        score_digits.zero.draw(x, y, r, g, b, a);
-    } else if (digit == 1) {
-        score_digits.one.draw(x, y, r, g, b, a);
-    } else if (digit == 2) {
-        score_digits.two.draw(x, y, r, g, b, a);
-    } else if (digit == 3) {
-        score_digits.three.draw(x, y, r, g, b, a);
-    } else if (digit == 4) {
-        score_digits.four.draw(x, y, r, g, b, a);
-    } else if (digit == 5) {
-        score_digits.five.draw(x, y, r, g, b, a);
-    } else if (digit == 6) {
-        score_digits.six.draw(x, y, r, g, b, a);
-    } else if (digit == 7) {
-        score_digits.seven.draw(x, y, r, g, b, a);
-    } else if (digit == 8) {
-        score_digits.eight.draw(x, y, r, g, b, a);
-    } else {
-        score_digits.nine.draw(x, y, r, g, b, a);
+    if (state.right_score != displayed_right_score) {
+        build_score_text(right_score_ascii, right_score_text, state.right_score);
+        if (right_score_run.replace_text_from(score_font, right_score_text)) {
+            displayed_right_score = state.right_score;
+        }
     }
 }
 
@@ -173,11 +143,13 @@ function update_ball(): void {
 function main(): i32 {
     init_window(640, 360, "Stasis Pointer Pong");
     score_font = load_font("assets/score.ttf", 32);
-    load_score_digits();
     state.left_y = 144.0;
     state.right_y = 144.0;
     state.left_score = 0;
     state.right_score = 0;
+    displayed_left_score = -1;
+    displayed_right_score = -1;
+    refresh_scores();
     reset_ball(1.0);
     return 0;
 }
@@ -189,24 +161,19 @@ function tick(): i32 {
     update_player();
     update_cpu();
     update_ball();
+    refresh_scores();
     return 0;
 }
 
 function render(): i32 {
-    let left_tens: i32 = score_digit(state.left_score, 10);
-    let left_ones: i32 = score_digit(state.left_score, 1);
-    let right_tens: i32 = score_digit(state.right_score, 10);
-    let right_ones: i32 = score_digit(state.right_score, 1);
     begin_frame();
     clear(0.02, 0.05, 0.09, 1.0);
     fill_rect(20.0, state.left_y, PADDLE_W, PADDLE_H, 0.33, 0.85, 0.98, 1.0);
     fill_rect(606.0, state.right_y, PADDLE_W, PADDLE_H, 0.98, 0.70, 0.32, 1.0);
     fill_rect(state.ball_x, state.ball_y, BALL_SIZE, BALL_SIZE, 0.96, 0.98, 1.0, 1.0);
     fill_rect(318.0, 0.0, 4.0, SCREEN_H, 0.16, 0.30, 0.40, 1.0);
-    draw_score_digit(left_tens, 274.0, 16.0, 0.33, 0.85, 0.98, 1.0);
-    draw_score_digit(left_ones, 294.0, 16.0, 0.33, 0.85, 0.98, 1.0);
-    draw_score_digit(right_tens, 338.0, 16.0, 0.98, 0.70, 0.32, 1.0);
-    draw_score_digit(right_ones, 358.0, 16.0, 0.98, 0.70, 0.32, 1.0);
+    left_score_run.draw(286.0, 16.0, 0.33, 0.85, 0.98, 1.0);
+    right_score_run.draw(350.0, 16.0, 0.98, 0.70, 0.32, 1.0);
     end_frame();
     return 0;
 }

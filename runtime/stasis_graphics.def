@@ -106,6 +106,7 @@ EXPORTS
     stasis_draw_text
     stasis_measure_text
     stasis_gfx_cache_text
+    stasis_gfx_replace_text
     stasis_gfx_draw_text_cached
     stasis_gfx_measure_text_cached
     stasis_gfx_get_resource_lifecycle

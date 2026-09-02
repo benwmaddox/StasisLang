@@ -20,6 +20,11 @@
   const fonts = new Map();
   const fontLoads = new Map();
   const cachedText = new Map();
+  const immutableTextHandles = new Map();
+  const TEXT_RUN_MAX_ENTRIES = 4096;
+  const TEXT_RUN_MAX_BYTES = 262144;
+  const DYNAMIC_TEXT_MAX_BYTES = 4096;
+  let cachedTextBytes = 0;
   const preparedText = new Map();
   const PREPARED_TEXT_MAX_ENTRIES = 256;
   const PREPARED_TEXT_MAX_BYTES = 8 * 1024 * 1024;
@@ -857,6 +862,65 @@
     else view.setInt32(offset, value, true);
     return true;
   };
+  const canWriteViewField = (base, index, field) => {
+    const path = game.views?.[String(base)]?.[field];
+    if (!path) return false;
+    if (index < 0) {
+      const global = instance?.exports?.[path];
+      if (global instanceof WebAssembly.Global) return true;
+      const metadata = game.globals?.[path];
+      const setter = metadata?.type_id === 2
+        ? instance?.exports?.__stasis_global_set_f32
+        : instance?.exports?.__stasis_global_set_i32;
+      return Boolean(metadata) && typeof setter === "function";
+    }
+    const layout = game.memory?.[path];
+    return Boolean(layout && index < layout.length && instance?.exports.memory);
+  };
+  const canWriteTextRun = (base, index) => ["font", "handle", "width", "height"]
+    .every(field => canWriteViewField(base, index, field));
+  const runtimeTextValue = reference => {
+    if (Object.prototype.hasOwnProperty.call(game.strings || {}, String(reference))) {
+      const text = String(game.strings[String(reference)]);
+      return { text, bytes: new TextEncoder().encode(text).length };
+    }
+    const memory = resolveU8Memory(reference);
+    if (!memory) return null;
+    const bytes = [];
+    for (let index = 0; index < memory.length; index += 1) {
+      const value = readU8(memory, index);
+      if (value === 0) break;
+      bytes.push(value);
+    }
+    try {
+      return { text: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)), bytes: bytes.length };
+    } catch {
+      return null;
+    }
+  };
+  const getViewField = (base, index, field) => {
+    const path = game.views?.[String(base)]?.[field];
+    if (!path) return 0;
+    if (index < 0) {
+      const global = instance?.exports?.[path];
+      if (global instanceof WebAssembly.Global) return Number(global.value);
+      const metadata = game.globals?.[path];
+      if (!metadata) return 0;
+      const getter = metadata.type_id === 2
+        ? instance?.exports?.__stasis_global_get_f32
+        : instance?.exports?.__stasis_global_get_i32;
+      return typeof getter === "function" ? Number(getter(metadata.hash)) : 0;
+    }
+    const layout = game.memory?.[path];
+    if (!layout || index >= layout.length || !instance?.exports.memory) return 0;
+    const offset = layout.offset + index * layout.stride;
+    const view = new DataView(instance.exports.memory.buffer);
+    if (layout.type_id === 2) return view.getFloat32(offset, true);
+    if (layout.type_id === 4) return view.getFloat64(offset, true);
+    if (layout.type_id === 5 || layout.type_id === 3) return view.getUint8(offset);
+    if (layout.type_id === 6) return view.getUint16(offset, true);
+    return view.getInt32(offset, true);
+  };
   const spriteDimensions = (width, height) => {
     const valid = value => Number.isFinite(value) && value > 0 && value <= DISPLAY_MAX_BACKING_WIDTH;
     if (!valid(width) || !valid(height)) return null;
@@ -1413,9 +1477,20 @@
   const refreshTextRun = run => {
     const font = fonts.get(run.font);
     if (!font?.ready) return;
+    const entry = cachedText.get(run.handle);
+    if (!entry || entry.generation !== run.generation) return;
     const metrics = measureTextRun(font, run.text);
+    entry.width = metrics.width;
+    entry.height = metrics.height;
     setViewField(run.base, run.index, "width", metrics.width);
     setViewField(run.base, run.index, "height", metrics.height);
+  };
+  const queuePendingTextRun = (font, run) => {
+    const prior = font.pendingRuns.findIndex(
+      pending => pending.base === run.base && pending.index === run.index,
+    );
+    if (prior >= 0) font.pendingRuns[prior] = run;
+    else font.pendingRuns.push(run);
   };
   const calibrateFont = font => {
     const { context } = resourcePreparationContext();
@@ -1885,23 +1960,78 @@
         && setViewField(base, index, "height", height) ? 1 : 0;
     },
     stasis_jit_gfx_cache_text: (font, textId) => {
+      const value = runtimeTextValue(textId);
+      if (!value) return 0;
+      const { text, bytes } = value;
+      const key = `${font}:${text}`;
+      const prior = immutableTextHandles.get(key);
+      if (prior) return prior;
+      if (cachedText.size >= TEXT_RUN_MAX_ENTRIES || cachedTextBytes + bytes > TEXT_RUN_MAX_BYTES) return 0;
       const handle = nextHandle++;
-      cachedText.set(handle, { font, text: stringValue(textId) });
+      cachedText.set(handle, { font, text, bytes, replaceable: false, generation: 0 });
+      immutableTextHandles.set(key, handle);
+      cachedTextBytes += bytes;
       return handle;
     },
     stasis_jit_text_run_load_from: (base, index, _len, font, textId) => {
-      const handle = nextHandle++;
-      const text = stringValue(textId);
-      cachedText.set(handle, { font, text });
+      if (!canWriteTextRun(base, index)) return 0;
+      const value = runtimeTextValue(textId);
+      if (!value) return 0;
+      const { text } = value;
+      const key = `${font}:${text}`;
+      let handle = immutableTextHandles.get(key);
+      if (!handle) {
+        const bytes = value.bytes;
+        if (cachedText.size >= TEXT_RUN_MAX_ENTRIES || cachedTextBytes + bytes > TEXT_RUN_MAX_BYTES) return 0;
+        handle = nextHandle++;
+        cachedText.set(handle, { font, text, bytes, replaceable: false, generation: 0 });
+        immutableTextHandles.set(key, handle);
+        cachedTextBytes += bytes;
+      }
       const fontInfo = fonts.get(font) || { size: 16 };
-      const run = { base, index, font, text };
+      const run = { base, index, font, text, handle, generation: 0 };
       const loaded = setViewField(base, index, "font", font)
         && setViewField(base, index, "handle", handle)
         && setViewField(base, index, "width", text.length * fontInfo.size * 0.6)
         && setViewField(base, index, "height", fontInfo.size);
       if (loaded && fontInfo.ready) refreshTextRun(run);
-      else if (loaded && fontInfo.pendingRuns) fontInfo.pendingRuns.push(run);
+      else if (loaded && fontInfo.pendingRuns) queuePendingTextRun(fontInfo, run);
       return loaded ? 1 : 0;
+    },
+    stasis_jit_text_run_replace_from: (base, index, _len, font, textId) => {
+      if (font <= 0 || !canWriteTextRun(base, index)) return 0;
+      const value = runtimeTextValue(textId);
+      if (!value) return 0;
+      const { text, bytes } = value;
+      if (bytes === 0 || bytes > DYNAMIC_TEXT_MAX_BYTES) return 0;
+      const fontInfo = fonts.get(font);
+      if (!fontInfo) return 0;
+      const oldHandle = getViewField(base, index, "handle");
+      const old = cachedText.get(oldHandle);
+      const reuse = old?.replaceable === true;
+      if (!reuse && cachedText.size >= TEXT_RUN_MAX_ENTRIES) return 0;
+      const priorBytes = reuse ? old.bytes : 0;
+      if (cachedTextBytes - priorBytes + bytes > TEXT_RUN_MAX_BYTES) return 0;
+      const handle = reuse ? oldHandle : nextHandle++;
+      const generation = reuse ? old.generation + 1 : 1;
+      const entry = { font, text, bytes, replaceable: true, generation,
+        width: text.length * fontInfo.size * 0.6, height: fontInfo.size };
+      cachedText.set(handle, entry);
+      cachedTextBytes += bytes - priorBytes;
+      const loaded = setViewField(base, index, "font", font)
+        && setViewField(base, index, "handle", handle)
+        && setViewField(base, index, "width", entry.width)
+        && setViewField(base, index, "height", entry.height);
+      if (!loaded) {
+        if (reuse) cachedText.set(handle, old);
+        else cachedText.delete(handle);
+        cachedTextBytes -= bytes - priorBytes;
+        return 0;
+      }
+      const run = { base, index, font, text, handle, generation };
+      if (fontInfo.ready) refreshTextRun(run);
+      else if (fontInfo.pendingRuns) queuePendingTextRun(fontInfo, run);
+      return 1;
     },
     storage_load_i32: (scope, key, fallback) => {
       const value = storageGet(storageKey(scope, key));

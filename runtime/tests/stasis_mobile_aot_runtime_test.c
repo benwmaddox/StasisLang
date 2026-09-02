@@ -115,6 +115,7 @@ void stasis_gfx_release_sprite(int handle) {
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
 int stasis_gfx_dump_png(const char *path) { return path != NULL; }
 int stasis_gfx_cache_text(int font, const char *text) { return font + (text != NULL); }
+int stasis_gfx_replace_text(int handle, int font, const char *text) { return handle > 0 ? handle : font + (text != NULL); }
 int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
 float stasis_gfx_measure_text_cached_height(int handle) { return (float)handle + 1.0f; }
@@ -278,6 +279,11 @@ int main(void) {
     CHECK(stasis_jit_text_run_load_from(101, 0, 1, 7, 23) == 1);
     CHECK(text_font[0] == 7 && text_handle[0] == 8);
     CHECK(text_width[0] == 8.0f && text_height[0] == 9.0f);
+    CHECK(stasis_jit_text_run_replace_from(101, 0, 1, 9, 23) == 1);
+    CHECK(text_font[0] == 9 && text_handle[0] == 8);
+    CHECK(text_width[0] == 8.0f && text_height[0] == 9.0f);
+    CHECK(stasis_jit_text_run_replace_from(101, 0, 1, 0, 23) == 0);
+    CHECK(text_font[0] == 9 && text_handle[0] == 8);
 
     stasis_jit_upsert_string_literal(40, "sample_game");
     stasis_jit_upsert_string_literal(41, "unlocked_tier");

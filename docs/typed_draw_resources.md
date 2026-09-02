@@ -130,6 +130,9 @@ released entries and pending canceled releases cannot reappear.
 
 `TextRun.draw` reads the cached text handle from its receiver. Font ownership is explicit because the existing prepared-text command requires both font and run handles; it must not recover the font through a detector, global side table keyed only by source position, or fake fallback.
 
+Frequently changing labels use the bounded caller-owned replacement contract in
+[dynamic_text_runs.md](dynamic_text_runs.md); immutable `load_text_from` behavior remains unchanged.
+
 Physical density remains transparent to Stasis code:
 
 ```text

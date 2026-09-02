@@ -53,6 +53,7 @@ void stasis_gfx_release_sprite(int handle);
 int stasis_gfx_dump_bmp(const char *path);
 int stasis_gfx_dump_png(const char *path);
 int stasis_gfx_cache_text(int font, const char *text);
+int stasis_gfx_replace_text(int handle, int font, const char *text);
 int stasis_gfx_poll_reload(int handle);
 float stasis_gfx_measure_text_cached(int handle);
 float stasis_gfx_measure_text_cached_height(int handle);
@@ -805,6 +806,23 @@ int stasis_jit_text_run_load_from(int32_t base, int32_t index, int32_t len, int3
     int32_t loaded_handle;
     if (font <= 0 || (index >= 0 && index >= len)) return 0;
     loaded_handle = stasis_jit_gfx_cache_text(font, text);
+    if (loaded_handle <= 0) return 0;
+    stasis_struct_i32_store(base, index, len, "font", font);
+    stasis_struct_i32_store(base, index, len, "handle", loaded_handle);
+    stasis_struct_f32_store(base, index, len, "width", stasis_jit_gfx_measure_text_cached(loaded_handle));
+    stasis_struct_f32_store(base, index, len, "height", stasis_jit_gfx_measure_text_cached_height(loaded_handle));
+    return 1;
+}
+int stasis_jit_text_run_replace_from(int32_t base, int32_t index, int32_t len, int32_t font, int32_t text) {
+    int32_t old_handle;
+    int32_t loaded_handle;
+    char *value;
+    if (font <= 0 || (index >= 0 && index >= len)) return 0;
+    value = resolve_text(text);
+    if (value == NULL) return 0;
+    old_handle = stasis_struct_i32_load(base, index, "handle");
+    loaded_handle = stasis_gfx_replace_text(old_handle, font, value);
+    free(value);
     if (loaded_handle <= 0) return 0;
     stasis_struct_i32_store(base, index, len, "font", font);
     stasis_struct_i32_store(base, index, len, "handle", loaded_handle);

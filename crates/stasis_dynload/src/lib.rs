@@ -1068,7 +1068,7 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
 
-const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 3;
+const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 4;
 
 fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String> {
     let address = lib
@@ -1685,6 +1685,7 @@ struct StasisGraphicsAssetsApi {
     stasis_load_font: usize,
     stasis_measure_text: usize,
     stasis_gfx_cache_text: usize,
+    stasis_gfx_replace_text: usize,
     stasis_gfx_measure_text_cached: usize,
     stasis_gfx_measure_text_cached_height: usize,
     stasis_clipboard_load_ascii: Option<usize>,
@@ -1766,6 +1767,7 @@ impl StasisGraphicsAssetsApi {
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
             stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
+            stasis_gfx_replace_text: lib.symbol_address("stasis_gfx_replace_text")?,
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
             stasis_gfx_measure_text_cached_height: lib
                 .symbol_address("stasis_gfx_measure_text_cached_height")?,
@@ -4814,6 +4816,7 @@ pub struct EmbeddedGraphicsHost {
     pub load_font: fn(&[u8], i32) -> i32,
     pub measure_text: fn(i32, &[u8]) -> f32,
     pub cache_text: fn(i32, &[u8]) -> i32,
+    pub replace_text: fn(i32, i32, &[u8]) -> i32,
     pub measure_text_cached: fn(i32) -> f32,
     pub measure_text_cached_height: fn(i32) -> f32,
     pub poll_reload: fn(i32) -> i32,
@@ -5662,6 +5665,28 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
     callback(font, text.as_ptr())
 }
 
+fn replace_cached_text(run_handle: i32, font: i32, text_id: i32) -> i32 {
+    let Some(text) = jit_text_arg_bytes(text_id) else {
+        return 0;
+    };
+    if let Some(host) = embedded_graphics_host() {
+        return (host.replace_text)(run_handle, font, &text);
+    }
+    let Ok(text) = CString::new(text) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, i32, *const c_char) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_replace_text) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, i32, *const c_char) -> i32 =
+        unsafe { std::mem::transmute(api.stasis_gfx_replace_text) };
+    callback(run_handle, font, text.as_ptr())
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
     if asset_extern_seam_evidence_path().is_some() {
@@ -5839,6 +5864,31 @@ pub extern "C" fn stasis_jit_text_run_load_from(
         "height",
         stasis_jit_gfx_measure_text_cached_height(loaded_handle),
     );
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_text_run_replace_from(
+    base: i32,
+    index: i32,
+    len: i32,
+    font: i32,
+    text_id: i32,
+) -> i32 {
+    if font <= 0 || (index >= 0 && index >= len) {
+        return 0;
+    }
+    let old_handle = struct_view_i32_load(base, index, "handle");
+    let loaded_handle = replace_cached_text(old_handle, font, text_id);
+    if loaded_handle <= 0 {
+        return 0;
+    }
+    let width = stasis_jit_gfx_measure_text_cached(loaded_handle);
+    let height = stasis_jit_gfx_measure_text_cached_height(loaded_handle);
+    struct_view_i32_store(base, index, len, "font", font);
+    struct_view_i32_store(base, index, len, "handle", loaded_handle);
+    struct_view_f32_store(base, index, len, "width", width);
+    struct_view_f32_store(base, index, len, "height", height);
     1
 }
 
@@ -7343,6 +7393,14 @@ mod tests {
         1
     }
 
+    fn test_replace_text(handle: i32, _: i32, _: &[u8]) -> i32 {
+        if handle <= 1 {
+            2
+        } else {
+            handle
+        }
+    }
+
     fn test_measure_cached(_: i32) -> f32 {
         1.0
     }
@@ -7565,6 +7623,7 @@ mod tests {
             load_font: test_font_load,
             measure_text: test_measure_text,
             cache_text: test_cache_text,
+            replace_text: test_replace_text,
             measure_text_cached: test_measure_cached,
             measure_text_cached_height: test_measure_cached,
             poll_reload: test_poll_reload,
@@ -7583,6 +7642,47 @@ mod tests {
         clear_registered_global_memory();
         clear_jit_i32_global_table();
         clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+    }
+
+    #[test]
+    fn jit_text_run_replacement_publishes_only_after_host_success() {
+        let _guard = test_lock();
+        clear_registered_global_memory();
+        clear_jit_string_literal_table();
+        let _host_reset = EmbeddedHostReset;
+        set_embedded_graphics_host(Some(EmbeddedGraphicsHost {
+            load_sprite: test_sprite_load,
+            release_sprite: test_sprite_release,
+            load_font: test_font_load,
+            measure_text: test_measure_text,
+            cache_text: test_cache_text,
+            replace_text: test_replace_text,
+            measure_text_cached: test_measure_cached,
+            measure_text_cached_height: test_measure_cached,
+            poll_reload: test_poll_reload,
+        }));
+        let mut fonts = [1_i32];
+        let mut handles = [1_i32];
+        let mut widths = [7.0_f32];
+        let mut heights = [8.0_f32];
+        register_global_i32_array(200, global_path_hash("font"), fonts.as_mut_ptr(), 1);
+        register_global_i32_array(200, global_path_hash("handle"), handles.as_mut_ptr(), 1);
+        register_global_f32_array(200, global_path_hash("width"), widths.as_mut_ptr(), 1);
+        register_global_f32_array(200, global_path_hash("height"), heights.as_mut_ptr(), 1);
+        upsert_jit_string_literal(88, "score 1");
+        assert_eq!(stasis_jit_text_run_replace_from(200, 0, 1, 1, 88), 1);
+        assert_eq!(
+            (fonts[0], handles[0], widths[0], heights[0]),
+            (1, 2, 1.0, 1.0)
+        );
+        upsert_jit_string_literal(88, "score 2");
+        assert_eq!(stasis_jit_text_run_replace_from(200, 0, 1, 1, 88), 1);
+        assert_eq!(handles[0], 2);
+        let before = (fonts[0], handles[0], widths[0], heights[0]);
+        assert_eq!(stasis_jit_text_run_replace_from(200, 0, 1, 0, 88), 0);
+        assert_eq!((fonts[0], handles[0], widths[0], heights[0]), before);
+        clear_registered_global_memory();
         clear_jit_string_literal_table();
     }
 
