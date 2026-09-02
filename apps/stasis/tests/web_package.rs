@@ -1100,9 +1100,9 @@ fn rooted_web_asset_paths_emit_package_relative_assets() {
     let source = fs::read_to_string(workspace.join("main.stasis"))
         .expect("read rooted web fixture source")
         .replace(
-            "extern function gfx_load_sprite",
+            "import \".stasis_cache/toolchain/src/stdlib/graphics.stasis\";",
             &format!(
-                "const ROOTED_SMOKE_PATH: string = \"{ROOTED_WEB_ASSET}\";\n\nextern function gfx_load_sprite"
+                "import \".stasis_cache/toolchain/src/stdlib/graphics.stasis\";\n\nconst ROOTED_SMOKE_PATH: string = \"{ROOTED_WEB_ASSET}\";"
             ),
         )
         .replace("\"assets/smoke.svg\"", "ROOTED_SMOKE_PATH");
