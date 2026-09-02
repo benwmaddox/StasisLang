@@ -330,8 +330,8 @@ def verify_it029(log: str, after_position: int) -> dict:
             or not isinstance(cleanup.get("frame_token"), int) \
             or cleanup["frame_token"] <= 0:
         raise SeamError("IT-029 cleanup did not restore the packaged project")
-    if summary.get("cases") != values:
-        raise SeamError("IT-029 summary cases differ from ordered case evidence")
+    if "cases" in summary:
+        raise SeamError("IT-029 summary must keep case evidence in bounded log records")
 
     for case in values:
         if case.get("schema") != "stasis.workshop_resource_scope.v1" \

@@ -130,7 +130,6 @@ _it029_summary = {
     "surface_recreated": True,
     "restore_once": True,
     "bounded": True,
-    "cases": _it029_cases,
     "captures": [case["capture_path"] for case in _it029_cases],
     "cleanup": {"status": "Restored", "frame_status": "passed", "frame_token": 90},
 }

@@ -66,8 +66,6 @@ final class WorkshopResourceScopeAcceptance {
                     .put("distinct_projects", true).put("distinct_assets", true)
                     .put("surface_recreated", true).put("restore_once", true)
                     .put("bounded", true)
-                    .put("cases", new JSONArray().put(alphaFirst).put(betaBefore)
-                            .put(betaAfter).put(alphaReturn))
                     .put("captures", new JSONArray()
                             .put(alphaFirst.getString("capture_path"))
                             .put(betaBefore.getString("capture_path"))
