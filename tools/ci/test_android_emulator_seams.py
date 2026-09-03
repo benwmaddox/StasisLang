@@ -31,6 +31,10 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
         cls.provenance_script = read("mobile/android/rust_bridge_provenance.ps1")
         cls.mobile_main = read("mobile/shells/common/stasis_mobile_main.c")
+        cls.workshop_resource_scope = read(
+            "mobile/android/app/src/workshop/java/com/stasislang/workshop/"
+            "WorkshopResourceScopeAcceptance.java"
+        )
 
     def workflow_job_body(self, name: str) -> str:
         match = re.search(
@@ -289,6 +293,29 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn('TestId = "IT-023"', self.emulator_script)
         self.assertEqual(3, self.emulator_script.count('TestId = "IT-024"'))
 
+    def test_it021_audio_telemetry_waits_for_ready_handles_after_runtime_step(self):
+        source = self.mobile_main
+        initialize = source.index("int status = stasis_mobile_runtime_initialize")
+        loop = source.index("while (status == STASIS_MOBILE_RUNTIME_OK)", initialize)
+        initialization_block = source[initialize:loop]
+        self.assertNotIn("collect_it021_audio_telemetry();", initialization_block)
+
+        step = source.index("status = stasis_mobile_runtime_step();", loop)
+        telemetry = source.index(
+            "if (seam_it021_audio && !seam_it021_audio_collected", step
+        )
+        frame_marker = source.index(
+            "if (seam_test_id != NULL && (frame == 1", telemetry
+        )
+        self.assertLess(step, telemetry)
+        self.assertLess(telemetry, frame_marker)
+        telemetry_block = source[telemetry:frame_marker]
+        self.assertIn('seam_i32("seam_audio_handle") > 0', telemetry_block)
+        self.assertIn('seam_i32("seam_voice_handle") > 0', telemetry_block)
+        self.assertIn("collect_it021_audio_telemetry();", telemetry_block)
+        self.assertIn("seam_it021_audio_collected = 1;", telemetry_block)
+        self.assertEqual(1, source.count("collect_it021_audio_telemetry();"))
+
     def test_it024_entry_failure_contract_is_exact_and_grouped(self):
         expected = {
             "main": (41, [1, 0, 0]),
@@ -539,6 +566,16 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn('"--it029-capture", $it029Capture', self.workshop_script)
         self.assertIn("/sdcard/Android/data/$Package/files/it029/$phase.png",
                       self.workshop_script)
+
+    def test_workshop_it029_mutates_public_direct_text_and_fails_closed(self):
+        source = self.workshop_resource_scope
+        self.assertIn('draw_text(font, \\"direct parity\\"', source)
+        self.assertIn('alpha ? "scope alpha!!" : "scope beta!!!"', source)
+        self.assertIn("replaceRequiredOnce", source)
+        self.assertIn("marker is missing", source)
+        self.assertIn("marker is ambiguous", source)
+        self.assertNotIn("directTextAssignments", source)
+        self.assertNotIn("cmd_u8", source)
 
     def test_workshop_fatal_scan_delegates_only_valid_it031_case_records(self):
         self.assertIn("ConvertFrom-Json -ErrorAction Stop", self.workshop_script)

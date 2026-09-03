@@ -944,6 +944,8 @@ def validate_asset_audio_markers(
         marker.get("audio_sample_checksum")
         for marker in markers
         if "audio_sample_checksum" in marker
+        and marker.get("audio_handle", 0) > 0
+        and marker.get("voice_handle", 0) > 0
     }
     if len(checksum_values) > 1:
         raise SeamError(

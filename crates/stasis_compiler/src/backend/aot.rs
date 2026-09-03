@@ -3159,6 +3159,40 @@ function end_frame(): void { return; }
             format!("{declarations}\n{asset_tasks}\n{audio}\n{source}"),
         );
         process.compile().expect("aot compile playback sample");
+        let signatures = &process
+            .program_snapshot
+            .as_ref()
+            .expect("program snapshot")
+            .analysis
+            .resolved_extern_signatures;
+        for symbol in [
+            "stasis_jit_audio_init",
+            "stasis_jit_audio_shutdown",
+            "stasis_jit_audio_is_available",
+            "stasis_jit_audio_get_sample_rate",
+            "stasis_jit_audio_get_channels",
+            "stasis_jit_audio_get_queued_frames",
+            "stasis_jit_audio_get_underruns",
+            "stasis_jit_audio_push_f32_interleaved",
+            "stasis_jit_audio_play",
+            "stasis_jit_audio_stop",
+            "stasis_jit_audio_voice_is_playing",
+            "stasis_jit_audio_voice_set_paused",
+            "stasis_jit_audio_voice_set_volume_pan",
+        ] {
+            assert!(
+                signatures
+                    .iter()
+                    .any(|signature| signature.symbol == symbol),
+                "missing canonical audio extern {symbol}"
+            );
+        }
+        assert!(
+            signatures
+                .iter()
+                .all(|signature| !signature.symbol.starts_with("audio_")),
+            "legacy raw audio extern leaked into AOT analysis: {signatures:?}"
+        );
     }
 
     #[test]
