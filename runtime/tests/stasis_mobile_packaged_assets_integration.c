@@ -25,6 +25,7 @@ extern void stasis_gfx_submit_u8(int32_t *i32s, const float *f32s, const uint8_t
 extern int stasis_load_font(const char *path, int size);
 extern int stasis_audio_load_wav(const char *path);
 extern int stasis_audio_load_music(const char *path);
+extern void stasis_sleep_ms(int ms);
 extern int stasis_host_copy_runtime_error(char *output, size_t output_size);
 
 /* The production function is intentionally not part of the shared-library ABI yet.
@@ -179,12 +180,18 @@ int main(int argc, char **argv) {
     CHECK(stasis_init_window(320, 180, "IT-015 mobile packaged assets") == 1);
     stasis_aot_bind_runtime_globals();
     CHECK(stasis_mobile_main_entry() == 0);
-    CHECK(stasis_mobile_tick_entry() == 0);
+    for (int tick = 0; tick < 1000; tick++) {
+        CHECK(stasis_mobile_tick_entry() == 0);
+        if (stasis_jit_global_i32_load(hash_path("seam_audio_event_order")) == 12) {
+            break;
+        }
+        stasis_sleep_ms(1);
+    }
+    CHECK(stasis_jit_global_i32_load(hash_path("seam_audio_event_order")) == 12);
     CHECK(stasis_jit_global_i32_load(hash_path("seam_music_handle")) > 0);
     CHECK(stasis_jit_global_i32_load(hash_path("seam_effect_handle")) > 0);
     CHECK(stasis_jit_global_i32_load(hash_path("seam_music_played")) == 1);
     CHECK(stasis_jit_global_i32_load(hash_path("seam_effect_played")) == 1);
-    CHECK(stasis_jit_global_i32_load(hash_path("seam_audio_event_order")) == 12);
     CHECK(stasis_mobile_render_entry() == 0);
 
     gfx_i32 = stasis_jit_global_i32_array_ptr(hash_path("gfx_cmd_i32"), 0, 67888);

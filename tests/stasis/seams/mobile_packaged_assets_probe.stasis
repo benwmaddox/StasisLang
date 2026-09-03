@@ -1,49 +1,6 @@
-@link("stasis_graphics");
+import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
 
-extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
-extern function load_font(path: string, size: i32): i32;
-extern function measure_text(font: i32, text: string): f32;
-
-function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
-function @extern("stasis_jit_gfx_measure_text_cached") gfx_measure_text_cached(handle: i32): f32;
-
-struct AudioAsset {
-    handle: i32;
-}
-
-struct AudioVoice {
-    handle: i32;
-}
-
-function @internal @effects(audio)@extern("stasis_jit_audio_load_music") audio_load_decoded_raw(path: string): i32;
-function @internal @effects(audio)@extern("audio_play") audio_play_raw(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
-function @internal @effects(audio)@extern("audio_stop") audio_stop_raw(voice_handle: i32): void;
-
-function @asset_path(path) load_audio(self: AudioAsset, path: string): bool {
-    self.handle = audio_load_decoded_raw(path);
-    return self.handle > 0;
-}
-
-function play(self: AudioVoice, asset: AudioAsset, loop: bool, volume: f32, pan: f32): bool {
-    self.stop();
-    self.handle = audio_play_raw(asset.handle, loop, volume, pan);
-    return self.handle > 0;
-}
-
-function stop(self: AudioVoice): void {
-    if (self.handle > 0) {
-        audio_stop_raw(self.handle);
-        self.handle = 0;
-    }
-}
-
-function play_once(self: AudioAsset, volume: f32, pan: f32): bool {
-    return audio_play_raw(self.handle, false, volume, pan) > 0;
-}
-
-global gfx_cmd_i32: i32[67888];
-global gfx_cmd_f32: f32[146564];
-global gfx_cmd_u8: u8[65536];
 global seam_sprite_handle: i32;
 global seam_font_handle: i32;
 global seam_cached_handle: i32;
@@ -54,6 +11,8 @@ global seam_effect_handle: i32;
 global seam_music_played: bool;
 global seam_effect_played: bool;
 global seam_audio_event_order: i32;
+global seam_sprite: Sprite;
+global seam_cached_text: TextRun;
 global seam_music: AudioAsset;
 global seam_effect: AudioAsset;
 global seam_direct_voice: AudioVoice;
@@ -62,116 +21,66 @@ global seam_direct_width: f32;
 global seam_cached_width: f32;
 
 function main(): i32 {
-    seam_sprite_handle = gfx_load_sprite("assets/sprite.png", 64, 64);
-    if (seam_sprite_handle == 0) {
+    if (!seam_sprite.load_sprite_from("assets/sprite.png", 64, 64)) {
         return 21;
     }
+    seam_sprite_handle = seam_sprite.handle;
     seam_font_handle = load_font("assets/ui.ttf", 24);
     if (seam_font_handle == 0) {
         return 22;
     }
-    seam_cached_handle = gfx_cache_text(seam_font_handle, "MOBILE");
-    if (seam_cached_handle == 0) {
+    if (!seam_cached_text.load_text_from(seam_font_handle, "MOBILE")) {
         return 23;
     }
+    seam_cached_handle = seam_cached_text.handle;
     seam_direct_width = measure_text(seam_font_handle, "BUNDLE");
-    seam_cached_width = gfx_measure_text_cached(seam_cached_handle);
+    seam_cached_width = seam_cached_text.width;
     if (seam_direct_width <= 0.0 || seam_cached_width <= 0.0) {
         return 24;
     }
     if (!seam_music.load_audio("assets/music.mp3") || !seam_effect.load_audio("assets/effect.wav")) {
         return 25;
     }
-    seam_music_handle = seam_music.handle;
-    seam_effect_handle = seam_effect.handle;
-    seam_audio_handle = seam_effect_handle;
-    if (!seam_direct_voice.play(seam_effect, false, 0.5, 0.0)) {
-        return 26;
-    }
-    seam_voice_handle = seam_direct_voice.handle;
     return 0;
 }
 
 function tick(): i32 {
-    if (seam_audio_event_order != 12) {
-        if (!seam_music_voice.play(seam_music, true, 0.18, 0.0)) {
-            return 27;
-        }
-        seam_music_played = true;
-        seam_audio_event_order = seam_audio_event_order * 10 + 1;
-        if (!seam_effect.play_once(0.25, 0.0)) {
-            return 28;
-        }
-        seam_effect_played = true;
-        seam_audio_event_order = seam_audio_event_order * 10 + 2;
+    if (seam_audio_event_order == 12) {
+        return 0;
     }
+    if (seam_music.failed() || seam_effect.failed()) {
+        return 25;
+    }
+    if (!seam_music.ready() || !seam_effect.ready()) {
+        return 0;
+    }
+    seam_music_handle = seam_music.handle;
+    seam_effect_handle = seam_effect.handle;
+    seam_audio_handle = seam_effect.handle;
+    if (!seam_direct_voice.play(seam_effect, false, 0.5, 0.0)) {
+        return 26;
+    }
+    seam_voice_handle = seam_direct_voice.handle;
+    if (!seam_music_voice.play(seam_music, true, 0.18, 0.0)) {
+        return 27;
+    }
+    seam_music_played = true;
+    seam_audio_event_order = seam_audio_event_order * 10 + 1;
+    if (!seam_effect.play_once(0.25, 0.0)) {
+        return 28;
+    }
+    seam_effect_played = true;
+    seam_audio_event_order = seam_audio_event_order * 10 + 2;
     return 0;
 }
 
 function render(): i32 {
-    gfx_cmd_i32[0] = 1196967473;
-    gfx_cmd_i32[1] = 7;
-    gfx_cmd_i32[2] = 3;
-    gfx_cmd_i32[3] = 0;
-    gfx_cmd_i32[4] = 1;
-    gfx_cmd_i32[7] = 2;
-    gfx_cmd_i32[9] = 7;
-    gfx_cmd_i32[22] = 3;
-    gfx_cmd_i32[29] = 1;
-    gfx_cmd_f32[0] = 0.04;
-    gfx_cmd_f32[1] = 0.07;
-    gfx_cmd_f32[2] = 0.12;
-    gfx_cmd_f32[3] = 1.0;
-
-    gfx_cmd_i32[32] = seam_sprite_handle;
-    gfx_cmd_i32[33] = 0 - 1;
-    gfx_cmd_i32[34] = 0;
-    gfx_cmd_f32[80004] = 52.0;
-    gfx_cmd_f32[80005] = 28.0;
-    gfx_cmd_f32[80006] = 64.0;
-    gfx_cmd_f32[80007] = 64.0;
-    gfx_cmd_f32[80008] = 0.0;
-    gfx_cmd_f32[80009] = 0.0;
-    gfx_cmd_f32[80010] = 0.0;
-    gfx_cmd_f32[80011] = 0.0;
-    gfx_cmd_f32[80012] = 32.0;
-    gfx_cmd_f32[80013] = 32.0;
-    gfx_cmd_f32[80014] = 1.0;
-    gfx_cmd_f32[80015] = 1.0;
-    gfx_cmd_f32[80016] = 0.0;
-
-    gfx_cmd_i32[18464] = 0;
-    gfx_cmd_i32[18465] = 1;
-    gfx_cmd_i32[18466] = 0 - 1;
-
-    gfx_cmd_i32[12320] = seam_font_handle;
-    gfx_cmd_i32[12321] = 0;
-    gfx_cmd_i32[12322] = 6;
-    gfx_cmd_f32[133252] = 30.0;
-    gfx_cmd_f32[133253] = 112.0;
-    gfx_cmd_f32[133254] = 1.0;
-    gfx_cmd_f32[133255] = 0.8;
-    gfx_cmd_f32[133256] = 0.1;
-    gfx_cmd_f32[133257] = 1.0;
-
-    gfx_cmd_i32[12323] = seam_font_handle;
-    gfx_cmd_i32[12324] = 0 - seam_cached_handle;
-    gfx_cmd_f32[133258] = 175.0;
-    gfx_cmd_f32[133259] = 112.0;
-    gfx_cmd_f32[133260] = 0.1;
-    gfx_cmd_f32[133261] = 0.9;
-    gfx_cmd_f32[133262] = 1.0;
-    gfx_cmd_f32[133263] = 1.0;
-
-    gfx_cmd_u8[0] = 66;
-    gfx_cmd_u8[1] = 85;
-    gfx_cmd_u8[2] = 78;
-    gfx_cmd_u8[3] = 68;
-    gfx_cmd_u8[4] = 76;
-    gfx_cmd_u8[5] = 69;
-    gfx_cmd_i32[51232] = 32768;
-    gfx_cmd_i32[51233] = 49152;
-    gfx_cmd_i32[51234] = 49153;
+    begin_frame();
+    clear(0.04, 0.07, 0.12, 1.0);
+    seam_sprite.draw(52.0, 28.0, 255, 0);
+    draw_text(seam_font_handle, "BUNDLE", 30.0, 112.0, 1.0, 0.8, 0.1, 1.0);
+    seam_cached_text.draw(175.0, 112.0, 0.1, 0.9, 1.0, 1.0);
+    end_frame();
     return 0;
 }
 

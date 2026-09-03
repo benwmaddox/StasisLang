@@ -35,6 +35,31 @@ fn repository_root() -> PathBuf {
     PathBuf::from(display.strip_prefix(r"\\?\").unwrap_or(&display))
 }
 
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create fixture destination");
+    for entry in fs::read_dir(source).expect("read fixture directory") {
+        let entry = entry.expect("read fixture entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).expect("copy fixture file");
+        }
+    }
+}
+
+fn materialize_toolchain_stdlib(project: &Path) {
+    let destination = project.join(".stasis_cache/toolchain/src/stdlib");
+    copy_tree(&repository_root().join("src/stdlib"), &destination);
+    for module in ["audio.stasis", "graphics.stasis"] {
+        assert!(
+            destination.join(module).is_file(),
+            "toolchain stdlib staging omitted {module}"
+        );
+    }
+}
+
 fn evidence_root() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -126,6 +151,7 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
     let engine_root = tree.0.join("engine");
     fs::create_dir_all(project.join("src")).expect("create source directory");
     fs::create_dir_all(project.join("assets")).expect("create asset directory");
+    materialize_toolchain_stdlib(&project);
     fs::write(project.join("src/main.stasis"), FIXTURE).expect("write AOT fixture");
     fs::copy(
         repository_root().join("samples/windows_launch_smoke/assets/smoke.png"),
