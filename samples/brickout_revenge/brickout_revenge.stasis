@@ -47,6 +47,7 @@ struct GlobalState {
 }
 
 global state: GlobalState;
+global brickout_host_frame: HostFrame;
 
 function render_begin(): void {
     state.gfx.lines.reset_lines();
@@ -73,6 +74,7 @@ export function main(): i32 {
     if (!init_ok) {
         return 1;
     }
+    brickout_host_frame.refresh();
 
     state.sprites.paddle.load_sprite_from("assets/paddle.svg", 128, 24);
     state.sprites.ball.load_sprite_from("assets/ball.svg", 32, 32);
@@ -86,7 +88,7 @@ export function main(): i32 {
     state.sprites.brick_reflector_fx.load_sprite_from("assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == false) {
-        state.game.rng_state = get_time_ms();
+        state.game.rng_state = brickout_host_frame.time_ms;
         //init_game(true);
         //setup_default_bricks();
         //start_wave();
@@ -108,7 +110,8 @@ function draw_level() {
 }
 
 function tick(): i32 {
-    let quit: bool = should_quit();
+    brickout_host_frame.refresh();
+    let quit: bool = brickout_host_frame.quit_requested;
     if (quit) {
         return 1;
     }

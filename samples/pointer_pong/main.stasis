@@ -27,6 +27,7 @@ global right_score_text: utf8[4];
 global displayed_left_score: i32;
 global displayed_right_score: i32;
 global state: PongState;
+global pointer_pong_host_frame: HostFrame;
 
 function score_for_display(score: i32): i32 {
     if (score < 0) {
@@ -87,15 +88,15 @@ function update_player(): void {
     // Pointer position is continuously available for mouse hover and touch.
     // A press is not required; keyboard movement remains the fallback when no
     // pointer has entered the game canvas yet.
-    if (pointer_controls_paddle(input_pointer_count())) {
-        state.left_y = paddle_from_pointer(input_pointer_y_logical(0));
+    if (pointer_controls_paddle(pointer_pong_host_frame.pointer_count)) {
+        state.left_y = paddle_from_pointer(pointer_pong_host_frame.pointers[0].y_logical);
         return;
     }
 
-    if (is_key_down(82)) {
+    if (pointer_pong_host_frame.keys[82] != 0) {
         state.left_y = state.left_y - 5.0;
     }
-    if (is_key_down(81)) {
+    if (pointer_pong_host_frame.keys[81] != 0) {
         state.left_y = state.left_y + 5.0;
     }
     state.left_y = clamp_paddle(state.left_y);
@@ -157,7 +158,8 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    if (should_quit()) {
+    pointer_pong_host_frame.refresh();
+    if (pointer_pong_host_frame.quit_requested) {
         return 1;
     }
     update_player();

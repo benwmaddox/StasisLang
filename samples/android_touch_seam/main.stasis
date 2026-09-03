@@ -24,35 +24,36 @@ global seam_safe_x: f32;
 global seam_safe_y: f32;
 global seam_safe_w: f32;
 global seam_safe_h: f32;
+global touch_seam_host_frame: HostFrame;
 
 function record_probe(kind: i32, pointer: i32): void {
     seam_probe_sequence += 1;
     seam_probe_kind = kind;
-    seam_probe_tick = host_tick_index();
-    seam_pointer_id = input_pointer_id(pointer);
-    seam_pointer_count = input_pointer_count();
+    seam_probe_tick = touch_seam_host_frame.tick_index;
+    seam_pointer_id = touch_seam_host_frame.pointers[pointer].id;
+    seam_pointer_count = touch_seam_host_frame.pointer_count;
     seam_pointer_is_down = 0;
-    if (input_pointer_is_down(pointer)) {
+    if (touch_seam_host_frame.pointers[pointer].is_down) {
         seam_pointer_is_down = 1;
     }
     seam_pointer_went_down = 0;
-    if (input_pointer_went_down(pointer)) {
+    if (touch_seam_host_frame.pointers[pointer].went_down) {
         seam_pointer_went_down = 1;
     }
     seam_pointer_went_up = 0;
-    if (input_pointer_went_up(pointer)) {
+    if (touch_seam_host_frame.pointers[pointer].went_up) {
         seam_pointer_went_up = 1;
     }
-    seam_pointer_x = input_pointer_x_logical(pointer);
-    seam_pointer_y = input_pointer_y_logical(pointer);
-    seam_pointer_dx = input_pointer_dx_logical(pointer);
-    seam_pointer_dy = input_pointer_dy_logical(pointer);
-    seam_pointer_x_n = input_pointer_x_n(pointer);
-    seam_pointer_y_n = input_pointer_y_n(pointer);
-    seam_safe_x = gfx_safe_viewport_x();
-    seam_safe_y = gfx_safe_viewport_y();
-    seam_safe_w = gfx_safe_viewport_width();
-    seam_safe_h = gfx_safe_viewport_height();
+    seam_pointer_x = touch_seam_host_frame.pointers[pointer].x_logical;
+    seam_pointer_y = touch_seam_host_frame.pointers[pointer].y_logical;
+    seam_pointer_dx = touch_seam_host_frame.pointers[pointer].dx_logical;
+    seam_pointer_dy = touch_seam_host_frame.pointers[pointer].dy_logical;
+    seam_pointer_x_n = touch_seam_host_frame.pointers[pointer].x_normalized;
+    seam_pointer_y_n = touch_seam_host_frame.pointers[pointer].y_normalized;
+    seam_safe_x = touch_seam_host_frame.display.safe_x;
+    seam_safe_y = touch_seam_host_frame.display.safe_y;
+    seam_safe_w = touch_seam_host_frame.display.safe_width;
+    seam_safe_h = touch_seam_host_frame.display.safe_height;
 }
 
 function main(): i32 {
@@ -68,12 +69,12 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    if (input_pointer_count() > 1) {
+    touch_seam_host_frame.refresh();
+    if (touch_seam_host_frame.pointer_count > 1) {
         let pointer: i32 = 1;
-        if (input_pointer_went_down(pointer)) {
+        if (touch_seam_host_frame.pointers[pointer].went_down) {
             seam_down_count += 1;
-            if (input_pointer_x_n(pointer) <= 0.001 ||
-                input_pointer_y_n(pointer) <= 0.001) {
+            if (touch_seam_host_frame.pointers[pointer].x_normalized <= 0.001 || touch_seam_host_frame.pointers[pointer].y_normalized <= 0.001) {
                 record_probe(1, pointer);
             } else {
                 if (seam_state_transitions == 0) {
@@ -83,14 +84,18 @@ function tick(): i32 {
                 record_probe(3, pointer);
             }
         }
-        if (input_pointer_is_down(pointer) && seam_state_transitions == 1 &&
-            seam_move_count == 0 && input_pointer_x_logical(pointer) >= 240.0 &&
-            input_pointer_y_logical(pointer) >= 480.0) {
+        if (
+            touch_seam_host_frame.pointers[pointer].is_down
+            && seam_state_transitions == 1
+            && seam_move_count == 0
+            && touch_seam_host_frame.pointers[pointer].x_logical >= 240.0
+            && touch_seam_host_frame.pointers[pointer].y_logical >= 480.0
+        ) {
             seam_move_count = 1;
             seam_input_phase = 2;
             record_probe(4, pointer);
         }
-        if (input_pointer_went_up(pointer)) {
+        if (touch_seam_host_frame.pointers[pointer].went_up) {
             seam_up_count += 1;
             if (seam_state_transitions == 0) {
                 record_probe(2, pointer);
@@ -100,8 +105,7 @@ function tick(): i32 {
             }
         }
     }
-    seam_state_checksum = 2000 + seam_down_count * 100 + seam_move_count * 10 +
-        seam_up_count + seam_state_transitions * 1000 + seam_input_phase;
+    seam_state_checksum = 2000 + seam_down_count * 100 + seam_move_count * 10 + seam_up_count + seam_state_transitions * 1000 + seam_input_phase;
     return 0;
 }
 

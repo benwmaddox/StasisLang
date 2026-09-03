@@ -4789,7 +4789,16 @@ mod tests {
         )
         .expect("graphics module");
         fs::write(
-            stdlib.join("internal/host_frame.stasis"),
+            stdlib.join("host_frame.stasis"),
+            concat!(
+                "struct HostPointerFrame { id: i32; }\n",
+                "struct HostFrame { pointer_count: i32; pointers: HostPointerFrame[8]; }\n",
+                "function refresh(self: HostFrame): void { return; }\n",
+            ),
+        )
+        .expect("public host frame module");
+        fs::write(
+            stdlib.join("internal/host_frame_raw.stasis"),
             "function host_private(): i32 { return 0; }\n",
         )
         .expect("internal module");
@@ -4805,12 +4814,13 @@ mod tests {
         let catalog = load_stdlib_module_index(stdlib_root.as_ref()).expect("stdlib module index");
 
         assert_eq!(catalog["available"], true);
-        assert_eq!(catalog["total"], 20);
+        assert_eq!(catalog["total"], 21);
         let rendered = serde_json::to_string(&catalog).expect("catalog JSON");
         assert!(rendered.contains("\"module\":\"graphics\""));
         assert!(rendered.contains("\"module\":\"module_17\""));
         assert!(rendered.contains("\"api_item_count\":4"));
         assert!(rendered.contains("/vendor/stasis/stdlib/graphics.stasis"));
+        assert!(rendered.contains("/vendor/stasis/stdlib/host_frame.stasis"));
         assert!(!rendered.contains("draw_line(x: f32, y: f32): void"));
         assert!(!rendered.contains("load_font(path: string, size: i32): i32"));
         assert!(!rendered.contains("private_counter"));

@@ -18,6 +18,7 @@ global render_calls: i32;
 global last_tick_result: i32;
 global last_render_result: i32;
 global last_trace: i32;
+global replay_host_frame: HostFrame;
 
 function main(): i32 {
     score = 5;
@@ -120,37 +121,39 @@ function apply_snapshot(index: i32): void {
 }
 
 function tick(): i32 {
+    replay_host_frame.refresh();
     tick_calls += 1;
-    if (host_key_down(44)) {
+    if (replay_host_frame.keys[44] != 0) {
         score += 7;
     } else {
         score -= 2;
     }
-    if (host_pointer_count() > 0) {
-        if (host_pointer_x_logical(0) > 15.0) {
+    if (replay_host_frame.pointer_count > 0) {
+        if (replay_host_frame.pointers[0].x_logical > 15.0) {
             pointer_marks += 3;
         } else {
             pointer_marks += 1;
         }
-        if (host_pointer_went_down(0)) {
+        if (replay_host_frame.pointers[0].went_down) {
             pointer_marks += 10;
         }
-        if (host_pointer_went_up(0)) {
+        if (replay_host_frame.pointers[0].went_up) {
             pointer_marks += 20;
         }
     }
-    if (host_resized()) {
-        resize_marks += host_screen_w_px() + host_screen_h_px();
+    if (replay_host_frame.display.resized) {
+        resize_marks += replay_host_frame.display.screen_width_px + replay_host_frame.display.screen_height_px;
     }
     return score + pointer_marks + resize_marks + tick_calls;
 }
 
 function render(): i32 {
+    replay_host_frame.refresh();
     render_calls += 1;
     gfx_cmd_begin();
     gfx_cmd_clear(0.05, 0.10, 0.15, 1.0);
     gfx_cmd_rect(4.0, 5.0, 20.0, 12.0, 0.2, 0.4, 0.6, 1.0);
-    if (host_pointer_is_down(0)) {
+    if (replay_host_frame.pointers[0].is_down) {
         gfx_cmd_rect(30.0, 8.0, 9.0, 7.0, 0.8, 0.3, 0.1, 1.0);
     }
     last_trace = native_render_trace(gfx_cmd_i32, 67888, gfx_cmd_f32, 146564, gfx_cmd_u8, 65536);

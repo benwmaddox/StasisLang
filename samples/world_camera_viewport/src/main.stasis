@@ -25,6 +25,7 @@ global sample_last_midpoint_x: f32;
 global sample_last_midpoint_y: f32;
 global sample_last_endpoint_x: f32;
 global sample_last_endpoint_y: f32;
+global world_camera_host_frame: HostFrame;
 
 function sample_schedule(axis_x: i32, axis_y: i32): i32 {
     let next_sequence: i32 = sample_sequence + 1;
@@ -178,7 +179,8 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    if (should_quit()) {
+    world_camera_host_frame.refresh();
+    if (world_camera_host_frame.quit_requested) {
         realtime_stop();
         return 1;
     }

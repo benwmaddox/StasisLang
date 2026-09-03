@@ -1489,7 +1489,7 @@ def main() -> int:
     assert render_main.startswith(canonical_graphics_import)
     assert render_frame.startswith(canonical_graphics_import)
     assert "seam_touch_checksum" in render_main
-    assert "input_pointer_x_n(0) * 1000.0" in render_main
+    assert "render_parity_host_frame.pointers[0].x_normalized * 1000.0" in render_main
     assert "append_parity_touch_marker" in render_frame
     assert "marker_active" in render_frame
     assert "fill_rect(i32_to_f32(marker_x_i32) - 8.0" in render_frame
@@ -1661,8 +1661,8 @@ def main() -> int:
     assert "PongHost.writer.finalize(4);" in preview_adapter
     assert "gfx_cmd_i32" not in preview_adapter
     exploration_host = read("mobile/android/app/src/main/assets/exploration_sample/src/host_runtime.stasis")
-    assert "if (input_pointer_count() > 0)" in exploration_host
-    assert "if (input_pointer_is_down(0))" in exploration_host
+    assert "if (exploration_host_frame.pointer_count > 0)" in exploration_host
+    assert "if (exploration_host_frame.pointers[0].is_down)" in exploration_host
     assert "Input.touch_active = 1;" in exploration_host
     assert '"encoding": "svg"' in pong_manifest
 

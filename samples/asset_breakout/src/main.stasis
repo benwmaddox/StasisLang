@@ -43,6 +43,7 @@ global bricks_left: i32;
 global ball_active: bool;
 global round_done: bool;
 global presentation_variant: i32;
+global asset_breakout_host_frame: HostFrame;
 
 function loading_completed_count(step: i32): i32 {
     if (step < 0) {
@@ -99,23 +100,23 @@ function reset_round(): void {
 }
 
 function update_pointer(): void {
-    if (input_pointer_count() > 0) {
-        let pointer_x: f32 = input_pointer_x_logical(0);
+    if (asset_breakout_host_frame.pointer_count > 0) {
+        let pointer_x: f32 = asset_breakout_host_frame.pointers[0].x_logical;
         set_paddle_x(pointer_x - PADDLE_W / 2.0);
-        if (input_pointer_went_down(0)) {
+        if (asset_breakout_host_frame.pointers[0].went_down) {
             if (round_done) {
                 reset_round();
             }
             ball_active = true;
         }
     }
-    if (is_key_down(80)) {
+    if (asset_breakout_host_frame.keys[80] != 0) {
         set_paddle_x(paddle_x - 4.0);
     }
-    if (is_key_down(79)) {
+    if (asset_breakout_host_frame.keys[79] != 0) {
         set_paddle_x(paddle_x + 4.0);
     }
-    if (is_key_down(44)) {
+    if (asset_breakout_host_frame.keys[44] != 0) {
         if (round_done) {
             reset_round();
         }
@@ -254,7 +255,8 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    if (should_quit()) {
+    asset_breakout_host_frame.refresh();
+    if (asset_breakout_host_frame.quit_requested) {
         return 1;
     }
     poll_asset_loading();

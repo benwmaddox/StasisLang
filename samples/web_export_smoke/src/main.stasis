@@ -1,3 +1,5 @@
+import "/.stasis_cache/toolchain/src/stdlib/host_frame.stasis";
+
 const SCREEN_WIDTH: i32 = 640;
 const PLAYER_WIDTH: i32 = 64;
 
@@ -13,10 +15,12 @@ global host_req_flags: i32;
 global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
 global audio_samples: f32[4800];
+global web_host_frame: HostFrame;
 
 function @extern("web_begin_frame") web_begin_frame(red: i32, green: i32, blue: i32): void;
 function @extern("web_draw_rect") web_draw_rect(x: i32, y: i32, width: i32, height: i32, red: i32, green: i32, blue: i32): void;
 function @extern("web_draw_text") web_draw_text(x: i32, y: i32, value: i32): void;
+
 extern function audio_init(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
 extern function audio_push_f32_interleaved(samples: f32[], frame_count: i32): i32;
 
@@ -43,7 +47,8 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    if (host_i32[32 + 9] != 0) {
+    web_host_frame.refresh();
+    if (web_host_frame.keys[9] != 0) {
         if (!fullscreen_latched) {
             if (fullscreen_enabled) {
                 fullscreen_enabled = false;
@@ -58,15 +63,15 @@ function tick(): i32 {
     } else {
         fullscreen_latched = false;
     }
-    if (host_i32[545] != 0) {
+    if (web_host_frame.pointer_count > 0 && web_host_frame.pointers[0].is_down) {
         let pointer_x: i32 = 0;
-        pointer_x.from_f32(host_f32[0]);
+        pointer_x.from_f32(web_host_frame.pointers[0].x_logical);
         player_x = pointer_x - PLAYER_WIDTH / 2;
     } else {
-        if (host_i32[32 + 80] != 0) {
+        if (web_host_frame.keys[80] != 0) {
             player_x -= 5;
         }
-        if (host_i32[32 + 79] != 0) {
+        if (web_host_frame.keys[79] != 0) {
             player_x += 5;
         }
     }
@@ -76,7 +81,7 @@ function tick(): i32 {
     if (player_x > SCREEN_WIDTH - PLAYER_WIDTH) {
         player_x = SCREEN_WIDTH - PLAYER_WIDTH;
     }
-    if (host_i32[32 + 44] != 0 || host_i32[545] != 0) {
+    if (web_host_frame.keys[44] != 0 ||(web_host_frame.pointer_count > 0 && web_host_frame.pointers[0].is_down)) {
         if (!tone_latched) {
             audio_push_f32_interleaved(audio_samples, 2400);
             score += 1;

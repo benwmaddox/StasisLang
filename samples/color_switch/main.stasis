@@ -4,6 +4,7 @@ const SCREEN_W: f32 = 360.0;
 const SCREEN_H: f32 = 640.0;
 
 global color_index: i32;
+global color_switch_host_frame: HostFrame;
 
 function next_color(index: i32): i32 {
     if (index >= 2) {
@@ -19,10 +20,11 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    if (should_quit()) {
+    color_switch_host_frame.refresh();
+    if (color_switch_host_frame.quit_requested) {
         return 1;
     }
-    if (input_pointer_count() > 0 && input_pointer_went_down(0)) {
+    if (color_switch_host_frame.pointer_count > 0 && color_switch_host_frame.pointers[0].went_down) {
         color_index = next_color(color_index);
     }
     return 0;

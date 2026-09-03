@@ -5,6 +5,7 @@ global svg_sprite: Sprite;
 global smoke_label: TextRun;
 global smoke_writer: SpriteRunWriter;
 global ticks: i32;
+global windows_smoke_host_frame: HostFrame;
 
 function smoke_write_sprite(sprite: Sprite, x: f32, y: f32): bool {
     let width: f32 = i32_to_f32(sprite.width);
@@ -39,8 +40,9 @@ function tick(): i32 {
 }
 
 function render(): i32 {
+    windows_smoke_host_frame.refresh();
     begin_frame();
-    if (input_pointer_count() > 0 && input_pointer_is_down(0)) {
+    if (windows_smoke_host_frame.pointer_count > 0 && windows_smoke_host_frame.pointers[0].is_down) {
         clear(0.80, 0.12, 0.08, 1.0);
     } else {
         clear(0.04, 0.07, 0.12, 1.0);

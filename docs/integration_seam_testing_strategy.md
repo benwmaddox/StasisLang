@@ -138,7 +138,7 @@ C, PowerShell, and Java.
 ### Contract values have one source of truth
 
 `runtime/stasis_render_contract.h` remains authoritative for rendering, and
-`src/stdlib/internal/host_frame.stasis` remains authoritative for HostFrame. A
+`src/stdlib/internal/host_frame_raw.stasis` remains authoritative for HostFrame. A
 fast contract test should extract or generate one machine-readable descriptor
 from those canonical definitions and compare every copied constant used by
 Rust allocation code, generated AOT bindings, JNI direct buffers, and Java

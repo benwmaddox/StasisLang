@@ -64,7 +64,7 @@ def main() -> int:
     testing_dir = stdlib_dir / "testing"
     required_internal = {
         "gfx_cmd.stasis",
-        "host_frame.stasis",
+        "host_frame_raw.stasis",
         "host_window_request.stasis",
     }
     missing_internal = sorted(

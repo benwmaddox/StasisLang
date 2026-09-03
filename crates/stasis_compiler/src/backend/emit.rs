@@ -2805,14 +2805,23 @@ pub(crate) fn emit_simple_statements(
                                     if let Some(element_type) =
                                         type_table.indexed_element_type_id(collection_type)
                                     {
-                                        if !suffix.is_empty() || element_type != TYPE_ID_F32 {
+                                        let path_type = resolve_local_collection_value_type(
+                                            collection_type,
+                                            suffix,
+                                            type_table,
+                                            named_struct_field_types,
+                                        )?;
+                                        if suffix.is_empty()
+                                            && element_type != TYPE_ID_F32
+                                            && !is_i32_scalar_lane_type(element_type, type_table)
+                                        {
                                             return Err(format!(
                                                 "unsupported indexed receiver field '{}[...].{}'",
                                                 collection_path, suffix
                                             ));
                                         }
                                         if !are_assignment_types_compatible(
-                                            element_type,
+                                            path_type,
                                             rhs.type_id,
                                             type_table,
                                         ) {
@@ -2850,7 +2859,60 @@ pub(crate) fn emit_simple_statements(
                                             field,
                                             builder,
                                         );
+                                        if !suffix.is_empty() {
+                                            if *op != AssignOp::Set {
+                                                return Err(format!(
+                                                    "compound indexed receiver field assignment is unsupported for '{}[...].{}'",
+                                                    collection_path, suffix
+                                                ));
+                                            }
+                                            let field_hash = builder.ins().iconst(
+                                                types::I32,
+                                                i64::from(hash_foreach_field_suffix(suffix)),
+                                            );
+                                            let store = if is_i32_scalar_lane_type(
+                                                path_type, type_table,
+                                            ) || path_type == TYPE_ID_BOOL
+                                            {
+                                                runtime_call_refs.global_i32_array_store
+                                            } else if path_type == TYPE_ID_F32 {
+                                                runtime_call_refs.global_f32_array_store
+                                            } else {
+                                                return Err(format!(
+                                                    "unsupported indexed receiver field type {} for '{}[...].{}'",
+                                                    path_type, collection_path, suffix
+                                                ));
+                                            };
+                                            builder.ins().call(
+                                                store,
+                                                &[
+                                                    collection_hash,
+                                                    field_hash,
+                                                    index_binding.value,
+                                                    rhs.value,
+                                                ],
+                                            );
+                                            continue;
+                                        }
                                         let no_field = builder.ins().iconst(types::I32, 0);
+                                        if is_i32_scalar_lane_type(path_type, type_table) {
+                                            if *op != AssignOp::Set {
+                                                return Err(format!(
+                                                    "compound indexed receiver assignment is unsupported for '{}'",
+                                                    collection_path
+                                                ));
+                                            }
+                                            builder.ins().call(
+                                                runtime_call_refs.global_i32_array_store,
+                                                &[
+                                                    collection_hash,
+                                                    no_field,
+                                                    index_binding.value,
+                                                    rhs.value,
+                                                ],
+                                            );
+                                            continue;
+                                        }
                                         let lhs = match op {
                                             AssignOp::Set => None,
                                             AssignOp::Mod => {

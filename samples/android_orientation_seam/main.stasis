@@ -29,23 +29,24 @@ global seam_content_scale: f32;
 global seam_raster_scale: f32;
 global seam_pending_generation: i32;
 global seam_last_generation: i32;
+global orientation_host_frame: HostFrame;
 
 // Copy HostFrame display lanes into guest-owned evidence before rendering.
 function snapshot_host_frame_display(): void {
-    seam_logical_w = gfx_logical_width();
-    seam_logical_h = gfx_logical_height();
-    seam_native_w = gfx_native_width_px();
-    seam_native_h = gfx_native_height_px();
-    seam_drawable_w = gfx_drawable_width_px();
-    seam_drawable_h = gfx_drawable_height_px();
-    seam_display_generation = gfx_display_generation();
-    seam_density_generation = gfx_density_generation();
-    seam_content_scale = gfx_content_scale();
-    seam_raster_scale = gfx_raster_scale();
-    seam_safe_x = gfx_safe_viewport_x();
-    seam_safe_y = gfx_safe_viewport_y();
-    seam_safe_w = gfx_safe_viewport_width();
-    seam_safe_h = gfx_safe_viewport_height();
+    seam_logical_w = orientation_host_frame.display.logical_width;
+    seam_logical_h = orientation_host_frame.display.logical_height;
+    seam_native_w = orientation_host_frame.display.native_width_px;
+    seam_native_h = orientation_host_frame.display.native_height_px;
+    seam_drawable_w = orientation_host_frame.display.drawable_width_px;
+    seam_drawable_h = orientation_host_frame.display.drawable_height_px;
+    seam_display_generation = orientation_host_frame.display.generation;
+    seam_density_generation = orientation_host_frame.display.density_generation;
+    seam_content_scale = orientation_host_frame.display.content_scale;
+    seam_raster_scale = orientation_host_frame.display.raster_scale;
+    seam_safe_x = orientation_host_frame.display.safe_x;
+    seam_safe_y = orientation_host_frame.display.safe_y;
+    seam_safe_w = orientation_host_frame.display.safe_width;
+    seam_safe_h = orientation_host_frame.display.safe_height;
 }
 
 function record_probe(pointer: i32): void {
@@ -55,25 +56,25 @@ function record_probe(pointer: i32): void {
     if (seam_native_w > seam_native_h) {
         seam_probe_kind = 2;
     }
-    seam_probe_tick = host_tick_index();
-    seam_pointer_id = input_pointer_id(pointer);
-    seam_pointer_count = input_pointer_count();
+    seam_probe_tick = orientation_host_frame.tick_index;
+    seam_pointer_id = orientation_host_frame.pointers[pointer].id;
+    seam_pointer_count = orientation_host_frame.pointer_count;
     seam_pointer_is_down = 0;
-    if (input_pointer_is_down(pointer)) {
+    if (orientation_host_frame.pointers[pointer].is_down) {
         seam_pointer_is_down = 1;
     }
     seam_pointer_went_down = 0;
-    if (input_pointer_went_down(pointer)) {
+    if (orientation_host_frame.pointers[pointer].went_down) {
         seam_pointer_went_down = 1;
     }
     seam_pointer_went_up = 0;
-    if (input_pointer_went_up(pointer)) {
+    if (orientation_host_frame.pointers[pointer].went_up) {
         seam_pointer_went_up = 1;
     }
-    seam_pointer_x = input_pointer_x_logical(pointer);
-    seam_pointer_y = input_pointer_y_logical(pointer);
-    seam_pointer_x_n = input_pointer_x_n(pointer);
-    seam_pointer_y_n = input_pointer_y_n(pointer);
+    seam_pointer_x = orientation_host_frame.pointers[pointer].x_logical;
+    seam_pointer_y = orientation_host_frame.pointers[pointer].y_logical;
+    seam_pointer_x_n = orientation_host_frame.pointers[pointer].x_normalized;
+    seam_pointer_y_n = orientation_host_frame.pointers[pointer].y_normalized;
     seam_pending_generation = 0;
     seam_state_checksum = 4000 + seam_probe_sequence * 100 + seam_probe_kind * 10 + seam_display_generation;
 }
@@ -88,13 +89,14 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    let generation: i32 = gfx_display_generation();
+    orientation_host_frame.refresh();
+    let generation: i32 = orientation_host_frame.display.generation;
     if (generation > 0 && generation != seam_last_generation) {
         snapshot_host_frame_display();
         seam_last_generation = generation;
         seam_pending_generation = generation;
     }
-    if (seam_pending_generation > 0 && input_pointer_count() > 1 && input_pointer_went_up(1)) {
+    if (seam_pending_generation > 0 && orientation_host_frame.pointer_count > 1 && orientation_host_frame.pointers[1].went_up) {
         record_probe(1);
     }
     return 0;

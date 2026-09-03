@@ -3,5 +3,6 @@
   "name": "web_export_smoke",
   "entry": "src/main.stasis",
   "tests": "tests",
-  "output": "build"
+  "output": "build",
+  "stdlib": "toolchain"
 }

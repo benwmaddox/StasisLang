@@ -620,7 +620,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
             "--quiet",
             "--no-index",
             "--",
-            "vendor/stasis/stdlib/internal/host_frame.stasis",
+            "vendor/stasis/stdlib/internal/host_frame_raw.stasis",
         ],
         &project
     )
@@ -649,7 +649,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         "{\n  \"recommendations\": [\n    \"stasislang.stasis\"\n  ]\n}\n"
     );
     assert!(project
-        .join("vendor/stasis/stdlib/internal/host_frame.stasis")
+        .join("vendor/stasis/stdlib/internal/host_frame_raw.stasis")
         .is_file());
     assert!(project
         .join("vendor/stasis/stdlib/internal/gfx_cmd.stasis")
@@ -2040,13 +2040,10 @@ fn semantic_symbol_queries_are_read_only_in_a_linked_vendor_worktree() {
         .expect("default query items");
     assert!(listed_items
         .iter()
-        .any(|item| item["name"] == "get_time_ms"));
-    assert!(listed_items
-        .iter()
         .any(|item| item["name"] == "network_client_supported"));
 
     for (file, name) in [
-        ("vendor/stasis/stdlib/graphics.stasis", "get_time_ms"),
+        ("vendor/stasis/stdlib/host_frame.stasis", "refresh"),
         (
             "vendor/stasis/stdlib/network_client.stasis",
             "network_client_supported",
@@ -2086,16 +2083,16 @@ fn semantic_symbol_queries_are_read_only_in_a_linked_vendor_worktree() {
         "--json",
         "symbol",
         "read",
-        "get_time_ms",
+        "refresh",
         "--kind",
         "function",
         "--file",
-        "vendor/stasis/stdlib/graphics.stasis",
+        "vendor/stasis/stdlib/host_frame.stasis",
     ]);
     assert_eq!(read.status.code(), Some(0));
     assert!(json_stdout(&read)["result"]["item"]["source"]
         .as_str()
-        .is_some_and(|source| source.contains("function get_time_ms")));
+        .is_some_and(|source| source.contains("function refresh")));
 
     let references = run_query(&["--json", "symbol", "references", "network_client_supported"]);
     assert_eq!(references.status.code(), Some(0));
@@ -2364,15 +2361,12 @@ fn toolchain_stdlib_queries_require_explicit_prepare_in_a_linked_worktree() {
         .expect("toolchain query items");
     assert!(listed_items
         .iter()
-        .any(|item| item["name"] == "get_time_ms"));
-    assert!(listed_items
-        .iter()
         .any(|item| item["name"] == "network_client_supported"));
 
     for (file, name) in [
         (
-            ".stasis_cache/toolchain/src/stdlib/graphics.stasis",
-            "get_time_ms",
+            ".stasis_cache/toolchain/src/stdlib/host_frame.stasis",
+            "refresh",
         ),
         (
             ".stasis_cache/toolchain/src/stdlib/network_client.stasis",
@@ -2394,16 +2388,16 @@ fn toolchain_stdlib_queries_require_explicit_prepare_in_a_linked_worktree() {
         "--json",
         "symbol",
         "read",
-        "get_time_ms",
+        "refresh",
         "--kind",
         "function",
         "--file",
-        ".stasis_cache/toolchain/src/stdlib/graphics.stasis",
+        ".stasis_cache/toolchain/src/stdlib/host_frame.stasis",
     ]);
     assert_eq!(read.status.code(), Some(0));
     assert!(json_stdout(&read)["result"]["item"]["source"]
         .as_str()
-        .is_some_and(|source| source.contains("function get_time_ms")));
+        .is_some_and(|source| source.contains("function refresh")));
 
     let references = run_query(&["--json", "symbol", "references", "network_client_supported"]);
     assert_eq!(references.status.code(), Some(0));

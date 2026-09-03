@@ -108,7 +108,7 @@
       "boundary": "HostFrame/render layouts",
       "fixture": [
         "crates/stasis_compiler/tests/host_frame_jit_seam.rs",
-        "src/stdlib/internal/host_frame.stasis",
+        "src/stdlib/internal/host_frame_raw.stasis",
         "runtime/stasis_render_contract.h"
       ],
       "owner": "stasis_compiler",

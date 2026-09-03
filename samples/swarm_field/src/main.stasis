@@ -20,6 +20,7 @@ global field_x: f32;
 global field_y: f32;
 global field_mode: i32;
 global presentation_variant: i32;
+global swarm_host_frame: HostFrame;
 
 function abs_f32(value: f32): f32 {
     if (value < 0.0) {
@@ -80,12 +81,12 @@ function toggle_field_mode(): void {
 }
 
 function update_field_from_pointer(): void {
-    if (input_pointer_count() <= 0) {
+    if (swarm_host_frame.pointer_count <= 0) {
         return;
     }
-    field_x = input_pointer_x_logical(0);
-    field_y = input_pointer_y_logical(0);
-    if (input_pointer_went_down(0)) {
+    field_x = swarm_host_frame.pointers[0].x_logical;
+    field_y = swarm_host_frame.pointers[0].y_logical;
+    if (swarm_host_frame.pointers[0].went_down) {
         toggle_field_mode();
     }
 }
@@ -143,7 +144,8 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    if (should_quit()) {
+    swarm_host_frame.refresh();
+    if (swarm_host_frame.quit_requested) {
         return 1;
     }
     update_field_from_pointer();

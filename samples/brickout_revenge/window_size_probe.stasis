@@ -11,11 +11,13 @@ struct ProbeState {
 global state: ProbeState;
 global desktop_w: i32[1];
 global desktop_h: i32[1];
+global window_probe_host_frame: HostFrame;
 
 function maximize_window_for_desktop(): void {
     desktop_w[0] = 0;
     desktop_h[0] = 0;
-    get_desktop_size(desktop_w, desktop_h);
+    desktop_w[0] = window_probe_host_frame.display.screen_width_px;
+    desktop_h[0] = window_probe_host_frame.display.screen_height_px;
 
     let desktop_width: i32 = desktop_w[0];
     let desktop_height: i32 = desktop_h[0];
@@ -99,15 +101,16 @@ function main(): i32 {
         return 1;
     }
 
+    window_probe_host_frame.refresh();
     maximize_window_for_desktop();
 
     print_string("WINDOW_SIZE ");
     let logical_w: i32;
-    logical_w.from_f32(gfx_logical_width());
+    logical_w.from_f32(window_probe_host_frame.display.logical_width);
     print_int(logical_w);
     print_string(" ");
     let logical_h: i32;
-    logical_h.from_f32(gfx_logical_height());
+    logical_h.from_f32(window_probe_host_frame.display.logical_height);
     print_int(logical_h);
     print_string("\n");
     return 0;

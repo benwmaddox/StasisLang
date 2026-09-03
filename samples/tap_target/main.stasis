@@ -11,6 +11,7 @@ struct TargetState {
 }
 
 global state: TargetState;
+global tap_target_host_frame: HostFrame;
 
 function target_contains(x: f32, y: f32): bool {
     return x >= state.x && x <= state.x + TARGET_SIZE && y >= state.y && y <= state.y + TARGET_SIZE;
@@ -38,11 +39,12 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    if (should_quit()) {
+    tap_target_host_frame.refresh();
+    if (tap_target_host_frame.quit_requested) {
         return 1;
     }
-    if (input_pointer_count() > 0 && input_pointer_went_down(0)) {
-        if (target_contains(input_pointer_x_logical(0), input_pointer_y_logical(0))) {
+    if (tap_target_host_frame.pointer_count > 0 && tap_target_host_frame.pointers[0].went_down) {
+        if (target_contains(tap_target_host_frame.pointers[0].x_logical, tap_target_host_frame.pointers[0].y_logical)) {
             state.taps = state.taps + 1;
             move_target();
         }

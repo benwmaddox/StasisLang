@@ -3,7 +3,7 @@
   "version": 1,
   "host_frame": {
     "version": 4,
-    "source": "src/stdlib/internal/host_frame.stasis",
+    "source": "src/stdlib/internal/host_frame_raw.stasis",
     "constants": {
       "HOST_MAX_POINTERS": 8,
       "HOST_I_TIME_MS": 0,

@@ -4591,16 +4591,16 @@ mod tests {
 
         assert!(profile
             .instruction
-            .contains("first JSONL record is the immutable request header"));
+            .contains("Later JSONL records are completed; do not repeat them"));
         assert!(profile
             .instruction
-            .contains("host-mediated virtual tools described by tool_specs"));
+            .contains("Use host-mediated tools through structured tool_calls, not native tools"));
         assert!(profile.instruction.contains(
-            "never search for them in or reject them because of the native callable-tool registry"
+            "Submit related symbols/imports/tests in one contiguous atomic tested write batch"
         ));
         assert!(profile
             .instruction
-            .contains("Return exactly one JSON object matching the response contract"));
+            .contains("Return one response-contract object"));
         assert!(profile
             .instruction
             .contains("Gauntlet-specific instruction."));

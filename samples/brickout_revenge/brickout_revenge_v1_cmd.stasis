@@ -13,22 +13,19 @@ import "../../src/stdlib/audio.stasis";
 
 // External runtime APIs
 // - init_window(width: i32, height: i32, title: string) -> bool
-// - get_time_ms() -> i32: millisecond clock
-// - should_quit() -> bool: polls SDL quit events
+// - HostFrame.refresh() snapshots timing, display, quit, keyboard, and pointer state
 // - begin_frame(), end_frame(): bracket GPU work
 // - clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
 // - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
 // - Sprite.load_sprite_from(path: string, width: i32, height: i32) -> bool
 // - draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): top-left
 // - gfx_poll_reload(handle: i32) -> bool
-// - gfx_logical_width() -> f32
-// - gfx_logical_height() -> f32
-// - gfx_window_resized() -> bool
+// - HostFrame.display exposes logical size, safe viewport, and resize state
 // - input_viewport_x_px() -> i32
 // - input_viewport_y_px() -> i32
 // - input_viewport_w_px() -> i32
 // - input_viewport_h_px() -> i32
-// - is_key_down(scancode: i32) -> bool
+// - HostFrame.keys[scancode] reports keyboard state
 
 // Pool sizes (compile-time; keep in sync with the array sizes below)
 const MAX_BRICKS: i32 = 50;
@@ -325,6 +322,7 @@ global audio_sr: i32;
 global sfx_voices: SoundVoice[12];
 global desktop_size_w: i32[1];
 global desktop_size_h: i32[1];
+global brickout_host_frame: HostFrame;
 
 // RNG functions
 function seed_rng(seed: i32): void {
@@ -601,8 +599,8 @@ function audio_update(): void {
 }
 
 function sync_screen_size(): void {
-    let w: i32 = f32_to_i32(host_logical_width());
-    let h: i32 = f32_to_i32(host_logical_height());
+    let w: i32 = f32_to_i32(brickout_host_frame.display.logical_width);
+    let h: i32 = f32_to_i32(brickout_host_frame.display.logical_height);
     if (w < 1 || h < 1) {
         return;
     }
@@ -612,10 +610,10 @@ function sync_screen_size(): void {
 }
 
 function update_layout(): void {
-    let vx: f32 = host_safe_x();
-    let vy: f32 = host_safe_y();
-    let vw: f32 = host_safe_width();
-    let vh: f32 = host_safe_height();
+    let vx: f32 = brickout_host_frame.display.safe_x;
+    let vy: f32 = brickout_host_frame.display.safe_y;
+    let vw: f32 = brickout_host_frame.display.safe_width;
+    let vh: f32 = brickout_host_frame.display.safe_height;
     if (vw < 1.0 || vh < 1.0) {
         return;
     }
@@ -721,7 +719,8 @@ function maximize_window_for_desktop(): void {
     // while preserving the virtual aspect ratio, and never going below the virtual size.
     desktop_size_w[0] = 0;
     desktop_size_h[0] = 0;
-    get_desktop_size(desktop_size_w, desktop_size_h);
+    desktop_size_w[0] = brickout_host_frame.display.screen_width_px;
+    desktop_size_h[0] = brickout_host_frame.display.screen_height_px;
 
     let dw: i32 = desktop_size_w[0];
     let dh: i32 = desktop_size_h[0];
@@ -1011,7 +1010,7 @@ function init_game(reset_progress: bool): void {
     state.drag_valid = 0;
 
     // Init timers
-    state.timers.last_time = get_time_ms();
+    state.timers.last_time = brickout_host_frame.time_ms;
     state.timers.ball_spawn_cd = 0;
     state.timers.phase_timer = 0;
     state.timers.tick_time_ms = 0;
@@ -1671,7 +1670,7 @@ function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, 
 }
 
 function draw_bricks(): void {
-    let now_ms: i32 = get_time_ms();
+    let now_ms: i32 = brickout_host_frame.time_ms;
     let t_mod: i32 = now_ms % 2000;
     let t_f: f32;
     t_f.from_i32(t_mod);
@@ -2530,7 +2529,7 @@ function draw_frame(): void {
 
 // Timing
 function compute_delta_ms(): i32 {
-    let current_time: i32 = host_time_ms();
+    let current_time: i32 = brickout_host_frame.time_ms;
     let delta_ms: i32 = current_time - state.timers.last_time;
     if (delta_ms < 1) {
         delta_ms = 1;
@@ -2571,15 +2570,15 @@ function update_drag_from_screen(screen_x: f32, screen_y: f32): void {
 }
 
 function handle_pointer_input(): void {
-    let count: i32 = host_pointer_count();
+    let count: i32 = brickout_host_frame.pointer_count;
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        let pid: i32 = host_pointer_id(i);
-        let went_down: bool = host_pointer_went_down(i);
-        let went_up: bool = host_pointer_went_up(i);
-        let is_down: bool = host_pointer_is_down(i);
-        let sx: f32 = host_pointer_x_logical(i) + state.layout.viewport_x;
-        let sy: f32 = host_pointer_y_logical(i) + state.layout.viewport_y;
+        let pid: i32 = brickout_host_frame.pointers[i].id;
+        let went_down: bool = brickout_host_frame.pointers[i].went_down;
+        let went_up: bool = brickout_host_frame.pointers[i].went_up;
+        let is_down: bool = brickout_host_frame.pointers[i].is_down;
+        let sx: f32 = brickout_host_frame.pointers[i].x_logical + state.layout.viewport_x;
+        let sy: f32 = brickout_host_frame.pointers[i].y_logical + state.layout.viewport_y;
 
         if (state.drag_active != 0) {
             if (pid == state.drag_pointer_id) {
@@ -2669,13 +2668,13 @@ function handle_pointer_input(): void {
 }
 
 function record_tap_pulses(): void {
-    let count: i32 = host_pointer_count();
+    let count: i32 = brickout_host_frame.pointer_count;
     let i: i32 = 0;
     for (i = 0; i < count; i = i + 1) {
-        let went_down: bool = host_pointer_went_down(i);
+        let went_down: bool = brickout_host_frame.pointers[i].went_down;
         if (went_down) {
-            let x: f32 = host_pointer_x_logical(i);
-            let y: f32 = host_pointer_y_logical(i);
+            let x: f32 = brickout_host_frame.pointers[i].x_logical;
+            let y: f32 = brickout_host_frame.pointers[i].y_logical;
             let vx: f32 = state.layout.viewport_x;
             let vy: f32 = state.layout.viewport_y;
             let j: i32 = 0;
@@ -2765,6 +2764,7 @@ function main(): i32 {
     if (!init_ok) {
         return 1;
     }
+    brickout_host_frame.refresh();
 
     if (!(BENCH_SKIP_MAXIMIZE == 1)) {
         maximize_window_for_desktop();
@@ -2811,8 +2811,8 @@ function main(): i32 {
     state.sprites.brick_reflector_fx.load_sprite_from("assets/brick_reflector_fx.svg", 160, 64);
 
     if (state.initialized == 0) {
-        // Use get_time_ms() so non-libc hosts (e.g. wasm) don't need C's time().
-        seed_rng(get_time_ms());
+        // Use the host frame clock so non-libc hosts (e.g. wasm) don't need C's time().
+        seed_rng(brickout_host_frame.time_ms);
         init_game(true);
         setup_default_bricks();
         start_wave();
@@ -2829,27 +2829,28 @@ function main(): i32 {
     bench_sum_us = 0;
     bench_count = 0;
 
-    state.timers.last_time = get_time_ms();
+    state.timers.last_time = brickout_host_frame.time_ms;
     state.running = 1;
     return 0;
 }
 
 function tick(): i32 {
+    brickout_host_frame.refresh();
     if (state.running != 1) {
         return 1;
     }
 
-    if (host_quit_requested()) {
+    if (brickout_host_frame.quit_requested) {
         state.running = 0;
     }
     sync_screen_size();
     update_layout();
     apply_config_live();
 
-    state.timers.frame_start = get_time_ms();
-    let bench_start_us: i32 = get_time_us();
+    state.timers.frame_start = brickout_host_frame.time_ms;
+    let bench_start_us: i32 = brickout_host_frame.time_us;
 
-    if (host_key_down(41)) {
+    if (brickout_host_frame.keys[41] != 0) {
         state.running = 0;
     }
 
@@ -2874,12 +2875,12 @@ function tick(): i32 {
     draw_frame();
     end_frame();
     // Measure frame time (logic + rendering prep, excluding vsync/swap/sleep)
-    let frame_end: i32 = get_time_ms();
+    let frame_end: i32 = brickout_host_frame.time_ms;
     state.timers.tick_time_ms = frame_end - state.timers.frame_start;
     if (state.timers.tick_time_ms < 0) {
         state.timers.tick_time_ms = 0;
     }
-    let tick_us: i32 = get_time_us() - bench_start_us;
+    let tick_us: i32 = brickout_host_frame.time_us - bench_start_us;
     if (tick_us < 0) {
         tick_us = 0;
     }

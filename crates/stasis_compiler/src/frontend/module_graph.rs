@@ -791,10 +791,10 @@ mod tests {
         assert_eq!(
             resolve_import_path(
                 "vendor/stasis/stdlib/graphics.stasis",
-                "internal/host_frame.stasis"
+                "internal/host_frame_raw.stasis"
             )
             .expect("package-internal relative import"),
-            "vendor/stasis/stdlib/internal/host_frame.stasis"
+            "vendor/stasis/stdlib/internal/host_frame_raw.stasis"
         );
     }
 

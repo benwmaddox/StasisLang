@@ -57,10 +57,10 @@ function gallery_page_name(page: GalleryPage): string {
 }
 
 function gallery_begin_screen(): void {
-    let x: f32 = gfx_safe_viewport_x();
-    let y: f32 = gfx_safe_viewport_y();
-    let w: f32 = gfx_safe_viewport_width();
-    let h: f32 = gfx_safe_viewport_height();
+    let x: f32 = ui_gallery_host_frame.display.safe_x;
+    let y: f32 = ui_gallery_host_frame.display.safe_y;
+    let w: f32 = ui_gallery_host_frame.display.safe_width;
+    let h: f32 = ui_gallery_host_frame.display.safe_height;
     ui_begin_frame(x, y, w, h);
     ui_inset(x, y, w, h, 18.0, 14.0, 18.0, 14.0);
     ui_vstack_begin(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 12.0, UiStackDirection.Forward);

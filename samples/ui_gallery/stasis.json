@@ -4,6 +4,12 @@
   "entry": "main.stasis",
   "tests": "tests",
   "output": "build",
+  "vendor": {
+    "stasis": {
+      "release_id": "development",
+      "sha256": "2293d0c712b8d63af6f171f22949f0f5f8fba480c07c47795b54322dbe7944dd"
+    }
+  },
   "android": {
     "application_id": "com.stasislang.sample.uigallery",
     "label": "Stasis UI Gallery",
