@@ -71,6 +71,7 @@ jobs:
           python -m unittest tools.ci.test_windows_vs_generator
           python -m unittest tools.ci.test_windows_signing_policy
           python -m unittest tools.ci.test_nightly_network_support
+          python -m unittest tools.ci.test_pr_ci_seam_placement
 
       - name: Test AI efficiency matrix
         run: python -m unittest tools.ci.test_stasis_ai_efficiency_matrix
@@ -111,18 +112,6 @@ jobs:
           python -m unittest tools.ci.test_run_architecture_characterization
           python tools/ci/run_architecture_characterization.py --run-fast
 
-      - name: Test HostFrame desktop JIT seam
-        run: cargo test -p stasis_compiler --test host_frame_jit_seam -- --test-threads=1
-
-      - name: Test gfx command capacity seam
-        run: cargo test -p stasis_compiler gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace -- --test-threads=1
-
-      - name: Test startup asset extern ABI seam
-        run: cargo test -p stasis_compiler startup_asset_externs_match_jit_and_linked_aot_recording_host -- --test-threads=1
-
-      - name: Test window request mailbox seam
-        run: cargo test -p stasis stasis_window_requests_apply_once_after_pre_main_baseline -- --test-threads=1
-
       - name: Run Cargo Test
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
         run: cargo test --workspace --all-targets -- --test-threads=1
@@ -149,12 +138,6 @@ jobs:
 
       - name: Setup MSVC dev environment
         uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Test startup asset extern ABI seam (linked AOT)
-        run: cargo test -p stasis_compiler startup_asset_externs_match_jit_and_linked_aot_recording_host -- --test-threads=1
-
-      - name: Test window request mailbox seam
-        run: cargo test -p stasis stasis_window_requests_apply_once_after_pre_main_baseline -- --test-threads=1
 
       - name: Capture the real Windows SDL parity fixture
         shell: pwsh
@@ -189,61 +172,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
 
-      - name: Test desktop SDL input to JIT frame seam
+      - name: Test Windows desktop SDL seam suite
         shell: pwsh
         run: |
           $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          cargo test -p stasis --test desktop_input_frame_seam -- --test-threads=1 --nocapture
+          python tools/ci/run_windows_platform_seams.py --suite DesktopSdl
 
-      - name: Test desktop display metrics round-trip seam
+      - name: Test Windows mobile runtime seam suite
         shell: pwsh
         run: |
           $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          cargo test -p stasis --test desktop_display_metrics_seam -- --test-threads=1 --nocapture
-
-      - name: Test desktop manifest asset rendering seam
-        shell: pwsh
-        run: |
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          cargo test -p stasis --test desktop_manifest_assets_seam -- --test-threads=1 --nocapture
-
-      - name: Test desktop asset load stress
-        shell: pwsh
-        run: |
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          python tools/cargo_cache.py run -- cargo test -p stasis --test desktop_asset_load_stress -- --test-threads=1 --nocapture
-
-      - name: Test malformed render buffer recovery seam
-        shell: pwsh
-        run: |
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          cargo test -p stasis --test desktop_render_recovery_seam -- --test-threads=1 --nocapture
-
-      - name: Test desktop hot-swap generation seam
-        shell: pwsh
-        run: |
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          cargo test -p stasis --test desktop_hot_swap_generation_seam -- --test-threads=1 --nocapture
-
-      - name: Test JIT and linked-AOT host replay seam
-        shell: pwsh
-        run: |
-          cargo test -p stasis_compiler --test jit_aot_host_replay_seam -- --test-threads=1 --nocapture
-
-      - name: Test generated AOT bindings, lifecycle, and frame order in the C mobile runtime
-        shell: pwsh
-        run: |
-          cargo test -p stasis --test generated_mobile_aot_runtime_seam -- --test-threads=1 --nocapture
-
-      - name: Test packaged mobile assets through linked AOT and shared native hosts
-        shell: pwsh
-        run: |
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          python tools/cargo_cache.py run -- cargo test -p stasis --test mobile_packaged_assets_seam -- --test-threads=1 --nocapture
+          python tools/ci/run_windows_platform_seams.py --suite MobileRuntime
 
       - name: Bootstrap Compile Smoke (compiler .stasis)
         # Compiler/JIT tests share process-global dispatch and runtime registration state.
         run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture
+
+      - name: Upload Windows platform seam evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-platform-seam-evidence
+          if-no-files-found: warn
+          path: |
+            target/render-parity-ci/frame.png
+            target/render-parity-ci/runtime.log
+            target/render-parity-ci/evidence.json
+            target/windows-platform-seams/**/*.log
+            build/codex-cargo-target/seam-tests/
 
   vscode-extension-e2e:
     if: ${{ inputs.run_slow_seams }}

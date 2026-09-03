@@ -190,6 +190,16 @@ availability does not block ordinary CI or task readiness. Production Android
 packaging remains ARM64; the x86_64 package target exists only for deterministic
 development/emulator tests.
 
+### CI placement rule
+
+Ordinary Rust test targets belong only in the broad Cargo workspace lane. A
+platform suite may name a target only when its cases share a genuine platform
+prerequisite, such as MSVC and the built graphics DLL. Compiler seams remain in
+the compiler-package suite. Package-link, device-acceptance, and editor
+boundaries remain separate jobs so their environments and evidence stay
+actionable. A focused command added for local debugging must not create a
+second CI invocation of a test already owned by one of these lanes.
+
 ## Proposed integration tests
 
 The priority is the suggested implementation order within this test program,
