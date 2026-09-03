@@ -1025,7 +1025,7 @@ fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
     fs::write(
         &source_path,
         format!(
-            "{source}\nfunction recording_demo(frame: i32): i32 {{\n    if (frame == 0) {{\n        effect.play_effect(0.25);\n    }}\n    if (frame == 20) {{\n        music.set_music_volume(0.05);\n    }}\n    if (frame == 40) {{\n        music.set_music_volume(0.18);\n    }}\n    return 0;\n}}\n"
+            "{source}\nfunction recording_demo(frame: i32): i32 {{\n    if (frame == 0) {{\n        effect.play_once(0.25, 0.0);\n    }}\n    if (frame == 20) {{\n        music_voice.set_volume_pan(0.05, 0.0);\n    }}\n    if (frame == 40) {{\n        music_voice.set_volume_pan(0.18, 0.0);\n    }}\n    return 0;\n}}\n"
         ),
     )
     .expect("write audio hook fixture");

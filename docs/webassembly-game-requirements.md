@@ -419,20 +419,17 @@ Recommendation:
 
 ## 8. Add a browser audio backend
 
-Current audio is exposed as runtime externs linked through `stasis_graphics`.
+Guest audio uses caller-owned `AudioStream`, `AudioAsset`, and `AudioVoice`
+values linked through `stasis_graphics`.
 
 For web support, that host implementation needs to be replaced with browser audio, likely via WebAudio.
 
 Required work:
 
-- define browser implementation of:
-  - `audio_init`
-  - `audio_is_available`
-  - `audio_get_sample_rate`
-  - `audio_get_channels`
-  - `audio_get_queued_frames`
-  - `audio_get_underruns`
-  - `audio_push_f32_interleaved`
+- implement `AudioStream.open()`, `refresh()`, `push()`, and `close()` over
+  browser audio, including its availability, format, queue, and underrun fields
+- implement `AudioAsset.load_audio()` and `AudioVoice`/`play_once()` playback
+  over browser decoding and voice ownership
 - define buffering policy
 - define browser autoplay/unlock behavior
 - decide whether audio starts only after user interaction

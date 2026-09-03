@@ -7,7 +7,7 @@
   "vendor": {
     "stasis": {
       "release_id": "development",
-      "sha256": "ade6945828f195a570391e252060d2e65fe89fb97a7a642accf8c48fb5f628bb"
+      "sha256": "eac6c8e5eae5a2015964d0edb85053c499d0fb0073e4b931c3b531ded5c32ca5"
     }
   },
   "android": {

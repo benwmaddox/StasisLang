@@ -3132,9 +3132,12 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../samples/audio_asset_playback/audio_asset_playback.stasis"
         ));
+        // This unit flattens the sample and stdlib into one synthetic module, so
+        // preserve the receiver call while dropping its real module qualifier.
         let source = sample
             .replace("import \"/vendor/stasis/src/stdlib/audio.stasis\";", "")
-            .replace("import \"/vendor/stasis/src/stdlib/graphics.stasis\";", "");
+            .replace("import \"/vendor/stasis/src/stdlib/graphics.stasis\";", "")
+            .replace("audio.refresh(audio_stream);", "audio_stream.refresh();");
         let asset_tasks = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../src/stdlib/asset_tasks.stasis"

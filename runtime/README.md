@@ -123,9 +123,12 @@ to the next sprite page, so it does not create an avoidable texture transition.
 Replay splits only at real page/domain, clip, primitive, state, or fixed-capacity
 boundaries. Applications do not need to layer or reorder translucent content.
 
-## API
+## Native host ABI
 
-The library exports these functions for Stasis programs:
+The library exports these functions for compiler and stdlib integration. Guest
+programs use the caller-owned `AudioStream`, `AudioAsset`, and `AudioVoice`
+surface from `src/stdlib/audio.stasis`; the `stasis_audio_*` entries below are
+host ABI details, not public guest calls.
 
 | Function | Description |
 |----------|-------------|
@@ -171,8 +174,8 @@ The library exports these functions for Stasis programs:
 | `stasis_asset_task_take_handle(task)` | Transfer a loaded sprite/audio handle to the caller and retire the task |
 | `stasis_asset_task_cancel(task)` | Cancel or retire a task and release an untaken resource |
 
-WAV asset decoding accepts little-endian PCM16 at 8–384 kHz, one or two channels. Category loaders
-also accept mono or stereo MP3 in that sample-rate range. Each source file is capped at 16 MiB and
+WAV asset decoding accepts little-endian PCM16 at 8–384 kHz, one or two channels. The compatibility
+decoders also accept mono or stereo MP3 in that sample-rate range. Each source file is capped at 16 MiB and
 each decoded asset at 64 MiB. Compressed bytes remain compressed in game packages and decode into
 bounded host memory when loaded. The callback linearly resamples into the active stereo device rate
 and clamps the combined raw-stream and asset-voice mix. Asset and voice tables are fixed at 64 and
@@ -183,7 +186,8 @@ code.
 Asynchronous asset tasks use one bounded 64-entry queue and one host worker. File access, image
 rasterization, and audio decoding happen off the frame thread. `asset_task_poll` performs only the
 required main-thread publication step (texture upload or mixer-table insertion). `ImageAsset` and
-`AudioAsset` expose this as `load_*()`, `ready()`, `failed()`, `play()`/`publish()`, and `release()`;
+`AudioAsset` exposes this as `load_audio()`, `ready()`, `failed()`, and `release()`. Playback uses
+`AudioVoice.play()` for owned voices or `AudioAsset.play_once()` for fire-and-forget effects;
 their `AssetState` and opaque handles are driven by the host task. Games should release abandoned
 or superseded assets so their bounded task slots can be reused. The web host maps the same states
 onto browser image and audio promises.

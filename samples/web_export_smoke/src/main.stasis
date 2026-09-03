@@ -1,4 +1,5 @@
 import "/.stasis_cache/toolchain/src/stdlib/host_frame.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
 
 const SCREEN_WIDTH: i32 = 640;
 const PLAYER_WIDTH: i32 = 64;
@@ -16,13 +17,11 @@ global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
 global audio_samples: f32[4800];
 global web_host_frame: HostFrame;
+global web_audio_stream: AudioStream;
 
 function @extern("web_begin_frame") web_begin_frame(red: i32, green: i32, blue: i32): void;
 function @extern("web_draw_rect") web_draw_rect(x: i32, y: i32, width: i32, height: i32, red: i32, green: i32, blue: i32): void;
 function @extern("web_draw_text") web_draw_text(x: i32, y: i32, value: i32): void;
-
-extern function audio_init(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
-extern function audio_push_f32_interleaved(samples: f32[], frame_count: i32): i32;
 
 function main(): i32 {
     player_x = 288;
@@ -42,12 +41,13 @@ function main(): i32 {
             audio_samples[i] = -0.08;
         }
     }
-    audio_init(48000, 2, 2048);
+    web_audio_stream.open(48000, 2, 2048);
     return 0;
 }
 
 function tick(): i32 {
-    web_host_frame.refresh();
+    host_frame.refresh(web_host_frame);
+    audio.refresh(web_audio_stream);
     if (web_host_frame.keys[9] != 0) {
         if (!fullscreen_latched) {
             if (fullscreen_enabled) {
@@ -83,7 +83,7 @@ function tick(): i32 {
     }
     if (web_host_frame.keys[44] != 0 ||(web_host_frame.pointer_count > 0 && web_host_frame.pointers[0].is_down)) {
         if (!tone_latched) {
-            audio_push_f32_interleaved(audio_samples, 2400);
+            web_audio_stream.push(audio_samples, 2400);
             score += 1;
             tone_latched = true;
         }

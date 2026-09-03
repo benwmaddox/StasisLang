@@ -12,11 +12,14 @@ global seam_direct_text_width: f32;
 global seam_cached_text_width: f32;
 global seam_sprite: Sprite;
 global seam_cached_text: TextRun;
+global seam_audio_asset: AudioAsset;
+global seam_audio_voice: AudioVoice;
+global seam_audio_stream: AudioStream;
 global seam_audio_samples: f32[8];
 
 function main(): i32 {
     init_window(640, 360, "Stasis Android Packaged Assets");
-    if (!audio_init(48000, 2, 512)) {
+    if (!seam_audio_stream.open(48000, 2, 512)) {
         return 11;
     }
     seam_sprite_handle = 0;
@@ -40,13 +43,8 @@ function main(): i32 {
     if (seam_cached_text_width <= 0.0) {
         return 16;
     }
-    seam_audio_handle = audio_load_wav("assets/asset_tone.wav");
-    if (seam_audio_handle == 0) {
+    if (!seam_audio_asset.load_audio("assets/asset_tone.wav")) {
         return 17;
-    }
-    seam_voice_handle = audio_play(seam_audio_handle, false, 0.5, 0.0);
-    if (seam_voice_handle == 0) {
-        return 18;
     }
     seam_audio_samples[0] = 0.25;
     seam_audio_samples[1] = 0.25;
@@ -56,7 +54,7 @@ function main(): i32 {
     seam_audio_samples[5] = 0.125;
     seam_audio_samples[6] = -0.125;
     seam_audio_samples[7] = -0.125;
-    if (audio_push_f32_interleaved(seam_audio_samples, 4) != 4) {
+    if (seam_audio_stream.push(seam_audio_samples, 4) != 4) {
         return 19;
     }
     ticks = 0;
@@ -65,6 +63,17 @@ function main(): i32 {
 }
 
 function tick(): i32 {
+    audio.refresh(seam_audio_stream);
+    if (seam_audio_asset.failed()) {
+        return 17;
+    }
+    if (seam_audio_handle == 0 && seam_audio_asset.ready()) {
+        seam_audio_handle = seam_audio_asset.handle;
+        if (!seam_audio_voice.play(seam_audio_asset, false, 0.5, 0.0)) {
+            return 18;
+        }
+        seam_voice_handle = seam_audio_voice.handle;
+    }
     ticks = ticks + 1;
     seam_state_checksum = 2100 + ticks * 7;
     return 0;
