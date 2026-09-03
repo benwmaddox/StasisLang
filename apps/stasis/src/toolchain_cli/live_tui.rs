@@ -4865,8 +4865,20 @@ mod tests {
 
     #[test]
     fn stdlib_audio_catalog_exposes_typed_surface_only() {
-        let stdlib = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/stdlib");
-        let (_, items) = read_stdlib_api_items(&stdlib, &stdlib.join("audio.stasis"))
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical project root");
+        let stdlib = project
+            .join("src/stdlib")
+            .canonicalize()
+            .expect("canonical stdlib root");
+        let root = StdlibApiRoot {
+            canonical_project: project,
+            canonical_root: stdlib.clone(),
+            import_prefix: "/src/stdlib",
+        };
+        let (_, items) = read_stdlib_api_items(&root, &stdlib.join("audio.stasis"))
             .expect("read canonical audio API");
         let rendered = serde_json::to_string(&items).expect("audio API JSON");
 
