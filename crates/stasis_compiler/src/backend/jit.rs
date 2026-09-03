@@ -4018,10 +4018,27 @@ function main(): i32 {
             let clif = process
                 .clif_for_function_name(caller)
                 .unwrap_or_else(|| panic!("missing CLIF for {caller}"));
+            let called_functions: Vec<_> = clif
+                .lines()
+                .filter_map(|line| {
+                    let (_, call) = line.split_once("call fn")?;
+                    let argument_start = call.find('(')?;
+                    Some(format!("fn{}", &call[..argument_start]))
+                })
+                .collect();
             assert!(
-                clif.contains("call fn"),
+                !called_functions.is_empty(),
                 "expected direct call in {caller}:\n{clif}"
             );
+            for callee in called_functions {
+                assert!(
+                    !clif.lines().any(|line| {
+                        line.trim_start()
+                            .starts_with(&format!("{callee} = colocated "))
+                    }),
+                    "cross-function JIT declaration {callee} assumed colocated in {caller}:\n{clif}"
+                );
+            }
         }
         assert!(process.clif_for_function_name("unreachable").is_none());
 

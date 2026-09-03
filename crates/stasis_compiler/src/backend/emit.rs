@@ -621,13 +621,9 @@ where
             SharedCompileBackendMode::JitDirect => "jit_fn_",
             SharedCompileBackendMode::AotDirect => "aot_fn_",
         };
-        // Cranelift's JIT allocator maps functions independently. AArch64's BL range
-        // therefore cannot be assumed between functions, even in one JITModule.
-        let force_far_nonself_calls = backend_mode == SharedCompileBackendMode::JitDirect
-            && matches!(
-                module.isa().triple().architecture,
-                target_lexicon::Architecture::Aarch64(_)
-            );
+        // Cranelift's JIT allocator maps functions independently, so no architecture's
+        // range-limited direct-call relocation can assume that functions are colocated.
+        let force_far_nonself_calls = backend_mode == SharedCompileBackendMode::JitDirect;
         let mut internal_calls = InternalCallMode::Direct(DirectCallMode {
             module: &mut module,
             self_function_id: meta.id,
