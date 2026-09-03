@@ -1597,7 +1597,10 @@ def capture_until_resource_regions_match(
 ) -> tuple[list[dict], list[dict]]:
     """Use the Android compositor capture as the actual presentation oracle."""
     last_error: SeamError | None = None
-    while time.monotonic() < deadline:
+    post_dialog_capture_pending = False
+    post_dialog_capture_used = False
+    while time.monotonic() < deadline or post_dialog_capture_pending:
+        post_dialog_capture_pending = False
         if ensure_test_activity_foreground(adb, serial, package_id, component):
             time.sleep(0.25)
         capture.write_bytes(
@@ -1621,7 +1624,12 @@ def capture_until_resource_regions_match(
                     component,
                     required=False,
                 )
-            time.sleep(0.25)
+                time.sleep(0.25)
+                if not post_dialog_capture_used and time.monotonic() >= deadline:
+                    post_dialog_capture_pending = True
+                    post_dialog_capture_used = True
+            else:
+                time.sleep(0.25)
     if last_error is not None:
         raise last_error
     raise SeamError("resource capture deadline expired before both pixel oracles passed")
@@ -1743,7 +1751,10 @@ def capture_until_regions_match(
 ) -> list[dict]:
     """Wait for the stable marker's frame to reach Android's compositor."""
     last_error: SeamError | None = None
-    while time.monotonic() < deadline:
+    post_dialog_capture_pending = False
+    post_dialog_capture_used = False
+    while time.monotonic() < deadline or post_dialog_capture_pending:
+        post_dialog_capture_pending = False
         if ensure_test_activity_foreground(adb, serial, package_id, component):
             time.sleep(0.25)
         capture.write_bytes(
@@ -1770,7 +1781,12 @@ def capture_until_regions_match(
                     component,
                     required=False,
                 )
-            time.sleep(0.25)
+                time.sleep(0.25)
+                if not post_dialog_capture_used and time.monotonic() >= deadline:
+                    post_dialog_capture_pending = True
+                    post_dialog_capture_used = True
+            else:
+                time.sleep(0.25)
     if last_error is not None:
         raise last_error
     raise SeamError("capture region deadline expired before the first frame")
