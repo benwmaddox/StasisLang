@@ -1335,6 +1335,183 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             calls,
         )
 
+    def test_region_capture_gets_one_post_deadline_capture_after_system_anr(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("exec-out", "screencap", "-p"):
+                return b"capture"
+            return ""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "frame.png"
+            with (
+                mock.patch.object(seam, "_run", side_effect=fake_run),
+                mock.patch.object(
+                    seam, "ensure_test_activity_foreground", return_value=False
+                ),
+                mock.patch.object(
+                    seam,
+                    "validate_regions",
+                    side_effect=[seam.SeamError("covered"), [{"name": "red"}]],
+                ),
+                mock.patch.object(
+                    seam, "dismiss_system_dialog_action", return_value=True
+                ) as dismiss,
+                mock.patch.object(seam.time, "monotonic", side_effect=[0.0, 2.0, 2.0]),
+                mock.patch.object(seam.time, "sleep"),
+            ):
+                observed = seam.capture_until_regions_match(
+                    Path("adb"),
+                    "device",
+                    capture,
+                    {"logical_size": [640, 360], "regions": []},
+                    1.0,
+                    "com.example.seam",
+                    "com.example.seam/.MainActivity",
+                )
+
+        self.assertEqual(observed, [{"name": "red"}])
+        self.assertEqual(2, calls.count(("exec-out", "screencap", "-p")))
+        dismiss.assert_called_once_with(Path("adb"), "device")
+
+    def test_resource_capture_gets_one_post_deadline_capture_after_system_anr(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("exec-out", "screencap", "-p"):
+                return b"capture"
+            return ""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "frame.png"
+            with (
+                mock.patch.object(seam, "_run", side_effect=fake_run),
+                mock.patch.object(
+                    seam, "ensure_test_activity_foreground", return_value=False
+                ),
+                mock.patch.object(
+                    seam,
+                    "validate_regions",
+                    side_effect=[[{"name": "red"}], [{"name": "red"}]],
+                ),
+                mock.patch.object(
+                    seam,
+                    "validate_resource_regions",
+                    side_effect=[
+                        seam.SeamError("covered"),
+                        [{"name": "sprite"}],
+                    ],
+                ),
+                mock.patch.object(
+                    seam, "dismiss_system_dialog_action", return_value=True
+                ) as dismiss,
+                mock.patch.object(seam.time, "monotonic", side_effect=[0.0, 2.0, 2.0]),
+                mock.patch.object(seam.time, "sleep"),
+            ):
+                observed = seam.capture_until_resource_regions_match(
+                    Path("adb"),
+                    "device",
+                    capture,
+                    {"logical_size": [640, 360], "regions": []},
+                    1.0,
+                    "com.example.seam",
+                    "com.example.seam/.MainActivity",
+                )
+
+        self.assertEqual(
+            observed,
+            ([{"name": "red"}], [{"name": "sprite"}]),
+        )
+        self.assertEqual(2, calls.count(("exec-out", "screencap", "-p")))
+        dismiss.assert_called_once_with(Path("adb"), "device")
+
+    def test_repeated_system_anr_does_not_extend_capture_twice(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("exec-out", "screencap", "-p"):
+                return b"capture"
+            return ""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "frame.png"
+            with (
+                mock.patch.object(seam, "_run", side_effect=fake_run),
+                mock.patch.object(
+                    seam, "ensure_test_activity_foreground", return_value=False
+                ),
+                mock.patch.object(
+                    seam,
+                    "validate_regions",
+                    side_effect=seam.SeamError("covered"),
+                ),
+                mock.patch.object(
+                    seam, "dismiss_system_dialog_action", return_value=True
+                ) as dismiss,
+                mock.patch.object(
+                    seam.time, "monotonic", side_effect=[0.0, 2.0, 2.0, 2.0]
+                ),
+                mock.patch.object(seam.time, "sleep"),
+            ):
+                with self.assertRaisesRegex(seam.SeamError, "covered"):
+                    seam.capture_until_regions_match(
+                        Path("adb"),
+                        "device",
+                        capture,
+                        {"logical_size": [640, 360], "regions": []},
+                        1.0,
+                        "com.example.seam",
+                        "com.example.seam/.MainActivity",
+                    )
+
+        self.assertEqual(2, calls.count(("exec-out", "screencap", "-p")))
+        self.assertEqual(2, dismiss.call_count)
+
+    def test_unrecognized_anr_does_not_extend_capture_deadline(self):
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments == ("exec-out", "screencap", "-p"):
+                return b"capture"
+            return ""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "frame.png"
+            with (
+                mock.patch.object(seam, "_run", side_effect=fake_run),
+                mock.patch.object(
+                    seam, "ensure_test_activity_foreground", return_value=False
+                ),
+                mock.patch.object(
+                    seam,
+                    "validate_regions",
+                    side_effect=seam.SeamError("product dialog"),
+                ),
+                mock.patch.object(
+                    seam, "dismiss_system_dialog_action", return_value=False
+                ) as dismiss,
+                mock.patch.object(seam.time, "monotonic", side_effect=[0.0, 2.0]),
+                mock.patch.object(seam.time, "sleep"),
+            ):
+                with self.assertRaisesRegex(seam.SeamError, "product dialog"):
+                    seam.capture_until_regions_match(
+                        Path("adb"),
+                        "device",
+                        capture,
+                        {"logical_size": [640, 360], "regions": []},
+                        1.0,
+                        "com.example.seam",
+                        "com.example.seam/.MainActivity",
+                    )
+
+        self.assertEqual(1, calls.count(("exec-out", "screencap", "-p")))
+        dismiss.assert_called_once_with(Path("adb"), "device")
+
     def test_selects_real_letterbox_for_each_surface_orientation(self):
         self.assertEqual(
             seam.outside_letterbox_point([360, 720], (1080, 2400)),
