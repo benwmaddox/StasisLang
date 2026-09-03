@@ -223,6 +223,56 @@ _first_it031 = next(line for line in GOOD.splitlines()
 GOOD = GOOD.replace(_first_it031, _it029_lines + "\n" + _first_it031, 1)
 
 
+def _it030_case(phase, sequence, source_sha, generation, runtime_fingerprint,
+                passed, failed, result_status):
+    return {
+        "schema": "stasis.workshop_test_runner.v1", "test_id": "IT-030",
+        "event": "case", "phase": phase, "sequence": sequence, "status": "passed",
+        "passed": passed, "failed": failed, "all_passed": failed == 0,
+        "result": {"file": "tests/it030_workshop_jni.test.stasis", "line": 3,
+                   "column": 1, "name": "IT-030 Workshop JNI rollback",
+                   "passed": result_status == "passed", "status": result_status},
+        "source_sha256": source_sha,
+        "runtime": {"fingerprint": runtime_fingerprint, "generation": generation,
+                    "activation": "native_frame"},
+        "test_file": {"path": "tests/it030_workshop_jni.test.stasis", "exists": True},
+    }
+
+
+_it030_cases = [
+    _it030_case("pass", 1, "c" * 64, 10, "accepted-runtime", 3, 0, "passed"),
+    _it030_case("fail", 2, "d" * 64, 11, "failing-runtime", 2, 1, "failed"),
+    _it030_case("subsequent_pass", 3, "c" * 64, 12, "accepted-runtime", 3, 0,
+                "passed"),
+]
+_it030_summary = {
+    "schema": "stasis.workshop_test_runner.v1", "test_id": "IT-030",
+    "event": "test_runner", "status": "passed", "ordered": True, "case_count": 3,
+    "case_phases": ["pass", "fail", "subsequent_pass"],
+    "transport": "rust_owned_json", "accepted_source_sha256": "c" * 64,
+    "failing_source_sha256": "d" * 64, "rollback_source_sha256": "c" * 64,
+    "accepted_runtime": {"fingerprint": "accepted-runtime", "generation": 10,
+                         "activation": "native_frame"},
+    "failing_runtime": {"fingerprint": "failing-runtime", "generation": 11,
+                        "activation": "native_frame"},
+    "rollback_runtime": {"fingerprint": "accepted-runtime", "generation": 12,
+                         "activation": "native_frame"},
+    "temporary_test": {"path": "tests/it030_workshop_jni.test.stasis",
+                       "created": True, "removed": True},
+    "cleanup_receipt": {"status": "Restored", "packaged_source_sha256": "e" * 64,
+                        "test_removed": True, "compile": "CompileReady: status=0",
+                        "runtime": {"fingerprint": "packaged-runtime", "generation": 13,
+                                    "activation": "native_frame"}},
+}
+_it030_lines = "\n".join(
+    "Stasis Workshop IT-030 case: " + json.dumps(case, separators=(",", ":"))
+    for case in _it030_cases
+) + "\nStasis Workshop IT-030: " + json.dumps(_it030_summary, separators=(",", ":"))
+_first_it031 = next(line for line in GOOD.splitlines()
+                    if line.startswith("Stasis Workshop IT-031: "))
+GOOD = GOOD.replace(_first_it031, _it030_lines + "\n" + _first_it031, 1)
+
+
 _full_it031_line = next(line for line in GOOD.splitlines()
                         if line.startswith("Stasis Workshop IT-031: "))
 _full_it031_marker = json.loads(_full_it031_line.split(": ", 1)[1])
@@ -516,6 +566,7 @@ class WorkshopSeamTests(unittest.TestCase):
         self.assertEqual(result["presented_frames"], 30)
         self.assertEqual(result["it028"]["test_id"], "IT-028")
         self.assertEqual(result["it029"]["test_id"], "IT-029")
+        self.assertEqual(result["it030"]["test_id"], "IT-030")
 
     def test_it029_log_uses_logical_restore_identity_not_capture_hash_equality(self):
         cases = verify_log(GOOD, MANIFEST)["it029_cases"]
@@ -575,6 +626,72 @@ class WorkshopSeamTests(unittest.TestCase):
                               "project_a_first.png")
         with self.assertRaisesRegex(SeamError, "capture artifacts"):
             verify_log(reused, MANIFEST)
+
+    def test_rejects_missing_truncated_or_reordered_it030_evidence(self):
+        summary = next(line for line in GOOD.splitlines()
+                       if line.startswith("Stasis Workshop IT-030: "))
+        with self.assertRaisesRegex(SeamError, "IT-030"):
+            verify_log(GOOD.replace(summary + "\n", "", 1), MANIFEST)
+        with self.assertRaisesRegex(SeamError, "invalid IT-030 marker JSON"):
+            verify_log(GOOD.replace(summary, summary[:-1], 1), MANIFEST)
+        cases = [line for line in GOOD.splitlines()
+                 if line.startswith("Stasis Workshop IT-030 case: ")]
+        swapped = GOOD.replace(cases[0] + "\n" + cases[1],
+                               cases[1] + "\n" + cases[0], 1)
+        with self.assertRaisesRegex(SeamError, "reordered"):
+            verify_log(swapped, MANIFEST)
+
+    def test_rejects_it030_count_location_name_and_status_loss(self):
+        mutations = [
+            ('"failed":1', '"failed":2'),
+            ('"line":3,"column":1,"name":"IT-030 Workshop JNI rollback"',
+             '"line":3,"column":0,"name":"IT-030 Workshop JNI rollback"'),
+            ('"name":"IT-030 Workshop JNI rollback","passed":false',
+             '"name":"renamed","passed":false'),
+            ('"passed":false,"status":"failed"',
+             '"passed":false,"status":"passed"'),
+        ]
+        for old, new in mutations:
+            with self.subTest(new=new), self.assertRaisesRegex(SeamError, "IT-030"):
+                verify_log(GOOD.replace(old, new, 1), MANIFEST)
+
+    def test_rejects_it030_leaked_test_or_rollback_identity_mismatch(self):
+        with self.assertRaisesRegex(SeamError, "lifecycle"):
+            verify_log(GOOD.replace('"exists":true', '"exists":false', 1), MANIFEST)
+        with self.assertRaisesRegex(SeamError, "IT-030"):
+            verify_log(GOOD.replace('"rollback_source_sha256":"' + "c" * 64 + '"',
+                                    '"rollback_source_sha256":"' + "d" * 64 + '"', 1),
+                       MANIFEST)
+        with self.assertRaisesRegex(SeamError, "cleanup"):
+            verify_log(GOOD.replace('"test_removed":true', '"test_removed":false', 1),
+                       MANIFEST)
+
+    def test_rejects_it030_missing_subsequent_success_or_generation_rollback(self):
+        subsequent = next(line for line in GOOD.splitlines()
+                          if 'IT-030 case:' in line and 'subsequent_pass' in line)
+        with self.assertRaisesRegex(SeamError, "exactly 3 IT-030 cases"):
+            verify_log(GOOD.replace(subsequent + "\n", "", 1), MANIFEST)
+        with self.assertRaisesRegex(SeamError, "rollback"):
+            verify_log(GOOD.replace('"fingerprint":"accepted-runtime","generation":12',
+                                    '"fingerprint":"accepted-runtime","generation":11', 1),
+                       MANIFEST)
+
+    def test_rejects_it030_runtime_without_native_activation(self):
+        with self.assertRaisesRegex(SeamError, "runtime identity"):
+            verify_log(GOOD.replace('"activation":"native_frame"',
+                                    '"activation":"compile_only"', 1), MANIFEST)
+
+    def test_it030_jni_transport_has_no_fixed_result_buffer(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "mobile/android/app/src/main/cpp/stasis_mobile_smoke.c") \
+            .read_text(encoding="utf-8")
+        start = source.index("Java_com_stasislang_workshop_MainActivity_nativeRunTests")
+        end = source.index("JNIEXPORT jstring JNICALL", start + 1)
+        body = source[start:end]
+        self.assertNotIn("char message[", body)
+        self.assertIn("bridge->run_tests(root)", body)
+        self.assertLess(body.index("NewStringUTF(env, message)"),
+                        body.index("bridge->free_string(message)"))
 
     def test_verify_files_binds_each_it029_png_to_its_case_hash(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -256,7 +256,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             ),
             sorted(release_artifacts),
         )
-        self.assertEqual(["android-workshop-it025-it029-seams"], workshop_artifacts)
+        self.assertEqual(["android-workshop-it025-it031-seams"], workshop_artifacts)
         self.assertEqual(9, self.workflow.count("          name: android-"))
         self.assertEqual(9, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)

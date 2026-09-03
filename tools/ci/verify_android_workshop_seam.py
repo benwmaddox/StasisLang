@@ -36,6 +36,8 @@ RESOURCE_SCOPE_CASE_MARKER = re.compile(
     r"Stasis Workshop IT-029 case: (\{[^\r\n]+\})"
 )
 RESOURCE_SCOPE_MARKER = re.compile(r"Stasis Workshop IT-029: (\{[^\r\n]+\})")
+TEST_RUNNER_CASE_MARKER = re.compile(r"Stasis Workshop IT-030 case: (\{[^\r\n]+\})")
+TEST_RUNNER_MARKER = re.compile(r"Stasis Workshop IT-030: (\{[^\r\n]+\})")
 DIAGNOSTIC_CASE_MARKER = re.compile(r"Stasis Workshop IT-031 case: (\{[^\r\n]+\})")
 DIAGNOSTIC_MARKER = re.compile(r"Stasis Workshop IT-031: (\{[^\r\n]+\})")
 COMPILE_ERROR_LINE = re.compile(r"^[^\r\n]*CompileError[^\r\n]*\r?$", re.MULTILINE)
@@ -532,6 +534,101 @@ def verify_it031(log: str, after_position: int) -> dict | None:
     return marker
 
 
+def verify_it030(log: str, after_position: int) -> dict:
+    summaries = _json_markers(TEST_RUNNER_MARKER, log, "IT-030 marker", "IT-030")
+    if len(summaries) != 1:
+        raise SeamError(f"expected exactly one IT-030 summary, found {len(summaries)}")
+    summary_match, summary = summaries[0]
+    cases = _json_markers(TEST_RUNNER_CASE_MARKER, log, "IT-030 case", "IT-030")
+    if len(cases) != 3:
+        raise SeamError(f"expected exactly 3 IT-030 cases, found {len(cases)}")
+    if summary_match.start() <= after_position or any(
+            match.start() <= after_position or match.start() >= summary_match.start()
+            for match, _ in cases):
+        raise SeamError("IT-030 cases must follow IT-029 and precede their summary")
+    values = [case for _, case in cases]
+    phases = ["pass", "fail", "subsequent_pass"]
+    if [case.get("phase") for case in values] != phases \
+            or [case.get("sequence") for case in values] != [1, 2, 3]:
+        raise SeamError("IT-030 pass/fail/rollback cases are missing or reordered")
+    for index, case in enumerate(values):
+        result = case.get("result")
+        test_file = case.get("test_file")
+        runtime = case.get("runtime")
+        passed = case.get("passed")
+        failed = case.get("failed")
+        expected_status = "failed" if index == 1 else "passed"
+        if case.get("schema") != "stasis.workshop_test_runner.v1" \
+                or case.get("event") != "case" or case.get("status") != "passed" \
+                or not isinstance(passed, int) or passed < 0 \
+                or not isinstance(failed, int) or failed < 0 \
+                or (failed == 0) != case.get("all_passed") \
+                or not isinstance(result, dict) \
+                or result.get("file") != "tests/it030_workshop_jni.test.stasis" \
+                or result.get("line") != 3 or result.get("column") != 1 \
+                or result.get("name") != "IT-030 Workshop JNI rollback" \
+                or result.get("status") != expected_status \
+                or result.get("passed") != (index != 1):
+            raise SeamError("IT-030 result lost exact counts, status, name, or source location")
+        if (index == 1 and failed != 1) or (index != 1 and failed != 0):
+            raise SeamError("IT-030 pass/fail counts do not prove the expected result")
+        if not isinstance(test_file, dict) \
+                or test_file.get("path") != "tests/it030_workshop_jni.test.stasis" \
+                or test_file.get("exists") is not True:
+            raise SeamError("IT-030 temporary test lifecycle is incomplete")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(case.get("source_sha256", ""))):
+            raise SeamError("IT-030 source checksum is not exact SHA-256 evidence")
+        if not isinstance(runtime, dict) or not runtime.get("fingerprint") \
+                or not isinstance(runtime.get("generation"), int) \
+                or runtime["generation"] <= 0 \
+                or runtime.get("activation") != "native_frame":
+            raise SeamError("IT-030 runtime identity is incomplete")
+    passed_case, failed_case, subsequent = values
+    if passed_case["passed"] <= 0 \
+            or failed_case["passed"] + 1 != passed_case["passed"] \
+            or passed_case["passed"] != subsequent["passed"] \
+            or passed_case["source_sha256"] != subsequent["source_sha256"] \
+            or passed_case["source_sha256"] == failed_case["source_sha256"] \
+            or passed_case["runtime"]["fingerprint"] != subsequent["runtime"]["fingerprint"] \
+            or passed_case["runtime"]["fingerprint"] == failed_case["runtime"]["fingerprint"] \
+            or failed_case["runtime"]["generation"] != passed_case["runtime"]["generation"] + 1 \
+            or subsequent["runtime"]["generation"] != failed_case["runtime"]["generation"] + 1:
+        raise SeamError("IT-030 rollback checksum/runtime identity or subsequent success mismatched")
+    required = {
+        "schema": "stasis.workshop_test_runner.v1", "test_id": "IT-030",
+        "event": "test_runner", "status": "passed", "ordered": True,
+        "case_count": 3, "case_phases": phases, "transport": "rust_owned_json",
+    }
+    if any(summary.get(key) != expected for key, expected in required.items()) \
+            or "cases" in summary:
+        raise SeamError("IT-030 summary is incomplete or duplicates case evidence")
+    if summary.get("accepted_source_sha256") != passed_case["source_sha256"] \
+            or summary.get("failing_source_sha256") != failed_case["source_sha256"] \
+            or summary.get("rollback_source_sha256") != subsequent["source_sha256"] \
+            or summary.get("accepted_runtime") != passed_case["runtime"] \
+            or summary.get("failing_runtime") != failed_case["runtime"] \
+            or summary.get("rollback_runtime") != subsequent["runtime"]:
+        raise SeamError("IT-030 summary does not match ordered case identities")
+    temporary = summary.get("temporary_test")
+    cleanup = summary.get("cleanup_receipt")
+    cleanup_runtime = cleanup.get("runtime") if isinstance(cleanup, dict) else None
+    if not isinstance(temporary, dict) \
+            or temporary.get("path") != "tests/it030_workshop_jni.test.stasis" \
+            or temporary.get("created") is not True or temporary.get("removed") is not True \
+            or not isinstance(cleanup, dict) or cleanup.get("status") != "Restored" \
+            or cleanup.get("test_removed") is not True \
+            or not re.fullmatch(r"[0-9a-f]{64}", str(cleanup.get("packaged_source_sha256", ""))) \
+            or not isinstance(cleanup.get("compile"), str) \
+            or not cleanup["compile"].startswith("CompileReady") \
+            or "status=0" not in cleanup["compile"] \
+            or not isinstance(cleanup_runtime, dict) \
+            or cleanup_runtime.get("generation", 0) <= subsequent["runtime"]["generation"] \
+            or cleanup_runtime.get("activation") != "native_frame" \
+            or cleanup.get("packaged_source_sha256") == passed_case["source_sha256"]:
+        raise SeamError("IT-030 cleanup did not restore the packaged project and remove its test")
+    return {"summary": summary, "cases": values, "_position": summary_match.start()}
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -846,7 +943,8 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         raise SeamError("IT-027 GLES and case evidence is not strictly interleaved")
     hot_edit = verify_it028(log, touch_summary_match.start())
     resource_scope = verify_it029(log, hot_edit["_position"])
-    diagnostic_seam = verify_it031(log, resource_scope["_position"])
+    test_runner = verify_it030(log, resource_scope["_position"])
+    diagnostic_seam = verify_it031(log, test_runner["_position"])
     if diagnostic_seam is None:
         raise SeamError("missing mandatory IT-031 diagnostic seam evidence")
     diagnostic_boundary = next(DIAGNOSTIC_MARKER.finditer(log)).end()
@@ -896,6 +994,8 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         "it028_gles": hot_edit["gles"],
         "it029": resource_scope["summary"],
         "it029_cases": resource_scope["cases"],
+        "it030": test_runner["summary"],
+        "it030_cases": test_runner["cases"],
         "it031": diagnostic_seam,
     }
 

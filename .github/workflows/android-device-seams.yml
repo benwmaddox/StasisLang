@@ -215,10 +215,10 @@ jobs:
           script: |
             pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 -Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90 -MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94
 
-      - name: Upload Android Workshop IT-025 through IT-029 evidence
+      - name: Upload Android Workshop IT-025 through IT-031 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-workshop-it025-it029-seams
+          name: android-workshop-it025-it031-seams
           path: artifacts/android_workshop_seam/e
           if-no-files-found: warn

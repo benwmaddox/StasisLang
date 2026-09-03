@@ -270,6 +270,30 @@ project A after switching back. `stasis.workshop_resource_scope.v1` binds each P
 hash to the native frame handles, exact resolver identities, renderer generation,
 stale-generation rejection count, restore uploads, and bounded atlas/text caches.
 Numeric GLES texture names are deliberately excluded because drivers may reuse them.
+
+IT-030 runs immediately after IT-029 and before IT-031 in the Workshop acceptance
+build. The Java runner captures the packaged project with
+`WorkshopAiProjectTransaction`, changes the uniquely tagged, reachable
+`IT028_TICK_REVISION` constant from packaged value 1 to IT-030 accepted value 3, and
+creates `tests/it030_workshop_jni.test.stasis`. It invokes `nativeRunTests` for an
+initial pass, publishes value 4 as a second compilable source revision that makes
+that same test fail, restores the accepted snapshot through the production
+transaction helper, and proves a subsequent pass. Because reachable tick code reads
+the constant, every source transition publishes a real runtime generation without
+changing an ABI or layout. After each compile, a native preview frame activates the
+staged candidate before Java captures its generation and fingerprint; evidence is
+rejected if Rust still reports a pending candidate. The C JNI shim converts the
+complete Rust-owned JSON string with `NewStringUTF` and frees it only afterward; no
+fixed-size transport buffer is allowed.
+
+Three ordered `stasis.workshop_test_runner.v1` case records carry bounded counts and
+the IT-030 result's exact file, line, column, name, and status. Each case also records
+a SHA-256 editable-project identity and the live runtime generation/fingerprint. The
+summary binds pass, failing revision, rollback, and cleanup identities without
+duplicating result arrays. Cleanup must restore the packaged project exactly, advance
+the runtime generation, and prove the temporary test no longer exists. The strict CI
+verifier rejects missing or reordered records, truncated JSON, count/location/status
+loss, rollback mismatches, a missing subsequent pass, or leaked test files.
 | IT-032 | 3 | Run 300 Workshop frames while compiling edits and recreating the surface; prove bounded buffers/resources and no stale pointers or generation mixing. | Peak counts, generation/trace log, no crash | Device |
 
 ## Implementation order
