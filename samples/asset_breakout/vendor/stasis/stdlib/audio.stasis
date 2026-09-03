@@ -96,16 +96,20 @@ function close(self: AudioStream): void {
     self.underruns = 0;
 }
 
-function @internal @effects(audio)@extern("audio_init") audio_init_raw(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
-function @internal @effects(audio)@extern("audio_shutdown") audio_shutdown_raw(): void;
-function @internal @effects(audio)@extern("audio_is_available") audio_is_available_raw(): bool;
-function @internal @effects(audio)@extern("audio_get_sample_rate") audio_get_sample_rate_raw(): i32;
-function @internal @effects(audio)@extern("audio_get_channels") audio_get_channels_raw(): i32;
-function @internal @effects(audio)@extern("audio_get_queued_frames") audio_get_queued_frames_raw(): i32;
-function @internal @effects(audio)@extern("audio_get_underruns") audio_get_underruns_raw(): i32;
-function @internal @effects(audio)@extern("audio_push_f32_interleaved") audio_push_f32_interleaved_raw(samples: f32[], frame_count: i32): i32;
-function @internal @effects(audio)@extern("audio_play") audio_play_raw(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
-function @internal @effects(audio)@extern("audio_stop") audio_stop_raw(voice_handle: i32): void;
-function @internal @effects(audio)@extern("audio_voice_is_playing") audio_voice_is_playing_raw(voice_handle: i32): bool;
-function @internal @effects(audio)@extern("audio_voice_set_paused") audio_voice_set_paused_raw(voice_handle: i32, paused: bool): void;
-function @internal @effects(audio)@extern("audio_voice_set_volume_pan") audio_voice_set_volume_pan_raw(voice_handle: i32, volume: f32, pan: f32): void;
+function @internal @effects(audio)@extern("stasis_jit_audio_init") audio_init_raw(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
+function @internal @effects(audio)@extern("stasis_jit_audio_shutdown") audio_shutdown_raw(): void;
+function @internal @effects(audio)@extern("stasis_jit_audio_is_available") audio_is_available_raw(): bool;
+function @internal @effects(audio)@extern("stasis_jit_audio_get_sample_rate") audio_get_sample_rate_raw(): i32;
+function @internal @effects(audio)@extern("stasis_jit_audio_get_channels") audio_get_channels_raw(): i32;
+function @internal @effects(audio)@extern("stasis_jit_audio_get_queued_frames") audio_get_queued_frames_raw(): i32;
+function @internal @effects(audio)@extern("stasis_jit_audio_get_underruns") audio_get_underruns_raw(): i32;
+function @internal @effects(audio)@extern("stasis_jit_audio_push_f32_interleaved") audio_push_f32_interleaved_raw(samples: f32[], frame_count: i32): i32;
+function @internal @effects(audio)@extern("stasis_jit_audio_play") audio_play_raw(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
+function @internal @effects(audio)@extern("stasis_jit_audio_stop") audio_stop_raw(voice_handle: i32): void;
+function @internal @effects(audio)@extern("stasis_jit_audio_voice_is_playing") audio_voice_is_playing_raw(voice_handle: i32): bool;
+function @internal @effects(audio)@extern("stasis_jit_audio_voice_set_paused") audio_voice_set_paused_raw(voice_handle: i32, paused: bool): void;
+function @internal @effects(audio)@extern("stasis_jit_audio_voice_set_volume_pan") audio_voice_set_volume_pan_raw(
+    voice_handle: i32,
+    volume: f32,
+    pan: f32
+): void;

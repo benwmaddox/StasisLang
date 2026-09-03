@@ -769,7 +769,11 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 "audio_replay_checksum": 17, "audio_replay_matches": 1,
             }
             markers = [
-                {"event": "initialized", "frame": 0},
+                {
+                    "event": "initialized", "frame": 0,
+                    "audio_handle": 0, "voice_handle": 0,
+                    "audio_sample_checksum": 0,
+                },
                 {"event": "frame", "frame": 1},
                 stable,
             ]
@@ -799,6 +803,25 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             self.assertEqual(manifest_hash, result["manifest_sha256"])
             self.assertEqual("/data/user/0/com.example.seam/files/stasis_game", result["asset_root"])
             self.assertEqual(1, result["identities"]["sprite"]["handle"])
+            divergent_ready = {
+                **stable,
+                "event": "frame",
+                "frame": 1,
+                "audio_sample_checksum": 19,
+            }
+            with self.assertRaisesRegex(
+                seam.SeamError, "audio_sample_checksum expected stable value"
+            ):
+                seam.validate_asset_audio_markers(
+                    [markers[0], divergent_ready, stable],
+                    {
+                        "stable_frame": 30,
+                        "state_checksum": 2310,
+                        "assets": {"audio": {"sample_checksum": "nonzero"}},
+                    },
+                    {"package_id": "com.example.seam", "assets": "."},
+                    package_manifest,
+                )
             stable["asset_root"] = "/data/data/com.example.seam/files/stasis_game"
             alias_result = seam.validate_asset_audio_markers(
                 markers,

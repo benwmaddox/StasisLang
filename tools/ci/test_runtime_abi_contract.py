@@ -123,6 +123,18 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 "// draw_text(",
                 "public_graphics_path",
             ),
+            (
+                contract.MOBILE_PACKAGED_ASSETS_FIXTURE,
+                'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
+                'import "graphics.stasis";',
+                "public_graphics_path",
+            ),
+            (
+                contract.MOBILE_PACKAGED_ASSETS_FIXTURE,
+                "seam_sprite.draw(",
+                "legacy_sprite_draw(",
+                "public_graphics_path",
+            ),
         )
         for path, current, stale, field in mutations:
             with self.subTest(path=path, field=field):
@@ -143,6 +155,48 @@ class RuntimeAbiContractTests(unittest.TestCase):
         )
         self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
         self.assertEqual(contract.GENERATED_MOBILE_AOT_FIXTURE.as_posix(), failure.consumer)
+
+    def test_it015_public_fixture_rejects_private_graphics_storage(self):
+        failures, _ = self.run_with(
+            contract.MOBILE_PACKAGED_ASSETS_FIXTURE,
+            "global seam_sprite_handle: i32;",
+            "global gfx_cmd_i32: i32[67888];\nglobal seam_sprite_handle: i32;",
+        )
+        failure = next(
+            failure for failure in failures
+            if failure.field == "public_graphics_boundary"
+        )
+        self.assertEqual(contract.MOBILE_PACKAGED_ASSETS_FIXTURE.as_posix(), failure.consumer)
+
+    def test_it015_fixture_requires_public_audio_path_and_rejects_private_audio(self):
+        mutations = (
+            (
+                'import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";',
+                'import "audio.stasis";',
+                "it015.public_audio_path",
+            ),
+            (
+                "seam_effect.play_once(",
+                "legacy_effect_play(",
+                "it015.public_audio_path",
+            ),
+            (
+                "global seam_audio_handle: i32;",
+                "function @extern(\"stasis_jit_audio_play\") "
+                "audio_play_raw(handle: i32): i32;\n"
+                "global seam_audio_handle: i32;",
+                "it015.public_audio_boundary",
+            ),
+        )
+        for current, stale, field in mutations:
+            with self.subTest(field=field, stale=stale):
+                failures, _ = self.run_with(
+                    contract.MOBILE_PACKAGED_ASSETS_FIXTURE, current, stale
+                )
+                failure = next(failure for failure in failures if failure.field == field)
+                self.assertEqual(
+                    contract.MOBILE_PACKAGED_ASSETS_FIXTURE.as_posix(), failure.consumer
+                )
 
     def test_grouped_sprite_runs_and_exploration_pointer_semantics_are_guarded(self):
         failures, _ = self.run_with(

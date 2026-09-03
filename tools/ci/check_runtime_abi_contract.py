@@ -47,6 +47,9 @@ DESKTOP_RENDER_RECOVERY = Path("apps/stasis/tests/desktop_render_recovery_seam.r
 DESKTOP_ERROR_TOAST = Path("apps/stasis/tests/desktop_error_toast_seam.rs")
 DESKTOP_HOT_SWAP_HARNESS = Path("apps/stasis/tests/desktop_hot_swap_generation_seam.rs")
 MOBILE_PACKAGED_ASSETS_HARNESS = Path("apps/stasis/tests/mobile_packaged_assets_seam.rs")
+MOBILE_PACKAGED_ASSETS_FIXTURE = Path(
+    "tests/stasis/seams/mobile_packaged_assets_probe.stasis"
+)
 MOBILE_PACKAGED_ASSETS_NATIVE = Path(
     "runtime/tests/stasis_mobile_packaged_assets_integration.c"
 )
@@ -81,7 +84,8 @@ RENDER_DOWNSTREAM = (
     DESKTOP_INPUT_FRAME_HARNESS, DESKTOP_DISPLAY_METRICS_HARNESS,
     GENERATED_MOBILE_AOT_C, GENERATED_MOBILE_AOT_RUST, GENERATED_MOBILE_AOT_FIXTURE,
     DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST, DESKTOP_HOT_SWAP_HARNESS,
-    MOBILE_PACKAGED_ASSETS_HARNESS, MOBILE_PACKAGED_ASSETS_NATIVE,
+    MOBILE_PACKAGED_ASSETS_HARNESS, MOBILE_PACKAGED_ASSETS_FIXTURE,
+    MOBILE_PACKAGED_ASSETS_NATIVE,
     PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
@@ -96,6 +100,7 @@ REQUIRED = (
     GENERATED_MOBILE_AOT_RUST, GENERATED_MOBILE_AOT_FIXTURE,
     DESKTOP_RENDER_RECOVERY, DESKTOP_ERROR_TOAST,
     DESKTOP_HOT_SWAP_HARNESS, MOBILE_PACKAGED_ASSETS_HARNESS,
+    MOBILE_PACKAGED_ASSETS_FIXTURE,
     MOBILE_PACKAGED_ASSETS_NATIVE, PLAY_ERROR_TOASTS,
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
@@ -860,6 +865,18 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             "draw_text(",
             "end_frame();",
         ),
+        MOBILE_PACKAGED_ASSETS_FIXTURE: (
+            'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
+            ".load_sprite_from(",
+            ".load_text_from(",
+            "measure_text(",
+            "begin_frame();",
+            "clear(",
+            "seam_sprite.draw(",
+            "draw_text(",
+            "seam_cached_text.draw(",
+            "end_frame();",
+        ),
     }
     for fixture, required_calls in public_render_fixtures.items():
         text = without_c_comments(sources[fixture])
@@ -875,6 +892,33 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                 label(RENDER_HEADER), label(fixture), "public_graphics_boundary",
                 "no command-storage identifiers", "internal identifier present",
             ))
+
+    mobile_packaged_fixture = without_c_comments(sources[MOBILE_PACKAGED_ASSETS_FIXTURE])
+    public_audio_calls = (
+        'import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";',
+        'seam_music.load_audio("assets/music.mp3")',
+        'seam_effect.load_audio("assets/effect.wav")',
+        "seam_direct_voice.play(",
+        "seam_music_voice.play(",
+        "seam_effect.play_once(",
+    )
+    checks += 1
+    if any(call not in mobile_packaged_fixture for call in public_audio_calls):
+        failures.append(Mismatch(
+            label(MOBILE_PACKAGED_ASSETS_FIXTURE), label(MOBILE_PACKAGED_ASSETS_FIXTURE),
+            "it015.public_audio_path", "rooted audio import and canonical public calls", "missing",
+        ))
+    checks += 1
+    private_audio = re.search(
+        r"@extern\b|\bstasis_jit_audio_[A-Za-z0-9_]+\b|"
+        r"\baudio_[A-Za-z0-9_]*_raw\b|\baudio_(?:play|stop|load_music|load_effect|load_wav)\s*\(",
+        mobile_packaged_fixture,
+    )
+    if private_audio:
+        failures.append(Mismatch(
+            label(MOBILE_PACKAGED_ASSETS_FIXTURE), label(MOBILE_PACKAGED_ASSETS_FIXTURE),
+            "it015.public_audio_boundary", "no private audio bindings", private_audio.group(0),
+        ))
 
     grouped_sprite_fixtures = {
         WINDOWS_LAUNCH_FIXTURE: (

@@ -75,6 +75,7 @@ static float seam_f32(const char *path) {
 }
 
 static int seam_it021_audio = 0;
+static int seam_it021_audio_collected = 0;
 static int seam_audio_queued_before = 0;
 static int seam_audio_queued_after = 0;
 static int seam_audio_frames_mixed = 0;
@@ -438,7 +439,6 @@ int SDL_main(int argc, char **argv) {
         stasis_mobile_network_present_join_url();
 #endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
-        if (seam_it021_audio) collect_it021_audio_telemetry();
         if (seam_test_id != NULL && seam_test_id[0] != '\0') {
             log_seam_marker(seam_test_id, "initialized", 0);
         }
@@ -456,6 +456,12 @@ int SDL_main(int argc, char **argv) {
         if (status == STASIS_MOBILE_RUNTIME_OK) {
 #if defined(STASIS_ENABLE_SEAM_TESTS)
             frame++;
+            if (seam_it021_audio && !seam_it021_audio_collected &&
+                    seam_i32("seam_audio_handle") > 0 &&
+                    seam_i32("seam_voice_handle") > 0) {
+                collect_it021_audio_telemetry();
+                seam_it021_audio_collected = 1;
+            }
             if (seam_test_id != NULL && (frame == 1 || (frame > 0 && frame % 30 == 0))) {
                 log_seam_marker(seam_test_id, frame == 1 ? "frame" : "stable", frame);
             }

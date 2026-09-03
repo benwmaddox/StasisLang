@@ -3155,28 +3155,34 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "storage_save_i32" | "stasis_storage_save_i32" | "stasis_jit_storage_save_i32" => {
             function_address(stasis_dynload::stasis_jit_storage_save_i32 as *const ())
         }
-        "audio_init" | "stasis_audio_init" => {
+        "audio_init" | "stasis_audio_init" | "stasis_jit_audio_init" => {
             function_address(stasis_dynload::stasis_jit_audio_init as *const ())
         }
-        "audio_shutdown" | "stasis_audio_shutdown" => {
+        "audio_shutdown" | "stasis_audio_shutdown" | "stasis_jit_audio_shutdown" => {
             function_address(stasis_dynload::stasis_jit_audio_shutdown as *const ())
         }
-        "audio_is_available" | "stasis_audio_is_available" => {
+        "audio_is_available" | "stasis_audio_is_available" | "stasis_jit_audio_is_available" => {
             function_address(stasis_dynload::stasis_jit_audio_is_available as *const ())
         }
-        "audio_get_sample_rate" | "stasis_audio_get_sample_rate" => {
+        "audio_get_sample_rate"
+        | "stasis_audio_get_sample_rate"
+        | "stasis_jit_audio_get_sample_rate" => {
             function_address(stasis_dynload::stasis_jit_audio_get_sample_rate as *const ())
         }
-        "audio_get_channels" | "stasis_audio_get_channels" => {
+        "audio_get_channels" | "stasis_audio_get_channels" | "stasis_jit_audio_get_channels" => {
             function_address(stasis_dynload::stasis_jit_audio_get_channels as *const ())
         }
-        "audio_get_queued_frames" | "stasis_audio_get_queued_frames" => {
+        "audio_get_queued_frames"
+        | "stasis_audio_get_queued_frames"
+        | "stasis_jit_audio_get_queued_frames" => {
             function_address(stasis_dynload::stasis_jit_audio_get_queued_frames as *const ())
         }
-        "audio_get_underruns" | "stasis_audio_get_underruns" => {
+        "audio_get_underruns" | "stasis_audio_get_underruns" | "stasis_jit_audio_get_underruns" => {
             function_address(stasis_dynload::stasis_jit_audio_get_underruns as *const ())
         }
-        "audio_push_f32_interleaved" | "stasis_audio_push_f32_interleaved" => {
+        "audio_push_f32_interleaved"
+        | "stasis_audio_push_f32_interleaved"
+        | "stasis_jit_audio_push_f32_interleaved" => {
             function_address(stasis_dynload::stasis_jit_audio_push_f32_interleaved as *const ())
         }
         "audio_load_wav" | "stasis_audio_load_wav" => {
@@ -3185,19 +3191,25 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "audio_release" | "stasis_audio_release" => {
             function_address(stasis_dynload::stasis_jit_audio_release as *const ())
         }
-        "audio_play" | "stasis_audio_play" => {
+        "audio_play" | "stasis_audio_play" | "stasis_jit_audio_play" => {
             function_address(stasis_dynload::stasis_jit_audio_play as *const ())
         }
-        "audio_stop" | "stasis_audio_stop" => {
+        "audio_stop" | "stasis_audio_stop" | "stasis_jit_audio_stop" => {
             function_address(stasis_dynload::stasis_jit_audio_stop as *const ())
         }
-        "audio_voice_is_playing" | "stasis_audio_voice_is_playing" => {
+        "audio_voice_is_playing"
+        | "stasis_audio_voice_is_playing"
+        | "stasis_jit_audio_voice_is_playing" => {
             function_address(stasis_dynload::stasis_jit_audio_voice_is_playing as *const ())
         }
-        "audio_voice_set_paused" | "stasis_audio_voice_set_paused" => {
+        "audio_voice_set_paused"
+        | "stasis_audio_voice_set_paused"
+        | "stasis_jit_audio_voice_set_paused" => {
             function_address(stasis_dynload::stasis_jit_audio_voice_set_paused as *const ())
         }
-        "audio_voice_set_volume_pan" | "stasis_audio_voice_set_volume_pan" => {
+        "audio_voice_set_volume_pan"
+        | "stasis_audio_voice_set_volume_pan"
+        | "stasis_jit_audio_voice_set_volume_pan" => {
             function_address(stasis_dynload::stasis_jit_audio_voice_set_volume_pan as *const ())
         }
         "stasis_jit_audio_load_music" | "audio_load_music" | "stasis_audio_load_music" => {
@@ -3520,6 +3532,74 @@ mod tests {
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_poll").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_take_handle").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_cancel").is_some());
+    }
+
+    #[test]
+    fn canonical_audio_runtime_shims_resolve_to_builtin_bridges() {
+        for (symbol, expected) in [
+            (
+                "stasis_jit_audio_init",
+                function_address(stasis_dynload::stasis_jit_audio_init as *const ()),
+            ),
+            (
+                "stasis_jit_audio_shutdown",
+                function_address(stasis_dynload::stasis_jit_audio_shutdown as *const ()),
+            ),
+            (
+                "stasis_jit_audio_is_available",
+                function_address(stasis_dynload::stasis_jit_audio_is_available as *const ()),
+            ),
+            (
+                "stasis_jit_audio_get_sample_rate",
+                function_address(stasis_dynload::stasis_jit_audio_get_sample_rate as *const ()),
+            ),
+            (
+                "stasis_jit_audio_get_channels",
+                function_address(stasis_dynload::stasis_jit_audio_get_channels as *const ()),
+            ),
+            (
+                "stasis_jit_audio_get_queued_frames",
+                function_address(stasis_dynload::stasis_jit_audio_get_queued_frames as *const ()),
+            ),
+            (
+                "stasis_jit_audio_get_underruns",
+                function_address(stasis_dynload::stasis_jit_audio_get_underruns as *const ()),
+            ),
+            (
+                "stasis_jit_audio_push_f32_interleaved",
+                function_address(
+                    stasis_dynload::stasis_jit_audio_push_f32_interleaved as *const (),
+                ),
+            ),
+            (
+                "stasis_jit_audio_play",
+                function_address(stasis_dynload::stasis_jit_audio_play as *const ()),
+            ),
+            (
+                "stasis_jit_audio_stop",
+                function_address(stasis_dynload::stasis_jit_audio_stop as *const ()),
+            ),
+            (
+                "stasis_jit_audio_voice_is_playing",
+                function_address(stasis_dynload::stasis_jit_audio_voice_is_playing as *const ()),
+            ),
+            (
+                "stasis_jit_audio_voice_set_paused",
+                function_address(stasis_dynload::stasis_jit_audio_voice_set_paused as *const ()),
+            ),
+            (
+                "stasis_jit_audio_voice_set_volume_pan",
+                function_address(
+                    stasis_dynload::stasis_jit_audio_voice_set_volume_pan as *const (),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                builtin_host_symbol_address(symbol),
+                Some(expected),
+                "{symbol}"
+            );
+        }
     }
 
     const WEB_NETWORK_EXTERN_FIXTURE: &str = r#"
@@ -3938,10 +4018,27 @@ function main(): i32 {
             let clif = process
                 .clif_for_function_name(caller)
                 .unwrap_or_else(|| panic!("missing CLIF for {caller}"));
+            let called_functions: Vec<_> = clif
+                .lines()
+                .filter_map(|line| {
+                    let (_, call) = line.split_once("call fn")?;
+                    let argument_start = call.find('(')?;
+                    Some(format!("fn{}", &call[..argument_start]))
+                })
+                .collect();
             assert!(
-                clif.contains("call fn"),
+                !called_functions.is_empty(),
                 "expected direct call in {caller}:\n{clif}"
             );
+            for callee in called_functions {
+                assert!(
+                    !clif.lines().any(|line| {
+                        line.trim_start()
+                            .starts_with(&format!("{callee} = colocated "))
+                    }),
+                    "cross-function JIT declaration {callee} assumed colocated in {caller}:\n{clif}"
+                );
+            }
         }
         assert!(process.clif_for_function_name("unreachable").is_none());
 

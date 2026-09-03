@@ -15,6 +15,10 @@ import java.security.MessageDigest;
 final class WorkshopResourceScopeAcceptance {
     private static final String LOG_TAG = "StasisWorkshop";
     private static final String SCHEMA = "stasis.workshop_resource_scope.v1";
+    private static final String CACHED_TEXT_MARKER =
+            "state.label.load_text_from(state.font, \"cached parity\");";
+    private static final String DIRECT_TEXT_MARKER =
+            "draw_text(font, \"direct parity\", 64.0, 252.0, 0.95, 0.95, 1.0, 1.0);";
 
     private WorkshopResourceScopeAcceptance() {}
 
@@ -119,15 +123,14 @@ final class WorkshopResourceScopeAcceptance {
     private static void customize(File root, String identity) throws Exception {
         boolean alpha = "alpha".equals(identity);
         File mainFile = new File(root, "src/main.stasis");
-        String main = read(mainFile).replace("cached parity",
-                alpha ? "cached alpha!" : "cached beta!!");
+        String cachedText = alpha ? "cached alpha!" : "cached beta!!";
+        String main = replaceRequiredOnce(read(mainFile), CACHED_TEXT_MARKER,
+                CACHED_TEXT_MARKER.replace("cached parity", cachedText), "cached text");
         write(mainFile, main);
 
         File frameFile = new File(root, "src/frame.stasis");
-        String frame = read(frameFile);
-        String replacement = directTextAssignments(alpha ? "scope alpha!!" : "scope beta!!!");
-        frame = frame.replaceAll("(?s)    cmd_u8\\[0\\] = 100;.*?    cmd_u8\\[12\\] = 121;",
-                java.util.regex.Matcher.quoteReplacement(replacement));
+        String frame = customizeDirectText(read(frameFile),
+                alpha ? "scope alpha!!" : "scope beta!!!");
         write(frameFile, frame);
 
         File sprite = new File(root, "assets/full_canvas.svg");
@@ -149,15 +152,24 @@ final class WorkshopResourceScopeAcceptance {
         write(manifestFile, manifest.toString(2) + "\n");
     }
 
-    private static String directTextAssignments(String text) {
-        if (text.length() != 13) throw new IllegalArgumentException("IT-029 text must be 13 bytes");
-        StringBuilder source = new StringBuilder();
-        for (int index = 0; index < text.length(); index += 1) {
-            source.append("    cmd_u8[").append(index).append("] = ")
-                    .append((int)text.charAt(index)).append(';');
-            if (index + 1 < text.length()) source.append('\n');
+    static String customizeDirectText(String source, String text) {
+        if (text.getBytes(StandardCharsets.UTF_8).length != 13) {
+            throw new IllegalArgumentException("IT-029 text must be 13 UTF-8 bytes");
         }
-        return source.toString();
+        return replaceRequiredOnce(source, DIRECT_TEXT_MARKER,
+                DIRECT_TEXT_MARKER.replace("direct parity", text), "direct text");
+    }
+
+    private static String replaceRequiredOnce(String source, String marker, String replacement,
+            String description) {
+        int first = source.indexOf(marker);
+        if (first < 0) {
+            throw new IllegalStateException("IT-029 " + description + " marker is missing");
+        }
+        if (source.indexOf(marker, first + marker.length()) >= 0) {
+            throw new IllegalStateException("IT-029 " + description + " marker is ambiguous");
+        }
+        return source.substring(0, first) + replacement + source.substring(first + marker.length());
     }
 
     private static void validate(JSONObject alphaFirst, JSONObject betaBefore,
@@ -175,17 +187,23 @@ final class WorkshopResourceScopeAcceptance {
                 throw new IllegalStateException(field + " did not intentionally collide");
             }
         }
-        if (alphaFirst.getString("direct_text_sha256")
-                        .equals(betaBefore.getString("direct_text_sha256"))
+        String alphaText = alphaFirst.getString("direct_text_sha256");
+        String betaText = betaBefore.getString("direct_text_sha256");
+        if (alphaText.equals(betaText)
                 || alphaFirst.getString("capture_sha256")
                         .equals(betaBefore.getString("capture_sha256"))) {
             throw new IllegalStateException("project asset/text captures did not prove identity");
         }
-        if (!betaBefore.getString("capture_sha256")
-                        .equals(betaAfter.getString("capture_sha256"))
-                || !alphaFirst.getString("capture_sha256")
-                        .equals(alphaReturn.getString("capture_sha256"))) {
-            throw new IllegalStateException("surface/project restore changed exact pixels");
+        if (!betaText.equals(betaAfter.getString("direct_text_sha256"))
+                || !alphaText.equals(alphaReturn.getString("direct_text_sha256"))) {
+            throw new IllegalStateException("surface/project restore changed direct text identity");
+        }
+        long alphaTrace = alphaFirst.getLong("command_trace");
+        long betaTrace = betaBefore.getLong("command_trace");
+        if (alphaTrace == betaTrace
+                || betaTrace != betaAfter.getLong("command_trace")
+                || alphaTrace != alphaReturn.getLong("command_trace")) {
+            throw new IllegalStateException("surface/project restore changed logical command trace");
         }
         if (!betaResources.getJSONArray("identities").toString()
                         .equals(restored.getJSONArray("identities").toString())
