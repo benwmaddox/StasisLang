@@ -1,11 +1,18 @@
+import contextlib
+import io
 import pathlib
 import re
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
+
+from tools.ci import run_windows_platform_seams as seam_runner
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/pr-ci.yml"
-RUNNER = ROOT / "tools/ci/run_windows_platform_seams.ps1"
+RUNNER = ROOT / "tools/ci/run_windows_platform_seams.py"
 STRATEGY = ROOT / "docs/integration_seam_testing_strategy.md"
 
 DESKTOP_SDL_TARGETS = (
@@ -65,8 +72,8 @@ class PrCiSeamPlacementTests(unittest.TestCase):
                 self.assertNotIn(command, self.linux)
 
     def test_windows_platform_suites_have_exact_ownership(self):
-        self.assertEqual(self.windows.count("-Suite DesktopSdl"), 1)
-        self.assertEqual(self.windows.count("-Suite MobileRuntime"), 1)
+        self.assertEqual(self.windows.count("--suite DesktopSdl"), 1)
+        self.assertEqual(self.windows.count("--suite MobileRuntime"), 1)
         for target in DESKTOP_SDL_TARGETS + MOBILE_RUNTIME_TARGETS:
             with self.subTest(target=target):
                 self.assertEqual(self.runner.count(f'"{target}"'), 1)
@@ -98,22 +105,31 @@ class PrCiSeamPlacementTests(unittest.TestCase):
                 self.assertRegex(self.workflow, rf"(?m)^  {boundary_job}:$")
 
     def test_runner_uses_cached_cargo_and_names_grouped_failures(self):
-        command = (
-            "python tools/cargo_cache.py run -- cargo test -p stasis "
-            "--test $target -- --test-threads=1 --nocapture"
+        cargo_tokens = (
+            '"tools/cargo_cache.py"',
+            '"cargo"',
+            '"test"',
+            '"--test"',
+            '"--test-threads=1"',
+            '"--nocapture"',
         )
-        self.assertEqual(self.runner.count(command), 1)
-        self.assertIn('Write-Host "::group::$Suite - $target"', self.runner)
+        for token in cargo_tokens:
+            with self.subTest(token=token):
+                self.assertIn(token, self.runner)
+        self.assertIn('print(f"::group::{suite} - {target}")', self.runner)
         self.assertIn("seam suite failed", self.runner)
-        self.assertIn("Remove-LingeringSeamProcesses -Target $target", self.runner)
+        self.assertIn("remove_lingering_case_processes(target)", self.runner)
 
     def test_windows_cases_stream_stable_logs_and_upload_evidence(self):
-        self.assertIn(
-            '"target/windows-platform-seams/$Suite"', self.runner
-        )
-        self.assertIn('$logPath = Join-Path $suiteLogDir "$target.log"', self.runner)
-        self.assertIn("2>&1 | Tee-Object -FilePath $logPath", self.runner)
-        self.assertIn("$exitCode = $LASTEXITCODE", self.runner)
+        self.assertIn('"target/windows-platform-seams" / suite', self.runner)
+        self.assertIn('log_dir / f"{target}.log"', self.runner)
+        self.assertIn("stderr=subprocess.STDOUT", self.runner)
+        self.assertIn("sys.stdout.write(line)", self.runner)
+        self.assertIn("log.write(line)", self.runner)
+        self.assertEqual(seam_runner.CASE_TIMEOUT_SECONDS, 900)
+        self.assertIn("deadline = time.monotonic() + timeout_seconds", self.runner)
+        self.assertIn("_terminate_process_tree(process)", self.runner)
+        self.assertIn("timed out after {CASE_TIMEOUT_SECONDS} seconds", self.runner)
 
         upload_name = "Upload Windows platform seam evidence"
         self.assertEqual(self.windows.count(upload_name), 1)
@@ -127,10 +143,53 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "target/render-parity-ci/runtime.log",
             "target/render-parity-ci/evidence.json",
             "target/windows-platform-seams/**/*.log",
+            "build/codex-cargo-target/seam-tests/",
         )
         for marker in upload_markers:
             with self.subTest(marker=marker):
                 self.assertEqual(upload.count(marker), 1)
+
+    def test_timeout_failure_does_not_skip_remaining_suite_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            results = [seam_runner.CaseResult(exit_code=-1, timed_out=True)]
+            results.extend(
+                seam_runner.CaseResult(exit_code=0, timed_out=False)
+                for _ in range(5)
+            )
+            with mock.patch.object(
+                seam_runner, "run_command", side_effect=results
+            ) as run_mock, mock.patch.object(
+                seam_runner, "remove_lingering_case_processes", return_value=[]
+            ), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ) as errors:
+                exit_code = seam_runner.run_suite(
+                    pathlib.Path(directory), "DesktopSdl"
+                )
+
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(run_mock.call_count, 6)
+            self.assertIn(
+                "desktop_input_frame_seam timed out after 900",
+                errors.getvalue(),
+            )
+
+    def test_windows_timeout_kill_is_scoped_to_spawned_process_tree(self):
+        process = mock.Mock()
+        process.pid = 4321
+        process.poll.return_value = None
+        process.wait.return_value = -1
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(seam_runner.os, "name", "nt"), mock.patch.object(
+            seam_runner.subprocess, "run", return_value=completed
+        ) as run_mock:
+            seam_runner._terminate_process_tree(process)
+
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["taskkill", "/PID", "4321", "/T", "/F"],
+        )
+        process.kill.assert_not_called()
 
     def test_documentation_states_the_placement_rule(self):
         normalized_strategy = " ".join(self.strategy.split())

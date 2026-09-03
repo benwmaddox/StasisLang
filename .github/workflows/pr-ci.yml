@@ -176,13 +176,13 @@ jobs:
         shell: pwsh
         run: |
           $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          ./tools/ci/run_windows_platform_seams.ps1 -Suite DesktopSdl
+          python tools/ci/run_windows_platform_seams.py --suite DesktopSdl
 
       - name: Test Windows mobile runtime seam suite
         shell: pwsh
         run: |
           $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          ./tools/ci/run_windows_platform_seams.ps1 -Suite MobileRuntime
+          python tools/ci/run_windows_platform_seams.py --suite MobileRuntime
 
       - name: Bootstrap Compile Smoke (compiler .stasis)
         # Compiler/JIT tests share process-global dispatch and runtime registration state.
@@ -199,6 +199,7 @@ jobs:
             target/render-parity-ci/runtime.log
             target/render-parity-ci/evidence.json
             target/windows-platform-seams/**/*.log
+            build/codex-cargo-target/seam-tests/
 
   vscode-extension-e2e:
     if: ${{ inputs.run_slow_seams }}
