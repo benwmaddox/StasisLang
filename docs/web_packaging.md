@@ -48,7 +48,21 @@ Self-contained single-file HTML output is intentionally deferred; web packages k
 assets external so hosted output remains compact and follows the same asset preparation path as
 Android and desktop packages.
 
-The browser shell owns page fitting and the guest owns its logical canvas. The shared `index.html`
+The browser shell owns page fitting and the guest owns its logical canvas. Projects may seed the
+authored size with `web.viewport`; for example, a Sheep Herder build authored at 1600 by 900 uses:
+
+```json
+{
+  "web": {
+    "viewport": { "width": 1600, "height": 900 }
+  }
+}
+```
+
+Both dimensions must be integers from 1 through 8192, and omitted settings default to 640 by 360.
+The generated canvas publishes this logical size before guest startup while retaining a safe
+640-by-360 initial physical backing; the runtime allocates its fitted, capped backing afterward.
+The shared `index.html`
 shell opts into `viewport-fit=cover`, reserves the CSS safe-area insets, and uses `svh`/`dvh`
 fallbacks. Its inline fitter uses `visualViewport.width`/`height` when available (with the layout
 viewport as a fallback), refitting on window resize, orientation changes, and visual-viewport
@@ -63,7 +77,9 @@ caps. Pointer coordinates remain guest-logical through `getBoundingClientRect()`
 including after a toolbar or orientation change. The runtime's private synchronous refit hook runs
 before an intentional logical resize is reported in HostFrame; extent events are coalesced into one
 generation, while origin-only scroll remains quiet. Consumers should not add post-processing resize
-or fullscreen controls.
+or fullscreen controls. Browser resize and orientation changes never rewrite logical dimensions;
+guest code may still intentionally request a new logical canvas size later through the existing
+host request contract.
 
 Web packages do not render an audio-enable control. The runtime requests audio immediately and
 automatically retries on the first pointer or keyboard gesture when browser autoplay policy starts

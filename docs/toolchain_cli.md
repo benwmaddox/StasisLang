@@ -70,7 +70,8 @@ project root and nested directories. `--workspace PATH` selects a project explic
   "tests": "tests",
   "output": "build",
   "web": {
-    "loading_font": "/assets/fonts/display.ttf"
+    "loading_font": "/assets/fonts/display.ttf",
+    "viewport": { "width": 1600, "height": 900 }
   },
   "vendor": {
     "stasis": {
@@ -84,6 +85,12 @@ project root and nested directories. `--workspace PATH` selects a project explic
 The optional `web.loading_font` value must identify an existing `.ttf`, `.otf`, `.woff`, or
 `.woff2` file under the project `assets/` directory. Both `/assets/...` and `assets/...` forms are
 accepted; web packaging normalizes them to a package-relative URL for the static loading shell.
+
+The optional `web.viewport` object sets the authored logical game size used when the browser shell
+starts. Both dimensions must be integers from 1 through 8192. A Sheep Herder build authored at 1600 by 900 can use
+`{"width":1600,"height":900}` to keep its 1600-by-900 world coordinates stable while the browser
+uniformly fits and centers that 16:9 view. Projects without this setting keep the 640-by-360
+default.
 
 The vendor release and hash describe the exact checked-in `vendor/stasis` snapshot.
 `manifest_version` versions the JSON schema and is independent of the selected toolchain release.

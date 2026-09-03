@@ -798,7 +798,21 @@ struct WebProjectManifest {
     entry: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     loading_font: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    viewport: Option<WebViewportManifest>,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+struct WebViewportManifest {
+    width: u32,
+    height: u32,
+}
+
+const DEFAULT_WEB_VIEWPORT: WebViewportManifest = WebViewportManifest {
+    width: 640,
+    height: 360,
+};
+const WEB_VIEWPORT_MAX_DIMENSION: u32 = 8192;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct VendorManifest {
@@ -915,6 +929,18 @@ impl ProjectManifest {
         if let Some(web) = &self.web {
             if let Some(path) = web.loading_font.as_deref() {
                 normalize_web_loading_font_path(path)?;
+            }
+            if let Some(viewport) = web.viewport {
+                for (field, value) in [
+                    ("web.viewport.width", viewport.width),
+                    ("web.viewport.height", viewport.height),
+                ] {
+                    if !(1..=WEB_VIEWPORT_MAX_DIMENSION).contains(&value) {
+                        return Err(format!(
+                            "{field} must be between 1 and {WEB_VIEWPORT_MAX_DIMENSION}"
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -4425,6 +4451,7 @@ fn package_web_workspace(
                 &workspace.manifest.name,
                 development_build,
                 loading_font.as_deref(),
+                workspace.manifest.web.as_ref().and_then(|web| web.viewport),
             ),
         )
         .map_err(|error| format!("failed to write web index: {error}"))?;
@@ -4594,7 +4621,13 @@ fn publish_package_output(staging_root: &Path, package_root: &Path) -> Result<()
     Ok(())
 }
 
-fn web_index_html(title: &str, development_build: bool, loading_font: Option<&str>) -> String {
+fn web_index_html(
+    title: &str,
+    development_build: bool,
+    loading_font: Option<&str>,
+    viewport: Option<WebViewportManifest>,
+) -> String {
+    let viewport = viewport.unwrap_or(DEFAULT_WEB_VIEWPORT);
     let (hud_style, hud) = if development_build {
         (
             "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }",
@@ -4631,6 +4664,8 @@ fn web_index_html(title: &str, development_build: bool, loading_font: Option<&st
         .replace("__STASIS_PERFORMANCE_HUD__", hud)
         .replace("__STASIS_LOADING_FONT_FACE__", &loading_font_face)
         .replace("__STASIS_LOADING_FONT_FAMILY__", &loading_font_family)
+        .replace("__STASIS_LOGICAL_WIDTH__", &viewport.width.to_string())
+        .replace("__STASIS_LOGICAL_HEIGHT__", &viewport.height.to_string())
 }
 
 fn link_web_runtime(
@@ -7520,14 +7555,17 @@ mod tests {
 
     #[test]
     fn release_web_index_omits_performance_hud() {
-        let release = web_index_html("release-game", false, None);
+        let release = web_index_html("release-game", false, None, None);
         assert!(!release.contains("stasis-hud"));
         assert!(!release.contains("__STASIS_"));
         assert!(release.contains(r#"<h1 id="stasis-loading-title">release-game</h1>"#));
         assert!(release.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
         assert!(release.contains(r#"id="stasis-loading" role="status" aria-live="polite""#));
+        assert!(release.contains(
+            r#"width="640" height="360" data-logical-width="640" data-logical-height="360""#
+        ));
 
-        let development = web_index_html("development-game", true, None);
+        let development = web_index_html("development-game", true, None, None);
         assert!(development.contains(r#"id="stasis-hud""#));
         assert!(development.contains(r#"<h1 id="stasis-loading-title">development-game</h1>"#));
         for html in [&release, &development] {
@@ -7540,8 +7578,63 @@ mod tests {
     }
 
     #[test]
+    fn sheep_herder_web_index_starts_with_authored_viewport() {
+        let html = web_index_html(
+            "sheep-herder",
+            false,
+            None,
+            Some(WebViewportManifest {
+                width: 1600,
+                height: 900,
+            }),
+        );
+        assert!(html.contains(
+            r#"width="640" height="360" data-logical-width="1600" data-logical-height="900""#
+        ));
+        assert!(!html.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn web_package_propagates_sheep_herder_viewport_to_startup_html() {
+        let root = temp_dir("sheep_herder_web_viewport");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        fs::write(
+            root.join("src/main.stasis"),
+            concat!(
+                "function main(): i32 { return 0; }\n",
+                "function tick(): i32 { return 0; }\n",
+                "function render(): i32 { return 0; }\n"
+            ),
+        )
+        .expect("entry source");
+        let mut manifest = ProjectManifest::new("sheep_herder".to_string());
+        manifest.web = Some(WebProjectManifest {
+            entry: String::new(),
+            loading_font: None,
+            viewport: Some(WebViewportManifest {
+                width: 1600,
+                height: 900,
+            }),
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+        };
+        let output = root.join("dist/sheep-herder-web");
+
+        package_web_workspace(&workspace, &output, true).expect("package web workspace");
+
+        let html = fs::read_to_string(output.join("index.html")).expect("packaged web index");
+        assert!(html.contains(
+            r#"width="640" height="360" data-logical-width="1600" data-logical-height="900""#
+        ));
+        assert!(!html.contains("__STASIS_"));
+        remove_temp(&root);
+    }
+
+    #[test]
     fn configured_web_loading_font_is_preloaded_and_used_by_shell() {
-        let html = web_index_html("font-game", false, Some("assets/fonts/ui.ttf"));
+        let html = web_index_html("font-game", false, Some("assets/fonts/ui.ttf"), None);
         assert!(html.contains(
             r#"<link rel="preload" href="assets/fonts/ui.ttf" as="font" type="font/ttf" crossorigin>"#
         ));
@@ -9339,6 +9432,7 @@ mod tests {
         network_workspace.manifest.web = Some(WebProjectManifest {
             entry: "src/main.stasis".to_string(),
             loading_font: None,
+            viewport: None,
         });
         let ios_network = root.join("ios-network-package");
         fs::create_dir_all(ios_network.join("ios/network/include"))
@@ -9532,6 +9626,37 @@ mod tests {
     }
 
     #[test]
+    fn manifest_validates_web_viewport_dimensions() {
+        let mut manifest = ProjectManifest::new("sheep_herder".to_string());
+        manifest.web = Some(WebProjectManifest {
+            entry: String::new(),
+            loading_font: None,
+            viewport: Some(WebViewportManifest {
+                width: 1600,
+                height: 900,
+            }),
+        });
+        assert!(manifest.validate().is_ok());
+
+        for (width, height, expected) in [
+            (0, 900, "web.viewport.width must be between 1 and 8192"),
+            (1600, 0, "web.viewport.height must be between 1 and 8192"),
+            (8193, 900, "web.viewport.width must be between 1 and 8192"),
+            (1600, 8193, "web.viewport.height must be between 1 and 8192"),
+        ] {
+            manifest.web.as_mut().unwrap().viewport = Some(WebViewportManifest { width, height });
+            assert_eq!(manifest.validate().unwrap_err(), expected);
+        }
+
+        let missing_height = serde_json::from_str::<ProjectManifest>(
+            r#"{"manifest_version":1,"name":"sheep_herder","entry":"src/main.stasis","tests":"tests","output":"build","web":{"viewport":{"width":1600}}}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing_height.contains("missing field `height`"));
+    }
+
+    #[test]
     fn manifest_accepts_only_the_active_toolchain_stdlib() {
         let mut manifest = ProjectManifest::new("demo".to_string());
         manifest.stdlib = Some("toolchain".to_string());
@@ -9660,6 +9785,7 @@ mod tests {
         manifest.web = Some(WebProjectManifest {
             entry: "src/guest_main.stasis".to_string(),
             loading_font: None,
+            viewport: None,
         });
         assert!(manifest.validate().is_ok());
         assert!(

@@ -28,8 +28,8 @@
       background: #081613;
       color: #f3eee1;
     }
-    main { position: relative; width: min(960px, 100%); max-width: 100%; aspect-ratio: 16 / 9; }
-    canvas { display: block; width: 100%; height: 100%; aspect-ratio: 16 / 9; background: #091b2d; touch-action: none; }
+    main { position: relative; width: 100%; max-width: 100%; aspect-ratio: __STASIS_LOGICAL_WIDTH__ / __STASIS_LOGICAL_HEIGHT__; }
+    canvas { display: block; width: 100%; height: 100%; aspect-ratio: __STASIS_LOGICAL_WIDTH__ / __STASIS_LOGICAL_HEIGHT__; background: #091b2d; touch-action: none; }
     __STASIS_PERFORMANCE_HUD_STYLE__
     #stasis-loading { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: calc(env(safe-area-inset-top, 0px) + clamp(1.5rem, 7vw, 5rem)) calc(env(safe-area-inset-right, 0px) + clamp(1.5rem, 7vw, 5rem)) calc(env(safe-area-inset-bottom, 0px) + clamp(1.5rem, 7vw, 5rem)) calc(env(safe-area-inset-left, 0px) + clamp(1.5rem, 7vw, 5rem)); box-sizing: border-box; overflow: hidden; isolation: isolate; background: linear-gradient(145deg, #102a24 0%, #0b1d1a 48%, #07131d 100%); color: #f3eee1; text-align: center; }
     #stasis-loading::before, #stasis-loading::after { position: absolute; z-index: -1; display: block; content: ""; pointer-events: none; }
@@ -49,7 +49,7 @@
 </head>
 <body>
   <main>
-    <canvas id="stasis-canvas" width="640" height="360" aria-label="__STASIS_GAME_TITLE__ game canvas" tabindex="0"></canvas>
+    <canvas id="stasis-canvas" width="640" height="360" data-logical-width="__STASIS_LOGICAL_WIDTH__" data-logical-height="__STASIS_LOGICAL_HEIGHT__" aria-label="__STASIS_GAME_TITLE__ game canvas" tabindex="0"></canvas>
     <div id="stasis-loading" role="status" aria-live="polite">
       <div class="stasis-loading-card">
         <div class="stasis-loading-rule" aria-hidden="true"></div>
@@ -89,13 +89,14 @@
         };
       };
 
+      const logicalDimension = (name, fallback) => {
+        const attribute = `data-logical-${name.toLowerCase()}`;
+        const value = Number(canvas.dataset?.[`logical${name}`] ?? canvas.getAttribute?.(attribute));
+        return Number.isInteger(value) && value >= 1 && value <= 8192 ? value : fallback;
+      };
       const logicalExtent = () => {
-        const width = finite(canvas.dataset?.logicalWidth)
-          || finite(canvas.getAttribute?.("data-logical-width"))
-          || finite(canvas.width);
-        const height = finite(canvas.dataset?.logicalHeight)
-          || finite(canvas.getAttribute?.("data-logical-height"))
-          || finite(canvas.height);
+        const width = logicalDimension("Width", finite(canvas.width) || 16);
+        const height = logicalDimension("Height", finite(canvas.height) || 9);
         return { width: width || 16, height: height || 9 };
       };
 
@@ -106,9 +107,9 @@
         const availableWidth = Math.max(1, viewport.width - viewport.left - viewport.right);
         const availableHeight = Math.max(1, viewport.height - viewport.top - viewport.bottom);
         const logical = logicalExtent();
-        const ratio = logical.width / logical.height;
-        const width = Math.max(1, Math.min(960, availableWidth, availableHeight * ratio));
-        const height = width / ratio;
+        const scale = Math.min(availableWidth / logical.width, availableHeight / logical.height);
+        const width = logical.width * scale;
+        const height = logical.height * scale;
         const extentKey = [viewport.width, viewport.height, viewport.left, viewport.right, viewport.top, viewport.bottom, logical.width, logical.height].join(":");
         const positionKey = `${viewport.offsetLeft}:${viewport.offsetTop}`;
         const extentChanged = extentKey !== lastExtent;
