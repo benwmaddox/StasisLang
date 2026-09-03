@@ -85,6 +85,126 @@ async function waitFor(description: string, predicate: () => boolean, timeoutMs 
   throw new Error(`Timed out waiting for ${description}.`);
 }
 
+async function waitForDocumentRefresh(
+  description: string,
+  document: vscode.TextDocument,
+  expectedText: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const uri = document.uri.toString();
+  const refreshEvents: string[] = [];
+  let diskState = "not read";
+  let diskContainsExpectedText = false;
+  let awaitingRefresh = false;
+  let resolveRefresh: (() => void) | undefined;
+  const changeListener = vscode.workspace.onDidChangeTextDocument((event) => {
+    if (event.document.uri.toString() !== uri) {
+      return;
+    }
+    const matches = event.document.getText().includes(expectedText);
+    refreshEvents.push(
+      `version=${event.document.version} dirty=${event.document.isDirty} changes=${event.contentChanges.length} matches=${matches}`,
+    );
+    if (refreshEvents.length > 20) {
+      refreshEvents.shift();
+    }
+    if (awaitingRefresh && matches) {
+      resolveRefresh?.();
+    }
+  });
+  const diagnostics = (): string =>
+    JSON.stringify({
+      uri,
+      dirty: document.isDirty,
+      documentVersion: document.version,
+      documentContainsExpectedText: document.getText().includes(expectedText),
+      diskState,
+      refreshEvents,
+    });
+  const withinDeadline = async <T>(operation: PromiseLike<T>, phase: string): Promise<T> => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`Timed out waiting for ${description} during ${phase}. ${diagnostics()}`);
+    }
+    return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error(`Timed out waiting for ${description} during ${phase}. ${diagnostics()}`)),
+        remainingMs,
+      );
+      void Promise.resolve(operation).then(
+        (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      );
+    });
+  };
+
+  try {
+    while (Date.now() < deadline) {
+      try {
+        const diskText = fs.readFileSync(document.uri.fsPath, "utf8");
+        const matches = diskText.includes(expectedText);
+        diskContainsExpectedText = matches;
+        diskState = `read ${Buffer.byteLength(diskText, "utf8")} bytes; contains expected text=${matches}`;
+        if (matches) {
+          break;
+        }
+      } catch (error) {
+        diskState = `read failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (!diskContainsExpectedText) {
+      throw new Error(`Timed out waiting for ${description} on disk. ${diagnostics()}`);
+    }
+    if (document.isDirty) {
+      throw new Error(`Refusing to revert dirty document while waiting for ${description}. ${diagnostics()}`);
+    }
+    if (document.getText().includes(expectedText)) {
+      return;
+    }
+
+    const editor = await withinDeadline(
+      vscode.window.showTextDocument(document, {
+        preserveFocus: false,
+        preview: false,
+        viewColumn: vscode.ViewColumn.Active,
+      }),
+      "editor activation",
+    );
+    if (editor.document.uri.toString() !== uri || vscode.window.activeTextEditor !== editor) {
+      throw new Error(`Expected document is not the active editor for ${description}. ${diagnostics()}`);
+    }
+    if (document.isDirty) {
+      throw new Error(`Refusing to revert dirty document while waiting for ${description}. ${diagnostics()}`);
+    }
+    if (document.getText().includes(expectedText)) {
+      return;
+    }
+
+    const refreshed = new Promise<void>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    awaitingRefresh = true;
+    await withinDeadline(
+      vscode.commands.executeCommand("workbench.action.files.revert"),
+      "file revert",
+    );
+    if (!document.getText().includes(expectedText)) {
+      await withinDeadline(refreshed, "document change after file revert");
+    }
+    assert.ok(document.getText().includes(expectedText), `${description} reaches the editor model`);
+  } finally {
+    changeListener.dispose();
+  }
+}
+
 async function definitionRoundTripP95(
   uri: vscode.Uri,
   position: vscode.Position,
@@ -726,7 +846,7 @@ export async function run(): Promise<void> {
 
     const editApplied = await api.request("apply", { run_tests: false });
     assert.equal(editApplied.kind, "edit_applied", "the previewed edit applies through the LSP broker");
-    await waitFor("semantic edit file refresh", () => document.getText().includes("score += 2"));
+    await waitForDocumentRefresh("semantic edit file refresh", document, "score += 2");
     const functionGeneration = (await api.request("status")).runtime_identity?.generation;
     assert.ok(
       typeof functionGeneration === "number" && functionGeneration > startedGeneration!,
@@ -738,7 +858,7 @@ export async function run(): Promise<void> {
 
     const editUndone = await api.request("undo", { run_tests: false });
     assert.equal(editUndone.kind, "edit_undone", "semantic edit rollback completes through the LSP broker");
-    await waitFor("semantic rollback file refresh", () => document.getText().includes("score += 1"));
+    await waitForDocumentRefresh("semantic rollback file refresh", document, "score += 1");
     await api.request("step", { ticks: 1 });
     const rolledBack = inspectedI32(await api.request("inspect", { path: "score" }));
     assert.equal(rolledBack, edited + 1, "rollback restores the previous function in the running game");
@@ -835,7 +955,7 @@ export async function run(): Promise<void> {
 
     const structApplied = await api.request("apply", { run_tests: false });
     assert.equal(structApplied.kind, "edit_applied", "the struct migration applies through the LSP broker");
-    await waitFor("struct edit file refresh", () => document.getText().includes("armor: i32"));
+    await waitForDocumentRefresh("struct edit file refresh", document, "armor: i32");
     const structGeneration = (await api.request("status")).runtime_identity?.generation;
     assert.ok(
       typeof structGeneration === "number" && structGeneration > beforeStructGeneration!,
