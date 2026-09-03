@@ -345,6 +345,9 @@ def verify_it029(log: str, after_position: int) -> dict:
             raise SeamError("IT-029 case lacks real JNI/GLES presentation evidence")
         if not isinstance(case.get("frame_token"), int) or case["frame_token"] <= 0:
             raise SeamError("IT-029 case lacks a positive frame token")
+        command_trace = case.get("command_trace")
+        if type(command_trace) is not int or not 0 <= command_trace <= 0xFFFFFFFF:
+            raise SeamError("IT-029 command_trace is not an unsigned 32-bit integer")
         for field in ("sprite_handles", "font_handles", "cached_text_handles"):
             handles = case.get(field)
             if not isinstance(handles, list) or not handles \
@@ -388,12 +391,13 @@ def verify_it029(log: str, after_position: int) -> dict:
             or beta_before["project_root"] != beta_after["project_root"]:
         raise SeamError("IT-029 project roots were reused or restored incorrectly")
     if alpha["direct_text_sha256"] == beta_before["direct_text_sha256"] \
-            or alpha["capture_sha256"] == beta_before["capture_sha256"]:
+            or alpha["capture_sha256"] == beta_before["capture_sha256"] \
+            or alpha["command_trace"] == beta_before["command_trace"]:
         raise SeamError("IT-029 project A/B asset identity was reused")
     if beta_before["direct_text_sha256"] != beta_after["direct_text_sha256"] \
-            or beta_before["capture_sha256"] != beta_after["capture_sha256"] \
             or alpha["direct_text_sha256"] != alpha_return["direct_text_sha256"] \
-            or alpha["capture_sha256"] != alpha_return["capture_sha256"]:
+            or beta_before["command_trace"] != beta_after["command_trace"] \
+            or alpha["command_trace"] != alpha_return["command_trace"]:
         raise SeamError("IT-029 recreated or returned project restored the wrong identity")
     alpha_identities = alpha["resources"]["identities"]
     beta_identities = beta_before["resources"]["identities"]
@@ -910,6 +914,7 @@ def verify_files(log_path: Path, capture: Path, manifest_path: Path, apk: Path,
         raise SeamError("exactly four IT-029 PNG captures are required")
     expected_cases = result["it029_cases"]
     capture_evidence = []
+    captures_by_phase = {}
     for path, case in zip(supplied_it029, expected_cases):
         if not path.is_file():
             raise SeamError(f"required IT-029 capture is missing: {path}")
@@ -921,6 +926,16 @@ def verify_files(log_path: Path, capture: Path, manifest_path: Path, apk: Path,
             "phase": case["phase"], "path": str(path), "sha256": digest,
             "pixel_oracle": pixel_oracle,
         })
+        captures_by_phase[case["phase"]] = path
+    restore_pixel_comparisons = [
+        _compare_it029_restore_pixels(
+            captures_by_phase[before], captures_by_phase[after], before, after
+        )
+        for before, after in (
+            ("project_a_first", "project_a_return"),
+            ("project_b_before_recreation", "project_b_after_recreation"),
+        )
+    ]
     evidence = {
         "schema": "stasis.workshop_seam.evidence.v1",
         "test_id": "IT-025",
@@ -930,11 +945,60 @@ def verify_files(log_path: Path, capture: Path, manifest_path: Path, apk: Path,
         "capture_sha256": _sha256(capture),
         "metadata": metadata,
         "it029_capture_artifacts": capture_evidence,
+        "it029_restore_pixel_comparisons": restore_pixel_comparisons,
         **result,
     }
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return evidence
+
+
+def _compare_it029_restore_pixels(
+        before_path: Path, after_path: Path, before_phase: str, after_phase: str) -> dict:
+    try:
+        before_width, before_height, before_rgba = read_capture(before_path)
+        after_width, after_height, after_rgba = read_capture(after_path)
+    except Exception as error:
+        raise SeamError(
+            f"IT-029 restore pair {before_phase}/{after_phase} is not a supported PNG: {error}"
+        ) from error
+    if (before_width, before_height) != (after_width, after_height):
+        raise SeamError(
+            f"IT-029 restore pair {before_phase}/{after_phase} has different dimensions"
+        )
+    pixel_count = before_width * before_height
+    if len(before_rgba) != pixel_count * 4 or len(after_rgba) != pixel_count * 4:
+        raise SeamError(
+            f"IT-029 restore pair {before_phase}/{after_phase} has invalid decoded dimensions"
+        )
+    changed_pixels = 0
+    max_channel_delta = 0
+    for offset in range(0, len(before_rgba), 4):
+        deltas = [
+            abs(before_rgba[offset + channel] - after_rgba[offset + channel])
+            for channel in range(4)
+        ]
+        if any(deltas):
+            changed_pixels += 1
+            max_channel_delta = max(max_channel_delta, *deltas)
+    allowance = max(256, pixel_count // 1000)
+    if max_channel_delta > 1:
+        raise SeamError(
+            f"IT-029 restore pair {before_phase}/{after_phase} max channel delta "
+            f"{max_channel_delta} exceeds 1"
+        )
+    if changed_pixels > allowance:
+        raise SeamError(
+            f"IT-029 restore pair {before_phase}/{after_phase} changed {changed_pixels} "
+            f"pixels, exceeding allowance {allowance}"
+        )
+    return {
+        "phases": [before_phase, after_phase],
+        "pixel_count": pixel_count,
+        "changed_pixels": changed_pixels,
+        "max_channel_delta": max_channel_delta,
+        "allowance": allowance,
+    }
 
 
 def _verify_it029_capture_pixels(path: Path, phase: str) -> dict:

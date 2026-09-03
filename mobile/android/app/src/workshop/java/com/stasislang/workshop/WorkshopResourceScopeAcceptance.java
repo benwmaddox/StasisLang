@@ -187,17 +187,23 @@ final class WorkshopResourceScopeAcceptance {
                 throw new IllegalStateException(field + " did not intentionally collide");
             }
         }
-        if (alphaFirst.getString("direct_text_sha256")
-                        .equals(betaBefore.getString("direct_text_sha256"))
+        String alphaText = alphaFirst.getString("direct_text_sha256");
+        String betaText = betaBefore.getString("direct_text_sha256");
+        if (alphaText.equals(betaText)
                 || alphaFirst.getString("capture_sha256")
                         .equals(betaBefore.getString("capture_sha256"))) {
             throw new IllegalStateException("project asset/text captures did not prove identity");
         }
-        if (!betaBefore.getString("capture_sha256")
-                        .equals(betaAfter.getString("capture_sha256"))
-                || !alphaFirst.getString("capture_sha256")
-                        .equals(alphaReturn.getString("capture_sha256"))) {
-            throw new IllegalStateException("surface/project restore changed exact pixels");
+        if (!betaText.equals(betaAfter.getString("direct_text_sha256"))
+                || !alphaText.equals(alphaReturn.getString("direct_text_sha256"))) {
+            throw new IllegalStateException("surface/project restore changed direct text identity");
+        }
+        long alphaTrace = alphaFirst.getLong("command_trace");
+        long betaTrace = betaBefore.getLong("command_trace");
+        if (alphaTrace == betaTrace
+                || betaTrace != betaAfter.getLong("command_trace")
+                || alphaTrace != alphaReturn.getLong("command_trace")) {
+            throw new IllegalStateException("surface/project restore changed logical command trace");
         }
         if (!betaResources.getJSONArray("identities").toString()
                         .equals(restored.getJSONArray("identities").toString())

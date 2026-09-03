@@ -5188,6 +5188,7 @@ public final class MainActivity extends Activity {
                 nativeFrameValues);
         if (status != 0) throw new IllegalStateException(nativeLastFrameError());
         int token = gamePreview.frameToken();
+        long commandTrace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
         if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
             throw new IllegalStateException("IT-029 GLES token timeout");
         }
@@ -5253,6 +5254,7 @@ public final class MainActivity extends Activity {
                 .put("status", "passed").put("phase", phase).put("sequence", sequence)
                 .put("project_root", new File(projectRoot).getCanonicalPath())
                 .put("frame_token", token).put("gles_presented", true)
+                .put("command_trace", commandTrace)
                 .put("sprite_handles", sprites).put("font_handles", fonts)
                 .put("cached_text_handles", cachedText)
                 .put("direct_text_sha256", sha256Bytes(frame.textBytes))

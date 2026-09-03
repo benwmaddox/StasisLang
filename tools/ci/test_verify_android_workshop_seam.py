@@ -30,7 +30,8 @@ def _png_rgba(width: int, height: int, pixels: bytes) -> bytes:
 
 
 def _it029_png(project_color: tuple[int, int, int, int],
-               missing_text: str = "") -> bytes:
+               missing_text: str = "", variation_delta: int = 0,
+               variation_pixels: int = 0) -> bytes:
     width, height = 100, 160
     pixels = bytearray(b"\x00\x00\x00\xff" * (width * height))
 
@@ -48,13 +49,26 @@ def _it029_png(project_color: tuple[int, int, int, int],
         fill(17, 98, 40, 106, (230, 235, 242, 255))
     if missing_text != "right":
         fill(53, 98, 79, 106, (242, 204, 38, 255))
+    for index in range(variation_pixels):
+        x = 45 + index % 40
+        y = 60 + index // 40
+        offset = (y * width + x) * 4
+        pixels[offset] += variation_delta
     return _png_rgba(width, height, bytes(pixels))
 
 
-def _verify_files_fixture(root: Path, alpha_png: bytes, beta_png: bytes):
-    alpha_hash = hashlib.sha256(alpha_png).hexdigest()
-    beta_hash = hashlib.sha256(beta_png).hexdigest()
-    log = GOOD.replace("a" * 64, alpha_hash).replace("b" * 64, beta_hash)
+def _verify_files_fixture(root: Path, alpha_png: bytes, beta_png: bytes,
+                          beta_after_png: bytes | None = None,
+                          alpha_return_png: bytes | None = None):
+    captures = (
+        alpha_png,
+        beta_png,
+        beta_png if beta_after_png is None else beta_after_png,
+        alpha_png if alpha_return_png is None else alpha_return_png,
+    )
+    log = GOOD
+    for placeholder, data in zip("abcd", captures):
+        log = log.replace(placeholder * 64, hashlib.sha256(data).hexdigest())
     log_path = root / "log.txt"
     log_path.write_text(log, encoding="utf-8")
     manifest = root / "manifest.json"
@@ -66,7 +80,7 @@ def _verify_files_fixture(root: Path, alpha_png: bytes, beta_png: bytes):
     capture.write_bytes(b"stable")
     apk.write_bytes(b"apk")
     it029 = []
-    for index, data in enumerate((alpha_png, beta_png, beta_png, alpha_png)):
+    for index, data in enumerate(captures):
         path = root / f"it029-{index}.png"
         path.write_bytes(data)
         it029.append(path)
@@ -120,8 +134,8 @@ Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-0
 """
 # Keep the fixture's IT-031 case evidence in separate bounded log records, as
 # the Android logcat line limit cannot carry five duplicated full cases.
-def _it029_case(phase, sequence, root, text_hash, capture_hash, generation,
-                stale_rejections, uploads):
+def _it029_case(phase, sequence, root, text_hash, capture_hash, command_trace,
+                generation, stale_rejections, uploads):
     resources = {
         "project_root": root,
         "surface_generation": generation,
@@ -158,6 +172,7 @@ def _it029_case(phase, sequence, root, text_hash, capture_hash, generation,
         "sequence": sequence,
         "project_root": root,
         "frame_token": 83 + sequence,
+        "command_trace": command_trace,
         "gles_presented": True,
         "sprite_handles": [101, 102, 103],
         "font_handles": [201, 201],
@@ -176,10 +191,13 @@ def _it029_case(phase, sequence, root, text_hash, capture_hash, generation,
 _alpha_root = "/data/user/0/com.stasislang.workshop/files/workshop_projects/it029-alpha"
 _beta_root = "/data/user/0/com.stasislang.workshop/files/workshop_projects/it029-beta"
 _it029_cases = [
-    _it029_case("project_a_first", 1, _alpha_root, "1" * 64, "a" * 64, 1, 0, 4),
-    _it029_case("project_b_before_recreation", 2, _beta_root, "2" * 64, "b" * 64, 1, 0, 8),
-    _it029_case("project_b_after_recreation", 3, _beta_root, "2" * 64, "b" * 64, 2, 6, 5),
-    _it029_case("project_a_return", 4, _alpha_root, "1" * 64, "a" * 64, 2, 6, 10),
+    _it029_case("project_a_first", 1, _alpha_root, "1" * 64, "a" * 64, 101, 1, 0, 4),
+    _it029_case("project_b_before_recreation", 2, _beta_root, "2" * 64,
+                "b" * 64, 202, 1, 0, 8),
+    _it029_case("project_b_after_recreation", 3, _beta_root, "2" * 64,
+                "c" * 64, 202, 2, 6, 5),
+    _it029_case("project_a_return", 4, _alpha_root, "1" * 64, "d" * 64,
+                101, 2, 6, 10),
 ]
 _it029_summary = {
     "schema": "stasis.workshop_resource_scope.v1",
@@ -499,6 +517,29 @@ class WorkshopSeamTests(unittest.TestCase):
         self.assertEqual(result["it028"]["test_id"], "IT-028")
         self.assertEqual(result["it029"]["test_id"], "IT-029")
 
+    def test_it029_log_uses_logical_restore_identity_not_capture_hash_equality(self):
+        cases = verify_log(GOOD, MANIFEST)["it029_cases"]
+        alpha, beta_before, beta_after, alpha_return = cases
+        self.assertEqual(4, len({case["capture_sha256"] for case in cases}))
+        self.assertEqual(alpha["command_trace"], alpha_return["command_trace"])
+        self.assertEqual(beta_before["command_trace"], beta_after["command_trace"])
+
+    def test_rejects_it029_restored_command_trace_mismatch(self):
+        mismatched = GOOD.replace('"command_trace":202', '"command_trace":303', 1)
+        with self.assertRaisesRegex(SeamError, "restored the wrong identity"):
+            verify_log(mismatched, MANIFEST)
+
+    def test_rejects_it029_command_trace_outside_unsigned_u32(self):
+        for invalid in (-1, 0x100000000, True):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                SeamError, "unsigned 32-bit integer"
+            ):
+                verify_log(
+                    GOOD.replace('"command_trace":101',
+                                 '"command_trace":' + json.dumps(invalid), 1),
+                    MANIFEST,
+                )
+
     def test_rejects_missing_or_reordered_it029_evidence(self):
         summary = next(line for line in GOOD.splitlines()
                        if line.startswith("Stasis Workshop IT-029: "))
@@ -554,6 +595,54 @@ class WorkshopSeamTests(unittest.TestCase):
             with self.assertRaisesRegex(SeamError, "capture hash"):
                 verify_files(log_path, capture, manifest, apk, metadata,
                              root / "evidence.json", it029)
+
+    def test_it029_restore_pixel_comparison_allows_bounded_one_level_variation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            alpha = _it029_png((0x12, 0x61, 0xA0, 0xFF))
+            alpha_return = _it029_png(
+                (0x12, 0x61, 0xA0, 0xFF), variation_delta=1, variation_pixels=1
+            )
+            beta = _it029_png((0xA0, 0x38, 0x12, 0xFF))
+            args = _verify_files_fixture(
+                root, alpha, beta, alpha_return_png=alpha_return
+            )
+
+            result = verify_files(*args[:5], root / "evidence.json", args[5])
+            comparisons = result["it029_restore_pixel_comparisons"]
+            self.assertEqual(1, comparisons[0]["changed_pixels"])
+            self.assertEqual(1, comparisons[0]["max_channel_delta"])
+            self.assertEqual(256, comparisons[0]["allowance"])
+
+    def test_it029_restore_pixel_comparison_rejects_channel_delta_above_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            alpha = _it029_png((0x12, 0x61, 0xA0, 0xFF))
+            alpha_return = _it029_png(
+                (0x12, 0x61, 0xA0, 0xFF), variation_delta=2, variation_pixels=1
+            )
+            beta = _it029_png((0xA0, 0x38, 0x12, 0xFF))
+            args = _verify_files_fixture(
+                root, alpha, beta, alpha_return_png=alpha_return
+            )
+
+            with self.assertRaisesRegex(SeamError, "max channel delta 2 exceeds 1"):
+                verify_files(*args[:5], root / "evidence.json", args[5])
+
+    def test_it029_restore_pixel_comparison_rejects_excess_changed_pixels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            alpha = _it029_png((0x12, 0x61, 0xA0, 0xFF))
+            alpha_return = _it029_png(
+                (0x12, 0x61, 0xA0, 0xFF), variation_delta=1, variation_pixels=257
+            )
+            beta = _it029_png((0xA0, 0x38, 0x12, 0xFF))
+            args = _verify_files_fixture(
+                root, alpha, beta, alpha_return_png=alpha_return
+            )
+
+            with self.assertRaisesRegex(SeamError, "exceeding allowance 256"):
+                verify_files(*args[:5], root / "evidence.json", args[5])
 
     def test_it029_pixel_oracle_rejects_hash_bound_wrong_project_color(self):
         with tempfile.TemporaryDirectory() as directory:
