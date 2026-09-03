@@ -1711,25 +1711,29 @@ def main() -> int:
         assert hashlib.sha256(asset_path.read_bytes()).hexdigest() == asset["content_sha256"]
         assert asset_path.read_bytes() == (canonical_audio_root / asset_path.name).read_bytes()
     audio_source = read("mobile/android/app/src/main/assets/audio_sink_sample/src/main.stasis")
-    assert "AudioAsset" not in audio_source
+    assert "struct AudioAsset" in audio_source
+    assert "struct AudioVoice" in audio_source
+    assert "struct AudioStream" in audio_source
     assert "import \"/vendor/stasis/src/stdlib/audio.stasis\"" not in audio_source
     assert '"assets/tone.mp3"' in audio_source
     assert '"assets/tone.wav"' in audio_source
-    assert 'function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_music")' in audio_source
-    assert 'function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_effect")' in audio_source
-    assert 'function @effects(audio)@extern("stasis_jit_audio_play_music")' in audio_source
-    assert 'function @effects(audio)@extern("stasis_jit_audio_play_effect")' in audio_source
+    assert "function @asset_path(path) load_audio(self: AudioAsset" in audio_source
+    assert "function play(self: AudioVoice, asset: AudioAsset" in audio_source
+    assert "function play_once(self: AudioAsset" in audio_source
+    assert "function open(self: AudioStream" in audio_source
+    assert "function refresh(self: AudioStream" in audio_source
+    assert "function push(self: AudioStream" in audio_source
     assert "global music_handle: i32" in audio_source
     assert "global effect_handle: i32" in audio_source
-    assert "manifest_music_ready = music_handle > 0" in audio_source
-    assert "manifest_effect_ready = effect_handle > 0" in audio_source
+    assert 'manifest_music_ready = music.load_audio("assets/tone.mp3")' in audio_source
+    assert 'manifest_effect_ready = effect.load_audio("assets/tone.wav")' in audio_source
     assert "manifest_audio_update" in audio_source
-    assert "audio_play_music(music_handle, true, 0.18)" in audio_source
-    assert "audio_play_effect(effect_handle, 0.25)" in audio_source
+    assert "music_voice.play(music, true, 0.18, 0.0)" in audio_source
+    assert "effect.play_once(0.25, 0.0)" in audio_source
     assert "manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_MUSIC" in audio_source
     assert "manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_EFFECT" in audio_source
     assert "audio_sink_acceptance_update" in audio_source
-    assert "audio_push_f32_interleaved" in audio_source
+    assert "audio_stream.push(audio_buf, AUDIO_FRAMES_PER_PUSH)" in audio_source
     audio_test = read(
         "mobile/android/app/src/main/assets/audio_sink_sample/tests/audio_sink.test.stasis"
     )

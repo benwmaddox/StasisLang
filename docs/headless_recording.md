@@ -72,7 +72,7 @@ and the requested input/output rate. MP4 recording also runs the existing game
 mixer offline at 48 kHz, stereo, PCM16 before muxing it as AAC. Audio samples
 for frame `n` are exactly `floor(n * 48000 / fps)`, so fractional rates do not
 accumulate rounding drift and no physical audio device is opened. This captures
-game-generated asset voices and `audio_push_f32_interleaved` samples only; it
+game-generated `AudioVoice` playback and `AudioStream.push()` samples only; it
 does not capture a microphone or system audio. PNG mode does not stage offline
 audio; guest code may still initialize and use the normal interactive audio API
 when that path is requested.
@@ -88,7 +88,7 @@ stasis --workspace samples/audio_asset_playback record `
 ```
 
 The MP3 contains only game-generated audio (asset voices and
-`audio_push_f32_interleaved` samples), encoded by FFmpeg's `libmp3lame` at 48 kHz
+`AudioStream.push()` samples), encoded by FFmpeg's `libmp3lame` at 48 kHz
 stereo. MP3 container start/duration may include up to the codec's frame-bounded
 encoder delay and padding; decoding through FFmpeg trims that metadata back to the
 exact pre-encode sample schedule. No microphone, system audio, physical device, or

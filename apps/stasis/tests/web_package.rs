@@ -1214,8 +1214,10 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
 
     let runtime = fs::read_to_string(output.join("game.js")).expect("audio game runtime");
     for expected in [
-        "stasis_jit_audio_load_music",
-        "stasis_jit_audio_load_effect",
+        "stasis_jit_asset_request_audio",
+        "stasis_jit_asset_task_poll",
+        "stasis_jit_asset_task_take_handle",
+        "audio_play:",
         "decodeAudioData",
         "visibilitychange",
         "pagehide",

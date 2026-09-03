@@ -4798,6 +4798,18 @@ mod tests {
         )
         .expect("public host frame module");
         fs::write(
+            stdlib.join("audio.stasis"),
+            concat!(
+                "struct AudioVoice { handle: i32; }\n",
+                "struct AudioStream { active: bool; available: bool; }\n",
+                "function play(self: AudioVoice, asset: i32, loop: bool, volume: f32, pan: f32): bool { return false; }\n",
+                "function refresh(self: AudioStream): void { return; }\n",
+                "function @internal @extern(\"audio_play\") audio_play_raw(asset: i32, loop: bool, volume: f32, pan: f32): i32;\n",
+                "function @internal @extern(\"audio_is_available\") audio_is_available_raw(): bool;\n",
+            ),
+        )
+        .expect("public audio module");
+        fs::write(
             stdlib.join("internal/host_frame_raw.stasis"),
             "function host_private(): i32 { return 0; }\n",
         )
@@ -4814,19 +4826,22 @@ mod tests {
         let catalog = load_stdlib_module_index(stdlib_root.as_ref()).expect("stdlib module index");
 
         assert_eq!(catalog["available"], true);
-        assert_eq!(catalog["total"], 21);
+        assert_eq!(catalog["total"], 22);
         let rendered = serde_json::to_string(&catalog).expect("catalog JSON");
         assert!(rendered.contains("\"module\":\"graphics\""));
         assert!(rendered.contains("\"module\":\"module_17\""));
         assert!(rendered.contains("\"api_item_count\":4"));
         assert!(rendered.contains("/vendor/stasis/stdlib/graphics.stasis"));
         assert!(rendered.contains("/vendor/stasis/stdlib/host_frame.stasis"));
+        assert!(rendered.contains("/vendor/stasis/stdlib/audio.stasis"));
         assert!(!rendered.contains("draw_line(x: f32, y: f32): void"));
         assert!(!rendered.contains("load_font(path: string, size: i32): i32"));
         assert!(!rendered.contains("private_counter"));
         assert!(!rendered.contains("host_private"));
         assert!(!rendered.contains("load_sprite_raw"));
         assert!(!rendered.contains("raw_draw"));
+        assert!(!rendered.contains("audio_play_raw"));
+        assert!(!rendered.contains("audio_is_available_raw"));
         fs::remove_dir_all(root).ok();
     }
 
@@ -4846,6 +4861,55 @@ mod tests {
         assert!(context.get("project_hints").is_none());
         assert!(context.get("project_index").is_none());
         assert!(context.get("initial_symbols").is_none());
+    }
+
+    #[test]
+    fn stdlib_audio_catalog_exposes_typed_surface_only() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical project root");
+        let stdlib = project
+            .join("src/stdlib")
+            .canonicalize()
+            .expect("canonical stdlib root");
+        let root = StdlibApiRoot {
+            canonical_project: project,
+            canonical_root: stdlib.clone(),
+            import_prefix: "/src/stdlib",
+        };
+        let (_, items) = read_stdlib_api_items(&root, &stdlib.join("audio.stasis"))
+            .expect("read canonical audio API");
+        let rendered = serde_json::to_string(&items).expect("audio API JSON");
+
+        for public in [
+            "AudioVoice",
+            "AudioStream",
+            "play(self: AudioVoice",
+            "play_once(self: AudioAsset",
+            "open(self: AudioStream",
+            "refresh(self: AudioStream",
+            "push(self: AudioStream",
+            "close(self: AudioStream",
+        ] {
+            assert!(
+                rendered.contains(public),
+                "missing public audio API: {public}"
+            );
+        }
+        for internal in [
+            "audio_play_raw",
+            "audio_init_raw",
+            "audio_load_music",
+            "audio_load_effect",
+            "audio_play_music",
+            "audio_play_effect",
+        ] {
+            assert!(
+                !rendered.contains(internal),
+                "internal audio API leaked: {internal}"
+            );
+        }
     }
 
     #[test]

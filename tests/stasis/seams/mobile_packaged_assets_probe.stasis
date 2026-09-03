@@ -6,12 +6,40 @@ extern function measure_text(font: i32, text: string): f32;
 
 function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
 function @extern("stasis_jit_gfx_measure_text_cached") gfx_measure_text_cached(handle: i32): f32;
-function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_music") audio_load_music(path: string): i32;
-function @effects(audio)@asset_path(path)@extern("stasis_jit_audio_load_effect") audio_load_effect(path: string): i32;
-function @effects(audio)@extern("stasis_jit_audio_play_music") audio_play_music(asset_handle: i32, loop: bool, volume: f32): bool;
-function @effects(audio)@extern("stasis_jit_audio_play_effect") audio_play_effect(asset_handle: i32, volume: f32): bool;
 
-extern function audio_play(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
+struct AudioAsset {
+    handle: i32;
+}
+
+struct AudioVoice {
+    handle: i32;
+}
+
+function @internal @effects(audio)@extern("stasis_jit_audio_load_music") audio_load_decoded_raw(path: string): i32;
+function @internal @effects(audio)@extern("audio_play") audio_play_raw(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
+function @internal @effects(audio)@extern("audio_stop") audio_stop_raw(voice_handle: i32): void;
+
+function @asset_path(path) load_audio(self: AudioAsset, path: string): bool {
+    self.handle = audio_load_decoded_raw(path);
+    return self.handle > 0;
+}
+
+function play(self: AudioVoice, asset: AudioAsset, loop: bool, volume: f32, pan: f32): bool {
+    self.stop();
+    self.handle = audio_play_raw(asset.handle, loop, volume, pan);
+    return self.handle > 0;
+}
+
+function stop(self: AudioVoice): void {
+    if (self.handle > 0) {
+        audio_stop_raw(self.handle);
+        self.handle = 0;
+    }
+}
+
+function play_once(self: AudioAsset, volume: f32, pan: f32): bool {
+    return audio_play_raw(self.handle, false, volume, pan) > 0;
+}
 
 global gfx_cmd_i32: i32[67888];
 global gfx_cmd_f32: f32[146564];
@@ -26,6 +54,10 @@ global seam_effect_handle: i32;
 global seam_music_played: bool;
 global seam_effect_played: bool;
 global seam_audio_event_order: i32;
+global seam_music: AudioAsset;
+global seam_effect: AudioAsset;
+global seam_direct_voice: AudioVoice;
+global seam_music_voice: AudioVoice;
 global seam_direct_width: f32;
 global seam_cached_width: f32;
 
@@ -47,27 +79,27 @@ function main(): i32 {
     if (seam_direct_width <= 0.0 || seam_cached_width <= 0.0) {
         return 24;
     }
-    seam_music_handle = audio_load_music("assets/music.mp3");
-    seam_effect_handle = audio_load_effect("assets/effect.wav");
-    if (seam_music_handle == 0 || seam_effect_handle == 0) {
+    if (!seam_music.load_audio("assets/music.mp3") || !seam_effect.load_audio("assets/effect.wav")) {
         return 25;
     }
+    seam_music_handle = seam_music.handle;
+    seam_effect_handle = seam_effect.handle;
     seam_audio_handle = seam_effect_handle;
-    seam_voice_handle = audio_play(seam_audio_handle, false, 0.5, 0.0);
-    if (seam_voice_handle == 0) {
+    if (!seam_direct_voice.play(seam_effect, false, 0.5, 0.0)) {
         return 26;
     }
+    seam_voice_handle = seam_direct_voice.handle;
     return 0;
 }
 
 function tick(): i32 {
     if (seam_audio_event_order != 12) {
-        if (!audio_play_music(seam_music_handle, true, 0.18)) {
+        if (!seam_music_voice.play(seam_music, true, 0.18, 0.0)) {
             return 27;
         }
         seam_music_played = true;
         seam_audio_event_order = seam_audio_event_order * 10 + 1;
-        if (!audio_play_effect(seam_effect_handle, 0.25)) {
+        if (!seam_effect.play_once(0.25, 0.0)) {
             return 28;
         }
         seam_effect_played = true;
