@@ -1061,7 +1061,7 @@ mod tests {
         config.budget.model_calls = 0;
         assert!(config.validate().is_err());
         config.budget.model_calls = 100;
-        config.execution.builder_max_turns = 49;
+        config.execution.builder_max_turns = 51;
         assert!(config.validate().is_err());
         config.execution.builder_max_turns = 30;
         config.execution.compaction.max_request_bytes = 1;
