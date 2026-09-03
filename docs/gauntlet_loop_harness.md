@@ -187,8 +187,8 @@ the initial and fixed-probe pair, so selection, movement, targeting, endings,
 and other project-specific states can be judged from pixels rather than inferred
 from tests.
 
-Ordinary `stasis ai` retains its 15-turn default. Gauntlet builders default to
-30 turns and may be configured from 1 through 48, still bounded by the run's
+Ordinary `stasis ai` uses a 50-turn default. Gauntlet builders default to
+30 turns and may be configured from 1 through 50, still bounded by the run's
 total model-call and wall-time budgets. This gives a difficult workstream room
 for multiple inspect/test/correct cycles without silently granting an
 unlimited session.

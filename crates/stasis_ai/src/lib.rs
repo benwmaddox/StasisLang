@@ -9,8 +9,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_AGENT_TURNS: usize = 15;
-pub const MAX_AGENT_TURNS: usize = 48;
+pub const DEFAULT_AGENT_TURNS: usize = 50;
+pub const MAX_AGENT_TURNS: usize = 50;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 50;
 pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
@@ -1339,16 +1339,16 @@ mod tests {
         )
         .expect("fifty-call batch");
 
-        assert_eq!(DEFAULT_AGENT_TURNS, 15);
-        assert_eq!(MAX_AGENT_TURNS, 48);
+        assert_eq!(DEFAULT_AGENT_TURNS, 50);
+        assert_eq!(MAX_AGENT_TURNS, 50);
         assert_eq!(tools.0, 50);
-        assert_eq!(contract_json()["limits"]["default_agent_turns"], 15);
-        assert_eq!(contract_json()["limits"]["maximum_profile_turns"], 48);
+        assert_eq!(contract_json()["limits"]["default_agent_turns"], 50);
+        assert_eq!(contract_json()["limits"]["maximum_profile_turns"], 50);
         assert_eq!(contract_json()["limits"]["tool_calls_per_turn"], 50);
     }
 
     #[test]
-    fn explicit_profiles_can_exceed_the_live_ai_default() {
+    fn explicit_profiles_accept_the_maximum_turn_limit() {
         let mut responses = (0..16)
             .map(|index| ModelResponse::ToolCalls {
                 working_notes: format!("Inspect bounded decision input {index}."),
@@ -1371,7 +1371,7 @@ mod tests {
             &AgentProfile {
                 role: "Gauntlet builder".to_string(),
                 instruction: "Complete the bounded workstream.".to_string(),
-                max_turns: 20,
+                max_turns: 50,
                 model: None,
                 reasoning_effort: None,
                 request_timeout: None,
@@ -1386,6 +1386,28 @@ mod tests {
         .expect("extended profile");
         assert_eq!(result, "extended");
         assert_eq!(tools.0, 16);
+    }
+
+    #[test]
+    fn profiles_reject_turn_limits_above_fifty() {
+        let mut profile = AgentProfile::default();
+        profile.max_turns = 51;
+        let mut provider = Responses(vec![]);
+        let mut tools = Tools::default();
+
+        let error = run_agent_with_profile(
+            &mut provider,
+            &mut tools,
+            &profile,
+            "invalid turn limit",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect_err("51 turns exceeds the shared maximum");
+
+        assert_eq!(error, "AI agent profile max_turns must be between 1 and 50");
     }
 
     #[test]
