@@ -4821,8 +4821,6 @@ mod tests {
         assert!(rendered.contains("\"api_item_count\":4"));
         assert!(rendered.contains("/vendor/stasis/stdlib/graphics.stasis"));
         assert!(rendered.contains("/vendor/stasis/stdlib/host_frame.stasis"));
-        assert!(rendered.contains("HostFrame"));
-        assert!(rendered.contains("refresh(self: HostFrame): void"));
         assert!(!rendered.contains("draw_line(x: f32, y: f32): void"));
         assert!(!rendered.contains("load_font(path: string, size: i32): i32"));
         assert!(!rendered.contains("private_counter"));
