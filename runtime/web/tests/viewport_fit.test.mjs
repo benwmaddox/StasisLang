@@ -160,6 +160,31 @@ test("layout viewport fallback works when visualViewport is unavailable", () => 
   assert.equal(fit.windowListeners.get("resize")?.length, 1);
 });
 
+function assertAuthoredViewportFit(name, logical, viewport, unusedAxis) {
+  const fit = runFitter({
+    layoutWidth: viewport[0], layoutHeight: viewport[1],
+    visualWidth: viewport[0], visualHeight: viewport[1],
+    backingWidth: logical[0], backingHeight: logical[1]
+  });
+  const width = parseFloat(fit.shellStyle.width);
+  const height = parseFloat(fit.shellStyle.height);
+  const scaleX = width / logical[0];
+  const scaleY = height / logical[1];
+  assert.ok(width <= viewport[0] && height <= viewport[1], `${name} stays inside the visible viewport`);
+  assert.ok(Math.abs(scaleX - scaleY) < 1e-12, `${name} uses one uniform scale`);
+  const unusedX = viewport[0] - width;
+  const unusedY = viewport[1] - height;
+  assert.ok(unusedAxis === "x" ? unusedX > 0 : unusedY > 0, `${name} leaves the expected unused axis`);
+}
+
+test("Sheep Herder authored viewport fits desktop and mobile orientations uniformly", () => {
+  const logical = [1600, 900];
+  assert.match(html, /body \{[\s\S]*?display: grid;[\s\S]*?place-items: center;/, "shell centers letterbox and pillarbox space");
+  assertAuthoredViewportFit("desktop landscape", logical, [1440, 900], "y");
+  assertAuthoredViewportFit("mobile portrait", logical, [390, 844], "y");
+  assertAuthoredViewportFit("mobile landscape", logical, [844, 390], "x");
+});
+
 test("index shell contract is safe-area aware and has one fitter", () => {
   assert.match(html, /viewport-fit=cover/);
   assert.match(html, /safe-area-inset-top/);
@@ -202,7 +227,13 @@ function integratedRuntime({
       drawImage() {}, translate() {}, rotate() {}
     }),
     getBoundingClientRect() {
-      return { left: 0, top: 0, width: parseFloat(shellStyle.width) || 0, height: parseFloat(shellStyle.height) || 0 };
+      const width = parseFloat(shellStyle.width) || 0;
+      const height = parseFloat(shellStyle.height) || 0;
+      const availableWidth = visualViewport.width - (safe.left || 0) - (safe.right || 0);
+      const availableHeight = visualViewport.height - (safe.top || 0) - (safe.bottom || 0);
+      const left = visualViewport.offsetLeft + (safe.left || 0) + (availableWidth - width) / 2;
+      const top = visualViewport.offsetTop + (safe.top || 0) + (availableHeight - height) / 2;
+      return { left, top, right: left + width, bottom: top + height, width, height };
     },
     addEventListener(type, listener) { this.listeners.set(type, listener); },
     setPointerCapture() {},
@@ -387,17 +418,17 @@ test("portrait guest observes landscape availability before main and settles wit
   await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(fixture.mainFrames, [{ version: 4, available: [1280, 720], logical: [360, 720] }]);
-  assert.equal(fixture.shellStyle.width, "960px");
-  assert.equal(fixture.shellStyle.height, "480px");
+  assert.equal(fixture.shellStyle.width, "1280px");
+  assert.equal(fixture.shellStyle.height, "640px");
   fixture.raf.shift()(16);
   assert.deepEqual(fixture.ticks.at(-1), {
-    resized: 1, generation: 2, drawable: [960, 480], logical: [720, 360],
+    resized: 1, generation: 2, drawable: [1280, 640], logical: [720, 360],
     available: [1280, 720], pointer: [0, 0]
   });
 
   fixture.setDpr(2);
   fixture.raf.shift()(32);
-  assert.deepEqual(fixture.ticks.at(-1).drawable, [1920, 960]);
+  assert.deepEqual(fixture.ticks.at(-1).drawable, [2560, 1280]);
   const settledGeneration = fixture.ticks.at(-1).generation;
   fixture.raf.shift()(48);
   fixture.raf.shift()(64);
@@ -409,20 +440,46 @@ test("portrait guest observes landscape availability before main and settles wit
   fixture.visualViewport.width = 1200;
   fixture.visualViewport.height = 700;
   fixture.visualViewport.dispatchEvent(new fixture.context.Event("resize"));
-  assert.equal(fixture.shellStyle.width, "960px");
-  assert.equal(fixture.shellStyle.height, "480px");
+  assert.equal(fixture.shellStyle.width, "1200px");
+  assert.equal(fixture.shellStyle.height, "600px");
   fixture.raf.shift()(72);
   assert.equal(fixture.ticks.at(-1).generation, pinnedGeneration + 1);
   assert.equal(fixture.ticks.at(-1).resized, 1);
-  assert.deepEqual(fixture.ticks.at(-1).drawable, [1920, 960]);
+  assert.deepEqual(fixture.ticks.at(-1).drawable, [2400, 1200]);
   assert.deepEqual(fixture.ticks.at(-1).available, [1200, 700]);
   fixture.raf.shift()(76);
   assert.equal(fixture.ticks.at(-1).generation, pinnedGeneration + 1);
   assert.equal(fixture.ticks.at(-1).resized, 0);
 
   fixture.canvas.listeners.get("pointerdown")({
-    pointerId: 9, pointerType: "mouse", clientX: 480, clientY: 240
+    pointerId: 9, pointerType: "mouse", clientX: 600, clientY: 350
   });
   fixture.raf.shift()(80);
   assert.deepEqual(fixture.ticks.at(-1).pointer, [360, 180], "CSS center maps to the landscape logical center");
+});
+
+test("pointer and touch map through a fitted Sheep Herder viewport", async () => {
+  const fixture = integratedRuntime({
+    logical: [1600, 900], viewport: [390, 844], layout: [390, 844], safe: {}, desktop: [390, 844]
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  const bounds = fixture.canvas.getBoundingClientRect();
+  assert.ok(bounds.top > 0 && bounds.bottom < 844, "portrait viewport is letterboxed without clipping");
+
+  fixture.canvas.listeners.get("pointerdown")({
+    pointerId: 10, pointerType: "mouse",
+    clientX: bounds.left + bounds.width / 2,
+    clientY: bounds.top + bounds.height / 2
+  });
+  fixture.raf.shift()(16);
+  assert.deepEqual(fixture.ticks.at(-1).pointer, [800, 450]);
+
+  fixture.canvas.listeners.get("pointerdown")({
+    pointerId: 11, pointerType: "touch",
+    clientX: bounds.left + bounds.width / 4,
+    clientY: bounds.top + bounds.height / 4
+  });
+  fixture.raf.shift()(32);
+  assert.deepEqual(fixture.ticks.at(-1).pointer, [400, 225]);
 });
