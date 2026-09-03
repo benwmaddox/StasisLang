@@ -28,6 +28,13 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             read("samples/android_asset_rejection_seam/android_seam_expectations.json")
         )
         cls.workshop_script = read("mobile/android/test_render_emulator.ps1")
+        cls.workshop_activity = read(
+            "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java"
+        )
+        cls.preview_renderer = read(
+            "mobile/android/app/src/main/java/com/stasislang/workshop/"
+            "StasisPreviewRenderer.java"
+        )
         cls.rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
         cls.provenance_script = read("mobile/android/rust_bridge_provenance.ps1")
         cls.mobile_main = read("mobile/shells/common/stasis_mobile_main.c")
@@ -122,6 +129,63 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn('Invoke-Adb @("emu", "avd", "name")', self.workshop_script)
         self.assertIn('getprop", "ro.boot.qemu.avd_name', self.workshop_script)
         self.assertIn('$observedAvd -ne $AvdName', self.workshop_script)
+
+    def test_workshop_performance_sampling_is_explicit_and_acceptance_only(self):
+        self.assertNotIn(
+            "private final FramePerformanceSamples performanceSamples =",
+            self.preview_renderer,
+        )
+        self.assertIn(
+            "synchronized void startPerformanceSamplingForAcceptance()",
+            self.preview_renderer,
+        )
+        self.assertIn(
+            "performanceSamples = new FramePerformanceSamples(",
+            self.preview_renderer,
+        )
+        self.assertIn(
+            '"stasis_render_performance"', self.workshop_activity
+        )
+        self.assertIn("protected void onNewIntent(Intent intent)", self.workshop_activity)
+        self.assertIn(
+            "if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || intent == null",
+            self.workshop_activity,
+        )
+        self.assertIn(
+            "queueEvent(renderer::startPerformanceSamplingForAcceptance)",
+            self.workshop_activity,
+        )
+
+    def test_workshop_benchmarks_after_capture_with_one_retry(self):
+        third_capture = self.workshop_script.index("$stableCaptures -ge 3")
+        attempt_loop = self.workshop_script.index(
+            "for ($attempt = 1; $attempt -le 2; $attempt += 1)"
+        )
+        trigger = self.workshop_script.index(
+            '"stasis_render_performance", "true"', attempt_loop
+        )
+        self.assertLess(third_capture, attempt_loop)
+        self.assertLess(attempt_loop, trigger)
+        self.assertEqual(1, self.workshop_script.count("$attempt -le 2"))
+        self.assertIn(
+            '"$Name-performance-attempt-$attempt.log"', self.workshop_script
+        )
+        self.assertIn(
+            '"--log", $attemptLog', self.workshop_script
+        )
+        self.assertIn(
+            '$attemptReports[$reportCountBeforeAttempt]', self.workshop_script
+        )
+        self.assertIn(
+            'render performance evidence failed after 2 attempts',
+            self.workshop_script,
+        )
+        self.assertIn(
+            '"--max-p50-ms", "$MaxRenderP50Millis"', self.workshop_script
+        )
+        self.assertIn(
+            '"--max-p95-ms", "$MaxRenderP95Millis"', self.workshop_script
+        )
 
     def test_nightly_grants_reusable_ci_read_permissions(self):
         self.assertIn("  contents: write", self.nightly_workflow)

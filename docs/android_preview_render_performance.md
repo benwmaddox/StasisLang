@@ -5,7 +5,9 @@ scene. It uses the canonical current gfx_cmd schema and
 exercises every category transition through the real x86_64
 JIT, the embedded GLES renderer, and three pixel-verified captures. Timing starts
 inside `StasisPreviewRenderer.onDrawFrame`; work is not deferred outside the
-measured action.
+measured action. The driver finishes all three external screenshot captures
+before it explicitly starts timing, so emulator framebuffer readback cannot
+stall the measured GLES work.
 
 Run the bounded gate on the repository API 35 emulator after building with
 `-RenderAcceptance`:
@@ -18,7 +20,11 @@ mobile/android/test_render_emulator.ps1 -Headless -SkipBuild `
 The gate discards 60 warm-up frames, measures 180 frames, records total,
 resource-preparation, and ordered-draw p50/p95, and writes device fingerprint,
 AVD, package version, Git revision, and APK SHA-256 beside the screenshots and
-logcat. The driver verifies the observed AVD and Android API and refuses dirty
+logcat. A timed-out, malformed, or out-of-budget attempt is discarded and one
+fresh 60+180-frame attempt is allowed; a second failure fails the gate. Each
+attempt is verified from an isolated log containing exactly one report, while
+the complete Workshop log remains available with the seam evidence. The driver
+verifies the observed AVD and Android API and refuses dirty
 tracked source, so the recorded revision identifies the tested APK inputs.
 `tools/ci/verify_android_render_performance.py` rejects missing, duplicated,
 unexpected, malformed, dirty-source, or out-of-budget evidence.

@@ -174,6 +174,8 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
     private static final int RENDER_FRAME_HEADER_SIZE = 22;
+    private static final String RENDER_PERFORMANCE_ACCEPTANCE_EXTRA =
+            "stasis_render_performance";
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
     private LinearLayout manualEditBody;
@@ -431,6 +433,7 @@ public final class MainActivity extends Activity {
             projectRegistryError = "baseline: " + error.getMessage();
         }
         setContentView(createWorkshopView(project));
+        handleRenderPerformanceAcceptanceIntent(getIntent());
         registerNetworkMonitoring();
         registerPowerMonitoring();
         markInterruptedAiOutcomeIfNeeded();
@@ -458,6 +461,22 @@ public final class MainActivity extends Activity {
                 }
             });
         }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleRenderPerformanceAcceptanceIntent(intent);
+    }
+
+    private void handleRenderPerformanceAcceptanceIntent(Intent intent) {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || intent == null
+                || !intent.getBooleanExtra(RENDER_PERFORMANCE_ACCEPTANCE_EXTRA, false)) {
+            return;
+        }
+        intent.removeExtra(RENDER_PERFORMANCE_ACCEPTANCE_EXTRA);
+        if (gamePreview != null) gamePreview.startPerformanceSamplingForAcceptance();
     }
 
     @Override
@@ -12261,6 +12280,12 @@ public final class MainActivity extends Activity {
             synchronized (renderer) {
                 textureProvider.resetAcceptanceMetrics();
             }
+        }
+
+        void startPerformanceSamplingForAcceptance() {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
+            queueEvent(renderer::startPerformanceSamplingForAcceptance);
+            requestRender();
         }
 
         JSONObject resourceScopeSnapshot() throws Exception {

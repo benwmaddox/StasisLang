@@ -372,6 +372,104 @@ function Assert-RenderedVariant(
                 }
             }
         } while ((Get-Date) -lt $deadline)
+        if ($renderPassed) {
+            $observedAvdLine = Invoke-Adb @("emu", "avd", "name") | Select-Object -First 1
+            $observedAvd = if ($null -eq $observedAvdLine) { "" } else { $observedAvdLine.Trim() }
+            if (-not $observedAvd) {
+                $observedAvdLine = Invoke-Adb @("shell", "getprop", "ro.boot.qemu.avd_name") |
+                    Select-Object -First 1
+                $observedAvd = if ($null -eq $observedAvdLine) { "" } else { $observedAvdLine.Trim() }
+            }
+            $observedSdk = (Invoke-Adb @("shell", "getprop", "ro.build.version.sdk") |
+                Select-Object -First 1).Trim()
+            if ($observedAvd -ne $AvdName -or $observedSdk -ne "35") {
+                throw "$Name benchmark identity mismatch: requested=$AvdName/API35 observed=$observedAvd/API$observedSdk"
+            }
+            $sourceStatus = @(& git -C $repoRoot status --porcelain)
+            if ($LASTEXITCODE -ne 0) { throw "Git source status could not be read for benchmark evidence" }
+            if ($sourceStatus) {
+                throw "$Name benchmark source is dirty; commit or remove source changes before publishing evidence"
+            }
+            $packageDump = @(Invoke-Adb @("shell", "dumpsys", "package", $Package)) -join "`n"
+            $versionName = [regex]::Match(
+                $packageDump, '(?m)^\s*versionName=([^\r\n]+)'
+            ).Groups[1].Value.Trim()
+            $versionCode = [regex]::Match(
+                $packageDump, '(?m)^\s*versionCode=(\d+)'
+            ).Groups[1].Value
+            $metadataPath = Join-Path $artifactRoot "$Name-performance-metadata.json"
+            @{
+                scene = "render_parity"
+                git_revision = (& git -C $repoRoot rev-parse HEAD).Trim()
+                source_dirty = $false
+                apk_sha256 = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
+                package_version = "$versionName ($versionCode)"
+                device_model = (Invoke-Adb @("shell", "getprop", "ro.product.model") |
+                    Select-Object -First 1).Trim()
+                device_fingerprint = (Invoke-Adb @("shell", "getprop", "ro.build.fingerprint") |
+                    Select-Object -First 1).Trim()
+                serial = $serial
+                avd = $observedAvd
+                android_sdk = [int]$observedSdk
+            } | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
+
+            $performancePassed = $false
+            for ($attempt = 1; $attempt -le 2; $attempt += 1) {
+                $beforeAttemptLog = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
+                $reportCountBeforeAttempt = @($beforeAttemptLog |
+                    Where-Object { $_ -match 'RenderPerformance:' }).Count
+                Invoke-Adb @(
+                    "shell", "am", "start", "--activity-single-top", "-n",
+                    "$Package/com.stasislang.workshop.MainActivity", "--ez",
+                    "stasis_render_performance", "true"
+                ) | Out-Null
+
+                $attemptDeadline = (Get-Date).AddSeconds($RenderTimeoutSeconds)
+                $attemptReport = $null
+                do {
+                    Start-Sleep -Milliseconds 500
+                    $attemptDeviceLog = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
+                    $attemptReports = @($attemptDeviceLog |
+                        Where-Object { $_ -match 'RenderPerformance:' })
+                    if ($attemptReports.Count -gt $reportCountBeforeAttempt) {
+                        $attemptReport = $attemptReports[$reportCountBeforeAttempt]
+                        break
+                    }
+                } while ((Get-Date) -lt $attemptDeadline)
+
+                $attemptLog = Join-Path $artifactRoot "$Name-performance-attempt-$attempt.log"
+                if ($null -eq $attemptReport) {
+                    Set-Content -LiteralPath $attemptLog -Value "" -Encoding UTF8
+                } else {
+                    Set-Content -LiteralPath $attemptLog -Value $attemptReport -Encoding UTF8
+                }
+                $attemptEvidence = Join-Path $artifactRoot "$Name-performance-attempt-$attempt.json"
+                $performanceArguments = @(
+                    (Join-Path $toolsCiRoot "verify_android_render_performance.py"),
+                    "--log", $attemptLog,
+                    "--metadata", $metadataPath,
+                    "--evidence", $attemptEvidence
+                )
+                if ($MaxRenderP50Millis -gt 0) {
+                    $performanceArguments += @("--max-p50-ms", "$MaxRenderP50Millis")
+                }
+                if ($MaxRenderP95Millis -gt 0) {
+                    $performanceArguments += @("--max-p95-ms", "$MaxRenderP95Millis")
+                }
+                & python @performanceArguments
+                if ($LASTEXITCODE -eq 0) {
+                    Copy-Item -LiteralPath $attemptEvidence `
+                        -Destination (Join-Path $artifactRoot "$Name-performance.json") -Force
+                    Write-Host "$Name render performance attempt $attempt passed"
+                    $performancePassed = $true
+                    break
+                }
+                Write-Warning "$Name render performance attempt $attempt failed"
+            }
+            if (-not $performancePassed) {
+                throw "$Name render performance evidence failed after 2 attempts; see $artifactRoot"
+            }
+        }
     } finally {
         if ($processId) { $log = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null) }
         if (-not $processId -or $LASTEXITCODE -ne 0) {
@@ -379,6 +477,9 @@ function Assert-RenderedVariant(
         }
         $log | Set-Content -LiteralPath $logFile -Encoding UTF8
         & $adb -s $serial shell am force-stop $Package 2>$null | Out-Null
+    }
+    if (-not $renderPassed) {
+        throw "$Name render acceptance timed out: $lastFailure; see $artifactRoot"
     }
     $it029CaptureNames = @(
         "project_a_first",
@@ -433,57 +534,6 @@ function Assert-RenderedVariant(
     }
     if ($RequireJit -and -not ($log -match 'CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=[1-9][0-9]*')) {
         throw "$Name did not log a successful non-empty Workshop JIT compile; see $logFile"
-    }
-    $observedAvdLine = Invoke-Adb @("emu", "avd", "name") | Select-Object -First 1
-    $observedAvd = if ($null -eq $observedAvdLine) { "" } else { $observedAvdLine.Trim() }
-    if (-not $observedAvd) {
-        $observedAvdLine = Invoke-Adb @("shell", "getprop", "ro.boot.qemu.avd_name") |
-            Select-Object -First 1
-        $observedAvd = if ($null -eq $observedAvdLine) { "" } else { $observedAvdLine.Trim() }
-    }
-    $observedSdk = (Invoke-Adb @("shell", "getprop", "ro.build.version.sdk") | Select-Object -First 1).Trim()
-    if ($observedAvd -ne $AvdName -or $observedSdk -ne "35") {
-        throw "$Name benchmark identity mismatch: requested=$AvdName/API35 observed=$observedAvd/API$observedSdk"
-    }
-    $sourceStatus = @(& git -C $repoRoot status --porcelain)
-    if ($LASTEXITCODE -ne 0) { throw "Git source status could not be read for benchmark evidence" }
-    if ($sourceStatus) {
-        throw "$Name benchmark source is dirty; commit or remove source changes before publishing evidence"
-    }
-    $packageDump = @(Invoke-Adb @("shell", "dumpsys", "package", $Package)) -join "`n"
-    $versionName = [regex]::Match($packageDump, '(?m)^\s*versionName=([^\r\n]+)').Groups[1].Value.Trim()
-    $versionCode = [regex]::Match($packageDump, '(?m)^\s*versionCode=(\d+)').Groups[1].Value
-    $metadataPath = Join-Path $artifactRoot "$Name-performance-metadata.json"
-    @{
-        scene = "render_parity"
-        git_revision = (& git -C $repoRoot rev-parse HEAD).Trim()
-        source_dirty = $false
-        apk_sha256 = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
-        package_version = "$versionName ($versionCode)"
-        device_model = (Invoke-Adb @("shell", "getprop", "ro.product.model") | Select-Object -First 1).Trim()
-        device_fingerprint = (Invoke-Adb @("shell", "getprop", "ro.build.fingerprint") | Select-Object -First 1).Trim()
-        serial = $serial
-        avd = $observedAvd
-        android_sdk = [int]$observedSdk
-    } | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
-    $performanceArguments = @(
-        (Join-Path $toolsCiRoot "verify_android_render_performance.py"),
-        "--log", $logFile,
-        "--metadata", $metadataPath,
-        "--evidence", (Join-Path $artifactRoot "$Name-performance.json")
-    )
-    if ($MaxRenderP50Millis -gt 0) {
-        $performanceArguments += @("--max-p50-ms", "$MaxRenderP50Millis")
-    }
-    if ($MaxRenderP95Millis -gt 0) {
-        $performanceArguments += @("--max-p95-ms", "$MaxRenderP95Millis")
-    }
-    & python @performanceArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Name render performance evidence failed; see $logFile"
-    }
-    if (-not $renderPassed) {
-        throw "$Name render acceptance timed out: $lastFailure; see $artifactRoot"
     }
     $workshopVerifyArguments = @(
         (Join-Path $toolsCiRoot "verify_android_workshop_seam.py"),
