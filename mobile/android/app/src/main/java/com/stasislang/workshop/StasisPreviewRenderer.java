@@ -319,9 +319,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private final RendererResourceLifecycle resourceLifecycle = new RendererResourceLifecycle();
     static final int MAX_PENDING_SPRITE_RELEASES = 256;
     private final ArrayDeque<Integer> pendingSpriteReleases = new ArrayDeque<>();
-    private final FramePerformanceSamples performanceSamples = BuildConfig.STASIS_RENDER_ACCEPTANCE
-            ? new FramePerformanceSamples(PERFORMANCE_WARMUP_FRAMES, PERFORMANCE_SAMPLE_FRAMES)
-            : null;
+    private FramePerformanceSamples performanceSamples;
     private final ByteBuffer frameI32Bytes = directBytes(FRAME_I32_CAPACITY * 4);
     private final ByteBuffer frameF32Bytes = directBytes(FRAME_F32_CAPACITY * 4);
     private final ByteBuffer frameU8Bytes = directBytes(TEXT_U8_CAPACITY);
@@ -685,6 +683,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             }
         }
         timing.onRendered(totalNanos);
+    }
+
+    synchronized void startPerformanceSamplingForAcceptance() {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
+        performanceSamples = new FramePerformanceSamples(
+                PERFORMANCE_WARMUP_FRAMES, PERFORMANCE_SAMPLE_FRAMES);
     }
 
     // Acceptance synchronization waits for the GL thread to consume the exact
