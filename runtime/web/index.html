@@ -49,7 +49,7 @@
 </head>
 <body>
   <main>
-    <canvas id="stasis-canvas" width="__STASIS_LOGICAL_WIDTH__" height="__STASIS_LOGICAL_HEIGHT__" data-logical-width="__STASIS_LOGICAL_WIDTH__" data-logical-height="__STASIS_LOGICAL_HEIGHT__" aria-label="__STASIS_GAME_TITLE__ game canvas" tabindex="0"></canvas>
+    <canvas id="stasis-canvas" width="640" height="360" data-logical-width="__STASIS_LOGICAL_WIDTH__" data-logical-height="__STASIS_LOGICAL_HEIGHT__" aria-label="__STASIS_GAME_TITLE__ game canvas" tabindex="0"></canvas>
     <div id="stasis-loading" role="status" aria-live="polite">
       <div class="stasis-loading-card">
         <div class="stasis-loading-rule" aria-hidden="true"></div>
@@ -89,13 +89,14 @@
         };
       };
 
+      const logicalDimension = (name, fallback) => {
+        const attribute = `data-logical-${name.toLowerCase()}`;
+        const value = Number(canvas.dataset?.[`logical${name}`] ?? canvas.getAttribute?.(attribute));
+        return Number.isInteger(value) && value >= 1 && value <= 8192 ? value : fallback;
+      };
       const logicalExtent = () => {
-        const width = finite(canvas.dataset?.logicalWidth)
-          || finite(canvas.getAttribute?.("data-logical-width"))
-          || finite(canvas.width);
-        const height = finite(canvas.dataset?.logicalHeight)
-          || finite(canvas.getAttribute?.("data-logical-height"))
-          || finite(canvas.height);
+        const width = logicalDimension("Width", finite(canvas.width) || 16);
+        const height = logicalDimension("Height", finite(canvas.height) || 9);
         return { width: width || 16, height: height || 9 };
       };
 
@@ -106,9 +107,9 @@
         const availableWidth = Math.max(1, viewport.width - viewport.left - viewport.right);
         const availableHeight = Math.max(1, viewport.height - viewport.top - viewport.bottom);
         const logical = logicalExtent();
-        const ratio = logical.width / logical.height;
-        const width = Math.max(1, Math.min(availableWidth, availableHeight * ratio));
-        const height = width / ratio;
+        const scale = Math.min(availableWidth / logical.width, availableHeight / logical.height);
+        const width = logical.width * scale;
+        const height = logical.height * scale;
         const extentKey = [viewport.width, viewport.height, viewport.left, viewport.right, viewport.top, viewport.bottom, logical.width, logical.height].join(":");
         const positionKey = `${viewport.offsetLeft}:${viewport.offsetTop}`;
         const extentChanged = extentKey !== lastExtent;

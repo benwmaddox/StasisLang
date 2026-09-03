@@ -16,7 +16,7 @@ test("shared web shell keeps the canvas keyboard reachable", () => {
   assert.match(canvasTag, /\btabindex=["']0["']/i);
 });
 
-function runFitter({ layoutWidth = 393, layoutHeight = 844, visualWidth = 393, visualHeight = 650, backingWidth = 640, backingHeight = 360, safe = {}, visual = true } = {}) {
+function runFitter({ layoutWidth = 393, layoutHeight = 844, visualWidth = 393, visualHeight = 650, backingWidth = 640, backingHeight = 360, logicalWidth = null, logicalHeight = null, safe = {}, visual = true } = {}) {
   const windowListeners = new Map();
   const visualListeners = new Map();
   const mutations = [];
@@ -27,11 +27,20 @@ function runFitter({ layoutWidth = 393, layoutHeight = 844, visualWidth = 393, v
   };
   const shellStyle = {};
   const canvasStyle = {};
+  const dataset = logicalWidth === null || logicalHeight === null ? undefined : {
+    logicalWidth: String(logicalWidth), logicalHeight: String(logicalHeight)
+  };
   const canvas = {
     width: backingWidth,
     height: backingHeight,
+    dataset,
     style: canvasStyle,
-    parentElement: { style: shellStyle }
+    parentElement: { style: shellStyle },
+    getAttribute(name) {
+      if (name === "data-logical-width") return dataset?.logicalWidth ?? null;
+      if (name === "data-logical-height") return dataset?.logicalHeight ?? null;
+      return null;
+    }
   };
   const visualViewport = visual ? {
     width: visualWidth,
@@ -110,7 +119,7 @@ test("visual viewport and orientation changes refit once without duplicate liste
   fit.dispatchVisual("resize");
   assert.deepEqual({ ...fit.window.STASIS_AVAILABLE_VIEWPORT }, { width: 393, height: 650 });
   assert.equal(fit.shellStyle.width, "393px");
-  assert.equal(fit.shellStyle.height, "221.0625px");
+  assert.ok(Math.abs(parseFloat(fit.shellStyle.height) - 221.0625) < 1e-9);
   const beforeScroll = { ...fit.shellStyle };
   fit.visualViewport.offsetTop = 12;
   fit.dispatchVisual("scroll");
@@ -164,7 +173,7 @@ function assertAuthoredViewportFit(name, logical, viewport, unusedAxis) {
   const fit = runFitter({
     layoutWidth: viewport[0], layoutHeight: viewport[1],
     visualWidth: viewport[0], visualHeight: viewport[1],
-    backingWidth: logical[0], backingHeight: logical[1]
+    logicalWidth: logical[0], logicalHeight: logical[1]
   });
   const width = parseFloat(fit.shellStyle.width);
   const height = parseFloat(fit.shellStyle.height);
@@ -185,6 +194,21 @@ test("Sheep Herder authored viewport fits desktop and mobile orientations unifor
   assertAuthoredViewportFit("mobile landscape", logical, [844, 390], "x");
 });
 
+test("extreme valid aspect ratios remain uniformly contained", () => {
+  for (const logical of [[1, 8192], [8192, 1]]) {
+    const fit = runFitter({
+      layoutWidth: 1, layoutHeight: 1, visualWidth: 1, visualHeight: 1,
+      logicalWidth: logical[0], logicalHeight: logical[1]
+    });
+    const width = parseFloat(fit.shellStyle.width);
+    const height = parseFloat(fit.shellStyle.height);
+    const scaleX = width / logical[0];
+    const scaleY = height / logical[1];
+    assert.ok(width > 0 && height > 0 && width <= 1 && height <= 1);
+    assert.ok(Math.abs(scaleX - scaleY) <= Number.EPSILON * Math.max(scaleX, scaleY, 1));
+  }
+});
+
 test("index shell contract is safe-area aware and has one fitter", () => {
   assert.match(html, /viewport-fit=cover/);
   assert.match(html, /safe-area-inset-top/);
@@ -203,7 +227,7 @@ test("index shell contract is safe-area aware and has one fitter", () => {
 function integratedRuntime({
   logical = [640, 360], viewport = [393, 650], layout = [393, 844],
   safe = { top: 24, bottom: 34, left: 0, right: 0 }, desktop = [393, 844],
-  dpr = 1, requestFromMain = null
+  backing = [640, 360], metadata = logical, dpr = 1, requestFromMain = null
 } = {}) {
   const listeners = new Map();
   const visualListeners = new Map();
@@ -216,12 +240,17 @@ function integratedRuntime({
   const shellStyle = {};
   const canvasStyle = {};
   const canvas = {
-    width: logical[0],
-    height: logical[1],
-    dataset: {},
+    width: backing[0],
+    height: backing[1],
+    dataset: { logicalWidth: String(metadata[0]), logicalHeight: String(metadata[1]) },
     style: canvasStyle,
     parentElement: { style: shellStyle },
     listeners: new Map(),
+    getAttribute(name) {
+      if (name === "data-logical-width") return this.dataset.logicalWidth;
+      if (name === "data-logical-height") return this.dataset.logicalHeight;
+      return null;
+    },
     getContext: kind => kind === "webgl2" ? fakeWebGL2() : ({
       fillRect() {}, fillText() {}, save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
       drawImage() {}, translate() {}, rotate() {}
@@ -240,6 +269,7 @@ function integratedRuntime({
     focus() {},
     requestFullscreen: async () => {}
   };
+  const initialBacking = [canvas.width, canvas.height];
   const visualViewport = {
     width: viewport[0],
     height: viewport[1],
@@ -275,7 +305,10 @@ function integratedRuntime({
     main: () => {
       const i32 = new Int32Array(memory.buffer, 0, 768);
       const f32 = new Float32Array(memory.buffer, 768 * 4, 64);
-      mainFrames.push({ version: i32[14], available: [f32[56], f32[57]], logical: [f32[50], f32[51]] });
+      mainFrames.push({
+        version: i32[14], available: [f32[56], f32[57]], logical: [f32[50], f32[51]],
+        backing: [i32[24], i32[25]]
+      });
       if (requestFromMain) {
         request.host_req_seq.value += 1;
         request.host_req_flags.value = 4;
@@ -358,15 +391,17 @@ function integratedRuntime({
   vm.runInNewContext(fitter, context, { filename: "runtime/web/index.html" });
   vm.runInNewContext(runtime, context, { filename: "runtime/web/game.js" });
   return {
-    canvas, canvasStyle, shellStyle, rootStyle, visualViewport, request, ticks, mainFrames, raf, mutations, listeners, context,
+    canvas, canvasStyle, shellStyle, rootStyle, visualViewport, request, ticks, mainFrames, raf, mutations, listeners, context, initialBacking,
     setDpr(value) { currentDpr = value; context.dispatchEvent(new context.Event("resize")); }
   };
 }
 
 async function startIntegratedRuntime() {
   const fixture = integratedRuntime();
+  assert.deepEqual(fixture.initialBacking, [640, 360]);
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fixture.mainFrames[0].logical, [640, 360]);
   assert.equal(fixture.raf.length, 1);
   fixture.raf.shift()(16);
   return fixture;
@@ -417,7 +452,9 @@ test("portrait guest observes landscape availability before main and settles wit
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
 
-  assert.deepEqual(fixture.mainFrames, [{ version: 4, available: [1280, 720], logical: [360, 720] }]);
+  assert.deepEqual(fixture.mainFrames, [{
+    version: 4, available: [1280, 720], logical: [360, 720], backing: [360, 720]
+  }]);
   assert.equal(fixture.shellStyle.width, "1280px");
   assert.equal(fixture.shellStyle.height, "640px");
   fixture.raf.shift()(16);
@@ -482,4 +519,27 @@ test("pointer and touch map through a fitted Sheep Herder viewport", async () =>
   });
   fixture.raf.shift()(32);
   assert.deepEqual(fixture.ticks.at(-1).pointer, [400, 225]);
+});
+
+test("configured maximum logical size starts from a safe physical backing", async () => {
+  const fixture = integratedRuntime({
+    logical: [8192, 8192], backing: [640, 360], viewport: [1024, 768], layout: [1024, 768], safe: {}
+  });
+  assert.deepEqual(fixture.initialBacking, [640, 360]);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fixture.mainFrames, [{
+    version: 4, available: [1024, 768], logical: [8192, 8192], backing: [768, 768]
+  }]);
+  assert.ok(fixture.canvas.width * fixture.canvas.height * 4 <= 64 * 1024 * 1024);
+});
+
+test("invalid logical metadata falls back to safe intrinsic dimensions", async () => {
+  const fixture = integratedRuntime({
+    logical: [320, 240], metadata: [9000, "bad"], backing: [320, 240],
+    viewport: [640, 480], layout: [640, 480], safe: {}
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fixture.mainFrames[0].logical, [320, 240]);
 });

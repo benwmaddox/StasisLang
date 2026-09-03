@@ -7589,7 +7589,7 @@ mod tests {
             }),
         );
         assert!(html.contains(
-            r#"width="1600" height="900" data-logical-width="1600" data-logical-height="900""#
+            r#"width="640" height="360" data-logical-width="1600" data-logical-height="900""#
         ));
         assert!(!html.contains("__STASIS_"));
     }
@@ -7626,7 +7626,7 @@ mod tests {
 
         let html = fs::read_to_string(output.join("index.html")).expect("packaged web index");
         assert!(html.contains(
-            r#"width="1600" height="900" data-logical-width="1600" data-logical-height="900""#
+            r#"width="640" height="360" data-logical-width="1600" data-logical-height="900""#
         ));
         assert!(!html.contains("__STASIS_"));
         remove_temp(&root);

@@ -60,7 +60,9 @@ authored size with `web.viewport`; for example, a Sheep Herder build authored at
 ```
 
 Both dimensions must be integers from 1 through 8192, and omitted settings default to 640 by 360.
-The generated canvas receives this logical size before guest startup. The shared `index.html`
+The generated canvas publishes this logical size before guest startup while retaining a safe
+640-by-360 initial physical backing; the runtime allocates its fitted, capped backing afterward.
+The shared `index.html`
 shell opts into `viewport-fit=cover`, reserves the CSS safe-area insets, and uses `svh`/`dvh`
 fallbacks. Its inline fitter uses `visualViewport.width`/`height` when available (with the layout
 viewport as a fallback), refitting on window resize, orientation changes, and visual-viewport

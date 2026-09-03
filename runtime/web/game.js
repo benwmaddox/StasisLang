@@ -33,20 +33,36 @@
   const DISPLAY_MIN_DPR = 0.5;
   const DISPLAY_MAX_BACKING_WIDTH = 8192;
   const DISPLAY_MAX_BACKING_HEIGHT = 8192;
+  const DISPLAY_MAX_LOGICAL_DIMENSION = 8192;
   const DISPLAY_MAX_BACKING_BYTES = 64 * 1024 * 1024;
   const DISPLAY_MAX_RASTER_BYTES = 64 * 1024 * 1024;
   const DISPLAY_DENSITY_TIERS = Object.freeze([1, 1.25, 1.5, 2, 3, 4, 6, 8]);
   const RASTER_OPTIONS = "contain-center-high-smoothing-v1";
   const SPRITE_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+  const initialBackingDimension = (value, fallback) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 1 ? Math.round(number) : fallback;
+  };
+  const initialLogicalDimension = (name, backing) => {
+    const attribute = `data-logical-${name.toLowerCase()}`;
+    const value = Number(canvas.dataset?.[`logical${name}`] ?? canvas.getAttribute?.(attribute));
+    return Number.isInteger(value) && value >= 1 && value <= DISPLAY_MAX_LOGICAL_DIMENSION
+      ? value
+      : Math.min(DISPLAY_MAX_LOGICAL_DIMENSION, backing);
+  };
+  const initialBackingWidth = initialBackingDimension(canvas.width, 640);
+  const initialBackingHeight = initialBackingDimension(canvas.height, 360);
+  const initialLogicalWidth = initialLogicalDimension("Width", initialBackingWidth);
+  const initialLogicalHeight = initialLogicalDimension("Height", initialBackingHeight);
   const display = {
-    logicalWidth: Math.max(1, Number(canvas.width) || 640),
-    logicalHeight: Math.max(1, Number(canvas.height) || 360),
+    logicalWidth: initialLogicalWidth,
+    logicalHeight: initialLogicalHeight,
     availableWidth: 1,
     availableHeight: 1,
     cssWidth: 0,
     cssHeight: 0,
-    backingWidth: Math.max(1, Number(canvas.width) || 640),
-    backingHeight: Math.max(1, Number(canvas.height) || 360),
+    backingWidth: initialBackingWidth,
+    backingHeight: initialBackingHeight,
     rawDpr: 1,
     effectiveDpr: 1,
     scaleX: 1,
