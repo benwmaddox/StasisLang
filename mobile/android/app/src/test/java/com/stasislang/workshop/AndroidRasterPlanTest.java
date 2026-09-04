@@ -42,6 +42,14 @@ public final class AndroidRasterPlanTest {
         assertEquals(4096, plan.height);
     }
 
+    @Test public void zeroUploadableCapacityIsNeverReportedSupported() {
+        AndroidRasterPlan.Result plan = AndroidRasterPlan.exact(
+                1, 1, new AndroidRasterPlan.Requirement(), 1.0f, 0);
+        assertFalse(plan.supported);
+        assertEquals(1, plan.width);
+        assertEquals(1, plan.height);
+    }
+
     @Test public void cacheIdentityChangesForDensityAndEitherGeneration() {
         AndroidRasterPlan.Result plan = new AndroidRasterPlan.Result(300, 150, true);
         String baseline = plan.identity(2.0f, 4, 7);

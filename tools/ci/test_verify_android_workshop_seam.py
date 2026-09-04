@@ -164,7 +164,7 @@ def _it029_case(phase, sequence, root, text_hash, capture_hash, command_trace,
         "maximum_font_entries": 1,
         "source_bytes": 4096 * sequence,
         "decode_bytes": 16384 * sequence,
-        "upload_bytes": 16384 * sequence,
+        "upload_bytes": 17424 * sequence,
         "texture_bytes": 16384 * sequence,
         "maximum_cache_bytes": 65536,
         "atlas_capacity_bytes": 16 * 1024 * 1024,
@@ -640,6 +640,9 @@ class WorkshopSeamTests(unittest.TestCase):
         with self.assertRaisesRegex(SeamError, "byte receipts exceed"):
             verify_log(GOOD.replace('"maximum_cache_bytes":65536',
                                     '"maximum_cache_bytes":67108865', 1), MANIFEST)
+        with self.assertRaisesRegex(SeamError, "byte receipts exceed"):
+            verify_log(GOOD.replace('"upload_bytes":17424',
+                                    '"upload_bytes":16000', 1), MANIFEST)
 
     def test_rejects_missing_truncated_or_reordered_it030_evidence(self):
         summary = next(line for line in GOOD.splitlines()

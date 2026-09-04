@@ -5,6 +5,9 @@ import java.util.ArrayList;
 /** Deterministic shelf packing used by the embedded GLES renderer. */
 final class WorkshopSpriteAtlas {
     static final int PADDING = 1;
+    static final int PRIVATE_HEADER_HEIGHT = 4;
+    static final int DEDICATED_WIDTH_OVERHEAD = PADDING * 2;
+    static final int DEDICATED_HEIGHT_OVERHEAD = PADDING * 2 + PRIVATE_HEADER_HEIGHT;
     static final int DEFAULT_PAGE_SIZE = 2048;
     static final int MIN_PAGE_SIZE = 256;
 
@@ -40,6 +43,17 @@ final class WorkshopSpriteAtlas {
 
     int pageSize() { return pageSize; }
     int pageCount() { return pages.size(); }
+
+    /** Conservative per-axis raster cap that is uploadable through every atlas path. */
+    static int maximumRasterDimension(int maximumTextureSize) {
+        return Math.max(0, maximumTextureSize - DEDICATED_HEIGHT_OVERHEAD);
+    }
+
+    /** Bytes sent by texSubImage2D after one-pixel edge extrusion. */
+    static long uploadBytes(int width, int height) {
+        if (width <= 0 || height <= 0) return 0L;
+        return (long)(width + PADDING * 2) * (height + PADDING * 2) * 4L;
+    }
 
     static int chooseSolidTexture(int activeTexture, int followingTexture) {
         return activeTexture != 0 ? activeTexture : followingTexture;
@@ -95,7 +109,7 @@ final class WorkshopSpriteAtlas {
         ShelfPage page = new ShelfPage();
         // Every page reserves a small host-private header for the white solid texel
         // and the missing-asset checker. Sprite packing can never overwrite it.
-        page.cursorY = 4;
+        page.cursorY = PRIVATE_HEADER_HEIGHT;
         pages.add(page);
         return allocateOnPage(page, pages.size() - 1, width, height,
                 paddedWidth, paddedHeight);

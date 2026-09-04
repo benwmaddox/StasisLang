@@ -388,7 +388,7 @@ def verify_it029(log: str, after_position: int) -> dict:
         if any(type(resources.get(field)) is not int or resources[field] <= 0
                for field in byte_receipts):
             raise SeamError("IT-029 physical resource byte receipts are incomplete")
-        if resources["upload_bytes"] != resources["texture_bytes"] \
+        if resources["upload_bytes"] < resources["texture_bytes"] \
                 or resources["maximum_cache_bytes"] > 64 * 1024 * 1024 \
                 or resources["atlas_capacity_bytes"] > 64 * 1024 * 1024:
             raise SeamError("IT-029 physical resource byte receipts exceed their bounds")

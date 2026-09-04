@@ -60,10 +60,11 @@ final class AndroidRasterPlan {
         scale *= density;
         int width = ceilProduct(sourceWidth, scale);
         int height = ceilProduct(sourceHeight, scale);
-        int cap = Math.min(MAX_DIMENSION, Math.max(1, maximumTextureSize));
-        boolean supported = width <= cap && height <= cap
+        int cap = Math.min(MAX_DIMENSION, Math.max(0, maximumTextureSize));
+        boolean supported = cap > 0 && width <= cap && height <= cap
                 && (long)width * height <= MAX_PIXELS;
-        return new Result(Math.min(width, cap), Math.min(height, cap), supported);
+        return new Result(Math.max(1, Math.min(width, cap)),
+                Math.max(1, Math.min(height, cap)), supported);
     }
 
     private static int ceilProduct(int value, double scale) {

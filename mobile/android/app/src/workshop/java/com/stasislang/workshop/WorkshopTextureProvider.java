@@ -77,6 +77,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private int acceptanceMaximumFontEntries;
     private long acceptanceSourceBytes;
     private long acceptanceDecodeBytes;
+    private long acceptanceUploadBytes;
     private long acceptanceTextureBytes;
     private long acceptanceMaximumCacheBytes;
 
@@ -182,7 +183,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         AndroidRasterPlan.Result cachedPlan = null;
         if (cached != null) {
             cachedPlan = AndroidRasterPlan.exact(cached.logicalWidth, cached.logicalHeight,
-                    requirement, rasterScale, Math.max(1, maximumTextureSize - 2));
+                    requirement, rasterScale,
+                    WorkshopSpriteAtlas.maximumRasterDimension(maximumTextureSize));
         }
         if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)
                 && cached.checkedManifestStamp == manifestStamp
@@ -210,7 +212,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             AndroidRasterPlan.Result plan = AndroidRasterPlan.exact(
                     Math.max(1, resolved.optInt("width")),
                     Math.max(1, resolved.optInt("height")), requirement, rasterScale,
-                    Math.max(1, maximumTextureSize - 2));
+                    WorkshopSpriteAtlas.maximumRasterDimension(maximumTextureSize));
             if (!plan.supported) throw new IOException(
                     "required physical raster exceeds Android texture limits");
             String canonicalSource = new File(resolved.getString("path")).getCanonicalPath();
@@ -247,6 +249,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
                 acceptanceSourceBytes += new File(resolved.getString("path")).length();
                 acceptanceDecodeBytes += decodedBytes;
+                acceptanceUploadBytes += WorkshopSpriteAtlas.uploadBytes(
+                        replacement.rasterWidth, replacement.rasterHeight);
                 acceptanceTextureBytes += decodedBytes;
             }
             recordAcceptanceUpload("sprite", handle, exactIdentity);
@@ -381,6 +385,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 long bytes = (long)width * height * 4L;
                 acceptanceSourceBytes += new File(resolved.getString("font_path")).length();
                 acceptanceDecodeBytes += bytes;
+                acceptanceUploadBytes += bytes;
                 acceptanceTextureBytes += bytes;
                 recordAcceptanceUpload("cached_text", runHandle, sha256(text));
             }
@@ -425,6 +430,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
                 acceptanceSourceBytes += fontInfo.sourceBytes;
                 acceptanceDecodeBytes += rasterBytes;
+                acceptanceUploadBytes += rasterBytes;
                 acceptanceTextureBytes += rasterBytes;
                 recordAcceptanceUpload("text", font, sha256(bytes));
             }
@@ -551,6 +557,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         acceptanceMaximumFontEntries = 0;
         acceptanceSourceBytes = 0L;
         acceptanceDecodeBytes = 0L;
+        acceptanceUploadBytes = 0L;
         acceptanceTextureBytes = 0L;
         acceptanceMaximumCacheBytes = 0L;
     }
@@ -585,7 +592,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 .put("maximum_font_entries", acceptanceMaximumFontEntries)
                 .put("source_bytes", acceptanceSourceBytes)
                 .put("decode_bytes", acceptanceDecodeBytes)
-                .put("upload_bytes", acceptanceTextureBytes)
+                .put("upload_bytes", acceptanceUploadBytes)
                 .put("texture_bytes", acceptanceTextureBytes)
                 .put("maximum_cache_bytes", acceptanceMaximumCacheBytes)
                 .put("atlas_capacity_bytes", atlasCapacityBytes());
@@ -796,15 +803,15 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             x = region.x;
             y = region.y;
         } else {
-            int width = bitmap.getWidth() + WorkshopSpriteAtlas.PADDING * 2;
-            int height = bitmap.getHeight() + WorkshopSpriteAtlas.PADDING * 2 + 4;
+            int width = bitmap.getWidth() + WorkshopSpriteAtlas.DEDICATED_WIDTH_OVERHEAD;
+            int height = bitmap.getHeight() + WorkshopSpriteAtlas.DEDICATED_HEIGHT_OVERHEAD;
             if (width > maximumTextureSize || height > maximumTextureSize) {
                 throw new IOException("sprite dimensions exceed the GLES atlas limit");
             }
             page = createAtlasPage(width, height);
             dedicatedAtlasPages.add(page);
             x = WorkshopSpriteAtlas.PADDING;
-            y = WorkshopSpriteAtlas.PADDING + 4;
+            y = WorkshopSpriteAtlas.PADDING + WorkshopSpriteAtlas.PRIVATE_HEADER_HEIGHT;
         }
         Bitmap padded = extrude(bitmap);
         try {

@@ -251,6 +251,10 @@ stale or oversized storage is not reused. SVG and bitmap sources are prepared di
 planned output size, font rasterization uses the same fitted density, and acceptance receipts expose
 source, decoded, uploaded, cache, and atlas-capacity bytes. Atlas capacity is capped at 64 MiB;
 requirements beyond dimension, pixel, or GLES limits fail visibly instead of silently blurring.
+`texture_bytes` counts unpadded prepared texels, while `upload_bytes` counts the actual GL payload,
+including each sprite raster's one-pixel extruded border. Raster plans reserve six pixels per axis,
+the worst-case dedicated-page overhead (two extrusion pixels plus the four-row private header), so a
+supported plan is uploadable through either atlas path.
 
 IT-019 uses an odd 1441x2561 portrait surface and 2561x1441 landscape surface so rotation,
 recreation, safe-area, touch mapping, generation ordering, and real >=2560x1440-class framebuffer
