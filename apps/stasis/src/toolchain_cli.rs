@@ -4765,7 +4765,7 @@ fn strip_web_runtime_feature(source: &str, feature: &str, enabled: bool) -> Stri
 
 // Keep these aligned with the metadata reads in runtime/web/game.js. Development
 // packages retain the complete reflection tables for inspection and tooling.
-const WEB_RESOURCE_BINDING_FIELDS: [&str; 4] = ["handle", "width", "height", "font"];
+const WEB_RESOURCE_BINDING_FIELDS: [&str; 5] = ["sprite_ref", "handle", "width", "height", "font"];
 const WEB_RUNTIME_BUFFERS: [&str; 5] = [
     "gfx_cmd_i32",
     "gfx_cmd_f32",
@@ -7717,6 +7717,10 @@ mod tests {
             .as_object()
             .expect("release view fields")
             .contains_key("handle")));
+        assert!(release_views.values().any(|fields| fields
+            .as_object()
+            .expect("release view fields")
+            .contains_key("sprite_ref")));
         let retained_view_paths = release_views
             .values()
             .flat_map(|fields| fields.as_object().expect("release view fields").values())

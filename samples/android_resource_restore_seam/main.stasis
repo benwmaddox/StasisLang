@@ -15,9 +15,10 @@ function main(): i32 {
     if (!sprite.load_sprite_from("assets/resource_sprite.svg", 112, 112)) {
         return 11;
     }
-    // Retain a typed reference after releasing its owner to exercise the
-    // runtime's missing-generation fallback without forging an integer id.
-    if (!fallback_owner.load_sprite_from("assets/resource_sprite.svg", 112, 112)) {
+    // This distinct fallback asset has exactly one owner. Retain its typed
+    // reference, then release that sole acquisition to make it stale without
+    // forging an integer id.
+    if (!fallback_owner.load_sprite_from("assets/fallback_sprite.svg", 112, 112)) {
         return 14;
     }
     fallback_ref = fallback_owner.reference();
