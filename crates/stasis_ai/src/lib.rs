@@ -9,6 +9,17 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub mod task_session;
+
+pub use task_session::{
+    ActionId, ActionKind, ActionRevision, ActionState, ConnectionState, FallbackState,
+    FocusedTestResult, GeneratedImageArtifact, GeneratedImageId, ImageAttribution,
+    ImageHandoffState, ImageReviewState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
+    ScreenshotAttachment, ScreenshotId, ShortcutBinding, ShortcutMapper, Task, TaskAction, TaskId,
+    TaskLifecycle, TaskMetrics, TaskProvenance, TaskSession, TaskSessionCommand, TaskSessionError,
+    ThreadEntry, ThreadEntryKind, UploadState, ValidationStatus, VisionCapability,
+};
+
 pub const DEFAULT_AGENT_TURNS: usize = 50;
 pub const MAX_AGENT_TURNS: usize = 50;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 50;

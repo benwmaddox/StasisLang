@@ -54,6 +54,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod dap;
+mod desktop_editor;
 mod gauntlet;
 mod headless;
 mod live_tui;
@@ -235,6 +236,7 @@ const COMMANDS: &[&str] = &[
     "lsp",
     "dap",
     "tui",
+    "editor",
     "build",
     "package",
     "package-mobile",
@@ -406,6 +408,14 @@ enum ToolchainCommand {
         tick_sleep_us: u64,
         #[arg(long)]
         ticks: Option<u64>,
+    },
+    /// Open the keyboard-first graphical AI editor beside the live game.
+    Editor {
+        /// Override the entry declared in stasis.json.
+        #[arg(value_name = "ENTRY")]
+        entry: Option<PathBuf>,
+        #[arg(long, default_value_t = 16_000)]
+        tick_sleep_us: u64,
     },
     /// Build the project for development or as a release executable.
     Build {
@@ -1166,6 +1176,7 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Lsp { .. } => "lsp",
         ToolchainCommand::Dap { .. } => "dap",
         ToolchainCommand::Tui { .. } => "tui",
+        ToolchainCommand::Editor { .. } => "editor",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
         ToolchainCommand::PackageMobile { .. } => "package-mobile",
@@ -1321,7 +1332,7 @@ fn execute(
         }
         other => {
             let workspace_path = workspace_arg.as_deref().or(match &other {
-                ToolchainCommand::Tui { entry, .. } => entry.as_deref(),
+                ToolchainCommand::Tui { entry, .. } | ToolchainCommand::Editor { entry, .. } => entry.as_deref(),
                 _ => None,
             });
             let vendor_gate = match &other {
@@ -1449,6 +1460,17 @@ fn execute(
                         )
                     }
                 }
+                ToolchainCommand::Editor {
+                    entry,
+                    tick_sleep_us,
+                } => {
+                    if json_output {
+                        Err("--json cannot be combined with editor; the editor owns a desktop window".to_string())
+                    } else {
+                        let entry = entry.as_deref().unwrap_or_else(|| Path::new(&workspace.manifest.entry));
+                        run_workspace_editor(&workspace, entry, tick_sleep_us)
+                    }
+                }
                 ToolchainCommand::Build { mode, out, signing } => {
                     validate_optional_workspace_path(&workspace, "build output", out.as_deref())?;
                     with_signing_selection(signing, || {
@@ -1520,6 +1542,7 @@ fn command_requires_runtime(command: &ToolchainCommand) -> bool {
         | ToolchainCommand::Lsp { .. }
         | ToolchainCommand::Dap { .. }
         | ToolchainCommand::Tui { .. }
+        | ToolchainCommand::Editor { .. }
         | ToolchainCommand::Build { .. }
         | ToolchainCommand::Package { .. }
         | ToolchainCommand::PackageMobile { .. } => true,
@@ -2933,6 +2956,52 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
             "trace": trace,
             "usage_trace": usage_trace,
         }),
+    ))
+}
+
+fn run_workspace_editor(
+    workspace: &Workspace,
+    entry: &Path,
+    tick_sleep_micros: u64,
+) -> Result<CommandResult, String> {
+    let (entry_path, entry_relative) = resolve_tui_entry(workspace, entry)?;
+    let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
+    let editor_root = workspace.root.clone();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let editor_shutdown = Arc::clone(&shutdown);
+    let editor = thread::spawn(move || desktop_editor::run(client, editor_root, editor_shutdown));
+    let config = LiveRunConfig::new(
+        workspace.root.clone(),
+        entry_relative,
+        PathBuf::from(&workspace.manifest.output),
+    )
+    .with_window_title(&workspace.manifest.name);
+    let run_result = run_live_in_process_with_data(
+        &entry_path,
+        None,
+        None,
+        None,
+        tick_sleep_micros,
+        None,
+        server,
+        config,
+    );
+    shutdown.store(true, Ordering::Release);
+    let editor_result = editor
+        .join()
+        .map_err(|_| "desktop editor thread panicked".to_string())
+        .and_then(|result| result);
+    match (run_result, editor_result) {
+        (Err(runtime), Err(editor)) => {
+            return Err(format!("{runtime}; editor shutdown also failed: {editor}"));
+        }
+        (Err(runtime), Ok(())) => return Err(runtime),
+        (Ok(()), Err(editor)) => return Err(editor),
+        (Ok(()), Ok(())) => {}
+    }
+    Ok(CommandResult::success(
+        "desktop editor session ended",
+        json!({"backend": "jit", "headless": false, "editor": "desktop", "task_scoped": true}),
     ))
 }
 
@@ -8885,6 +8954,28 @@ mod tests {
                 ..
             } if entry == Path::new("samples/state_inspection/src/main.stasis")
         ));
+    }
+
+    #[test]
+    fn editor_entry_is_optional_and_accepts_runtime_pacing() {
+        let default = ToolchainCli::try_parse_from(["stasis", "editor"])
+            .expect("parse manifest editor entry");
+        assert!(matches!(
+            default.command,
+            ToolchainCommand::Editor { entry: None, .. }
+        ));
+
+        let explicit = ToolchainCli::try_parse_from([
+            "stasis",
+            "editor",
+            "src/game.stasis",
+            "--tick-sleep-us",
+            "0",
+        ])
+        .expect("parse explicit editor entry");
+        assert!(matches!(explicit.command, ToolchainCommand::Editor {
+            entry: Some(entry), tick_sleep_us: 0
+        } if entry == PathBuf::from("src/game.stasis")));
     }
 
     #[test]
