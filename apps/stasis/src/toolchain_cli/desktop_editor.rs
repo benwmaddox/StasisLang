@@ -502,7 +502,7 @@ impl DesktopEditor {
             "LIVE GAME\n\nThe interactive game runs in its native window\nand keeps independent keyboard and mouse focus.\n\nCtrl+Alt+G focuses this surface.",
             egui::FontId::proportional(18.0), color);
         if self.state.focus == FocusArea::Game {
-            painter.rect_stroke(response.rect, 6.0, egui::Stroke::new(2.0, color));
+            painter.rect_stroke(response.rect, 6.0, egui::Stroke::new(2.0_f32, color));
         }
     }
 
