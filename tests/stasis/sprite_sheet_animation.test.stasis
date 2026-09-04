@@ -1,5 +1,9 @@
 import "../../src/stdlib/graphics.stasis";
 
+enum SpriteRef {
+    Probe = 9,
+}
+
 global test_sheet: SpriteSheet;
 
 test `animation once clamps and reports completion`(): bool {
@@ -50,12 +54,12 @@ test `invalid animation fails safely`(): bool {
 
 test `sprite commands publish one full-source semantic run`(): bool {
     gfx_cmd_begin();
-    gfx_cmd_sprite(3, 2.0, 4.0, 8.0, 6.0, 0, 255);
+    gfx_cmd_sprite(SpriteRef.Probe, 2.0, 4.0, 8.0, 6.0, 0, 255);
     return gfx_cmd_sprite_count() == 1 && gfx_cmd_sprite_run_count() == 1 && gfx_cmd_order_count() == 1 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 4] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 5] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 6] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 7] == 0.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 10] == 1.0 && gfx_cmd_f32[GFX_F_SPRITE_BASE + 11] == 1.0;
 }
 
 test `sprite sheet draw frame selects a row major cell`(): bool {
-    test_sheet.handle = 9;
+    test_sheet.sprite_ref = SpriteRef.Probe;
     test_sheet.columns = 2;
     test_sheet.rows = 2;
     test_sheet.cell_width = 12;
@@ -69,7 +73,7 @@ test `sprite sheet draw frame selects a row major cell`(): bool {
 }
 
 test `sprite sheet scaled frame preserves custom geometry and nonfull UV`(): bool {
-    test_sheet.handle = 9;
+    test_sheet.sprite_ref = SpriteRef.Probe;
     test_sheet.columns = 2;
     test_sheet.rows = 2;
     test_sheet.cell_width = 12;
@@ -83,7 +87,7 @@ test `sprite sheet scaled frame preserves custom geometry and nonfull UV`(): boo
 }
 
 test `sprite sheet scaled frame rejects invalid geometry and frames`(): bool {
-    test_sheet.handle = 9;
+    test_sheet.sprite_ref = SpriteRef.Probe;
     test_sheet.columns = 2;
     test_sheet.rows = 2;
     test_sheet.cell_width = 12;
