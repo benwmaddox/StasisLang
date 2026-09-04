@@ -82,6 +82,9 @@ jobs:
       - name: Test Android verified asset cache
         run: python tools/ci/test_android_asset_cache.py
 
+      - name: Test Android project baseline policy
+        run: python tools/ci/test_android_project_baseline_policy.py
+
       - name: Test render parity fixture and capture gate
         run: |
           python -m unittest tools.ci.test_verify_android_render_performance

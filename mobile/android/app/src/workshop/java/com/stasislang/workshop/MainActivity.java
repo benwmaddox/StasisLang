@@ -10547,7 +10547,15 @@ public final class MainActivity extends Activity {
                 : activeProject.templateId;
         String expectedReady = "format=3\ntemplate_id=" + templateId
                 + "\nrenderer=gfx_cmd\nrenderer_schema=7\n";
-        if (readyFile.isFile() && expectedReady.equals(readTextFile(readyFile))) return;
+        boolean readyExists = readyFile.isFile();
+        boolean readyMatches = readyExists && expectedReady.equals(readTextFile(readyFile));
+        WorkshopProjectBaselinePolicy.Action action = WorkshopProjectBaselinePolicy.requiredAction(
+                activeProject != null && "import".equals(activeProject.origin), readyExists, readyMatches);
+        if (action == WorkshopProjectBaselinePolicy.Action.KEEP) return;
+        if (action == WorkshopProjectBaselinePolicy.Action.UPDATE_MARKER) {
+            writeTextFile(readyFile, expectedReady);
+            return;
+        }
         ProjectSnapshot baseline = activeProject != null && "import".equals(activeProject.origin)
                 ? current : loadBundledAssetSnapshot();
         deleteBaselineDirectory(baselineRoot);
