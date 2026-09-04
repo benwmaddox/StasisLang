@@ -57,6 +57,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         cls.strategy = STRATEGY.read_text(encoding="utf-8")
         cls.linux = job(cls.workflow, "test")
         cls.windows = job(cls.workflow, "bootstrap-smoke-windows")
+        cls.vscode = job(cls.workflow, "vscode-extension-e2e")
 
     def test_linux_ordinary_rust_seams_run_once_in_workspace_lane(self):
         broad = "cargo test --workspace --all-targets -- --test-threads=1"
@@ -77,7 +78,8 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         for target in DESKTOP_SDL_TARGETS + MOBILE_RUNTIME_TARGETS:
             with self.subTest(target=target):
                 self.assertEqual(self.runner.count(f'"{target}"'), 1)
-                self.assertNotIn(target, self.workflow)
+                if target != "desktop_display_metrics_seam":
+                    self.assertNotIn(target, self.workflow)
 
     def test_windows_duplicate_focused_seams_are_absent(self):
         duplicates = (
@@ -103,6 +105,35 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         ):
             with self.subTest(job=boundary_job):
                 self.assertRegex(self.workflow, rf"(?m)^  {boundary_job}:$")
+
+    def test_macos_retina_seam_is_platform_bound_and_uploads_evidence(self):
+        step_name = "Test macOS Retina display metrics seam"
+        self.assertEqual(self.vscode.count(step_name), 1)
+        retina = step(self.vscode, step_name)
+        required = (
+            "if: runner.os == 'macOS'",
+            'export STASIS_RUNTIME_DLL_PATH="$STASIS_RUNTIME_LIBRARY_PATH"',
+            "python3 tools/cargo_cache.py run -- cargo test -p stasis --test desktop_display_metrics_seam -- --test-threads=1 --nocapture",
+            "target/vscode-e2e/desktop-display-metrics-seam.log",
+            "kind=sprite.*logical=20x12 raster=40x24.*density_generation=7",
+            "kind=font.*logical_size=18 raster_size=36 atlas=1024x1024.*density_generation=7",
+            "build/codex-cargo-target/seam-tests/it-007-desktop-display-metrics.json",
+        )
+        for marker in required:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, retina)
+
+        command = "--test desktop_display_metrics_seam"
+        self.assertEqual(self.vscode.count(command), 1)
+        self.assertEqual(self.workflow.count(command), 1)
+        upload = step(self.vscode, "Upload VS Code E2E evidence")
+        for evidence in (
+            "target/vscode-e2e/frame.png",
+            "target/vscode-e2e/desktop-display-metrics-seam.log",
+            "target/vscode-e2e/it-007-desktop-display-metrics.json",
+        ):
+            with self.subTest(evidence=evidence):
+                self.assertEqual(upload.count(evidence), 1)
 
     def test_runner_uses_cached_cargo_and_names_grouped_failures(self):
         cargo_tokens = (

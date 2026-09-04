@@ -236,3 +236,7 @@ desktop packages preserve the same app-bundle contract with a game-specific
 2x Retina display receives a `1600 x 1200` drawable instead of a
 resolution-doubled low-density surface. The runtime applies the same drawable
 scale and density-sensitive resource rebuild policy used on Windows.
+The macOS arm64 VS Code E2E lane also runs the native IT-007 display-metrics
+seam against that lane's freshly built `libstasis_graphics.dylib`. Its artifact
+keeps the real `target/vscode-e2e/frame.png` capture beside the focused seam log
+and deterministic `it-007-desktop-display-metrics.json` receipt.

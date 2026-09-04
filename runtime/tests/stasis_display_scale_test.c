@@ -103,6 +103,37 @@ static void test_desktop_density_tiers_preserve_logical_geometry(void) {
     CHECK(stasis_display_scaled_extent_for_backing(18, 720, 360, 1921, 986) == 49);
 }
 
+static void test_retina_landscape_uses_exact_smallest_preparations(void) {
+    StasisDisplayMetrics metrics = metrics_for(
+        1280, 720, 1280, 720, 2560, 1440);
+    CHECK(metrics.logical_w == 1280);
+    CHECK(metrics.logical_h == 720);
+    CHECK(metrics.native_w == 1280);
+    CHECK(metrics.native_h == 720);
+    CHECK(metrics.drawable_w == 2560);
+    CHECK(metrics.drawable_h == 1440);
+    CHECK(close_enough(metrics.content_scale, 2.0f));
+    CHECK(close_enough(metrics.raster_scale, 2.0f));
+    CHECK(stasis_display_scaled_extent_for_backing(
+        20, 1280, 720, 2560, 1440) == 40);
+    CHECK(stasis_display_scaled_extent_for_backing(
+        12, 1280, 720, 2560, 1440) == 24);
+    CHECK(stasis_display_scaled_extent_for_backing(
+        18, 1280, 720, 2560, 1440) == 36);
+    CHECK(stasis_display_font_atlas_extent(metrics.raster_scale) == 1024);
+
+    float native_x = 0.0f;
+    float native_y = 0.0f;
+    float logical_x = 0.0f;
+    float logical_y = 0.0f;
+    stasis_display_logical_to_native_xy(
+        &metrics, 960.0f, 540.0f, &native_x, &native_y);
+    stasis_display_native_to_logical_xy(
+        &metrics, native_x, native_y, &logical_x, &logical_y);
+    CHECK(close_enough(logical_x, 960.0f));
+    CHECK(close_enough(logical_y, 540.0f));
+}
+
 static void test_preparation_scale_is_exact_and_bounded(void) {
     const StasisDisplayPreparationScale unity =
         stasis_display_preparation_scale(2000, 1000, 2000, 1000);
@@ -275,6 +306,7 @@ int main(void) {
     test_pointer_mapping_round_trips_through_letterbox();
     test_fractional_and_downscale_metrics_are_distinct();
     test_desktop_density_tiers_preserve_logical_geometry();
+    test_retina_landscape_uses_exact_smallest_preparations();
     test_preparation_scale_is_exact_and_bounded();
     test_x11_content_scale_selects_window_backing();
     test_x11_scale_control_requires_an_explicit_valid_factor();
