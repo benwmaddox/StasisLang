@@ -236,3 +236,34 @@ desktop packages preserve the same app-bundle contract with a game-specific
 2x Retina display receives a `1600 x 1200` drawable instead of a
 resolution-doubled low-density surface. The runtime applies the same drawable
 scale and density-sensitive resource rebuild policy used on Windows.
+
+## Android physical raster preparation
+
+The Android Workshop keeps game layout, safe-area calculations, input, and replay state in
+logical coordinates. Before resolving frame resources it aggregates every draw of each sprite
+handle. The physical raster is the smallest aspect-preserving size whose horizontal and vertical
+sampling rates cover the largest full-image or cropped draw after absolute per-axis scale and the
+fitted drawable density are applied. Fractional results round outward with `ceil`.
+
+The cache identity contains the canonical source hash, exact output dimensions, density bits,
+surface generation, and renderer generation. A tier change replaces the handle's cache identity;
+stale or oversized storage is not reused. SVG and bitmap sources are prepared directly at the
+planned output size, font rasterization uses the same fitted density, and acceptance receipts expose
+source, decoded, uploaded, cache, and atlas-capacity bytes. Atlas capacity is capped at 64 MiB;
+requirements beyond dimension, pixel, or GLES limits fail visibly instead of silently blurring.
+
+IT-019 uses an odd 1441x2561 portrait surface and 2561x1441 landscape surface so rotation,
+recreation, safe-area, touch mapping, generation ordering, and real >=2560x1440-class framebuffer
+captures remain independently inspectable without even-size rounding hiding coordinate errors.
+
+Theory gained: the required sprite tier is a property of the complete frame, not the asset handle;
+cropped and nonuniform draws prove that source dimensions and density alone cannot predict it. The
+adjacent prediction is that any future camera zoom must enter the same aggregation step or its
+captures will expose undersampling.
+
+Good: one pure plan now drives PNG/SVG preparation, cache identity, bounds, and deterministic tests.
+
+Bad: the previous handle-first lookup hid the maximum frame footprint and retained source-sized PNGs.
+
+Adjustment: collect all handle uses first, replace stale exact identities, and enforce a fixed atlas
+capacity while generation-owned regions remain immutable.

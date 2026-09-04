@@ -5,7 +5,7 @@
   "state_checksum": 4000,
   "logical_size": [360, 720],
   "orientation": {
-    "display_size": [1001, 1601],
+    "display_size": [1441, 2561],
     "coordinate_tolerance": 16.0,
     "surface_tolerance": 2,
     "safe_viewport": [0, 0, 360, 720],
