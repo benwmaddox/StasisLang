@@ -55,4 +55,3 @@ test `one tick removes one overlapping brick and reflects once`(): bool {
 ```
 
 Full source: [breakout_brick.stasis](../examples/src/breakout_brick.stasis)
-

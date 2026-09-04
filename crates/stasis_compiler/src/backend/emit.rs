@@ -4553,8 +4553,13 @@ pub(crate) fn emit_simple_expression(
                         .and_then(|fields| fields.get(field))
                         .copied()
                     {
-                        if type_table.indexed_element_type_id(collection_type) == Some(TYPE_ID_F32)
-                            && suffix.is_empty()
+                        if let Some(element_type) = type_table
+                            .indexed_element_type_id(collection_type)
+                            .filter(|_| suffix.is_empty())
+                            .filter(|element_type| {
+                                *element_type == TYPE_ID_F32
+                                    || is_i32_abi_compatible_type(*element_type, type_table)
+                            })
                         {
                             let index_binding = emit_simple_expression(
                                 builder,
@@ -4585,13 +4590,17 @@ pub(crate) fn emit_simple_expression(
                                 builder,
                             );
                             let no_field = builder.ins().iconst(types::I32, 0);
-                            let call = builder.ins().call(
-                                runtime_call_refs.global_f32_array_load,
-                                &[collection_hash, no_field, index_binding.value],
-                            );
+                            let load = if element_type == TYPE_ID_F32 {
+                                runtime_call_refs.global_f32_array_load
+                            } else {
+                                runtime_call_refs.global_i32_array_load
+                            };
+                            let call = builder
+                                .ins()
+                                .call(load, &[collection_hash, no_field, index_binding.value]);
                             return Ok(ValueBinding {
                                 value: builder.inst_results(call)[0],
-                                type_id: TYPE_ID_F32,
+                                type_id: element_type,
                             });
                         }
                     }

@@ -436,23 +436,38 @@ impl Compiler {
             .collect();
         let project_root = self.project_root.clone();
         let mut confined_root = None;
-        let result = ModuleGraph::load(self.entry_roots.iter().cloned(), |path| {
-            if let Some(source) = available.get(path) {
-                return Ok(source.clone());
-            }
-            let root = project_root.as_deref().ok_or_else(|| {
-                format!("missing imported module '{path}': compiler project root is not set")
-            })?;
-            if confined_root.is_none() {
-                confined_root = Some(
-                    crate::frontend::module_graph::ConfinedProjectRoot::new(std::path::Path::new(
-                        root,
-                    ))
-                    .map_err(|message| format!("missing imported module '{path}': {message}"))?,
-                );
-            }
-            confined_root.as_ref().unwrap().read_source(path)
-        });
+        let allow_graphics_test_seams = cfg!(test)
+            || project_root.as_deref().is_some_and(|root| {
+                let repository_root =
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+                std::fs::canonicalize(root)
+                    .ok()
+                    .zip(std::fs::canonicalize(repository_root).ok())
+                    .is_some_and(|(root, repository_root)| root == repository_root)
+            });
+        let result = ModuleGraph::load_with_graphics_test_seams(
+            self.entry_roots.iter().cloned(),
+            |path| {
+                if let Some(source) = available.get(path) {
+                    return Ok(source.clone());
+                }
+                let root = project_root.as_deref().ok_or_else(|| {
+                    format!("missing imported module '{path}': compiler project root is not set")
+                })?;
+                if confined_root.is_none() {
+                    confined_root = Some(
+                        crate::frontend::module_graph::ConfinedProjectRoot::new(
+                            std::path::Path::new(root),
+                        )
+                        .map_err(|message| {
+                            format!("missing imported module '{path}': {message}")
+                        })?,
+                    );
+                }
+                confined_root.as_ref().unwrap().read_source(path)
+            },
+            allow_graphics_test_seams,
+        );
         let (mut graph, loaded_sources) = match result {
             Ok(result) => result,
             Err(diagnostic) => {

@@ -6,7 +6,7 @@
 import "memory.stasis";
 
 // Abort the current hot swap after on_code_swap restores any application invariants it can.
-extern function reject_code_swap(): void;
+extern function @effects(code_swap) reject_code_swap(): void;
 
 // Bootstrap provides type-specific host functions behind one source-level overload family.
 function print(value: i32): void {

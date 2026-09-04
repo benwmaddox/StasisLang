@@ -67,4 +67,3 @@ test `applied input is consumed once`(): bool {
 ```
 
 **Keep:** input becomes live only through validation, queue ownership, and one ordered consume.
-

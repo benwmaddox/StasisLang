@@ -3,7 +3,8 @@ import "/vendor/stasis/src/stdlib/graphics.stasis";
 global ticks: i32;
 global seam_state_checksum: i32;
 global sprite: Sprite;
-global fallback: Sprite;
+global fallback_owner: Sprite;
+global fallback_ref: SpriteRef;
 global font: i32;
 global label: TextRun;
 
@@ -14,11 +15,13 @@ function main(): i32 {
     if (!sprite.load_sprite_from("assets/resource_sprite.svg", 112, 112)) {
         return 11;
     }
-    // A non-existent handle deliberately exercises the runtime's procedural
-    // fallback texture. It must be rebuilt with the other active resources.
-    fallback.handle = 2147483647;
-    fallback.width = 112;
-    fallback.height = 112;
+    // Retain a typed reference after releasing its owner to exercise the
+    // runtime's missing-generation fallback without forging an integer id.
+    if (!fallback_owner.load_sprite_from("assets/resource_sprite.svg", 112, 112)) {
+        return 14;
+    }
+    fallback_ref = fallback_owner.reference();
+    fallback_owner.release();
     font = load_font("assets/resource.ttf", 24);
     if (font == 0) {
         return 12;
@@ -42,7 +45,7 @@ function render(): i32 {
     fill_rect(232.0, 48.0, 176.0, 264.0, 0.19, 0.19, 0.19, 1.0);
     fill_rect(432.0, 48.0, 176.0, 264.0, 0.95, 0.78, 0.20, 1.0);
     sprite.draw(64.0, 124.0, 255, 0);
-    fallback.draw(264.0, 124.0, 255, 0);
+    draw_sprite(fallback_ref, 264.0, 124.0, 112.0, 112.0, 0, 255);
     draw_text(font, "DIRECT AOT", 260.0, 68.0, 1.0, 1.0, 1.0, 1.0);
     label.draw(448.0, 156.0, 0.0666667, 0.9058824, 0.8627451, 1.0);
     end_frame();

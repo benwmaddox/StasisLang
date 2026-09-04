@@ -4090,26 +4090,10 @@ mod tests {
     fn android_jit_preserves_negative_stable_sprite_handles() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = temp_project("negative_sprite_handle");
-        fs::create_dir_all(root.join("assets")).expect("create assets");
-        let sprite = include_bytes!(
-            "../../../mobile/android/app/src/main/assets/workshop_sample/assets/ball.svg"
+        let (root, handle) = write_typed_sprite_project(
+            "negative_sprite_handle",
+            "import \"/vendor/stasis/stdlib/graphics.stasis\";\nglobal TestHost { sprite: Sprite; }\nfunction main(): void { TestHost.sprite.load_sprite_from(\"assets/ball.svg\", 32, 32); }\nfunction tick(): void {}\n",
         );
-        fs::write(root.join("assets/ball.svg"), sprite).expect("write sprite");
-        let hash = stasis_assets::sha256_bytes(sprite);
-        fs::write(
-            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
-            format!(r#"{{"schema":"stasis-assets","version":1,"assets":[{{"id":"ball","path":"assets/ball.svg","content_sha256":"{hash}","format":{{"kind":"sprite","encoding":"svg","width":32,"height":32}},"dependencies":[]}}]}}"#),
-        )
-        .expect("write manifest");
-        let manifest = load_android_workshop_asset_manifest(&root).expect("load manifest");
-        let handle = manifest.by_id("ball").expect("ball entry").handle.as_i32();
-        assert!(handle < 0, "fixture must exercise a negative stable handle");
-        fs::write(
-            root.join("src/main.stasis"),
-            "@link(\"stasis_graphics\");\nstruct Sprite { handle: i32; width: i32; height: i32; }\nglobal TestHost { sprite: Sprite; }\nfunction @extern(\"stasis_jit_sprite_load_from\") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;\nfunction main(): void { load_sprite_from(TestHost.sprite, \"assets/ball.svg\", 32, 32); }\nfunction tick(): void {}\n",
-        )
-        .expect("write source");
 
         run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
             .expect("load negative-handle sprite");
@@ -4118,7 +4102,7 @@ mod tests {
             get_android_workshop_i32_global(
                 &root,
                 Path::new("src/main.stasis"),
-                "TestHost.sprite.handle",
+                "TestHost.sprite.sprite_ref",
             )
             .expect("read sprite handle"),
             handle
@@ -4148,7 +4132,7 @@ global state: State;
 function main(): void {
     if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
         state.loaded = 1;
-        state.initial_handle = state.sprite.handle;
+        state.initial_handle = state.sprite.sprite_ref;
         state.initial_width = state.sprite.width;
         state.initial_height = state.sprite.height;
     }
@@ -4208,7 +4192,7 @@ function tick(): void {
             get_android_workshop_i32_global(
                 &root,
                 Path::new("src/main.stasis"),
-                "state.sprite.handle"
+                "state.sprite.sprite_ref"
             )
             .expect("read released handle"),
             0
@@ -4280,7 +4264,7 @@ function tick(): void {
         state.sprite.release();
         if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
             state.reloaded = 1;
-            state.reload_handle = state.sprite.handle;
+            state.reload_handle = state.sprite.sprite_ref;
             state.reload_width = state.sprite.width;
             state.reload_height = state.sprite.height;
         }

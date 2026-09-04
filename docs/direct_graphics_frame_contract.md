@@ -9,7 +9,7 @@ do not change published frame counts or order.
 
 ## Ownership boundary
 
-Guest data describes what to draw: a logical image handle, logical source crop,
+Guest data describes what to draw: an opaque `SpriteRef`, logical source crop,
 destination geometry, pivot, scale/flip, rotation, tint, feature flags, and
 shared material/blend/filter/pass intent. Physical atlas pages, normalized
 packed UVs, binding domains, resource generations, GPU handles and records,
@@ -23,7 +23,7 @@ bytes: three i32 fields followed by thirteen f32 fields.
 
 | Lane | Offset | Meaning |
 | --- | ---: | --- |
-| i32 | 0 | logical image handle (nonzero; signed encodings are valid) |
+| i32 | 0 | opaque logical `SpriteRef` ABI value (nonzero; signed encodings are valid) |
 | i32 | 1 | packed tint RGBA8 (`0xRRGGBBAA`) |
 | i32 | 2 | negotiated instance/feature flags |
 | f32 | 0..3 | destination x, y, width, height |
@@ -84,8 +84,10 @@ effects.
 
 ## Compatibility and migration
 
-`gfx_cmd_sprite` and the public `Sprite`/`SpriteSheet` helpers are implemented
-through the writer. Sprite sheets emit logical pixel crops, not normalized UVs.
+The internal `gfx_cmd_sprite` helper and the public `Sprite`/`SpriteSheet`
+helpers are implemented through the writer. Public submission accepts only the
+nominal `SpriteRef`; raw integer submission is removed. Sprite sheets emit
+logical pixel crops, not normalized UVs.
 The scratch-array `gfx_cmd_sprites_from`/`gfx_draw_sprites` path and raw sprite
 count/set APIs are removed in v7: callers reserve, write, and finalize instead.
 There is no second authoritative sprite representation and no guest
@@ -99,26 +101,26 @@ dynamic render still writes its semantic instances into the canonical frame on
 each render; moving transforms therefore pay direct stores plus the host's
 private record repack/upload. The benchmark's JavaScript typed-array allocation
 is measurement scaffolding and does not model the runtime's persistent global
-canonical lanes. A game may cache its own immutable semantic inputs, but v7 does
-not expose a sealed persistent frame/list or a safe patch-in-place slot API.
-One-time static-list construction and transform-only patch/replay remain the
-non-forgeable persistent-reference work tracked for #399; no such optimization
-is assumed by this contract or its evidence.
+canonical lanes. A game may cache a bounded `PresentationList`, construct it
+once, patch logical sprite fields through the typed API, and replay it. This
+list never exposes the canonical frame arrays or host resource records; replay
+performs the only guest-side translation into ABI v7 and the host still
+validates the complete frame before adopting it.
 
 Hosts validate an entire frame before replay. Invalid run spans, order
-references, handles, flags, shared state, or non-finite/invalid geometry reject
+references, flags, shared state, or non-finite/invalid geometry reject
 the frame transactionally; a consumer must retain its prior valid frame rather
 than partially adopting malformed data.
 
 The order stream is declarative correctness data, not an application batching
 schedule. A run may contain A-B-A-B logical images when host-private placement
-puts them in one compatible binding domain; logical handle transitions alone do
+puts them in one compatible binding domain; logical reference transitions alone do
 not split it. Capable hosts also translate solid rectangles into their private
 ordered quad representation and merge them with adjacent compatible sprites.
 Each production host reserves a private white region per atlas binding domain.
 WebGL2 uses its 64-byte private quad record, SDL uses bounded
 `SDL_RenderGeometry` buffers, and Workshop GLES2 uses reusable expanded-quad
-buffers. This consumes no guest handle and exposes no atlas identity. These are
+buffers. This consumes no guest resource and exposes no atlas identity. These are
 the only renderers for their targets; missing resources, oversize resources,
 and context restoration remain inside the same backend instead of selecting a
 fallback renderer. Hosts still split on real clip, blend, pass,

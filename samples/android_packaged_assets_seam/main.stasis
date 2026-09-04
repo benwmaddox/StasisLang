@@ -26,7 +26,7 @@ function main(): i32 {
     if (!seam_sprite.load_sprite_from("assets/asset_sprite.svg", 128, 128)) {
         return 12;
     }
-    seam_sprite_handle = seam_sprite.handle;
+    seam_sprite_handle = seam_sprite.reference();
     seam_font_handle = load_font("assets/asset_font.ttf", 28);
     if (seam_font_handle == 0) {
         return 13;

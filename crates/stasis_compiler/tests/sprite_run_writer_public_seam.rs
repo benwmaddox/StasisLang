@@ -17,6 +17,17 @@ const FIXTURE: &str =
 const GRAPHICS: &str = include_str!("../../../src/stdlib/graphics.stasis");
 const BRICKOUT_PATH: &str = "samples/brickout_revenge/brickout_revenge.stasis";
 const BRICKOUT: &str = include_str!("../../../samples/brickout_revenge/brickout_revenge.stasis");
+const BRICKOUT_V1_PATH: &str = "samples/brickout_revenge/brickout_revenge_v1.stasis";
+const BRICKOUT_V1: &str =
+    include_str!("../../../samples/brickout_revenge/brickout_revenge_v1.stasis");
+const BRICKOUT_V1_CMD_PATH: &str = "samples/brickout_revenge/brickout_revenge_v1_cmd.stasis";
+const BRICKOUT_V1_CMD: &str =
+    include_str!("../../../samples/brickout_revenge/brickout_revenge_v1_cmd.stasis");
+const TYPED_SPRITE_PATH: &str = "samples/typed_sprite/main.stasis";
+const TYPED_SPRITE: &str = include_str!("../../../samples/typed_sprite/main.stasis");
+const ANDROID_RESOURCE_RESTORE_PATH: &str = "samples/android_resource_restore_seam/main.stasis";
+const ANDROID_RESOURCE_RESTORE: &str =
+    include_str!("../../../samples/android_resource_restore_seam/main.stasis");
 const POINTER_PONG_PATH: &str = "samples/pointer_pong/main.stasis";
 const POINTER_PONG: &str = include_str!("../../../samples/pointer_pong/main.stasis");
 const ROOT: &str = "sprite_run_writer_public_probe";
@@ -244,8 +255,10 @@ fn public_writer_contract_and_brickout_compile() {
     assert!(!GRAPHICS.contains("gfx_reserve_sprite_run"));
     assert!(!GRAPHICS.contains("let writer: SpriteRunWriter"));
     assert!(GRAPHICS.contains("function reserve(self: SpriteRunWriter, max_count: i32"));
-    assert!(!BRICKOUT.contains("let sprites: SpriteRunWriter"));
-    assert!(BRICKOUT.contains("state.gfx.sprites.reserve("));
+    assert!(!BRICKOUT.contains("SpriteRunWriter"));
+    assert!(BRICKOUT.contains("presentation: PresentationList"));
+    assert!(BRICKOUT.contains("state.gfx.presentation.append_sprite("));
+    assert!(BRICKOUT.contains("state.gfx.presentation.replay()"));
     assert!(GRAPHICS.contains("struct LineBatch"));
     assert!(!GRAPHICS.contains("function draw_lines("));
     assert!(BRICKOUT.contains("state.gfx.lines.draw()"));
@@ -256,6 +269,51 @@ fn public_writer_contract_and_brickout_compile() {
     jit.set_required_emit_roots(&["tick".to_string()]);
     jit.upsert_file(BRICKOUT_PATH, BRICKOUT);
     jit.compile().expect("compile migrated Brickout sample");
+
+    for (path, source) in [
+        (BRICKOUT_V1_PATH, BRICKOUT_V1),
+        (BRICKOUT_V1_CMD_PATH, BRICKOUT_V1_CMD),
+    ] {
+        assert!(!source.contains(".handle"), "raw sprite handle in {path}");
+        let mut jit = JitProcess::new();
+        jit.set_project_root(repository_root().to_string_lossy())
+            .expect("set historical Brickout JIT project root");
+        jit.set_required_emit_roots(&["tick".to_string()]);
+        jit.upsert_file(path, source);
+        jit.compile()
+            .unwrap_or_else(|error| panic!("compile migrated {path}: {error:?}"));
+    }
+
+    assert!(!TYPED_SPRITE.contains("sprite.handle"));
+    let mut typed_sprite = JitProcess::new();
+    typed_sprite
+        .set_project_root(repository_root().to_string_lossy())
+        .expect("set typed-sprite JIT project root");
+    typed_sprite.set_required_emit_roots(&["main".to_string()]);
+    typed_sprite.upsert_file(TYPED_SPRITE_PATH, TYPED_SPRITE);
+    typed_sprite
+        .compile()
+        .expect("compile typed-sprite sample without raw sprite handles");
+
+    assert!(!ANDROID_RESOURCE_RESTORE.contains("fallback.handle"));
+    assert!(ANDROID_RESOURCE_RESTORE.contains("fallback_owner.reference()"));
+    let resource_restore = ANDROID_RESOURCE_RESTORE.replace(
+        "import \"/vendor/stasis/src/stdlib/graphics.stasis\";",
+        "import \"../../src/stdlib/graphics.stasis\";",
+    );
+    let mut resource_restore_jit = JitProcess::new();
+    resource_restore_jit
+        .set_project_root(repository_root().to_string_lossy())
+        .expect("set Android resource-restore JIT project root");
+    resource_restore_jit.set_required_emit_roots(&[
+        "main".to_string(),
+        "tick".to_string(),
+        "render".to_string(),
+    ]);
+    resource_restore_jit.upsert_file(ANDROID_RESOURCE_RESTORE_PATH, &resource_restore);
+    resource_restore_jit
+        .compile()
+        .expect("compile Android resource-restore typed stale-reference path");
 }
 
 #[test]

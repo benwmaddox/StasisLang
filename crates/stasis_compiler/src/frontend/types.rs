@@ -470,6 +470,14 @@ impl TypeTable {
         })
     }
 
+    /// `SpriteRef` is a compiler-owned nominal scalar. It deliberately keeps an
+    /// i32 ABI lane for the host boundary, but source code may not treat it as
+    /// an integer or exchange it with another i32-compatible type.
+    pub(crate) fn is_sealed_sprite_ref(&self, type_id: TypeId) -> bool {
+        self.type_info(type_id)
+            .is_some_and(|info| info.name == "SpriteRef")
+    }
+
     pub(crate) fn assignment_types_are_compatible(
         &self,
         target_type: TypeId,
@@ -477,6 +485,9 @@ impl TypeTable {
     ) -> bool {
         if target_type == expression_type {
             return true;
+        }
+        if self.is_sealed_sprite_ref(target_type) {
+            return false;
         }
         if target_type == TYPE_ID_BOOL || expression_type == TYPE_ID_BOOL {
             return false;
@@ -784,5 +795,17 @@ mod tests {
         assert!(table.is_argument_compatible_with_param(TYPE_ID_I32, u8_type));
         assert!(table.is_argument_compatible_with_param(u8_type, TYPE_ID_I32));
         assert!(!table.is_argument_compatible_with_param(TYPE_ID_I32, ascii_view));
+    }
+
+    #[test]
+    fn sealed_sprite_ref_keeps_abi_lane_without_integer_source_compatibility() {
+        let mut table = TypeTable::new();
+        let sprite_ref = table.resolve_or_intern("SpriteRef").expect("SpriteRef");
+
+        assert!(table.is_i32_abi_compatible(sprite_ref));
+        assert!(!table.is_argument_compatible_with_param(TYPE_ID_I32, sprite_ref));
+        assert!(!table.is_argument_compatible_with_param(sprite_ref, TYPE_ID_I32));
+        assert!(!table.assignment_types_are_compatible(sprite_ref, TYPE_ID_I32));
+        assert!(table.assignment_types_are_compatible(TYPE_ID_I32, sprite_ref));
     }
 }

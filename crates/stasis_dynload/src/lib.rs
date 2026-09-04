@@ -5849,8 +5849,8 @@ pub extern "C" fn stasis_jit_sprite_load_from(
     if loaded_handle == 0 {
         return 0;
     }
-    let old_handle = struct_view_i32_load(base, index, "handle");
-    struct_view_i32_store(base, index, len, "handle", loaded_handle);
+    let old_handle = struct_view_i32_load(base, index, "sprite_ref");
+    struct_view_i32_store(base, index, len, "sprite_ref", loaded_handle);
     struct_view_i32_store(base, index, len, "width", width);
     struct_view_i32_store(base, index, len, "height", height);
     if old_handle != 0 {

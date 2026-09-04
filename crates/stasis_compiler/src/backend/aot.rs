@@ -1825,11 +1825,25 @@ mod tests {
         jit.set_required_emit_roots(&GFX_CAPACITY_TRACE_ROOTS.map(str::to_string));
         jit.set_project_root(project_root.to_string_lossy())
             .expect("set project root");
+        let probe_source = GFX_CAPACITY_FIXTURE.replace(
+            "import \"../../../src/stdlib/internal/gfx_cmd.stasis\";",
+            "import \"../internal/gfx_cmd.stasis\";",
+        );
+        let gfx_source = gfx_source
+            .replace(
+                "import \"../stdlib.stasis\";",
+                "import \"/src/stdlib/stdlib.stasis\";",
+            )
+            .replace(
+                "import \"../asset_tasks.stasis\";",
+                "import \"/src/stdlib/asset_tasks.stasis\";",
+            )
+            .replace("function @effects(graphics) gfx_", "function gfx_");
         jit.upsert_file(
             "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
-            GFX_CAPACITY_FIXTURE,
+            &probe_source,
         );
-        jit.upsert_file("src/stdlib/internal/gfx_cmd.stasis", gfx_source);
+        jit.upsert_file("tests/stasis/internal/gfx_cmd.stasis", &gfx_source);
         jit.compile().expect("compile gfx capacity JIT fixture");
 
         let mut i32_storage = vec![0; I32_COUNT + 2];
@@ -1971,11 +1985,25 @@ mod tests {
         aot.set_required_emit_roots(&GFX_CAPACITY_TRACE_ROOTS.map(str::to_string));
         aot.set_project_root(project_root.to_string_lossy())
             .expect("set AOT project root");
+        let probe_source = GFX_CAPACITY_FIXTURE.replace(
+            "import \"../../../src/stdlib/internal/gfx_cmd.stasis\";",
+            "import \"../internal/gfx_cmd.stasis\";",
+        );
+        let gfx_source = GFX_CMD_SOURCE
+            .replace(
+                "import \"../stdlib.stasis\";",
+                "import \"/src/stdlib/stdlib.stasis\";",
+            )
+            .replace(
+                "import \"../asset_tasks.stasis\";",
+                "import \"/src/stdlib/asset_tasks.stasis\";",
+            )
+            .replace("function @effects(graphics) gfx_", "function gfx_");
         aot.upsert_file(
             "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
-            GFX_CAPACITY_FIXTURE,
+            &probe_source,
         );
-        aot.upsert_file("src/stdlib/internal/gfx_cmd.stasis", GFX_CMD_SOURCE);
+        aot.upsert_file("tests/stasis/internal/gfx_cmd.stasis", &gfx_source);
         aot.compile().expect("compile gfx capacity AOT fixture");
         let state_layout = aot.state_layout();
         for (path, expected) in [("full_text", 1_024), ("tail_text", 960)] {
@@ -3155,7 +3183,7 @@ function end_frame(): void { return; }
 "#;
         let mut process = AotProcess::new();
         process.upsert_file(
-            "samples/audio_asset_playback/audio_asset_playback.stasis",
+            "tests/stasis/compiler/audio_asset_playback.stasis",
             format!("{declarations}\n{asset_tasks}\n{audio}\n{source}"),
         );
         process.compile().expect("aot compile playback sample");
@@ -3219,7 +3247,7 @@ function end_frame(): void { return; }
     fn aot_process_rejects_fake_runtime_prefix_extern_without_export_contract_entry() {
         let mut process = AotProcess::new();
         process.upsert_file(
-            "sample.stasis",
+            "tests/stasis/compiler/fake_graphics_extern.stasis",
             "extern function gfx_totally_missing(path: string, max_w: i32, max_h: i32): i32;\nfunction main(): i32 { return gfx_totally_missing(\"sprite.bmp\", 8, 8); }\n",
         );
 
@@ -3553,7 +3581,7 @@ function end_frame(): void { return; }
     fn aot_process_prefers_runtime_string_shims_for_host_string_externs() {
         let mut process = AotProcess::new();
         process.upsert_file(
-            "sample.stasis",
+            "tests/stasis/compiler/runtime_string_shims.stasis",
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\nextern function gfx_release_sprite(handle: i32): void;\nextern function load_font(path: string, size: i32): i32;\nextern function measure_text(font: i32, text: string): f32;\nfunction @extern(\"stasis_gfx_cache_text\") gfx_cache_text(font: i32, text: string): i32;\nextern function storage_load_i32(scope: string, key: string, fallback: i32): i32;\nextern function storage_save_i32(scope: string, key: string, value: i32): bool;\nfunction @extern(\"stasis_jit_storage_load_ascii\") storage_load_ascii(scope: string, key: string, out: ascii[], capacity: i32): i32;\nfunction @extern(\"stasis_jit_storage_save_ascii\") storage_save_ascii(scope: string, key: string, value: ascii[], length: i32): i32;\nfunction @extern(\"stasis_jit_clipboard_load_ascii\") clipboard_load_ascii(out: ascii[], capacity: i32): i32;\nfunction @extern(\"stasis_jit_clipboard_save_ascii\") clipboard_save_ascii(value: ascii[], length: i32): i32;\nfunction main(): i32 { gfx_release_sprite(0); return 0; }\n",
         );
         process.compile().expect("compile");
@@ -3651,7 +3679,7 @@ function end_frame(): void { return; }
     fn aot_engine_bundle_manifest_includes_hot_render_policy_without_pixels() {
         let mut process = AotProcess::new();
         process.upsert_file(
-            "sample.stasis",
+            "tests/stasis/compiler/hot_render_manifest.stasis",
             r#"struct Sprite { handle: i32; width: i32; height: i32; }
 global hero: Sprite;
 function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;

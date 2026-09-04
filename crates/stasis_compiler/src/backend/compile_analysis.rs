@@ -29,6 +29,7 @@ pub(crate) struct ExternCallSignature {
     pub(crate) params: Vec<TypeId>,
     pub(crate) return_type: TypeId,
     pub(crate) source_path: String,
+    pub(crate) trusted_graphics_source: bool,
     pub(crate) source_start: usize,
     pub(crate) source_end: usize,
 }
@@ -37,6 +38,8 @@ pub(crate) struct ExternCallSignature {
 pub(crate) struct ResolvedExternCallSignature {
     pub(crate) name: String,
     pub(crate) symbol: String,
+    pub(crate) source_path: String,
+    pub(crate) trusted_graphics_source: bool,
     pub(crate) params: Vec<TypeId>,
     pub(crate) return_type: TypeId,
 }
@@ -173,6 +176,11 @@ pub(crate) fn collect_supported_extern_call_signatures(
         for declaration in declarations {
             let mut signature = build_extern_call_signature(type_table, declaration.clone())?;
             signature.source_path = file.path.clone();
+            signature.trusted_graphics_source =
+                crate::frontend::module_graph::is_recognized_graphics_implementation_source(
+                    &file.path,
+                    &file.content,
+                ) || crate::frontend::module_graph::is_explicit_graphics_test_seam_path(&file.path);
             signature.source_start = declaration.name_range.start;
             signature.source_end = declaration.name_range.end;
             out.push(signature);
@@ -216,6 +224,8 @@ pub(crate) fn resolve_extern_call_signatures_with_index(
         resolved.push(ResolvedExternCallSignature {
             name: signature.name.clone(),
             symbol,
+            source_path: signature.source_path.clone(),
+            trusted_graphics_source: signature.trusted_graphics_source,
             params: signature.params.clone(),
             return_type: signature.return_type,
         });
@@ -268,6 +278,7 @@ pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
     resolved_extern_signatures: Vec<ResolvedExternCallSignature>,
     extern_symbol_addresses: ExternSymbolAddressMap,
 ) -> Result<CompileAnalysisCache, String> {
+    validate_privileged_graphics_extern_provenance(&resolved_extern_signatures)?;
     let call_signatures =
         collect_supported_call_signatures(functions, &resolved_extern_signatures, type_table);
     let constant_values = collect_top_level_constant_values(files, type_table)?;
@@ -285,6 +296,24 @@ pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
         named_struct_field_types,
         extern_symbol_addresses,
     })
+}
+
+fn validate_privileged_graphics_extern_provenance(
+    signatures: &[ResolvedExternCallSignature],
+) -> Result<(), String> {
+    for signature in signatures {
+        if crate::frontend::module_graph::is_privileged_graphics_extern(
+            &signature.name,
+            &signature.symbol,
+        ) && !signature.trusted_graphics_source
+        {
+            return Err(format!(
+                "privileged graphics extern '{}' resolved from non-canonical module '{}'",
+                signature.symbol, signature.source_path
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn build_extern_call_signature(
@@ -309,6 +338,7 @@ pub(crate) fn build_extern_call_signature(
         params,
         return_type,
         source_path: String::new(),
+        trusted_graphics_source: false,
         source_start: 0,
         source_end: 0,
     })
@@ -364,6 +394,9 @@ pub(crate) fn is_i32_scalar_lane_type(type_id: TypeId, type_table: &TypeTable) -
 }
 
 pub(crate) fn is_i32_numeric_type(type_id: TypeId, type_table: &TypeTable) -> bool {
+    if type_table.is_sealed_sprite_ref(type_id) {
+        return false;
+    }
     if type_table.is_integer(type_id) {
         return true;
     }
@@ -1335,4 +1368,30 @@ fn hash_string_literal(value: &str) -> i32 {
         hash = hash.wrapping_mul(16777619);
     }
     hash as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_graphics_externs_retain_and_validate_module_provenance() {
+        let signature = ResolvedExternCallSignature {
+            name: "release_alias".to_string(),
+            symbol: "stasis_jit_gfx_release_sprite".to_string(),
+            source_path: "game/main.stasis".to_string(),
+            trusted_graphics_source: false,
+            params: vec![TYPE_ID_I32],
+            return_type: TYPE_ID_VOID,
+        };
+        let error = validate_privileged_graphics_extern_provenance(&[signature.clone()])
+            .expect_err("resolved project extern must be rejected before emission");
+        assert!(error.contains("non-canonical module 'game/main.stasis'"));
+
+        let mut canonical = signature;
+        canonical.source_path = "src/stdlib/graphics.stasis".to_string();
+        canonical.trusted_graphics_source = true;
+        validate_privileged_graphics_extern_provenance(&[canonical])
+            .expect("compiler-owned graphics extern retains valid provenance");
+    }
 }

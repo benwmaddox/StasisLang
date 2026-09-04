@@ -903,7 +903,7 @@ function unused(): i32 { return load_font("assets/unused.ttf", 16); }
 function main(): i32 { return helper(); }
 "#;
         let mut jit = JitProcess::new();
-        jit.upsert_file("main.stasis", source);
+        jit.upsert_file("tests/stasis/assets/reachable.stasis", source);
         jit.compile().expect("compile asset fixture");
         let references = jit.program_snapshot().expect("snapshot").asset_references();
         assert_eq!(references.len(), 1);
@@ -912,7 +912,7 @@ function main(): i32 { return helper(); }
         assert_eq!(&source[references[0].start..references[0].end], "FONT_PATH");
 
         let mut aot = AotProcess::new();
-        aot.upsert_file("main.stasis", source);
+        aot.upsert_file("tests/stasis/assets/reachable.stasis", source);
         aot.compile().expect("compile AOT asset fixture");
         assert_eq!(
             references,
@@ -929,7 +929,7 @@ extern function @asset_path(path) load_font(path: string, size: i32): i32;
 function main(path: string): i32 { return path.load_font(16); }
 "#;
         let mut jit = JitProcess::new();
-        jit.upsert_file("main.stasis", source);
+        jit.upsert_file("tests/stasis/assets/dynamic_receiver.stasis", source);
         jit.compile().expect("compile dynamic receiver fixture");
         let references = jit.program_snapshot().expect("snapshot").asset_references();
         assert_eq!(references.len(), 1);
@@ -993,7 +993,7 @@ function main(): i32 {
 }
 "#;
         let mut jit = JitProcess::new();
-        jit.upsert_file("main.stasis", source);
+        jit.upsert_file("tests/stasis/assets/scoped_bindings.stasis", source);
         jit.compile().expect("compile scoped asset fixture");
         let references = jit.program_snapshot().expect("snapshot").asset_references();
         let paths = references

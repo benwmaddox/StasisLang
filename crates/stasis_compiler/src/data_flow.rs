@@ -1395,6 +1395,11 @@ fn build_context<'a>(
                     resolved_externs.push(ResolvedExternCallSignature {
                         name: external.name,
                         symbol: external.symbol_name,
+                        source_path: file.path.clone(),
+                        trusted_graphics_source: crate::frontend::module_graph::is_recognized_graphics_implementation_source(
+                            &file.path,
+                            &file.content,
+                        ) || crate::frontend::module_graph::is_explicit_graphics_test_seam_path(&file.path),
                         params,
                         return_type,
                     });

@@ -12,6 +12,17 @@ const ORDER_BASE = 51232;
 const RUN_BASE = 18464;
 const CLIP_BASE = 145540;
 
+test("sprite loader publishes the opaque reference field", () => {
+  assert.match(
+    source,
+    /stasis_jit_sprite_load_from:[\s\S]*?setViewField\(base, index, "sprite_ref", handle\)/,
+  );
+  assert.doesNotMatch(
+    source,
+    /return setViewField\(base, index, "handle", handle\)/,
+  );
+});
+
 function fakeGl(stats, available = true, throwing = false, textureThrow = false) {
   if (!available) return null;
   const gl = {

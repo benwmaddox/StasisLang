@@ -182,13 +182,13 @@ function ensure_window(): bool {
         print_string("\n");
         return false;
     }
-    if (state.bucket_sprite.handle == 0) {
+    if (!state.bucket_sprite.valid()) {
         print_string("error: failed to load bucket sprite: ");
         print_string(state.config.bucket_sprite_path);
         print_string("\n");
         return false;
     }
-    if (state.ball_sprite.handle == 0) {
+    if (!state.ball_sprite.valid()) {
         print_string("error: failed to load ball sprite: ");
         print_string(state.config.ball_sprite_path);
         print_string("\n");
@@ -310,7 +310,7 @@ function draw_ui(): void {
 }
 
 function is_ready_to_run(): bool {
-    return state.config.json_loaded && state.ui_font != 0 && state.bucket_sprite.handle != 0 && state.ball_sprite.handle != 0;
+    return state.config.json_loaded && state.ui_font != 0 && state.bucket_sprite.valid() && state.ball_sprite.valid();
 }
 
 function tick(): i32 {

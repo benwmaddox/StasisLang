@@ -215,7 +215,7 @@ function poll_asset_loading(): void {
         return;
     }
     if (loader.step >= ASSET_TOTAL) {
-        loader.assets_ready = assets.background.handle > 0 && assets.brick.handle > 0 && assets.paddle.handle > 0 && assets.ball.handle > 0;
+        loader.assets_ready = assets.background.valid() && assets.brick.valid() && assets.paddle.valid() && assets.ball.valid();
         if (loader.assets_ready) {
             reset_round();
         } else {

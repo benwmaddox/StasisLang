@@ -10,13 +10,12 @@ struct FixtureState {
 global state: FixtureState;
 
 function main(): i32 {
-    state.invalid_sprite.handle = 99;
     state.invalid_sprite.width = 8;
     state.invalid_sprite.height = 8;
     if (state.invalid_sprite.load_sprite_from("assets/__typed_drawable_fixture.svg", 0, 92)) {
         return 1;
     }
-    if (state.invalid_sprite.handle != 99) {
+    if (state.invalid_sprite.valid()) {
         return 2;
     }
     if (state.invalid_sprite.width != 8 || state.invalid_sprite.height != 8) {
@@ -37,19 +36,16 @@ function main(): i32 {
         return 6;
     }
 
-    state.sprite.handle = 41;
     state.sprite.width = 136;
     state.sprite.height = 92;
 
     state.sprite.release();
-    if (state.sprite.handle != 0 || state.sprite.width != 0 || state.sprite.height != 0) {
+    if (state.sprite.valid() || state.sprite.width != 0 || state.sprite.height != 0) {
         return 7;
     }
-    state.sprite.handle = 41;
-    state.sprite.width = 136;
-    state.sprite.height = 92;
 
     begin_frame();
+    // Invalid typed sprites are ignored without exposing or forging a host id.
     state.sprite.draw(12.5, 23.5, 211, 17);
 
     state.text.font = 3;

@@ -313,7 +313,7 @@ const evidence = {
   platform: `node ${process.version} ${process.platform}/${process.arch}`,
   phase_model: {
     image_and_atlas_preparation: "not timed here; production performs it once per load/resource/density/context generation and the modeled solid-texel bytes are labeled separately",
-    static_frame_or_list_construction: "not measured: v7 does not expose sealed persistent replay or patchable slots; remaining #399 scope",
+    static_frame_or_list_construction: "not measured: PresentationList now exposes bounded typed construction, logical sprite patching, and exact-order replay without exposing v7 frame storage",
     dynamic_frame_construction: "measured every render; harness allocations do not model production's persistent global canonical lanes",
     host_private_repack_and_upload: "modeled byte counts only; this harness does not execute production planner, WebGL bufferSubData, driver, or GPU work"
   },

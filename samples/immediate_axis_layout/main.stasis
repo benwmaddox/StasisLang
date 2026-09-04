@@ -26,7 +26,7 @@ function main(): i32 {
     state.button.load_sprite_from("../render_parity/assets/opaque.svg", 180, 56);
     state.play_clicked = false;
     state.audit_emitted = false;
-    if (state.font == 0 || state.title.handle == 0 || state.play.handle == 0 || state.button.handle == 0) {
+    if (state.font == 0 || state.title.handle == 0 || state.play.handle == 0 || !state.button.valid()) {
         return 1;
     }
     return 0;

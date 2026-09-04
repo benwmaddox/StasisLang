@@ -4,57 +4,40 @@ global tested_sprite: Sprite;
 global tested_text: TextRun;
 
 test `invalid sprite replacement preserves receiver atomically`(): bool {
-    tested_sprite.handle = 23;
     tested_sprite.width = 16;
     tested_sprite.height = 16;
     if (tested_sprite.load_sprite_from("assets/__typed_drawable_fixture.svg", 0, 48)) {
         return false;
     }
-    return tested_sprite.handle == 23 && tested_sprite.width == 16 && tested_sprite.height == 16;
+    return !tested_sprite.valid() && tested_sprite.width == 16 && tested_sprite.height == 16;
 }
 
-test `sprite release clears live receiver and is idempotent`(): bool {
-    tested_sprite.handle = 0 - 23;
+test `sprite release clears receiver and is idempotent`(): bool {
     tested_sprite.width = 16;
     tested_sprite.height = 16;
     tested_sprite.release();
-    if (tested_sprite.handle != 0 || tested_sprite.width != 0 || tested_sprite.height != 0) {
+    if (tested_sprite.valid() || tested_sprite.width != 0 || tested_sprite.height != 0) {
         return false;
     }
     tested_sprite.release();
-    return tested_sprite.handle == 0 && tested_sprite.width == 0 && tested_sprite.height == 0;
+    return !tested_sprite.valid() && tested_sprite.width == 0 && tested_sprite.height == 0;
 }
 
 test `zero sprite release remains zero`(): bool {
-    tested_sprite.handle = 0;
     tested_sprite.width = 0;
     tested_sprite.height = 0;
     tested_sprite.release();
-    return tested_sprite.handle == 0 && tested_sprite.width == 0 && tested_sprite.height == 0;
+    return !tested_sprite.valid() && tested_sprite.width == 0 && tested_sprite.height == 0;
 }
 
-test `draw uses sprite logical dimensions`(): bool {
-    tested_sprite.handle = 0 - 7;
+test `draw ignores invalid sprite metadata`(): bool {
     tested_sprite.width = 80;
     tested_sprite.height = 48;
 
     begin_frame();
     tested_sprite.draw(2.0, 3.0, 190, 9);
     end_frame();
-    return tested_sprite.handle == 0 - 7 && tested_sprite.width == 80 && tested_sprite.height == 48;
-}
-
-test `draw ignores invalid sprite metadata`(): bool {
-    tested_sprite.handle = 0;
-    tested_sprite.width = 80;
-    tested_sprite.height = 48;
-    begin_frame();
-    tested_sprite.draw(0.0, 0.0, 255, 0);
-    tested_sprite.handle = 7;
-    tested_sprite.width = 0;
-    tested_sprite.draw(0.0, 0.0, 255, 0);
-    end_frame();
-    return tested_sprite.handle == 7 && tested_sprite.width == 0 && tested_sprite.height == 48;
+    return !tested_sprite.valid() && tested_sprite.width == 80 && tested_sprite.height == 48;
 }
 
 test `cached text draw uses its font and run handles`(): bool {

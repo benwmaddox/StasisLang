@@ -484,7 +484,10 @@ function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, al
 
     fn hot_render_snapshot(body: &str) -> ProgramSnapshot {
         let mut aot = AotProcess::new();
-        aot.upsert_file("main.stasis", format!("{HOT_RENDER_PRELUDE}\n{body}"));
+        aot.upsert_file(
+            "tests/stasis/compiler/hot_render.stasis",
+            format!("{HOT_RENDER_PRELUDE}\n{body}"),
+        );
         aot.compile().expect("compile hot-render fixture");
         aot.program_snapshot().expect("snapshot").clone()
     }
@@ -529,10 +532,10 @@ function main(): void { hero.load_sprite_from("assets/hero.png", 32, 24); }
 function render(): void { hero.draw(1.0, 2.0, 255, 0); hero.draw(3.0, 4.0, 255, 0); }
 "#;
         let mut jit = JitProcess::new();
-        jit.upsert_file("main.stasis", source);
+        jit.upsert_file("tests/stasis/compiler/hot_render.stasis", source);
         jit.compile().expect("compile JIT hot-render fixture");
         let mut aot = AotProcess::new();
-        aot.upsert_file("main.stasis", source);
+        aot.upsert_file("tests/stasis/compiler/hot_render.stasis", source);
         aot.compile().expect("compile AOT hot-render fixture");
         assert_eq!(
             jit.program_snapshot()
@@ -573,7 +576,7 @@ function render(): void {{
 "#
         );
         let mut aot = AotProcess::new();
-        aot.upsert_file("chess_td.stasis", source);
+        aot.upsert_file("tests/stasis/compiler/hot_render_aliases.stasis", source);
         aot.compile().expect("compile ChessTD-shaped alias fixture");
         let images = aot
             .program_snapshot()
@@ -608,7 +611,7 @@ function render(): void {{ {draws} }}
 "#
             );
             let mut aot = AotProcess::new();
-            aot.upsert_file("order.stasis", source);
+            aot.upsert_file("tests/stasis/compiler/hot_render_order.stasis", source);
             aot.compile().expect("compile ordered render fixture");
             aot.program_snapshot().expect("snapshot").clone()
         }
@@ -753,7 +756,7 @@ function main(): void { sheet.load_sprite_sheet_from(PATH, COLUMNS, ROWS, CELL, 
 function render(): void { sheet.draw_frame(0, 1.0, 2.0, 255, 0); }
 "#;
         let mut aot = AotProcess::new();
-        aot.upsert_file("main.stasis", source);
+        aot.upsert_file("tests/stasis/compiler/hot_render_sheet.stasis", source);
         aot.compile().expect("compile sheet fixture");
         let sheet = &aot
             .program_snapshot()
@@ -779,7 +782,10 @@ function main(): void { sheet.load_sprite_sheet_from("assets/sheet.png", 2147483
 function render(): void { sheet.draw_frame(0, 1.0, 2.0, 255, 0); }
 "#;
         let mut aot = AotProcess::new();
-        aot.upsert_file("main.stasis", source);
+        aot.upsert_file(
+            "tests/stasis/compiler/hot_render_sheet_overflow.stasis",
+            source,
+        );
         aot.compile().expect("compile overflowing sheet fixture");
         let sheet = &aot
             .program_snapshot()
@@ -808,7 +814,10 @@ function render(): void {{ {draws} }}
             draws = "a.draw(0.0, 0.0, 255, 0); b.draw(0.0, 0.0, 255, 0); ".repeat(5)
         );
         let mut aot = AotProcess::new();
-        aot.upsert_file("main.stasis", source);
+        aot.upsert_file(
+            "tests/stasis/compiler/hot_render_profitability.stasis",
+            source,
+        );
         aot.compile().expect("compile profitable group fixture");
         let images = aot
             .program_snapshot()
@@ -867,7 +876,7 @@ function render(): void {{ {draws} }}
             for _ in 0..7 {
                 let start = Instant::now();
                 let mut aot = AotProcess::new();
-                aot.upsert_file("benchmark.stasis", source);
+                aot.upsert_file("tests/stasis/compiler/hot_render_benchmark.stasis", source);
                 aot.compile().expect("compile benchmark fixture");
                 samples.push(start.elapsed().as_micros());
                 metadata_bytes = serde_json::to_vec(

@@ -1,21 +1,24 @@
 import "/vendor/stasis/src/stdlib/graphics.stasis";
 
-global tested_sprite: Sprite;
+global tested_sprite_owner: Sprite;
+global tested_sprite_ref: SpriteRef;
 global tested_text: TextRun;
 
 test `resource restore frame retains named resource lanes`(): bool {
-    tested_sprite.handle = 2147483647;
-    tested_sprite.width = 112;
-    tested_sprite.height = 112;
+    if (!tested_sprite_owner.load_sprite_from("assets/resource_sprite.svg", 112, 112)) {
+        return false;
+    }
+    tested_sprite_ref = tested_sprite_owner.reference();
+    tested_sprite_owner.release();
     tested_text.font = 3;
     tested_text.handle = 9;
     tested_text.width = 120.0;
     tested_text.height = 24.0;
     begin_frame();
-    tested_sprite.draw(1.0, 2.0, 255, 0);
+    draw_sprite(tested_sprite_ref, 1.0, 2.0, 112.0, 112.0, 0, 255);
     tested_text.draw(3.0, 4.0, 1.0, 1.0, 1.0, 1.0);
     end_frame();
-    return tested_sprite.handle == 2147483647 && tested_text.font == 3 && tested_text.handle == 9;
+    return tested_sprite_ref != SpriteRef.Invalid && tested_text.font == 3 && tested_text.handle == 9;
 }
 
 test `invalid cached text never replaces the live run`(): bool {
