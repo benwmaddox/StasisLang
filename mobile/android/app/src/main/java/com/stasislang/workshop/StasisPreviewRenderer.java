@@ -11,6 +11,7 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.util.Arrays;
 import java.util.ArrayDeque;
+import java.util.HashMap;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -140,6 +141,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         default void onDisplayMetricsChanged(float rasterScale, int densityGeneration) {}
 
         int textureFor(int handle);
+
+        default int textureFor(int handle, AndroidRasterPlan.Requirement requirement) {
+            return textureFor(handle);
+        }
 
         default void releaseSprite(int handle) {}
 
@@ -919,7 +924,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private void prepareFrameResources() {
         updateDisplayMetrics();
         textures.onFrameStart();
-        resolveFrameResources(textures, frameI32, frameU8Bytes,
+        resolveFrameResources(textures, frameI32, frameF32, frameU8Bytes,
                 frameSpriteTextures, frameSpriteFilters, frameSpriteWidths,
                 frameSpriteHeights, frameSpriteU0, frameSpriteV0,
                 frameSpriteU1, frameSpriteV1, frameTextTextures);
@@ -928,22 +933,46 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static void resolveFrameResources(TextureProvider textures, IntBuffer frameI32,
             ByteBuffer frameU8Bytes, int[] spriteTextures, int[] spriteFilters,
             long[] textTextures) {
-        resolveFrameResources(textures, frameI32, frameU8Bytes, spriteTextures, spriteFilters,
+        resolveFrameResources(textures, frameI32, null, frameU8Bytes, spriteTextures, spriteFilters,
                 new int[MAX_SPRITES], new int[MAX_SPRITES], new float[MAX_SPRITES],
                 new float[MAX_SPRITES], new float[MAX_SPRITES], new float[MAX_SPRITES],
                 textTextures);
     }
 
     static void resolveFrameResources(TextureProvider textures, IntBuffer frameI32,
+            FloatBuffer frameF32,
             ByteBuffer frameU8Bytes, int[] spriteTextures, int[] spriteFilters,
             int[] spriteWidths, int[] spriteHeights,
             float[] spriteU0, float[] spriteV0, float[] spriteU1, float[] spriteV1,
             long[] textTextures) {
         int spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
+        HashMap<Integer, AndroidRasterPlan.Requirement> requirements = new HashMap<>();
+        if (frameF32 != null) {
+            for (int index = 0; index < spriteCount; index += 1) {
+                int handle = frameI32.get(I_SPRITE_BASE + index * SPRITE_I32_STRIDE);
+                int values = F_SPRITE_BASE + index * SPRITE_F32_STRIDE;
+                AndroidRasterPlan.Requirement requirement = requirements.get(handle);
+                if (requirement == null) {
+                    requirement = new AndroidRasterPlan.Requirement();
+                    requirements.put(handle, requirement);
+                }
+                requirement.include(frameF32.get(values + 2), frameF32.get(values + 3),
+                        frameF32.get(values + 6), frameF32.get(values + 7),
+                        frameF32.get(values + 10), frameF32.get(values + 11));
+            }
+        }
+        HashMap<Integer, Integer> resolvedTextures = new HashMap<>();
         for (int index = 0; index < spriteCount; index += 1) {
             int base = I_SPRITE_BASE + index * SPRITE_I32_STRIDE;
             int handle = frameI32.get(base);
-            int texture = textures.textureFor(handle);
+            Integer resolvedTexture = resolvedTextures.get(handle);
+            int texture;
+            if (resolvedTexture == null) {
+                texture = textures.textureFor(handle, requirements.get(handle));
+                resolvedTextures.put(handle, texture);
+            } else {
+                texture = resolvedTexture;
+            }
             spriteTextures[index] = texture == 0 ? textures.fallbackTexture() : texture;
             spriteFilters[index] = textures.filterFor(handle);
             spriteWidths[index] = Math.max(1, textures.logicalWidthFor(handle));

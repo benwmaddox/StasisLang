@@ -38,4 +38,12 @@ public final class WorkshopTextureProviderTest {
         assertFalse(WorkshopTextureProvider.generationMatches(3, 7, 4, 7));
         assertFalse(WorkshopTextureProvider.generationMatches(4, 6, 4, 7));
     }
+
+    @Test
+    public void textRasterMemoryLimitIsExactAndOverflowSafe() {
+        assertTrue(WorkshopTextureProvider.textRasterSupported(2048, 2048));
+        assertFalse(WorkshopTextureProvider.textRasterSupported(2049, 2048));
+        assertFalse(WorkshopTextureProvider.textRasterSupported(Integer.MAX_VALUE, 2));
+        assertFalse(WorkshopTextureProvider.textRasterSupported(0, 1));
+    }
 }

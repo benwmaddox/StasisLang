@@ -604,6 +604,54 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(13, (int)textTextures[1]);
     }
 
+    @Test
+    public void frameResourcesAggregateEveryUseBeforeResolvingAHandle() {
+        IntBuffer frame = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        FloatBuffer values = FloatBuffer.allocate(StasisPreviewRenderer.FRAME_F32_CAPACITY);
+        frame.put(StasisPreviewRenderer.I_SPRITE_COUNT, 2);
+        frame.put(StasisPreviewRenderer.I_SPRITE_BASE, 7);
+        frame.put(StasisPreviewRenderer.I_SPRITE_BASE + StasisPreviewRenderer.SPRITE_I32_STRIDE, 7);
+        int first = StasisPreviewRenderer.F_SPRITE_BASE;
+        int second = first + StasisPreviewRenderer.SPRITE_F32_STRIDE;
+        values.put(first + 2, 20.0f); values.put(first + 3, 10.0f);
+        values.put(first + 10, 1.0f); values.put(first + 11, 1.0f);
+        values.put(second + 2, 30.0f); values.put(second + 3, 10.0f);
+        values.put(second + 6, 5.0f); values.put(second + 7, 5.0f);
+        values.put(second + 10, -2.0f); values.put(second + 11, 3.0f);
+        final int[] calls = {0};
+        final AndroidRasterPlan.Requirement[] captured = {null};
+        StasisPreviewRenderer.TextureProvider provider = new StasisPreviewRenderer.TextureProvider() {
+            @Override public void onResourceGenerationChanged(int surface, int renderer,
+                    boolean discard, String reason) {}
+            @Override public int textureFor(int handle) { throw new AssertionError(); }
+            @Override public int textureFor(int handle, AndroidRasterPlan.Requirement requirement) {
+                calls[0] += 1;
+                captured[0] = requirement;
+                return 8;
+            }
+        };
+        int[] textures = new int[StasisPreviewRenderer.MAX_SPRITES];
+        int[] filters = new int[StasisPreviewRenderer.MAX_SPRITES];
+        long[] text = new long[StasisPreviewRenderer.MAX_TEXT];
+
+        StasisPreviewRenderer.resolveFrameResources(provider, frame, values,
+                ByteBuffer.allocate(StasisPreviewRenderer.TEXT_U8_CAPACITY), textures, filters,
+                new int[StasisPreviewRenderer.MAX_SPRITES],
+                new int[StasisPreviewRenderer.MAX_SPRITES],
+                new float[StasisPreviewRenderer.MAX_SPRITES],
+                new float[StasisPreviewRenderer.MAX_SPRITES],
+                new float[StasisPreviewRenderer.MAX_SPRITES],
+                new float[StasisPreviewRenderer.MAX_SPRITES], text);
+
+        assertEquals(1, calls[0]);
+        AndroidRasterPlan.Result plan = AndroidRasterPlan.exact(
+                100, 50, captured[0], 2.0f, 8192);
+        assertEquals(2400, plan.width);
+        assertEquals(1200, plan.height);
+        assertEquals(8, textures[0]);
+        assertEquals(8, textures[1]);
+    }
+
     private static void putLine(FloatBuffer lines, int index, float x1, float y1,
             float x2, float y2, float r, float g, float b, float a) {
         int base = StasisPreviewRenderer.F_LINE_BASE

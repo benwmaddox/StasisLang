@@ -383,6 +383,15 @@ def verify_it029(log: str, after_position: int) -> dict:
                or resources[field] < 0 or resources[field] > maximum
                for field, maximum in bounds.items()):
             raise SeamError("IT-029 resource counts are unbounded")
+        byte_receipts = ("source_bytes", "decode_bytes", "upload_bytes",
+                         "texture_bytes", "maximum_cache_bytes", "atlas_capacity_bytes")
+        if any(type(resources.get(field)) is not int or resources[field] <= 0
+               for field in byte_receipts):
+            raise SeamError("IT-029 physical resource byte receipts are incomplete")
+        if resources["upload_bytes"] < resources["texture_bytes"] \
+                or resources["maximum_cache_bytes"] > 64 * 1024 * 1024 \
+                or resources["atlas_capacity_bytes"] > 64 * 1024 * 1024:
+            raise SeamError("IT-029 physical resource byte receipts exceed their bounds")
 
     alpha, beta_before, beta_after, alpha_return = values
     for field in ("sprite_handles", "font_handles", "cached_text_handles"):
@@ -1036,6 +1045,7 @@ def verify_files(log_path: Path, capture: Path, manifest_path: Path, apk: Path,
             ("project_b_before_recreation", "project_b_after_recreation"),
         )
     ]
+    framebuffer_width, framebuffer_height, _ = read_capture(supplied_it029[-1])
     evidence = {
         "schema": "stasis.workshop_seam.evidence.v1",
         "test_id": "IT-025",
@@ -1043,6 +1053,12 @@ def verify_files(log_path: Path, capture: Path, manifest_path: Path, apk: Path,
         "source_revision": metadata.get("git_revision", ""),
         "apk_sha256": _sha256(apk),
         "capture_sha256": _sha256(capture),
+        "costs": {
+            "apk_bytes": apk.stat().st_size,
+            "capture_png_bytes": capture.stat().st_size,
+            "framebuffer_bytes": framebuffer_width * framebuffer_height * 4,
+            "framebuffer_size": [framebuffer_width, framebuffer_height],
+        },
         "metadata": metadata,
         "it029_capture_artifacts": capture_evidence,
         "it029_restore_pixel_comparisons": restore_pixel_comparisons,

@@ -162,6 +162,12 @@ def _it029_case(phase, sequence, root, text_hash, capture_hash, command_trace,
         "maximum_live_regions": 3,
         "maximum_text_textures": 2,
         "maximum_font_entries": 1,
+        "source_bytes": 4096 * sequence,
+        "decode_bytes": 16384 * sequence,
+        "upload_bytes": 17424 * sequence,
+        "texture_bytes": 16384 * sequence,
+        "maximum_cache_bytes": 65536,
+        "atlas_capacity_bytes": 16 * 1024 * 1024,
     }
     return {
         "schema": "stasis.workshop_resource_scope.v1",
@@ -627,6 +633,17 @@ class WorkshopSeamTests(unittest.TestCase):
         with self.assertRaisesRegex(SeamError, "capture artifacts"):
             verify_log(reused, MANIFEST)
 
+    def test_rejects_it029_missing_or_unbounded_physical_byte_receipts(self):
+        with self.assertRaisesRegex(SeamError, "byte receipts are incomplete"):
+            verify_log(GOOD.replace('"decode_bytes":16384', '"decode_bytes":0', 1),
+                       MANIFEST)
+        with self.assertRaisesRegex(SeamError, "byte receipts exceed"):
+            verify_log(GOOD.replace('"maximum_cache_bytes":65536',
+                                    '"maximum_cache_bytes":67108865', 1), MANIFEST)
+        with self.assertRaisesRegex(SeamError, "byte receipts exceed"):
+            verify_log(GOOD.replace('"upload_bytes":17424',
+                                    '"upload_bytes":16000', 1), MANIFEST)
+
     def test_rejects_missing_truncated_or_reordered_it030_evidence(self):
         summary = next(line for line in GOOD.splitlines()
                        if line.startswith("Stasis Workshop IT-030: "))
@@ -704,6 +721,8 @@ class WorkshopSeamTests(unittest.TestCase):
             result = verify_files(log_path, capture, manifest, apk, metadata,
                                   root / "evidence.json", it029)
             self.assertEqual(4, len(result["it029_capture_artifacts"]))
+            self.assertGreater(result["costs"]["apk_bytes"], 0)
+            self.assertGreater(result["costs"]["framebuffer_bytes"], 0)
             self.assertGreater(
                 result["it029_capture_artifacts"][0]["pixel_oracle"]["project_pixels"], 32
             )
