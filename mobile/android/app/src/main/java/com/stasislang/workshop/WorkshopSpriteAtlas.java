@@ -44,8 +44,11 @@ final class WorkshopSpriteAtlas {
     int pageSize() { return pageSize; }
     int pageCount() { return pages.size(); }
 
-    /** Conservative per-axis raster cap that is uploadable through every atlas path. */
-    static int maximumRasterDimension(int maximumTextureSize) {
+    static int maximumRasterWidth(int maximumTextureSize) {
+        return Math.max(0, maximumTextureSize - DEDICATED_WIDTH_OVERHEAD);
+    }
+
+    static int maximumRasterHeight(int maximumTextureSize) {
         return Math.max(0, maximumTextureSize - DEDICATED_HEIGHT_OVERHEAD);
     }
 

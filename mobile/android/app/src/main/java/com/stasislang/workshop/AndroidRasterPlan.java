@@ -48,6 +48,12 @@ final class AndroidRasterPlan {
 
     static Result exact(int sourceWidth, int sourceHeight, Requirement requirement,
             float density, int maximumTextureSize) {
+        return exact(sourceWidth, sourceHeight, requirement, density,
+                maximumTextureSize, maximumTextureSize);
+    }
+
+    static Result exact(int sourceWidth, int sourceHeight, Requirement requirement,
+            float density, int maximumWidth, int maximumHeight) {
         if (sourceWidth <= 0 || sourceHeight <= 0 || !Float.isFinite(density)
                 || density <= 0.0f) return new Result(1, 1, false);
         Requirement requested = requirement == null ? new Requirement() : requirement;
@@ -60,11 +66,13 @@ final class AndroidRasterPlan {
         scale *= density;
         int width = ceilProduct(sourceWidth, scale);
         int height = ceilProduct(sourceHeight, scale);
-        int cap = Math.min(MAX_DIMENSION, Math.max(0, maximumTextureSize));
-        boolean supported = cap > 0 && width <= cap && height <= cap
+        int widthCap = Math.min(MAX_DIMENSION, Math.max(0, maximumWidth));
+        int heightCap = Math.min(MAX_DIMENSION, Math.max(0, maximumHeight));
+        boolean supported = widthCap > 0 && heightCap > 0
+                && width <= widthCap && height <= heightCap
                 && (long)width * height <= MAX_PIXELS;
-        return new Result(Math.max(1, Math.min(width, cap)),
-                Math.max(1, Math.min(height, cap)), supported);
+        return new Result(Math.max(1, Math.min(width, widthCap)),
+                Math.max(1, Math.min(height, heightCap)), supported);
     }
 
     private static int ceilProduct(int value, double scale) {

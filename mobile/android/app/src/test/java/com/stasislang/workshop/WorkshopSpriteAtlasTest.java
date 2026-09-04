@@ -10,19 +10,20 @@ import org.junit.Test;
 
 public final class WorkshopSpriteAtlasTest {
     @Test
-    public void dedicatedPageBoundaryReservesHeaderAndExtrusionOnBothAxes() {
-        assertEquals(250, WorkshopSpriteAtlas.maximumRasterDimension(256));
-        assertEquals(4090, WorkshopSpriteAtlas.maximumRasterDimension(4096));
-        assertEquals(0, WorkshopSpriteAtlas.maximumRasterDimension(5));
+    public void dedicatedPageBoundaryReservesIndependentWidthAndHeightOverhead() {
+        int widthCap = WorkshopSpriteAtlas.maximumRasterWidth(256);
+        int heightCap = WorkshopSpriteAtlas.maximumRasterHeight(256);
+        assertEquals(254, widthCap);
+        assertEquals(250, heightCap);
+        assertEquals(4094, WorkshopSpriteAtlas.maximumRasterWidth(4096));
+        assertEquals(4090, WorkshopSpriteAtlas.maximumRasterHeight(4096));
 
-        AndroidRasterPlan.Requirement exact = new AndroidRasterPlan.Requirement();
-        exact.include(250, 250, 0, 0, 1, 1);
-        assertTrue(AndroidRasterPlan.exact(100, 100, exact, 1.0f,
-                WorkshopSpriteAtlas.maximumRasterDimension(256)).supported);
-        AndroidRasterPlan.Requirement tooLarge = new AndroidRasterPlan.Requirement();
-        tooLarge.include(251, 251, 0, 0, 1, 1);
-        assertFalse(AndroidRasterPlan.exact(100, 100, tooLarge, 1.0f,
-                WorkshopSpriteAtlas.maximumRasterDimension(256)).supported);
+        assertTrue(AndroidRasterPlan.exact(
+                254, 250, null, 1.0f, widthCap, heightCap).supported);
+        assertFalse(AndroidRasterPlan.exact(
+                255, 250, null, 1.0f, widthCap, heightCap).supported);
+        assertFalse(AndroidRasterPlan.exact(
+                254, 251, null, 1.0f, widthCap, heightCap).supported);
     }
 
     @Test

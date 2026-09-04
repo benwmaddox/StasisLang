@@ -184,7 +184,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         if (cached != null) {
             cachedPlan = AndroidRasterPlan.exact(cached.logicalWidth, cached.logicalHeight,
                     requirement, rasterScale,
-                    WorkshopSpriteAtlas.maximumRasterDimension(maximumTextureSize));
+                    WorkshopSpriteAtlas.maximumRasterWidth(maximumTextureSize),
+                    WorkshopSpriteAtlas.maximumRasterHeight(maximumTextureSize));
         }
         if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)
                 && cached.checkedManifestStamp == manifestStamp
@@ -212,7 +213,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             AndroidRasterPlan.Result plan = AndroidRasterPlan.exact(
                     Math.max(1, resolved.optInt("width")),
                     Math.max(1, resolved.optInt("height")), requirement, rasterScale,
-                    WorkshopSpriteAtlas.maximumRasterDimension(maximumTextureSize));
+                    WorkshopSpriteAtlas.maximumRasterWidth(maximumTextureSize),
+                    WorkshopSpriteAtlas.maximumRasterHeight(maximumTextureSize));
             if (!plan.supported) throw new IOException(
                     "required physical raster exceeds Android texture limits");
             String canonicalSource = new File(resolved.getString("path")).getCanonicalPath();
