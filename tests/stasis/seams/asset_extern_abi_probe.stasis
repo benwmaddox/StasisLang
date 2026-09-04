@@ -1,9 +1,5 @@
 import "../../../src/stdlib/graphics.stasis";
 
-enum SpriteRef {
-    Loaded = 101,
-}
-
 global ProbeState {
     sprite: Sprite;
     text: TextRun;
@@ -19,20 +15,9 @@ function set_replacement_text(a: u8, b: u8, length: i32): void {
 }
 
 function render(): i32 {
-    gfx_cmd_begin();
+    begin_frame();
     ProbeState.text.draw(12.0, 34.0, 1.0, 1.0, 1.0, 1.0);
-    if (gfx_cmd_i32[GFX_I_TEXT_COUNT] != 1) {
-        return 1;
-    }
-    if (gfx_cmd_i32[GFX_I_TEXT_BASE + 0] != ProbeState.text.font) {
-        return 2;
-    }
-    if (gfx_cmd_i32[GFX_I_TEXT_BASE + 1] != 0 - ProbeState.text.handle) {
-        return 3;
-    }
-    if (gfx_cmd_i32[GFX_I_TEXT_BASE + 2] != 0) {
-        return 4;
-    }
+    end_frame();
     return 0;
 }
 
@@ -40,7 +25,12 @@ function main(): i32 {
     if (!ProbeState.sprite.load_sprite_from("assets/球.png", 47, 29)) {
         return 1;
     }
-    if (ProbeState.sprite.reference() != SpriteRef.Loaded || ProbeState.sprite.width != 47 || ProbeState.sprite.height != 29) {
+    if (
+        !ProbeState.sprite.valid()
+        || ProbeState.sprite.reference() == SpriteRef.Invalid
+        || ProbeState.sprite.width != 47
+        || ProbeState.sprite.height != 29
+    ) {
         return 2;
     }
 

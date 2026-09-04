@@ -3338,8 +3338,8 @@ mod tests {
         .expect("write manifest");
         let sources = vec![(
             "src/main.stasis".to_string(),
-            r#"extern function load_font(path: string, size: i32): i32;
-function main(): i32 { load_font("../assets/fonts/ui.ttf", 16); return 0; }
+            r#"function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }
+function main(): i32 { request_font("../assets/fonts/ui.ttf", 16); return 0; }
 "#
             .to_string(),
         )];
@@ -3391,10 +3391,8 @@ function main(): i32 { load_font("../assets/fonts/ui.ttf", 16); return 0; }
         .expect("write manifest");
         let sources = vec![(
             "src/main.stasis".to_string(),
-            r#"struct Sprite { handle: i32; width: i32; height: i32; }
-global hero: Sprite;
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
-function main(): void { hero.load_sprite_from("../assets/svg/used.svg", 32, 32); }
+            r#"function @asset_path(path) request_sprite(path: string, width: i32, height: i32): bool { return true; }
+function main(): void { request_sprite("../assets/svg/used.svg", 32, 32); }
 "#
             .to_string(),
         )];
@@ -3437,10 +3435,8 @@ function main(): void { hero.load_sprite_from("../assets/svg/used.svg", 32, 32);
         std::fs::write(svg_dir.join("unused.svg"), unused_svg).expect("write unused svg");
         std::fs::write(
             src_dir.join("main.stasis"),
-            r#"struct Sprite { handle: i32; width: i32; height: i32; }
-global hero: Sprite;
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
-function main(): i32 { if (hero.load_sprite_from("../assets/svg/used.svg", 37, 19)) { return hero.handle; } return 0; }
+            r#"function @asset_path(path) request_sprite(path: string, width: i32, height: i32): bool { return true; }
+function main(): i32 { if (request_sprite("../assets/svg/used.svg", 37, 19)) { return 1; } return 0; }
 function tick(): i32 { return 0; }
 function render(): i32 { return 0; }
 "#,

@@ -7820,14 +7820,18 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
         let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
         let mut process = WasmProcess::new();
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        process
+            .set_project_root(display_path(&source_root))
+            .expect("set compiler-owned graphics project root");
         process.set_required_emit_roots(&[
             "main".to_string(),
             "tick".to_string(),
             "render".to_string(),
         ]);
         process.upsert_file(
-            "dynamic_text.stasis",
-            "struct TextRun { font: i32; handle: i32; width: f32; height: f32; } global run: TextRun; global text: utf8[8]; function @effects(graphics)@extern(\"stasis_jit_text_run_replace_from\") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool; function main(): i32 { text[0] = 65; text.length = 1; if (run.replace_text_from(1, text)) { return 1; } return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+            "tests/stasis/compiler/dynamic_text_release.stasis",
+            "import \"../../../src/stdlib/graphics.stasis\"; global run: TextRun; global text: utf8[8]; function main(): i32 { text[0] = 65; text.length = 1; if (run.replace_text_from(1, text)) { return 1; } return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
         );
         process.compile().expect("compile Web dynamic text fixture");
         assert!(process
