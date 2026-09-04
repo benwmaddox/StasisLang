@@ -30,93 +30,94 @@ function main(): i32 {
     last_tick_result = 0;
     last_render_result = 0;
     last_trace = 0;
-    host_i32[32 + 44] = 0;
+    host_i32[HOST_I_KEY_BASE + 44] = 0;
     return 0;
 }
 
 function apply_snapshot(index: i32): void {
-    host_i32[10] = index + 1;
-    host_i32[11] = 0;
-    host_i32[12] = 320;
-    host_i32[13] = 180;
-    host_i32[14] = 4;
-    host_i32[16] = 60;
-    host_i32[17] = 1;
-    host_i32[18] = 0;
-    host_i32[22] = 320;
-    host_i32[23] = 180;
-    host_i32[24] = 320;
-    host_i32[25] = 180;
-    host_i32[30] = 1;
-    host_i32[31] = 1;
-    host_i32[8] = 1;
-    host_i32[544] = 77;
-    host_i32[545] = 1;
-    host_i32[546] = 0;
-    host_i32[547] = 0;
-    host_f32[48] = 1.0;
-    host_f32[49] = 1.0;
-    host_f32[50] = 320.0;
-    host_f32[51] = 180.0;
-    host_f32[52] = 0.0;
-    host_f32[53] = 0.0;
-    host_f32[54] = 320.0;
-    host_f32[55] = 180.0;
-    host_f32[56] = 1280.0;
-    host_f32[57] = 720.0;
+    host_i32[HOST_I_TICK_INDEX] = index + 1;
+    host_i32[HOST_I_RESIZED] = 0;
+    host_i32[HOST_I_SCREEN_W_PX] = 320;
+    host_i32[HOST_I_SCREEN_H_PX] = 180;
+    host_i32[HOST_I_VERSION] = 4;
+    host_i32[HOST_I_TICK_HZ] = 60;
+    host_i32[HOST_I_WINDOW_FOCUSED] = 1;
+    host_i32[HOST_I_WINDOW_MINIMIZED] = 0;
+    host_i32[HOST_I_NATIVE_W_PX] = 320;
+    host_i32[HOST_I_NATIVE_H_PX] = 180;
+    host_i32[HOST_I_DRAWABLE_W_PX] = 320;
+    host_i32[HOST_I_DRAWABLE_H_PX] = 180;
+    host_i32[HOST_I_DISPLAY_GENERATION] = 1;
+    host_i32[HOST_I_DENSITY_GENERATION] = 1;
+    host_i32[HOST_I_DROPPED_POINTERS] = 0;
+    host_i32[HOST_I_POINTER_COUNT] = 1;
+    host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 0] = 77;
+    host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 1] = 1;
+    host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 2] = 0;
+    host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 3] = 0;
+    host_f32[HOST_F_CONTENT_SCALE] = 1.0;
+    host_f32[HOST_F_RASTER_SCALE] = 1.0;
+    host_f32[HOST_F_LOGICAL_W] = 320.0;
+    host_f32[HOST_F_LOGICAL_H] = 180.0;
+    host_f32[HOST_F_SAFE_X] = 0.0;
+    host_f32[HOST_F_SAFE_Y] = 0.0;
+    host_f32[HOST_F_SAFE_W] = 320.0;
+    host_f32[HOST_F_SAFE_H] = 180.0;
+    host_f32[HOST_F_AVAILABLE_W] = 1280.0;
+    host_f32[HOST_F_AVAILABLE_H] = 720.0;
 
     if (index == 0) {
-        host_i32[32 + 44] = 1;
-        host_i32[546] = 1;
-        host_f32[42] = 10.5;
-        host_f32[43] = 20.0;
-        host_f32[46] = 0.0328125;
-        host_f32[47] = 0.11111111;
+        host_i32[HOST_I_KEY_BASE + 44] = 1;
+        host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 2] = 1;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 0] = 10.5;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 1] = 20.0;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 4] = 0.0328125;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 5] = 0.11111111;
     } else if (index == 1) {
-        host_i32[32 + 44] = 0;
-        host_i32[11] = 1;
-        host_i32[12] = 641;
-        host_i32[13] = 359;
-        host_i32[22] = 1282;
-        host_i32[23] = 718;
-        host_i32[24] = 1282;
-        host_i32[25] = 718;
-        host_i32[30] = 2;
-        host_i32[31] = 2;
-        host_f32[42] = 18.25;
-        host_f32[43] = 28.5;
-        host_f32[44] = 7.75;
-        host_f32[45] = 8.5;
-        host_f32[46] = 0.02847114;
-        host_f32[47] = 0.07938719;
-        host_f32[49] = 2.0;
-        host_f32[50] = 641.0;
-        host_f32[51] = 359.0;
-        host_f32[54] = 641.0;
-        host_f32[55] = 359.0;
+        host_i32[HOST_I_KEY_BASE + 44] = 0;
+        host_i32[HOST_I_RESIZED] = 1;
+        host_i32[HOST_I_SCREEN_W_PX] = 641;
+        host_i32[HOST_I_SCREEN_H_PX] = 359;
+        host_i32[HOST_I_NATIVE_W_PX] = 1282;
+        host_i32[HOST_I_NATIVE_H_PX] = 718;
+        host_i32[HOST_I_DRAWABLE_W_PX] = 1282;
+        host_i32[HOST_I_DRAWABLE_H_PX] = 718;
+        host_i32[HOST_I_DISPLAY_GENERATION] = 2;
+        host_i32[HOST_I_DENSITY_GENERATION] = 2;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 0] = 18.25;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 1] = 28.5;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 2] = 7.75;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 3] = 8.5;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 4] = 0.02847114;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 5] = 0.07938719;
+        host_f32[HOST_F_RASTER_SCALE] = 2.0;
+        host_f32[HOST_F_LOGICAL_W] = 641.0;
+        host_f32[HOST_F_LOGICAL_H] = 359.0;
+        host_f32[HOST_F_SAFE_W] = 641.0;
+        host_f32[HOST_F_SAFE_H] = 359.0;
     } else {
-        host_i32[32 + 44] = 1;
-        host_i32[545] = 0;
-        host_i32[547] = 1;
-        host_i32[12] = 641;
-        host_i32[13] = 359;
-        host_i32[22] = 1282;
-        host_i32[23] = 718;
-        host_i32[24] = 1282;
-        host_i32[25] = 718;
-        host_i32[30] = 2;
-        host_i32[31] = 2;
-        host_f32[42] = 21.0;
-        host_f32[43] = 31.0;
-        host_f32[44] = 2.75;
-        host_f32[45] = 2.5;
-        host_f32[46] = 0.03276131;
-        host_f32[47] = 0.08635098;
-        host_f32[49] = 2.0;
-        host_f32[50] = 641.0;
-        host_f32[51] = 359.0;
-        host_f32[54] = 641.0;
-        host_f32[55] = 359.0;
+        host_i32[HOST_I_KEY_BASE + 44] = 1;
+        host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 1] = 0;
+        host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 3] = 1;
+        host_i32[HOST_I_SCREEN_W_PX] = 641;
+        host_i32[HOST_I_SCREEN_H_PX] = 359;
+        host_i32[HOST_I_NATIVE_W_PX] = 1282;
+        host_i32[HOST_I_NATIVE_H_PX] = 718;
+        host_i32[HOST_I_DRAWABLE_W_PX] = 1282;
+        host_i32[HOST_I_DRAWABLE_H_PX] = 718;
+        host_i32[HOST_I_DISPLAY_GENERATION] = 2;
+        host_i32[HOST_I_DENSITY_GENERATION] = 2;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 0] = 21.0;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 1] = 31.0;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 2] = 2.75;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 3] = 2.5;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 4] = 0.03276131;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 5] = 0.08635098;
+        host_f32[HOST_F_RASTER_SCALE] = 2.0;
+        host_f32[HOST_F_LOGICAL_W] = 641.0;
+        host_f32[HOST_F_LOGICAL_H] = 359.0;
+        host_f32[HOST_F_SAFE_W] = 641.0;
+        host_f32[HOST_F_SAFE_H] = 359.0;
     }
 }
 
@@ -183,7 +184,10 @@ function replay_metric(ticks: i32, metric: i32): i32 {
     if (metric == 3) {
         return gfx_cmd_i32[3] * 1000000 + gfx_cmd_i32[24] * 1000 + gfx_cmd_i32[22];
     }
-    return last_trace;
+    if (metric == 4) {
+        return last_trace;
+    }
+    return pointer_marks;
 }
 
 function it011_t1_entry(): i32 {
@@ -206,6 +210,10 @@ function it011_t1_trace(): i32 {
     return replay_metric(1, 4);
 }
 
+function it011_t1_pointer_marks(): i32 {
+    return replay_metric(1, 5);
+}
+
 function it011_t2_entry(): i32 {
     return replay_metric(2, 0);
 }
@@ -226,6 +234,10 @@ function it011_t2_trace(): i32 {
     return replay_metric(2, 4);
 }
 
+function it011_t2_pointer_marks(): i32 {
+    return replay_metric(2, 5);
+}
+
 function it011_t3_entry(): i32 {
     return replay_metric(3, 0);
 }
@@ -244,4 +256,8 @@ function it011_t3_counts(): i32 {
 
 function it011_t3_trace(): i32 {
     return replay_metric(3, 4);
+}
+
+function it011_t3_pointer_marks(): i32 {
+    return replay_metric(3, 5);
 }
