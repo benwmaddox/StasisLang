@@ -774,24 +774,22 @@ impl Task {
         self.ensure_open("mark an action for repair on")?;
         let reason = validate_text("repair reason", &reason.into(), MAX_ACTION_TEXT_CHARS)?;
         let action = self.action_mut(id)?;
-        if matches!(&action.state, ActionState::Rejected { .. }) {
-            if action.revisions.len() >= MAX_ACTION_REVISIONS {
-                return Err(TaskSessionError::FieldTooLong {
-                    max: MAX_ACTION_REVISIONS,
-                    actual: action.revisions.len() + 1,
-                    field: "action revisions",
-                });
-            }
-            action.revisions.push(ActionRevision {
-                description: action.description.clone(),
-                state: action.state.clone(),
-            });
-        }
         match &action.state {
             ActionState::Proposed
             | ActionState::Accepted
             | ActionState::Applied
             | ActionState::Rejected { .. } => {
+                if action.revisions.len() >= MAX_ACTION_REVISIONS {
+                    return Err(TaskSessionError::FieldTooLong {
+                        max: MAX_ACTION_REVISIONS,
+                        actual: action.revisions.len() + 1,
+                        field: "action revisions",
+                    });
+                }
+                action.revisions.push(ActionRevision {
+                    description: action.description.clone(),
+                    state: action.state.clone(),
+                });
                 action.state = ActionState::NeedsRepair { reason };
                 Ok(())
             }
@@ -1833,6 +1831,50 @@ mod tests {
             .expect("task")
             .accepted_actions()
             .any(|action| action.id == ActionId::new("good")));
+    }
+
+    #[test]
+    fn repairing_accepted_and_applied_actions_preserves_acceptance_history() {
+        let mut session = session_with_task();
+        session
+            .propose_action("accepted", "accepted edit")
+            .expect("accepted action");
+        session.accept_action("accepted").expect("accept action");
+        session
+            .mark_action_for_repair("accepted", "revise accepted edit")
+            .expect("mark accepted action for repair");
+        session
+            .repair_action("accepted", "repaired accepted edit")
+            .expect("repair accepted action");
+
+        session
+            .propose_action("applied", "applied edit")
+            .expect("applied action");
+        session
+            .accept_action("applied")
+            .expect("accept applied action");
+        session.apply_action("applied").expect("apply action");
+        session
+            .mark_action_for_repair("applied", "revise applied edit")
+            .expect("mark applied action for repair");
+        session
+            .repair_action("applied", "repaired applied edit")
+            .expect("repair applied action");
+
+        for id in ["accepted", "applied"] {
+            let action = &session.active_task().expect("task").actions[&ActionId::new(id)];
+            assert_eq!(action.state, ActionState::Proposed);
+            assert!(action.was_accepted(), "{id} lost its accepted revision");
+            assert!(session
+                .active_task()
+                .expect("task")
+                .accepted_actions()
+                .any(|candidate| candidate.id == ActionId::new(id)));
+            assert!(action
+                .revisions
+                .iter()
+                .any(|revision| revision.state.is_accepted()));
+        }
     }
 
     #[test]

@@ -64,18 +64,22 @@ impl DesktopEditor {
     }
 
     fn flush_intents(&mut self) {
-        for intent in self.state.intents.drain(..) {
-            if matches!(intent, EditorIntent::Reconnect(_)) {
-                let request = LiveRequest::new(self.next_request, LiveCommand::Status);
-                self.next_request = self.next_request.saturating_add(1);
-                if let Err(error) = self.client.submit(request) {
-                    self.state.notice = Some(error);
+        let intents = std::mem::take(&mut self.state.intents);
+        let mut pending = Vec::with_capacity(intents.len());
+        for intent in intents {
+            match intent {
+                EditorIntent::Reconnect(task) => {
+                    let request = LiveRequest::new(self.next_request, LiveCommand::Status);
+                    self.next_request = self.next_request.saturating_add(1);
+                    if let Err(error) = self.client.submit(request) {
+                        self.state.notice = Some(error);
+                        pending.push(EditorIntent::Reconnect(task));
+                    }
                 }
-            } else if !matches!(intent, EditorIntent::Cancel(_)) {
-                self.state.notice = Some(
-                    "Queued for the task-scoped host adapter; approval and validation remain explicit.".into());
+                intent => pending.push(intent),
             }
         }
+        self.state.intents = pending;
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -392,7 +396,14 @@ impl EditorState {
             egui::Key::Num7 => Key::Digit(7),
             egui::Key::Num8 => Key::Digit(8),
             egui::Key::Num9 => Key::Digit(9),
-            other => Key::Char(other.name().chars().next()?.to_ascii_lowercase()),
+            other => {
+                let mut name = other.name().chars();
+                let character = name.next()?;
+                if name.next().is_some() {
+                    return None;
+                }
+                Key::Char(character.to_ascii_lowercase())
+            }
         };
         Some(KeyChord::new(
             Modifiers {
@@ -622,6 +633,7 @@ mod tests {
     use stasis_ai::task_session::{
         ConnectionState, FocusedTestResult, TaskLifecycle, ValidationStatus,
     };
+    use stasis_runner::live::live_session;
 
     fn task_state() -> EditorState {
         let mut state = EditorState::default();
@@ -736,5 +748,109 @@ mod tests {
             state.session.active_task().unwrap().lifecycle,
             TaskLifecycle::Canceled
         ));
+    }
+
+    #[test]
+    fn flush_keeps_unhandled_test_intent_and_running_validation() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Run focused tests".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .handle(TaskSessionCommand::RunFocusedTests)
+            .unwrap();
+
+        editor.flush_intents();
+
+        assert!(matches!(
+            editor.state.intents.as_slice(),
+            [EditorIntent::Test(task)] if task == "task-1"
+        ));
+        assert!(matches!(
+            editor.state.session.active_task().unwrap().validation,
+            ValidationStatus::Running
+        ));
+    }
+
+    #[test]
+    fn flush_removes_reconnect_after_status_submission() {
+        let (client, server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Reconnect task".into();
+        editor.state.create_task().unwrap();
+        editor.state.session.disconnect().unwrap();
+        editor.state.handle(TaskSessionCommand::Reconnect).unwrap();
+
+        editor.flush_intents();
+
+        assert!(editor.state.intents.is_empty());
+        let requests = server.drain(4);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].command, LiveCommand::Status);
+    }
+
+    #[test]
+    fn flush_keeps_reconnect_when_status_submission_fails() {
+        let (client, server) = live_session(1);
+        client
+            .submit(LiveRequest::new(99, LiveCommand::Status))
+            .unwrap();
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Reconnect task".into();
+        editor.state.create_task().unwrap();
+        editor.state.session.disconnect().unwrap();
+        editor.state.handle(TaskSessionCommand::Reconnect).unwrap();
+
+        editor.flush_intents();
+
+        assert!(matches!(
+            editor.state.intents.as_slice(),
+            [EditorIntent::Reconnect(task)] if task == "task-1"
+        ));
+        assert_eq!(
+            editor.state.notice.as_deref(),
+            Some("live-session command queue is full")
+        );
+        assert_eq!(server.drain(1).len(), 1);
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn function_and_navigation_keys_do_not_alias_character_shortcuts() {
+        let state = EditorState::default();
+        let ctrl_shift = egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            ..egui::Modifiers::default()
+        };
+
+        assert_eq!(
+            EditorState::chord(&key_event(egui::Key::F1, egui::Modifiers::CTRL))
+                .and_then(|chord| state.shortcuts.command_for(chord)),
+            None
+        );
+        assert_eq!(
+            EditorState::chord(&key_event(egui::Key::Delete, ctrl_shift))
+                .and_then(|chord| state.shortcuts.command_for(chord)),
+            None
+        );
+        assert_eq!(
+            EditorState::chord(&key_event(egui::Key::F, egui::Modifiers::CTRL))
+                .and_then(|chord| state.shortcuts.command_for(chord)),
+            Some(TaskSessionCommand::Search)
+        );
     }
 }

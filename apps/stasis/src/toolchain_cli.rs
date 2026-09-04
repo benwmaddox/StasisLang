@@ -2968,30 +2968,45 @@ fn run_workspace_editor(
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
     let editor_root = workspace.root.clone();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let editor_shutdown = Arc::clone(&shutdown);
-    let editor = thread::spawn(move || desktop_editor::run(client, editor_root, editor_shutdown));
     let config = LiveRunConfig::new(
         workspace.root.clone(),
         entry_relative,
         PathBuf::from(&workspace.manifest.output),
     )
     .with_window_title(&workspace.manifest.name);
-    let run_result = run_live_in_process_with_data(
-        &entry_path,
-        None,
-        None,
-        None,
-        tick_sleep_micros,
-        None,
-        server,
-        config,
-    );
-    shutdown.store(true, Ordering::Release);
-    let editor_result = editor
-        .join()
-        .map_err(|_| "desktop editor thread panicked".to_string())
+    let runtime_shutdown = Arc::clone(&shutdown);
+    let runtime = thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_live_in_process_with_data(
+                &entry_path,
+                None,
+                None,
+                None,
+                tick_sleep_micros,
+                None,
+                server,
+                config,
+            )
+        }))
+        .map_err(|_| "live runtime thread panicked".to_string())
         .and_then(|result| result);
-    match (run_result, editor_result) {
+        runtime_shutdown.store(true, Ordering::Release);
+        result
+    });
+    let quit_client = client.clone();
+    let editor_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        desktop_editor::run(client, editor_root, Arc::clone(&shutdown))
+    }))
+    .map_err(|_| "desktop editor panicked".to_string())
+    .and_then(|result| result);
+    shutdown.store(true, Ordering::Release);
+    let _ = quit_client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
+    drop(quit_client);
+    let runtime_result = runtime
+        .join()
+        .map_err(|_| "live runtime thread panicked".to_string())
+        .and_then(|result| result);
+    match (runtime_result, editor_result) {
         (Err(runtime), Err(editor)) => {
             return Err(format!("{runtime}; editor shutdown also failed: {editor}"));
         }
