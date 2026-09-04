@@ -13,13 +13,17 @@ fn caller_effect_contract_must_name_writer_global_region() {
     let accepted = r#"
 import "../../src/stdlib/graphics.stasis";
 
+enum SpriteRef {
+    Probe = 1,
+}
+
 global effect_writer: SpriteRunWriter;
 
 function @effects(graphics, effect_writer) writer_lifecycle_with_region(): bool {
     if (!effect_writer.reserve(1, -1, 0, 0, 0, 0, 0)) {
         return false;
     }
-    if (!effect_writer.write(1, -1, 0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0)) {
+    if (!effect_writer.write(SpriteRef.Probe, -1, 0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0)) {
         effect_writer.cancel();
         return false;
     }
