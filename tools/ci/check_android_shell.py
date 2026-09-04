@@ -26,6 +26,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopFrameBudget.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPongAssetManifestMigration.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectBaselinePolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingStore.java",
@@ -116,7 +117,9 @@ REQUIRED_FILES = [
     "mobile/shells/android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java",
     "mobile/shells/android/app/src/main/cpp/stasis_android_assets.c",
     "tools/ci/test_android_asset_cache.py",
+    "tools/ci/test_android_project_baseline_policy.py",
     "tools/ci/java/com/stasislang/shell/StasisAssetCacheTest.java",
+    "tools/ci/java/com/stasislang/workshop/WorkshopProjectBaselinePolicyCheck.java",
     "tools/ci/check_android_release_package.py",
     "tests/android/AiQueuePolicyTest.java",
     "tests/android/WorkshopProjectFormatPolicyTest.java",
@@ -970,6 +973,8 @@ def main() -> int:
     assert "StandardCopyOption.REPLACE_EXISTING" in project_registry
     assert "PROJECT_BASELINES_DIR" in activity
     assert "ensureActiveProjectBaseline" in activity
+    assert "WorkshopProjectBaselinePolicy.requiredAction" in activity
+    assert "WorkshopProjectBaselinePolicy.Action.UPDATE_MARKER" in activity
     assert "loadProjectBaselineSnapshot" in activity
     assert "restoreImportedProjectSourceBaseline" in activity
     assert '"import".equals(activeProject.origin)' in activity
