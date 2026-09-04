@@ -5,11 +5,28 @@ const PARITY_WINDOW_H: i32 = 360;
 
 global parity_writer: SpriteRunWriter;
 
-function parity_write_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rotation: i32, alpha: i32): bool {
-    return parity_writer.write(handle, -256 + alpha, 0, x, y, w, h, 0.0, 0.0, 0.0, 0.0, w * 0.5, h * 0.5, 1.0, 1.0, i32_to_f32(rotation));
+function parity_write_sprite(sprite_ref: SpriteRef, x: f32, y: f32, w: f32, h: f32, rotation: i32, alpha: i32): bool {
+    return parity_writer.write(
+        sprite_ref,
+        -256 + alpha,
+        0,
+        x,
+        y,
+        w,
+        h,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        w * 0.5,
+        h * 0.5,
+        1.0,
+        1.0,
+        i32_to_f32(rotation)
+    );
 }
 
-function build_parity_frame(canvas_sprite: i32, opaque_sprite: i32, translucent_sprite: i32, font: i32, cached_label: TextRun): void {
+function build_parity_frame(canvas_sprite: SpriteRef, opaque_sprite: SpriteRef, translucent_sprite: SpriteRef, font: i32, cached_label: TextRun): void {
     begin_frame();
     clear(0.05, 0.08, 0.13, 1.0);
 

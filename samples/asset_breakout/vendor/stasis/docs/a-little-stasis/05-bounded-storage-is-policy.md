@@ -42,4 +42,3 @@ test `allocation reuses the lowest released slot`(): bool {
 ```
 
 **Keep:** capacity and slot reuse are state transitions, not hidden collection behavior.
-

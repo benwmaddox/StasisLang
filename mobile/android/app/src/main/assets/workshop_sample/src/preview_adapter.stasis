@@ -10,11 +10,11 @@ global PongHost {
     writer: SpriteRunWriter;
 }
 
-function pong_host_write_sprite(handle: i32, x: i32, y: i32, w: i32, h: i32, rotation: i32): bool {
+function pong_host_write_sprite(sprite_ref: SpriteRef, x: i32, y: i32, w: i32, h: i32, rotation: i32): bool {
     let width: f32 = i32_to_f32(w);
     let height: f32 = i32_to_f32(h);
     return PongHost.writer.write(
-        handle,
+        sprite_ref,
         -1,
         0,
         i32_to_f32(x),
@@ -40,7 +40,7 @@ function pong_host_render(): void {
         let written: i32 = 0;
         if (
             pong_host_write_sprite(
-                PongHost.paddle_sprite.handle,
+                PongHost.paddle_sprite.reference(),
                 Render.command1_x,
                 Render.command1_y,
                 Render.command1_w,
@@ -52,7 +52,7 @@ function pong_host_render(): void {
         }
         if (
             pong_host_write_sprite(
-                PongHost.paddle_sprite.handle,
+                PongHost.paddle_sprite.reference(),
                 Render.command2_x,
                 Render.command2_y,
                 Render.command2_w,
@@ -64,7 +64,7 @@ function pong_host_render(): void {
         }
         if (
             pong_host_write_sprite(
-                PongHost.center_sprite.handle,
+                PongHost.center_sprite.reference(),
                 Render.command4_x,
                 Render.command4_y,
                 Render.command4_w,
@@ -76,7 +76,7 @@ function pong_host_render(): void {
         }
         if (
             pong_host_write_sprite(
-                PongHost.ball_sprite.handle,
+                PongHost.ball_sprite.reference(),
                 Render.command3_x,
                 Render.command3_y,
                 Render.command3_w,

@@ -31,4 +31,3 @@ test `falling through the floor boundary lands in the same tick`(): bool {
 ```
 
 Full source: [platformer_landing.stasis](../examples/src/platformer_landing.stasis)
-

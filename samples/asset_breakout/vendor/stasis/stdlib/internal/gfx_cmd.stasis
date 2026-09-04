@@ -1,4 +1,5 @@
 import "../stdlib.stasis";
+import "../asset_tasks.stasis";
 
 // Graphics command buffer (current)
 //
@@ -290,7 +291,7 @@ function @effects(graphics) gfx_cmd_sprite_run_reserve(max_count: i32, clip: i32
 // Checked sequential direct store into the canonical instance lanes.
 function gfx_cmd_sprite_run_write(
     token: i32,
-    handle: i32,
+    sprite_ref: SpriteRef,
     tint_rgba: i32,
     instance_flags: i32,
     x: f32,
@@ -312,7 +313,7 @@ function gfx_cmd_sprite_run_write(
         || token != gfx_sprite_writer_token
         || gfx_sprite_writer_written < 0
         || gfx_sprite_writer_written >= gfx_sprite_writer_capacity
-        || handle == 0
+        || sprite_ref == SpriteRef.Invalid
         || instance_flags != 0
         || w <= 0.0
         || h <= 0.0
@@ -330,7 +331,7 @@ function gfx_cmd_sprite_run_write(
     let index: i32 = gfx_sprite_writer_start + gfx_sprite_writer_written;
     let base_i: i32 = GFX_I_SPRITE_BASE + index * GFX_SPRITE_STRIDE_I32;
     let base_f: i32 = GFX_F_SPRITE_BASE + index * GFX_SPRITE_STRIDE_F32;
-    gfx_cmd_i32[base_i + 0] = handle;
+    gfx_cmd_i32[base_i + 0] = sprite_ref;
     gfx_cmd_i32[base_i + 1] = tint_rgba;
     gfx_cmd_i32[base_i + 2] = instance_flags;
     gfx_cmd_f32[base_f + 0] = x;
@@ -390,7 +391,7 @@ function @effects(graphics) gfx_cmd_sprite_run_cancel(token: i32): bool {
 }
 
 function gfx_cmd_sprite_semantic(
-    handle: i32,
+    sprite_ref: SpriteRef,
     x: f32,
     y: f32,
     w: f32,
@@ -413,7 +414,7 @@ function gfx_cmd_sprite_semantic(
     if (
         !gfx_cmd_sprite_run_write(
             token,
-            handle,
+            sprite_ref,
             tint_rgba,
             0,
             x,
@@ -437,7 +438,7 @@ function gfx_cmd_sprite_semantic(
     gfx_cmd_sprite_run_finalize(token, 1);
 }
 
-function gfx_cmd_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
+function gfx_cmd_sprite(sprite_ref: SpriteRef, x: f32, y: f32, w: f32, h: f32, rot_deg: i32, a: i32): void {
     let alpha: i32 = a;
     if (alpha < 0) {
         alpha = 0;
@@ -445,7 +446,7 @@ function gfx_cmd_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rot_deg: i3
     if (alpha > 255) {
         alpha = 255;
     }
-    gfx_cmd_sprite_semantic(handle, x, y, w, h, 0.0, 0.0, 0.0, 0.0, w * 0.5, h * 0.5, 1.0, 1.0, i32_to_f32(rot_deg), -256 + alpha);
+    gfx_cmd_sprite_semantic(sprite_ref, x, y, w, h, 0.0, 0.0, 0.0, 0.0, w * 0.5, h * 0.5, 1.0, 1.0, i32_to_f32(rot_deg), -256 + alpha);
 }
 
 function gfx_cmd_text(font: i32, text: utf8[], x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {

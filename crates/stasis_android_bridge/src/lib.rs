@@ -4090,26 +4090,10 @@ mod tests {
     fn android_jit_preserves_negative_stable_sprite_handles() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = temp_project("negative_sprite_handle");
-        fs::create_dir_all(root.join("assets")).expect("create assets");
-        let sprite = include_bytes!(
-            "../../../mobile/android/app/src/main/assets/workshop_sample/assets/ball.svg"
+        let (root, handle) = write_typed_sprite_project(
+            "negative_sprite_handle",
+            "import \"/vendor/stasis/stdlib/graphics.stasis\";\nglobal TestHost { sprite: Sprite; }\nfunction main(): void { TestHost.sprite.load_sprite_from(\"assets/ball.svg\", 32, 32); }\nfunction tick(): void {}\n",
         );
-        fs::write(root.join("assets/ball.svg"), sprite).expect("write sprite");
-        let hash = stasis_assets::sha256_bytes(sprite);
-        fs::write(
-            root.join(stasis_assets::DEFAULT_ASSET_MANIFEST_PATH),
-            format!(r#"{{"schema":"stasis-assets","version":1,"assets":[{{"id":"ball","path":"assets/ball.svg","content_sha256":"{hash}","format":{{"kind":"sprite","encoding":"svg","width":32,"height":32}},"dependencies":[]}}]}}"#),
-        )
-        .expect("write manifest");
-        let manifest = load_android_workshop_asset_manifest(&root).expect("load manifest");
-        let handle = manifest.by_id("ball").expect("ball entry").handle.as_i32();
-        assert!(handle < 0, "fixture must exercise a negative stable handle");
-        fs::write(
-            root.join("src/main.stasis"),
-            "@link(\"stasis_graphics\");\nstruct Sprite { handle: i32; width: i32; height: i32; }\nglobal TestHost { sprite: Sprite; }\nfunction @extern(\"stasis_jit_sprite_load_from\") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;\nfunction main(): void { load_sprite_from(TestHost.sprite, \"assets/ball.svg\", 32, 32); }\nfunction tick(): void {}\n",
-        )
-        .expect("write source");
 
         run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
             .expect("load negative-handle sprite");
@@ -4118,7 +4102,7 @@ mod tests {
             get_android_workshop_i32_global(
                 &root,
                 Path::new("src/main.stasis"),
-                "TestHost.sprite.handle",
+                "TestHost.sprite.sprite_ref",
             )
             .expect("read sprite handle"),
             handle
@@ -4148,7 +4132,7 @@ global state: State;
 function main(): void {
     if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
         state.loaded = 1;
-        state.initial_handle = state.sprite.handle;
+        state.initial_handle = state.sprite.sprite_ref;
         state.initial_width = state.sprite.width;
         state.initial_height = state.sprite.height;
     }
@@ -4208,7 +4192,7 @@ function tick(): void {
             get_android_workshop_i32_global(
                 &root,
                 Path::new("src/main.stasis"),
-                "state.sprite.handle"
+                "state.sprite.sprite_ref"
             )
             .expect("read released handle"),
             0
@@ -4280,7 +4264,7 @@ function tick(): void {
         state.sprite.release();
         if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
             state.reloaded = 1;
-            state.reload_handle = state.sprite.handle;
+            state.reload_handle = state.sprite.sprite_ref;
             state.reload_width = state.sprite.width;
             state.reload_height = state.sprite.height;
         }
@@ -4402,6 +4386,14 @@ function tick(): void {}
                 fs::copy(&source_path, &destination_path).expect("copy project file");
             }
         }
+    }
+
+    fn install_test_stdlib(root: &Path) {
+        let stdlib = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/stdlib")
+            .canonicalize()
+            .expect("canonical stdlib root");
+        copy_tree(&stdlib, &root.join("vendor/stasis/src/stdlib"));
     }
 
     fn stage_project_with_stdlib(
@@ -6575,9 +6567,9 @@ function tick(): void {}
             error.contains("|diagnostic_file=src/systems/broken.stasis"),
             "{error}"
         );
-        assert!(error.contains("|diagnostic_line=3"));
-        assert!(error.contains("|diagnostic_column=17"));
-        assert!(error.contains("|diagnostic_symbol=broken"));
+        assert!(error.contains("|diagnostic_line=3"), "{error}");
+        assert!(error.contains("|diagnostic_column=17"), "{error}");
+        assert!(error.contains("|diagnostic_symbol=broken"), "{error}");
         assert!(error.contains("|diagnostic_message="));
         assert!(error.contains("diagnostic_stage=parse"));
         assert!(error.contains("diagnostic_code=stasis.parse"));
@@ -6854,25 +6846,27 @@ function on_code_swap(): void {}\n",
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("it031_render_schema");
-        fs::create_dir_all(root.join("tests/stasis/seams")).expect("seam directory");
+        install_test_stdlib(&root);
         fs::write(
-            root.join("tests/stasis/seams/render_schema.stasis"),
-            "global gfx_cmd_i32: i32[67888];\n\
-global gfx_cmd_f32: f32[146564];\n\
-global gfx_cmd_u8: u8[65536];\n\
+            root.join("src/main.stasis"),
+            "import \"/vendor/stasis/src/stdlib/graphics.stasis\";\n\
 function main(): void {}\n\
 function tick(): i32 { return 0; }\n\
-function render(): i32 { gfx_cmd_i32[0] = 1196967473; gfx_cmd_i32[1] = 99; return 0; }\n\
+function render(): i32 { return 0; }\n\
 function on_code_swap(): void {}\n",
         )
         .expect("write source");
-        compile_android_workshop_project(
-            &root,
-            Path::new("tests/stasis/seams/render_schema.stasis"),
-        )
-        .expect("render-schema source compiles before invocation");
+        compile_android_workshop_project(&root, Path::new("src/main.stasis"))
+            .expect("render-schema source compiles before invocation");
+        let command_header =
+            stasis_dynload::stasis_jit_global_i32_array_ptr(hash_global_path("gfx_cmd_i32"), 0, 2);
+        assert!(!command_header.is_null(), "canonical command header");
+        unsafe {
+            *command_header = 1196967473;
+            *command_header.add(1) = 99;
+        }
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
-        let entry_c = CString::new("tests/stasis/seams/render_schema.stasis").expect("entry cstr");
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
         let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
         let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
         let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
@@ -6920,72 +6914,32 @@ function on_code_swap(): void {}\n",
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("ffi_production_frame_tick");
-        fs::create_dir_all(root.join("tests/stasis/seams")).expect("seam directory");
+        install_test_stdlib(&root);
         fs::write(
-            root.join("tests/stasis/seams/production_frame.stasis"),
-            "global host_i32: i32[768];
+            root.join("src/main.stasis"),
+            "import \"/vendor/stasis/src/stdlib/graphics.stasis\";
+global host_i32: i32[768];
 global host_f32: f32[64];
 global host_req_window_w_px: i32;
 global host_req_window_h_px: i32;
-global gfx_cmd_i32: i32[67888];
-global gfx_cmd_f32: f32[146564];
-global gfx_cmd_u8: u8[65536];
 function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
 function tick(): void {}
 function render(): void {
-  gfx_cmd_i32[0] = 1196967473;
-  gfx_cmd_i32[1] = 7;
-  gfx_cmd_i32[2] = 3;
-  gfx_cmd_i32[3] = 1;
-  gfx_cmd_i32[4] = 1;
-  gfx_cmd_i32[7] = 1;
-  gfx_cmd_i32[9] = 2;
-  gfx_cmd_i32[22] = 3;
-  gfx_cmd_i32[29] = 1;
-  gfx_cmd_f32[0] = 0.1;
-  gfx_cmd_f32[4] = host_f32[0];
-  gfx_cmd_f32[5] = host_f32[1];
-  gfx_cmd_f32[6] = 30.0;
-  gfx_cmd_f32[7] = 40.0;
-  gfx_cmd_f32[8] = 1.0;
-  gfx_cmd_i32[32] = 77;
-  gfx_cmd_i32[33] = -1;
-  gfx_cmd_i32[34] = 0;
-  gfx_cmd_i32[12320] = 5;
-  gfx_cmd_i32[12321] = 0;
-  gfx_cmd_i32[12322] = 1;
-  gfx_cmd_i32[18464] = 0;
-  gfx_cmd_i32[18465] = 1;
-  gfx_cmd_i32[18466] = -1;
-  gfx_cmd_i32[51232] = 32768;
-  gfx_cmd_i32[51233] = 16384;
-  gfx_cmd_i32[51234] = 49152;
-  gfx_cmd_f32[80004] = 10.25;
-  gfx_cmd_f32[80005] = 20.5;
-  gfx_cmd_f32[80006] = 30.75;
-  gfx_cmd_f32[80007] = 40.125;
-  gfx_cmd_f32[80008] = 0.0;
-  gfx_cmd_f32[80009] = 0.0;
-  gfx_cmd_f32[80010] = 0.0;
-  gfx_cmd_f32[80011] = 0.0;
-  gfx_cmd_f32[80012] = 15.375;
-  gfx_cmd_f32[80013] = 20.0625;
-  gfx_cmd_f32[80014] = 1.0;
-  gfx_cmd_f32[80015] = 1.0;
-  gfx_cmd_f32[80016] = 0.0;
-  gfx_cmd_f32[133252] = 12.0;
-  gfx_cmd_u8[0] = 65;
-  gfx_cmd_u8[1] = 0;
+  begin_frame();
+  clear(0.1, 0.2, 0.3, 0.4);
+  draw_line(host_f32[0], host_f32[1], 30.0, 40.0, 1.0, 0.0, 0.0, 1.0);
+  draw_text(5, \"A\", 12.0, 13.0, 1.0, 1.0, 1.0, 1.0);
+  fill_rect(10.25, 20.5, 30.75, 40.125, 0.0, 0.0, 0.0, 1.0);
+  end_frame();
 }
 ",
         )
         .expect("write production source");
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
-        let entry_c =
-            CString::new("tests/stasis/seams/production_frame.stasis").expect("entry cstr");
-        let mut frame_i32 = vec![0i32; ANDROID_RENDER_GFX_I32_CAPACITY];
-        let mut frame_f32 = vec![0.0f32; ANDROID_RENDER_GFX_F32_CAPACITY];
-        let mut frame_u8 = vec![0u8; ANDROID_RENDER_GFX_U8_CAPACITY];
+        let entry_c = CString::new("src/main.stasis").expect("entry cstr");
+        let mut frame_i32 = vec![-123i32; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut frame_f32 = vec![-1.25f32; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut frame_u8 = vec![222u8; ANDROID_RENDER_GFX_U8_CAPACITY];
         let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
@@ -7003,23 +6957,36 @@ function render(): void {
         );
         assert_eq!(status, 0);
         // Current source frames copy into the canonical destination layout.
-        assert_eq!(&frame_i32[..5], &[1196967473, 7, 3, 1, 1]);
+        assert_eq!(&frame_i32[..5], &[1196967473, 7, 3, 1, 0]);
         assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
         assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
         assert_eq!(&frame_i32[20..22], &[1, 1]);
         assert_eq!(frame_i32[22], 3);
-        assert_eq!(frame_i32[32], 77);
-        assert_eq!(frame_i32[33], -1);
+        assert_eq!(frame_i32[32], -123, "inactive sprite span is not copied");
         assert_eq!(&frame_i32[12320..12323], &[5, 0, 1]);
-        assert_eq!(&frame_i32[18464..18467], &[0, 1, -1]);
-        assert_eq!(&frame_i32[51232..51235], &[32768, 16384, 49152]);
+        assert_eq!(frame_i32[12323], -123, "inactive text span is not copied");
+        assert_eq!(
+            frame_i32[18464], -123,
+            "inactive sprite-run span is not copied"
+        );
+        assert_eq!(&frame_i32[51232..51235], &[16384, 49152, 65536]);
+        assert_eq!(frame_i32[51235], -123, "inactive order span is not copied");
         assert_eq!(frame_f32[4], 180.0);
         assert_eq!(frame_f32[5], 360.0);
-        assert_eq!(&frame_f32[80004..80008], &[10.25, 20.5, 30.75, 40.125]);
-        assert_eq!(&frame_f32[80008..80012], &[0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(&frame_f32[80014..80017], &[1.0, 1.0, 0.0]);
+        assert_eq!(frame_f32[12], -1.25, "inactive line span is not copied");
+        assert_eq!(&frame_f32[79996..80000], &[10.25, 20.5, 30.75, 40.125]);
+        assert_eq!(
+            frame_f32[79995], -1.25,
+            "inactive rectangle span is not copied"
+        );
+        assert_eq!(
+            frame_f32[80004], -1.25,
+            "inactive sprite span is not copied"
+        );
         assert_eq!(frame_f32[133252], 12.0);
+        assert_eq!(frame_f32[133258], -1.25, "inactive text span is not copied");
         assert_eq!(&frame_u8[..2], &[65, 0]);
+        assert_eq!(frame_u8[2], 222, "inactive text bytes are not copied");
         fs::remove_dir_all(&root).ok();
     }
 
@@ -7028,14 +6995,16 @@ function render(): void {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("ffi_resource_error");
+        install_test_stdlib(&root);
         fs::write(
             root.join("src/main.stasis"),
-            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+            "import \"/vendor/stasis/src/stdlib/graphics.stasis\";
+global missing_sprite: Sprite;
 global host_i32: i32[768];
 global host_f32: f32[64];
 function main(): void {}
 function tick(): void {}
-function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }
+function render(): void { missing_sprite.load_sprite_from(\"assets/render_missing.svg\", 32, 32); }
 ",
         )
         .expect("write source");
@@ -7092,14 +7061,16 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("ffi_tick_resource_error");
+        install_test_stdlib(&root);
         fs::write(
             root.join("src/main.stasis"),
-            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
+            "import \"/vendor/stasis/src/stdlib/graphics.stasis\";\n\
+global missing_sprite: Sprite;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
 function main(): void {}\n\
-function tick(): void { gfx_load_sprite(\"assets/tick_missing.svg\", 32, 32); }\n\
-function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32); }\n",
+function tick(): void { missing_sprite.load_sprite_from(\"assets/tick_missing.svg\", 32, 32); }\n\
+function render(): void { missing_sprite.load_sprite_from(\"assets/render_missing.svg\", 32, 32); }\n",
         )
         .expect("write source");
         let error =
@@ -7157,8 +7128,9 @@ function render(): void { gfx_load_sprite(\"assets/render_missing.svg\", 32, 32)
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("it031_resource_hot_reload");
-        let baseline =
-            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\n\
+        install_test_stdlib(&root);
+        let baseline = "import \"/vendor/stasis/src/stdlib/graphics.stasis\";\n\
+global missing_sprite: Sprite;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
 global GameState { tick_count: i32; }\n\
@@ -7178,7 +7150,7 @@ function on_code_swap(): void {}\n";
             )
             .replace(
                 "function on_code_swap(): void {}",
-                "function on_code_swap(): void { gfx_load_sprite(\"assets/IT031_missing.svg\", 32, 32); }",
+                "function on_code_swap(): void { missing_sprite.load_sprite_from(\"assets/IT031_missing.svg\", 32, 32); }",
             );
         fs::write(root.join("src/main.stasis"), edited).expect("hot reload source");
         compile_android_workshop_project(&root, Path::new("src/main.stasis"))

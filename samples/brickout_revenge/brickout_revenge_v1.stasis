@@ -1811,7 +1811,7 @@ function @inline play_draw_circle(cx: f32, cy: f32, radius: f32, red: f32, green
     draw_circle(play_snap_x(cx), play_snap_y(cy), play_snap_len(radius), red, green, blue, alpha);
 }
 
-function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, rot_deg: i32, alpha: i32): void {
+function play_draw_sprite(sprite_ref: SpriteRef, x: f32, y: f32, width: f32, height: f32, rot_deg: i32, alpha: i32): void {
     let screen_x: f32 = play_snap_x(x);
     let screen_y: f32 = play_snap_y(y);
     let screen_w_f: f32 = play_snap_len(width);
@@ -1835,7 +1835,7 @@ function play_draw_sprite(handle: i32, x: f32, y: f32, width: f32, height: f32, 
     screen_y_i.from_f32(screen_y);
     let top_left_x: i32 = screen_x_i -(screen_w / 2);
     let top_left_y: i32 = screen_y_i -(screen_h / 2);
-    draw_sprite(handle, i32_to_f32(top_left_x), i32_to_f32(top_left_y), i32_to_f32(screen_w), i32_to_f32(screen_h), rot_deg, alpha);
+    draw_sprite(sprite_ref, i32_to_f32(top_left_x), i32_to_f32(top_left_y), i32_to_f32(screen_w), i32_to_f32(screen_h), rot_deg, alpha);
 }
 
 function draw_bricks(): void {
@@ -1850,34 +1850,34 @@ function draw_bricks(): void {
 
     foreach (let brick in state.bricks) {
         if (brick.active) {
-            let h_base: i32 = state.sprites.brick_basic_base.handle;
-            let h_turret: i32 = state.sprites.brick_basic_turret.handle;
-            let h_fx: i32 = state.sprites.brick_basic_fx.handle;
+            let h_base: SpriteRef = state.sprites.brick_basic_base.reference();
+            let h_turret: SpriteRef = state.sprites.brick_basic_turret.reference();
+            let h_fx: SpriteRef = state.sprites.brick_basic_fx.reference();
             if (brick.brick_type == BrickType.Basic) {
-                h_base = state.sprites.brick_basic_base.handle;
-                h_turret = state.sprites.brick_basic_turret.handle;
-                h_fx = state.sprites.brick_basic_fx.handle;
+                h_base = state.sprites.brick_basic_base.reference();
+                h_turret = state.sprites.brick_basic_turret.reference();
+                h_fx = state.sprites.brick_basic_fx.reference();
             }
             if (brick.brick_type == BrickType.Armored) {
-                h_base = state.sprites.brick_armored_base.handle;
-                h_turret = state.sprites.brick_armored_turret.handle;
-                h_fx = state.sprites.brick_armored_fx.handle;
+                h_base = state.sprites.brick_armored_base.reference();
+                h_turret = state.sprites.brick_armored_turret.reference();
+                h_fx = state.sprites.brick_armored_fx.reference();
             }
             if (brick.brick_type == BrickType.Reflector) {
-                h_base = state.sprites.brick_reflector_base.handle;
-                h_turret = 0;
-                h_fx = state.sprites.brick_reflector_fx.handle;
+                h_base = state.sprites.brick_reflector_base.reference();
+                h_turret = SpriteRef.Invalid;
+                h_fx = state.sprites.brick_reflector_fx.reference();
             }
 
             let cx: f32 = brick.x + brick.width / 2.0;
             let cy: f32 = brick.y + brick.height / 2.0;
 
-            if (h_base != 0) {
+            if (h_base != SpriteRef.Invalid) {
                 play_draw_sprite(h_base, cx, cy, brick.width, brick.height, 0, 255);
             }
 
             // Turret bob/pulse (driven by time; no SVG animation tags)
-            if (h_turret != 0) {
+            if (h_turret != SpriteRef.Invalid) {
                 let seed: f32 = cx * 0.013 + cy * 0.021;
                 let wobble: f32 = sin_fast(phase + seed);
                 let oy: f32 = wobble * 1.4;
@@ -1889,7 +1889,7 @@ function draw_bricks(): void {
             }
 
             // Effects layer (pulse alpha)
-            if (h_fx != 0) {
+            if (h_fx != SpriteRef.Invalid) {
                 let a_f: f32 = fx_alpha;
                 if (brick.brick_type == BrickType.Reflector) {
                     a_f = 0.12 + 0.28 *(0.5 + 0.5 * sin_fast(phase * 1.7));
@@ -1935,13 +1935,13 @@ function draw_bricks(): void {
 function draw_balls(): void {
     foreach (let ball in state.balls) {
         if (ball.active) {
-            if (state.sprites.ball.handle == 0) {
+            if (!state.sprites.ball.valid()) {
                 let bx: f32 = ball.x;
                 let by: f32 = ball.y;
                 let br: f32 = ball.radius;
                 play_draw_circle(bx, by, br, 1.0, 0.3, 1.0, 1.0);
             } else {
-                play_draw_sprite(state.sprites.ball.handle, ball.x, ball.y, ball.radius * 2.0, ball.radius * 2.0, 0, 255);
+                play_draw_sprite(state.sprites.ball.reference(), ball.x, ball.y, ball.radius * 2.0, ball.radius * 2.0, 0, 255);
             }
 
             // Ball HP bar
@@ -1974,7 +1974,7 @@ function draw_balls(): void {
 }
 
 function draw_paddle(): void {
-    if (state.sprites.paddle.handle == 0) {
+    if (!state.sprites.paddle.valid()) {
         let half_w: f32 = state.paddle.width / 2.0;
         let half_h: f32 = state.paddle.height / 2.0;
         let px: f32 = state.paddle.x - half_w;
@@ -1984,7 +1984,7 @@ function draw_paddle(): void {
         play_draw_filled_rect(px, py, pw, ph, 0.3, 1.0, 1.0, 1.0);
     } else {
         play_draw_sprite(
-            state.sprites.paddle.handle,
+            state.sprites.paddle.reference(),
             state.paddle.x,
             state.paddle.y,
             state.paddle.width,
@@ -2535,14 +2535,14 @@ function draw_menu_panel(x: f32, y: f32, w: f32, h: f32): void {
                     draw_text(state.ui_font, "15s/2p", x + UI_MENU_PAD + 8.0, sy + 6.0, 0.9, 0.9, 0.9, 0.9);
                 }
 
-                let icon_handle: i32 = state.sprites.brick_basic_base.handle;
+                let icon_handle: SpriteRef = state.sprites.brick_basic_base.reference();
                 if (i == 1) {
-                    icon_handle = state.sprites.brick_armored_base.handle;
+                    icon_handle = state.sprites.brick_armored_base.reference();
                 }
                 if (i == 2) {
-                    icon_handle = state.sprites.brick_reflector_base.handle;
+                    icon_handle = state.sprites.brick_reflector_base.reference();
                 }
-                if (icon_handle != 0) {
+                if (icon_handle != SpriteRef.Invalid) {
                     let icon_size: f32 = UI_MENU_SLOT_H - 10.0;
                     let max_size: f32 = slot_w - 12.0;
                     if (icon_size > max_size) {

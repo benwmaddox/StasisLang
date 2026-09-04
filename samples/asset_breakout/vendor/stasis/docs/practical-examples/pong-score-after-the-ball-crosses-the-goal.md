@@ -42,4 +42,3 @@ test `crossing the right goal scores once and resets play`(): bool {
 ```
 
 Full source: [pong_goal.stasis](../examples/src/pong_goal.stasis)
-

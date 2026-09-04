@@ -395,12 +395,13 @@ function render(): i32 {
 }
 
 #[test]
-fn web_package_instantiates_direct_measure_text_import() {
+fn web_package_instantiates_public_measure_text_import() {
     let root = repo_root();
     let workspace = root
         .join("build")
         .join(format!("web-measure-text-test-{}", stamp()));
     fs::create_dir_all(workspace.join("src")).expect("create measure_text fixture");
+    copy_tree(&root.join("src"), &workspace.join("vendor/stasis/src"));
     fs::write(
         workspace.join("stasis.json"),
         r#"{"manifest_version":1,"name":"web_measure_text","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
@@ -409,7 +410,7 @@ fn web_package_instantiates_direct_measure_text_import() {
     fs::write(
         workspace.join("src/main.stasis"),
         r#"
-extern function measure_text(font: i32, text: string): f32;
+import "/vendor/stasis/src/stdlib/graphics.stasis";
 
 function main(): i32 {
     let width: f32 = measure_text(2, "abc");
@@ -434,7 +435,7 @@ function render(): i32 {
     let runtime = fs::read_to_string(output.join("game.js")).expect("measure_text web runtime");
     assert!(
         runtime.contains("measure_text:"),
-        "web host omitted the direct measure_text import"
+        "web host omitted the public measure_text import"
     );
     let execution = execute_web_main_with_measure_text(&output.join("game.wasm"));
     assert!(

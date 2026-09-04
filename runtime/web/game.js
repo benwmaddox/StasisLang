@@ -1988,7 +1988,7 @@
     stasis_jit_measure_text: (font, textId) => measureText(font, textId),
     stasis_jit_sprite_load_from: (base, index, _len, pathId, width, height) => {
       const handle = loadSprite(pathId, width, height);
-      return setViewField(base, index, "handle", handle)
+      return setViewField(base, index, "sprite_ref", handle)
         && setViewField(base, index, "width", width)
         && setViewField(base, index, "height", height) ? 1 : 0;
     },

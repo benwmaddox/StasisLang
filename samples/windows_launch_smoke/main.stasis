@@ -10,7 +10,24 @@ global windows_smoke_host_frame: HostFrame;
 function smoke_write_sprite(sprite: Sprite, x: f32, y: f32): bool {
     let width: f32 = i32_to_f32(sprite.width);
     let height: f32 = i32_to_f32(sprite.height);
-    return smoke_writer.write(sprite.handle, -1, 0, x, y, width, height, 0.0, 0.0, 0.0, 0.0, width * 0.5, height * 0.5, 1.0, 1.0, 0.0);
+    return smoke_writer.write(
+        sprite.reference(),
+        -1,
+        0,
+        x,
+        y,
+        width,
+        height,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        width * 0.5,
+        height * 0.5,
+        1.0,
+        1.0,
+        0.0
+    );
 }
 
 function main(): i32 {

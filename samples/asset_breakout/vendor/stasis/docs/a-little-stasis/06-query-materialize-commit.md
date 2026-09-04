@@ -69,4 +69,3 @@ test `attack commit consumes one intent once`(): bool {
 ```
 
 **Keep:** query what may happen, materialize one intent, and let one commit own the transition.
-

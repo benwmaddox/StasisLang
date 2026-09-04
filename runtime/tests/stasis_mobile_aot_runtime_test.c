@@ -258,7 +258,7 @@ int main(void) {
     CHECK(strcmp(last_sprite_path, "sprite.bmp") == 0);
     CHECK(stasis_jit_gfx_dump_png(23) == 1);
 
-    stasis_jit_register_global_i32_array(100, hash_text("handle"), sprite_handle, 1);
+    stasis_jit_register_global_i32_array(100, hash_text("sprite_ref"), sprite_handle, 1);
     stasis_jit_register_global_i32_array(100, hash_text("width"), sprite_width, 1);
     stasis_jit_register_global_i32_array(100, hash_text("height"), sprite_height, 1);
     CHECK(stasis_jit_sprite_load_from(100, 0, 1, 23, 48, 24) == 1);

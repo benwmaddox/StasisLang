@@ -1,5 +1,9 @@
 import "../../../src/stdlib/internal/gfx_cmd.stasis";
 
+enum SpriteRef {
+    Probe = 1,
+}
+
 function @extern("stasis_jit_render_trace") native_render_trace(
     cmd_i32: i32[],
     cmd_i32_len: i32,
@@ -34,7 +38,7 @@ function fill_geometry(): void {
 
 function fill_sprites(): void {
     for (let i: i32 = 0; i < 4096; i += 1) {
-        gfx_cmd_sprite(i + 1, 9.0, 10.0, 11.0, 12.0, i, 255);
+        gfx_cmd_sprite(SpriteRef.Probe, 9.0, 10.0, 11.0, 12.0, i, 255);
     }
 }
 
@@ -152,7 +156,7 @@ function main(): i32 {
     gfx_cmd_append_order(GFX_ORDER_LINE, 0);
     gfx_cmd_line(1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 1.0);
     gfx_cmd_rect(5.0, 6.0, 7.0, 8.0, 0.4, 0.5, 0.6, 1.0);
-    gfx_cmd_sprite(1, 9.0, 10.0, 11.0, 12.0, 0, 255);
+    gfx_cmd_sprite(SpriteRef.Probe, 9.0, 10.0, 11.0, 12.0, 0, 255);
     gfx_cmd_text_cached(1, 1, 15.0, 16.0, 1.0, 1.0, 1.0, 1.0);
 
     return trace_commands();

@@ -28,10 +28,10 @@ struct Sprites {
     brick_reflector_fx: Sprite;
 }
 
-// Lines and sprites use caller-owned, bounded public writers.
+// Lines and sprites use caller-owned, bounded semantic lists.
 struct GfxState {
     lines: LineBatch;
-    sprites: SpriteRunWriter;
+    presentation: PresentationList;
 }
 
 struct GameState {
@@ -51,6 +51,7 @@ global brickout_host_frame: HostFrame;
 
 function render_begin(): void {
     state.gfx.lines.reset_lines();
+    state.gfx.presentation.reset_presentation();
 }
 
 function render_push_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): void {
@@ -142,56 +143,9 @@ function tick(): i32 {
     let ball_y: f32;
     ball_x.from_i32((w / 2) - 16);
     ball_y.from_i32((h / 2) - 16);
-    if (state.gfx.sprites.reserve(2, 0 - 1, 0, 0, 0, 0, 0)) {
-        let written: i32 = 0;
-        if (
-            state.gfx.sprites.write(
-                state.sprites.paddle.handle,
-                0 - 1,
-                0,
-                paddle_x,
-                paddle_y,
-                128.0,
-                24.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                64.0,
-                12.0,
-                1.0,
-                1.0,
-                0.0
-            )
-        ) {
-            written = written + 1;
-        }
-        if (
-            state.gfx.sprites.write(
-                state.sprites.ball.handle,
-                0 - 1,
-                0,
-                ball_x,
-                ball_y,
-                32.0,
-                32.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                16.0,
-                16.0,
-                1.0,
-                1.0,
-                0.0
-            )
-        ) {
-            written = written + 1;
-        }
-        if (written != 2 || !state.gfx.sprites.finalize(written)) {
-            state.gfx.sprites.cancel();
-        }
-    }
+    state.gfx.presentation.append_sprite(state.sprites.paddle.reference(), paddle_x, paddle_y, 128.0, 24.0, 0, 255);
+    state.gfx.presentation.append_sprite(state.sprites.ball.reference(), ball_x, ball_y, 32.0, 32.0, 0, 255);
+    state.gfx.presentation.replay();
     state.gfx.lines.draw();
     draw_frame();
 

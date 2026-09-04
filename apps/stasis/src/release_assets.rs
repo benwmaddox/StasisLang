@@ -166,10 +166,10 @@ mod tests {
         let sources = vec![(
             "src/main.stasis".to_string(),
             concat!(
-                "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32; ",
+                "function @asset_path(path) request_sprite(path: string, max_w: i32, max_h: i32): bool { return true; } ",
                 "function main(): void { ",
-                "gfx_load_sprite(\"../assets/svg/used.svg\", 32, 32); ",
-                "gfx_load_sprite(\"assets/svg/used.svg\", 32, 32); }"
+                "request_sprite(\"../assets/svg/used.svg\", 32, 32); ",
+                "request_sprite(\"assets/svg/used.svg\", 32, 32); }"
             )
             .to_string(),
         )];
@@ -199,8 +199,8 @@ mod tests {
         let sources = vec![(
             "src/main.stasis".to_string(),
             concat!(
-                "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32; ",
-                "function main(): void { gfx_load_sprite(\"assets/svg/used.svg\", 32, 32); }"
+                "function @asset_path(path) request_sprite(path: string, max_w: i32, max_h: i32): bool { return true; } ",
+                "function main(): void { request_sprite(\"assets/svg/used.svg\", 32, 32); }"
             )
             .to_string(),
         )];

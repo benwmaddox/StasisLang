@@ -40,3 +40,10 @@ function host_request_maximized(enabled: i32): void {
     }
     host_req_seq = host_req_seq + 1;
 }
+
+function host_request_maximized_canvas(width: i32, height: i32): void {
+    host_req_flags = HOST_REQ_FLAG_MAXIMIZED;
+    host_req_window_w_px = width;
+    host_req_window_h_px = height;
+    host_req_seq = host_req_seq + 1;
+}

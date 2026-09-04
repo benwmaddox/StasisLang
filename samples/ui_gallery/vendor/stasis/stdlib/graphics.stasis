@@ -16,7 +16,7 @@ import "asset_tasks.stasis";
 extern function @effects(nondeterministic) sleep_ms(ms: i32): void;
 
 // Startup / assets (host calls; avoid in hot paths)
-extern function @effects(graphics) gfx_poll_reload(handle: i32): bool;
+extern function @effects(graphics) gfx_poll_reload(sprite_ref: SpriteRef): bool;
 extern function @effects(graphics, storage) gfx_dump_bmp(path: string): i32;
 extern function @effects(graphics, storage) gfx_dump_png(path: string): i32;
 extern function @effects(graphics)@asset_path(path) load_font(path: string, size: i32): i32;
@@ -41,13 +41,123 @@ struct AnimationClip {
 }
 
 struct SpriteSheet {
-    handle: i32;
+    sprite_ref: SpriteRef;
     width: i32;
     height: i32;
     columns: i32;
     rows: i32;
     cell_width: i32;
     cell_height: i32;
+}
+
+enum PresentationCommandKind {
+    Empty,
+    Sprite,
+    SolidRect,
+}
+
+// Persistent, bounded semantic commands. Callers may build a list once, patch
+// logical fields, and replay it; only this compiler-owned module translates
+// the commands into the private frame ABI.
+struct PresentationCommand {
+    kind: PresentationCommandKind;
+    sprite_ref: SpriteRef;
+    x: f32;
+    y: f32;
+    width: f32;
+    height: f32;
+    rotation: i32;
+    alpha: i32;
+    r: f32;
+    g: f32;
+    b: f32;
+    a: f32;
+}
+
+struct PresentationList {
+    kinds: PresentationCommandKind[256];
+    sprite_refs: SpriteRef[256];
+    x: f32[256];
+    y: f32[256];
+    width: f32[256];
+    height: f32[256];
+    rotation: i32[256];
+    alpha: i32[256];
+    r: f32[256];
+    g: f32[256];
+    b: f32[256];
+    a: f32[256];
+    count: i32;
+}
+
+function reset_presentation(self: PresentationList): void {
+    self.count = 0;
+}
+
+function append_sprite(self: PresentationList, sprite_ref: SpriteRef, x: f32, y: f32, width: f32, height: f32, rotation: i32, alpha: i32): bool {
+    if (self.count < 0) {
+        self.count = 0;
+    }
+    if (self.count >= 256 || sprite_ref == SpriteRef.Invalid || width <= 0.0 || height <= 0.0) {
+        return false;
+    }
+    let i: i32 = self.count;
+    self.kinds[i] = PresentationCommandKind.Sprite;
+    self.sprite_refs[i] = sprite_ref;
+    self.x[i] = x;
+    self.y[i] = y;
+    self.width[i] = width;
+    self.height[i] = height;
+    self.rotation[i] = rotation;
+    self.alpha[i] = alpha;
+    self.count = i + 1;
+    return true;
+}
+
+function append_solid_rect(self: PresentationList, x: f32, y: f32, width: f32, height: f32, r: f32, g: f32, b: f32, a: f32): bool {
+    if (self.count < 0) {
+        self.count = 0;
+    }
+    if (self.count >= 256 || width <= 0.0 || height <= 0.0) {
+        return false;
+    }
+    let i: i32 = self.count;
+    self.kinds[i] = PresentationCommandKind.SolidRect;
+    self.x[i] = x;
+    self.y[i] = y;
+    self.width[i] = width;
+    self.height[i] = height;
+    self.r[i] = r;
+    self.g[i] = g;
+    self.b[i] = b;
+    self.a[i] = a;
+    self.count = i + 1;
+    return true;
+}
+
+function patch_sprite(
+    self: PresentationList,
+    index: i32,
+    sprite_ref: SpriteRef,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    rotation: i32,
+    alpha: i32
+): bool {
+    if (index < 0 || index >= self.count || index >= 256 || sprite_ref == SpriteRef.Invalid || width <= 0.0 || height <= 0.0) {
+        return false;
+    }
+    self.kinds[index] = PresentationCommandKind.Sprite;
+    self.sprite_refs[index] = sprite_ref;
+    self.x[index] = x;
+    self.y[index] = y;
+    self.width[index] = width;
+    self.height[index] = height;
+    self.rotation[index] = rotation;
+    self.alpha[index] = alpha;
+    return true;
 }
 
 // Public bounded bulk-line storage. Count and storage travel together, so a
@@ -153,7 +263,7 @@ function reserve(self: SpriteRunWriter, max_count: i32, clip: i32, material: i32
 
 function @effects(graphics) write(
     self: SpriteRunWriter,
-    handle: i32,
+    sprite_ref: SpriteRef,
     tint_rgba: i32,
     instance_flags: i32,
     x: f32,
@@ -172,7 +282,7 @@ function @effects(graphics) write(
 ): bool {
     return gfx_cmd_sprite_run_write(
         self.token,
-        handle,
+        sprite_ref,
         tint_rgba,
         instance_flags,
         x,
@@ -224,13 +334,13 @@ function publish(self: ImageAsset, target: Sprite): bool {
     if (!self.ready()) {
         return false;
     }
-    if (target.handle != 0) {
-        gfx_release_sprite(target.handle);
+    if (target.sprite_ref != SpriteRef.Invalid) {
+        gfx_release_sprite(target.sprite_ref);
     }
-    target.handle = self.handle;
+    target.sprite_ref = self.sprite_ref;
     target.width = self.width;
     target.height = self.height;
-    self.handle = 0;
+    self.sprite_ref = SpriteRef.Invalid;
     self.width = 0;
     self.height = 0;
     self.state = AssetState.None;
@@ -238,14 +348,29 @@ function publish(self: ImageAsset, target: Sprite): bool {
 }
 
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
-    if (self.handle == 0 || self.width <= 0 || self.height <= 0) {
+    if (self.sprite_ref == SpriteRef.Invalid || self.width <= 0 || self.height <= 0) {
         return;
     }
     let width: f32 = 0.0;
     let height: f32 = 0.0;
     width.from_i32(self.width);
     height.from_i32(self.height);
-    gfx_cmd_sprite(self.handle, x, y, width, height, rotation, alpha);
+    gfx_cmd_sprite(self.sprite_ref, x, y, width, height, rotation, alpha);
+}
+
+function valid(self: Sprite): bool {
+    return self.sprite_ref != SpriteRef.Invalid;
+}
+
+function reference(self: Sprite): SpriteRef {
+    return self.sprite_ref;
+}
+
+function poll_reload(self: Sprite): bool {
+    if (!self.valid()) {
+        return false;
+    }
+    return gfx_poll_reload(self.sprite_ref);
 }
 
 function load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool {
@@ -282,7 +407,7 @@ function draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, r
 // frame selection and UV emission here avoids callers having to patch command
 // buffers after the command is appended (which would reset the frame UV).
 function draw_frame_scaled(self: SpriteSheet, frame: i32, x: f32, y: f32, width: f32, height: f32, alpha: i32, rotation: i32): void {
-    if (self.handle == 0 || self.columns <= 0 || self.rows <= 0 || self.cell_width <= 0 || self.cell_height <= 0) {
+    if (self.sprite_ref == SpriteRef.Invalid || self.columns <= 0 || self.rows <= 0 || self.cell_width <= 0 || self.cell_height <= 0) {
         return;
     }
     if (width <= 0.0 || height <= 0.0) {
@@ -309,7 +434,7 @@ function draw_frame_scaled(self: SpriteSheet, frame: i32, x: f32, y: f32, width:
     let source_width: f32 = i32_to_f32(self.cell_width);
     let source_height: f32 = i32_to_f32(self.cell_height);
     gfx_cmd_sprite_semantic(
-        self.handle,
+        self.sprite_ref,
         x,
         y,
         width,
@@ -429,8 +554,8 @@ function draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a
     gfx_cmd_line(x1, y1, x2, y2, r, g, b, a);
 }
 
-function draw_sprite(handle: i32, x: f32, y: f32, w: f32, h: f32, rotation: i32, alpha: i32): void {
-    gfx_cmd_sprite(handle, x, y, w, h, rotation, alpha);
+function draw_sprite(sprite_ref: SpriteRef, x: f32, y: f32, w: f32, h: f32, rotation: i32, alpha: i32): void {
+    gfx_cmd_sprite(sprite_ref, x, y, w, h, rotation, alpha);
 }
 
 function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
@@ -439,6 +564,40 @@ function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f
 
 function fill_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
     gfx_cmd_rect(x, y, w, h, r, g, b, a);
+}
+
+function replay(self: PresentationList): void {
+    let bounded_count: i32 = self.count;
+    if (bounded_count < 0) {
+        bounded_count = 0;
+    }
+    if (bounded_count > 256) {
+        bounded_count = 256;
+    }
+    for (let i: i32 = 0; i < bounded_count; i += 1) {
+        if (self.kinds[i] == PresentationCommandKind.Sprite) {
+            draw_sprite(
+                self.sprite_refs[i],
+                self.x[i],
+                self.y[i],
+                self.width[i],
+                self.height[i],
+                self.rotation[i],
+                self.alpha[i]
+            );
+        } else if (self.kinds[i] == PresentationCommandKind.SolidRect) {
+            fill_rect(
+                self.x[i],
+                self.y[i],
+                self.width[i],
+                self.height[i],
+                self.r[i],
+                self.g[i],
+                self.b[i],
+                self.a[i]
+            );
+        }
+    }
 }
 
 // Ordered logical clipping.  Push/pop entries are interpreted by every

@@ -4765,7 +4765,7 @@ fn strip_web_runtime_feature(source: &str, feature: &str, enabled: bool) -> Stri
 
 // Keep these aligned with the metadata reads in runtime/web/game.js. Development
 // packages retain the complete reflection tables for inspection and tooling.
-const WEB_RESOURCE_BINDING_FIELDS: [&str; 4] = ["handle", "width", "height", "font"];
+const WEB_RESOURCE_BINDING_FIELDS: [&str; 5] = ["sprite_ref", "handle", "width", "height", "font"];
 const WEB_RUNTIME_BUFFERS: [&str; 5] = [
     "gfx_cmd_i32",
     "gfx_cmd_f32",
@@ -7717,6 +7717,10 @@ mod tests {
             .as_object()
             .expect("release view fields")
             .contains_key("handle")));
+        assert!(release_views.values().any(|fields| fields
+            .as_object()
+            .expect("release view fields")
+            .contains_key("sprite_ref")));
         let retained_view_paths = release_views
             .values()
             .flat_map(|fields| fields.as_object().expect("release view fields").values())
@@ -7820,14 +7824,18 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
         let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
         let mut process = WasmProcess::new();
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        process
+            .set_project_root(display_path(&source_root))
+            .expect("set compiler-owned graphics project root");
         process.set_required_emit_roots(&[
             "main".to_string(),
             "tick".to_string(),
             "render".to_string(),
         ]);
         process.upsert_file(
-            "dynamic_text.stasis",
-            "struct TextRun { font: i32; handle: i32; width: f32; height: f32; } global run: TextRun; global text: utf8[8]; function @effects(graphics)@extern(\"stasis_jit_text_run_replace_from\") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool; function main(): i32 { text[0] = 65; text.length = 1; if (run.replace_text_from(1, text)) { return 1; } return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+            "tests/stasis/compiler/dynamic_text_release.stasis",
+            "import \"../../../src/stdlib/graphics.stasis\"; global run: TextRun; global text: utf8[8]; function main(): i32 { text[0] = 65; text.length = 1; if (run.replace_text_from(1, text)) { return 1; } return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
         );
         process.compile().expect("compile Web dynamic text fixture");
         assert!(process

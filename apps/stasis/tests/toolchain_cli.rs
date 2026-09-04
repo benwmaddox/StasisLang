@@ -165,8 +165,8 @@ fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
     fs::write(
         project.join("src/main.stasis"),
         concat!(
-            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
-            "function main(): i32 { return load_font(\"../assets/fonts/UI.ttf\", 16); }\n"
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
+            "function main(): i32 { return request_font(\"../assets/fonts/UI.ttf\", 16); }\n"
         ),
     )
     .expect("entry source");
@@ -176,7 +176,7 @@ fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
     let error = json_stderr(&checked);
     assert_eq!(error["code"], "asset_validation_failed");
     assert_eq!(error["diagnostics"][0]["code"], "asset_path_case_mismatch");
-    assert_eq!(error["diagnostics"][0]["api"], "load_font");
+    assert_eq!(error["diagnostics"][0]["api"], "request_font");
     assert_eq!(
         error["diagnostics"][0]["logical_path"],
         "../assets/fonts/UI.ttf"
@@ -193,8 +193,8 @@ fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
     fs::write(
         project.join("src/main.stasis"),
         concat!(
-            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
-            "function main(): i32 { return load_font(\"../assets/fonts/ui.ttf\", 16); }\n"
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
+            "function main(): i32 { return request_font(\"../assets/fonts/ui.ttf\", 16); }\n"
         ),
     )
     .expect("corrected entry source");
@@ -205,9 +205,9 @@ fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
     fs::write(
         project.join("src/main.stasis"),
         concat!(
-            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
             "const FONT_PATH: string = \"../assets/fonts/ui.ttf\";\n",
-            "function choose_font(FONT_PATH: string): i32 { return load_font(FONT_PATH, 16); }\n",
+            "function choose_font(FONT_PATH: string): i32 { return request_font(FONT_PATH, 16); }\n",
             "function main(): i32 { return choose_font(\"../assets/fonts/ui.ttf\"); }\n"
         ),
     )
@@ -226,9 +226,9 @@ fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
     fs::write(
         project.join("tests/assets.test.stasis"),
         concat!(
-            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
             "test `invalid asset is never executed`(): bool {\n",
-            "    return load_font(\"../assets/fonts/missing.ttf\", 16) > 0;\n",
+            "    return request_font(\"../assets/fonts/missing.ttf\", 16) > 0;\n",
             "}\n"
         ),
     )
@@ -262,8 +262,8 @@ fn check_resolves_nested_asset_calls_from_the_entry_source_boundary() {
     fs::write(
         project.join("src/game/view/assets.stasis"),
         concat!(
-            "extern function @asset_path(path) load_font(path: string, size: i32): i32;\n",
-            "function load_ui_font(): i32 { return load_font(\"../assets/fonts/ui.ttf\", 16); }\n",
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
+            "function load_ui_font(): i32 { return request_font(\"../assets/fonts/ui.ttf\", 16); }\n",
         ),
     )
     .expect("nested asset source");
@@ -1150,7 +1150,7 @@ fn inspect_reports_compiler_state_memory_and_capacity_projection() {
         "struct Enemy { hp: i32; speed: f64; }\n\
          struct GameState { score: i32; enemies: Enemy[4]; }\n\
          global state: GameState;\n\
-         global gfx_cmd_i32: i32[8];\n",
+         global render_cmd_i32: i32[8];\n",
     )
     .expect("write imported memory fixture");
 
@@ -1182,7 +1182,7 @@ fn inspect_reports_compiler_state_memory_and_capacity_projection() {
         .is_some_and(|items| items.iter().any(|item| item["path"] == "state")));
     assert!(memory["command_buffers"]
         .as_array()
-        .is_some_and(|items| items.iter().any(|item| item["path"] == "gfx_cmd_i32")));
+        .is_some_and(|items| items.iter().any(|item| item["path"] == "render_cmd_i32")));
     assert!(memory["warnings"]
         .as_array()
         .is_some_and(|items| items.iter().any(|item| item

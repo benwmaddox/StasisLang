@@ -36,4 +36,3 @@ test `a reverse turn is consumed without reversing movement`(): bool {
 ```
 
 Full source: [snake_turn.stasis](../examples/src/snake_turn.stasis)
-

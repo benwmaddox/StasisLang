@@ -1,5 +1,14 @@
 import "../../../src/stdlib/graphics.stasis";
 
+// Test-only semantic ids supplied as enum constants; production projects are
+// forbidden from extending or redefining SpriteRef.
+enum SpriteRef {
+    Probe101 = 101,
+    Probe202 = 202,
+    Probe303 = 303,
+    Probe404 = 404,
+}
+
 global probe_writer: SpriteRunWriter;
 global blocker_writer: SpriteRunWriter;
 global line_batch: LineBatch;
@@ -72,7 +81,7 @@ function probe_writer_lifecycle(): i32 {
     if (!probe_writer.reserve(2, -1, 0, 0, 0, 0, 0)) {
         return 7;
     }
-    if (!probe_writer.write(303, -3, 0, 1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 5.0, 6.0, 1.0, 2.0, 1.0, 1.0, 7.0)) {
+    if (!probe_writer.write(SpriteRef.Probe303, -3, 0, 1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 5.0, 6.0, 1.0, 2.0, 1.0, 1.0, 7.0)) {
         return 8;
     }
     if (probe_writer.finalize(2)) {
@@ -100,11 +109,13 @@ function sprite_run_writer_public_probe(): i32 {
     if (!probe_writer.reserve(2, -1, 0, 0, 0, 0, 0)) {
         return 12;
     }
-    if (!probe_writer.write(101, -1430532899, 0, 10.0, 20.0, 30.0, 40.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.5, 2.5, 15.0)) {
+    if (!probe_writer.write(SpriteRef.Probe101, -1430532899, 0, 10.0, 20.0, 30.0, 40.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.5, 2.5, 15.0)) {
         probe_writer.cancel();
         return 13;
     }
-    if (!probe_writer.write(202, 287454020, 0, 50.0, 60.0, 70.0, 80.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, -1.0, 0.5, -30.0)) {
+    if (
+        !probe_writer.write(SpriteRef.Probe202, 287454020, 0, 50.0, 60.0, 70.0, 80.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, -1.0, 0.5, -30.0)
+    ) {
         probe_writer.cancel();
         return 14;
     }
@@ -113,11 +124,11 @@ function sprite_run_writer_public_probe(): i32 {
         return 15;
     }
     draw_line(100.0, 101.0, 102.0, 103.0, 0.1, 0.2, 0.3, 0.4);
-    drawable_sprite.handle = 303;
+    drawable_sprite.sprite_ref = SpriteRef.Probe303;
     drawable_sprite.width = 80;
     drawable_sprite.height = 48;
     drawable_sprite.draw(2.0, 3.0, 190, 9);
-    draw_sprite(404, 12.0, 13.0, 14.0, 15.0, 16, 17);
+    draw_sprite(SpriteRef.Probe404, 12.0, 13.0, 14.0, 15.0, 16, 17);
     draw_text(7, "probe", 20.0, 21.0, 0.9, 0.8, 0.7, 0.6);
     drawable_text.font = 5;
     drawable_text.handle = 6;

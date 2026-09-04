@@ -1,20 +1,25 @@
 import "../../src/stdlib/graphics.stasis";
 
+enum SpriteRef {
+    Prior = 11,
+    Published = 22,
+}
+
 global asset: ImageAsset;
 global target: Sprite;
 
 test `publishing an image transfers its host handle and replaces the target`(): bool {
-    asset.handle = 22;
+    asset.sprite_ref = SpriteRef.Published;
     asset.state = AssetState.Loaded;
     asset.width = 64;
     asset.height = 48;
 
-    target.handle = 11;
+    target.sprite_ref = SpriteRef.Prior;
     target.width = 8;
     target.height = 8;
 
     if (!asset.publish(target)) {
         return false;
     }
-    return target.handle == 22 && target.width == 64 && target.height == 48 && asset.handle == 0 && asset.state == AssetState.None;
+    return target.sprite_ref == SpriteRef.Published && target.width == 64 && target.height == 48 && asset.sprite_ref == SpriteRef.Invalid && asset.state == AssetState.None;
 }

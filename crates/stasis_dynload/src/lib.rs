@@ -5849,8 +5849,8 @@ pub extern "C" fn stasis_jit_sprite_load_from(
     if loaded_handle == 0 {
         return 0;
     }
-    let old_handle = struct_view_i32_load(base, index, "handle");
-    struct_view_i32_store(base, index, len, "handle", loaded_handle);
+    let old_handle = struct_view_i32_load(base, index, "sprite_ref");
+    struct_view_i32_store(base, index, len, "sprite_ref", loaded_handle);
     struct_view_i32_store(base, index, len, "width", width);
     struct_view_i32_store(base, index, len, "height", height);
     if old_handle != 0 {
@@ -7654,16 +7654,21 @@ mod tests {
             measure_text_cached_height: test_measure_cached,
             poll_reload: test_poll_reload,
         }));
-        let mut handles = [0_i32];
+        let mut sprite_refs = [0_i32];
         let mut widths = [0_i32];
         let mut heights = [0_i32];
-        register_global_i32_array(100, global_path_hash("handle"), handles.as_mut_ptr(), 1);
+        register_global_i32_array(
+            100,
+            global_path_hash("sprite_ref"),
+            sprite_refs.as_mut_ptr(),
+            1,
+        );
         register_global_i32_array(100, global_path_hash("width"), widths.as_mut_ptr(), 1);
         register_global_i32_array(100, global_path_hash("height"), heights.as_mut_ptr(), 1);
         upsert_jit_string_literal(55, "assets/sprite.svg");
         assert_eq!(stasis_jit_sprite_load_from(100, 0, 1, 55, 32, 24), 1);
         assert_eq!(stasis_jit_sprite_load_from(100, 0, 1, 55, 32, 24), 1);
-        assert_eq!(handles[0], 77);
+        assert_eq!(sprite_refs[0], 77);
         assert_eq!(TEST_SPRITE_RELEASES.load(Ordering::SeqCst), 1);
         clear_registered_global_memory();
         clear_jit_i32_global_table();

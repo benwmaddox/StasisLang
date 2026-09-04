@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use crate::frontend::lexer::{
     is_inside_backtick_literal, lex, lex_with_diagnostic, Token, TokenKind,
 };
-use crate::frontend::parser::{lexer_error_context, parse_string_literal_text};
+use crate::frontend::parser::{
+    lexer_error_context, parse_string_literal_text, parse_top_level_extern_functions,
+    parse_top_level_type_layout,
+};
 use crate::{SourceDiagnostic, SourceDiagnosticCode, SourceDiagnosticEdit, SourceDiagnosticFix};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +38,15 @@ pub struct ModuleGraph {
 impl ModuleGraph {
     pub fn load(
         roots: impl IntoIterator<Item = String>,
+        load_source: impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<(Self, BTreeMap<String, String>), SourceDiagnostic> {
+        Self::load_with_graphics_test_seams(roots, load_source, cfg!(test))
+    }
+
+    pub(crate) fn load_with_graphics_test_seams(
+        roots: impl IntoIterator<Item = String>,
         mut load_source: impl FnMut(&str) -> Result<String, String>,
+        allow_graphics_test_seams: bool,
     ) -> Result<(Self, BTreeMap<String, String>), SourceDiagnostic> {
         let roots: BTreeSet<String> = roots.into_iter().collect();
         let mut pending: Vec<(String, Option<(String, Range<usize>, Range<usize>, String)>)> =
@@ -70,7 +81,12 @@ impl ModuleGraph {
                 }
             })?;
             let imports = parse_imports(&path, &source)?;
-            validate_graphics_internal_source_policy(&path, &source, &imports)?;
+            validate_graphics_internal_source_policy(
+                &path,
+                &source,
+                &imports,
+                allow_graphics_test_seams,
+            )?;
             for import in imports.iter().rev() {
                 if !modules.contains_key(&import.target) {
                     pending.push((
@@ -182,10 +198,13 @@ fn validate_graphics_internal_source_policy(
     path: &str,
     source: &str,
     imports: &[ModuleImport],
+    allow_graphics_test_seams: bool,
 ) -> Result<(), SourceDiagnostic> {
     let normalized = path.replace('\\', "/");
-    let is_graphics_implementation = is_recognized_graphics_implementation_path(&normalized);
-    let is_explicit_seam = normalized.starts_with("tests/stasis/");
+    let is_graphics_implementation =
+        is_recognized_graphics_implementation_source(&normalized, source);
+    let is_explicit_seam =
+        allow_graphics_test_seams && is_explicit_graphics_test_seam_path(&normalized);
     if is_graphics_implementation || is_explicit_seam {
         return Ok(());
     }
@@ -200,6 +219,45 @@ fn validate_graphics_internal_source_policy(
             &import.path,
             "graphics command storage is internal; import stdlib/graphics.stasis and use its public API",
         ));
+    }
+
+    // These policy scanners intentionally parse only top-level declaration
+    // shapes. Let the canonical parser own malformed-source diagnostics so a
+    // partial scan cannot replace the user's function and span with a
+    // synthetic graphics-policy location.
+    if let Ok(layout) = parse_top_level_type_layout(source) {
+        if layout
+            .enums
+            .iter()
+            .any(|definition| definition.name == "SpriteRef")
+            || layout
+                .structs
+                .iter()
+                .any(|definition| definition.name == "SpriteRef")
+        {
+            return Err(diagnostic(
+                path,
+                0..0,
+                "SpriteRef",
+                "SpriteRef is a sealed compiler-owned graphics type and cannot be redefined",
+            ));
+        }
+    }
+
+    if let Ok(externals) = parse_top_level_extern_functions(source) {
+        for external in externals {
+            if is_privileged_graphics_extern(&external.name, &external.symbol_name) {
+                return Err(diagnostic(
+                    path,
+                    external.name_range,
+                    &external.name,
+                    format!(
+                        "privileged graphics extern '{}' may only be declared by the compiler-owned graphics library",
+                        external.symbol_name
+                    ),
+                ));
+            }
+        }
     }
 
     let tokens = lex_with_diagnostic(source).map_err(|error| {
@@ -233,10 +291,11 @@ fn validate_graphics_internal_source_policy(
     Ok(())
 }
 
-fn is_recognized_graphics_implementation_path(path: &str) -> bool {
+pub(crate) fn is_recognized_graphics_implementation_path(path: &str) -> bool {
     let path = path.trim_start_matches("./");
     let is_graphics_file = |root: &str| {
         path == format!("{root}/graphics.stasis")
+            || path == format!("{root}/asset_tasks.stasis")
             || path == format!("{root}/internal/gfx_cmd.stasis")
     };
 
@@ -250,9 +309,56 @@ fn is_recognized_graphics_implementation_path(path: &str) -> bool {
             is_graphics_file(root)
                 || path
                     .strip_suffix("/graphics.stasis")
+                    .or_else(|| path.strip_suffix("/asset_tasks.stasis"))
                     .or_else(|| path.strip_suffix("/internal/gfx_cmd.stasis"))
                     .is_some_and(|prefix| prefix == *root || prefix.ends_with(&format!("/{root}")))
         })
+}
+
+pub(crate) fn is_recognized_graphics_implementation_source(path: &str, source: &str) -> bool {
+    if !is_recognized_graphics_implementation_path(path) {
+        return false;
+    }
+    let normalized = path.replace('\\', "/");
+    let expected = if normalized.ends_with("/internal/gfx_cmd.stasis")
+        || normalized == "src/stdlib/internal/gfx_cmd.stasis"
+    {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/internal/gfx_cmd.stasis"
+        ))
+    } else if normalized.ends_with("/asset_tasks.stasis")
+        || normalized == "src/stdlib/asset_tasks.stasis"
+    {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/asset_tasks.stasis"
+        ))
+    } else {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/graphics.stasis"
+        ))
+    };
+    source == expected || source.replace("\r\n", "\n") == expected.replace("\r\n", "\n")
+}
+
+pub(crate) fn is_explicit_graphics_test_seam_path(path: &str) -> bool {
+    path.replace('\\', "/").starts_with("tests/stasis/")
+}
+
+pub(crate) fn is_privileged_graphics_extern(name: &str, symbol: &str) -> bool {
+    symbol.starts_with("stasis_gfx_")
+        || symbol.starts_with("stasis_jit_gfx_")
+        || name.starts_with("gfx_")
+        || matches!(name, "load_font" | "measure_text")
+        || matches!(
+            symbol,
+            "stasis_jit_sprite_load_from"
+                | "stasis_jit_text_run_load_from"
+                | "stasis_jit_text_run_replace_from"
+                | "stasis_jit_asset_request_sprite"
+        )
 }
 
 pub fn load_project_module_graph(
@@ -934,9 +1040,34 @@ mod tests {
         assert_eq!(transitive_error.path, "helper.stasis");
         assert!(transitive_error
             .message
-            .contains("graphics internal identifier"));
+            .contains("privileged graphics extern"));
+
+        for source in [
+            "enum SpriteRef { Forged = 42, }",
+            "struct SpriteRef { value: i32; }",
+        ] {
+            let error = graph(&["main.stasis"], &[("main.stasis", source)])
+                .expect_err("sealed sprite references cannot be redefined");
+            assert!(error
+                .message
+                .contains("sealed compiler-owned graphics type"));
+        }
+
+        for source in [
+            "function @extern(\"stasis_jit_gfx_release_sprite\") release_alias(value: i32): void;",
+            "function @extern(\"stasis_jit_sprite_load_from\") load_alias(value: i32): void;",
+            "function @extern(\"stasis_gfx_submit\") submit_alias(): void;",
+            "extern function gfx_release_sprite(value: i32): void;",
+            "extern function gfx_load_sprite(path: string, width: i32, height: i32): i32;",
+        ] {
+            let error = graph(&["main.stasis"], &[("main.stasis", source)])
+                .expect_err("privileged graphics symbols cannot be aliased");
+            assert!(error.message.contains("privileged graphics extern"));
+        }
 
         for spoof_path in [
+            "src/stdlib/graphics.stasis",
+            "vendor/stasis/stdlib/graphics.stasis",
             "src/my/stdlib/graphics.stasis",
             "src/my/stdlib/internal/gfx_cmd.stasis",
             "src/tests/stasis/main.stasis",
@@ -951,28 +1082,63 @@ mod tests {
     }
 
     #[test]
-    fn graphics_internal_policy_allows_implementation_and_explicit_seams() {
-        for implementation_path in [
-            "src/stdlib/graphics.stasis",
-            "src/stdlib/internal/gfx_cmd.stasis",
-            ".stasis_cache/toolchain/src/stdlib/graphics.stasis",
-            ".stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis",
-            "vendor/stasis/stdlib/graphics.stasis",
-            "vendor/stasis/stdlib/internal/gfx_cmd.stasis",
-            "vendor/stasis/src/stdlib/graphics.stasis",
-            "vendor/stasis/src/stdlib/internal/gfx_cmd.stasis",
-            "samples/example/vendor/stasis/stdlib/graphics.stasis",
-            "samples/example/vendor/stasis/stdlib/internal/gfx_cmd.stasis",
+    fn graphics_policy_partial_scanners_defer_malformed_source_diagnostics() {
+        for source in [
+            "function broken(: i32): void {}",
+            "function final_hook(): void {\n",
         ] {
-            graph(
-                &[implementation_path],
-                &[(
-                    implementation_path,
-                    "function private_probe(): i32 { return gfx_cmd_line_count(); }",
-                )],
-            )
-            .expect("recognized graphics module identity owns the private vocabulary");
+            graph(&["main.stasis"], &[("main.stasis", source)])
+                .expect("canonical parser must own malformed source diagnostics");
         }
+    }
+
+    #[test]
+    fn graphics_internal_policy_allows_implementation_and_explicit_seams() {
+        let graphics = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/graphics.stasis"
+        ));
+        let asset_tasks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/asset_tasks.stasis"
+        ));
+        let gfx_cmd = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/internal/gfx_cmd.stasis"
+        ));
+        for (implementation_path, source) in [
+            ("src/stdlib/graphics.stasis", graphics),
+            ("src/stdlib/asset_tasks.stasis", asset_tasks),
+            ("src/stdlib/internal/gfx_cmd.stasis", gfx_cmd),
+            (
+                ".stasis_cache/toolchain/src/stdlib/graphics.stasis",
+                graphics,
+            ),
+            ("vendor/stasis/stdlib/graphics.stasis", graphics),
+            (
+                "samples/example/vendor/stasis/src/stdlib/asset_tasks.stasis",
+                asset_tasks,
+            ),
+            (
+                "samples/example/vendor/stasis/stdlib/internal/gfx_cmd.stasis",
+                gfx_cmd,
+            ),
+        ] {
+            validate_graphics_internal_source_policy(implementation_path, source, &[], false)
+                .expect("canonical graphics content owns the private vocabulary");
+        }
+        let tampered = format!("{graphics}\nfunction bypass(): void {{ gfx_cmd_submit(); }}");
+        let error = validate_graphics_internal_source_policy(
+            "src/stdlib/graphics.stasis",
+            &tampered,
+            &[],
+            false,
+        )
+        .expect_err("path spelling cannot grant graphics privileges to modified source");
+        assert!(
+            error.message.contains("compiler-owned graphics library"),
+            "{error:?}"
+        );
         graph(
             &["tests/stasis/seams/gfx_probe.stasis"],
             &[(
@@ -981,6 +1147,14 @@ mod tests {
             )],
         )
         .expect("explicit ABI seams may inspect storage");
+
+        let error = ModuleGraph::load_with_graphics_test_seams(
+            ["tests/stasis/seams/gfx_probe.stasis".to_string()],
+            |_| Ok("global gfx_cmd_i32: i32[4];".to_string()),
+            false,
+        )
+        .expect_err("ordinary project roots cannot claim the repository test seam");
+        assert!(error.message.contains("graphics internal identifier"));
     }
 
     #[cfg(unix)]

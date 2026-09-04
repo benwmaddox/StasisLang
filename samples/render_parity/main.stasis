@@ -51,13 +51,13 @@ function main(): i32 {
     state.translucent.load_sprite_from("assets/translucent.svg", 96, 72);
     state.canvas.load_sprite_from("assets/full_canvas.svg", PARITY_WINDOW_W, PARITY_WINDOW_H);
     state.font = load_font("assets/parity.ttf", 24);
-    if (state.opaque.handle == 0) {
+    if (!state.opaque.valid()) {
         return 11;
     }
-    if (state.translucent.handle == 0) {
+    if (!state.translucent.valid()) {
         return 12;
     }
-    if (state.canvas.handle == 0) {
+    if (!state.canvas.valid()) {
         return 13;
     }
     if (state.font == 0) {
@@ -114,7 +114,7 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    build_parity_frame(state.canvas.handle, state.opaque.handle, state.translucent.handle, state.font, state.label);
+    build_parity_frame(state.canvas.reference(), state.opaque.reference(), state.translucent.reference(), state.font, state.label);
     append_parity_touch_marker(seam_touch_marker_active, seam_touch_x, seam_touch_y);
     if (seam_it028_enabled != 0) {
         seam_it028_render_marker = IT028_RENDER_REVISION;

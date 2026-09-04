@@ -9,8 +9,15 @@ enum AssetState {
     Cancelled,
 }
 
+// Compiler-owned nominal sprite identity. The host stores a generation-safe
+// logical resource id in this i32 ABI lane; application code can copy the
+// value, but cannot construct one from an integer.
+enum SpriteRef {
+    Invalid,
+}
+
 struct ImageAsset {
-    handle: i32;
+    sprite_ref: SpriteRef;
     request: i32;
     state: AssetState;
     width: i32;
@@ -88,9 +95,10 @@ function successful(self: LoadingProgress): bool {
 function @internal @effects(graphics)@extern("stasis_jit_asset_request_sprite") asset_request_sprite(path: string, width: i32, height: i32): i32;
 function @internal @effects(audio)@extern("stasis_jit_asset_request_audio") asset_request_audio(path: string): i32;
 function @internal @effects(platform)@extern("stasis_jit_asset_task_poll") asset_task_state(request: i32): AssetState;
-function @internal @effects(platform)@extern("stasis_jit_asset_task_take_handle") asset_task_take_handle(request: i32): i32;
+function @internal @effects(platform)@extern("stasis_jit_asset_task_take_handle") asset_task_take_sprite_ref(request: i32): SpriteRef;
+function @internal @effects(platform)@extern("stasis_jit_asset_task_take_handle") asset_task_take_audio_handle(request: i32): i32;
 function @internal @effects(platform)@extern("stasis_jit_asset_task_cancel") asset_task_cancel(request: i32): void;
-function @internal @effects(graphics)@extern("stasis_jit_gfx_release_sprite") gfx_release_sprite(handle: i32): void;
+function @internal @effects(graphics)@extern("stasis_jit_gfx_release_sprite") gfx_release_sprite(sprite_ref: SpriteRef): void;
 
 extern function @internal @effects(audio) audio_release(asset_handle: i32): void;
 
@@ -98,11 +106,11 @@ function @internal reset_image(self: ImageAsset): void {
     if (self.request > 0) {
         asset_task_cancel(self.request);
     }
-    if (self.handle != 0) {
-        gfx_release_sprite(self.handle);
+    if (self.sprite_ref != SpriteRef.Invalid) {
+        gfx_release_sprite(self.sprite_ref);
     }
     self.request = 0;
-    self.handle = 0;
+    self.sprite_ref = SpriteRef.Invalid;
     self.state = AssetState.None;
 }
 
@@ -110,7 +118,7 @@ function @internal reset_image(self: ImageAsset): void {
 // import graphics get one unambiguous receiver-method module, while direct
 // asset_tasks imports keep the existing ImageAsset/AudioAsset release API.
 struct Sprite {
-    handle: i32;
+    sprite_ref: SpriteRef;
     width: i32;
     height: i32;
 }
@@ -136,13 +144,13 @@ function release(self: AudioAsset): void {
 }
 
 // Release is safe to call repeatedly. A Sprite is an owning value only when
-// it was populated by load_sprite_from; copied integer handles do not acquire
+// it was populated by load_sprite_from; copied references do not acquire
 // another native reference.
 function release(self: Sprite): void {
-    if (self.handle != 0) {
-        gfx_release_sprite(self.handle);
+    if (self.sprite_ref != SpriteRef.Invalid) {
+        gfx_release_sprite(self.sprite_ref);
     }
-    self.handle = 0;
+    self.sprite_ref = SpriteRef.Invalid;
     self.width = 0;
     self.height = 0;
 }
@@ -177,9 +185,9 @@ function status(self: ImageAsset): AssetState {
     }
     self.state = asset_task_state(self.request);
     if (self.state == AssetState.Loaded) {
-        self.handle = asset_task_take_handle(self.request);
+        self.sprite_ref = asset_task_take_sprite_ref(self.request);
         self.request = 0;
-        if (self.handle == 0) {
+        if (self.sprite_ref == SpriteRef.Invalid) {
             self.state = AssetState.Failed;
         }
     }
@@ -192,7 +200,7 @@ function status(self: AudioAsset): AssetState {
     }
     self.state = asset_task_state(self.request);
     if (self.state == AssetState.Loaded) {
-        self.handle = asset_task_take_handle(self.request);
+        self.handle = asset_task_take_audio_handle(self.request);
         self.request = 0;
         if (self.handle == 0) {
             self.state = AssetState.Failed;

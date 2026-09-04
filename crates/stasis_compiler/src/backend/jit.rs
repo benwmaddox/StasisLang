@@ -4208,7 +4208,7 @@ function main(): i32 {
         let mut process = JitProcess::new();
         process.set_local_runtime_helper_trampolines(true);
         process.upsert_file(
-            "sample.stasis",
+            "tests/stasis/compiler/preview_externs.stasis",
             "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let reloaded: bool = gfx_poll_reload(0); let width: f32 = gfx_measure_text_cached(0); let audio: bool = audio_is_available(); return 1; }\n",
         );
         process
