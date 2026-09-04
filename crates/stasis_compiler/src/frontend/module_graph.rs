@@ -221,38 +221,42 @@ fn validate_graphics_internal_source_policy(
         ));
     }
 
-    let layout = parse_top_level_type_layout(source)
-        .map_err(|message| diagnostic(path, 0..0, "SpriteRef", message))?;
-    if layout
-        .enums
-        .iter()
-        .any(|definition| definition.name == "SpriteRef")
-        || layout
-            .structs
+    // These policy scanners intentionally parse only top-level declaration
+    // shapes. Let the canonical parser own malformed-source diagnostics so a
+    // partial scan cannot replace the user's function and span with a
+    // synthetic graphics-policy location.
+    if let Ok(layout) = parse_top_level_type_layout(source) {
+        if layout
+            .enums
             .iter()
             .any(|definition| definition.name == "SpriteRef")
-    {
-        return Err(diagnostic(
-            path,
-            0..0,
-            "SpriteRef",
-            "SpriteRef is a sealed compiler-owned graphics type and cannot be redefined",
-        ));
-    }
-
-    for external in parse_top_level_extern_functions(source)
-        .map_err(|message| diagnostic(path, 0..0, "graphics extern", message))?
-    {
-        if is_privileged_graphics_extern(&external.name, &external.symbol_name) {
+            || layout
+                .structs
+                .iter()
+                .any(|definition| definition.name == "SpriteRef")
+        {
             return Err(diagnostic(
                 path,
-                external.name_range,
-                &external.name,
-                format!(
-                    "privileged graphics extern '{}' may only be declared by the compiler-owned graphics library",
-                    external.symbol_name
-                ),
+                0..0,
+                "SpriteRef",
+                "SpriteRef is a sealed compiler-owned graphics type and cannot be redefined",
             ));
+        }
+    }
+
+    if let Ok(externals) = parse_top_level_extern_functions(source) {
+        for external in externals {
+            if is_privileged_graphics_extern(&external.name, &external.symbol_name) {
+                return Err(diagnostic(
+                    path,
+                    external.name_range,
+                    &external.name,
+                    format!(
+                        "privileged graphics extern '{}' may only be declared by the compiler-owned graphics library",
+                        external.symbol_name
+                    ),
+                ));
+            }
         }
     }
 
@@ -1074,6 +1078,17 @@ mod tests {
             )
             .expect_err("a stdlib suffix alone must not grant graphics implementation access");
             assert!(error.message.contains("graphics internal identifier"));
+        }
+    }
+
+    #[test]
+    fn graphics_policy_partial_scanners_defer_malformed_source_diagnostics() {
+        for source in [
+            "function broken(: i32): void {}",
+            "function final_hook(): void {\n",
+        ] {
+            graph(&["main.stasis"], &[("main.stasis", source)])
+                .expect("canonical parser must own malformed source diagnostics");
         }
     }
 
