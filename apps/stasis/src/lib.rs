@@ -9569,7 +9569,7 @@ function render(): void {{ {draws} return; }}
         .expect("asset manifest");
         fs::write(
             &entry,
-            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\nfunction @asset_path(path) request_sprite(self: i32, path: string, width: i32, height: i32): bool { return true; }\nfunction @asset_path(path) request_dynamic(self: i32, path: string, width: i32, height: i32): bool { return true; }\nfunction use_dynamic(path: string): bool { return request_dynamic(0, path, 32, 32); }\nfunction main(): i32 { if (request_sprite(0, \"../assets/piece.svg\", 32, 32) && use_dynamic(\"../assets/dynamic.svg\")) { return gfx_load_sprite(\"../assets/piece.svg\", 32, 32); } return 0; }\n",
+            "function @asset_path(path) request_sprite(self: i32, path: string, width: i32, height: i32): bool { return true; }\nfunction @asset_path(path) request_dynamic(self: i32, path: string, width: i32, height: i32): bool { return true; }\nfunction use_dynamic(path: string): bool { return request_dynamic(0, path, 32, 32); }\nfunction main(): i32 { if (request_sprite(0, \"../assets/piece.svg\", 32, 32) && use_dynamic(\"../assets/dynamic.svg\")) { return 1; } return 0; }\n",
         )
         .expect("entry source");
 
