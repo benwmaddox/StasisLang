@@ -5,6 +5,8 @@ mod compiler_backend;
 mod events;
 mod frame_pacer;
 mod host_set_registry;
+#[cfg(test)]
+mod jit_test_support;
 mod live_workspace;
 mod mobile_aot_bindings;
 mod play_error_toasts;
@@ -5027,11 +5029,6 @@ mod tests {
         "/../../samples/between_tick_layout_migration/reject.stasis"
     ));
 
-    fn jit_global_table_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     fn hot_render_test_image(path: &str) -> stasis_dynload::HotRenderRuntimeImage {
         stasis_dynload::HotRenderRuntimeImage {
             logical_path: path.to_string(),
@@ -5071,7 +5068,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn initial_jit_policy_is_published_before_guest_startup() {
-        let _global_lock = jit_global_table_lock().lock().expect("acquire global lock");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::replace_hot_render_metadata(
             stasis_dynload::HOT_RENDER_METADATA_VERSION,
             &[],
@@ -5089,7 +5086,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn prepared_jit_hook_observes_candidate_policy_and_rejection_restores_previous() {
-        let _global_lock = jit_global_table_lock().lock().expect("acquire global lock");
+        let _global_guard = crate::jit_test_support::lock();
         let previous = vec![hot_render_test_image("assets/previous.png")];
         stasis_dynload::replace_hot_render_metadata(
             stasis_dynload::HOT_RENDER_METADATA_VERSION,
@@ -5129,7 +5126,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn aot_hot_render_policy_publishes_only_for_successful_commit() {
-        let _global_lock = jit_global_table_lock().lock().expect("acquire global lock");
+        let _global_guard = crate::jit_test_support::lock();
         let previous = vec![hot_render_test_image("assets/aot-previous.png")];
         stasis_dynload::replace_hot_render_metadata(
             stasis_dynload::HOT_RENDER_METADATA_VERSION,
@@ -5358,11 +5355,9 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn stasis_window_requests_apply_once_after_pre_main_baseline() {
+        let _global_guard = crate::jit_test_support::lock();
         use std::cell::RefCell;
 
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
         stasis_dynload::clear_registered_global_memory();
         stasis_dynload::clear_jit_i32_global_table();
 
@@ -6563,9 +6558,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn apply_play_data_binding_value_populates_registered_scalars_and_strings() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_registered_global_memory();
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
@@ -6805,9 +6798,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn load_play_data_bindings_applies_struct_array_csv_table() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_registered_global_memory();
         stasis_dynload::clear_jit_i32_global_table();
         let collection_hash = hash_global_path("level.rows");
@@ -6887,6 +6878,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn validate_play_binding_targets_rejects_missing_compiled_global() {
+        let _global_guard = crate::jit_test_support::lock();
         let jit = JitProcess::new();
         let metadata = PlayStructMetadata {
             version: 1,
@@ -6906,6 +6898,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn validate_play_binding_targets_rejects_wrong_type_and_capacity() {
+        let _global_guard = crate::jit_test_support::lock();
         let mut jit = JitProcess::new();
         jit.upsert_file(
             "binding-shape.stasis",
@@ -6946,9 +6939,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn load_play_data_bindings_applies_columnar_csv_arrays() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_registered_global_memory();
         stasis_dynload::clear_jit_i32_global_table();
         let mut hp = [0i32; 3];
@@ -6985,9 +6976,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn load_play_data_bindings_rejects_set_before_mutating_runtime() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_registered_global_memory();
         stasis_dynload::clear_jit_i32_global_table();
         let mut value = 5i32;
@@ -7034,9 +7023,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn load_play_data_bindings_rejects_duplicate_targets_before_mutating_runtime() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_registered_global_memory();
         stasis_dynload::clear_jit_i32_global_table();
         let mut value = 5i32;
@@ -7192,9 +7179,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn compiler_thread_stages_jit_candidate_without_activating_runtime() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_jit_i32_global_table();
 
         let stamp = SystemTime::now()
@@ -7245,9 +7230,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn runner_collection_growth_uses_shared_migration_transaction() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_i32_array_global_table();
 
@@ -7317,9 +7300,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn layout_migration_commits_between_ticks_before_new_code_runs() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_jit_i32_global_table();
 
         let source_path = "between_tick_layout_migration.stasis";
@@ -7409,9 +7390,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn background_watch_patch_keeps_old_multi_root_windows_until_atomic_publish() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         let root = std::env::temp_dir().join(format!("stasis-watch-patch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("create watch patch fixture");
@@ -7496,9 +7475,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn rejected_between_tick_layout_migration_keeps_old_code_and_state() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_jit_i32_global_table();
 
         let source_path = "between_tick_layout_migration.stasis";
@@ -7563,9 +7540,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn runner_rejects_missing_jit_candidate_without_mutating_state() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_jit_i32_global_table();
         let score_hash = hash_global_path("score");
         stasis_dynload::stasis_jit_global_i32_store(score_hash, 7);
@@ -7612,9 +7587,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn watched_hook_rejection_restores_mutated_runtime_state() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         let mut active = JitProcess::new();
         active.upsert_file(
             "watch_rollback.stasis",
@@ -7654,9 +7627,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn watched_code_only_candidate_bypasses_state_snapshot_limit() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         let mut active = JitProcess::new();
         active.upsert_file("watch_large.stasis", "function main(): i32 { return 0; }");
         active.compile().expect("active compile");
@@ -7695,9 +7666,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn runner_commit_hook_rejection_restores_migrated_and_hook_state() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_jit_i32_global_table();
         let mut active = JitProcess::new();
         active.upsert_file(
@@ -7798,9 +7767,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn code_only_commit_without_hook_bypasses_state_snapshot_limit() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global lock should be acquired");
+        let _global_guard = crate::jit_test_support::lock();
         let _jit = JitProcess::new();
         let oversized_len = MAX_STATE_SNAPSHOT_BYTES / std::mem::size_of::<i32>() + 1;
         stasis_dynload::ensure_jit_i32_array_capacity(9001, 0, oversized_len)
@@ -7996,6 +7963,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn standalone_play_root_supports_entry_imports_in_sibling_directory() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -8580,6 +8548,7 @@ function render(): void {{ {draws} return; }}
     #[cfg(windows)]
     #[test]
     fn aot_native_hook_executes_hook_export_and_mutates_state_when_enabled() {
+        let _global_guard = crate::jit_test_support::lock();
         fn find_lld_link() -> Option<PathBuf> {
             let candidates = [
                 r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
@@ -9536,6 +9505,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn watch_asset_paths_follow_reachable_asset_loader_references() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -9762,6 +9732,7 @@ function render(): void {{ {draws} return; }}
     #[cfg(windows)]
     #[test]
     fn real_backend_smoke_compiles_and_commits_literal_main() {
+        let _global_guard = crate::jit_test_support::lock();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -9798,6 +9769,7 @@ function render(): void {{ {draws} return; }}
     #[cfg(windows)]
     #[test]
     fn real_backend_smoke_compiles_and_commits_binary_literal_main() {
+        let _global_guard = crate::jit_test_support::lock();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -9834,6 +9806,7 @@ function render(): void {{ {draws} return; }}
     #[cfg(windows)]
     #[test]
     fn real_backend_smoke_compiles_and_commits_void_hook_and_literal_main() {
+        let _global_guard = crate::jit_test_support::lock();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -9870,9 +9843,7 @@ function render(): void {{ {draws} return; }}
     #[cfg(windows)]
     #[test]
     fn real_backend_executes_hook_and_mutates_global_state() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global table lock should succeed");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_jit_i32_global_table();
 
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -9917,9 +9888,7 @@ function render(): void {{ {draws} return; }}
     #[cfg(windows)]
     #[test]
     fn real_backend_runs_hook_on_subsequent_commits_when_hook_body_unchanged() {
-        let _global_lock = jit_global_table_lock()
-            .lock()
-            .expect("jit global table lock should succeed");
+        let _global_guard = crate::jit_test_support::lock();
         stasis_dynload::clear_jit_i32_global_table();
         stasis_dynload::clear_jit_f32_global_table();
 
@@ -10133,6 +10102,7 @@ function render(): void {{ {draws} return; }}
     #[cfg(windows)]
     #[test]
     fn real_backend_smoke_compiles_and_commits_brickout_v1() {
+        let _global_guard = crate::jit_test_support::lock();
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
