@@ -20,7 +20,7 @@ function exploration_host_draw(): void {
     exploration_host_begin_frame();
     if (Render.command1_kind == 2) {
         exploration_host_sprite(
-            ExplorationHostAssets.sun.handle,
+            ExplorationHostAssets.sun.reference(),
             Render.command1_x,
             Render.command1_y,
             Render.command1_w,
@@ -31,7 +31,7 @@ function exploration_host_draw(): void {
     }
     if (Render.command2_kind == 2) {
         exploration_host_sprite(
-            ExplorationHostAssets.moon.handle,
+            ExplorationHostAssets.moon.reference(),
             Render.command2_x,
             Render.command2_y,
             Render.command2_w,
@@ -42,7 +42,7 @@ function exploration_host_draw(): void {
     }
     if (Render.command3_kind == 2) {
         exploration_host_sprite(
-            ExplorationHostAssets.sun.handle,
+            ExplorationHostAssets.sun.reference(),
             Render.command3_x,
             Render.command3_y,
             Render.command3_w,
@@ -52,7 +52,7 @@ function exploration_host_draw(): void {
         );
     }
     exploration_host_sprite(
-        ExplorationHostAssets.player.handle,
+        ExplorationHostAssets.player.reference(),
         Render.command4_x,
         Render.command4_y,
         Render.command4_w,
@@ -62,7 +62,7 @@ function exploration_host_draw(): void {
     );
     if (Render.command5_kind == 2) {
         exploration_host_sprite(
-            ExplorationHostAssets.destination.handle,
+            ExplorationHostAssets.destination.reference(),
             Render.command5_x,
             Render.command5_y,
             Render.command5_w,
@@ -86,6 +86,7 @@ function exploration_host_start(): void {
 }
 
 function exploration_host_tick(): void {
+    exploration_host_frame.refresh();
     exploration_host_sync_input();
     exploration_tick_schedule();
     exploration_host_draw();

@@ -1,0 +1,73 @@
+name: Stasis Weekly Nightly
+
+on:
+  schedule:
+    - cron: "0 9 * * 5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.nightly.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve newest complete nightly
+        id: nightly
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseId = ./tools/resolve-stasis-nightly.ps1
+          "release_id=$releaseId" >> $env:GITHUB_OUTPUT
+
+  validate:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: stasis-nightly-linux-x64.tar.gz
+            platform: linux-x64
+          - os: windows-latest
+            asset: stasis-nightly-win-x64.zip
+            platform: win-x64
+          - os: macos-15
+            asset: stasis-nightly-osx-arm64.tar.gz
+            platform: osx-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore verified Stasis toolchain
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tools/restore-stasis-release.ps1 -ReleaseId '${{ needs.resolve.outputs.release_id }}' -AssetName '${{ matrix.asset }}'
+
+      - name: Update vendored Stasis sources
+        run: stasis vendor update
+
+      - name: Check formatting
+        run: stasis fmt --check
+
+      - name: Check
+        run: stasis check
+
+      - name: Test
+        run: stasis test
+
+      - name: Package desktop
+        run: stasis package --target desktop
+
+      - name: Upload temporary desktop package
+        uses: actions/upload-artifact@v4
+        with:
+          name: stasis-weekly-${{ needs.resolve.outputs.release_id }}-${{ matrix.platform }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7

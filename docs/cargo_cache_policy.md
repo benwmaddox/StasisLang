@@ -50,13 +50,13 @@ python tools/cargo_cache.py measure --json
 Preview removal of one stale worktree's entire Cargo target:
 
 ```text
-python tools/cargo_cache.py clean --worktree F:\StasisLang\.worktrees\old-task
+python tools/cargo_cache.py clean --worktree "C:\src\StasisLang\.worktrees\old-task"
 ```
 
 Remove only that target's incremental directories after reviewing the exact paths:
 
 ```text
-python tools/cargo_cache.py clean --worktree F:\StasisLang\.worktrees\old-task --incremental-only --apply
+python tools/cargo_cache.py clean --worktree "C:\src\StasisLang\.worktrees\old-task" --incremental-only --apply
 ```
 
 Preview or remove the shared automation cache:

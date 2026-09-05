@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "name": "android_lifecycle_failure_tick",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "android": {
+    "application_id": "com.stasislang.seam.it024.tick",
+    "label": "Stasis Tick Failure Seam",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "1.0.0"
+  }
+}

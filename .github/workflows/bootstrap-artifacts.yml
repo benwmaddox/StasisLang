@@ -22,9 +22,18 @@ jobs:
           - ubuntu-latest
           - macos-14
     runs-on: ${{ matrix.os }}
+    env:
+      STASIS_RELEASE_ID: bootstrap-${{ github.sha }}
+      STASIS_SOURCE_COMMIT: ${{ github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Compute shared toolchain fingerprint
+        shell: pwsh
+        run: |
+          $fingerprint = (python tools/compute_toolchain_fingerprint.py --source-commit $env:STASIS_SOURCE_COMMIT --release-id $env:STASIS_RELEASE_ID).Trim()
+          "STASIS_BUILD_FINGERPRINT=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -70,9 +79,10 @@ jobs:
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
-            -DSTASIS_GRAPHICS_SDL_ONLY=ON \
             -DSTASIS_BUILD_RUNNER="${runner_build}" \
-            -DSTASIS_BUILD_SYS=OFF
+            -DSTASIS_BUILD_SYS=OFF \
+            -DSTASIS_RELEASE_ID="${STASIS_RELEASE_ID}" \
+            -DSTASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}"
           cmake --build runtime/build_ci --config Release --target "${build_targets[@]}"
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
@@ -91,10 +101,11 @@ jobs:
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON `
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
-            -DSTASIS_GRAPHICS_SDL_ONLY=ON `
             -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON `
             -DSTASIS_BUILD_RUNNER=ON `
-            -DSTASIS_BUILD_SYS=OFF
+            -DSTASIS_BUILD_SYS=OFF `
+            -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" `
+            -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
 
           cmake --build $buildDir --config Release --target stasis_graphics stasis_runner stasis_render_contract_test stasis_asset_path_test
           ctest --test-dir $buildDir -C Release -R "stasis_(render_command|asset_path)_contract" --output-on-failure
@@ -119,9 +130,11 @@ jobs:
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
           mkdir -p "${out}/runtime"
-          cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/nanosvg.h runtime/nanosvgrast.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_graphics.c runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stb_truetype.h "${out}/runtime/"
+          cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stb_truetype.h "${out}/runtime/"
+          cp -R runtime/third_party "${out}/runtime/"
           mkdir -p "${out}/docs"
           cp docs/agent_workflow.md docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md docs/release_provenance.md docs/sdl3_migration.md "${out}/docs/"
+          cp -R docs/knowledge "${out}/docs/"
           release_tag="${{ github.event.release.tag_name }}"
           development_flag=()
           if [ -z "${release_tag}" ]; then
@@ -164,14 +177,18 @@ jobs:
           Copy-Item README.md "$out/" -Force
           Copy-Item LICENSE "$out/" -Force
           Copy-Item THIRD_PARTY_NOTICES.md "$out/" -Force
+          New-Item -ItemType Directory -Force -Path "$out/tools/windows" | Out-Null
+          Copy-Item tools/windows/stasis-signing.ps1 "$out/tools/windows/" -Force
           Copy-Item src "$out/" -Recurse -Force
           Copy-Item samples "$out/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/runtime" | Out-Null
-          @('CMakeLists.txt', 'MINIMP3-LICENSE.txt', 'minimp3.h', 'minimp3_ex.h', 'nanosvg.h', 'nanosvgrast.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_render_contract.h', 'stasis_renderer_lifecycle.h', 'stasis_audio_assets.c', 'stasis_audio_assets.h', 'stasis_graphics.c', 'stasis_runner.manifest', 'stasis_runner_macos.plist.in', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stasis_platform_storage.c', 'stasis_platform_storage.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
+          @('CMakeLists.txt', 'MINIMP3-LICENSE.txt', 'minimp3.h', 'minimp3_ex.h', 'stasis_svg.cpp', 'stasis_svg.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_render_contract.h', 'stasis_renderer_lifecycle.h', 'stasis_performance_metrics.h', 'stasis_audio_assets.c', 'stasis_audio_assets.h', 'stasis_graphics.c', 'stasis_mixed_quad_planner.h', 'stasis_sprite_atlas_policy.h', 'stasis_image_writer.c', 'stasis_image_writer.h', 'stasis_runner.manifest', 'stasis_runner_macos.plist.in', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stasis_platform_storage.c', 'stasis_platform_storage.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
+          Copy-Item "runtime/third_party" "$out/runtime/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
           Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md "$out/docs/" -Force
+          Copy-Item docs/knowledge "$out/docs/knowledge" -Recurse -Force
           $releaseTag = "${{ github.event.release.tag_name }}"
           $developmentFlag = @()
           if (-not $releaseTag) {
@@ -203,7 +220,21 @@ jobs:
           .\stasis.exe --workspace cli-smoke check
           .\stasis.exe --workspace cli-smoke test
           .\stasis.exe --workspace cli-smoke build --mode release
-          .\cli-smoke\build\ci_smoke.exe
+          $smokeProcess = Start-Process -FilePath ".\cli-smoke\build\ci_smoke.exe" -PassThru
+          try {
+            if ($smokeProcess.WaitForExit(5000)) {
+              if ($smokeProcess.ExitCode -ne 0) { throw "ci_smoke exited early with code $($smokeProcess.ExitCode)" }
+            } else {
+              Stop-Process -Id $smokeProcess.Id -Force -ErrorAction SilentlyContinue
+              $smokeProcess.WaitForExit()
+            }
+          } finally {
+            if (-not $smokeProcess.HasExited) {
+              Stop-Process -Id $smokeProcess.Id -Force -ErrorAction SilentlyContinue
+              $smokeProcess.WaitForExit()
+            }
+            $smokeProcess.Dispose()
+          }
           Set-Content -Path "cli-smoke/src/main.stasis" -Encoding ASCII -Value @(
             "function main(): i32 { return 0; }",
             "function tick(): i32 { return 0; }",
@@ -217,7 +248,9 @@ jobs:
             .\stasis.exe --workspace cli-smoke package --target desktop
           }
           if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package runner missing" }
-          if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/ci_smoke.dll")) { throw "game package library missing" }
+          if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis.json")) { throw "game package manifest missing" }
+          if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis_provenance.json")) { throw "game package provenance missing" }
+          if (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/ci_smoke.dll") { throw "obsolete game package library present; monolithic Windows package must not contain app/ci_smoke.dll" }
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
             .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/android --development-build
             .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios --development-build
@@ -244,7 +277,28 @@ jobs:
           ./bin/stasis --workspace cli-smoke check
           ./bin/stasis --workspace cli-smoke test
           ./bin/stasis --workspace cli-smoke build --mode release
-          ./cli-smoke/build/ci_smoke
+          smoke_executable="./cli-smoke/build/ci_smoke"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"
+          fi
+          python3 - "${smoke_executable}" <<'PY'
+          import subprocess
+          import sys
+
+          process = subprocess.Popen([sys.argv[1]])
+          try:
+              return_code = process.wait(timeout=5)
+          except subprocess.TimeoutExpired:
+              process.terminate()
+              try:
+                  process.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  process.kill()
+                  process.wait()
+          else:
+              if return_code != 0:
+                  raise SystemExit(f"ci_smoke exited early with code {return_code}")
+          PY
           printf '%s\n' \
             'function main(): i32 { return 0; }' \
             'function tick(): i32 { return 0; }' \

@@ -16,6 +16,10 @@ Enable fast, reliable, low-friction iteration on a running Stasis-based game by 
 
 directly inside the running game engine, avoiding disk I/O and process restarts.
 
+The cross-cutting deterministic live simulation promise, capability order, and evidence gates are
+defined in [`docs/deterministic_live_simulation_roadmap.md`](deterministic_live_simulation_roadmap.md).
+This PRD owns the hot-swap architecture and requirements; it does not duplicate that roadmap.
+
 The system must:
 
 - preserve game state across code changes
@@ -95,6 +99,8 @@ Pruning is symbol-level and happens before Cranelift emission.
 
 ### 4.2 File-Level Pipeline
 
+The implementation map for this pipeline is [compiler_architecture.md](compiler_architecture.md).
+
 ```text
 Raw Text
  -> Lex
@@ -128,9 +134,11 @@ Each function produces:
 Rules:
 
 - If `fnBodyHash` is unchanged -> reuse target-independent analysis/lowering inputs when safe
-- If a layout-affecting semantic fact changes -> seed every function whose lowered storage facts
-  changed, then expand its reverse caller closure
+- If any compiler-visible layout fact changes -> recompile every reachable function into one
+  coherent generation
 - Unchanged reachable functions may reuse their accepted live machine code and addresses in JIT dev
+  only while the compiler-layout digest is unchanged. This keeps ordinary body and constant edits
+  selective without requiring per-function proofs for embedded struct offsets or collection shapes.
 
 ### 4.4 Generation Compatibility Rule
 
@@ -508,6 +516,10 @@ full measurement and executable-memory budgets are in `docs/jit_generation_contr
 must not be on the hot path.
 
 ## 15. Development Phases
+
+These local development phases own the hot-compilation implementation sequence and status. The
+cross-cutting deterministic simulation outcome and capability dependencies remain in the
+[`deterministic_live_simulation_roadmap.md`](deterministic_live_simulation_roadmap.md).
 
 Phase P0 (#184):
 - Lock selective reverse-caller invalidation and the host-entry-only trampoline ABI.

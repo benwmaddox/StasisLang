@@ -1,0 +1,98 @@
+import "../../../src/stdlib/graphics.stasis";
+
+global ProbeState {
+    sprite: Sprite;
+    text: TextRun;
+}
+
+global replacement_text: utf8[16];
+
+function set_replacement_text(a: u8, b: u8, length: i32): void {
+    replacement_text[0] = a;
+    replacement_text[1] = b;
+    replacement_text.length = length;
+    replacement_text.char_length = length;
+}
+
+function render(): i32 {
+    begin_frame();
+    ProbeState.text.draw(12.0, 34.0, 1.0, 1.0, 1.0, 1.0);
+    end_frame();
+    return 0;
+}
+
+function main(): i32 {
+    if (!ProbeState.sprite.load_sprite_from("assets/球.png", 47, 29)) {
+        return 1;
+    }
+    if (
+        !ProbeState.sprite.valid()
+        || ProbeState.sprite.reference() == SpriteRef.Invalid
+        || ProbeState.sprite.width != 47
+        || ProbeState.sprite.height != 29
+    ) {
+        return 2;
+    }
+
+    let font: i32 = load_font("fonts/Ångström.ttf", 19);
+    if (font != 202) {
+        return 3;
+    }
+    let width: f32 = measure_text(font, "héllo 世界");
+    if (width != 18.75) {
+        return 4;
+    }
+
+    if (!ProbeState.text.load_text_from(font, "cached ✓")) {
+        return 5;
+    }
+    if (ProbeState.text.font != 202 || ProbeState.text.handle != 303) {
+        return 6;
+    }
+    if (ProbeState.text.width != 44.5 || ProbeState.text.height != 12.25) {
+        return 7;
+    }
+    set_replacement_text(65, 49, 2);
+    if (!ProbeState.text.replace_text_from(font, replacement_text)) {
+        return 11;
+    }
+    if (ProbeState.text.font != 202 || ProbeState.text.handle != 404) {
+        return 12;
+    }
+    set_replacement_text(66, 50, 2);
+    if (!ProbeState.text.replace_text_from(font, replacement_text)) {
+        return 13;
+    }
+    if (ProbeState.text.handle != 404) {
+        return 14;
+    }
+    let prior_font: i32 = ProbeState.text.font;
+    let prior_handle: i32 = ProbeState.text.handle;
+    let prior_width: f32 = ProbeState.text.width;
+    let prior_height: f32 = ProbeState.text.height;
+    set_replacement_text(195, 40, 2);
+    if (ProbeState.text.replace_text_from(font, replacement_text)) {
+        return 15;
+    }
+    if (
+        ProbeState.text.font != prior_font
+        || ProbeState.text.handle != prior_handle
+        || ProbeState.text.width != prior_width
+        || ProbeState.text.height != prior_height
+    ) {
+        return 16;
+    }
+    if (render() != 0) {
+        return 17;
+    }
+    if (!ProbeState.sprite.poll_reload()) {
+        return 8;
+    }
+    if (gfx_dump_bmp("captures/帧.bmp") != 11) {
+        return 9;
+    }
+    if (gfx_dump_png("captures/帧.png") != 12) {
+        return 10;
+    }
+    return 79;
+}

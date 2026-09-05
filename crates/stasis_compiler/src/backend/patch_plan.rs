@@ -44,6 +44,7 @@ pub enum PatchReason {
     BodyChanged,
     AddedOrSignatureChanged,
     BecameReachable,
+    CompilerLayoutChanged,
     LoweredContractChanged,
     SccPeer { changed: FunctionKey },
     DirectCaller { callee: FunctionKey },
@@ -886,31 +887,13 @@ mod tests {
     }
 
     #[test]
-    fn removed_reachable_callee_rebuilds_unchanged_callers() {
-        let before = "function leaf(): i32 { return 1; } function main(): i32 { return leaf(); }";
-        let previous = accepted(before);
-        let plan = plan(&previous, "function main(): i32 { return leaf(); }");
-
-        assert_eq!(key_by_name(&plan.re_jit), vec!["main"]);
-        assert_eq!(key_by_name(&plan.removed), vec!["leaf"]);
-        let main = plan
-            .re_jit
-            .iter()
-            .find(|key| key.name == "main")
-            .expect("main invalidated");
-        let reason = plan.reason_for(main).expect("main reason");
-        assert!(matches!(
-            &reason.reason,
-            PatchReason::DirectCaller { callee } if callee.name == "leaf"
-        ));
-        assert_eq!(
-            reason
-                .path_from_change
-                .iter()
-                .map(|key| key.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["leaf", "main"]
-        );
+    fn removed_reachable_callee_is_rejected_before_patch_planning() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("main.stasis", "function main(): i32 { return leaf(); }");
+        let error = compiler
+            .check()
+            .expect_err("an unresolved caller cannot produce a patch plan");
+        assert!(format!("{error:?}").contains("cannot resolve call 'leaf'"));
     }
 
     #[test]

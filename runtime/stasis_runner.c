@@ -44,7 +44,7 @@ typedef int (*stasis_tick_fn)(void);
 typedef void (*stasis_aot_bind_runtime_globals_fn)(void);
 typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
 typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
-typedef void (*stasis_gfx_submit_u8_fn)(const int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
+typedef void (*stasis_gfx_submit_u8_fn)(int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
 typedef void (*stasis_host_bulk_init_fn)(const int32_t *host_req_seq);
 typedef void (*stasis_host_bulk_apply_requests_fn)(
     const int32_t *host_req_seq,
@@ -52,6 +52,7 @@ typedef void (*stasis_host_bulk_apply_requests_fn)(
     const int32_t *host_req_window_w_px,
     const int32_t *host_req_window_h_px);
 typedef void (*stasis_host_set_performance_metrics_fn)(uint64_t tick_us, uint64_t render_us);
+typedef int (*stasis_host_performance_metrics_enabled_fn)(void);
 typedef int (*stasis_host_bulk_step_fn)(
     int32_t *host_i32,
     float *host_f32,
@@ -2214,6 +2215,7 @@ int main(int argc, char **argv)
 
         stasis_host_get_frame_fn host_get_frame = NULL;
         stasis_host_set_performance_metrics_fn host_set_performance_metrics = NULL;
+        stasis_host_performance_metrics_enabled_fn host_performance_metrics_enabled = NULL;
         stasis_gfx_submit_u8_fn gfx_submit_u8 = NULL;
         int32_t last_req_seq = host_req_seq ? *host_req_seq : 0;
 
@@ -2230,6 +2232,10 @@ int main(int argc, char **argv)
             host_set_performance_metrics = (stasis_host_set_performance_metrics_fn)GetProcAddress(
                 gfx,
                 "stasis_host_set_performance_metrics");
+            host_performance_metrics_enabled =
+                (stasis_host_performance_metrics_enabled_fn)GetProcAddress(
+                    gfx,
+                    "stasis_host_performance_metrics_enabled");
             gfx_submit_u8 = (stasis_gfx_submit_u8_fn)GetProcAddress(gfx, "stasis_gfx_submit_u8");
         }
 
@@ -2610,16 +2616,21 @@ int main(int argc, char **argv)
                 }
 
                 int step_result = 0;
+                const int measure_hud = host_performance_metrics_enabled &&
+                    host_performance_metrics_enabled();
                 uint64_t tick_us = 0;
                 uint64_t render_us = 0;
                 if (tick)
                 {
                     LARGE_INTEGER phase_started;
                     LARGE_INTEGER phase_finished;
-                    QueryPerformanceCounter(&phase_started);
+                    if (measure_hud) QueryPerformanceCounter(&phase_started);
                     step_result = tick();
-                    QueryPerformanceCounter(&phase_finished);
-                    tick_us = (uint64_t)((phase_finished.QuadPart - phase_started.QuadPart) * 1000000LL / freq.QuadPart);
+                    if (measure_hud)
+                    {
+                        QueryPerformanceCounter(&phase_finished);
+                        tick_us = (uint64_t)((phase_finished.QuadPart - phase_started.QuadPart) * 1000000LL / freq.QuadPart);
+                    }
                     if (step_result != 0)
                     {
                         result = step_result == 1 ? 0 : step_result;
@@ -2631,10 +2642,13 @@ int main(int argc, char **argv)
                 {
                     LARGE_INTEGER phase_started;
                     LARGE_INTEGER phase_finished;
-                    QueryPerformanceCounter(&phase_started);
+                    if (measure_hud) QueryPerformanceCounter(&phase_started);
                     step_result = render();
-                    QueryPerformanceCounter(&phase_finished);
-                    render_us = (uint64_t)((phase_finished.QuadPart - phase_started.QuadPart) * 1000000LL / freq.QuadPart);
+                    if (measure_hud)
+                    {
+                        QueryPerformanceCounter(&phase_finished);
+                        render_us = (uint64_t)((phase_finished.QuadPart - phase_started.QuadPart) * 1000000LL / freq.QuadPart);
+                    }
                     if (step_result != 0)
                     {
                         result = step_result == 1 ? 0 : step_result;
@@ -2651,7 +2665,7 @@ int main(int argc, char **argv)
 
                 if (gfx_submit_u8 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
                 {
-                    if (host_set_performance_metrics)
+                    if (measure_hud && host_set_performance_metrics)
                     {
                         host_set_performance_metrics(tick_us, render_us);
                     }

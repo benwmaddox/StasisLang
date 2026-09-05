@@ -1,137 +1,77 @@
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
 const PARITY_WINDOW_W: i32 = 640;
 const PARITY_WINDOW_H: i32 = 360;
-const PARITY_GFX_MAGIC: i32 = 1196967473;
-const PARITY_GFX_VERSION: i32 = 3;
-const PARITY_GFX_FLAG_CLEAR: i32 = 1;
-const PARITY_GFX_FLAG_PRESENT: i32 = 2;
-const PARITY_GFX_I_SPRITE_BASE: i32 = 32;
-const PARITY_GFX_I_TEXT_BASE: i32 = 12320;
-const PARITY_GFX_I_ORDER_BASE: i32 = 18464;
-const PARITY_GFX_ORDER_SCALE: i32 = 16384;
-const PARITY_GFX_F_SPRITE_BASE: i32 = 80004;
-const PARITY_GFX_F_TEXT_BASE: i32 = 96388;
 
-function parity_add_sprite(cmd_i32: i32[], handle: i32, rotation: i32, alpha: i32): void {
-    let index: i32 = cmd_i32[4];
-    let base_i: i32 = PARITY_GFX_I_SPRITE_BASE + index * 3;
-    cmd_i32[base_i] = handle;
-    cmd_i32[base_i + 1] = rotation;
-    cmd_i32[base_i + 2] = alpha;
-    cmd_i32[4] = index + 1;
+global parity_writer: SpriteRunWriter;
+
+function parity_write_sprite(sprite_ref: SpriteRef, x: f32, y: f32, w: f32, h: f32, rotation: i32, alpha: i32): bool {
+    return parity_writer.write(
+        sprite_ref,
+        -256 + alpha,
+        0,
+        x,
+        y,
+        w,
+        h,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        w * 0.5,
+        h * 0.5,
+        1.0,
+        1.0,
+        i32_to_f32(rotation)
+    );
 }
 
-function parity_add_sprite_geometry(cmd_f32: f32[], index: i32, x: f32, y: f32, w: f32, h: f32): void {
-    let base_f: i32 = PARITY_GFX_F_SPRITE_BASE + index * 4;
-    cmd_f32[base_f] = x;
-    cmd_f32[base_f + 1] = y;
-    cmd_f32[base_f + 2] = w;
-    cmd_f32[base_f + 3] = h;
+function build_parity_frame(canvas_sprite: SpriteRef, opaque_sprite: SpriteRef, translucent_sprite: SpriteRef, font: i32, cached_label: TextRun): void {
+    begin_frame();
+    clear(0.05, 0.08, 0.13, 1.0);
+
+    if (parity_writer.reserve(1, -1, 0, 0, 0, 0, 0)) {
+        if (parity_write_sprite(canvas_sprite, 0.0, 0.0, 640.0, 360.0, 0, 96)) {
+            parity_writer.finalize(1);
+        } else {
+            parity_writer.cancel();
+        }
+    }
+    fill_rect(224.0, 148.0, 192.0, 56.0, 0.16, 0.58, 0.32, 0.78);
+    draw_line(24.0, 36.0, 616.0, 324.0, 1.0, 0.25, 0.15, 1.0);
+    draw_line(24.0, 324.0, 616.0, 36.0, 0.10, 0.85, 1.0, 0.85);
+
+    if (parity_writer.reserve(4, -1, 0, 0, 0, 0, 0)) {
+        let written: i32 = 0;
+        if (parity_write_sprite(canvas_sprite, 32.0, 48.0, 64.0, 64.0, 0, 255)) {
+            written += 1;
+        }
+        if (parity_write_sprite(opaque_sprite, 136.0, 44.0, 96.0, 72.0, 0, 255)) {
+            written += 1;
+        }
+        if (parity_write_sprite(translucent_sprite, 272.0, 44.0, 96.0, 72.0, 0, 180)) {
+            written += 1;
+        }
+        if (parity_write_sprite(opaque_sprite, 440.0, 36.0, 112.0, 84.0, 27, 180)) {
+            written += 1;
+        }
+        if (written == 4) {
+            parity_writer.finalize(4);
+        } else {
+            parity_writer.cancel();
+        }
+    }
+    draw_text(font, "direct parity", 64.0, 252.0, 0.95, 0.95, 1.0, 1.0);
+    cached_label.draw(344.0, 252.0, 1.0, 0.85, 0.25, 1.0);
+    end_frame();
 }
 
-function parity_add_direct_label(cmd_i32: i32[], cmd_f32: f32[], cmd_u8: u8[], font: i32): void {
-    cmd_i32[PARITY_GFX_I_TEXT_BASE] = font;
-    cmd_i32[PARITY_GFX_I_TEXT_BASE + 1] = 0;
-    cmd_i32[PARITY_GFX_I_TEXT_BASE + 2] = 13;
-    cmd_f32[PARITY_GFX_F_TEXT_BASE] = 64.0;
-    cmd_f32[PARITY_GFX_F_TEXT_BASE + 1] = 252.0;
-    cmd_f32[PARITY_GFX_F_TEXT_BASE + 2] = 0.95;
-    cmd_f32[PARITY_GFX_F_TEXT_BASE + 3] = 0.95;
-    cmd_f32[PARITY_GFX_F_TEXT_BASE + 4] = 1.0;
-    cmd_f32[PARITY_GFX_F_TEXT_BASE + 5] = 1.0;
-    cmd_u8[0] = 100;
-    cmd_u8[1] = 105;
-    cmd_u8[2] = 114;
-    cmd_u8[3] = 101;
-    cmd_u8[4] = 99;
-    cmd_u8[5] = 116;
-    cmd_u8[6] = 32;
-    cmd_u8[7] = 112;
-    cmd_u8[8] = 97;
-    cmd_u8[9] = 114;
-    cmd_u8[10] = 105;
-    cmd_u8[11] = 116;
-    cmd_u8[12] = 121;
-    cmd_u8[13] = 0;
-    cmd_i32[7] = 1;
-    cmd_i32[9] = 14;
+function append_parity_touch_marker(marker_active: i32, marker_x_i32: i32, marker_y_i32: i32): void {
+    if (marker_active != 0) {
+        fill_rect(i32_to_f32(marker_x_i32) - 8.0, i32_to_f32(marker_y_i32) - 8.0, 16.0, 16.0, 1.0, 0.65, 0.08, 1.0);
+    }
 }
 
-function parity_add_cached_label(cmd_i32: i32[], cmd_f32: f32[], font: i32, cached_label: i32): void {
-    let base_i: i32 = PARITY_GFX_I_TEXT_BASE + 3;
-    let base_f: i32 = PARITY_GFX_F_TEXT_BASE + 6;
-    cmd_i32[base_i] = font;
-    cmd_i32[base_i + 1] = 0 - cached_label;
-    cmd_i32[base_i + 2] = 0;
-    cmd_f32[base_f] = 344.0;
-    cmd_f32[base_f + 1] = 252.0;
-    cmd_f32[base_f + 2] = 1.0;
-    cmd_f32[base_f + 3] = 0.85;
-    cmd_f32[base_f + 4] = 0.25;
-    cmd_f32[base_f + 5] = 1.0;
-    cmd_i32[7] = 2;
-}
-
-function build_parity_frame(
-    cmd_i32: i32[],
-    cmd_f32: f32[],
-    cmd_u8: u8[],
-    canvas_sprite: i32,
-    opaque_sprite: i32,
-    translucent_sprite: i32,
-    font: i32,
-    cached_label: i32
-): void {
-    cmd_i32[0] = PARITY_GFX_MAGIC;
-    cmd_i32[1] = PARITY_GFX_VERSION;
-    cmd_i32[2] = PARITY_GFX_FLAG_CLEAR + PARITY_GFX_FLAG_PRESENT;
-    cmd_i32[3] = 2;
-    cmd_i32[4] = 0;
-    cmd_i32[7] = 0;
-    cmd_i32[9] = 0;
-    cmd_f32[0] = 0.05;
-    cmd_f32[1] = 0.08;
-    cmd_f32[2] = 0.13;
-    cmd_f32[3] = 1.0;
-
-    cmd_f32[4] = 24.0;
-    cmd_f32[5] = 36.0;
-    cmd_f32[6] = 616.0;
-    cmd_f32[7] = 324.0;
-    cmd_f32[8] = 1.0;
-    cmd_f32[9] = 0.25;
-    cmd_f32[10] = 0.15;
-    cmd_f32[11] = 1.0;
-    cmd_f32[12] = 24.0;
-    cmd_f32[13] = 324.0;
-    cmd_f32[14] = 616.0;
-    cmd_f32[15] = 36.0;
-    cmd_f32[16] = 0.10;
-    cmd_f32[17] = 0.85;
-    cmd_f32[18] = 1.0;
-    cmd_f32[19] = 0.85;
-
-    parity_add_sprite(cmd_i32, canvas_sprite, 0, 96);
-    parity_add_sprite_geometry(cmd_f32, 0, 0.0, 0.0, 640.0, 360.0);
-    parity_add_sprite(cmd_i32, 0, 0, 255);
-    parity_add_sprite_geometry(cmd_f32, 1, 32.0, 48.0, 64.0, 64.0);
-    parity_add_sprite(cmd_i32, opaque_sprite, 0, 255);
-    parity_add_sprite_geometry(cmd_f32, 2, 136.0, 44.0, 96.0, 72.0);
-    parity_add_sprite(cmd_i32, translucent_sprite, 0, 180);
-    parity_add_sprite_geometry(cmd_f32, 3, 272.0, 44.0, 96.0, 72.0);
-    parity_add_sprite(cmd_i32, opaque_sprite, 27, 180);
-    parity_add_sprite_geometry(cmd_f32, 4, 440.0, 36.0, 112.0, 84.0);
-    parity_add_direct_label(cmd_i32, cmd_f32, cmd_u8, font);
-    parity_add_cached_label(cmd_i32, cmd_f32, font, cached_label);
-
-    // Preserve this scene's historical layering through the v3 order stream.
-    cmd_i32[22] = 9;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 0] = PARITY_GFX_ORDER_SCALE + 0;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 1] = PARITY_GFX_ORDER_SCALE + 1;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 2] = PARITY_GFX_ORDER_SCALE * 2 + 0;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 3] = PARITY_GFX_ORDER_SCALE * 2 + 1;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 4] = PARITY_GFX_ORDER_SCALE * 2 + 2;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 5] = PARITY_GFX_ORDER_SCALE * 2 + 3;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 6] = PARITY_GFX_ORDER_SCALE * 2 + 4;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 7] = PARITY_GFX_ORDER_SCALE * 3 + 0;
-    cmd_i32[PARITY_GFX_I_ORDER_BASE + 8] = PARITY_GFX_ORDER_SCALE * 3 + 1;
+function append_it028_marker(revision: i32): void {
+    fill_rect(48.0 + i32_to_f32(revision) * 64.0, 48.0, 24.0, 24.0, 0.2, 0.9, 0.95, 1.0);
 }

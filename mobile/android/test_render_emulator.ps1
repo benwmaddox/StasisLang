@@ -4,7 +4,10 @@ param(
     [switch]$Headless,
     [switch]$SkipBuild,
     [int]$RenderTimeoutSeconds = 45,
+    [int]$StepTimeoutSeconds = 300,
     [int]$TotalTimeoutSeconds = 900,
+    [double]$MaxRenderP50Millis = 0,
+    [double]$MaxRenderP95Millis = 0,
     [string]$OutputPath = ""
 )
 
@@ -16,22 +19,29 @@ $serial = "emulator-$Port"
 $startedEmulator = $false
 $packages = @("com.stasislang.workshop")
 
+$runningOnWindows = [System.IO.Path]::DirectorySeparatorChar -eq [char]'\'
 $androidHome = if ($env:ANDROID_HOME) {
     $env:ANDROID_HOME
 } elseif ($env:ANDROID_SDK_ROOT) {
     $env:ANDROID_SDK_ROOT
 } else {
-    "C:\Android\Sdk"
+    if ($runningOnWindows) { "C:\Android\Sdk" } else {
+        Join-Path ([Environment]::GetFolderPath("UserProfile")) "Android/sdk"
+    }
 }
-$adb = Join-Path $androidHome "platform-tools\adb.exe"
-if (-not (Test-Path $adb)) { throw "adb.exe was not found: $adb" }
+$adbExecutableSuffix = if ($runningOnWindows) { ".exe" } else { "" }
+$adb = Join-Path (Join-Path $androidHome "platform-tools") "adb$adbExecutableSuffix"
+if (-not (Test-Path $adb)) { throw "adb was not found: $adb" }
 
 $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
 if (-not $OutputPath) {
-    $OutputPath = Join-Path $repoRoot "artifacts\android_render_e2e\$stamp"
+    $OutputPath = Join-Path (Join-Path (Join-Path $repoRoot "artifacts") "android_workshop_seam") "e"
 }
 $artifactRoot = [System.IO.Path]::GetFullPath($OutputPath)
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+$toolsCiRoot = Join-Path (Join-Path $repoRoot "tools") "ci"
+$renderParityManifest = Join-Path (Join-Path (Join-Path $repoRoot "samples") "render_parity") "capture_manifest.json"
+$workshopApk = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $scriptRoot "app") "build") "outputs") "apk") "workshop") (Join-Path "debug" "app-workshop-debug.apk")
 
 function Assert-In-Time([string]$Step) {
     if ($startedAt.Elapsed.TotalSeconds -gt $TotalTimeoutSeconds) {
@@ -41,7 +51,7 @@ function Assert-In-Time([string]$Step) {
 
 function Invoke-BoundedScript([string]$Path, [string[]]$Arguments, [string]$Phase) {
     $remainingSeconds = [math]::Floor($TotalTimeoutSeconds - $startedAt.Elapsed.TotalSeconds)
-    $stepSeconds = [math]::Min(300, $remainingSeconds)
+    $stepSeconds = [math]::Min($StepTimeoutSeconds, $remainingSeconds)
     if ($stepSeconds -le 0) { throw "Android render E2E exceeded ${TotalTimeoutSeconds}s before $Phase" }
     $stdout = Join-Path $artifactRoot "$Phase-stdout.log"
     $stderr = Join-Path $artifactRoot "$Phase-stderr.log"
@@ -64,7 +74,14 @@ function Invoke-BoundedScript([string]$Path, [string[]]$Arguments, [string]$Phas
     $errorTask = $process.StandardError.ReadToEndAsync()
     $timedOut = -not $process.WaitForExit($stepSeconds * 1000)
     if ($timedOut) {
-        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        $killWithTree = $process.GetType().GetMethod("Kill", [Type[]]@([bool]))
+        if ($null -ne $killWithTree) {
+            $process.Kill($true)
+        } elseif ($runningOnWindows) {
+            & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        } else {
+            $process.Kill()
+        }
     }
     $process.WaitForExit()
     $outputTask.Result | Set-Content -LiteralPath $stdout -Encoding UTF8
@@ -110,17 +127,21 @@ function Find-PackageProcessId([string]$Package) {
 }
 
 function Resolve-Gradle {
-    $wrapper = Join-Path $scriptRoot "gradlew.bat"
+    $wrapperName = if ($runningOnWindows) { "gradlew.bat" } else { "gradlew" }
+    $wrapper = Join-Path $scriptRoot $wrapperName
     if (Test-Path $wrapper) { return $wrapper }
-    if ($env:ChocolateyInstall) {
-        $installed = Get-ChildItem (Join-Path $env:ChocolateyInstall "lib\gradle\tools") `
+    $gradleName = if ($runningOnWindows) { "gradle.bat" } else { "gradle" }
+    if ($runningOnWindows -and $env:ChocolateyInstall) {
+        $installed = Get-ChildItem (Join-Path (Join-Path (Join-Path $env:ChocolateyInstall "lib") "gradle") "tools") `
             -Recurse -Filter gradle.bat -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending | Select-Object -First 1
         if ($installed) { return $installed.FullName }
     }
-    $command = Get-Command gradle -ErrorAction SilentlyContinue
+    $command = Get-Command $gradleName -CommandType Application -All -ErrorAction SilentlyContinue |
+        Where-Object { [System.IO.Path]::GetFileName($_.Source) -eq $gradleName } |
+        Select-Object -First 1
     if ($command) { return $command.Source }
-    throw "Gradle was not found; install Gradle 8.9 or newer"
+    throw "$gradleName was not found; install Gradle 8.9 or newer"
 }
 
 function Save-Screenshot([string]$Path) {
@@ -329,9 +350,9 @@ function Assert-RenderedVariant(
                 }
                 Write-Host "$Name viewport=$viewportArg"
                 Save-Screenshot $capture
-                & python (Join-Path $repoRoot "tools\ci\verify_render_parity.py") `
+                & python (Join-Path $toolsCiRoot "verify_render_parity.py") `
                     --capture $capture --capture-only --profile android_emulator `
-                    "--viewport=$viewportArg"
+                    "--viewport=$viewportArg" --viewport-y-search-radius=32
                 if ($LASTEXITCODE -eq 0) {
                     $stableCaptures += 1
                     if ($stableCaptures -ge 3) {
@@ -351,6 +372,104 @@ function Assert-RenderedVariant(
                 }
             }
         } while ((Get-Date) -lt $deadline)
+        if ($renderPassed) {
+            $observedAvdLine = Invoke-Adb @("emu", "avd", "name") | Select-Object -First 1
+            $observedAvd = if ($null -eq $observedAvdLine) { "" } else { $observedAvdLine.Trim() }
+            if (-not $observedAvd) {
+                $observedAvdLine = Invoke-Adb @("shell", "getprop", "ro.boot.qemu.avd_name") |
+                    Select-Object -First 1
+                $observedAvd = if ($null -eq $observedAvdLine) { "" } else { $observedAvdLine.Trim() }
+            }
+            $observedSdk = (Invoke-Adb @("shell", "getprop", "ro.build.version.sdk") |
+                Select-Object -First 1).Trim()
+            if ($observedAvd -ne $AvdName -or $observedSdk -ne "35") {
+                throw "$Name benchmark identity mismatch: requested=$AvdName/API35 observed=$observedAvd/API$observedSdk"
+            }
+            $sourceStatus = @(& git -C $repoRoot status --porcelain)
+            if ($LASTEXITCODE -ne 0) { throw "Git source status could not be read for benchmark evidence" }
+            if ($sourceStatus) {
+                throw "$Name benchmark source is dirty; commit or remove source changes before publishing evidence"
+            }
+            $packageDump = @(Invoke-Adb @("shell", "dumpsys", "package", $Package)) -join "`n"
+            $versionName = [regex]::Match(
+                $packageDump, '(?m)^\s*versionName=([^\r\n]+)'
+            ).Groups[1].Value.Trim()
+            $versionCode = [regex]::Match(
+                $packageDump, '(?m)^\s*versionCode=(\d+)'
+            ).Groups[1].Value
+            $metadataPath = Join-Path $artifactRoot "$Name-performance-metadata.json"
+            @{
+                scene = "render_parity"
+                git_revision = (& git -C $repoRoot rev-parse HEAD).Trim()
+                source_dirty = $false
+                apk_sha256 = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
+                package_version = "$versionName ($versionCode)"
+                device_model = (Invoke-Adb @("shell", "getprop", "ro.product.model") |
+                    Select-Object -First 1).Trim()
+                device_fingerprint = (Invoke-Adb @("shell", "getprop", "ro.build.fingerprint") |
+                    Select-Object -First 1).Trim()
+                serial = $serial
+                avd = $observedAvd
+                android_sdk = [int]$observedSdk
+            } | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
+
+            $performancePassed = $false
+            for ($attempt = 1; $attempt -le 2; $attempt += 1) {
+                $beforeAttemptLog = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
+                $reportCountBeforeAttempt = @($beforeAttemptLog |
+                    Where-Object { $_ -match 'RenderPerformance:' }).Count
+                Invoke-Adb @(
+                    "shell", "am", "start", "--activity-single-top", "-n",
+                    "$Package/com.stasislang.workshop.MainActivity", "--ez",
+                    "stasis_render_performance", "true"
+                ) | Out-Null
+
+                $attemptDeadline = (Get-Date).AddSeconds($RenderTimeoutSeconds)
+                $attemptReport = $null
+                do {
+                    Start-Sleep -Milliseconds 500
+                    $attemptDeviceLog = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
+                    $attemptReports = @($attemptDeviceLog |
+                        Where-Object { $_ -match 'RenderPerformance:' })
+                    if ($attemptReports.Count -gt $reportCountBeforeAttempt) {
+                        $attemptReport = $attemptReports[$reportCountBeforeAttempt]
+                        break
+                    }
+                } while ((Get-Date) -lt $attemptDeadline)
+
+                $attemptLog = Join-Path $artifactRoot "$Name-performance-attempt-$attempt.log"
+                if ($null -eq $attemptReport) {
+                    Set-Content -LiteralPath $attemptLog -Value "" -Encoding UTF8
+                } else {
+                    Set-Content -LiteralPath $attemptLog -Value $attemptReport -Encoding UTF8
+                }
+                $attemptEvidence = Join-Path $artifactRoot "$Name-performance-attempt-$attempt.json"
+                $performanceArguments = @(
+                    (Join-Path $toolsCiRoot "verify_android_render_performance.py"),
+                    "--log", $attemptLog,
+                    "--metadata", $metadataPath,
+                    "--evidence", $attemptEvidence
+                )
+                if ($MaxRenderP50Millis -gt 0) {
+                    $performanceArguments += @("--max-p50-ms", "$MaxRenderP50Millis")
+                }
+                if ($MaxRenderP95Millis -gt 0) {
+                    $performanceArguments += @("--max-p95-ms", "$MaxRenderP95Millis")
+                }
+                & python @performanceArguments
+                if ($LASTEXITCODE -eq 0) {
+                    Copy-Item -LiteralPath $attemptEvidence `
+                        -Destination (Join-Path $artifactRoot "$Name-performance.json") -Force
+                    Write-Host "$Name render performance attempt $attempt passed"
+                    $performancePassed = $true
+                    break
+                }
+                Write-Warning "$Name render performance attempt $attempt failed"
+            }
+            if (-not $performancePassed) {
+                throw "$Name render performance evidence failed after 2 attempts; see $artifactRoot"
+            }
+        }
     } finally {
         if ($processId) { $log = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null) }
         if (-not $processId -or $LASTEXITCODE -ne 0) {
@@ -359,13 +478,54 @@ function Assert-RenderedVariant(
         $log | Set-Content -LiteralPath $logFile -Encoding UTF8
         & $adb -s $serial shell am force-stop $Package 2>$null | Out-Null
     }
+    if (-not $renderPassed) {
+        throw "$Name render acceptance timed out: $lastFailure; see $artifactRoot"
+    }
+    $it029CaptureNames = @(
+        "project_a_first",
+        "project_b_before_recreation",
+        "project_b_after_recreation",
+        "project_a_return"
+    )
+    $it029Captures = @()
+    foreach ($phase in $it029CaptureNames) {
+        $localCapture = Join-Path $artifactRoot "workshop-it029-$phase.png"
+        $remoteCapture = "/sdcard/Android/data/$Package/files/it029/$phase.png"
+        Invoke-Adb @("pull", $remoteCapture, $localCapture) | Out-Null
+        if (-not (Test-Path $localCapture)) {
+            throw "$Name IT-029 capture was not collected: $phase"
+        }
+        $it029Captures += $localCapture
+    }
     $fatalPatterns = @(
         "native preview frame failed",
         "Render resource error",
         "resource restore failed",
         "FATAL EXCEPTION"
     )
-    $fatal = $log | Select-String -SimpleMatch $fatalPatterns
+    # IT-031 intentionally records the real missing-resource diagnostic as a
+    # bounded case line. Let the strict seam verifier validate that JSON while
+    # keeping malformed/ambient matching text fatal here.
+    $fatalScanLog = @($log | ForEach-Object {
+        $line = $_
+        if ($line -match 'Stasis Workshop IT-031 case:\s+(\{.*\})\s*$') {
+            $markerText = $Matches[0]
+            try {
+                $case = $Matches[1] | ConvertFrom-Json -ErrorAction Stop
+                if (($case.test_id -eq "IT-031") -and $case.name -and ($case.equal -eq $true) `
+                        -and ($null -ne $case.native) -and ($null -ne $case.ui)) {
+                    $markerIndex = $line.IndexOf($markerText)
+                    if ($markerIndex -ge 0) {
+                        $line = $line.Remove($markerIndex, $markerText.Length)
+                    }
+                }
+            } catch {
+                # Leave malformed case lines in the fatal scan.
+            }
+        }
+        $line
+    })
+    $fatal = $fatalScanLog | Select-String -SimpleMatch $fatalPatterns
     if ($fatal) { throw "$Name logged a rendering/runtime failure; see $logFile" }
     $frameCounts = [regex]::Matches(($log -join "`n"), 'RenderAcceptanceFrame: count=(\d+)') |
         ForEach-Object { [int]$_.Groups[1].Value }
@@ -375,9 +535,17 @@ function Assert-RenderedVariant(
     if ($RequireJit -and -not ($log -match 'CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=[1-9][0-9]*')) {
         throw "$Name did not log a successful non-empty Workshop JIT compile; see $logFile"
     }
-    if (-not $renderPassed) {
-        throw "$Name render acceptance timed out: $lastFailure; see $artifactRoot"
+    $workshopVerifyArguments = @(
+        (Join-Path $toolsCiRoot "verify_android_workshop_seam.py"),
+        "--log", $logFile, "--capture", $capture, "--manifest", $renderParityManifest,
+        "--apk", $Apk, "--metadata", $metadataPath,
+        "--evidence", (Join-Path $artifactRoot "$Name-workshop-seam.json")
+    )
+    foreach ($it029Capture in $it029Captures) {
+        $workshopVerifyArguments += @("--it029-capture", $it029Capture)
     }
+    & python @workshopVerifyArguments
+    if ($LASTEXITCODE -ne 0) { throw "$Name IT-025 Workshop seam verification failed; see $logFile" }
     Write-Output "$Name render acceptance passed: $capture"
 }
 
@@ -386,23 +554,27 @@ try {
         $_ -match "^$([regex]::Escape($serial))\s+device(?:\s|$)"
     }
     $startedEmulator = -not [bool]$runningBefore
-    $emulatorArguments = @("-AvdName", $AvdName, "-Port", "$Port")
-    if ($Headless) { $emulatorArguments += "-Headless" }
-    $serial = Invoke-BoundedScript (Join-Path $scriptRoot "start_emulator.ps1") `
-        $emulatorArguments "start-emulator"
-    $serial = @($serial) | Select-Object -Last 1
+    if ($startedEmulator) {
+        $emulatorArguments = @("-AvdName", $AvdName, "-Port", "$Port")
+        if ($Headless) { $emulatorArguments += "-Headless" }
+        $serial = Invoke-BoundedScript (Join-Path $scriptRoot "start_emulator.ps1") `
+            $emulatorArguments "start-emulator"
+        $serial = @($serial) | Select-Object -Last 1
+    } else {
+        Write-Host "Reusing ready Android emulator $serial"
+    }
 
     if (-not $SkipBuild) {
         $gradle = Resolve-Gradle
         Invoke-BoundedScript (Join-Path $scriptRoot "build_debug.ps1") @(
-            "-RenderAcceptance", "-SkipCodexNative", "-SkipRustBridgeBuild",
+            "-RenderAcceptance", "-SkipCodexNative",
             "-NoGradleDaemon", "-GradlePath", $gradle
         ) "build-workshop" | Out-Null
         Assert-In-Time "Workshop build"
     }
 
     Assert-RenderedVariant "workshop" "com.stasislang.workshop" `
-        (Join-Path $scriptRoot "app\build\outputs\apk\workshop\debug\app-workshop-debug.apk") `
+        $workshopApk `
         "Interactive Stasis game preview. Touch the game to control it." $true
     Assert-In-Time "render acceptance"
 

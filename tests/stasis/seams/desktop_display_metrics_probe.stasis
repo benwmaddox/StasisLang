@@ -1,0 +1,105 @@
+import "../../../src/stdlib/host_frame.stasis";
+import "../../../src/stdlib/internal/gfx_cmd.stasis";
+
+global metric_tick: i32;
+global metric_resized: bool;
+global metric_minimized: bool;
+global metric_native_w: i32;
+global metric_native_h: i32;
+global metric_drawable_w: i32;
+global metric_drawable_h: i32;
+global metric_display_generation: i32;
+global metric_density_generation: i32;
+global metric_logical_w: f32;
+global metric_logical_h: f32;
+global metric_safe_x: f32;
+global metric_safe_y: f32;
+global metric_safe_w: f32;
+global metric_safe_h: f32;
+global metric_content_scale: f32;
+global metric_raster_scale: f32;
+global metric_pointer_x: f32;
+global metric_pointer_y: f32;
+global metric_pointer_x_n: f32;
+global metric_pointer_y_n: f32;
+global metric_pointer_id: i32;
+global metric_pointer_count: i32;
+global metric_pointer_is_down: i32;
+global metric_pointer_went_down: i32;
+global metric_pointer_went_up: i32;
+global metric_release_actions: i32;
+global metric_host_frame: HostFrame;
+
+function main(): i32 {
+    metric_tick = 0;
+    metric_release_actions = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    metric_host_frame.refresh();
+    metric_tick += 1;
+    metric_resized = metric_host_frame.display.resized;
+    metric_minimized = metric_host_frame.window_minimized;
+    metric_native_w = metric_host_frame.display.native_width_px;
+    metric_native_h = metric_host_frame.display.native_height_px;
+    metric_drawable_w = metric_host_frame.display.drawable_width_px;
+    metric_drawable_h = metric_host_frame.display.drawable_height_px;
+    metric_display_generation = metric_host_frame.display.generation;
+    metric_density_generation = metric_host_frame.display.density_generation;
+    metric_logical_w = metric_host_frame.display.logical_width;
+    metric_logical_h = metric_host_frame.display.logical_height;
+    metric_safe_x = metric_host_frame.display.safe_x;
+    metric_safe_y = metric_host_frame.display.safe_y;
+    metric_safe_w = metric_host_frame.display.safe_width;
+    metric_safe_h = metric_host_frame.display.safe_height;
+    metric_content_scale = metric_host_frame.display.content_scale;
+    metric_raster_scale = metric_host_frame.display.raster_scale;
+    metric_pointer_count = metric_host_frame.pointer_count;
+    if (metric_host_frame.pointer_count > 1) {
+        metric_pointer_id = metric_host_frame.pointers[1].id;
+        metric_pointer_is_down = 0;
+        if (metric_host_frame.pointers[1].is_down) {
+            metric_pointer_is_down = 1;
+        }
+        metric_pointer_went_down = 0;
+        if (metric_host_frame.pointers[1].went_down) {
+            metric_pointer_went_down = 1;
+        }
+        metric_pointer_went_up = 0;
+        if (metric_host_frame.pointers[1].went_up) {
+            metric_pointer_went_up = 1;
+            metric_release_actions += 1;
+        }
+        metric_pointer_x = metric_host_frame.pointers[1].x_logical;
+        metric_pointer_y = metric_host_frame.pointers[1].y_logical;
+        metric_pointer_x_n = metric_host_frame.pointers[1].x_normalized;
+        metric_pointer_y_n = metric_host_frame.pointers[1].y_normalized;
+    } else {
+        metric_pointer_id = 0;
+        metric_pointer_is_down = 0;
+        metric_pointer_went_down = 0;
+        metric_pointer_went_up = 0;
+        metric_pointer_x = 0.0;
+        metric_pointer_y = 0.0;
+        metric_pointer_x_n = 0.0;
+        metric_pointer_y_n = 0.0;
+    }
+    return 0;
+}
+
+function render(): i32 {
+    gfx_cmd_begin();
+    if (metric_minimized) {
+        gfx_cmd_clear(0.5, 0.5, 0.5, 1.0);
+    } else if (metric_display_generation == 2) {
+        gfx_cmd_clear(0.8, 0.2, 0.1, 1.0);
+    } else if (metric_display_generation == 3) {
+        gfx_cmd_clear(0.1, 0.3, 0.9, 1.0);
+    } else {
+        gfx_cmd_clear(0.0, 0.0, 0.0, 1.0);
+    }
+    gfx_cmd_rect(metric_pointer_x, metric_pointer_y, 5.0, 7.0, 1.0, 1.0, 1.0, 1.0);
+    gfx_cmd_mark_present();
+    return 0;
+}

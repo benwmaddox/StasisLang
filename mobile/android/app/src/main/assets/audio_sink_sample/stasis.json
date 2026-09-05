@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "name": "brickout_audio",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "android": {
+    "application_id": "com.stasislang.brickoutaudio",
+    "label": "Stasis Brickout Audio",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "0.1.0"
+  }
+}

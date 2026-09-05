@@ -4,10 +4,14 @@ import android.opengl.GLES20;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.IntBuffer;
 import java.nio.FloatBuffer;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.junit.Test;
 
@@ -32,16 +36,23 @@ public final class StasisPreviewRendererSchemaTest {
 
         assertEquals(0, replaced[0].sprites.length);
         assertEquals(0, replaced[0].spriteValues.length);
+        assertEquals(0, replaced[0].spriteRuns.length);
+        assertEquals(0, replaced[0].clips.length);
     }
 
     @Test
     public void productionSchemaMatchesNativeContract() {
         assertEquals(12_320, StasisPreviewRenderer.I_TEXT_BASE);
         assertEquals(80_004, StasisPreviewRenderer.F_SPRITE_BASE);
-        assertEquals(96_388, StasisPreviewRenderer.F_TEXT_BASE);
-        assertEquals(18_464, StasisPreviewRenderer.I_ORDER_BASE);
-        assertEquals(34_608, StasisPreviewRenderer.FRAME_I32_CAPACITY);
-        assertEquals(108_676, StasisPreviewRenderer.FRAME_F32_CAPACITY);
+        assertEquals(79_996, StasisPreviewRenderer.F_RECT_REVERSE_BASE);
+        assertEquals(133_252, StasisPreviewRenderer.F_TEXT_BASE);
+        assertEquals(18_464, StasisPreviewRenderer.I_SPRITE_RUN_BASE);
+        assertEquals(51_232, StasisPreviewRenderer.I_ORDER_BASE);
+        assertEquals(145_540, StasisPreviewRenderer.F_CLIP_BASE);
+        assertEquals(256, StasisPreviewRenderer.MAX_CLIPS);
+        assertEquals(4, StasisPreviewRenderer.CLIP_STRIDE_F32);
+        assertEquals(67_888, StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        assertEquals(146_564, StasisPreviewRenderer.FRAME_F32_CAPACITY);
         assertEquals(65_536, StasisPreviewRenderer.TEXT_U8_CAPACITY);
     }
 
@@ -54,6 +65,106 @@ public final class StasisPreviewRendererSchemaTest {
         assertTrue(diagnostic.contains("logical=24x16 raster=72x48 backend=gles"));
         assertTrue(diagnostic.contains("surface_generation=3 renderer_generation=4"));
         assertTrue(diagnostic.contains("reason=surface_changed failure=upload_failed"));
+    }
+
+    @Test
+    public void spriteReleaseQueueIsOrderedBoundedAndAppliedThroughProvider() {
+        List<Integer> released = new ArrayList<>();
+        StasisPreviewRenderer.TextureProvider provider =
+                new StasisPreviewRenderer.TextureProvider() {
+                    @Override public void onResourceGenerationChanged(
+                            int surfaceGeneration, int rendererGeneration,
+                            boolean discardGpuHandles, String transitionReason) {}
+                    @Override public int textureFor(int handle) { return 0; }
+                    @Override public void releaseSprite(int handle) { released.add(handle); }
+                };
+        StasisPreviewRenderer renderer = new StasisPreviewRenderer(provider, ignored -> {});
+
+        assertTrue(renderer.enqueuePendingSpriteReleases(
+                "{\"status\":\"ok\",\"handles\":[-7,11,-13]}"));
+        assertTrue(renderer.hasPendingSpriteReleases());
+        renderer.applyPendingSpriteReleases();
+        assertEquals(java.util.Arrays.asList(-7, 11, -13), released);
+        assertFalse(renderer.hasPendingSpriteReleases());
+
+        String tooLarge = releaseBatchJson(StasisPreviewRenderer.MAX_PENDING_SPRITE_RELEASES + 1);
+        assertFalse(renderer.enqueuePendingSpriteReleases(tooLarge));
+        assertFalse(renderer.hasPendingSpriteReleases());
+
+        String full = releaseBatchJson(StasisPreviewRenderer.MAX_PENDING_SPRITE_RELEASES);
+        assertTrue(renderer.enqueuePendingSpriteReleases(full));
+        assertFalse(renderer.enqueuePendingSpriteReleases("{\"handles\":[99]}"));
+        assertTrue(renderer.hasPendingSpriteReleases());
+        renderer.applyPendingSpriteReleases();
+        assertFalse(renderer.hasPendingSpriteReleases());
+        assertEquals(3 + StasisPreviewRenderer.MAX_PENDING_SPRITE_RELEASES, released.size());
+        assertEquals(-1, released.get(3).intValue());
+        assertEquals(-StasisPreviewRenderer.MAX_PENDING_SPRITE_RELEASES,
+                released.get(released.size() - 1).intValue());
+    }
+
+    @Test
+    public void queuedReleaseIsCanceledBeforeGlApplicationWhenHandleReacquires() {
+        List<Integer> released = new ArrayList<>();
+        StasisPreviewRenderer.TextureProvider provider =
+                new StasisPreviewRenderer.TextureProvider() {
+                    @Override public void onResourceGenerationChanged(
+                            int surfaceGeneration, int rendererGeneration,
+                            boolean discardGpuHandles, String transitionReason) {}
+                    @Override public int textureFor(int handle) { return 0; }
+                    @Override public void releaseSprite(int handle) { released.add(handle); }
+                };
+        StasisPreviewRenderer renderer = new StasisPreviewRenderer(provider, ignored -> {});
+
+        assertTrue(renderer.enqueuePendingSpriteReleases(
+                "{\"handles\":[-17,23]}"));
+        assertTrue(renderer.cancelPendingSpriteReleases(
+                "{\"handles\":[-17]}"));
+        assertTrue(renderer.hasPendingSpriteReleases());
+        renderer.applyPendingSpriteReleases();
+        assertEquals(java.util.Arrays.asList(23), released);
+        assertFalse(renderer.hasPendingSpriteReleases());
+        assertFalse(renderer.cancelPendingSpriteReleases(
+                "{\"handles\":[-17]}"));
+        assertTrue(renderer.enqueuePendingSpriteReleases("{\"handles\":[-17]}"));
+        renderer.applyPendingSpriteReleases();
+        assertEquals(java.util.Arrays.asList(23, -17), released);
+    }
+
+    @Test
+    public void spriteReleasesWaitForPresentationButCanCleanUpWithoutAFrame() {
+        List<Integer> released = new ArrayList<>();
+        StasisPreviewRenderer.TextureProvider provider =
+                new StasisPreviewRenderer.TextureProvider() {
+                    @Override public void onResourceGenerationChanged(
+                            int surfaceGeneration, int rendererGeneration,
+                            boolean discardGpuHandles, String transitionReason) {}
+                    @Override public int textureFor(int handle) { return 0; }
+                    @Override public void releaseSprite(int handle) { released.add(handle); }
+                };
+        StasisPreviewRenderer renderer = new StasisPreviewRenderer(provider, ignored -> {});
+
+        assertTrue(renderer.enqueuePendingSpriteReleases("{\"handles\":[-31]}"));
+        renderer.finishPendingSpriteReleases(true, false);
+        assertTrue(renderer.hasPendingSpriteReleases());
+        assertTrue(released.isEmpty());
+        renderer.finishPendingSpriteReleases(true, true);
+        assertFalse(renderer.hasPendingSpriteReleases());
+        assertEquals(java.util.Arrays.asList(-31), released);
+
+        assertTrue(renderer.enqueuePendingSpriteReleases("{\"handles\":[47]}"));
+        renderer.finishPendingSpriteReleases(false, false);
+        assertFalse(renderer.hasPendingSpriteReleases());
+        assertEquals(java.util.Arrays.asList(-31, 47), released);
+    }
+
+    private static String releaseBatchJson(int count) {
+        StringBuilder json = new StringBuilder("{\"handles\":[");
+        for (int index = 0; index < count; index += 1) {
+            if (index != 0) json.append(',');
+            json.append(-(index + 1));
+        }
+        return json.append("]}").toString();
     }
 
     @Test
@@ -90,19 +201,141 @@ public final class StasisPreviewRendererSchemaTest {
     @Test
     public void validationRequiresProductionMagicAndVersion() {
         IntBuffer frame = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
-        assertFalse(StasisPreviewRenderer.isValidFrame(frame));
+        FloatBuffer floats = FloatBuffer.allocate(StasisPreviewRenderer.FRAME_F32_CAPACITY);
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
         frame.put(0, StasisPreviewRenderer.RENDER_MAGIC);
         frame.put(1, StasisPreviewRenderer.RENDER_VERSION);
-        assertTrue(StasisPreviewRenderer.isValidFrame(frame));
-        assertFalse(StasisPreviewRenderer.shouldPresent(frame));
+        assertTrue(StasisPreviewRenderer.isValidFrame(frame, floats));
+        assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
         frame.put(StasisPreviewRenderer.I_FLAGS, StasisPreviewRenderer.FLAG_PRESENT);
-        assertTrue(StasisPreviewRenderer.shouldPresent(frame));
-        frame.put(1, StasisPreviewRenderer.RENDER_V2_VERSION);
-        assertTrue(StasisPreviewRenderer.isValidFrame(frame));
+        assertTrue(StasisPreviewRenderer.shouldPresent(frame, floats));
+        for (int version = 2; version <= 5; version += 1) {
+            frame.put(1, version);
+            assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+            assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
+        }
         frame.put(1, 1);
-        assertFalse(StasisPreviewRenderer.isValidFrame(frame));
-        assertFalse(StasisPreviewRenderer.shouldPresent(frame));
-        assertFalse(StasisPreviewRenderer.isValidFrame(IntBuffer.allocate(10)));
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+        assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
+        assertFalse(StasisPreviewRenderer.isValidFrame(IntBuffer.allocate(10), floats));
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, FloatBuffer.allocate(10)));
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, null));
+    }
+
+    @Test
+    public void spriteGeometryValidationMatchesNativeV7Contract() {
+        IntBuffer frame = validSpriteFrame();
+        FloatBuffer floats = validSpriteFloats();
+        assertTrue(StasisPreviewRenderer.isValidFrame(frame, floats));
+
+        int base = StasisPreviewRenderer.F_SPRITE_BASE;
+        int[] finiteFields = {0, 1, 8, 9, 12};
+        for (int field : finiteFields) {
+            float saved = floats.get(base + field);
+            floats.put(base + field, Float.NaN);
+            assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+            floats.put(base + field, Float.POSITIVE_INFINITY);
+            assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+            floats.put(base + field, saved);
+        }
+
+        floats.put(base + 2, 0.0f);
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+        floats.put(base + 2, 16.0f);
+        floats.put(base + 3, -1.0f);
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+        floats.put(base + 3, 12.0f);
+
+        floats.put(base + 10, 0.0f);
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+        floats.put(base + 10, 1.0f);
+        floats.put(base + 11, Float.NEGATIVE_INFINITY);
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+    }
+
+    @Test
+    public void sourceCropMustBeDefaultOrACompletePositiveRectangle() {
+        IntBuffer frame = validSpriteFrame();
+        FloatBuffer floats = validSpriteFloats();
+        int base = StasisPreviewRenderer.F_SPRITE_BASE;
+
+        assertTrue(StasisPreviewRenderer.isValidFrame(frame, floats));
+        floats.put(base + 4, 3.0f);
+        floats.put(base + 5, 4.0f);
+        assertTrue(StasisPreviewRenderer.isValidFrame(frame, floats));
+
+        floats.put(base + 6, 5.0f);
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+        floats.put(base + 7, 6.0f);
+        assertTrue(StasisPreviewRenderer.isValidFrame(frame, floats));
+        floats.put(base + 6, 0.0f);
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+        floats.put(base + 6, -1.0f);
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+        floats.put(base + 6, 5.0f);
+        floats.put(base + 4, -1.0f);
+        assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+    }
+
+    @Test
+    public void rejectedResourceCropAppendsNoQuad() throws Exception {
+        StasisPreviewRenderer renderer = new StasisPreviewRenderer(
+                new StasisPreviewRenderer.TextureProvider() {
+                    @Override public void onResourceGenerationChanged(
+                            int surfaceGeneration, int rendererGeneration,
+                            boolean discardGpuHandles, String transitionReason) {}
+                    @Override public int textureFor(int handle) { return 1; }
+                }, ignored -> {});
+        IntBuffer frame = renderer.frameI32Bytes().asIntBuffer();
+        FloatBuffer floats = renderer.frameF32Bytes().asFloatBuffer();
+        putValidSprite(frame, floats);
+        int base = StasisPreviewRenderer.F_SPRITE_BASE;
+        floats.put(base + 4, 9.0f);
+        floats.put(base + 5, 0.0f);
+        floats.put(base + 6, 2.0f);
+        floats.put(base + 7, 2.0f);
+
+        java.lang.reflect.Field widths = StasisPreviewRenderer.class
+                .getDeclaredField("frameSpriteWidths");
+        java.lang.reflect.Field heights = StasisPreviewRenderer.class
+                .getDeclaredField("frameSpriteHeights");
+        widths.setAccessible(true);
+        heights.setAccessible(true);
+        ((int[])widths.get(renderer))[0] = 10;
+        ((int[])heights.get(renderer))[0] = 10;
+
+        assertFalse(renderer.appendSprite(StasisPreviewRenderer.I_SPRITE_BASE));
+    }
+
+    private static IntBuffer validSpriteFrame() {
+        IntBuffer frame = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        FloatBuffer ignored = FloatBuffer.allocate(StasisPreviewRenderer.FRAME_F32_CAPACITY);
+        putValidSprite(frame, ignored);
+        return frame;
+    }
+
+    private static FloatBuffer validSpriteFloats() {
+        IntBuffer ignored = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        FloatBuffer floats = FloatBuffer.allocate(StasisPreviewRenderer.FRAME_F32_CAPACITY);
+        putValidSprite(ignored, floats);
+        return floats;
+    }
+
+    private static void putValidSprite(IntBuffer frame, FloatBuffer floats) {
+        frame.put(StasisPreviewRenderer.I_MAGIC, StasisPreviewRenderer.RENDER_MAGIC);
+        frame.put(StasisPreviewRenderer.I_VERSION, StasisPreviewRenderer.RENDER_VERSION);
+        frame.put(StasisPreviewRenderer.I_SPRITE_COUNT, 1);
+        frame.put(StasisPreviewRenderer.I_SPRITE_BASE, 17);
+        int base = StasisPreviewRenderer.F_SPRITE_BASE;
+        floats.put(base, 10.0f);
+        floats.put(base + 1, 20.0f);
+        floats.put(base + 2, 16.0f);
+        floats.put(base + 3, 12.0f);
+        floats.put(base + 8, 8.0f);
+        floats.put(base + 9, 6.0f);
+        floats.put(base + 10, 1.0f);
+        floats.put(base + 11, 1.0f);
+        floats.put(base + 12, 15.0f);
     }
 
     @Test
@@ -110,16 +343,28 @@ public final class StasisPreviewRendererSchemaTest {
         int line = StasisPreviewRenderer.ORDER_LINE * StasisPreviewRenderer.ORDER_KIND_SCALE;
         int sprite = StasisPreviewRenderer.ORDER_SPRITE * StasisPreviewRenderer.ORDER_KIND_SCALE;
         int text = StasisPreviewRenderer.ORDER_TEXT * StasisPreviewRenderer.ORDER_KIND_SCALE;
+        int rectangle = StasisPreviewRenderer.ORDER_RECT
+                * StasisPreviewRenderer.ORDER_KIND_SCALE;
+        int clipPush = StasisPreviewRenderer.ORDER_CLIP_PUSH
+                * StasisPreviewRenderer.ORDER_KIND_SCALE;
+        int clipPop = StasisPreviewRenderer.ORDER_CLIP_POP
+                * StasisPreviewRenderer.ORDER_KIND_SCALE;
 
-        int[] backgroundFirst = {sprite, line, text};
-        int[] overlayFirst = {line, text, sprite};
+        int[] backgroundFirst = {sprite, rectangle, line, text};
+        int[] overlayFirst = {line, text, rectangle, sprite};
 
         assertEquals(StasisPreviewRenderer.ORDER_SPRITE,
                 StasisPreviewRenderer.orderKind(backgroundFirst[0]));
         assertEquals(StasisPreviewRenderer.ORDER_LINE,
                 StasisPreviewRenderer.orderKind(overlayFirst[0]));
         assertEquals(StasisPreviewRenderer.ORDER_TEXT,
-                StasisPreviewRenderer.orderKind(backgroundFirst[2]));
+                StasisPreviewRenderer.orderKind(backgroundFirst[3]));
+        assertEquals(StasisPreviewRenderer.ORDER_RECT,
+                StasisPreviewRenderer.orderKind(backgroundFirst[1]));
+        assertEquals(StasisPreviewRenderer.ORDER_CLIP_PUSH,
+                StasisPreviewRenderer.orderKind(clipPush + 2));
+        assertEquals(StasisPreviewRenderer.ORDER_CLIP_POP,
+                StasisPreviewRenderer.orderKind(clipPop));
         assertEquals(0, StasisPreviewRenderer.orderIndex(backgroundFirst[0]));
         assertEquals(-1, StasisPreviewRenderer.orderIndex(-1));
     }
@@ -137,6 +382,12 @@ public final class StasisPreviewRendererSchemaTest {
                 StasisPreviewRenderer.activeTextI32Count(Integer.MAX_VALUE));
         assertEquals(StasisPreviewRenderer.MAX_LINES * StasisPreviewRenderer.LINE_F32_STRIDE,
                 StasisPreviewRenderer.activeLineF32Count(Integer.MAX_VALUE));
+        assertEquals(8, StasisPreviewRenderer.activeRectF32Count(
+                StasisPreviewRenderer.MAX_GEOMETRY - 1, Integer.MAX_VALUE));
+        assertEquals(8, StasisPreviewRenderer.activeRectF32Count(0, 1));
+        assertEquals(3, StasisPreviewRenderer.clampedClipCount(3));
+        assertEquals(StasisPreviewRenderer.MAX_CLIPS, StasisPreviewRenderer.clampedClipCount(
+                Integer.MAX_VALUE));
         assertEquals(StasisPreviewRenderer.MAX_TEXT * StasisPreviewRenderer.TEXT_F32_STRIDE,
                 StasisPreviewRenderer.activeTextF32Count(Integer.MAX_VALUE));
         assertEquals(StasisPreviewRenderer.TEXT_U8_CAPACITY,
@@ -198,9 +449,12 @@ public final class StasisPreviewRendererSchemaTest {
         renderer.frameI32Bytes().asIntBuffer().put(0, StasisPreviewRenderer.RENDER_MAGIC);
         renderer.frameI32Bytes().asIntBuffer().put(1, StasisPreviewRenderer.RENDER_VERSION);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_LINE_COUNT, 1);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_RECT_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_COUNT, 1);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_RUN_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_BYTES_USED, 4);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_CLIP_COUNT, 1);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_LOGICAL_W, 360);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DRAWABLE_H, 2400);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_DENSITY_GENERATION, 7);
@@ -208,10 +462,21 @@ public final class StasisPreviewRendererSchemaTest {
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_ORDER_BASE,
                 StasisPreviewRenderer.ORDER_SPRITE * StasisPreviewRenderer.ORDER_KIND_SCALE);
         renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_LINE_BASE, 12.5f);
+        renderer.frameF32Bytes().asFloatBuffer().put(
+                StasisPreviewRenderer.F_RECT_REVERSE_BASE, 33.5f);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_BASE, 77);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_RUN_BASE, 0);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_RUN_BASE + 1, 1);
+        renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_SPRITE_RUN_BASE + 2, -1);
         renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_SPRITE_BASE, 19.25f);
+        renderer.frameF32Bytes().asFloatBuffer().put(
+                StasisPreviewRenderer.F_SPRITE_BASE + 4, 0.25f);
         renderer.frameI32Bytes().asIntBuffer().put(StasisPreviewRenderer.I_TEXT_BASE, 5);
         renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_TEXT_BASE, 42.0f);
+        renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_CLIP_BASE, 8.0f);
+        renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_CLIP_BASE + 1, 9.0f);
+        renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_CLIP_BASE + 2, 70.0f);
+        renderer.frameF32Bytes().asFloatBuffer().put(StasisPreviewRenderer.F_CLIP_BASE + 3, 40.0f);
         renderer.frameU8Bytes().put(0, (byte)'A');
         renderer.frameU8Bytes().put(1, (byte)'B');
         renderer.frameU8Bytes().put(2, (byte)'C');
@@ -219,16 +484,21 @@ public final class StasisPreviewRendererSchemaTest {
 
         StasisPreviewRenderer.LogicalFrameSnapshot snapshot = renderer.captureLogicalFrame();
 
-        assertEquals(StasisPreviewRenderer.I_DENSITY_GENERATION + 1, snapshot.header.length);
+        assertEquals(StasisPreviewRenderer.I_SPRITE_RUN_COUNT + 2, snapshot.header.length);
         assertEquals(360, snapshot.header[StasisPreviewRenderer.I_LOGICAL_W]);
         assertEquals(2400, snapshot.header[StasisPreviewRenderer.I_DRAWABLE_H]);
         assertEquals(7, snapshot.header[StasisPreviewRenderer.I_DENSITY_GENERATION]);
         assertEquals(StasisPreviewRenderer.LINE_F32_STRIDE, snapshot.lines.length);
         assertEquals(12.5f, snapshot.lines[0], 0.0f);
+        assertEquals(StasisPreviewRenderer.GEOMETRY_F32_STRIDE, snapshot.rectangles.length);
+        assertEquals(33.5f, snapshot.rectangles[0], 0.0f);
         assertEquals(StasisPreviewRenderer.SPRITE_I32_STRIDE, snapshot.sprites.length);
         assertEquals(77, snapshot.sprites[0]);
         assertEquals(StasisPreviewRenderer.SPRITE_F32_STRIDE, snapshot.spriteValues.length);
         assertEquals(19.25f, snapshot.spriteValues[0], 0.0f);
+        assertEquals(0.25f, snapshot.spriteValues[4], 0.0f);
+        assertEquals(StasisPreviewRenderer.SPRITE_RUN_I32_STRIDE, snapshot.spriteRuns.length);
+        assertEquals(1, snapshot.spriteRuns[1]);
         assertEquals(StasisPreviewRenderer.TEXT_I32_STRIDE, snapshot.textMetadata.length);
         assertEquals(5, snapshot.textMetadata[0]);
         assertEquals(StasisPreviewRenderer.TEXT_F32_STRIDE, snapshot.textValues.length);
@@ -238,6 +508,9 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(1, snapshot.order.length);
         assertEquals(StasisPreviewRenderer.ORDER_SPRITE,
                 StasisPreviewRenderer.orderKind(snapshot.order[0]));
+        assertEquals(4, snapshot.clips.length);
+        assertEquals(8.0f, snapshot.clips[0], 0.0f);
+        assertEquals(40.0f, snapshot.clips[3], 0.0f);
     }
 
     @Test
@@ -252,6 +525,131 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(2, StasisPreviewRenderer.horizontalRunLength(lines, 0, 4));
         assertEquals(1, StasisPreviewRenderer.horizontalRunLength(lines, 2, 4));
         assertEquals(1, StasisPreviewRenderer.horizontalRunLength(lines, 3, 4));
+    }
+
+    @Test
+    public void performanceSamplesExcludeWarmupAndUseNearestRankPercentiles() {
+        StasisPreviewRenderer.FramePerformanceSamples samples =
+                new StasisPreviewRenderer.FramePerformanceSamples(2, 4);
+        assertNull(samples.add(99_000, 90_000, 9_000, 9, 1, 2, 3, 4, 5));
+        assertNull(samples.add(98_000, 80_000, 8_000, 8, 1, 2, 3, 4, 5));
+        assertNull(samples.add(10_000, 4_000, 5_000, 3, 1, 2, 3, 4, 5));
+        assertNull(samples.add(20_000, 8_000, 10_000, 4, 1, 2, 3, 4, 5));
+        assertNull(samples.add(30_000, 12_000, 15_000, 5, 1, 2, 3, 4, 5));
+
+        String report = samples.add(40_000, 16_000, 20_000, 6, 1, 2, 3, 4, 5);
+
+        assertTrue(report.contains("warmup=2 samples=4"));
+        assertTrue(report.contains("total_p50_us=20 total_p95_us=40"));
+        assertTrue(report.contains("resource_p50_us=8 resource_p95_us=16"));
+        assertTrue(report.contains("draw_p50_us=10 draw_p95_us=20"));
+        assertTrue(report.contains("draw_calls_min=3 draw_calls_max=6"));
+        assertTrue(report.endsWith("lines=1 rects=2 sprites=3 text=4 order=5"));
+        assertNull(samples.add(1, 1, 1, 1, 0, 0, 0, 0, 0));
+    }
+
+    @Test
+    public void frameResourcesResolveOnceBeforeOrderedSubmission() {
+        IntBuffer frame = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        ByteBuffer textBytes = ByteBuffer.allocate(StasisPreviewRenderer.TEXT_U8_CAPACITY);
+        frame.put(StasisPreviewRenderer.I_SPRITE_COUNT, 2);
+        frame.put(StasisPreviewRenderer.I_SPRITE_BASE, 7);
+        frame.put(StasisPreviewRenderer.I_SPRITE_BASE + StasisPreviewRenderer.SPRITE_I32_STRIDE, 0);
+        frame.put(StasisPreviewRenderer.I_TEXT_COUNT, 2);
+        frame.put(StasisPreviewRenderer.I_TEXT_BYTES_USED, 4);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE, 11);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE + 1, 0);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE + 2, 3);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE + StasisPreviewRenderer.TEXT_I32_STRIDE, 11);
+        frame.put(StasisPreviewRenderer.I_TEXT_BASE + StasisPreviewRenderer.TEXT_I32_STRIDE + 1, -9);
+        int[] calls = new int[4];
+        StasisPreviewRenderer.TextureProvider provider = new StasisPreviewRenderer.TextureProvider() {
+            @Override public void onResourceGenerationChanged(int surfaceGeneration,
+                    int rendererGeneration, boolean discardGpuHandles, String transitionReason) {}
+            @Override public int textureFor(int handle) {
+                calls[0] += 1;
+                return handle == 0 ? 0 : 70;
+            }
+            @Override public int fallbackTexture() { return 99; }
+            @Override public int filterFor(int handle) {
+                calls[1] += 1;
+                return 100 + handle;
+            }
+            @Override public long textTextureFor(
+                    int font, ByteBuffer utf8, int offset, int length) {
+                calls[2] += 1;
+                return StasisPreviewRenderer.packTexture(12, 30, 10);
+            }
+            @Override public long cachedTextTextureFor(int runHandle) {
+                calls[3] += 1;
+                return StasisPreviewRenderer.packTexture(13, 31, 11);
+            }
+        };
+        int[] textures = new int[StasisPreviewRenderer.MAX_SPRITES];
+        int[] filters = new int[StasisPreviewRenderer.MAX_SPRITES];
+        long[] textTextures = new long[StasisPreviewRenderer.MAX_TEXT];
+
+        StasisPreviewRenderer.resolveFrameResources(
+                provider, frame, textBytes, textures, filters, textTextures);
+
+        assertEquals(2, calls[0]);
+        assertEquals(2, calls[1]);
+        assertEquals(1, calls[2]);
+        assertEquals(1, calls[3]);
+        assertEquals(70, textures[0]);
+        assertEquals(99, textures[1]);
+        assertEquals(107, filters[0]);
+        assertEquals(100, filters[1]);
+        assertEquals(12, (int)textTextures[0]);
+        assertEquals(13, (int)textTextures[1]);
+    }
+
+    @Test
+    public void frameResourcesAggregateEveryUseBeforeResolvingAHandle() {
+        IntBuffer frame = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        FloatBuffer values = FloatBuffer.allocate(StasisPreviewRenderer.FRAME_F32_CAPACITY);
+        frame.put(StasisPreviewRenderer.I_SPRITE_COUNT, 2);
+        frame.put(StasisPreviewRenderer.I_SPRITE_BASE, 7);
+        frame.put(StasisPreviewRenderer.I_SPRITE_BASE + StasisPreviewRenderer.SPRITE_I32_STRIDE, 7);
+        int first = StasisPreviewRenderer.F_SPRITE_BASE;
+        int second = first + StasisPreviewRenderer.SPRITE_F32_STRIDE;
+        values.put(first + 2, 20.0f); values.put(first + 3, 10.0f);
+        values.put(first + 10, 1.0f); values.put(first + 11, 1.0f);
+        values.put(second + 2, 30.0f); values.put(second + 3, 10.0f);
+        values.put(second + 6, 5.0f); values.put(second + 7, 5.0f);
+        values.put(second + 10, -2.0f); values.put(second + 11, 3.0f);
+        final int[] calls = {0};
+        final AndroidRasterPlan.Requirement[] captured = {null};
+        StasisPreviewRenderer.TextureProvider provider = new StasisPreviewRenderer.TextureProvider() {
+            @Override public void onResourceGenerationChanged(int surface, int renderer,
+                    boolean discard, String reason) {}
+            @Override public int textureFor(int handle) { throw new AssertionError(); }
+            @Override public int textureFor(int handle, AndroidRasterPlan.Requirement requirement) {
+                calls[0] += 1;
+                captured[0] = requirement;
+                return 8;
+            }
+        };
+        int[] textures = new int[StasisPreviewRenderer.MAX_SPRITES];
+        int[] filters = new int[StasisPreviewRenderer.MAX_SPRITES];
+        long[] text = new long[StasisPreviewRenderer.MAX_TEXT];
+
+        StasisPreviewRenderer.resolveFrameResources(provider, frame, values,
+                ByteBuffer.allocate(StasisPreviewRenderer.TEXT_U8_CAPACITY), textures, filters,
+                new int[StasisPreviewRenderer.MAX_SPRITES],
+                new int[StasisPreviewRenderer.MAX_SPRITES],
+                new float[StasisPreviewRenderer.MAX_SPRITES],
+                new float[StasisPreviewRenderer.MAX_SPRITES],
+                new float[StasisPreviewRenderer.MAX_SPRITES],
+                new float[StasisPreviewRenderer.MAX_SPRITES], text);
+
+        assertEquals(1, calls[0]);
+        AndroidRasterPlan.Result plan = AndroidRasterPlan.exact(
+                100, 50, captured[0], 2.0f, 8192);
+        assertEquals(2400, plan.width);
+        assertEquals(1200, plan.height);
+        assertEquals(8, textures[0]);
+        assertEquals(8, textures[1]);
     }
 
     private static void putLine(FloatBuffer lines, int index, float x1, float y1,

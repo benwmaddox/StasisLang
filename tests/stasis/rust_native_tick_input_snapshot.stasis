@@ -1,4 +1,4 @@
-import "../../src/stdlib/internal/host_frame.stasis";
+import "../../src/stdlib/host_frame.stasis";
 
 global last_tick_code: i32;
 global snapshot_mode: i32;
@@ -6,6 +6,7 @@ global model_pointer_count: i32;
 global model_escape_down: bool;
 global model_first_went_down: bool;
 global model_first_x: f32;
+global test_host_frame: HostFrame;
 
 function apply_test_snapshot(): void {
     if (snapshot_mode == 1) {
@@ -25,21 +26,22 @@ function apply_test_snapshot(): void {
 }
 
 function refresh_input_model_for_test(): void {
-    model_pointer_count = host_pointer_count();
-    model_escape_down = host_key_down(41);
+    model_pointer_count = test_host_frame.pointer_count;
+    model_escape_down = test_host_frame.keys[41] != 0;
     model_first_went_down = false;
     model_first_x = 0.0;
     if (model_pointer_count > 0) {
-        model_first_went_down = host_pointer_went_down(0);
-        model_first_x = host_pointer_x_logical(0);
+        model_first_went_down = test_host_frame.pointers[0].went_down;
+        model_first_x = test_host_frame.pointers[0].x_logical;
     }
     return;
 }
 
 function tick(): i32 {
     apply_test_snapshot();
+    test_host_frame.refresh();
     refresh_input_model_for_test();
-    if (host_quit_requested()) {
+    if (test_host_frame.quit_requested) {
         last_tick_code = -1;
         return last_tick_code;
     }

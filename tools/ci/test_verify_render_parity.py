@@ -5,13 +5,19 @@ import unittest
 from pathlib import Path
 
 from tools.ci.verify_render_parity import (
+    ATLAS_SPRITE_HANDLES,
     DEFAULT_MANIFEST,
+    _atlas_sprite_handles,
+    _function_body,
+    _parity_command_counts,
     read_capture,
     validate_fixture,
     verify_capture,
     verify_runtime_evidence,
     write_stage_evidence,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def write_bmp(path: Path, width: int, height: int, rgba: bytes) -> None:
@@ -32,11 +38,74 @@ def write_bmp(path: Path, width: int, height: int, rgba: bytes) -> None:
 
 
 class RenderParityGateTest(unittest.TestCase):
+    def test_windows_workflow_does_not_mask_parity_verifier_failure(self):
+        lines = (ROOT / ".github/workflows/pr-ci.yml").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        verifier = next(
+            index
+            for index, line in enumerate(lines)
+            if line.strip().startswith(
+                "python tools/ci/verify_render_parity.py --capture target/render-parity-ci/frame.png"
+            )
+        )
+        self.assertEqual(
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+            lines[verifier + 1].strip(),
+        )
+
     def test_checked_in_fixture_is_complete(self):
         manifest = validate_fixture(DEFAULT_MANIFEST)
         self.assertEqual(manifest["logical_size"], [640, 360])
         self.assertEqual(len(manifest["stages"]), 4)
         self.assertIn("android_emulator", manifest["capture_profiles"])
+
+    def test_fixture_uses_only_canonical_resolved_atlas_resources(self):
+        frame = (DEFAULT_MANIFEST.parent / "frame.stasis").read_text(encoding="utf-8")
+        self.assertEqual(_atlas_sprite_handles(frame), ATLAS_SPRITE_HANDLES)
+        mutated = frame.replace(
+            "parity_write_sprite(canvas_sprite, 0.0",
+            "parity_write_sprite(missing_sprite, 0.0",
+            1,
+        )
+        self.assertNotEqual(_atlas_sprite_handles(mutated), ATLAS_SPRITE_HANDLES)
+
+    def test_builder_body_scopes_public_command_counts_and_handles(self):
+        source = '''
+function build_parity_frame(canvas_sprite: i32, cached_label: TextRun): void {
+    clear(0.0, 0.0, 0.0, 1.0);
+    if (true) { parity_write_sprite(canvas_sprite, 0.0, 0.0, 1.0, 1.0, 0, 255); }
+    fill_rect(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    draw_line(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    draw_text(1, "brace } text", 0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
+    cached_label.draw(0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
+    end_frame();
+}
+function append_marker(missing_sprite: i32): void {
+    fill_rect(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    parity_write_sprite(missing_sprite, 0.0, 0.0, 1.0, 1.0, 0, 255);
+}
+'''
+        self.assertEqual(
+            _parity_command_counts(source),
+            {
+                "clear": 1,
+                "lines": 1,
+                "filled_rectangles": 1,
+                "sprites": 1,
+                "direct_text": 1,
+                "cached_text": 1,
+                "present": 1,
+            },
+        )
+        self.assertEqual(_atlas_sprite_handles(source), ("canvas_sprite",))
+        self.assertIn("brace } text", _function_body(source, "build_parity_frame"))
+
+    def test_builder_body_reports_missing_and_malformed_functions(self):
+        with self.assertRaisesRegex(ValueError, "missing function build_parity_frame"):
+            _function_body("function other(): void {}", "build_parity_frame")
+        with self.assertRaisesRegex(ValueError, "unterminated body"):
+            _function_body("function build_parity_frame(): void {", "build_parity_frame")
 
     def test_bmp_reader_and_exact_capture_hash(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -53,7 +122,10 @@ class RenderParityGateTest(unittest.TestCase):
                     }
                 },
             }
-            self.assertEqual(verify_capture(manifest, capture, "exact"), manifest["capture_profiles"]["exact"]["sha256_rgba"])
+            self.assertEqual(
+                verify_capture(manifest, capture, "exact"),
+                (manifest["capture_profiles"]["exact"]["sha256_rgba"], None),
+            )
 
     def test_region_failure_names_the_stage_region(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -77,6 +149,27 @@ class RenderParityGateTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "sprite_upload"):
                 verify_capture(manifest, capture, "portable")
 
+    def test_atlas_canvas_region_requires_blue_gradient_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "frame.bmp"
+            blue_gradient = bytes((31, 45, 60, 255))
+            write_bmp(capture, 2, 1, blue_gradient * 2)
+            manifest = {
+                "logical_size": [2, 1],
+                "capture_profiles": {
+                    "portable": {
+                        "comparison": "regions",
+                        "regions": [{
+                            "name": "atlas_canvas_sprite",
+                            "rect": [0, 0, 2, 1],
+                            "predicate": "atlas_canvas",
+                            "min_coverage": 1.0,
+                        }],
+                    }
+                },
+            }
+            verify_capture(manifest, capture, "portable")
+
     def test_letterboxed_capture_uses_explicit_viewport(self):
         with tempfile.TemporaryDirectory() as directory:
             capture = Path(directory) / "device.bmp"
@@ -98,7 +191,75 @@ class RenderParityGateTest(unittest.TestCase):
                     }
                 },
             }
-            verify_capture(manifest, capture, "portable", [0, 2, 4, 2])
+            _, selected = verify_capture(
+                manifest, capture, "portable", [0, 2, 4, 2], 2
+            )
+            self.assertEqual(selected, [0, 2, 4, 2])
+
+    def test_bounded_vertical_search_recovers_offset_viewport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            black = bytes((0, 0, 0, 255))
+            green = bytes((20, 200, 80, 255))
+            write_bmp(capture, 4, 6, black * 12 + green * 8 + black * 4)
+            manifest = {
+                "logical_size": [2, 2],
+                "capture_profiles": {
+                    "portable": {
+                        "comparison": "regions",
+                        "regions": [{
+                            "name": "scene",
+                            "rect": [0, 0, 2, 2],
+                            "rgba": [20, 200, 80, 255],
+                            "max_channel_delta": 0,
+                            "min_coverage": 1.0,
+                        }],
+                    }
+                },
+            }
+            _, selected = verify_capture(
+                manifest, capture, "portable", [0, 1, 4, 2], 2
+            )
+            self.assertEqual(selected, [0, 3, 4, 2])
+
+    def test_bounded_vertical_search_rejects_out_of_radius_offset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            black = bytes((0, 0, 0, 255))
+            green = bytes((20, 200, 80, 255))
+            write_bmp(capture, 4, 6, black * 12 + green * 8 + black * 4)
+            manifest = {
+                "logical_size": [2, 2],
+                "capture_profiles": {
+                    "portable": {
+                        "comparison": "regions",
+                        "regions": [{
+                            "name": "scene",
+                            "rect": [0, 0, 2, 2],
+                            "rgba": [20, 200, 80, 255],
+                            "max_channel_delta": 0,
+                            "min_coverage": 1.0,
+                        }],
+                    }
+                },
+            }
+            with self.assertRaisesRegex(ValueError, "no viewport matched"):
+                verify_capture(manifest, capture, "portable", [0, 0, 4, 2], 1)
+
+    def test_bounded_vertical_search_rejects_invalid_radius_and_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            write_bmp(capture, 2, 2, bytes((20, 200, 80, 255)) * 4)
+            manifest = {
+                "logical_size": [2, 2],
+                "capture_profiles": {
+                    "portable": {"comparison": "regions", "regions": []}
+                },
+            }
+            with self.assertRaisesRegex(ValueError, "nonnegative"):
+                verify_capture(manifest, capture, "portable", [0, 0, 2, 2], -1)
+            with self.assertRaisesRegex(ValueError, "out of bounds"):
+                verify_capture(manifest, capture, "portable", [0, 1, 2, 2], 1)
 
     def test_bad_stage_matrix_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -109,14 +270,28 @@ class RenderParityGateTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "matrix"):
                 validate_fixture(temporary)
 
+    def test_runtime_evidence_rejects_zero_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = root / "capture.png"
+            log = root / "runtime.log"
+            evidence = root / "evidence.json"
+            capture.write_bytes(b"captured frame")
+            log.write_text(
+                "Stasis render contract v7 trace=0 flags=3 lines=2 rects=1 sprites=5 text=2\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "zero command trace"):
+                write_stage_evidence(capture, log, "initial_launch", evidence)
+
     def test_runtime_evidence_requires_generation_advance_and_foreground_restore(self):
-        manifest = {"command_trace": 3298812902}
+        manifest = {}
         log = """Stasis display metrics: logical=1280x720 native=2400x1080 drawable=2400x1080 scale=1.50
 gfx_load_sprite: /fixture/assets/opaque.svg (96x72) -> handle=1 raster=144x108 backend=sdl
 gfx_load_sprite: /fixture/assets/translucent.svg (96x72) -> handle=2 raster=144x108 backend=sdl
 gfx_load_sprite: /fixture/assets/full_canvas.svg (640x360) -> handle=3 raster=960x540 backend=sdl
 stasis_load_font: loaded /fixture/assets/parity.ttf logical_size=24 raster_size=36 scale=1.50 handle=1
-Stasis render contract v3 trace=3298812902 flags=3 lines=2 sprites=5 text=2
+Stasis render contract v7 trace=1853793133 flags=3 lines=2 rects=1 sprites=5 text=2
 Stasis renderer resources restored: backend=sdl surface_generation=3 renderer_generation=1 reason=surface_changed sprites=3
 Stasis renderer resources restored: backend=sdl surface_generation=4 renderer_generation=1 reason=surface_changed sprites=3
 Stasis renderer resources restored: backend=sdl surface_generation=5 renderer_generation=2 reason=foreground sprites=3
@@ -149,13 +324,13 @@ Stasis renderer resources restored: backend=sdl surface_generation=5 renderer_ge
                 )
 
     def test_launch_stages_accept_initial_sdl3_resource_generation(self):
-        manifest = {"command_trace": 3298812902}
+        manifest = {}
         log = """Stasis display metrics: logical=800x600 native=800x600 drawable=800x600 scale=1.00
 gfx_load_sprite: /fixture/assets/opaque.svg (96x72) -> handle=1 raster=96x72 backend=sdl
 gfx_load_sprite: /fixture/assets/translucent.svg (96x72) -> handle=2 raster=96x72 backend=sdl
 gfx_load_sprite: /fixture/assets/full_canvas.svg (640x360) -> handle=3 raster=640x360 backend=sdl
 stasis_load_font: loaded /fixture/assets/parity.ttf logical_size=24 raster_size=24 scale=1.00 handle=1
-Stasis render contract v3 trace=3298812902 flags=3 lines=2 sprites=5 text=2
+Stasis render contract v7 trace=123456789 flags=3 lines=2 rects=1 sprites=5 text=2
 """
         with tempfile.TemporaryDirectory() as directory:
             capture = Path(directory) / "capture.png"

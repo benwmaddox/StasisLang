@@ -35,6 +35,7 @@ global GameState {
 }
 
 global phase_samples: PhaseSample[2];
+global workshop_host_frame: HostFrame;
 
 global Render {
     command_schema_version: i32;
@@ -348,14 +349,18 @@ function main(): i32 {
 }
 
 function tick(): i32 {
-    Input.screen_w.from_f32(host_f32[50]);
-    Input.screen_h.from_f32(host_f32[51]);
-    Input.touch_active = host_i32[545];
+    workshop_host_frame.refresh();
+    Input.screen_w.from_f32(workshop_host_frame.display.logical_width);
+    Input.screen_h.from_f32(workshop_host_frame.display.logical_height);
+    Input.touch_active = 0;
+    if (workshop_host_frame.pointer_count > 0 && workshop_host_frame.pointers[0].is_down) {
+        Input.touch_active = 1;
+    }
     let touch_x: i32;
-    touch_x.from_f32(host_f32[0]);
+    touch_x.from_f32(workshop_host_frame.pointers[0].x_logical);
     Input.touch_x = touch_x;
     let touch_y: i32;
-    touch_y.from_f32(host_f32[1]);
+    touch_y.from_f32(workshop_host_frame.pointers[0].y_logical);
     Input.touch_y = touch_y;
     pong_game_tick();
     return 0;

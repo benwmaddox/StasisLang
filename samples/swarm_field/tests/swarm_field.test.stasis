@@ -1,0 +1,87 @@
+import "../src/main.stasis";
+
+test `agent lattice initialization is deterministic`(): bool {
+    initialize_agents();
+    if (agents[0].x != 2.0 || agents[0].y != 2.0) {
+        return false;
+    }
+    if (agents[8191].x != 637.0 || agents[8191].y != 317.0) {
+        return false;
+    }
+    if (agents[8191].band != 1) {
+        return false;
+    }
+    return true;
+}
+
+test `field mode toggles between attract and repel`(): bool {
+    field_mode = 0;
+    toggle_field_mode();
+    if (field_mode != 1) {
+        return false;
+    }
+    toggle_field_mode();
+    return field_mode == 0;
+}
+
+test `agent update wraps and clamps speed`(): bool {
+    field_x = 0.0;
+    field_y = 0.0;
+    field_mode = 1;
+    agents[0].x = 0.1;
+    agents[0].y = 0.1;
+    agents[0].vx = -2.8;
+    agents[0].vy = -2.8;
+    update_agent(0);
+    if (agents[0].x < 0.0 || agents[0].x >= SCREEN_W) {
+        return false;
+    }
+    if (agents[0].y < 0.0 || agents[0].y >= SCREEN_H) {
+        return false;
+    }
+    if (agents[0].vx < 0.0 - MAX_SPEED || agents[0].vx > MAX_SPEED) {
+        return false;
+    }
+    if (agents[0].vy < 0.0 - MAX_SPEED || agents[0].vy > MAX_SPEED) {
+        return false;
+    }
+    return true;
+}
+
+test `soft core repels attract mode`(): bool {
+    field_x = 321.0;
+    field_y = 2.0;
+    field_mode = 0;
+    agents[64].x = 322.0;
+    agents[64].y = 2.0;
+    agents[64].vx = 0.0;
+    agents[64].vy = 0.0;
+    update_agent(64);
+    return agents[64].vx > 0.0;
+}
+
+test `home springs preserve broad coverage`(): bool {
+    initialize_agents();
+    field_x = 320.0;
+    field_y = 180.0;
+    field_mode = 0;
+    for (let tick: i32 = 0; tick < 9000; tick += 1) {
+        update_agent(0);
+        update_agent(8191);
+    }
+    if (agents[0].x > 180.0 || agents[8191].x < 460.0) {
+        return false;
+    }
+    return agents[0].y < 180.0 && agents[8191].y > 180.0;
+}
+
+test `hot swap changes presentation without resetting agents`(): bool {
+    agents[3].x = 123.0;
+    agents[3].y = 45.0;
+    presentation_variant = 0;
+    on_code_swap();
+    if (presentation_variant != 1) {
+        return false;
+    }
+    return agents[3].x == 123.0 && agents[3].y == 45.0;
+}

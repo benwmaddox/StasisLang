@@ -56,8 +56,10 @@ To smoke-test the installed Codex provider and shared response schema, run `carg
 
 1. Update any docs that would prevent repeating the same mistake.
 2. If the task came from PR review feedback, reply on GitHub when appropriate with the fix, clarification, or follow-up question.
-3. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
-4. Append a concise entry to `docs/night_shift_report.md`.
+3. For user-visible graphical work, capture and inspect reviewable evidence in addition to automated checks. Use PNG for a representative still state; use MP4 for motion, timing, animation, input, or multi-step interaction. Keep captures focused on the behavior under review and exclude unrelated windows, notifications, secrets, and personal data.
+4. Every AI-authored work summary must include `Visual evidence:` followed by the inspected PNG/MP4 paths and what they prove. Use `Visual evidence: not applicable` when the change has no user-visible behavior. If capture was relevant but unavailable, say so explicitly and record the remaining validation gap.
+5. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
+6. Append a concise entry to `docs/night_shift_report.md`.
 
 ## Stop Conditions
 

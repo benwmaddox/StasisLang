@@ -1,37 +1,34 @@
-@link("stasis_graphics");
-
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
 import "frame.stasis";
 
-extern function load_font(path: string, size: i32): i32;
+// IT-025 reads this guest-owned value through the live JIT global bridge.  It
+// is deliberately independent of host display metadata.
+global seam_state_checksum: i32;
 
-struct Sprite {
-    handle: i32;
-    width: i32;
-    height: i32;
-}
+// IT-027 keeps the canonical HostFrame pointer lanes in guest-owned state so
+// the acceptance proof can observe the same values that drive its marker.
+global seam_touch_x: i32;
+global seam_touch_y: i32;
+global seam_touch_dx: i32;
+global seam_touch_dy: i32;
+global seam_touch_x_norm_x1000: i32;
+global seam_touch_y_norm_x1000: i32;
+global seam_touch_down_edge: i32;
+global seam_touch_up_edge: i32;
+global seam_touch_active: i32;
+global seam_touch_marker_active: i32;
+global seam_touch_checksum: i32;
 
-struct TextRun {
-    font: i32;
-    handle: i32;
-    width: f32;
-    height: f32;
-}
+// IT-028 is enabled only by the acceptance runner after IT-027. The tagged
+// revisions make a valid source publication observable in both tick and
+// render without changing ordinary parity or touch frames.
+const IT028_TICK_REVISION: i32 = 1;
+const IT028_RENDER_REVISION: i32 = 1;
 
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
-function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
-
-global gfx_cmd_i32: i32[34608];
-global gfx_cmd_f32: f32[108676];
-global gfx_cmd_u8: u8[65536];
-global host_i32: i32[768];
-global host_f32: f32[64];
-
-// The host consumes this request between ticks; mobile shells already own the
-// surface and simply ignore the desktop window size request.
-global host_req_flags: i32;
-global host_req_window_w_px: i32;
-global host_req_window_h_px: i32;
-global host_req_seq: i32;
+global seam_it028_enabled: i32;
+global seam_it028_tick_marker: i32;
+global seam_it028_render_marker: i32;
+global seam_it028_state_counter: i32;
 
 struct ParityState {
     opaque: Sprite;
@@ -44,24 +41,23 @@ struct ParityState {
 // Command buffers and host_req_* are fixed host ABI globals. Application-owned
 // resources stay under the single root state.
 global state: ParityState;
+global render_parity_host_frame: HostFrame;
 
 function main(): i32 {
-    host_req_flags = 1;
-    host_req_window_w_px = PARITY_WINDOW_W;
-    host_req_window_h_px = PARITY_WINDOW_H;
-    host_req_seq += 1;
+    seam_state_checksum = 2500;
+    init_window(PARITY_WINDOW_W, PARITY_WINDOW_H, "Render parity");
 
     state.opaque.load_sprite_from("assets/opaque.svg", 96, 72);
     state.translucent.load_sprite_from("assets/translucent.svg", 96, 72);
     state.canvas.load_sprite_from("assets/full_canvas.svg", PARITY_WINDOW_W, PARITY_WINDOW_H);
     state.font = load_font("assets/parity.ttf", 24);
-    if (state.opaque.handle == 0) {
+    if (!state.opaque.valid()) {
         return 11;
     }
-    if (state.translucent.handle == 0) {
+    if (!state.translucent.valid()) {
         return 12;
     }
-    if (state.canvas.handle == 0) {
+    if (!state.canvas.valid()) {
         return 13;
     }
     if (state.font == 0) {
@@ -75,20 +71,55 @@ function main(): i32 {
 }
 
 function tick(): i32 {
+    render_parity_host_frame.refresh();
+    let touch_x: i32;
+    let touch_y: i32;
+    let touch_dx: i32;
+    let touch_dy: i32;
+    let touch_x_norm: i32;
+    let touch_y_norm: i32;
+    touch_x.from_f32(render_parity_host_frame.pointers[0].x_logical);
+    touch_y.from_f32(render_parity_host_frame.pointers[0].y_logical);
+    touch_dx.from_f32(render_parity_host_frame.pointers[0].dx_logical);
+    touch_dy.from_f32(render_parity_host_frame.pointers[0].dy_logical);
+    touch_x_norm.from_f32(render_parity_host_frame.pointers[0].x_normalized * 1000.0);
+    touch_y_norm.from_f32(render_parity_host_frame.pointers[0].y_normalized * 1000.0);
+    seam_touch_x = touch_x;
+    seam_touch_y = touch_y;
+    seam_touch_dx = touch_dx;
+    seam_touch_dy = touch_dy;
+    seam_touch_x_norm_x1000 = touch_x_norm;
+    seam_touch_y_norm_x1000 = touch_y_norm;
+    seam_touch_active = 0;
+    seam_touch_down_edge = 0;
+    seam_touch_up_edge = 0;
+    if (render_parity_host_frame.pointer_count > 0) {
+        if (render_parity_host_frame.pointers[0].is_down) {
+            seam_touch_active = 1;
+        }
+        if (render_parity_host_frame.pointers[0].went_down) {
+            seam_touch_down_edge = 1;
+        }
+        if (render_parity_host_frame.pointers[0].went_up) {
+            seam_touch_up_edge = 1;
+        }
+    }
+    seam_touch_marker_active = seam_touch_active + seam_touch_up_edge;
+    seam_touch_checksum = seam_touch_x + seam_touch_y * 3 + seam_touch_dx * 5 + seam_touch_dy * 7 + seam_touch_x_norm_x1000 * 11 + seam_touch_y_norm_x1000 * 13 + seam_touch_active * 17 + seam_touch_down_edge * 19 + seam_touch_up_edge * 23;
+    if (seam_it028_enabled != 0) {
+        seam_it028_state_counter += 1;
+        seam_it028_tick_marker = IT028_TICK_REVISION;
+    }
     return 0;
 }
 
 function render(): i32 {
-    build_parity_frame(
-        gfx_cmd_i32,
-        gfx_cmd_f32,
-        gfx_cmd_u8,
-        state.canvas.handle,
-        state.opaque.handle,
-        state.translucent.handle,
-        state.font,
-        state.label.handle
-    );
+    build_parity_frame(state.canvas.reference(), state.opaque.reference(), state.translucent.reference(), state.font, state.label);
+    append_parity_touch_marker(seam_touch_marker_active, seam_touch_x, seam_touch_y);
+    if (seam_it028_enabled != 0) {
+        seam_it028_render_marker = IT028_RENDER_REVISION;
+        append_it028_marker(IT028_RENDER_REVISION);
+    }
     return 0;
 }
 

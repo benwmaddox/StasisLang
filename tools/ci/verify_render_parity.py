@@ -15,6 +15,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = ROOT / "samples" / "render_parity" / "capture_manifest.json"
+ATLAS_SPRITE_HANDLES = (
+    "canvas_sprite",
+    "canvas_sprite",
+    "opaque_sprite",
+    "translucent_sprite",
+    "opaque_sprite",
+)
 ALLOWED_STAGES = {
     "initial_launch",
     "second_frame",
@@ -22,6 +29,19 @@ ALLOWED_STAGES = {
     "resource_restore",
 }
 INITIAL_STAGE_FRAMES = {"initial_launch": 1, "second_frame": 2}
+RUNTIME_TRACE_PATTERN = re.compile(
+    r"Stasis render contract v7 trace=(\d+)\s+flags=3\s+lines=2\s+rects=1\s+sprites=5\s+text=2"
+)
+
+
+def _runtime_command_trace(log: str, stage: str) -> int:
+    trace_match = RUNTIME_TRACE_PATTERN.search(log)
+    if trace_match is None:
+        raise ValueError(f"runtime evidence for {stage} lacks current v7 command counts")
+    trace = int(trace_match.group(1))
+    if trace == 0:
+        raise ValueError(f"runtime evidence for {stage} has a zero command trace")
+    return trace
 
 
 def _read_bmp(path: Path) -> tuple[int, int, bytes]:
@@ -130,6 +150,82 @@ def read_capture(path: Path) -> tuple[int, int, bytes]:
     raise ValueError("capture must use .bmp or .png")
 
 
+def _function_body(source: str, name: str) -> str:
+    declaration = re.search(rf"\bfunction\s+{re.escape(name)}\s*\(", source)
+    if declaration is None:
+        raise ValueError(f"fixture is missing function {name}")
+    opening = source.find("{", declaration.end())
+    if opening < 0:
+        raise ValueError(f"fixture function {name} has no body")
+
+    depth = 0
+    index = opening
+    quote = False
+    escaped = False
+    line_comment = False
+    block_comment = False
+    while index < len(source):
+        character = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if line_comment:
+            if character == "\n":
+                line_comment = False
+        elif block_comment:
+            if character == "*" and following == "/":
+                block_comment = False
+                index += 1
+        elif quote:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quote = False
+        elif character == "/" and following == "/":
+            line_comment = True
+            index += 1
+        elif character == "/" and following == "*":
+            block_comment = True
+            index += 1
+        elif character == '"':
+            quote = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening + 1 : index]
+        index += 1
+    raise ValueError(f"fixture function {name} has an unterminated body")
+
+
+def _parity_command_counts(frame_source: str) -> dict[str, int]:
+    body = _function_body(frame_source, "build_parity_frame")
+
+    def count(pattern: str) -> int:
+        return len(re.findall(pattern, body))
+
+    return {
+        "clear": count(r"\bclear\s*\("),
+        "lines": count(r"\bdraw_line\s*\("),
+        "filled_rectangles": count(r"\bfill_rect\s*\("),
+        "sprites": count(r"\bparity_write_sprite\s*\("),
+        "direct_text": count(r"\bdraw_text\s*\("),
+        "cached_text": count(r"\bcached_label\s*\.\s*draw\s*\("),
+        "present": count(r"\bend_frame\s*\("),
+    }
+
+
+def _atlas_sprite_handles(frame_source: str) -> tuple[str, ...]:
+    body = _function_body(frame_source, "build_parity_frame")
+    return tuple(
+        re.findall(
+            r"\bparity_write_sprite\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,",
+            body,
+        )
+    )
+
+
 def validate_fixture(manifest_path: Path) -> dict:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != 1:
@@ -139,20 +235,17 @@ def validate_fixture(manifest_path: Path) -> dict:
         raise ValueError(f"render parity fixture is missing: {fixture}")
     source = fixture.read_text(encoding="utf-8")
     frame_source = (fixture.parent / "frame.stasis").read_text(encoding="utf-8")
-    actual_commands = {
-        "clear": int("PARITY_GFX_FLAG_CLEAR + PARITY_GFX_FLAG_PRESENT" in frame_source),
-        "lines": 2 if "cmd_i32[3] = 2;" in frame_source else 0,
-        "sprites": frame_source.count("\n    parity_add_sprite("),
-        "direct_text": frame_source.count("\n    parity_add_direct_label("),
-        "cached_text": frame_source.count("\n    parity_add_cached_label("),
-        "present": int("PARITY_GFX_FLAG_CLEAR + PARITY_GFX_FLAG_PRESENT" in frame_source),
-    }
+    actual_commands = _parity_command_counts(frame_source)
     for command, actual in actual_commands.items():
         expected = int(manifest["required_commands"][command])
         if actual != expected:
             raise ValueError(f"fixture has {actual} {command} commands; expected {expected}")
-    if "parity_add_sprite(cmd_i32, 0," not in frame_source:
-        raise ValueError("fixture does not exercise the procedural fallback sprite")
+    atlas_handles = _atlas_sprite_handles(frame_source)
+    if atlas_handles != ATLAS_SPRITE_HANDLES:
+        raise ValueError(
+            "fixture sprite instances must use the canonical five resolved "
+            "atlas-backed resources"
+        )
     if "platform" in frame_source.lower():
         raise ValueError("render parity fixture must not branch on platform")
     if 'import "frame.stasis";' not in source or "build_parity_frame(" not in source:
@@ -162,10 +255,15 @@ def validate_fixture(manifest_path: Path) -> dict:
     if not trace_fixture.is_file():
         raise ValueError(f"render parity trace fixture is missing: {trace_fixture}")
     trace_source = trace_fixture.read_text(encoding="utf-8")
-    if "native_render_trace" not in trace_source or "build_parity_frame(" not in trace_source:
-        raise ValueError("trace fixture does not use the canonical parity frame builder")
-    if int(manifest["command_trace"]) <= 0:
-        raise ValueError("command_trace must be a nonzero i32 value")
+    trace_markers = (
+        "native_render_trace",
+        "cmd_i32[1] = 7;",
+        "native_render_trace(cmd_i32, 67888, cmd_f32, 146564, cmd_u8, 65536)",
+    )
+    if any(marker not in trace_source for marker in trace_markers):
+        raise ValueError("trace fixture does not use the current schema-7 renderer ABI seam")
+    if "command_trace" in manifest:
+        raise ValueError("render parity manifest must not freeze a current-ABI command trace")
 
     fixture_root = fixture.parent
     while fixture_root != fixture_root.parent and not (fixture_root / "stasis.json").is_file():
@@ -236,14 +334,67 @@ def verify_capture(
     capture_path: Path,
     profile_name: str,
     viewport: list[int] | None = None,
-) -> str:
-    width, height, rgba = read_capture(capture_path)
+    viewport_y_search_radius: int = 0,
+) -> tuple[str, list[int] | None]:
+    if viewport_y_search_radius < 0:
+        raise ValueError("viewport y search radius must be nonnegative")
+    if viewport_y_search_radius > 0 and viewport is None:
+        raise ValueError("viewport y search radius requires an explicit viewport")
+    capture_width, capture_height, capture_rgba = read_capture(capture_path)
     logical_width, logical_height = manifest["logical_size"]
     if viewport is not None:
-        rgba = _normalize_viewport(
-            rgba, width, height, viewport, logical_width, logical_height
+        _normalize_viewport(
+            capture_rgba,
+            capture_width,
+            capture_height,
+            viewport,
+            logical_width,
+            logical_height,
         )
-        width, height = logical_width, logical_height
+    candidates = [viewport]
+    if viewport is not None:
+        candidates.extend(
+            [viewport[0], viewport[1] + delta, viewport[2], viewport[3]]
+            for distance in range(1, viewport_y_search_radius + 1)
+            for delta in (-distance, distance)
+            if 0 <= viewport[1] + delta
+            and viewport[1] + delta + viewport[3] <= capture_height
+        )
+    failures = []
+    for candidate in candidates:
+        try:
+            rgba = capture_rgba
+            width, height = capture_width, capture_height
+            if candidate is not None:
+                rgba = _normalize_viewport(
+                    rgba,
+                    width,
+                    height,
+                    candidate,
+                    logical_width,
+                    logical_height,
+                )
+                width, height = logical_width, logical_height
+            digest = _verify_capture_rgba(
+                manifest, profile_name, rgba, width, height
+            )
+            return digest, candidate
+        except ValueError as error:
+            failures.append(str(error))
+    raise ValueError(
+        f"no viewport matched within y search radius {viewport_y_search_radius}; "
+        f"base failure: {failures[0]}"
+    )
+
+
+def _verify_capture_rgba(
+    manifest: dict,
+    profile_name: str,
+    rgba: bytes,
+    width: int,
+    height: int,
+) -> str:
+    logical_width, logical_height = manifest["logical_size"]
     if [width, height] != [logical_width, logical_height]:
         raise ValueError(
             f"capture dimensions are {width}x{height}; expected "
@@ -306,6 +457,17 @@ def verify_capture(
                     f"region {region['name']} green-sprite coverage {coverage:.3f}; expected "
                     f"at least {region['min_coverage']:.3f}"
                 )
+        elif region.get("predicate") == "atlas_canvas":
+            matching = sum(
+                pixel[1] >= 40 and pixel[2] >= 55
+                for pixel in pixels
+            )
+            coverage = matching / len(pixels)
+            if coverage < float(region["min_coverage"]):
+                raise ValueError(
+                    f"region {region['name']} atlas-canvas coverage {coverage:.3f}; expected "
+                    f"at least {region['min_coverage']:.3f}"
+                )
         elif region.get("predicate") == "crossing_lines":
             red_coverage = sum(
                 pixel[0] >= 120 and pixel[0] >= pixel[1] + 45 and pixel[0] >= pixel[2] + 35
@@ -358,12 +520,7 @@ def verify_runtime_evidence(
     require_load_details: bool = False,
 ) -> None:
     log = _read_runtime_log(log_path)
-    trace_match = re.search(
-        r"Stasis render contract v3 trace=(\d+)\s+flags=3\s+lines=2\s+sprites=5\s+text=2",
-        log,
-    )
-    if trace_match is None or int(trace_match.group(1)) != int(manifest["command_trace"]):
-        raise ValueError(f"runtime evidence for {stage} lacks the exact command trace/counts")
+    observed_trace = _runtime_command_trace(log, stage)
     metrics = re.search(
         r"Stasis display metrics: logical=(\d+)x(\d+)\s+native=(\d+)x(\d+)\s+"
         r"drawable=(\d+)x(\d+)\s+scale=([0-9.]+)",
@@ -410,6 +567,8 @@ def verify_runtime_evidence(
     capture_hash = hashlib.sha256(capture_path.read_bytes()).hexdigest()
     if evidence.get("stage") != stage or evidence.get("capture_sha256") != capture_hash:
         raise ValueError(f"stage evidence for {stage} is not bound to this capture")
+    if evidence.get("observed_command_trace") != observed_trace:
+        raise ValueError(f"stage evidence for {stage} is not bound to the observed command trace")
     evidence_restore = (
         evidence.get("backend"),
         evidence.get("surface_generation"),
@@ -458,6 +617,7 @@ def verify_runtime_evidence(
 
 def write_stage_evidence(capture_path: Path, log_path: Path, stage: str, output_path: Path) -> None:
     log = _read_runtime_log(log_path)
+    observed_trace = _runtime_command_trace(log, stage)
     capture_hash = hashlib.sha256(capture_path.read_bytes()).hexdigest()
     capture_events = re.findall(
         r"Stasis parity capture: stage=(\w+)\s+path=(.+?)\s+frame=(\d+)\s+"
@@ -497,6 +657,7 @@ def write_stage_evidence(capture_path: Path, log_path: Path, stage: str, output_
                 "frame": int(frame),
                 "reason": reason,
                 "sprites": sprites,
+                "observed_command_trace": observed_trace,
             },
             indent=2,
         )
@@ -520,6 +681,12 @@ def main() -> int:
         "--viewport",
         help="physical x,y,width,height containing the logical scene",
     )
+    parser.add_argument(
+        "--viewport-y-search-radius",
+        type=int,
+        default=0,
+        help="bounded physical-pixel vertical refinement around --viewport",
+    )
     parser.add_argument("--runtime-log", type=Path)
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--write-evidence", action="store_true")
@@ -533,10 +700,14 @@ def main() -> int:
             if viewport is not None and len(viewport) != 4:
                 raise ValueError("--viewport requires x,y,width,height")
             if args.capture_only:
-                digest = verify_capture(
-                    manifest, args.capture.resolve(), args.profile, viewport
+                digest, selected_viewport = verify_capture(
+                    manifest, args.capture.resolve(), args.profile, viewport,
+                    args.viewport_y_search_radius,
                 )
-                print(f"render parity capture passed: sha256_rgba={digest}")
+                print(
+                    f"render parity capture passed: sha256_rgba={digest} "
+                    f"viewport={selected_viewport}"
+                )
                 return 0
             if not args.stage:
                 raise ValueError("--capture requires --stage")
@@ -559,10 +730,14 @@ def main() -> int:
                 args.stage,
                 args.require_load_details,
             )
-            digest = verify_capture(
-                manifest, args.capture.resolve(), args.profile, viewport
+            digest, selected_viewport = verify_capture(
+                manifest, args.capture.resolve(), args.profile, viewport,
+                args.viewport_y_search_radius,
             )
-            print(f"render parity capture passed: stage={args.stage} sha256_rgba={digest}")
+            print(
+                f"render parity capture passed: stage={args.stage} "
+                f"sha256_rgba={digest} viewport={selected_viewport}"
+            )
         else:
             print("render parity fixture passed")
         return 0

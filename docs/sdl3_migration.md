@@ -21,9 +21,19 @@ layer beneath that contract:
 - SDL3_image loads package raster assets without a separate global init path;
 - lifecycle, hot-swap, and Stasis-facing ABI entry points do not change.
 
-There is no SDL2 or `sdl2-compat` fallback. Android packages load `libSDL3.so`
-and `libSDL3_image.so`; iOS packages embed and sign `SDL3.framework` and
-`SDL3_image.framework`; desktop release runtimes link the pinned static family.
+There is no SDL2 or `sdl2-compat` fallback. Android production packages
+statically link SDL3 and SDL3_image into the sole `libmain.so`; iOS packages
+embed and sign `SDL3.framework` and `SDL3_image.framework`; desktop production
+runtimes link the pinned static family into one executable. Development and
+hot-reload hosts retain their modular runtime arrangement.
+
+Production builds retain SDL video, rendering, input events, audio, timers,
+threads, and filesystem support. Camera, GPU, joystick, haptic, HID, power,
+sensor, dialog, tray, and Vulkan paths are disabled. SDL_image retains only its
+stb-backed PNG decoder. SVG assets remain supported by the graphics runtime's
+ThorVG path, so SDL_image's separate SVG decoder is disabled. SDL_image cannot
+be removed while PNG remains part of the asset contract unless a replacement
+PNG decoder is first moved into the graphics runtime.
 
 ## Validation matrix
 

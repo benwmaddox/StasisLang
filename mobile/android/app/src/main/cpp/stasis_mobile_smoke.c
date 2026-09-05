@@ -2,7 +2,9 @@
 #include <android/log.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,18 +14,25 @@
 #include "stasis_render_contract.h"
 #include "stasis_mobile_aot_runtime.h"
 #include "stasis_platform_storage.h"
+#include "stasis_android_audio.h"
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
 #define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
+#ifndef STASIS_RENDER_ACCEPTANCE
+#define STASIS_RENDER_ACCEPTANCE 0
+#endif
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
+typedef const char *(*stasis_android_bridge_version_fn)(void);
 typedef char *(*stasis_android_bridge_run_tests_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_run_tick_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h);
-typedef int (*stasis_android_bridge_run_tick_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len);
+typedef int (*stasis_android_bridge_run_render_frame_fn)(const char *project_root, const char *entry_file, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len);
 typedef char *(*stasis_android_bridge_last_frame_error_fn)(void);
 typedef char *(*stasis_android_bridge_inspect_runtime_state_fn)(const char *project_root);
 typedef char *(*stasis_android_bridge_set_i32_global_fn)(const char *project_root, const char *entry_file, const char *path, int value);
 typedef char *(*stasis_android_bridge_get_i32_global_fn)(const char *project_root, const char *entry_file, const char *path);
 typedef char *(*stasis_android_bridge_resolve_sprite_asset_fn)(const char *project_root, int handle);
+typedef char *(*stasis_android_bridge_drain_sprite_releases_fn)(void);
+typedef char *(*stasis_android_bridge_poll_sprite_release_cancellations_fn)(void);
 typedef char *(*stasis_android_bridge_resolve_cached_text_fn)(const char *project_root, int handle);
 typedef char *(*stasis_android_bridge_resolve_font_fn)(const char *project_root, int handle);
 typedef char *(*stasis_android_bridge_source_items_fn)(const char *project_root, const char *entry_file);
@@ -31,6 +40,31 @@ typedef char *(*stasis_android_bridge_find_references_fn)(const char *project_ro
 typedef char *(*stasis_android_bridge_semantic_edit_fn)(const char *project_root, const char *entry_file, const char *request_json, int dry_run, int validate, int run_tests);
 typedef int (*stasis_android_bridge_set_storage_root_fn)(const char *storage_root);
 typedef void (*stasis_android_bridge_free_string_fn)(char *value);
+typedef struct StasisAudioHostApi {
+    int (*init)(int, int, int);
+    void (*shutdown)(void);
+    int (*is_available)(void);
+    int (*get_sample_rate)(void);
+    int (*get_channels)(void);
+    int (*get_queued_frames)(void);
+    int (*get_underruns)(void);
+    int (*push_f32_interleaved)(const float *, int);
+    int (*load_wav)(const char *);
+    void (*release)(int);
+    int (*play)(int, int, float, float);
+    void (*stop)(int);
+    int (*voice_is_playing)(int);
+    void (*voice_set_paused)(int, int);
+    void (*voice_set_volume_pan)(int, float, float);
+    int (*load_music)(const char *);
+    int (*load_effect)(const char *);
+    int (*play_music)(int, int, float);
+    void (*stop_music)(int);
+    void (*pause_music)(int, int);
+    void (*set_music_volume)(int, float);
+    int (*play_effect)(int, float);
+} StasisAudioHostApi;
+typedef int (*stasis_android_bridge_install_audio_api_fn)(const StasisAudioHostApi *api);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
 typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
 typedef void (*stasis_codex_android_cancel_response_fn)(void);
@@ -40,15 +74,18 @@ typedef int (*stasis_codex_android_initialize_fn)(void *env, void *context);
 typedef void (*stasis_codex_android_free_string_fn)(char *value);
 typedef struct RustBridgeApi {
     void *handle;
+    stasis_android_bridge_version_fn version;
     stasis_android_bridge_compile_project_fn compile_project;
     stasis_android_bridge_run_tests_fn run_tests;
     stasis_android_bridge_run_tick_fn run_tick;
-    stasis_android_bridge_run_tick_frame_fn run_tick_frame;
+    stasis_android_bridge_run_render_frame_fn run_render_frame;
     stasis_android_bridge_last_frame_error_fn last_frame_error;
     stasis_android_bridge_inspect_runtime_state_fn inspect_runtime_state;
     stasis_android_bridge_set_i32_global_fn set_i32_global;
     stasis_android_bridge_get_i32_global_fn get_i32_global;
     stasis_android_bridge_resolve_sprite_asset_fn resolve_sprite_asset;
+    stasis_android_bridge_drain_sprite_releases_fn drain_sprite_releases;
+    stasis_android_bridge_poll_sprite_release_cancellations_fn poll_sprite_release_cancellations;
     stasis_android_bridge_resolve_cached_text_fn resolve_cached_text;
     stasis_android_bridge_resolve_font_fn resolve_font;
     stasis_android_bridge_source_items_fn source_items;
@@ -56,6 +93,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_semantic_edit_fn semantic_edit;
     stasis_android_bridge_set_storage_root_fn set_storage_root;
     stasis_android_bridge_free_string_fn free_string;
+    stasis_android_bridge_install_audio_api_fn install_audio_api;
     int attempted;
 } RustBridgeApi;
 
@@ -75,6 +113,133 @@ typedef struct CodexBridgeApi {
 } CodexBridgeApi;
 
 static CodexBridgeApi codex_bridge_api = {0};
+
+typedef struct StasisJniFrameDescriptor {
+    const char *lane;
+    size_t byte_capacity;
+    size_t alignment;
+} StasisJniFrameDescriptor;
+
+#define STASIS_JNI_FRAME_DESCRIPTOR(kind, name, bytes, alignment) \
+    {name, bytes, alignment},
+static const StasisJniFrameDescriptor stasis_jni_frame_descriptors[] = {
+    STASIS_RENDER_BUFFER_DESCRIPTORS(STASIS_JNI_FRAME_DESCRIPTOR)
+};
+#undef STASIS_JNI_FRAME_DESCRIPTOR
+
+static __thread char stasis_jni_last_frame_error[320];
+static jmethodID stasis_jni_buffer_order_method;
+static jobject stasis_jni_native_order;
+static pthread_mutex_t stasis_jni_order_mutex = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int stasis_jni_order_ready = ATOMIC_VAR_INIT(0);
+
+static void clear_stasis_jni_frame_error(void) {
+    stasis_jni_last_frame_error[0] = '\0';
+}
+
+static void set_stasis_jni_frame_error(const char *lane, const char *reason,
+        size_t expected, jlong actual) {
+    snprintf(stasis_jni_last_frame_error, sizeof(stasis_jni_last_frame_error),
+            "{\"schema\":\"stasis.workshop_jni_frame_abi.v1\","
+            "\"test_id\":\"IT-026\",\"event\":\"error\","
+            "\"lane\":\"%s\",\"reason\":\"%s\","
+            "\"expected\":%zu,\"actual\":%lld}",
+            lane, reason, expected, (long long)actual);
+}
+
+static void set_stasis_jni_frame_order_error(const char *lane) {
+    snprintf(stasis_jni_last_frame_error, sizeof(stasis_jni_last_frame_error),
+            "{\"schema\":\"stasis.workshop_jni_frame_abi.v1\","
+            "\"test_id\":\"IT-026\",\"event\":\"error\","
+            "\"lane\":\"%s\",\"reason\":\"byte_order\","
+            "\"expected\":\"native\",\"actual\":\"non_native\"}", lane);
+}
+
+static int stasis_jni_clear_exception(JNIEnv *env) {
+    if (!(*env)->ExceptionCheck(env)) return 0;
+    (*env)->ExceptionClear(env);
+    return 1;
+}
+
+static int initialize_stasis_jni_order(JNIEnv *env) {
+    if (atomic_load_explicit(&stasis_jni_order_ready, memory_order_acquire)) return 1;
+    if (pthread_mutex_lock(&stasis_jni_order_mutex) != 0) return 0;
+    if (atomic_load_explicit(&stasis_jni_order_ready, memory_order_relaxed)) {
+        pthread_mutex_unlock(&stasis_jni_order_mutex);
+        return 1;
+    }
+    jclass buffer_class = (*env)->FindClass(env, "java/nio/ByteBuffer");
+    if (stasis_jni_clear_exception(env) || buffer_class == NULL) goto failed;
+    jclass order_class = (*env)->FindClass(env, "java/nio/ByteOrder");
+    if (stasis_jni_clear_exception(env) || order_class == NULL) goto failed;
+    jmethodID buffer_order_method = (*env)->GetMethodID(
+            env, buffer_class, "order", "()Ljava/nio/ByteOrder;");
+    if (stasis_jni_clear_exception(env) || buffer_order_method == NULL) goto failed;
+    jmethodID native_order_method = (*env)->GetStaticMethodID(
+            env, order_class, "nativeOrder", "()Ljava/nio/ByteOrder;");
+    if (stasis_jni_clear_exception(env) || native_order_method == NULL) goto failed;
+    jobject native_order = (*env)->CallStaticObjectMethod(env, order_class, native_order_method);
+    if (stasis_jni_clear_exception(env) || native_order == NULL) goto failed;
+    jobject native_order_global = (*env)->NewGlobalRef(env, native_order);
+    if (stasis_jni_clear_exception(env) || native_order_global == NULL) {
+        if (native_order_global != NULL) (*env)->DeleteGlobalRef(env, native_order_global);
+        goto failed;
+    }
+    stasis_jni_buffer_order_method = buffer_order_method;
+    stasis_jni_native_order = native_order_global;
+    atomic_store_explicit(&stasis_jni_order_ready, 1, memory_order_release);
+    pthread_mutex_unlock(&stasis_jni_order_mutex);
+    return 1;
+
+failed:
+    pthread_mutex_unlock(&stasis_jni_order_mutex);
+    return 0;
+}
+
+static int validate_stasis_jni_frame_buffers(JNIEnv *env,
+        jobject frame_i32, jobject frame_f32, jobject frame_u8) {
+    const jobject buffers[] = {frame_i32, frame_f32, frame_u8};
+    clear_stasis_jni_frame_error();
+    if (!initialize_stasis_jni_order(env)) {
+        set_stasis_jni_frame_error("all", "jni_exception", 0, -1);
+        return 0;
+    }
+    for (size_t index = 0; index < sizeof(buffers) / sizeof(buffers[0]); index++) {
+        const StasisJniFrameDescriptor *descriptor = &stasis_jni_frame_descriptors[index];
+        if (buffers[index] == NULL) {
+            set_stasis_jni_frame_error(descriptor->lane, "null_buffer",
+                    descriptor->byte_capacity, -1);
+            return 0;
+        }
+        jobject actual_order = (*env)->CallObjectMethod(
+                env, buffers[index], stasis_jni_buffer_order_method);
+        if (stasis_jni_clear_exception(env)) {
+            set_stasis_jni_frame_error(descriptor->lane, "jni_exception", 0, -1);
+            return 0;
+        }
+        if (actual_order == NULL
+                || (*env)->IsSameObject(env, actual_order, stasis_jni_native_order) == JNI_FALSE) {
+            set_stasis_jni_frame_order_error(descriptor->lane);
+            return 0;
+        }
+        void *address = (*env)->GetDirectBufferAddress(env, buffers[index]);
+        jlong capacity = (*env)->GetDirectBufferCapacity(env, buffers[index]);
+        if (address == NULL) {
+            set_stasis_jni_frame_error(descriptor->lane, "not_direct", descriptor->byte_capacity, capacity);
+            return 0;
+        }
+        if (capacity != (jlong)descriptor->byte_capacity) {
+            set_stasis_jni_frame_error(descriptor->lane, "capacity", descriptor->byte_capacity, capacity);
+            return 0;
+        }
+        if (((uintptr_t)address % descriptor->alignment) != 0) {
+            set_stasis_jni_frame_error(descriptor->lane, "alignment", descriptor->alignment,
+                    (jlong)((uintptr_t)address % descriptor->alignment));
+            return 0;
+        }
+    }
+    return 1;
+}
 
 static char *read_file_text(const char *path, long *size_out);
 
@@ -166,14 +331,16 @@ static RustBridgeApi *load_rust_bridge_api(void) {
         return NULL;
     }
 
+    rust_bridge_api.version =
+            (stasis_android_bridge_version_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_version");
     rust_bridge_api.compile_project =
             (stasis_android_bridge_compile_project_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_compile_project");
     rust_bridge_api.run_tests =
             (stasis_android_bridge_run_tests_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tests");
     rust_bridge_api.run_tick =
             (stasis_android_bridge_run_tick_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick");
-    rust_bridge_api.run_tick_frame =
-            (stasis_android_bridge_run_tick_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2");
+    rust_bridge_api.run_render_frame =
+            (stasis_android_bridge_run_render_frame_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_render_frame");
     rust_bridge_api.last_frame_error =
             (stasis_android_bridge_last_frame_error_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_last_frame_error");
     rust_bridge_api.inspect_runtime_state =
@@ -184,6 +351,11 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_get_i32_global_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_get_i32_global");
     rust_bridge_api.resolve_sprite_asset =
             (stasis_android_bridge_resolve_sprite_asset_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_sprite_asset");
+    rust_bridge_api.drain_sprite_releases =
+            (stasis_android_bridge_drain_sprite_releases_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_drain_sprite_releases");
+    rust_bridge_api.poll_sprite_release_cancellations =
+            (stasis_android_bridge_poll_sprite_release_cancellations_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_poll_sprite_release_cancellations");
     rust_bridge_api.resolve_cached_text =
             (stasis_android_bridge_resolve_cached_text_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_cached_text");
     rust_bridge_api.resolve_font =
@@ -198,11 +370,42 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_set_storage_root_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_set_storage_root");
     rust_bridge_api.free_string =
             (stasis_android_bridge_free_string_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_free_string");
-    if (rust_bridge_api.compile_project == NULL ||
+    rust_bridge_api.install_audio_api =
+            (stasis_android_bridge_install_audio_api_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_install_audio_api");
+    if (rust_bridge_api.version == NULL ||
+        rust_bridge_api.compile_project == NULL ||
         rust_bridge_api.run_tick == NULL ||
         rust_bridge_api.free_string == NULL) {
         __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG, "Rust Android bridge missing required symbols");
         return NULL;
+    }
+
+    if (rust_bridge_api.install_audio_api != NULL) {
+        const StasisAudioHostApi audio_api = {
+            stasis_audio_init,
+            stasis_audio_shutdown,
+            stasis_audio_is_available,
+            stasis_audio_get_sample_rate,
+            stasis_audio_get_channels,
+            stasis_audio_get_queued_frames,
+            stasis_audio_get_underruns,
+            stasis_audio_push_f32_interleaved,
+            stasis_audio_load_wav,
+            stasis_audio_release,
+            stasis_audio_play,
+            stasis_audio_stop,
+            stasis_audio_voice_is_playing,
+            stasis_audio_voice_set_paused,
+            stasis_audio_voice_set_volume_pan,
+            stasis_audio_load_music,
+            stasis_audio_load_effect,
+            stasis_audio_play_music,
+            stasis_audio_stop_music,
+            stasis_audio_pause_music,
+            stasis_audio_set_music_volume,
+            stasis_audio_play_effect};
+        rust_bridge_api.install_audio_api(&audio_api);
     }
 
     return &rust_bridge_api;
@@ -267,6 +470,9 @@ static CodexBridgeApi *load_codex_bridge_api(void) {
         codex_bridge_api.free_string == NULL) {
         __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG,
                 "Phone-native Codex bridge missing required symbols");
+        dlclose(codex_bridge_api.handle);
+        memset(&codex_bridge_api, 0, sizeof(codex_bridge_api));
+        codex_bridge_api.attempted = 1;
         return NULL;
     }
     return &codex_bridge_api;
@@ -346,25 +552,11 @@ static jstring call_codex_response(JNIEnv *env, jstring codex_home, jstring requ
     return result;
 }
 
-static void call_rust_bridge_compile(const char *project_root, char *message, size_t message_size) {
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL || bridge->compile_project == NULL || bridge->free_string == NULL) {
-        snprintf(message, message_size,
-                "CompileError: required Rust Android compiler bridge is unavailable");
-        return;
-    }
-
-    char *bridge_message = bridge->compile_project(project_root, "src/main.stasis");
-    if (bridge_message == NULL) {
-        snprintf(message, message_size, "CompileError: Rust Android bridge returned null message");
-        return;
-    }
-
-    snprintf(message, message_size, "%s", bridge_message);
-    bridge->free_string(bridge_message);
-}
-
 static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, char *message, size_t message_size) {
+    if (!stasis_audio_set_project_root(project_root)) {
+        snprintf(message, message_size, "RunError: invalid audio project root");
+        return 1;
+    }
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->run_tick == NULL || bridge->free_string == NULL) {
         return 0;
@@ -382,6 +574,10 @@ static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int t
 }
 
 static int try_rust_bridge_set_i32_global(const char *project_root, const char *path, int value, char *message, size_t message_size) {
+    if (!stasis_audio_set_project_root(project_root)) {
+        snprintf(message, message_size, "StateError: invalid audio project root");
+        return 1;
+    }
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->set_i32_global == NULL || bridge->free_string == NULL) {
         snprintf(message, message_size, "StateError: Rust Android bridge set_i32_global unavailable");
@@ -399,22 +595,11 @@ static int try_rust_bridge_set_i32_global(const char *project_root, const char *
     return 1;
 }
 
-static int try_rust_bridge_run_tests(const char *project_root, char *message, size_t message_size) {
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL || bridge->run_tests == NULL || bridge->free_string == NULL) {
-        return 0;
-    }
-    char *bridge_message = bridge->run_tests(project_root);
-    if (bridge_message == NULL) {
-        snprintf(message, message_size, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"Rust Android bridge returned null test result\"}");
+static int try_rust_bridge_get_i32_global(const char *project_root, const char *path, char *message, size_t message_size) {
+    if (!stasis_audio_set_project_root(project_root)) {
+        snprintf(message, message_size, "StateError: invalid audio project root");
         return 1;
     }
-    snprintf(message, message_size, "%s", bridge_message);
-    bridge->free_string(bridge_message);
-    return 1;
-}
-
-static int try_rust_bridge_get_i32_global(const char *project_root, const char *path, char *message, size_t message_size) {
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->get_i32_global == NULL || bridge->free_string == NULL) {
         snprintf(message, message_size, "StateError: Rust Android bridge get_i32_global unavailable");
@@ -431,12 +616,34 @@ static int try_rust_bridge_get_i32_global(const char *project_root, const char *
     bridge->free_string(bridge_message);
     return 1;
 }
-static int try_rust_bridge_run_tick_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len) {
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL || bridge->run_tick_frame == NULL) {
+
+static int parse_state_value(const char *message, int *value) {
+    return strstr(message, "StateGet:") != NULL && parse_manifest_i32(message, "value=", value);
+}
+
+#if STASIS_RENDER_ACCEPTANCE
+static void log_workshop_it025_marker(JNIEnv *env, const char *bridge_version,
+        int state_checksum, uint32_t command_trace, int render_version, int frame_token) {
+    __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG,
+            "Stasis Workshop IT-025: {\"schema\":\"stasis.workshop_seam.v1\","
+            "\"test_id\":\"IT-025\",\"event\":\"frame\","
+            "\"jni_version\":%d,\"rust_bridge_version\":\"%s\","
+            "\"render_version\":%d,\"state_checksum\":%d,"
+            "\"command_trace\":%u,\"frame_token\":%d,\"fallback\":0,\"stub\":0}",
+            (*env)->GetVersion(env), bridge_version, render_version,
+            state_checksum, command_trace, frame_token);
+}
+
+#endif
+static int try_rust_bridge_run_render_frame(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, int32_t *out_i32, uintptr_t out_i32_len, float *out_f32, uintptr_t out_f32_len, uint8_t *out_u8, uintptr_t out_u8_len) {
+    if (!stasis_audio_set_project_root(project_root)) {
         return -1;
     }
-    return bridge->run_tick_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active,
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->run_render_frame == NULL) {
+        return -1;
+    }
+    return bridge->run_render_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active,
             screen_w, screen_h, out_i32, out_i32_len, out_f32, out_f32_len,
             out_u8, out_u8_len);
 }
@@ -488,18 +695,61 @@ Java_com_stasislang_workshop_MainActivity_nativeRunTests(JNIEnv *env, jclass act
     if (root == NULL) {
         return (*env)->NewStringUTF(env, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"unable to read project root\"}");
     }
-    char message[8192];
-    if (try_rust_bridge_run_tests(root, message, sizeof(message)) == 0) {
-        snprintf(message, sizeof(message), "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"Rust Android bridge test runner unavailable\"}");
+    if (!stasis_audio_set_project_root(root)) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"invalid audio project root\"}");
     }
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->run_tests == NULL || bridge->free_string == NULL) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"Rust Android bridge test runner unavailable\"}");
+    }
+    char *message = bridge->run_tests(root);
     (*env)->ReleaseStringUTFChars(env, project_root, root);
-    return (*env)->NewStringUTF(env, message);
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "{\"kind\":\"stasis_test_run\",\"passed\":0,\"failed\":1,\"all_passed\":false,\"error\":\"Rust Android bridge returned null test result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
 }
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeStatus(JNIEnv *env, jclass activity_class) {
     (void)activity_class;
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "native smoke entry loaded");
     return (*env)->NewStringUTF(env, "Stasis Android native smoke loaded");
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioSetPaused(
+        JNIEnv *env, jclass activity_class, jboolean paused) {
+    (void)env;
+    (void)activity_class;
+    stasis_android_audio_set_paused(paused ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioSetFocus(
+        JNIEnv *env, jclass activity_class, jboolean focused) {
+    (void)env;
+    (void)activity_class;
+    stasis_android_audio_set_focus(focused ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioShutdown(
+        JNIEnv *env, jclass activity_class) {
+    (void)env;
+    (void)activity_class;
+    stasis_audio_shutdown();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeAudioRequested(
+        JNIEnv *env, jclass activity_class) {
+    (void)env;
+    (void)activity_class;
+    return stasis_android_audio_is_requested() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL
@@ -522,6 +772,41 @@ Java_com_stasislang_workshop_MainActivity_nativeResolveSpriteAsset(
     if (message == NULL) {
         return (*env)->NewStringUTF(env,
                 "{\"status\":\"error\",\"error\":\"shared sprite resolver returned no result\"}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeDrainSpriteReleases(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->drain_sprite_releases == NULL || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    char *message = bridge->drain_sprite_releases();
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativePollSpriteReleaseCancellations(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->poll_sprite_release_cancellations == NULL
+            || bridge->free_string == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
+    }
+    char *message = bridge->poll_sprite_release_cancellations();
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "{\"status\":\"ok\",\"handles\":[]}");
     }
     jstring result = (*env)->NewStringUTF(env, message);
     bridge->free_string(message);
@@ -662,12 +947,23 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
         return (*env)->NewStringUTF(env, "CompileError: unable to read project root");
     }
 
-    char message[256];
-    call_rust_bridge_compile(root, message, sizeof(message));
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->compile_project == NULL || bridge->free_string == NULL) {
+        (*env)->ReleaseStringUTFChars(env, project_root, root);
+        return (*env)->NewStringUTF(env,
+                "CompileError: required Rust Android compiler bridge is unavailable");
+    }
+
+    char *message = bridge->compile_project(root, "src/main.stasis");
 
     (*env)->ReleaseStringUTFChars(env, project_root, root);
+    if (message == NULL) {
+        return (*env)->NewStringUTF(env, "CompileError: Rust Android bridge returned null message");
+    }
     __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG, "%s", message);
-    return (*env)->NewStringUTF(env, message);
+    jstring result = (*env)->NewStringUTF(env, message);
+    bridge->free_string(message);
+    return result;
 }
 
 JNIEXPORT jstring JNICALL
@@ -750,18 +1046,12 @@ Java_com_stasislang_workshop_MainActivity_nativeSemanticEdit(
 JNIEXPORT jint JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jobject frame_i32, jobject frame_f32, jobject frame_u8) {
     (void)activity_class;
+    if (!validate_stasis_jni_frame_buffers(env, frame_i32, frame_f32, frame_u8)) {
+        return -1;
+    }
     int32_t *values_i32 = (int32_t *)(*env)->GetDirectBufferAddress(env, frame_i32);
     float *values_f32 = (float *)(*env)->GetDirectBufferAddress(env, frame_f32);
     uint8_t *values_u8 = (uint8_t *)(*env)->GetDirectBufferAddress(env, frame_u8);
-    jlong bytes_i32 = (*env)->GetDirectBufferCapacity(env, frame_i32);
-    jlong bytes_f32 = (*env)->GetDirectBufferCapacity(env, frame_f32);
-    jlong bytes_u8 = (*env)->GetDirectBufferCapacity(env, frame_u8);
-    if (values_i32 == NULL || values_f32 == NULL || values_u8 == NULL
-            || bytes_i32 < (jlong)(STASIS_RENDER_I32_COUNT * sizeof(int32_t))
-            || bytes_f32 < (jlong)(STASIS_RENDER_F32_COUNT * sizeof(float))
-            || bytes_u8 < (jlong)STASIS_RENDER_U8_COUNT) {
-        return -1;
-    }
 
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
     if (root == NULL) {
@@ -769,11 +1059,10 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
         return -1;
     }
 
-    int status = try_rust_bridge_run_tick_frame(
+    int status = try_rust_bridge_run_render_frame(
             root, (int)touch_x, (int)touch_y, (int)touch_active, (int)screen_w, (int)screen_h,
             values_i32, STASIS_RENDER_I32_COUNT, values_f32, STASIS_RENDER_F32_COUNT,
             values_u8, STASIS_RENDER_U8_COUNT);
-    (*env)->ReleaseStringUTFChars(env, project_root, root);
     if (status != 0) {
         values_i32[0] = -1;
     } else {
@@ -785,11 +1074,12 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
                 last_density_generation != values_i32[STASIS_RENDER_I_DENSITY_GENERATION]) {
             uint32_t trace = stasis_render_trace(values_i32, values_f32, values_u8);
             __android_log_print(ANDROID_LOG_INFO, STASIS_ANDROID_LOG_TAG,
-                    "Stasis preview gfx_cmd v%d trace=%u flags=%d lines=%d sprites=%d text=%d "
+                    "Stasis preview gfx_cmd v%d trace=%u flags=%d lines=%d rects=%d sprites=%d text=%d "
                     "logical=%dx%d native=%dx%d drawable=%dx%d display_gen=%d density_gen=%d",
                     values_i32[STASIS_RENDER_I_VERSION], trace,
                     values_i32[STASIS_RENDER_I_FLAGS],
                     values_i32[STASIS_RENDER_I_LINE_COUNT],
+                    values_i32[STASIS_RENDER_I_RECT_COUNT],
                     values_i32[STASIS_RENDER_I_SPRITE_COUNT],
                     values_i32[STASIS_RENDER_I_TEXT_COUNT],
                     values_i32[STASIS_RENDER_I_LOGICAL_W],
@@ -804,14 +1094,93 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
             last_display_generation = values_i32[STASIS_RENDER_I_DISPLAY_GENERATION];
             last_density_generation = values_i32[STASIS_RENDER_I_DENSITY_GENERATION];
         }
+#if STASIS_RENDER_ACCEPTANCE
+        {
+            static int it025_state_ready = 0;
+            static int it025_state_checksum;
+            static const char *it025_bridge_version;
+            RustBridgeApi *bridge = load_rust_bridge_api();
+            char state_message[256];
+            if (!it025_state_ready) {
+                it025_bridge_version = bridge == NULL || bridge->version == NULL
+                        ? NULL : bridge->version();
+                if (it025_bridge_version == NULL || it025_bridge_version[0] == '\0' ||
+                        !try_rust_bridge_get_i32_global(root, "seam_state_checksum",
+                                state_message, sizeof(state_message)) ||
+                        !parse_state_value(state_message, &it025_state_checksum) ||
+                        it025_state_checksum <= 0) {
+                    __android_log_print(ANDROID_LOG_ERROR, STASIS_ANDROID_LOG_TAG,
+                            "IT-025 state checksum was unavailable from the live Rust JIT global bridge");
+                    (*env)->ReleaseStringUTFChars(env, project_root, root);
+                    values_i32[0] = -1;
+                    return -1;
+                }
+                it025_state_ready = 1;
+            }
+            if (it025_bridge_version == NULL) {
+                __android_log_print(ANDROID_LOG_ERROR, STASIS_ANDROID_LOG_TAG,
+                        "IT-025 Rust bridge version was unavailable after initialization");
+                (*env)->ReleaseStringUTFChars(env, project_root, root);
+                values_i32[0] = -1;
+                return -1;
+            }
+            log_workshop_it025_marker(env, it025_bridge_version, it025_state_checksum,
+                    stasis_render_trace(values_i32, values_f32, values_u8),
+                    values_i32[STASIS_RENDER_I_VERSION],
+                    values_i32[STASIS_RENDER_I_FRAME_TOKEN]);
+        }
+#endif
     }
+    (*env)->ReleaseStringUTFChars(env, project_root, root);
     return (jint)status;
 }
+
+#if STASIS_RENDER_ACCEPTANCE
+JNIEXPORT jstring JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeFrameAbiDescriptor(
+        JNIEnv *env, jclass activity_class) {
+    (void)activity_class;
+    char descriptor_json[512];
+    const StasisJniFrameDescriptor *i32 = &stasis_jni_frame_descriptors[0];
+    const StasisJniFrameDescriptor *f32 = &stasis_jni_frame_descriptors[1];
+    const StasisJniFrameDescriptor *u8 = &stasis_jni_frame_descriptors[2];
+    snprintf(descriptor_json, sizeof(descriptor_json),
+            "{\"schema\":\"stasis.workshop_jni_frame_abi.v1\","
+            "\"test_id\":\"IT-026\",\"event\":\"descriptor\","
+            "\"lanes\":[{\"lane\":\"%s\",\"bytes\":%zu,\"alignment\":%zu},"
+            "{\"lane\":\"%s\",\"bytes\":%zu,\"alignment\":%zu},"
+            "{\"lane\":\"%s\",\"bytes\":%zu,\"alignment\":%zu}]}",
+            i32->lane, i32->byte_capacity, i32->alignment,
+            f32->lane, f32->byte_capacity, f32->alignment,
+            u8->lane, u8->byte_capacity, u8->alignment);
+    return (*env)->NewStringUTF(env, descriptor_json);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeFrameTrace(
+        JNIEnv *env, jclass activity_class, jobject frame_i32, jobject frame_f32,
+        jobject frame_u8) {
+    (void)activity_class;
+    if (!validate_stasis_jni_frame_buffers(env, frame_i32, frame_f32, frame_u8)) {
+        return -1;
+    }
+    int32_t *values_i32 = (int32_t *)(*env)->GetDirectBufferAddress(env, frame_i32);
+    float *values_f32 = (float *)(*env)->GetDirectBufferAddress(env, frame_f32);
+    uint8_t *values_u8 = (uint8_t *)(*env)->GetDirectBufferAddress(env, frame_u8);
+    return (jint)stasis_render_trace(values_i32, values_f32, values_u8);
+}
+#endif
 
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeLastFrameError(
         JNIEnv *env, jclass activity_class) {
     (void)activity_class;
+    if (stasis_jni_last_frame_error[0] != '\0') {
+        char message[sizeof(stasis_jni_last_frame_error)];
+        snprintf(message, sizeof(message), "%s", stasis_jni_last_frame_error);
+        clear_stasis_jni_frame_error();
+        return (*env)->NewStringUTF(env, message);
+    }
     RustBridgeApi *bridge = load_rust_bridge_api();
     if (bridge == NULL || bridge->last_frame_error == NULL || bridge->free_string == NULL) {
         return (*env)->NewStringUTF(env, "native preview frame failed");

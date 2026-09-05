@@ -1,0 +1,115 @@
+import "internal/host_frame_raw.stasis";
+
+struct HostPointerFrame {
+    id: i32;
+    is_down: bool;
+    went_down: bool;
+    went_up: bool;
+    x_logical: f32;
+    y_logical: f32;
+    dx_logical: f32;
+    dy_logical: f32;
+    x_normalized: f32;
+    y_normalized: f32;
+}
+
+struct HostDisplayFrame {
+    resized: bool;
+    screen_width_px: i32;
+    screen_height_px: i32;
+    native_width_px: i32;
+    native_height_px: i32;
+    drawable_width_px: i32;
+    drawable_height_px: i32;
+    logical_width: f32;
+    logical_height: f32;
+    safe_x: f32;
+    safe_y: f32;
+    safe_width: f32;
+    safe_height: f32;
+    available_width: f32;
+    available_height: f32;
+    content_scale: f32;
+    raster_scale: f32;
+    generation: i32;
+    density_generation: i32;
+}
+
+struct HostFrame {
+    time_ms: i32;
+    time_us: i32;
+    tick_index: i32;
+    version: i32;
+    flags: i32;
+    tick_hz: i32;
+    window_focused: bool;
+    window_minimized: bool;
+    quit_requested: bool;
+    pointer_count: i32;
+    dropped_pointer_count: i32;
+    display: HostDisplayFrame;
+    pointers: HostPointerFrame[8];
+    keys: i32[512];
+}
+
+function @internal copy_keys(self: HostFrame): void {
+    for (let index: i32 = 0; index < HOST_I_KEY_COUNT; index += 1) {
+        self.keys[index] = host_i32[HOST_I_KEY_BASE + index];
+    }
+}
+
+function refresh(self: HostFrame): void {
+    self.time_ms = host_i32[HOST_I_TIME_MS];
+    self.time_us = host_i32[HOST_I_TIME_US];
+    self.tick_index = host_i32[HOST_I_TICK_INDEX];
+    self.version = host_i32[HOST_I_VERSION];
+    self.flags = host_i32[HOST_I_FLAGS];
+    self.tick_hz = host_i32[HOST_I_TICK_HZ];
+    self.window_focused = host_i32[HOST_I_WINDOW_FOCUSED] != 0;
+    self.window_minimized = host_i32[HOST_I_WINDOW_MINIMIZED] != 0;
+    self.quit_requested = host_i32[HOST_I_QUIT_REQUESTED] != 0;
+    self.pointer_count = host_i32[HOST_I_POINTER_COUNT];
+    if (self.pointer_count < 0) {
+        self.pointer_count = 0;
+    }
+    if (self.pointer_count > HOST_MAX_POINTERS) {
+        self.pointer_count = HOST_MAX_POINTERS;
+    }
+    self.dropped_pointer_count = host_i32[HOST_I_DROPPED_POINTERS];
+
+    self.display.resized = host_i32[HOST_I_RESIZED] != 0;
+    self.display.screen_width_px = host_i32[HOST_I_SCREEN_W_PX];
+    self.display.screen_height_px = host_i32[HOST_I_SCREEN_H_PX];
+    self.display.native_width_px = host_i32[HOST_I_NATIVE_W_PX];
+    self.display.native_height_px = host_i32[HOST_I_NATIVE_H_PX];
+    self.display.drawable_width_px = host_i32[HOST_I_DRAWABLE_W_PX];
+    self.display.drawable_height_px = host_i32[HOST_I_DRAWABLE_H_PX];
+    self.display.logical_width = host_f32[HOST_F_LOGICAL_W];
+    self.display.logical_height = host_f32[HOST_F_LOGICAL_H];
+    self.display.safe_x = host_f32[HOST_F_SAFE_X];
+    self.display.safe_y = host_f32[HOST_F_SAFE_Y];
+    self.display.safe_width = host_f32[HOST_F_SAFE_W];
+    self.display.safe_height = host_f32[HOST_F_SAFE_H];
+    self.display.available_width = host_f32[HOST_F_AVAILABLE_W];
+    self.display.available_height = host_f32[HOST_F_AVAILABLE_H];
+    self.display.content_scale = host_f32[HOST_F_CONTENT_SCALE];
+    self.display.raster_scale = host_f32[HOST_F_RASTER_SCALE];
+    self.display.generation = host_i32[HOST_I_DISPLAY_GENERATION];
+    self.display.density_generation = host_i32[HOST_I_DENSITY_GENERATION];
+
+    for (let index: i32 = 0; index < HOST_MAX_POINTERS; index += 1) {
+        let pointer_i32: i32 = HOST_I_POINTER_BASE + index * HOST_I_POINTER_STRIDE;
+        let pointer_f32: i32 = HOST_F_POINTER_BASE + index * HOST_F_POINTER_STRIDE;
+        self.pointers[index].id = host_i32[pointer_i32 + 0];
+        self.pointers[index].is_down = host_i32[pointer_i32 + 1] != 0;
+        self.pointers[index].went_down = host_i32[pointer_i32 + 2] != 0;
+        self.pointers[index].went_up = host_i32[pointer_i32 + 3] != 0;
+        self.pointers[index].x_logical = host_f32[pointer_f32 + 0];
+        self.pointers[index].y_logical = host_f32[pointer_f32 + 1];
+        self.pointers[index].dx_logical = host_f32[pointer_f32 + 2];
+        self.pointers[index].dy_logical = host_f32[pointer_f32 + 3];
+        self.pointers[index].x_normalized = host_f32[pointer_f32 + 4];
+        self.pointers[index].y_normalized = host_f32[pointer_f32 + 5];
+    }
+    self.copy_keys();
+}

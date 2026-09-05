@@ -2,28 +2,230 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, CString};
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use std::ffi::CStr;
-#[cfg(windows)]
-use std::ffi::OsStr;
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
+mod dynamic_library;
+pub use dynamic_library::{atomic_rename_no_replace, Library};
 
-pub struct Library {
-    #[cfg(windows)]
-    handle: *mut c_void,
-    #[cfg(unix)]
-    handle: *mut c_void,
+#[cfg(feature = "cross-atlas-research")]
+mod cross_atlas_research;
+#[cfg(feature = "cross-atlas-research")]
+pub use cross_atlas_research::*;
+
+pub const HOT_RENDER_METADATA_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotRenderRuntimeImage {
+    pub logical_path: String,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub max_renders_per_render: Option<u64>,
+    pub atlas_eligible: bool,
+    pub grouping_key: String,
+    pub estimated_distinct_transitions: u64,
+    pub group_member_count: u32,
+    pub group_logical_pixel_area: u64,
+    pub group_max_logical_width: u32,
+    pub group_max_logical_height: u32,
+    pub backend_constraints: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HotRenderAtlasPolicy {
+    pub eligible: bool,
+    pub group_id: u64,
+    pub member_count: u32,
+    pub logical_pixel_area: u64,
+    pub max_logical_width: u32,
+    pub max_logical_height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealizedHotRenderImage {
+    pub image: HotRenderRuntimeImage,
+    pub realized_width: u32,
+    pub realized_height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotRenderLoadPlan {
+    pub groups: Vec<(String, Vec<(String, u32, u32)>)>,
+    pub standalone: Vec<(String, u32, u32)>,
+}
+
+fn hot_render_runtime_images() -> &'static RwLock<HashMap<(String, u32, u32), HotRenderRuntimeImage>>
+{
+    static IMAGES: OnceLock<RwLock<HashMap<(String, u32, u32), HotRenderRuntimeImage>>> =
+        OnceLock::new();
+    IMAGES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn normalized_asset_key(path: &str, width: u32, height: u32) -> (String, u32, u32) {
+    (path.replace('\\', "/"), width, height)
+}
+
+/// Atomically replaces the runtime policy table. Unknown contract versions
+/// deliberately publish an empty table, preserving standalone-safe behavior.
+pub fn replace_hot_render_metadata(version: u32, images: &[HotRenderRuntimeImage]) {
+    let mut next = HashMap::new();
+    if version == HOT_RENDER_METADATA_VERSION {
+        for image in images {
+            next.insert(
+                normalized_asset_key(
+                    &image.logical_path,
+                    image.logical_width,
+                    image.logical_height,
+                ),
+                image.clone(),
+            );
+        }
+    }
+    *hot_render_runtime_images()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+}
+
+/// Captures the currently accepted policy for transactional host publication.
+pub fn snapshot_hot_render_metadata() -> Vec<HotRenderRuntimeImage> {
+    let mut images = hot_render_runtime_images()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    images.sort_by(|left, right| {
+        (&left.logical_path, left.logical_width, left.logical_height).cmp(&(
+            &right.logical_path,
+            right.logical_width,
+            right.logical_height,
+        ))
+    });
+    images
+}
+
+/// Missing, stale, unknown, and <=1 records are standalone by default.
+pub fn hot_render_atlas_eligible(path: &str, width: u32, height: u32) -> bool {
+    hot_render_atlas_policy(path, width, height).eligible
+}
+
+fn stable_group_id(key: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in key.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
+pub fn hot_render_atlas_policy(path: &str, width: u32, height: u32) -> HotRenderAtlasPolicy {
+    hot_render_runtime_images()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&normalized_asset_key(path, width, height))
+        .filter(|image| {
+            image.atlas_eligible
+                && image.max_renders_per_render.is_some_and(|count| count > 1)
+                && image.group_member_count > 1
+                && !image.grouping_key.is_empty()
+        })
+        .map_or_else(HotRenderAtlasPolicy::default, |image| {
+            HotRenderAtlasPolicy {
+                eligible: true,
+                group_id: stable_group_id(&image.grouping_key),
+                member_count: image.group_member_count,
+                logical_pixel_area: image.group_logical_pixel_area,
+                max_logical_width: image.group_max_logical_width,
+                max_logical_height: image.group_max_logical_height,
+            }
+        })
+}
+
+/// Deterministic candidate grouping from compiler metadata. Render backends
+/// must refine this with realized dimensions before allocating pages.
+pub fn plan_hot_render_groups(
+    images: &[HotRenderRuntimeImage],
+) -> Vec<(String, Vec<(String, u32, u32)>)> {
+    let mut groups = std::collections::BTreeMap::<String, Vec<(String, u32, u32)>>::new();
+    for image in images.iter().filter(|image| {
+        image.atlas_eligible && image.max_renders_per_render.is_some_and(|count| count > 1)
+    }) {
+        let compatible_key = format!("{}:{}", image.grouping_key, image.backend_constraints);
+        groups
+            .entry(compatible_key)
+            .or_default()
+            .push(normalized_asset_key(
+                &image.logical_path,
+                image.logical_width,
+                image.logical_height,
+            ));
+    }
+    for entries in groups.values_mut() {
+        entries.sort();
+        entries.dedup();
+    }
+    groups.into_iter().collect()
+}
+
+/// Plans with device-realized raster extents. Logical dimensions in compiler
+/// metadata never stand in for decoded/device-scaled dimensions here.
+pub fn plan_realized_hot_render_loads(
+    images: &[RealizedHotRenderImage],
+    page_width: u32,
+    page_height: u32,
+    max_texture_extent: u32,
+) -> HotRenderLoadPlan {
+    let mut groups = std::collections::BTreeMap::<String, Vec<(String, u32, u32)>>::new();
+    let mut standalone = Vec::new();
+    let max_width = page_width.min(max_texture_extent);
+    let max_height = page_height.min(max_texture_extent);
+    for realized in images {
+        let key = normalized_asset_key(
+            &realized.image.logical_path,
+            realized.realized_width,
+            realized.realized_height,
+        );
+        let required_width = realized.realized_width.checked_add(4);
+        let required_height = realized.realized_height.checked_add(4);
+        let fits = realized.realized_width > 0
+            && realized.realized_height > 0
+            && required_width.is_some_and(|width| width <= max_width)
+            && required_height.is_some_and(|height| height <= max_height);
+        if fits
+            && realized.image.atlas_eligible
+            && realized
+                .image
+                .max_renders_per_render
+                .is_some_and(|count| count > 1)
+        {
+            let group = format!(
+                "{}:{}",
+                realized.image.grouping_key, realized.image.backend_constraints
+            );
+            groups.entry(group).or_default().push(key);
+        } else {
+            standalone.push(key);
+        }
+    }
+    for entries in groups.values_mut() {
+        entries.sort();
+        entries.dedup();
+    }
+    standalone.sort();
+    standalone.dedup();
+    HotRenderLoadPlan {
+        groups: groups.into_iter().collect(),
+        standalone,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +240,189 @@ pub struct JitHostEntryTargets {
 static JIT_HOST_ENTRY_TARGETS: AtomicUsize = AtomicUsize::new(0);
 
 static JIT_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "network")]
+static NETWORK_HOST_HANDLE: AtomicUsize = AtomicUsize::new(0);
+static JIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
+static JIT_PROFILE_GENERATION: AtomicU64 = AtomicU64::new(1);
+static RECORDING_CLOCK_FPS: AtomicU64 = AtomicU64::new(0);
+static RECORDING_CLOCK_FRAME: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_recording_clock(fps: u32, frame: u64) {
+    RECORDING_CLOCK_FPS.store(u64::from(fps), Ordering::Release);
+    RECORDING_CLOCK_FRAME.store(frame, Ordering::Release);
+}
+
+pub fn set_recording_clock_frame(frame: u64) {
+    RECORDING_CLOCK_FRAME.store(frame, Ordering::Release);
+}
+
+pub fn clear_recording_clock() {
+    RECORDING_CLOCK_FPS.store(0, Ordering::Release);
+    RECORDING_CLOCK_FRAME.store(0, Ordering::Release);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitProfileSample {
+    pub function_id: u32,
+    pub calls: u64,
+    pub inclusive_ns: u64,
+    pub exclusive_ns: u64,
+    pub max_inclusive_ns: u64,
+}
+
+struct JitProfileFrame {
+    function_id: u32,
+    generation: u64,
+    started: Instant,
+    child_ns: u64,
+}
+
+#[derive(Default)]
+struct JitProfileAggregate {
+    calls: AtomicU64,
+    inclusive_ns: AtomicU64,
+    exclusive_ns: AtomicU64,
+    max_inclusive_ns: AtomicU64,
+}
+
+#[derive(Default)]
+struct JitProfileState {
+    generation: u64,
+    frames: Vec<JitProfileFrame>,
+    aggregate_cache: HashMap<u32, Arc<JitProfileAggregate>>,
+}
+
+thread_local! {
+    static JIT_PROFILE_STATE: RefCell<JitProfileState> = RefCell::new(JitProfileState::default());
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn jit_profile_aggregates() -> &'static RwLock<HashMap<u32, Arc<JitProfileAggregate>>> {
+    static AGGREGATES: OnceLock<RwLock<HashMap<u32, Arc<JitProfileAggregate>>>> = OnceLock::new();
+    AGGREGATES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn sync_jit_profile_generation(state: &mut JitProfileState, generation: u64) {
+    if state.generation != generation {
+        state.generation = generation;
+        state.frames.clear();
+        state.aggregate_cache.clear();
+    }
+}
+
+pub fn enable_jit_profiler() {
+    reset_jit_profile();
+    JIT_PROFILE_ENABLED.store(true, Ordering::Release);
+}
+
+pub fn disable_jit_profiler() {
+    JIT_PROFILE_ENABLED.store(false, Ordering::Release);
+    JIT_PROFILE_STATE.with(|state| state.borrow_mut().frames.clear());
+}
+
+pub fn reset_jit_profile() {
+    JIT_PROFILE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    let aggregates = jit_profile_aggregates()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for aggregate in aggregates.values() {
+        aggregate.calls.store(0, Ordering::Relaxed);
+        aggregate.inclusive_ns.store(0, Ordering::Relaxed);
+        aggregate.exclusive_ns.store(0, Ordering::Relaxed);
+        aggregate.max_inclusive_ns.store(0, Ordering::Relaxed);
+    }
+}
+
+pub fn jit_profile_snapshot() -> Vec<JitProfileSample> {
+    let aggregates = jit_profile_aggregates()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut samples: Vec<JitProfileSample> = aggregates
+        .iter()
+        .map(|(function_id, aggregate)| JitProfileSample {
+            function_id: *function_id,
+            calls: aggregate.calls.load(Ordering::Relaxed),
+            inclusive_ns: aggregate.inclusive_ns.load(Ordering::Relaxed),
+            exclusive_ns: aggregate.exclusive_ns.load(Ordering::Relaxed),
+            max_inclusive_ns: aggregate.max_inclusive_ns.load(Ordering::Relaxed),
+        })
+        .filter(|sample| sample.calls > 0)
+        .collect();
+    samples.sort_by_key(|sample| sample.function_id);
+    samples
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_profile_frame_enter(function_id: i32) {
+    if !JIT_PROFILE_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let generation = JIT_PROFILE_GENERATION.load(Ordering::Acquire);
+    let started = Instant::now();
+    JIT_PROFILE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        sync_jit_profile_generation(&mut state, generation);
+        state.frames.push(JitProfileFrame {
+            function_id: function_id as u32,
+            generation,
+            started,
+            child_ns: 0,
+        });
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_profile_frame_leave(function_id: i32) {
+    if !JIT_PROFILE_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let generation = JIT_PROFILE_GENERATION.load(Ordering::Acquire);
+    JIT_PROFILE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        sync_jit_profile_generation(&mut state, generation);
+        let Some(frame) = state.frames.pop() else {
+            return;
+        };
+        if frame.generation != generation || frame.function_id != function_id as u32 {
+            state.frames.clear();
+            return;
+        }
+        let inclusive_ns = elapsed_ns(frame.started);
+        let exclusive_ns = inclusive_ns.saturating_sub(frame.child_ns);
+        if let Some(parent) = state.frames.last_mut() {
+            parent.child_ns = parent.child_ns.saturating_add(inclusive_ns);
+        }
+        let aggregate = if let Some(aggregate) = state.aggregate_cache.get(&frame.function_id) {
+            Arc::clone(aggregate)
+        } else {
+            let mut aggregates = jit_profile_aggregates()
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let aggregate = Arc::clone(
+                aggregates
+                    .entry(frame.function_id)
+                    .or_insert_with(|| Arc::new(JitProfileAggregate::default())),
+            );
+            state
+                .aggregate_cache
+                .insert(frame.function_id, Arc::clone(&aggregate));
+            aggregate
+        };
+        aggregate.calls.fetch_add(1, Ordering::Relaxed);
+        aggregate
+            .inclusive_ns
+            .fetch_add(inclusive_ns, Ordering::Relaxed);
+        aggregate
+            .exclusive_ns
+            .fetch_add(exclusive_ns, Ordering::Relaxed);
+        aggregate
+            .max_inclusive_ns
+            .fetch_max(inclusive_ns, Ordering::Relaxed);
+    });
+}
 
 fn jit_output_capture() -> &'static Mutex<Option<String>> {
     static CAPTURE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -449,112 +834,6 @@ fn call_jit_host_void_target(address: usize) {
     callback();
 }
 
-// Library handles are process-wide OS resources and can be moved between threads.
-unsafe impl Send for Library {}
-// Loading a module and calling exports is thread-safe on supported desktop platforms; the handle
-// is immutable after load.
-unsafe impl Sync for Library {}
-
-impl Library {
-    pub fn load(path: &Path) -> Result<Self, String> {
-        #[cfg(windows)]
-        {
-            let mut wide: Vec<u16> = os_str_to_wide(path.as_os_str());
-            wide.push(0);
-            let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
-            if handle.is_null() {
-                return Err(format!(
-                    "failed to load dynamic library {}: {}",
-                    path.display(),
-                    std::io::Error::last_os_error()
-                ));
-            }
-            return Ok(Self { handle });
-        }
-
-        #[cfg(unix)]
-        {
-            let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-                format!(
-                    "dynamic library path contains interior NUL byte: {}",
-                    path.display()
-                )
-            })?;
-            clear_dynamic_loading_error();
-            let handle = unsafe { dlopen(path.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
-            if handle.is_null() {
-                return Err(format!(
-                    "failed to load dynamic library {}: {}",
-                    path.to_string_lossy(),
-                    dynamic_loading_error()
-                ));
-            }
-            Ok(Self { handle })
-        }
-
-        #[cfg(not(any(windows, unix)))]
-        {
-            let _ = path;
-            Err("dynamic loading is unsupported on this platform in stasis_dynload".to_string())
-        }
-    }
-
-    pub fn symbol_address(&self, symbol: &str) -> Result<usize, String> {
-        #[cfg(windows)]
-        {
-            let name = CString::new(symbol)
-                .map_err(|_| format!("symbol name contains interior NUL byte: {symbol}"))?;
-            let address = unsafe { GetProcAddress(self.handle, name.as_ptr()) };
-            if address.is_null() {
-                return Err(format!("failed to resolve symbol {symbol}"));
-            }
-            return Ok(address as usize);
-        }
-
-        #[cfg(unix)]
-        {
-            let name = CString::new(symbol)
-                .map_err(|_| format!("symbol name contains interior NUL byte: {symbol}"))?;
-            clear_dynamic_loading_error();
-            let address = unsafe { dlsym(self.handle, name.as_ptr()) };
-            let error = dynamic_loading_error_if_present();
-            if let Some(error) = error {
-                return Err(format!("failed to resolve symbol {symbol}: {error}"));
-            }
-            if address.is_null() {
-                return Err(format!("failed to resolve symbol {symbol}: null address"));
-            }
-            Ok(address as usize)
-        }
-
-        #[cfg(not(any(windows, unix)))]
-        {
-            let _ = symbol;
-            Err(
-                "dynamic symbol resolution is unsupported on this platform in stasis_dynload"
-                    .to_string(),
-            )
-        }
-    }
-}
-
-impl Drop for Library {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        {
-            if !self.handle.is_null() {
-                let _ = unsafe { FreeLibrary(self.handle) };
-            }
-        }
-        #[cfg(unix)]
-        {
-            if !self.handle.is_null() {
-                let _ = unsafe { dlclose(self.handle) };
-            }
-        }
-    }
-}
-
 pub fn invoke_noarg_u64(address: usize) -> Result<u64, String> {
     if address == 0 {
         return Err("cannot invoke null function pointer".to_string());
@@ -653,6 +932,31 @@ pub fn invoke_i32_to_void(address: usize, arg0: i32) -> Result<(), String> {
         let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(address) };
         callback(arg0);
         Ok(())
+    }
+}
+
+/// Invoke a guest ABI function with one i32 argument and an i32 result.
+///
+/// The address is produced by the JIT, so keeping the platform calling
+/// convention and the dispatch/execution guards in one helper prevents hosts
+/// from accidentally introducing a second callback ABI.
+pub fn invoke_i32_to_i32(address: usize, arg0: i32) -> Result<i32, String> {
+    if address == 0 {
+        return Err("cannot invoke null function pointer".to_string());
+    }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
+    #[cfg(windows)]
+    {
+        let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+        return Ok(callback(arg0));
+    }
+    #[cfg(not(windows))]
+    {
+        let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+        Ok(callback(arg0))
     }
 }
 
@@ -764,7 +1068,7 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
 
-const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 2;
+const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 3;
 
 fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String> {
     let address = lib
@@ -799,14 +1103,97 @@ fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String>
 pub fn graphics_runtime_release_id(path: &Path) -> Result<String, String> {
     let lib = Library::load(path)?;
     verify_graphics_runtime_abi(&lib, path)?;
-    let address = lib
-        .symbol_address("stasis_graphics_release_id")
-        .map_err(|_| {
-            format!(
-                "incompatible stasis graphics runtime {}: missing release identity",
-                path.display()
-            )
-        })?;
+    read_graphics_runtime_string(&lib, path, "stasis_graphics_release_id", "release identity")
+}
+
+pub fn graphics_runtime_build_fingerprint(path: &Path) -> Result<String, String> {
+    let lib = Library::load(path)?;
+    verify_graphics_runtime_abi(&lib, path)?;
+    read_graphics_runtime_string(
+        &lib,
+        path,
+        "stasis_graphics_build_fingerprint",
+        "build fingerprint",
+    )
+}
+
+pub fn graphics_runtime_identity(path: &Path) -> Result<(String, String), String> {
+    let lib = Library::load(path)?;
+    verify_graphics_runtime_abi(&lib, path)?;
+    let release_id =
+        read_graphics_runtime_string(&lib, path, "stasis_graphics_release_id", "release identity")?;
+    let fingerprint = read_graphics_runtime_string(
+        &lib,
+        path,
+        "stasis_graphics_build_fingerprint",
+        "build fingerprint",
+    )?;
+    Ok((release_id, fingerprint))
+}
+
+/// Returns the fingerprint compiled into the Rust side of this toolchain.
+///
+/// An absent value is expected for ordinary source-tree development builds and
+/// is deliberately not treated as an installed-toolchain identity.
+pub fn compiled_build_fingerprint() -> Option<&'static str> {
+    option_env!("STASIS_BUILD_FINGERPRINT")
+        .map(str::trim)
+        .filter(|value| is_verified_build_fingerprint(value))
+}
+
+pub fn is_verified_build_fingerprint(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == 64
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !value.eq_ignore_ascii_case("development")
+}
+
+pub fn verify_graphics_runtime_build_fingerprint(
+    path: &Path,
+    expected: &str,
+) -> Result<(), String> {
+    let lib = Library::load(path)?;
+    verify_graphics_runtime_build_fingerprint_on_library(&lib, path, expected)
+}
+
+fn verify_graphics_runtime_build_fingerprint_on_library(
+    lib: &Library,
+    path: &Path,
+    expected: &str,
+) -> Result<(), String> {
+    if !is_verified_build_fingerprint(expected) {
+        return Err(
+            "stasis CLI has no verified build fingerprint; refusing installed runtime startup"
+                .to_string(),
+        );
+    }
+    let actual = read_graphics_runtime_string(
+        lib,
+        path,
+        "stasis_graphics_build_fingerprint",
+        "build fingerprint",
+    )?;
+    if actual != expected {
+        return Err(format!(
+            "toolchain build fingerprint mismatch: stasis is '{expected}' but {} is '{actual}'",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn read_graphics_runtime_string(
+    lib: &Library,
+    path: &Path,
+    symbol: &str,
+    label: &str,
+) -> Result<String, String> {
+    let address = lib.symbol_address(symbol).map_err(|_| {
+        format!(
+            "incompatible stasis graphics runtime {}: missing {label}",
+            path.display()
+        )
+    })?;
     #[cfg(windows)]
     let value = {
         let identity: extern "system" fn() -> *const c_char =
@@ -820,29 +1207,43 @@ pub fn graphics_runtime_release_id(path: &Path) -> Result<String, String> {
     };
     if value.is_null() {
         return Err(format!(
-            "incompatible stasis graphics runtime {}: empty release identity",
-            path.display()
+            "incompatible stasis graphics runtime {}: empty {label}",
+            path.display(),
         ));
     }
     let value = unsafe { std::ffi::CStr::from_ptr(value) }
         .to_str()
         .map_err(|_| {
             format!(
-                "incompatible stasis graphics runtime {}: release identity is not UTF-8",
-                path.display()
+                "incompatible stasis graphics runtime {}: {label} is not UTF-8",
+                path.display(),
             )
         })?;
+    if value.trim().is_empty() {
+        return Err(format!(
+            "incompatible stasis graphics runtime {}: empty {label}",
+            path.display()
+        ));
+    }
     Ok(value.to_string())
 }
 
 pub struct StasisGraphicsApi {
     _lib: Library,
     stasis_init_window: usize,
+    stasis_set_asset_root: usize,
     stasis_host_get_frame: usize,
     stasis_host_bulk_init: usize,
     stasis_host_bulk_apply_requests: usize,
+    stasis_host_performance_metrics_enabled: usize,
     stasis_host_set_performance_metrics: usize,
     stasis_gfx_submit_u8: usize,
+    stasis_set_recording_config: Option<usize>,
+    stasis_set_recording_audio_config: Option<usize>,
+    stasis_recording_audio_pull_f32_interleaved: Option<usize>,
+    stasis_test_get_render_submission_state: Option<usize>,
+    stasis_gfx_notify_file_changed: Option<usize>,
+    stasis_load_font: Option<usize>,
     stasis_sleep_ms: usize,
 }
 
@@ -867,23 +1268,63 @@ impl StasisGraphicsApi {
     pub fn load(path: &Path) -> Result<Self, String> {
         let lib = Library::load(path)?;
         verify_graphics_runtime_abi(&lib, path)?;
+        if let Some(expected) = option_env!("STASIS_BUILD_FINGERPRINT") {
+            verify_graphics_runtime_build_fingerprint_on_library(&lib, path, expected)?;
+        }
+        if let Some(expected) = option_env!("STASIS_RELEASE_ID") {
+            let actual = read_graphics_runtime_string(
+                &lib,
+                path,
+                "stasis_graphics_release_id",
+                "release identity",
+            )?;
+            if actual != expected {
+                return Err(format!(
+                    "toolchain release mismatch: stasis is '{expected}' but {} is '{actual}'",
+                    path.display()
+                ));
+            }
+        }
         let stasis_init_window = lib.symbol_address("stasis_init_window")?;
+        let stasis_set_asset_root = lib.symbol_address("stasis_set_asset_root")?;
         let stasis_host_get_frame = lib.symbol_address("stasis_host_get_frame")?;
         let stasis_host_bulk_init = lib.symbol_address("stasis_host_bulk_init")?;
         let stasis_host_bulk_apply_requests =
             lib.symbol_address("stasis_host_bulk_apply_requests")?;
         let stasis_host_set_performance_metrics =
             lib.symbol_address("stasis_host_set_performance_metrics")?;
+        let stasis_host_performance_metrics_enabled =
+            lib.symbol_address("stasis_host_performance_metrics_enabled")?;
         let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
+        let stasis_set_recording_config = lib.symbol_address("stasis_set_recording_config").ok();
+        let stasis_set_recording_audio_config =
+            lib.symbol_address("stasis_set_recording_audio_config").ok();
+        let stasis_recording_audio_pull_f32_interleaved = lib
+            .symbol_address("stasis_recording_audio_pull_f32_interleaved")
+            .ok();
+        let stasis_test_get_render_submission_state = lib
+            .symbol_address("stasis_test_get_render_submission_state")
+            .ok();
+        let stasis_gfx_notify_file_changed =
+            lib.symbol_address("stasis_gfx_notify_file_changed").ok();
+        let stasis_load_font = lib.symbol_address("stasis_load_font").ok();
         let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
         Ok(Self {
             _lib: lib,
             stasis_init_window,
+            stasis_set_asset_root,
             stasis_host_get_frame,
             stasis_host_bulk_init,
             stasis_host_bulk_apply_requests,
+            stasis_host_performance_metrics_enabled,
             stasis_host_set_performance_metrics,
             stasis_gfx_submit_u8,
+            stasis_set_recording_config,
+            stasis_set_recording_audio_config,
+            stasis_recording_audio_pull_f32_interleaved,
+            stasis_test_get_render_submission_state,
+            stasis_gfx_notify_file_changed,
+            stasis_load_font,
             stasis_sleep_ms,
         })
     }
@@ -905,6 +1346,115 @@ impl StasisGraphicsApi {
             let callback: extern "C" fn(i32, i32, *const c_char) -> i32 =
                 unsafe { std::mem::transmute(self.stasis_init_window) };
             Ok(callback(width, height, title.as_ptr()) != 0)
+        }
+    }
+
+    pub fn set_recording_config(&self, width: u32, height: u32, fps: u32) -> Result<(), String> {
+        let symbol = self.stasis_set_recording_config.ok_or_else(|| {
+            "graphics runtime lacks typed headless recording configuration support".to_string()
+        })?;
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(i32, i32, u32) -> i32 =
+                unsafe { std::mem::transmute(symbol) };
+            if callback(width as i32, height as i32, fps) == 0 {
+                return Err("graphics runtime rejected typed recording configuration".to_string());
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(i32, i32, u32) -> i32 =
+                unsafe { std::mem::transmute(symbol) };
+            if callback(width as i32, height as i32, fps) == 0 {
+                return Err("graphics runtime rejected typed recording configuration".to_string());
+            }
+            Ok(())
+        }
+    }
+
+    pub fn set_recording_audio_config(&self, enabled: bool) -> Result<(), String> {
+        let symbol = self.stasis_set_recording_audio_config.ok_or_else(|| {
+            "graphics runtime lacks offline recording audio configuration support".to_string()
+        })?;
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(symbol) };
+            if callback(if enabled { 1 } else { 0 }) == 0 {
+                return Err(
+                    "graphics runtime rejected offline recording audio configuration".to_string(),
+                );
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(symbol) };
+            if callback(if enabled { 1 } else { 0 }) == 0 {
+                return Err(
+                    "graphics runtime rejected offline recording audio configuration".to_string(),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    pub fn pull_recording_audio_f32_interleaved(
+        &self,
+        output: &mut [f32],
+    ) -> Result<usize, String> {
+        if output.len() % 2 != 0 {
+            return Err("recording audio output must contain stereo samples".to_string());
+        }
+        let symbol = self
+            .stasis_recording_audio_pull_f32_interleaved
+            .ok_or_else(|| {
+                "graphics runtime lacks offline recording audio pull support".to_string()
+            })?;
+        let frame_count = output.len() / 2;
+        if frame_count > i32::MAX as usize {
+            return Err("recording audio pull exceeds runtime frame-count bound".to_string());
+        }
+        #[cfg(windows)]
+        let callback: extern "system" fn(*mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(symbol) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(*mut f32, i32) -> i32 = unsafe { std::mem::transmute(symbol) };
+        let accepted = callback(output.as_mut_ptr(), frame_count as i32);
+        if accepted < 0 || accepted as usize != frame_count {
+            return Err(format!(
+                "graphics runtime returned {accepted} recording audio frames, expected {frame_count}"
+            ));
+        }
+        Ok(accepted as usize)
+    }
+
+    pub fn set_asset_root(&self, path: &Path) -> Result<(), String> {
+        let path = CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| "asset root contains an interior NUL byte".to_string())?;
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*const c_char) -> i32 =
+                unsafe { std::mem::transmute(self.stasis_set_asset_root) };
+            if callback(path.as_ptr()) == 0 {
+                return Err(format!(
+                    "graphics runtime rejected asset root {}",
+                    path.to_string_lossy()
+                ));
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(*const c_char) -> i32 =
+                unsafe { std::mem::transmute(self.stasis_set_asset_root) };
+            if callback(path.as_ptr()) == 0 {
+                return Err(format!(
+                    "graphics runtime rejected asset root {}",
+                    path.to_string_lossy()
+                ));
+            }
+            Ok(())
         }
     }
 
@@ -996,26 +1546,104 @@ impl StasisGraphicsApi {
         }
     }
 
+    pub fn host_performance_metrics_enabled(&self) -> Result<bool, String> {
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn() -> i32 =
+                unsafe { std::mem::transmute(self.stasis_host_performance_metrics_enabled) };
+            return Ok(callback() != 0);
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn() -> i32 =
+                unsafe { std::mem::transmute(self.stasis_host_performance_metrics_enabled) };
+            Ok(callback() != 0)
+        }
+    }
+
     pub fn gfx_submit_u8(
         &self,
-        cmd_i32: &[i32],
+        cmd_i32: &mut [i32],
         cmd_f32: &[f32],
         cmd_u8: &[u8],
     ) -> Result<(), String> {
         #[cfg(windows)]
         {
-            let callback: extern "system" fn(*const i32, *const f32, *const u8) =
+            let callback: extern "system" fn(*mut i32, *const f32, *const u8) =
                 unsafe { std::mem::transmute(self.stasis_gfx_submit_u8) };
-            callback(cmd_i32.as_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
+            callback(cmd_i32.as_mut_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
             return Ok(());
         }
         #[cfg(not(windows))]
         {
-            let callback: extern "C" fn(*const i32, *const f32, *const u8) =
+            let callback: extern "C" fn(*mut i32, *const f32, *const u8) =
                 unsafe { std::mem::transmute(self.stasis_gfx_submit_u8) };
-            callback(cmd_i32.as_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
+            callback(cmd_i32.as_mut_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr());
             Ok(())
         }
+    }
+
+    pub fn test_render_submission_state(&self) -> Result<Option<[i32; 5]>, String> {
+        let Some(address) = self.stasis_test_get_render_submission_state else {
+            return Ok(None);
+        };
+        let mut state = [0; 5];
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*mut i32, i32) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            return Ok((callback(state.as_mut_ptr(), state.len() as i32) != 0).then_some(state));
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(*mut i32, i32) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            Ok((callback(state.as_mut_ptr(), state.len() as i32) != 0).then_some(state))
+        }
+    }
+
+    pub fn notify_file_changed(&self, path: &Path) -> Result<(), String> {
+        let Some(address) = self.stasis_gfx_notify_file_changed else {
+            return Ok(());
+        };
+        let path = CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| "changed asset path contains interior NUL byte".to_string())?;
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(*const c_char) =
+                unsafe { std::mem::transmute(address) };
+            callback(path.as_ptr());
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(*const c_char) = unsafe { std::mem::transmute(address) };
+            callback(path.as_ptr());
+            Ok(())
+        }
+    }
+
+    /// Load a font through the existing path-based graphics runtime symbol.
+    pub fn load_font(&self, path: &Path, size: i32) -> Result<i32, String> {
+        let address = self
+            .stasis_load_font
+            .ok_or_else(|| "graphics runtime lacks font loading support".to_string())?;
+        let path = CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|_| "font path contains an interior NUL byte".to_string())?;
+        #[cfg(windows)]
+        let callback: extern "system" fn(*const c_char, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(*const c_char, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        let handle = callback(path.as_ptr(), size);
+        if handle <= 0 {
+            return Err(format!(
+                "graphics runtime rejected font {}",
+                path.to_string_lossy()
+            ));
+        }
+        Ok(handle)
     }
 
     pub fn sleep_ms(&self, ms: i32) -> Result<(), String> {
@@ -1042,6 +1670,13 @@ impl StasisGraphicsApi {
 struct StasisGraphicsAssetsApi {
     _lib: Library,
     stasis_gfx_load_sprite: usize,
+    stasis_gfx_set_next_sprite_atlas_policy_v3: Option<usize>,
+    stasis_asset_request_sprite_with_policy_v3: Option<usize>,
+    stasis_asset_request_sprite: Option<usize>,
+    stasis_asset_request_audio: Option<usize>,
+    stasis_asset_task_poll: Option<usize>,
+    stasis_asset_task_take_handle: Option<usize>,
+    stasis_asset_task_cancel: Option<usize>,
     stasis_gfx_release_sprite: usize,
     stasis_gfx_dump_bmp: usize,
     stasis_gfx_dump_png: Option<usize>,
@@ -1050,6 +1685,7 @@ struct StasisGraphicsAssetsApi {
     stasis_load_font: usize,
     stasis_measure_text: usize,
     stasis_gfx_cache_text: usize,
+    stasis_gfx_replace_text: Option<usize>,
     stasis_gfx_measure_text_cached: usize,
     stasis_gfx_measure_text_cached_height: usize,
     stasis_clipboard_load_ascii: Option<usize>,
@@ -1108,6 +1744,17 @@ impl StasisGraphicsAssetsApi {
         verify_graphics_runtime_abi(&lib, path)?;
         Ok(Self {
             stasis_gfx_load_sprite: lib.symbol_address("stasis_gfx_load_sprite")?,
+            stasis_gfx_set_next_sprite_atlas_policy_v3: lib
+                .symbol_address("stasis_gfx_set_next_sprite_atlas_policy_v3")
+                .ok(),
+            stasis_asset_request_sprite_with_policy_v3: lib
+                .symbol_address("stasis_asset_request_sprite_with_policy_v3")
+                .ok(),
+            stasis_asset_request_sprite: lib.symbol_address("stasis_asset_request_sprite").ok(),
+            stasis_asset_request_audio: lib.symbol_address("stasis_asset_request_audio").ok(),
+            stasis_asset_task_poll: lib.symbol_address("stasis_asset_task_poll").ok(),
+            stasis_asset_task_take_handle: lib.symbol_address("stasis_asset_task_take_handle").ok(),
+            stasis_asset_task_cancel: lib.symbol_address("stasis_asset_task_cancel").ok(),
             stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
             // PNG capture was added after the original asset ABI. Keep older runtimes usable for
@@ -1120,6 +1767,9 @@ impl StasisGraphicsAssetsApi {
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
             stasis_gfx_cache_text: lib.symbol_address("stasis_gfx_cache_text")?,
+            // Replaceable runs are additive to graphics ABI 3. Older runtimes remain usable for
+            // immutable TextRuns and report replacement as unsupported.
+            stasis_gfx_replace_text: lib.symbol_address("stasis_gfx_replace_text").ok(),
             stasis_gfx_measure_text_cached: lib.symbol_address("stasis_gfx_measure_text_cached")?,
             stasis_gfx_measure_text_cached_height: lib
                 .symbol_address("stasis_gfx_measure_text_cached_height")?,
@@ -1193,37 +1843,51 @@ fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, Stri
 }
 
 pub fn runtime_library_candidate_paths() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            // A release bundle is one unit. Never let an environment override replace its sibling
-            // runtime with a different build.
-            for file_name in runtime_library_file_names() {
-                out.push(exe_dir.join(file_name));
-            }
+    let configured = [
+        std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH"),
+        // Preserve the original variable as a compatibility alias for existing Windows workflows.
+        std::env::var_os("STASIS_RUNTIME_DLL_PATH"),
+    ]
+    .into_iter()
+    .flatten()
+    .map(PathBuf::from)
+    .collect::<Vec<_>>();
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    runtime_library_candidate_paths_for(executable_dir.as_deref(), &configured)
+}
 
-            // Dev-friendly default: locate the runtime built under the repo tree by
-            // walking a few parents from the executable location.
-            for ancestor in exe_dir.ancestors().take(6) {
-                for file_name in runtime_library_file_names() {
-                    for configuration in [None, Some("Release"), Some("Debug")] {
-                        let mut candidate = ancestor.join("runtime").join("build").join("bin");
-                        if let Some(configuration) = configuration {
-                            candidate.push(configuration);
-                        }
-                        candidate.push(file_name);
-                        out.push(candidate);
+fn runtime_library_candidate_paths_for(
+    executable_dir: Option<&Path>,
+    configured: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(exe_dir) = executable_dir {
+        // A release bundle is one unit. Never let an environment override replace its sibling
+        // runtime with a different build.
+        for file_name in runtime_library_file_names() {
+            out.push(exe_dir.join(file_name));
+        }
+        out.extend(configured.iter().cloned());
+
+        // Dev-friendly default: locate the runtime built under the repo tree by
+        // walking a few parents from the executable location.
+        for ancestor in exe_dir.ancestors().take(6) {
+            for file_name in runtime_library_file_names() {
+                for configuration in [None, Some("Release"), Some("Debug")] {
+                    let mut candidate = ancestor.join("runtime").join("build").join("bin");
+                    if let Some(configuration) = configuration {
+                        candidate.push(configuration);
                     }
+                    candidate.push(file_name);
+                    out.push(candidate);
                 }
             }
         }
-    }
-    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH") {
-        out.push(PathBuf::from(configured));
-    }
-    // Preserve the original variable as a compatibility alias for existing Windows workflows.
-    if let Some(configured) = std::env::var_os("STASIS_RUNTIME_DLL_PATH") {
-        out.push(PathBuf::from(configured));
+    } else {
+        // If there is no executable directory, the configured path is the only explicit fallback.
+        out.extend(configured.iter().cloned());
     }
 
     // Allow loading from the current working directory too (handy for ad-hoc runs).
@@ -1399,6 +2063,19 @@ fn direct_storage_slots() -> &'static Mutex<HashMap<StorageKey, Box<JitStorageSl
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn direct_array_required_lengths() -> &'static Mutex<HashMap<StorageKey, usize>> {
+    static TABLE: OnceLock<Mutex<HashMap<StorageKey, usize>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn accepts_direct_array_rebind(key: StorageKey, len: usize) -> bool {
+    direct_array_required_lengths()
+        .lock()
+        .expect("direct array required-length table mutex poisoned")
+        .get(&key)
+        .is_none_or(|required| len >= *required)
+}
+
 fn guest_execution_count() -> &'static AtomicUsize {
     static COUNT: AtomicUsize = AtomicUsize::new(0);
     &COUNT
@@ -1462,6 +2139,19 @@ pub fn direct_array_storage_slot_address(
     direct_storage_slot_address(kind, collection_hash, field_hash)
 }
 
+#[doc(hidden)]
+pub fn direct_array_storage_slot_len_for_test(
+    kind: JitStorageKind,
+    collection_hash: i32,
+    field_hash: i32,
+) -> Option<usize> {
+    direct_storage_slots()
+        .lock()
+        .expect("direct storage slot table mutex poisoned")
+        .get(&(kind, collection_hash, field_hash))
+        .map(|slot| slot.len)
+}
+
 fn direct_storage_slot_address(
     kind: JitStorageKind,
     collection_hash: i32,
@@ -1522,6 +2212,10 @@ pub fn provision_direct_array_storage(
         }
     }
     let (data, actual_len) = registered_storage(kind, collection_hash, field_hash)?;
+    direct_array_required_lengths()
+        .lock()
+        .expect("direct array required-length table mutex poisoned")
+        .insert(key, len);
     update_direct_storage_slot(key, data, actual_len);
     Ok(())
 }
@@ -1834,6 +2528,36 @@ pub fn preflight_jit_i32_array_capacity(
         owned_i32_arrays(),
         registered_i32_arrays(),
     )
+}
+
+/// Returns the registered/owned capacity without growing or mutating a JIT
+/// collection. Realtime ABI wrappers use this before every bounded load/store.
+pub fn jit_i32_array_capacity(collection_hash: i32, field_hash: i32) -> Option<usize> {
+    if let Some((_, len)) = registered_i32_arrays()
+        .lock()
+        .expect("registered i32 array table mutex poisoned")
+        .get(&(collection_hash, field_hash))
+        .copied()
+    {
+        return Some(len);
+    }
+    if let Some(len) = owned_i32_arrays()
+        .lock()
+        .expect("owned i32 array table mutex poisoned")
+        .get(&(collection_hash, field_hash))
+        .map(Vec::len)
+    {
+        return Some(len);
+    }
+    let fallback = jit_i32_array_global_table()
+        .lock()
+        .expect("jit i32 array table mutex poisoned");
+    let max_index = fallback
+        .keys()
+        .filter(|(collection, field, _)| *collection == collection_hash && *field == field_hash)
+        .map(|(_, _, index)| *index)
+        .max()?;
+    usize::try_from(max_index).ok()?.checked_add(1)
 }
 
 pub fn preflight_jit_f32_array_capacity(
@@ -2160,6 +2884,10 @@ pub fn clear_registered_global_memory() {
     direct_storage_slots()
         .lock()
         .expect("direct storage slot table mutex poisoned")
+        .clear();
+    direct_array_required_lengths()
+        .lock()
+        .expect("direct array required-length table mutex poisoned")
         .clear();
 }
 
@@ -2540,6 +3268,9 @@ pub fn register_global_i32_array(collection_hash: i32, field_hash: i32, ptr: *mu
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::I32, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     discard_integer_array_lane(key, JitStorageKind::I32);
     remove_replaced_owned_array(key, ptr as usize, owned_i32_arrays());
@@ -2592,6 +3323,9 @@ pub fn register_global_f32_array(collection_hash: i32, field_hash: i32, ptr: *mu
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::F32, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     remove_replaced_owned_array(key, ptr as usize, owned_f32_arrays());
     let table = registered_f32_arrays();
@@ -2613,6 +3347,9 @@ pub fn register_global_f64_array(collection_hash: i32, field_hash: i32, ptr: *mu
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::F64, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     remove_replaced_owned_array(key, ptr as usize, owned_f64_arrays());
     let table = registered_f64_arrays();
@@ -2695,6 +3432,9 @@ pub fn register_global_u16_array(collection_hash: i32, field_hash: i32, ptr: *mu
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::U16, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     discard_integer_array_lane(key, JitStorageKind::U16);
     remove_replaced_owned_array(key, ptr as usize, owned_u16_arrays());
@@ -2716,6 +3456,9 @@ pub fn register_global_u8_array(collection_hash: i32, field_hash: i32, ptr: *mut
     let Ok(_rebind) = acquire_rebind_guard() else {
         return;
     };
+    if !accepts_direct_array_rebind((JitStorageKind::U8, collection_hash, field_hash), len) {
+        return;
+    }
     let key = (collection_hash, field_hash);
     discard_integer_array_lane(key, JitStorageKind::U8);
     remove_replaced_owned_array(key, ptr as usize, owned_u8_arrays());
@@ -2955,41 +3698,60 @@ pub extern "C" fn stasis_jit_print_string(value_id: i32) {
     }
 }
 
-pub const STASIS_RENDER_I32_COUNT: usize = 34_608;
-const STASIS_RENDER_V2_I32_COUNT: usize = 18_464;
-pub const STASIS_RENDER_F32_COUNT: usize = 108_676;
+pub const STASIS_RENDER_I32_COUNT: usize = 67_888;
+pub const STASIS_RENDER_F32_COUNT: usize = 146_564;
 pub const STASIS_RENDER_U8_COUNT: usize = 65_536;
-const STASIS_RENDER_MAGIC: i32 = 0x4758_4631;
-const STASIS_RENDER_V2_VERSION: i32 = 2;
-const STASIS_RENDER_VERSION: i32 = 3;
+pub const STASIS_RENDER_MAGIC: i32 = 0x4758_4631;
+pub const STASIS_RENDER_VERSION: i32 = 7;
 const STASIS_RENDER_HEADER_I32_COUNT: usize = 10;
 const STASIS_RENDER_ORDER_COUNT_INDEX: usize = 22;
 const STASIS_RENDER_ORDER_HEADER_END: usize = 24;
-const STASIS_RENDER_ORDER_BASE: usize = 18_464;
-const STASIS_RENDER_MAX_ORDER: usize = 16_144;
+const STASIS_RENDER_RECT_COUNT_INDEX: usize = 24;
+const STASIS_RENDER_RECT_HEADER_END: usize = 26;
+const STASIS_RENDER_CLIP_COUNT_INDEX: usize = 27;
+const STASIS_RENDER_CLIP_HEADER_END: usize = 29;
+const STASIS_RENDER_SPRITE_RUN_HEADER_END: usize = 31;
+const STASIS_RENDER_F_CLEAR_BASE: usize = 0;
+const STASIS_RENDER_F_LINE_BASE: usize = 4;
+pub const STASIS_RENDER_ORDER_BASE: usize = 51_232;
+const STASIS_RENDER_MAX_CLIPS: usize = 256;
+const STASIS_RENDER_MAX_ORDER: usize = 16_656;
 const STASIS_RENDER_SPRITE_BASE: usize = 32;
+const STASIS_RENDER_MAX_GEOMETRY: usize = 10_000;
 const STASIS_RENDER_MAX_LINES: usize = 10_000;
+const STASIS_RENDER_GEOMETRY_STRIDE_F32: usize = 8;
 const STASIS_RENDER_LINE_STRIDE: usize = 8;
-const STASIS_RENDER_MAX_SPRITES: usize = 4_096;
+pub const STASIS_RENDER_MAX_SPRITES: usize = 4_096;
 const STASIS_RENDER_SPRITE_STRIDE_I32: usize = 3;
+const STASIS_RENDER_SPRITE_RUN_COUNT_INDEX: usize = 29;
+const STASIS_RENDER_SPRITE_RUN_BASE: usize = 18_464;
+const STASIS_RENDER_MAX_SPRITE_RUNS: usize = 4_096;
+const STASIS_RENDER_SPRITE_RUN_STRIDE_I32: usize = 8;
 const STASIS_RENDER_SPRITE_BASE_F32: usize = 80_004;
-const STASIS_RENDER_SPRITE_STRIDE_F32: usize = 4;
-const STASIS_RENDER_TEXT_BASE_I32: usize = 12_320;
-const STASIS_RENDER_TEXT_BASE_F32: usize = 96_388;
+pub const STASIS_RENDER_RECT_REVERSE_BASE_F32: usize = 79_996;
+const STASIS_RENDER_SPRITE_STRIDE_F32: usize = 13;
+pub const STASIS_RENDER_TEXT_BASE_I32: usize = 12_320;
+const STASIS_RENDER_TEXT_BASE_F32: usize = 133_252;
 const STASIS_RENDER_MAX_TEXT: usize = 2_048;
 const STASIS_RENDER_TEXT_STRIDE_I32: usize = 3;
 const STASIS_RENDER_TEXT_STRIDE_F32: usize = 6;
+const STASIS_RENDER_CLIP_BASE_F32: usize = 145_540;
+const STASIS_RENDER_CLIP_STRIDE_F32: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderActiveCounts {
     pub lines: usize,
+    pub rects: usize,
     pub sprites: usize,
+    pub sprite_runs: usize,
     pub text: usize,
     pub text_bytes: usize,
     pub order: usize,
+    pub clips: usize,
 }
 
-fn global_path_hash(path: &str) -> i32 {
+/// Returns the stable identifier used by JIT global registration and lookup.
+pub fn global_path_hash(path: &str) -> i32 {
     let mut hash = 2_166_136_261u32;
     for byte in path.bytes() {
         hash ^= u32::from(byte);
@@ -3019,12 +3781,12 @@ pub fn copy_jit_render_active(
         return Err("production render buffers were not registered by the JIT".to_string());
     }
     let version = unsafe { *i32_header_ptr.add(1) };
-    let source_i32_count = match version {
-        STASIS_RENDER_V2_VERSION => STASIS_RENDER_V2_I32_COUNT,
-        STASIS_RENDER_VERSION => STASIS_RENDER_I32_COUNT,
-        _ => return Err("JIT frame is not a supported production gfx_cmd frame".to_string()),
-    };
-    let i32_ptr = stasis_jit_global_i32_array_ptr(i32_id, 0, source_i32_count as i32);
+    if version != STASIS_RENDER_VERSION {
+        return Err(format!(
+            "JIT frame has unsupported gfx_cmd version {version}; expected {STASIS_RENDER_VERSION}"
+        ));
+    }
+    let i32_ptr = stasis_jit_global_i32_array_ptr(i32_id, 0, STASIS_RENDER_I32_COUNT as i32);
     let f32_ptr = stasis_jit_global_f32_array_ptr(
         global_path_hash("gfx_cmd_f32"),
         0,
@@ -3038,68 +3800,118 @@ pub fn copy_jit_render_active(
     if i32_ptr.is_null() || f32_ptr.is_null() || u8_ptr.is_null() {
         return Err("production render buffers were not registered by the JIT".to_string());
     }
-    let source_i32 = unsafe { std::slice::from_raw_parts(i32_ptr, source_i32_count) };
+    let source_i32 = unsafe { std::slice::from_raw_parts(i32_ptr, STASIS_RENDER_I32_COUNT) };
     let source_f32 = unsafe { std::slice::from_raw_parts(f32_ptr, STASIS_RENDER_F32_COUNT) };
     let source_u8 = unsafe { std::slice::from_raw_parts(u8_ptr, STASIS_RENDER_U8_COUNT) };
-    if source_i32[0] != STASIS_RENDER_MAGIC
-        || !matches!(
-            source_i32[1],
-            STASIS_RENDER_V2_VERSION | STASIS_RENDER_VERSION
-        )
-    {
+    if source_i32[0] != STASIS_RENDER_MAGIC || source_i32[1] != STASIS_RENDER_VERSION {
         return Err("JIT frame is not a supported production gfx_cmd frame".to_string());
     }
 
+    let lines = source_i32[3].clamp(0, STASIS_RENDER_MAX_LINES as i32) as usize;
     let counts = RenderActiveCounts {
-        lines: source_i32[3].clamp(0, STASIS_RENDER_MAX_LINES as i32) as usize,
+        lines,
+        rects: source_i32[STASIS_RENDER_RECT_COUNT_INDEX]
+            .clamp(0, (STASIS_RENDER_MAX_GEOMETRY - lines) as i32) as usize,
         sprites: source_i32[4].clamp(0, STASIS_RENDER_MAX_SPRITES as i32) as usize,
+        sprite_runs: source_i32[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX]
+            .clamp(0, STASIS_RENDER_MAX_SPRITE_RUNS as i32) as usize,
         text: source_i32[7].clamp(0, STASIS_RENDER_MAX_TEXT as i32) as usize,
         text_bytes: source_i32[9].clamp(0, STASIS_RENDER_U8_COUNT as i32) as usize,
-        order: if source_i32[1] == STASIS_RENDER_VERSION {
-            source_i32[STASIS_RENDER_ORDER_COUNT_INDEX].clamp(0, STASIS_RENDER_MAX_ORDER as i32)
-                as usize
-        } else {
-            0
-        },
+        order: source_i32[STASIS_RENDER_ORDER_COUNT_INDEX].clamp(0, STASIS_RENDER_MAX_ORDER as i32)
+            as usize,
+        clips: source_i32[STASIS_RENDER_CLIP_COUNT_INDEX].clamp(0, STASIS_RENDER_MAX_CLIPS as i32)
+            as usize,
     };
     out_i32[..STASIS_RENDER_HEADER_I32_COUNT]
         .copy_from_slice(&source_i32[..STASIS_RENDER_HEADER_I32_COUNT]);
     out_i32[STASIS_RENDER_ORDER_COUNT_INDEX..STASIS_RENDER_ORDER_HEADER_END].fill(0);
     out_i32[STASIS_RENDER_ORDER_COUNT_INDEX] = counts.order as i32;
+    out_i32[STASIS_RENDER_RECT_COUNT_INDEX..STASIS_RENDER_RECT_HEADER_END].fill(0);
+    out_i32[STASIS_RENDER_RECT_COUNT_INDEX..STASIS_RENDER_RECT_HEADER_END].copy_from_slice(
+        &source_i32[STASIS_RENDER_RECT_COUNT_INDEX..STASIS_RENDER_RECT_HEADER_END],
+    );
+    out_i32[STASIS_RENDER_RECT_COUNT_INDEX] = counts.rects as i32;
+    out_i32[STASIS_RENDER_CLIP_COUNT_INDEX..STASIS_RENDER_CLIP_HEADER_END].fill(0);
+    out_i32[STASIS_RENDER_CLIP_COUNT_INDEX..STASIS_RENDER_CLIP_HEADER_END].copy_from_slice(
+        &source_i32[STASIS_RENDER_CLIP_COUNT_INDEX..STASIS_RENDER_CLIP_HEADER_END],
+    );
+    out_i32[STASIS_RENDER_CLIP_COUNT_INDEX] = counts.clips as i32;
+    out_i32[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX..STASIS_RENDER_SPRITE_RUN_HEADER_END]
+        .copy_from_slice(
+            &source_i32[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX..STASIS_RENDER_SPRITE_RUN_HEADER_END],
+        );
+    out_i32[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX] = counts.sprite_runs as i32;
     let sprite_end = STASIS_RENDER_SPRITE_BASE + counts.sprites * STASIS_RENDER_SPRITE_STRIDE_I32;
     out_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]
         .copy_from_slice(&source_i32[STASIS_RENDER_SPRITE_BASE..sprite_end]);
     let text_i32_end = STASIS_RENDER_TEXT_BASE_I32 + counts.text * STASIS_RENDER_TEXT_STRIDE_I32;
     out_i32[STASIS_RENDER_TEXT_BASE_I32..text_i32_end]
         .copy_from_slice(&source_i32[STASIS_RENDER_TEXT_BASE_I32..text_i32_end]);
+    let sprite_run_end =
+        STASIS_RENDER_SPRITE_RUN_BASE + counts.sprite_runs * STASIS_RENDER_SPRITE_RUN_STRIDE_I32;
+    out_i32[STASIS_RENDER_SPRITE_RUN_BASE..sprite_run_end]
+        .copy_from_slice(&source_i32[STASIS_RENDER_SPRITE_RUN_BASE..sprite_run_end]);
     let order_end = STASIS_RENDER_ORDER_BASE + counts.order;
     out_i32[STASIS_RENDER_ORDER_BASE..order_end]
         .copy_from_slice(&source_i32[STASIS_RENDER_ORDER_BASE..order_end]);
 
-    out_f32[..4].copy_from_slice(&source_f32[..4]);
-    let line_end = 4 + counts.lines * STASIS_RENDER_LINE_STRIDE;
-    out_f32[4..line_end].copy_from_slice(&source_f32[4..line_end]);
+    out_f32[STASIS_RENDER_F_CLEAR_BASE..STASIS_RENDER_F_LINE_BASE]
+        .copy_from_slice(&source_f32[STASIS_RENDER_F_CLEAR_BASE..STASIS_RENDER_F_LINE_BASE]);
+    let line_end = STASIS_RENDER_F_LINE_BASE + counts.lines * STASIS_RENDER_LINE_STRIDE;
+    out_f32[STASIS_RENDER_F_LINE_BASE..line_end]
+        .copy_from_slice(&source_f32[STASIS_RENDER_F_LINE_BASE..line_end]);
+    let rect_start = if counts.rects == 0 {
+        STASIS_RENDER_SPRITE_BASE_F32
+    } else {
+        STASIS_RENDER_RECT_REVERSE_BASE_F32 - (counts.rects - 1) * STASIS_RENDER_GEOMETRY_STRIDE_F32
+    };
+    out_f32[rect_start..STASIS_RENDER_SPRITE_BASE_F32]
+        .copy_from_slice(&source_f32[rect_start..STASIS_RENDER_SPRITE_BASE_F32]);
     let sprite_f32_end =
         STASIS_RENDER_SPRITE_BASE_F32 + counts.sprites * STASIS_RENDER_SPRITE_STRIDE_F32;
     out_f32[STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end]
         .copy_from_slice(&source_f32[STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end]);
-    let text_f32_end = STASIS_RENDER_TEXT_BASE_F32 + counts.text * STASIS_RENDER_TEXT_STRIDE_F32;
-    out_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]
-        .copy_from_slice(&source_f32[STASIS_RENDER_TEXT_BASE_F32..text_f32_end]);
+    let source_text_base = STASIS_RENDER_TEXT_BASE_F32;
+    let text_values = counts.text * STASIS_RENDER_TEXT_STRIDE_F32;
+    out_f32[STASIS_RENDER_TEXT_BASE_F32..STASIS_RENDER_TEXT_BASE_F32 + text_values]
+        .copy_from_slice(&source_f32[source_text_base..source_text_base + text_values]);
+    if counts.clips > 0 {
+        let clip_values = counts.clips * STASIS_RENDER_CLIP_STRIDE_F32;
+        out_f32[STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values]
+            .copy_from_slice(
+                &source_f32[STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values],
+            );
+    }
     out_u8[..counts.text_bytes].copy_from_slice(&source_u8[..counts.text_bytes]);
     Ok(counts)
 }
 
 unsafe extern "C" {
-    fn stasis_render_v2_trace_native(
+    fn stasis_render_trace_native(
         cmd_i32: *const i32,
         cmd_f32: *const f32,
         cmd_u8: *const u8,
     ) -> u32;
 }
 
+/// Computes the command trace for the current render ABI from host-owned buffers.
+///
+/// This is an internal current-build seam: inputs with non-canonical capacities,
+/// magic, or version are rejected rather than interpreted as an older layout.
+pub fn current_render_trace(cmd_i32: &[i32], cmd_f32: &[f32], cmd_u8: &[u8]) -> u32 {
+    if cmd_i32.len() != STASIS_RENDER_I32_COUNT
+        || cmd_f32.len() != STASIS_RENDER_F32_COUNT
+        || cmd_u8.len() != STASIS_RENDER_U8_COUNT
+        || cmd_i32.first().copied() != Some(STASIS_RENDER_MAGIC)
+        || cmd_i32.get(1).copied() != Some(STASIS_RENDER_VERSION)
+    {
+        return 0;
+    }
+    unsafe { stasis_render_trace_native(cmd_i32.as_ptr(), cmd_f32.as_ptr(), cmd_u8.as_ptr()) }
+}
+
 #[no_mangle]
-pub unsafe extern "C" fn stasis_jit_render_v2_trace(
+pub unsafe extern "C" fn stasis_jit_render_trace(
     cmd_i32_id: i32,
     cmd_i32_len: i32,
     cmd_f32_id: i32,
@@ -3107,10 +3919,8 @@ pub unsafe extern "C" fn stasis_jit_render_v2_trace(
     cmd_u8_id: i32,
     cmd_u8_len: i32,
 ) -> i32 {
-    if !matches!(
-        cmd_i32_len as usize,
-        STASIS_RENDER_V2_I32_COUNT | STASIS_RENDER_I32_COUNT
-    ) || cmd_f32_len != STASIS_RENDER_F32_COUNT as i32
+    if cmd_i32_len as usize != STASIS_RENDER_I32_COUNT
+        || cmd_f32_len as usize != STASIS_RENDER_F32_COUNT
         || cmd_u8_len != STASIS_RENDER_U8_COUNT as i32
     {
         return 0;
@@ -3121,23 +3931,17 @@ pub unsafe extern "C" fn stasis_jit_render_v2_trace(
     }
     let magic = *cmd_i32_header;
     let version = *cmd_i32_header.add(1);
-    let version_matches_len = matches!(
-        (version, cmd_i32_len as usize),
-        (STASIS_RENDER_V2_VERSION, STASIS_RENDER_V2_I32_COUNT)
-            | (STASIS_RENDER_VERSION, STASIS_RENDER_I32_COUNT)
-    );
-    if magic != STASIS_RENDER_MAGIC || !version_matches_len {
+    if magic != STASIS_RENDER_MAGIC || version != STASIS_RENDER_VERSION {
         return 0;
     }
     let cmd_i32 = stasis_jit_global_i32_array_ptr(cmd_i32_id, 0, cmd_i32_len);
-    let cmd_f32 = stasis_jit_global_f32_array_ptr(cmd_f32_id, 0, STASIS_RENDER_F32_COUNT as i32);
+    let cmd_f32 = stasis_jit_global_f32_array_ptr(cmd_f32_id, 0, cmd_f32_len);
     let cmd_u8 = global_u8_array_ptr(cmd_u8_id, 0, STASIS_RENDER_U8_COUNT as i32);
     if cmd_i32.is_null() || cmd_f32.is_null() || cmd_u8.is_null() {
         return 0;
     }
-    stasis_render_v2_trace_native(cmd_i32, cmd_f32, cmd_u8) as i32
+    stasis_render_trace_native(cmd_i32, cmd_f32, cmd_u8) as i32
 }
-
 fn jit_text_buffer_is_registered(value_id: i32) -> bool {
     if jit_collection_runtime_metadata_is_registered(value_id) {
         return true;
@@ -3181,6 +3985,791 @@ fn jit_global_text_bytes(value_id: i32) -> Option<Vec<u8>> {
         bytes.push(byte);
     }
     Some(bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_supported() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_network_supported();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+
+// The browser network-client ABI is intentionally unavailable to ordinary
+// native JIT sessions. Deterministic recording opts into these inert bridges
+// so a guest may import the shared stdlib without opening sockets, creating
+// credentials, reading storage, or mutating a payload buffer.
+const OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES: i32 = 64 * 1024;
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_supported() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_connect() -> i32 {
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_status() -> i32 {
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_poll(_out_id: i32, capacity: i32) -> i32 {
+    if !(0..=OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES).contains(&capacity) {
+        return -1;
+    }
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_send(_payload_id: i32, length: i32) -> i32 {
+    if !(0..=OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES).contains(&length) {
+        return -1;
+    }
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_resume_seat() -> i32 {
+    -1
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_last_sequence() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_offline_web_network_checkpoint(seat: i32, last_sequence: i32) -> i32 {
+    if !(-1..8).contains(&seat) || last_sequence < 0 {
+        return -1;
+    }
+    -4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_random_seed() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_network_random_seed();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_start(content_id: i32, content_length: i32) -> i32 {
+    stasis_jit_network_host_start_bind(content_id, content_length, 0x7f000001)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_start_bind(
+    content_id: i32,
+    content_length: i32,
+    bind_ipv4: i32,
+) -> i32 {
+    if content_length <= 0 || content_length as usize > 32 * 1024 * 1024 {
+        return -1;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (content_id, content_length, bind_ipv4);
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        if NETWORK_HOST_HANDLE.load(Ordering::Acquire) != 0 {
+            return -2;
+        }
+        let Some(content) = jit_text_arg_bytes(content_id) else {
+            return -1;
+        };
+        let length = content_length as usize;
+        if length > content.len() {
+            return -1;
+        }
+        let mut port = 0_u16;
+        let handle = stasis_network::stasis_network_host_start_bind(
+            0,
+            bind_ipv4 as u32,
+            content[..length].as_ptr(),
+            length,
+            &mut port,
+        );
+        if handle.is_null() {
+            return -3;
+        }
+        NETWORK_HOST_HANDLE.store(handle as usize, Ordering::Release);
+        i32::from(port)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_start_text(content_id: i32) -> i32 {
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = content_id;
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        let Some(content) = jit_text_arg_bytes(content_id) else {
+            return -1;
+        };
+        stasis_jit_network_host_start_bind(content_id, content.len() as i32, 0x7f000001)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_start_bind_text(content_id: i32, bind_ipv4: i32) -> i32 {
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (content_id, bind_ipv4);
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        let Some(content) = jit_text_arg_bytes(content_id) else {
+            return -1;
+        };
+        stasis_jit_network_host_start_bind(content_id, content.len() as i32, bind_ipv4)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_status() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            0
+        } else {
+            unsafe {
+                stasis_network::stasis_network_host_status(
+                    handle as *mut stasis_network::NetworkHost,
+                )
+            }
+        }
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_overflow_count() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            0
+        } else {
+            unsafe {
+                stasis_network::stasis_network_host_overflow_count(
+                    handle as *mut stasis_network::NetworkHost,
+                ) as i32
+            }
+        }
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_port() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            0
+        } else {
+            unsafe {
+                stasis_network::stasis_network_host_port(handle as *mut stasis_network::NetworkHost)
+                    as i32
+            }
+        }
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_poll(
+    out_fields_id: i32,
+    out_field_capacity: i32,
+    out_payload_id: i32,
+    out_payload_capacity: i32,
+) -> i32 {
+    if out_field_capacity < 3 || out_payload_capacity < 0 {
+        return -1;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (out_fields_id, out_payload_id);
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            return -3;
+        }
+        let mut event = stasis_network::StasisNetworkEvent {
+            kind: 0,
+            connection: 0,
+            length: 0,
+            payload: [0; stasis_network::MAX_MESSAGE_BYTES],
+        };
+        let result = unsafe {
+            stasis_network::stasis_network_host_poll(
+                handle as *mut stasis_network::NetworkHost,
+                &mut event,
+            )
+        };
+        if result <= 0 {
+            return result;
+        }
+        if event.length as usize > out_payload_capacity as usize {
+            return -1;
+        }
+        for (index, value) in [
+            event.kind as i32,
+            event.connection as i32,
+            event.length as i32,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            stasis_jit_global_i32_array_store(out_fields_id, 0, index as i32, value);
+        }
+        for index in 0..event.length as usize {
+            stasis_jit_global_i32_array_store(
+                out_payload_id,
+                0,
+                index as i32,
+                i32::from(event.payload[index]),
+            );
+        }
+        result
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_send(
+    connection: i32,
+    payload_id: i32,
+    payload_length: i32,
+) -> i32 {
+    if connection <= 0 || payload_length < 0 || payload_length as usize > 64 * 1024 {
+        return -1;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = payload_id;
+        return -4;
+    }
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
+        if handle == 0 {
+            return -3;
+        }
+        let mut payload = Vec::with_capacity(payload_length as usize);
+        for index in 0..payload_length {
+            let value = stasis_jit_global_i32_array_load(payload_id, 0, index);
+            let Ok(value) = u8::try_from(value) else {
+                return -30 - index;
+            };
+            payload.push(value);
+        }
+        unsafe {
+            stasis_network::stasis_network_host_send(
+                handle as *mut stasis_network::NetworkHost,
+                connection as u32,
+                payload.as_ptr(),
+                payload.len(),
+            )
+        }
+    }
+}
+#[no_mangle]
+pub extern "C" fn stasis_jit_network_host_stop() {
+    #[cfg(feature = "network")]
+    {
+        let handle = NETWORK_HOST_HANDLE.swap(0, Ordering::AcqRel);
+        if handle != 0 {
+            unsafe {
+                stasis_network::stasis_network_host_stop(
+                    handle as *mut stasis_network::NetworkHost,
+                );
+            }
+        }
+    }
+}
+
+// Bounded realtime controls use the same Rust scheduler for native and JIT
+// guests.  These wrappers intentionally expose only scalar operations; game
+// state and rendering remain owned by the guest.
+fn stasis_network_payload_limit() -> usize {
+    #[cfg(feature = "network")]
+    {
+        stasis_network::REALTIME_NATIVE_MAX_PAYLOAD
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        0
+    }
+}
+
+const REALTIME_GUEST_MAX_TICK: u64 = i32::MAX as u64;
+const REALTIME_GUEST_MAX_EPOCH: i32 = i32::MAX;
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_start(
+    simulation_hz: i32,
+    presentation_hz: i32,
+    control_hz: i32,
+    input_delay_ticks: i32,
+    seats: i32,
+) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        if simulation_hz < 0
+            || presentation_hz < 0
+            || control_hz < 0
+            || input_delay_ticks < 0
+            || seats < 0
+        {
+            return -1;
+        }
+        return stasis_network::stasis_realtime_start(
+            simulation_hz,
+            presentation_hz,
+            control_hz,
+            input_delay_ticks,
+            seats,
+        );
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (
+            simulation_hz,
+            presentation_hz,
+            control_hz,
+            input_delay_ticks,
+            seats,
+        );
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_stop() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_stop();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_submit_payload(payload_id: i32, payload_length: i32) -> i32 {
+    if payload_length < 0 || payload_length as usize > stasis_network_payload_limit() {
+        return -1;
+    }
+    if jit_i32_array_capacity(payload_id, 0)
+        .is_none_or(|capacity| capacity < payload_length as usize)
+    {
+        return -11;
+    }
+    #[cfg(feature = "network")]
+    {
+        let mut payload = Vec::with_capacity(payload_length as usize);
+        for index in 0..payload_length {
+            let value = stasis_jit_global_i32_array_load(payload_id, 0, index);
+            let Ok(value) = u8::try_from(value) else {
+                return -1;
+            };
+            payload.push(value);
+        }
+        return stasis_network::submit_realtime_payload_bytes(&payload);
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = payload_id;
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_build_payload(
+    out_payload_id: i32,
+    capacity: i32,
+    seat: i32,
+    epoch: i32,
+    sequence: i32,
+    apply_tick: i32,
+    buttons: i32,
+    axis_x: i32,
+    axis_y: i32,
+) -> i32 {
+    if seat < 0
+        || seat >= 8
+        || epoch <= 0
+        || sequence <= 0
+        || apply_tick < 0
+        || apply_tick as u64 > REALTIME_GUEST_MAX_TICK
+        || epoch > REALTIME_GUEST_MAX_EPOCH
+        || buttons < 0
+        || buttons > i32::from(u16::MAX)
+        || !(-128..=127).contains(&axis_x)
+        || !(-128..=127).contains(&axis_y)
+        || capacity < 0
+        || capacity as usize > stasis_network_payload_limit()
+    {
+        return -1;
+    }
+    #[cfg(feature = "network")]
+    {
+        if jit_i32_array_capacity(out_payload_id, 0)
+            .is_none_or(|registered| registered < capacity as usize)
+        {
+            return -11;
+        }
+        let mut payload = vec![0_i32; capacity as usize];
+        let length = unsafe {
+            stasis_network::stasis_realtime_build_payload(
+                payload.as_mut_ptr(),
+                capacity,
+                seat,
+                epoch,
+                sequence,
+                apply_tick,
+                buttons,
+                axis_x,
+                axis_y,
+            )
+        };
+        if length < 0 {
+            return length;
+        }
+        for (index, value) in payload.into_iter().take(length as usize).enumerate() {
+            stasis_jit_global_i32_array_store(out_payload_id, 0, index as i32, value);
+        }
+        return length;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = out_payload_id;
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_resync_required() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_resync_required();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_record_hash(tick: i32, hash_low: i32, hash_high: i32) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_record_hash(tick, hash_low, hash_high);
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (tick, hash_low, hash_high);
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_apply_snapshot(
+    revision: i32,
+    tick: i32,
+    seat_count: i32,
+    buttons_id: i32,
+    axis_x_id: i32,
+    axis_y_id: i32,
+    sequences_id: i32,
+    epochs_id: i32,
+    active_id: i32,
+) -> i32 {
+    if revision <= 0 || tick < 0 || seat_count <= 0 || seat_count > 8 {
+        return -1;
+    }
+    let count = seat_count as usize;
+    for id in [
+        buttons_id,
+        axis_x_id,
+        axis_y_id,
+        sequences_id,
+        epochs_id,
+        active_id,
+    ] {
+        if jit_i32_array_capacity(id, 0).is_none_or(|capacity| capacity < count) {
+            return -11;
+        }
+    }
+    #[cfg(feature = "network")]
+    {
+        let mut buttons = Vec::<i32>::with_capacity(count);
+        let mut axis_x = Vec::<i32>::with_capacity(count);
+        let mut axis_y = Vec::<i32>::with_capacity(count);
+        let mut sequences = Vec::<i32>::with_capacity(count);
+        let mut epochs = Vec::<i32>::with_capacity(count);
+        let mut active = Vec::<i32>::with_capacity(count);
+        for index in 0..seat_count {
+            let button = stasis_jit_global_i32_array_load(buttons_id, 0, index);
+            let x = stasis_jit_global_i32_array_load(axis_x_id, 0, index);
+            let y = stasis_jit_global_i32_array_load(axis_y_id, 0, index);
+            let sequence = stasis_jit_global_i32_array_load(sequences_id, 0, index);
+            let epoch = stasis_jit_global_i32_array_load(epochs_id, 0, index);
+            let is_active = stasis_jit_global_i32_array_load(active_id, 0, index);
+            if button < 0
+                || button > i32::from(u16::MAX)
+                || !(-128..=127).contains(&x)
+                || !(-128..=127).contains(&y)
+                || sequence < 0
+                || epoch <= 0
+                || epoch > REALTIME_GUEST_MAX_EPOCH
+                || !matches!(is_active, 0 | 1)
+            {
+                return -1;
+            }
+            buttons.push(button);
+            axis_x.push(x);
+            axis_y.push(y);
+            sequences.push(sequence);
+            epochs.push(epoch);
+            active.push(is_active);
+        }
+        return unsafe {
+            stasis_network::stasis_realtime_apply_snapshot(
+                revision,
+                tick,
+                seat_count,
+                buttons.as_ptr(),
+                axis_x.as_ptr(),
+                axis_y.as_ptr(),
+                sequences.as_ptr(),
+                epochs.as_ptr(),
+                active.as_ptr(),
+            )
+        };
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (
+            buttons_id,
+            axis_x_id,
+            axis_y_id,
+            sequences_id,
+            epochs_id,
+            active_id,
+        );
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_current_tick() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_current_tick();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_current_epoch(seat: i32) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return if seat < 0 {
+            -1
+        } else {
+            stasis_network::stasis_realtime_current_epoch(seat)
+        };
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = seat;
+        -1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_schedule(
+    seat: i32,
+    epoch: i32,
+    sequence: i32,
+    apply_tick: i32,
+    buttons: i32,
+    axis_x: i32,
+    axis_y: i32,
+) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        if seat < 0 || epoch < 0 || sequence < 0 || buttons < 0 {
+            return -1;
+        }
+        return stasis_network::stasis_realtime_schedule(
+            seat, epoch, sequence, apply_tick, buttons, axis_x, axis_y,
+        );
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (seat, epoch, sequence, apply_tick, buttons, axis_x, axis_y);
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_advance() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_advance();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_read_control(
+    seat: i32,
+    out_buttons_id: i32,
+    out_axis_x_id: i32,
+    out_axis_y_id: i32,
+) -> i32 {
+    if seat < 0 {
+        return -1;
+    }
+    if [out_buttons_id, out_axis_x_id, out_axis_y_id]
+        .into_iter()
+        .any(|id| jit_i32_array_capacity(id, 0).is_none_or(|capacity| capacity < 1))
+    {
+        return -11;
+    }
+    #[cfg(feature = "network")]
+    {
+        let mut buttons = 0_i32;
+        let mut axis_x = 0_i32;
+        let mut axis_y = 0_i32;
+        let result = unsafe {
+            stasis_network::stasis_realtime_read_control(
+                seat,
+                &mut buttons,
+                &mut axis_x,
+                &mut axis_y,
+            )
+        };
+        if result == 0 {
+            stasis_jit_global_i32_array_store(out_buttons_id, 0, 0, buttons as i32);
+            stasis_jit_global_i32_array_store(out_axis_x_id, 0, 0, axis_x);
+            stasis_jit_global_i32_array_store(out_axis_y_id, 0, 0, axis_y);
+        }
+        return result;
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = (out_buttons_id, out_axis_x_id, out_axis_y_id);
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_disconnect(seat: i32) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return if seat < 0 {
+            -1
+        } else {
+            stasis_network::stasis_realtime_disconnect(seat)
+        };
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = seat;
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_reconnect(seat: i32) -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return if seat < 0 {
+            -1
+        } else {
+            stasis_network::stasis_realtime_reconnect(seat)
+        };
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        let _ = seat;
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_pause() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_pause();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_focus_lost() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_focus_lost();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_realtime_rematch() -> i32 {
+    #[cfg(feature = "network")]
+    {
+        return stasis_network::stasis_realtime_rematch();
+    }
+    #[cfg(not(feature = "network"))]
+    {
+        -4
+    }
 }
 
 fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
@@ -3235,9 +4824,50 @@ pub struct EmbeddedGraphicsHost {
     pub load_font: fn(&[u8], i32) -> i32,
     pub measure_text: fn(i32, &[u8]) -> f32,
     pub cache_text: fn(i32, &[u8]) -> i32,
+    pub replace_text: fn(i32, i32, &[u8]) -> i32,
     pub measure_text_cached: fn(i32) -> f32,
     pub measure_text_cached_height: fn(i32) -> f32,
     pub poll_reload: fn(i32) -> i32,
+}
+
+pub const ASSET_EXTERN_SEAM_EVIDENCE_ENV: &str = "STASIS_ASSET_EXTERN_SEAM_EVIDENCE";
+
+fn asset_extern_seam_evidence_path() -> Option<PathBuf> {
+    std::env::var_os(ASSET_EXTERN_SEAM_EVIDENCE_ENV).map(PathBuf::from)
+}
+
+fn asset_extern_seam_text_hex(text: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(text.len() * 2);
+    for byte in text {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn record_asset_extern_seam_call(kind: &str, fields: &[String]) -> Option<bool> {
+    let path = asset_extern_seam_evidence_path()?;
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!(
+                "asset extern seam recorder failed to open {}: {error}",
+                path.display()
+            );
+            return Some(false);
+        }
+    };
+    let mut line = format!("stasis.asset_extern.v1\t{kind}");
+    for field in fields {
+        line.push('\t');
+        line.push_str(field);
+    }
+    Some(writeln!(file, "{line}").is_ok())
 }
 
 thread_local! {
@@ -3270,6 +4900,36 @@ fn jit_text_arg_to_cstring(value_id: i32) -> Result<CString, String> {
 // translate that into a stable `const char*` when calling the C runtime.
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(path) = jit_text_arg_bytes(path_id) else {
+            return 0;
+        };
+        return if record_asset_extern_seam_call(
+            "load_sprite",
+            &[
+                asset_extern_seam_text_hex(&path),
+                max_w.to_string(),
+                max_h.to_string(),
+                "101".to_string(),
+            ],
+        ) == Some(true)
+        {
+            101
+        } else {
+            0
+        };
+    }
+    let atlas_policy = if let Some(path) = jit_text_arg_bytes(path_id) {
+        let path_text = String::from_utf8_lossy(&path);
+        u32::try_from(max_w)
+            .ok()
+            .zip(u32::try_from(max_h).ok())
+            .map_or_else(HotRenderAtlasPolicy::default, |(width, height)| {
+                hot_render_atlas_policy(&path_text, width, height)
+            })
+    } else {
+        HotRenderAtlasPolicy::default()
+    };
     if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
         return (host.load_sprite)(&path, max_w, max_h);
     }
@@ -3284,6 +4944,22 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
             return 0;
         }
     };
+    if let Some(address) = api.stasis_gfx_set_next_sprite_atlas_policy_v3 {
+        #[cfg(windows)]
+        let set_policy: extern "system" fn(i32, u64, u32, u64, u32, u32) =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let set_policy: extern "C" fn(i32, u64, u32, u64, u32, u32) =
+            unsafe { std::mem::transmute(address) };
+        set_policy(
+            i32::from(atlas_policy.eligible),
+            atlas_policy.group_id,
+            atlas_policy.member_count,
+            atlas_policy.logical_pixel_area,
+            atlas_policy.max_logical_width,
+            atlas_policy.max_logical_height,
+        );
+    }
     #[cfg(windows)]
     let callback: extern "system" fn(*const c_char, i32, i32) -> i32 =
         unsafe { std::mem::transmute(api.stasis_gfx_load_sprite) };
@@ -3295,6 +4971,137 @@ pub extern "C" fn stasis_jit_gfx_load_sprite(path_id: i32, max_w: i32, max_h: i3
         eprintln!("gfx_load_sprite failed for {}", path.to_string_lossy());
     }
     handle
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_request_sprite(path_id: i32, max_w: i32, max_h: i32) -> i32 {
+    let atlas_policy =
+        jit_text_arg_bytes(path_id).map_or_else(HotRenderAtlasPolicy::default, |path| {
+            let path_text = String::from_utf8_lossy(&path);
+            u32::try_from(max_w)
+                .ok()
+                .zip(u32::try_from(max_h).ok())
+                .map_or_else(HotRenderAtlasPolicy::default, |(width, height)| {
+                    hot_render_atlas_policy(&path_text, width, height)
+                })
+        });
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    if let Some(address) = api.stasis_asset_request_sprite_with_policy_v3 {
+        #[cfg(windows)]
+        let callback: extern "system" fn(
+            *const c_char,
+            i32,
+            i32,
+            i32,
+            u64,
+            u32,
+            u64,
+            u32,
+            u32,
+        ) -> i32 = unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(
+            *const c_char,
+            i32,
+            i32,
+            i32,
+            u64,
+            u32,
+            u64,
+            u32,
+            u32,
+        ) -> i32 = unsafe { std::mem::transmute(address) };
+        return callback(
+            path.as_ptr(),
+            max_w,
+            max_h,
+            i32::from(atlas_policy.eligible),
+            atlas_policy.group_id,
+            atlas_policy.member_count,
+            atlas_policy.logical_pixel_area,
+            atlas_policy.max_logical_width,
+            atlas_policy.max_logical_height,
+        );
+    }
+    let Some(address) = api.stasis_asset_request_sprite else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    callback(path.as_ptr(), max_w, max_h)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_request_audio(path_id: i32) -> i32 {
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_asset_request_audio else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(path.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_task_poll(task: i32) -> i32 {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_asset_task_poll else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(task)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_task_take_handle(task: i32) -> i32 {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_asset_task_take_handle else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(task)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_asset_task_cancel(task: i32) {
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    let Some(address) = api.stasis_asset_task_cancel else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(address) };
+    callback(task);
 }
 
 #[no_mangle]
@@ -3686,6 +5493,20 @@ pub extern "C" fn stasis_jit_storage_save_i32(scope_id: i32, key_id: i32, value:
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(path) = jit_text_arg_bytes(path_id) else {
+            return 0;
+        };
+        return if record_asset_extern_seam_call(
+            "dump_bmp",
+            &[asset_extern_seam_text_hex(&path), "11".to_string()],
+        ) == Some(true)
+        {
+            11
+        } else {
+            0
+        };
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -3703,6 +5524,20 @@ pub extern "C" fn stasis_jit_gfx_dump_bmp(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_dump_png(path_id: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(path) = jit_text_arg_bytes(path_id) else {
+            return 0;
+        };
+        return if record_asset_extern_seam_call(
+            "dump_png",
+            &[asset_extern_seam_text_hex(&path), "12".to_string()],
+        ) == Some(true)
+        {
+            12
+        } else {
+            0
+        };
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -3722,6 +5557,24 @@ pub extern "C" fn stasis_jit_gfx_dump_png(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(path) = jit_text_arg_bytes(path_id) else {
+            return 0;
+        };
+        return if record_asset_extern_seam_call(
+            "load_font",
+            &[
+                asset_extern_seam_text_hex(&path),
+                size.to_string(),
+                "202".to_string(),
+            ],
+        ) == Some(true)
+        {
+            202
+        } else {
+            0
+        };
+    }
     if let (Some(host), Some(path)) = (embedded_graphics_host(), jit_text_arg_bytes(path_id)) {
         return (host.load_font)(&path, size);
     }
@@ -3742,6 +5595,24 @@ pub extern "C" fn stasis_jit_load_font(path_id: i32, size: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let Some(text) = jit_text_arg_bytes(text_id) else {
+            return 0.0;
+        };
+        return if record_asset_extern_seam_call(
+            "measure_text",
+            &[
+                font.to_string(),
+                asset_extern_seam_text_hex(&text),
+                18.75_f32.to_bits().to_string(),
+            ],
+        ) == Some(true)
+        {
+            18.75
+        } else {
+            0.0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         if let Some(width) =
             with_jit_text_arg_bytes(text_id, |text| (host.measure_text)(font, text))
@@ -3769,6 +5640,21 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
     let Some(text) = validated_jit_text_arg_bytes(text_id) else {
         return 0;
     };
+    if asset_extern_seam_evidence_path().is_some() {
+        return if record_asset_extern_seam_call(
+            "cache_text",
+            &[
+                font.to_string(),
+                asset_extern_seam_text_hex(&text),
+                "303".to_string(),
+            ],
+        ) == Some(true)
+        {
+            303
+        } else {
+            0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         return (host.cache_text)(font, &text);
     }
@@ -3787,8 +5673,66 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
     callback(font, text.as_ptr())
 }
 
+fn replace_cached_text(run_handle: i32, font: i32, text_id: i32) -> i32 {
+    let Some(text) = jit_text_arg_bytes(text_id) else {
+        return 0;
+    };
+    if asset_extern_seam_evidence_path().is_some() {
+        let result = if std::str::from_utf8(&text).is_ok() {
+            404
+        } else {
+            0
+        };
+        return if record_asset_extern_seam_call(
+            "replace_text",
+            &[
+                run_handle.to_string(),
+                font.to_string(),
+                asset_extern_seam_text_hex(&text),
+                result.to_string(),
+            ],
+        ) == Some(true)
+        {
+            result
+        } else {
+            0
+        };
+    }
+    if let Some(host) = embedded_graphics_host() {
+        return (host.replace_text)(run_handle, font, &text);
+    }
+    let Ok(text) = CString::new(text) else {
+        return 0;
+    };
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_gfx_replace_text else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, i32, *const c_char) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, i32, *const c_char) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    callback(run_handle, font, text.as_ptr())
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        let result = i32::from(handle == 101);
+        return if record_asset_extern_seam_call(
+            "poll_reload",
+            &[handle.to_string(), result.to_string()],
+        ) == Some(true)
+        {
+            result
+        } else {
+            0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         return (host.poll_reload)(handle);
     }
@@ -3806,6 +5750,17 @@ pub extern "C" fn stasis_jit_gfx_poll_reload(handle: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        return if record_asset_extern_seam_call(
+            "measure_text_cached",
+            &[run_handle.to_string(), 44.5_f32.to_bits().to_string()],
+        ) == Some(true)
+        {
+            44.5
+        } else {
+            0.0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         return (host.measure_text_cached)(run_handle);
     }
@@ -3823,6 +5778,17 @@ pub extern "C" fn stasis_jit_gfx_measure_text_cached(run_handle: i32) -> f32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_measure_text_cached_height(run_handle: i32) -> f32 {
+    if asset_extern_seam_evidence_path().is_some() {
+        return if record_asset_extern_seam_call(
+            "measure_text_cached_height",
+            &[run_handle.to_string(), 12.25_f32.to_bits().to_string()],
+        ) == Some(true)
+        {
+            12.25
+        } else {
+            0.0
+        };
+    }
     if let Some(host) = embedded_graphics_host() {
         return (host.measure_text_cached_height)(run_handle);
     }
@@ -3889,11 +5855,11 @@ pub extern "C" fn stasis_jit_sprite_load_from(
     if loaded_handle == 0 {
         return 0;
     }
-    let old_handle = struct_view_i32_load(base, index, "handle");
-    struct_view_i32_store(base, index, len, "handle", loaded_handle);
+    let old_handle = struct_view_i32_load(base, index, "sprite_ref");
+    struct_view_i32_store(base, index, len, "sprite_ref", loaded_handle);
     struct_view_i32_store(base, index, len, "width", width);
     struct_view_i32_store(base, index, len, "height", height);
-    if old_handle != 0 && old_handle != loaded_handle {
+    if old_handle != 0 {
         stasis_jit_gfx_release_sprite(old_handle);
     }
     1
@@ -3933,6 +5899,31 @@ pub extern "C" fn stasis_jit_text_run_load_from(
     1
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_jit_text_run_replace_from(
+    base: i32,
+    index: i32,
+    len: i32,
+    font: i32,
+    text_id: i32,
+) -> i32 {
+    if font <= 0 || (index >= 0 && index >= len) {
+        return 0;
+    }
+    let old_handle = struct_view_i32_load(base, index, "handle");
+    let loaded_handle = replace_cached_text(old_handle, font, text_id);
+    if loaded_handle <= 0 {
+        return 0;
+    }
+    let width = stasis_jit_gfx_measure_text_cached(loaded_handle);
+    let height = stasis_jit_gfx_measure_text_cached_height(loaded_handle);
+    struct_view_i32_store(base, index, len, "font", font);
+    struct_view_i32_store(base, index, len, "handle", loaded_handle);
+    struct_view_f32_store(base, index, len, "width", width);
+    struct_view_f32_store(base, index, len, "height", height);
+    1
+}
+
 // AOT engine bundles may be linked and executed headlessly; keep this as a no-op so tests don't
 // block on sleeps during deterministic quality-gate runs.
 #[no_mangle]
@@ -3941,8 +5932,22 @@ pub extern "C" fn stasis_jit_sleep_ms(ms: i32) {
 }
 
 // Runtime-compatible time APIs used by `extern function time()`/`time_us()` expansion.
+fn recording_clock_us() -> Option<u64> {
+    let fps = RECORDING_CLOCK_FPS.load(Ordering::Acquire);
+    (fps != 0).then(|| {
+        RECORDING_CLOCK_FRAME
+            .load(Ordering::Acquire)
+            .saturating_mul(1_000_000)
+            / fps
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_get_time_ms() -> i32 {
+    if let Some(micros) = recording_clock_us() {
+        return (micros / 1_000).min(i32::MAX as u64) as i32;
+    }
+
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_millis() as i32,
         Err(_) => 0,
@@ -3951,6 +5956,9 @@ pub extern "C" fn stasis_get_time_ms() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_get_time_us() -> i32 {
+    if let Some(micros) = recording_clock_us() {
+        return micros.min(i32::MAX as u64) as i32;
+    }
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_micros() as i32,
         Err(_) => 0,
@@ -4223,11 +6231,38 @@ pub extern "C" fn stasis_jit_global_i32_array_load(
             return 0;
         }
     }
-    let table = jit_i32_array_global_table();
-    let guard = table.lock().expect("jit global table mutex poisoned");
+    let (runtime_value, runtime_array_exists) = {
+        let table = jit_i32_array_global_table();
+        let guard = table.lock().expect("jit global table mutex poisoned");
+        (
+            guard.get(&(collection_hash, field_hash, index)).copied(),
+            guard.keys().any(|(collection, field, _)| {
+                *collection == collection_hash && *field == field_hash
+            }),
+        )
+    };
+    if let Some(value) = runtime_value {
+        return value;
+    }
+    if runtime_array_exists {
+        return 0;
+    }
+
+    // A string literal is represented by its hash while lowering text-view
+    // indexing. Registered/dynamic runtime arrays above must win when they
+    // use the same hash; only an unbound byte view can fall back to the
+    // literal table.
+    if field_hash != 0 {
+        return 0;
+    }
+    let table = jit_string_literal_table();
+    let guard = table
+        .lock()
+        .expect("jit string literal table mutex poisoned");
     guard
-        .get(&(collection_hash, field_hash, index))
-        .copied()
+        .get(&collection_hash)
+        .and_then(|text| text.as_bytes().get(idx))
+        .map(|byte| i32::from(*byte))
         .unwrap_or_default()
 }
 
@@ -4613,12 +6648,69 @@ pub extern "C" fn stasis_jit_sys_memmove_f32(
 // Audio host API (JIT extern call bridge)
 // ============================================================
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StasisAudioHostApi {
+    pub init: Option<extern "C" fn(i32, i32, i32) -> i32>,
+    pub shutdown: Option<extern "C" fn()>,
+    pub is_available: Option<extern "C" fn() -> i32>,
+    pub get_sample_rate: Option<extern "C" fn() -> i32>,
+    pub get_channels: Option<extern "C" fn() -> i32>,
+    pub get_queued_frames: Option<extern "C" fn() -> i32>,
+    pub get_underruns: Option<extern "C" fn() -> i32>,
+    pub push_f32_interleaved: Option<extern "C" fn(*const f32, i32) -> i32>,
+    pub load_wav: Option<extern "C" fn(*const c_char) -> i32>,
+    pub release: Option<extern "C" fn(i32)>,
+    pub play: Option<extern "C" fn(i32, i32, f32, f32) -> i32>,
+    pub stop: Option<extern "C" fn(i32)>,
+    pub voice_is_playing: Option<extern "C" fn(i32) -> i32>,
+    pub voice_set_paused: Option<extern "C" fn(i32, i32)>,
+    pub voice_set_volume_pan: Option<extern "C" fn(i32, f32, f32)>,
+    pub load_music: Option<extern "C" fn(*const c_char) -> i32>,
+    pub load_effect: Option<extern "C" fn(*const c_char) -> i32>,
+    pub play_music: Option<extern "C" fn(i32, i32, f32) -> i32>,
+    pub stop_music: Option<extern "C" fn(i32)>,
+    pub pause_music: Option<extern "C" fn(i32, i32)>,
+    pub set_music_volume: Option<extern "C" fn(i32, f32)>,
+    pub play_effect: Option<extern "C" fn(i32, f32) -> i32>,
+}
+
+static AUDIO_HOST_API: OnceLock<Mutex<Option<StasisAudioHostApi>>> = OnceLock::new();
+
+fn current_audio_host_api() -> Option<StasisAudioHostApi> {
+    *AUDIO_HOST_API
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("audio host API mutex poisoned")
+}
+
+pub fn install_audio_host_api(api: Option<StasisAudioHostApi>) {
+    *AUDIO_HOST_API
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("audio host API mutex poisoned") = api;
+}
+
+fn invoke_audio_host_path(
+    path_id: i32,
+    callback: Option<extern "C" fn(*const c_char) -> i32>,
+) -> Option<i32> {
+    let callback = callback?;
+    let Ok(path) = jit_text_arg_to_cstring(path_id) else {
+        return Some(0);
+    };
+    Some(callback(path.as_ptr()))
+}
+
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_init(
     sample_rate: i32,
     channels: i32,
     target_latency_frames: i32,
 ) -> i32 {
+    if let Some(init) = current_audio_host_api().and_then(|api| api.init) {
+        return init(sample_rate, channels, target_latency_frames);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4635,6 +6727,10 @@ pub extern "C" fn stasis_jit_audio_init(
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_shutdown() {
+    if let Some(shutdown) = current_audio_host_api().and_then(|api| api.shutdown) {
+        shutdown();
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -4650,6 +6746,9 @@ pub extern "C" fn stasis_jit_audio_shutdown() {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
+    if let Some(available) = current_audio_host_api().and_then(|api| api.is_available) {
+        return available();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4665,6 +6764,9 @@ pub extern "C" fn stasis_jit_audio_is_available() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_sample_rate() -> i32 {
+    if let Some(get) = current_audio_host_api().and_then(|api| api.get_sample_rate) {
+        return get();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4680,6 +6782,9 @@ pub extern "C" fn stasis_jit_audio_get_sample_rate() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_channels() -> i32 {
+    if let Some(get) = current_audio_host_api().and_then(|api| api.get_channels) {
+        return get();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4695,6 +6800,9 @@ pub extern "C" fn stasis_jit_audio_get_channels() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_queued_frames() -> i32 {
+    if let Some(get) = current_audio_host_api().and_then(|api| api.get_queued_frames) {
+        return get();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4710,6 +6818,9 @@ pub extern "C" fn stasis_jit_audio_get_queued_frames() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_get_underruns() -> i32 {
+    if let Some(get) = current_audio_host_api().and_then(|api| api.get_underruns) {
+        return get();
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4744,6 +6855,15 @@ fn with_jit_audio_f32_interleaved(
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_push_f32_interleaved(samples: i32, frame_count: i32) -> i32 {
+    if let Some(host) = current_audio_host_api() {
+        let Some(push) = host.push_f32_interleaved else {
+            return 0;
+        };
+        let channels = host.get_channels.map(|get| get()).unwrap_or(0);
+        return with_jit_audio_f32_interleaved(samples, frame_count, channels, |values, frames| {
+            push(values, frames)
+        });
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4763,6 +6883,12 @@ pub extern "C" fn stasis_jit_audio_push_f32_interleaved(samples: i32, frame_coun
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_load_wav(path_id: i32) -> i32 {
+    if let Some(result) = invoke_audio_host_path(
+        path_id,
+        current_audio_host_api().and_then(|api| api.load_wav),
+    ) {
+        return result;
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -4782,6 +6908,10 @@ pub extern "C" fn stasis_jit_audio_load_wav(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_release(asset_handle: i32) {
+    if let Some(release) = current_audio_host_api().and_then(|api| api.release) {
+        release(asset_handle);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -4802,6 +6932,9 @@ pub extern "C" fn stasis_jit_audio_play(
     volume: f32,
     pan: f32,
 ) -> i32 {
+    if let Some(play) = current_audio_host_api().and_then(|api| api.play) {
+        return play(asset_handle, looped, volume, pan);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4819,6 +6952,10 @@ pub extern "C" fn stasis_jit_audio_play(
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_stop(voice_handle: i32) {
+    if let Some(stop) = current_audio_host_api().and_then(|api| api.stop) {
+        stop(voice_handle);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -4834,6 +6971,9 @@ pub extern "C" fn stasis_jit_audio_stop(voice_handle: i32) {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_voice_is_playing(voice_handle: i32) -> i32 {
+    if let Some(is_playing) = current_audio_host_api().and_then(|api| api.voice_is_playing) {
+        return is_playing(voice_handle);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4849,6 +6989,10 @@ pub extern "C" fn stasis_jit_audio_voice_is_playing(voice_handle: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_voice_set_paused(voice_handle: i32, paused: i32) {
+    if let Some(set_paused) = current_audio_host_api().and_then(|api| api.voice_set_paused) {
+        set_paused(voice_handle, paused);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -4864,6 +7008,11 @@ pub extern "C" fn stasis_jit_audio_voice_set_paused(voice_handle: i32, paused: i
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_voice_set_volume_pan(voice_handle: i32, volume: f32, pan: f32) {
+    if let Some(set_volume_pan) = current_audio_host_api().and_then(|api| api.voice_set_volume_pan)
+    {
+        set_volume_pan(voice_handle, volume, pan);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -4879,6 +7028,12 @@ pub extern "C" fn stasis_jit_audio_voice_set_volume_pan(voice_handle: i32, volum
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_load_music(path_id: i32) -> i32 {
+    if let Some(result) = invoke_audio_host_path(
+        path_id,
+        current_audio_host_api().and_then(|api| api.load_music),
+    ) {
+        return result;
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -4898,6 +7053,12 @@ pub extern "C" fn stasis_jit_audio_load_music(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_load_effect(path_id: i32) -> i32 {
+    if let Some(result) = invoke_audio_host_path(
+        path_id,
+        current_audio_host_api().and_then(|api| api.load_effect),
+    ) {
+        return result;
+    }
     let Ok(path) = jit_text_arg_to_cstring(path_id) else {
         return 0;
     };
@@ -4917,6 +7078,9 @@ pub extern "C" fn stasis_jit_audio_load_effect(path_id: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_play_music(asset_handle: i32, looped: i32, volume: f32) -> i32 {
+    if let Some(play_music) = current_audio_host_api().and_then(|api| api.play_music) {
+        return play_music(asset_handle, looped, volume);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -4933,6 +7097,10 @@ pub extern "C" fn stasis_jit_audio_play_music(asset_handle: i32, looped: i32, vo
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_stop_music(asset_handle: i32) {
+    if let Some(stop_music) = current_audio_host_api().and_then(|api| api.stop_music) {
+        stop_music(asset_handle);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -4948,6 +7116,10 @@ pub extern "C" fn stasis_jit_audio_stop_music(asset_handle: i32) {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_pause_music(asset_handle: i32, paused: i32) {
+    if let Some(pause_music) = current_audio_host_api().and_then(|api| api.pause_music) {
+        pause_music(asset_handle, paused);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -4963,6 +7135,10 @@ pub extern "C" fn stasis_jit_audio_pause_music(asset_handle: i32, paused: i32) {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_set_music_volume(asset_handle: i32, volume: f32) {
+    if let Some(set_music_volume) = current_audio_host_api().and_then(|api| api.set_music_volume) {
+        set_music_volume(asset_handle, volume);
+        return;
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return;
     };
@@ -4978,6 +7154,9 @@ pub extern "C" fn stasis_jit_audio_set_music_volume(asset_handle: i32, volume: f
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_audio_play_effect(asset_handle: i32, volume: f32) -> i32 {
+    if let Some(play_effect) = current_audio_host_api().and_then(|api| api.play_effect) {
+        return play_effect(asset_handle, volume);
+    }
     let Ok(api) = stasis_graphics_assets_api() else {
         return 0;
     };
@@ -5044,67 +7223,291 @@ fn jit_string_literal_table() -> &'static Mutex<JitStringLiteralMap> {
     TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-#[cfg(windows)]
-fn os_str_to_wide(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().collect()
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-extern "system" {
-    fn LoadLibraryW(path: *const u16) -> *mut c_void;
-    fn FreeLibrary(handle: *mut c_void) -> i32;
-    fn GetProcAddress(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-}
-
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
-const RTLD_LOCAL: i32 = 0;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-const RTLD_LOCAL: i32 = 4;
-#[cfg(unix)]
-const RTLD_NOW: i32 = 2;
-
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
-#[link(name = "dl")]
-unsafe extern "C" {
-    fn dlopen(path: *const c_char, flags: i32) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn dlclose(handle: *mut c_void) -> i32;
-    fn dlerror() -> *const c_char;
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-unsafe extern "C" {
-    fn dlopen(path: *const c_char, flags: i32) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn dlclose(handle: *mut c_void) -> i32;
-    fn dlerror() -> *const c_char;
-}
-
-#[cfg(unix)]
-fn clear_dynamic_loading_error() {
-    let _ = unsafe { dlerror() };
-}
-
-#[cfg(unix)]
-fn dynamic_loading_error_if_present() -> Option<String> {
-    let error = unsafe { dlerror() };
-    (!error.is_null()).then(|| {
-        unsafe { CStr::from_ptr(error) }
-            .to_string_lossy()
-            .into_owned()
-    })
-}
-
-#[cfg(unix)]
-fn dynamic_loading_error() -> String {
-    dynamic_loading_error_if_present().unwrap_or_else(|| "unknown dynamic loader error".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::MutexGuard;
+
+    fn hot_image(path: &str, count: Option<u64>, eligible: bool) -> HotRenderRuntimeImage {
+        HotRenderRuntimeImage {
+            logical_path: path.to_string(),
+            logical_width: 32,
+            logical_height: 24,
+            max_renders_per_render: count,
+            atlas_eligible: eligible,
+            grouping_key: "batch-v3:test".to_string(),
+            estimated_distinct_transitions: 8,
+            group_member_count: 2,
+            group_logical_pixel_area: 131_072,
+            group_max_logical_width: 32,
+            group_max_logical_height: 24,
+            backend_constraints: "desktop-gl".to_string(),
+        }
+    }
+
+    #[test]
+    fn hot_render_policy_falls_back_for_missing_stale_and_cold_metadata() {
+        let _guard = test_lock();
+        replace_hot_render_metadata(
+            HOT_RENDER_METADATA_VERSION,
+            &[
+                hot_image("assets/hot.png", Some(2), true),
+                hot_image("assets/cold.png", Some(1), false),
+                hot_image("assets/unknown.png", None, true),
+            ],
+        );
+        assert!(hot_render_atlas_eligible("assets\\hot.png", 32, 24));
+        let policy = hot_render_atlas_policy("assets/hot.png", 32, 24);
+        assert!(policy.eligible);
+        assert_ne!(policy.group_id, 0);
+        assert_eq!(policy.member_count, 2);
+        assert_eq!(policy.logical_pixel_area, 131_072);
+        assert_eq!(
+            (policy.max_logical_width, policy.max_logical_height),
+            (32, 24)
+        );
+        assert!(!hot_render_atlas_eligible("assets/cold.png", 32, 24));
+        assert!(!hot_render_atlas_eligible("assets/unknown.png", 32, 24));
+        assert!(!hot_render_atlas_eligible("assets/missing.png", 32, 24));
+        assert!(!hot_render_atlas_eligible("assets/hot.png", 33, 24));
+        replace_hot_render_metadata(
+            HOT_RENDER_METADATA_VERSION + 1,
+            &[hot_image("assets/hot.png", Some(2), true)],
+        );
+        assert!(!hot_render_atlas_eligible("assets/hot.png", 32, 24));
+    }
+
+    #[test]
+    fn hot_render_groups_are_deterministic_by_compiler_group_identity() {
+        let images = vec![
+            hot_image("z.png", Some(4), true),
+            hot_image("a.png", Some(2), true),
+            hot_image("cold.png", Some(1), false),
+        ];
+        let groups = plan_hot_render_groups(&images);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1[0].0, "a.png");
+        assert_eq!(groups[0].1[1].0, "z.png");
+    }
+
+    #[test]
+    fn realized_hot_render_planner_allows_mixed_sizes_and_uses_limit_fallback() {
+        let realized = vec![
+            RealizedHotRenderImage {
+                image: hot_image("b-2k.png", Some(8), true),
+                realized_width: 2048,
+                realized_height: 2048,
+            },
+            RealizedHotRenderImage {
+                image: hot_image("a-2k.png", Some(8), true),
+                realized_width: 2048,
+                realized_height: 2048,
+            },
+            RealizedHotRenderImage {
+                image: hot_image("4k.png", Some(8), true),
+                realized_width: 4096,
+                realized_height: 4096,
+            },
+        ];
+
+        let plan_8k = plan_realized_hot_render_loads(&realized, 8192, 8192, 8192);
+        assert_eq!(plan_8k.groups.len(), 1);
+        assert!(plan_8k.standalone.is_empty());
+        assert_eq!(plan_8k.groups[0].1[0].0, "4k.png");
+        assert_eq!(plan_8k.groups[0].1[1].0, "a-2k.png");
+        assert_eq!(plan_8k.groups[0].1[2].0, "b-2k.png");
+
+        let plan_4k = plan_realized_hot_render_loads(&realized, 4096, 4096, 4096);
+        assert_eq!(plan_4k.groups.len(), 1);
+        assert_eq!(plan_4k.standalone, vec![("4k.png".to_string(), 4096, 4096)]);
+
+        let plan_2k = plan_realized_hot_render_loads(&realized, 2048, 2048, 2048);
+        assert!(plan_2k.groups.is_empty());
+        assert_eq!(plan_2k.standalone.len(), 3);
+    }
+
+    #[test]
+    #[ignore = "representative timing report; run explicitly with --ignored"]
+    fn hot_render_planner_microbenchmark() {
+        let realized = (0..8)
+            .map(|index| RealizedHotRenderImage {
+                image: hot_image(&format!("sprite{index}.png"), Some(64), true),
+                realized_width: 512,
+                realized_height: 512,
+            })
+            .collect::<Vec<_>>();
+        let iterations = 10_000_u128;
+        let start = std::time::Instant::now();
+        let mut last = None;
+        for _ in 0..iterations {
+            last = Some(plan_realized_hot_render_loads(&realized, 2048, 2048, 4096));
+        }
+        let elapsed_ns = start.elapsed().as_nanos();
+        let plan = last.expect("load plan");
+        let standalone_bytes = 8_u64 * 512 * 512 * 4;
+        let atlas_bytes = 2048_u64 * 2048 * 4;
+        let live_bytes = standalone_bytes;
+        eprintln!(
+            "hot-render planner benchmark: iterations={iterations} mean_ns={} standalone_bytes={standalone_bytes} atlas_bytes={atlas_bytes} occupancy_percent={} standalone_binds=512 atlas_binds=1",
+            elapsed_ns / iterations,
+            live_bytes * 100 / atlas_bytes
+        );
+        assert_eq!(plan.groups.len(), 1);
+        assert!(plan.standalone.is_empty());
+    }
+
+    #[test]
+    fn recording_clock_uses_frame_index_without_accumulated_rounding() {
+        let _guard = test_lock();
+        set_recording_clock(60, 0);
+        assert_eq!(stasis_get_time_ms(), 0);
+        assert_eq!(stasis_get_time_us(), 0);
+        set_recording_clock_frame(1);
+        assert_eq!(stasis_get_time_us(), 16_666);
+        set_recording_clock_frame(3);
+        assert_eq!(stasis_get_time_us(), 50_000);
+        set_recording_clock(59, 59);
+        assert_eq!(stasis_get_time_us(), (59_u64 * 1_000_000 / 59) as i32);
+        set_recording_clock(1, u64::MAX);
+        assert_eq!(stasis_get_time_ms(), i32::MAX);
+        assert_eq!(stasis_get_time_us(), i32::MAX);
+        clear_recording_clock();
+    }
+
+    #[test]
+    fn atomic_rename_no_replace_refuses_existing_destination() {
+        let _guard = test_lock();
+        let root = std::env::temp_dir().join(format!(
+            "stasis-atomic-rename-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create atomic rename test directory");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::write(&source, b"source").expect("write source");
+        std::fs::write(&destination, b"destination").expect("write destination");
+        assert!(atomic_rename_no_replace(&source, &destination).is_err());
+        assert_eq!(std::fs::read(&source).expect("read source"), b"source");
+        assert_eq!(
+            std::fs::read(&destination).expect("read destination"),
+            b"destination"
+        );
+        std::fs::remove_dir_all(root).expect("remove atomic rename test directory");
+    }
+
+    static TEST_SPRITE_RELEASES: AtomicUsize = AtomicUsize::new(0);
+    static TEST_AUDIO_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+    static TEST_AUDIO_PATH_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_sprite_load(_: &[u8], _: i32, _: i32) -> i32 {
+        77
+    }
+
+    fn test_sprite_release(handle: i32) {
+        if handle == 77 {
+            TEST_SPRITE_RELEASES.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn test_font_load(_: &[u8], _: i32) -> i32 {
+        1
+    }
+
+    fn test_measure_text(_: i32, _: &[u8]) -> f32 {
+        1.0
+    }
+
+    fn test_cache_text(_: i32, _: &[u8]) -> i32 {
+        1
+    }
+
+    fn test_replace_text(handle: i32, _: i32, _: &[u8]) -> i32 {
+        if handle <= 1 {
+            2
+        } else {
+            handle
+        }
+    }
+
+    fn test_measure_cached(_: i32) -> f32 {
+        1.0
+    }
+
+    fn test_poll_reload(_: i32) -> i32 {
+        0
+    }
+
+    extern "C" fn test_audio_load(path: *const c_char) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        if !path.is_null() {
+            let path = unsafe { std::ffi::CStr::from_ptr(path) };
+            if path.to_bytes().starts_with(b"assets/") {
+                TEST_AUDIO_PATH_CALLS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        101
+    }
+
+    extern "C" fn test_audio_release(_: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_play(_: i32, _: i32, _: f32, _: f32) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        202
+    }
+
+    extern "C" fn test_audio_stop(_: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_voice_is_playing(_: i32) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        1
+    }
+
+    extern "C" fn test_audio_voice_set_paused(_: i32, _: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_voice_set_volume_pan(_: i32, _: f32, _: f32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_play_music(_: i32, _: i32, _: f32) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        303
+    }
+
+    extern "C" fn test_audio_stop_music(_: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_pause_music(_: i32, _: i32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_set_music_volume(_: i32, _: f32) {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn test_audio_play_effect(_: i32, _: f32) -> i32 {
+        TEST_AUDIO_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+        404
+    }
+
+    struct AudioHostReset;
+
+    impl Drop for AudioHostReset {
+        fn drop(&mut self) {
+            install_audio_host_api(None);
+            clear_jit_string_literal_table();
+        }
+    }
 
     fn test_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -5114,13 +7517,239 @@ mod tests {
     }
 
     #[test]
-    fn bundled_graphics_runtime_outranks_environment_overrides() {
+    fn audio_asset_bridges_dispatch_through_installed_host_api() {
+        let _guard = test_lock();
+        let _host_reset = AudioHostReset;
+        TEST_AUDIO_CALLBACKS.store(0, Ordering::SeqCst);
+        TEST_AUDIO_PATH_CALLS.store(0, Ordering::SeqCst);
+        clear_jit_string_literal_table();
+        upsert_jit_string_literal(900, "assets/music.mp3");
+        upsert_jit_string_literal(901, "assets/effect.wav");
+
+        install_audio_host_api(Some(StasisAudioHostApi {
+            init: None,
+            shutdown: None,
+            is_available: None,
+            get_sample_rate: None,
+            get_channels: None,
+            get_queued_frames: None,
+            get_underruns: None,
+            push_f32_interleaved: None,
+            load_wav: Some(test_audio_load),
+            release: Some(test_audio_release),
+            play: Some(test_audio_play),
+            stop: Some(test_audio_stop),
+            voice_is_playing: Some(test_audio_voice_is_playing),
+            voice_set_paused: Some(test_audio_voice_set_paused),
+            voice_set_volume_pan: Some(test_audio_voice_set_volume_pan),
+            load_music: Some(test_audio_load),
+            load_effect: Some(test_audio_load),
+            play_music: Some(test_audio_play_music),
+            stop_music: Some(test_audio_stop_music),
+            pause_music: Some(test_audio_pause_music),
+            set_music_volume: Some(test_audio_set_music_volume),
+            play_effect: Some(test_audio_play_effect),
+        }));
+
+        assert_eq!(stasis_jit_audio_load_wav(901), 101);
+        assert_eq!(stasis_jit_audio_load_music(900), 101);
+        assert_eq!(stasis_jit_audio_load_effect(901), 101);
+        stasis_jit_audio_release(101);
+        assert_eq!(stasis_jit_audio_play(101, 1, 0.5, -0.25), 202);
+        stasis_jit_audio_stop(202);
+        assert_eq!(stasis_jit_audio_voice_is_playing(202), 1);
+        stasis_jit_audio_voice_set_paused(202, 1);
+        stasis_jit_audio_voice_set_volume_pan(202, 0.25, 0.5);
+        assert_eq!(stasis_jit_audio_play_music(101, 1, 0.4), 303);
+        stasis_jit_audio_stop_music(303);
+        stasis_jit_audio_pause_music(101, 1);
+        stasis_jit_audio_set_music_volume(101, 0.2);
+        assert_eq!(stasis_jit_audio_play_effect(101, 0.3), 404);
+        assert_eq!(TEST_AUDIO_PATH_CALLS.load(Ordering::SeqCst), 3);
+        assert_eq!(TEST_AUDIO_CALLBACKS.load(Ordering::SeqCst), 14);
+    }
+
+    #[test]
+    fn offline_web_network_bridges_are_inert_and_contractual() {
+        assert_eq!(stasis_jit_offline_web_network_supported(), 0);
+        assert_eq!(stasis_jit_offline_web_network_connect(), -4);
+        assert_eq!(stasis_jit_offline_web_network_status(), -4);
+        assert_eq!(stasis_jit_offline_web_network_poll(123, 0), -4);
+        assert_eq!(stasis_jit_offline_web_network_send(456, 0), -4);
+        assert_eq!(stasis_jit_offline_web_network_resume_seat(), -1);
+        assert_eq!(stasis_jit_offline_web_network_last_sequence(), 0);
+        assert_eq!(stasis_jit_offline_web_network_checkpoint(-1, 0), -4);
+
+        assert_eq!(
+            stasis_jit_offline_web_network_poll(123, -1),
+            -1,
+            "poll rejects negative capacity"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_poll(123, OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES + 1),
+            -1,
+            "poll rejects oversized capacity"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_send(456, -1),
+            -1,
+            "send rejects negative length"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_send(456, OFFLINE_WEB_NETWORK_MAX_MESSAGE_BYTES + 1),
+            -1,
+            "send rejects oversized length"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_checkpoint(-2, 0),
+            -1,
+            "checkpoint rejects invalid seat"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_checkpoint(0, -1),
+            -1,
+            "checkpoint rejects invalid sequence"
+        );
+        assert_eq!(
+            stasis_jit_offline_web_network_checkpoint(8, 0),
+            -1,
+            "checkpoint rejects out-of-range seat"
+        );
+    }
+
+    #[test]
+    fn network_seed_bridge_is_capability_gated() {
+        #[cfg(feature = "network")]
+        {
+            assert_eq!(stasis_jit_network_supported(), 1);
+            let seed = stasis_jit_network_host_random_seed();
+            assert!(seed > 0 && seed <= i32::MAX);
+        }
+        #[cfg(not(feature = "network"))]
+        {
+            assert_eq!(stasis_jit_network_supported(), 0);
+            assert_eq!(stasis_jit_network_host_random_seed(), 0);
+        }
+    }
+
+    struct EmbeddedHostReset;
+
+    impl Drop for EmbeddedHostReset {
+        fn drop(&mut self) {
+            set_embedded_graphics_host(None);
+        }
+    }
+
+    #[test]
+    fn jit_sprite_same_handle_replacement_releases_prior_acquisition() {
+        let _guard = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+        TEST_SPRITE_RELEASES.store(0, Ordering::SeqCst);
+        let _host_reset = EmbeddedHostReset;
+        set_embedded_graphics_host(Some(EmbeddedGraphicsHost {
+            load_sprite: test_sprite_load,
+            release_sprite: test_sprite_release,
+            load_font: test_font_load,
+            measure_text: test_measure_text,
+            cache_text: test_cache_text,
+            replace_text: test_replace_text,
+            measure_text_cached: test_measure_cached,
+            measure_text_cached_height: test_measure_cached,
+            poll_reload: test_poll_reload,
+        }));
+        let mut sprite_refs = [0_i32];
+        let mut widths = [0_i32];
+        let mut heights = [0_i32];
+        register_global_i32_array(
+            100,
+            global_path_hash("sprite_ref"),
+            sprite_refs.as_mut_ptr(),
+            1,
+        );
+        register_global_i32_array(100, global_path_hash("width"), widths.as_mut_ptr(), 1);
+        register_global_i32_array(100, global_path_hash("height"), heights.as_mut_ptr(), 1);
+        upsert_jit_string_literal(55, "assets/sprite.svg");
+        assert_eq!(stasis_jit_sprite_load_from(100, 0, 1, 55, 32, 24), 1);
+        assert_eq!(stasis_jit_sprite_load_from(100, 0, 1, 55, 32, 24), 1);
+        assert_eq!(sprite_refs[0], 77);
+        assert_eq!(TEST_SPRITE_RELEASES.load(Ordering::SeqCst), 1);
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+    }
+
+    #[test]
+    fn jit_text_run_replacement_publishes_only_after_host_success() {
+        let _guard = test_lock();
+        clear_registered_global_memory();
+        clear_jit_string_literal_table();
+        let _host_reset = EmbeddedHostReset;
+        set_embedded_graphics_host(Some(EmbeddedGraphicsHost {
+            load_sprite: test_sprite_load,
+            release_sprite: test_sprite_release,
+            load_font: test_font_load,
+            measure_text: test_measure_text,
+            cache_text: test_cache_text,
+            replace_text: test_replace_text,
+            measure_text_cached: test_measure_cached,
+            measure_text_cached_height: test_measure_cached,
+            poll_reload: test_poll_reload,
+        }));
+        let mut fonts = [1_i32];
+        let mut handles = [1_i32];
+        let mut widths = [7.0_f32];
+        let mut heights = [8.0_f32];
+        register_global_i32_array(200, global_path_hash("font"), fonts.as_mut_ptr(), 1);
+        register_global_i32_array(200, global_path_hash("handle"), handles.as_mut_ptr(), 1);
+        register_global_f32_array(200, global_path_hash("width"), widths.as_mut_ptr(), 1);
+        register_global_f32_array(200, global_path_hash("height"), heights.as_mut_ptr(), 1);
+        upsert_jit_string_literal(88, "score 1");
+        assert_eq!(stasis_jit_text_run_replace_from(200, 0, 1, 1, 88), 1);
+        assert_eq!(
+            (fonts[0], handles[0], widths[0], heights[0]),
+            (1, 2, 1.0, 1.0)
+        );
+        upsert_jit_string_literal(88, "score 2");
+        assert_eq!(stasis_jit_text_run_replace_from(200, 0, 1, 1, 88), 1);
+        assert_eq!(handles[0], 2);
+        let before = (fonts[0], handles[0], widths[0], heights[0]);
+        assert_eq!(stasis_jit_text_run_replace_from(200, 0, 1, 0, 88), 0);
+        assert_eq!((fonts[0], handles[0], widths[0], heights[0]), before);
+        clear_registered_global_memory();
+        clear_jit_string_literal_table();
+    }
+
+    #[test]
+    fn bundled_graphics_runtime_is_default_candidate() {
         let executable = std::env::current_exe().expect("current test executable");
+        let candidates = runtime_library_candidate_paths();
         let expected = executable
             .parent()
             .expect("test executable directory")
             .join(runtime_library_file_names()[0]);
-        assert_eq!(runtime_library_candidate_paths().first(), Some(&expected));
+        assert_eq!(candidates.first(), Some(&expected));
+    }
+
+    #[test]
+    fn build_fingerprint_contract_accepts_only_sha256_hex() {
+        let valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(is_verified_build_fingerprint(valid));
+        assert!(is_verified_build_fingerprint(&valid.to_ascii_uppercase()));
+        assert!(!is_verified_build_fingerprint("development"));
+        assert!(!is_verified_build_fingerprint(""));
+        assert!(!is_verified_build_fingerprint("not-a-sha256"));
+    }
+
+    #[test]
+    fn configured_runtime_is_fallback_without_executable_directory() {
+        let configured = PathBuf::from("configured/stasis_graphics.dll");
+        let candidates =
+            runtime_library_candidate_paths_for(None, std::slice::from_ref(&configured));
+        assert_eq!(candidates.first(), Some(&configured));
     }
 
     #[cfg(not(windows))]
@@ -5320,7 +7949,7 @@ mod tests {
 
         // Safety: invalid lengths must be rejected before any pointer is resolved.
         let trace = unsafe {
-            stasis_jit_render_v2_trace(
+            stasis_jit_render_trace(
                 101,
                 i32::MAX,
                 102,
@@ -5346,7 +7975,7 @@ mod tests {
     }
 
     #[test]
-    fn render_trace_preserves_v3_cross_category_order() {
+    fn render_trace_preserves_cross_category_order() {
         let mut i32s = vec![0i32; STASIS_RENDER_I32_COUNT];
         let mut f32s = vec![0.0f32; STASIS_RENDER_F32_COUNT];
         let u8s = vec![0u8; STASIS_RENDER_U8_COUNT];
@@ -5355,38 +7984,72 @@ mod tests {
         i32s[3] = 1;
         i32s[4] = 1;
         i32s[STASIS_RENDER_SPRITE_BASE] = 17;
+        i32s[STASIS_RENDER_SPRITE_BASE + 1] = -1;
         f32s[4..12].copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 0.5, 0.6, 0.7, 0.8]);
-        f32s[STASIS_RENDER_SPRITE_BASE_F32..STASIS_RENDER_SPRITE_BASE_F32 + 4]
-            .copy_from_slice(&[10.0, 20.0, 30.0, 40.0]);
+        f32s[STASIS_RENDER_SPRITE_BASE_F32..STASIS_RENDER_SPRITE_BASE_F32 + 13].copy_from_slice(&[
+            10.0, 20.0, 30.0, 40.0, 0.0, 0.0, 0.0, 0.0, 15.0, 20.0, 1.0, 1.0, 0.0,
+        ]);
+        i32s[STASIS_RENDER_SPRITE_RUN_COUNT_INDEX] = 1;
+        i32s[STASIS_RENDER_SPRITE_RUN_BASE] = 0;
+        i32s[STASIS_RENDER_SPRITE_RUN_BASE + 1] = 1;
+        i32s[STASIS_RENDER_SPRITE_RUN_BASE + 2] = -1;
         i32s[STASIS_RENDER_ORDER_COUNT_INDEX] = 2;
         i32s[STASIS_RENDER_ORDER_BASE] = 2 * 16_384;
         i32s[STASIS_RENDER_ORDER_BASE + 1] = 16_384;
 
         let sprite_then_line =
-            unsafe { stasis_render_v2_trace_native(i32s.as_ptr(), f32s.as_ptr(), u8s.as_ptr()) };
+            unsafe { stasis_render_trace_native(i32s.as_ptr(), f32s.as_ptr(), u8s.as_ptr()) };
         i32s[STASIS_RENDER_ORDER_BASE] = 16_384;
         i32s[STASIS_RENDER_ORDER_BASE + 1] = 2 * 16_384;
         let line_then_sprite =
-            unsafe { stasis_render_v2_trace_native(i32s.as_ptr(), f32s.as_ptr(), u8s.as_ptr()) };
+            unsafe { stasis_render_trace_native(i32s.as_ptr(), f32s.as_ptr(), u8s.as_ptr()) };
         i32s[STASIS_RENDER_ORDER_COUNT_INDEX] = 0;
-        let legacy_fallback =
-            unsafe { stasis_render_v2_trace_native(i32s.as_ptr(), f32s.as_ptr(), u8s.as_ptr()) };
+        let fallback_without_order =
+            unsafe { stasis_render_trace_native(i32s.as_ptr(), f32s.as_ptr(), u8s.as_ptr()) };
 
         assert_ne!(sprite_then_line, 0);
         assert_ne!(sprite_then_line, line_then_sprite);
-        assert_eq!(line_then_sprite, legacy_fallback);
+        assert_eq!(line_then_sprite, fallback_without_order);
     }
 
     #[test]
-    fn render_v2_buffers_keep_their_historical_i32_capacity() {
+    fn current_render_trace_accepts_only_the_current_canonical_buffers() {
+        let mut i32s = vec![0i32; STASIS_RENDER_I32_COUNT];
+        let mut f32s = vec![0.0f32; STASIS_RENDER_F32_COUNT];
+        let u8s = vec![0u8; STASIS_RENDER_U8_COUNT];
+        i32s[0] = STASIS_RENDER_MAGIC;
+        i32s[1] = STASIS_RENDER_VERSION;
+        i32s[3] = 1;
+        f32s[4..12].copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 0.5, 0.6, 0.7, 0.8]);
+
+        assert_ne!(current_render_trace(&i32s, &f32s, &u8s), 0);
+        assert_eq!(
+            current_render_trace(&i32s[..i32s.len() - 1], &f32s, &u8s),
+            0
+        );
+        assert_eq!(
+            current_render_trace(&i32s, &f32s[..f32s.len() - 1], &u8s),
+            0
+        );
+        assert_eq!(current_render_trace(&i32s, &f32s, &u8s[..u8s.len() - 1]), 0);
+
+        i32s[1] = STASIS_RENDER_VERSION - 1;
+        assert_eq!(current_render_trace(&i32s, &f32s, &u8s), 0);
+        i32s[1] = STASIS_RENDER_VERSION;
+        i32s[0] ^= 1;
+        assert_eq!(current_render_trace(&i32s, &f32s, &u8s), 0);
+    }
+
+    #[test]
+    fn render_trace_rejects_legacy_versions_and_non_current_lengths() {
         let _lock = test_lock();
         clear_registered_global_memory();
 
-        let mut i32s = vec![0i32; STASIS_RENDER_V2_I32_COUNT];
+        let mut i32s = vec![0i32; STASIS_RENDER_I32_COUNT];
         let mut f32s = vec![0.0f32; STASIS_RENDER_F32_COUNT];
         let mut u8s = vec![0u8; STASIS_RENDER_U8_COUNT];
         i32s[0] = STASIS_RENDER_MAGIC;
-        i32s[1] = STASIS_RENDER_V2_VERSION;
+        i32s[1] = STASIS_RENDER_VERSION;
         i32s[3] = 1;
         f32s[4..12].copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 0.5, 0.6, 0.7, 0.8]);
 
@@ -5398,10 +8061,11 @@ mod tests {
         register_global_u8_array(u8_id, 0, u8s.as_mut_ptr(), u8s.len());
 
         let expected =
-            unsafe { stasis_render_v2_trace_native(i32s.as_ptr(), f32s.as_ptr(), u8s.as_ptr()) }
+            unsafe { stasis_render_trace_native(i32s.as_ptr(), f32s.as_ptr(), u8s.as_ptr()) }
                 as i32;
-        let v2_with_current_len = unsafe {
-            stasis_jit_render_v2_trace(
+        assert_ne!(expected, 0);
+        let current = unsafe {
+            stasis_jit_render_trace(
                 i32_id,
                 STASIS_RENDER_I32_COUNT as i32,
                 f32_id,
@@ -5410,44 +8074,98 @@ mod tests {
                 STASIS_RENDER_U8_COUNT as i32,
             )
         };
-        assert_eq!(v2_with_current_len, 0);
-        let actual = unsafe {
-            stasis_jit_render_v2_trace(
-                i32_id,
-                STASIS_RENDER_V2_I32_COUNT as i32,
-                f32_id,
-                STASIS_RENDER_F32_COUNT as i32,
-                u8_id,
-                STASIS_RENDER_U8_COUNT as i32,
-            )
-        };
-        assert_ne!(expected, 0);
-        assert_eq!(actual, expected);
-
+        assert_eq!(current, expected);
+        for legacy_version in 2..=5 {
+            i32s[1] = legacy_version;
+            let rejected = unsafe {
+                stasis_jit_render_trace(
+                    i32_id,
+                    STASIS_RENDER_I32_COUNT as i32,
+                    f32_id,
+                    STASIS_RENDER_F32_COUNT as i32,
+                    u8_id,
+                    STASIS_RENDER_U8_COUNT as i32,
+                )
+            };
+            assert_eq!(
+                rejected, 0,
+                "legacy render version {legacy_version} must be rejected"
+            );
+        }
         i32s[1] = STASIS_RENDER_VERSION;
-        let v3_with_legacy_len = unsafe {
-            stasis_jit_render_v2_trace(
+        let wrong_i32_length = unsafe {
+            stasis_jit_render_trace(
                 i32_id,
-                STASIS_RENDER_V2_I32_COUNT as i32,
+                (STASIS_RENDER_I32_COUNT - 1) as i32,
                 f32_id,
                 STASIS_RENDER_F32_COUNT as i32,
                 u8_id,
                 STASIS_RENDER_U8_COUNT as i32,
             )
         };
-        assert_eq!(v3_with_legacy_len, 0);
-        i32s[1] = STASIS_RENDER_V2_VERSION;
+        assert_eq!(wrong_i32_length, 0);
+        let wrong_f32_length = unsafe {
+            stasis_jit_render_trace(
+                i32_id,
+                STASIS_RENDER_I32_COUNT as i32,
+                f32_id,
+                (STASIS_RENDER_F32_COUNT - 1) as i32,
+                u8_id,
+                STASIS_RENDER_U8_COUNT as i32,
+            )
+        };
+        assert_eq!(wrong_f32_length, 0);
+
+        clear_registered_global_memory();
+    }
+    #[test]
+    fn active_render_copy_preserves_reverse_rectangles() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+
+        let mut i32s = vec![0i32; STASIS_RENDER_I32_COUNT];
+        let mut f32s = vec![0.0f32; STASIS_RENDER_F32_COUNT];
+        let mut u8s = vec![0u8; STASIS_RENDER_U8_COUNT];
+        i32s[0] = STASIS_RENDER_MAGIC;
+        i32s[1] = STASIS_RENDER_VERSION;
+        i32s[3] = 1;
+        i32s[STASIS_RENDER_RECT_COUNT_INDEX] = 2;
+        i32s[STASIS_RENDER_ORDER_COUNT_INDEX] = 3;
+        f32s[4..12].copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 0.4]);
+        let rect_start = STASIS_RENDER_SPRITE_BASE_F32 - 2 * STASIS_RENDER_LINE_STRIDE;
+        f32s[rect_start..STASIS_RENDER_SPRITE_BASE_F32].copy_from_slice(&[
+            9.0, 10.0, 11.0, 12.0, 0.5, 0.6, 0.7, 0.8, 1.0, 2.0, 3.0, 4.0, 0.2, 0.3, 0.4, 0.5,
+        ]);
+
+        let i32_id = global_path_hash("gfx_cmd_i32");
+        register_global_i32_array(i32_id, 0, i32s.as_mut_ptr(), i32s.len());
+        register_global_f32_array(
+            global_path_hash("gfx_cmd_f32"),
+            0,
+            f32s.as_mut_ptr(),
+            f32s.len(),
+        );
+        register_global_u8_array(
+            global_path_hash("gfx_cmd_u8"),
+            0,
+            u8s.as_mut_ptr(),
+            u8s.len(),
+        );
 
         let mut out_i32 = vec![0i32; STASIS_RENDER_I32_COUNT];
         let mut out_f32 = vec![0.0f32; STASIS_RENDER_F32_COUNT];
         let mut out_u8 = vec![0u8; STASIS_RENDER_U8_COUNT];
         let counts = copy_jit_render_active(&mut out_i32, &mut out_f32, &mut out_u8)
-            .expect("copy historical v2 buffer");
+            .expect("copy current buffer");
+
         assert_eq!(counts.lines, 1);
-        assert_eq!(counts.order, 0);
-        assert_eq!(out_i32[1], STASIS_RENDER_V2_VERSION);
-        assert_eq!(out_i32[STASIS_RENDER_ORDER_COUNT_INDEX], 0);
-        assert_eq!(&out_f32[4..12], &f32s[4..12]);
+        assert_eq!(counts.rects, 2);
+        assert_eq!(counts.order, 3);
+        assert_eq!(out_i32[STASIS_RENDER_RECT_COUNT_INDEX], 2);
+        assert_eq!(
+            &out_f32[rect_start..STASIS_RENDER_SPRITE_BASE_F32],
+            &f32s[rect_start..STASIS_RENDER_SPRITE_BASE_F32]
+        );
 
         clear_registered_global_memory();
     }
@@ -5599,6 +8317,61 @@ mod tests {
         assert_eq!(stasis_jit_collection_i32_load(1234, 1), 5);
         assert_eq!(stasis_jit_collection_i32_load(1234, 2), 5);
         assert_eq!(stasis_jit_collection_i32_load(1234, 3), 5);
+    }
+
+    #[test]
+    fn jit_global_i32_array_load_reads_string_literal_bytes_with_safe_bounds() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+
+        let literal_id = 0x1357_2468i32;
+        upsert_jit_string_literal(literal_id, "52%");
+
+        assert_eq!(
+            stasis_jit_global_i32_array_load(literal_id, 0, 0),
+            i32::from(b'5')
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(literal_id, 0, 1),
+            i32::from(b'2')
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(literal_id, 0, 2),
+            i32::from(b'%')
+        );
+        assert_eq!(stasis_jit_global_i32_array_load(literal_id, 0, 3), 0);
+        assert_eq!(stasis_jit_global_i32_array_load(literal_id, 0, -1), 0);
+
+        clear_jit_string_literal_table();
+    }
+
+    #[test]
+    fn jit_global_i32_array_load_prefers_runtime_arrays_over_literal_hash_collisions() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+
+        let shared_id = 0x2468_1357i32;
+        upsert_jit_string_literal(shared_id, "literal");
+
+        stasis_jit_global_i32_array_store(shared_id, 0, 0, 81);
+        let mut registered = [91i32, 92];
+        register_global_i32_array(shared_id, 0, registered.as_mut_ptr(), registered.len());
+
+        assert_eq!(stasis_jit_global_i32_array_load(shared_id, 0, 0), 91);
+        assert_eq!(stasis_jit_global_i32_array_load(shared_id, 0, 1), 92);
+
+        clear_registered_global_memory();
+        assert_eq!(stasis_jit_global_i32_array_load(shared_id, 0, 0), 81);
+        assert_eq!(stasis_jit_global_i32_array_load(shared_id, 0, 1), 0);
+
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
     }
 
     #[test]
@@ -5755,12 +8528,90 @@ mod tests {
         assert_eq!(stasis_jit_collection_i32_load(shared_id, 3), 6);
     }
 
+    #[test]
+    fn jit_profiler_aggregates_nested_inclusive_and_exclusive_time() {
+        let _lock = test_lock();
+        enable_jit_profiler();
+        stasis_jit_profile_frame_enter(11);
+        stasis_jit_profile_frame_enter(22);
+        let mut value = 0_u64;
+        for i in 0..10_000_u64 {
+            value = std::hint::black_box(value.wrapping_add(i));
+        }
+        stasis_jit_profile_frame_leave(22);
+        stasis_jit_profile_frame_leave(11);
+        std::hint::black_box(value);
+        disable_jit_profiler();
+
+        let samples = jit_profile_snapshot();
+        let parent = samples
+            .iter()
+            .find(|sample| sample.function_id == 11)
+            .expect("parent sample");
+        let child = samples
+            .iter()
+            .find(|sample| sample.function_id == 22)
+            .expect("child sample");
+        assert_eq!(parent.calls, 1);
+        assert_eq!(child.calls, 1);
+        assert!(parent.inclusive_ns >= child.inclusive_ns);
+        assert!(parent.inclusive_ns >= parent.exclusive_ns);
+        assert!(child.inclusive_ns >= child.exclusive_ns);
+        assert_eq!(parent.max_inclusive_ns, parent.inclusive_ns);
+
+        reset_jit_profile();
+        assert!(jit_profile_snapshot().is_empty());
+    }
+
+    #[test]
+    fn jit_profiler_merges_samples_from_multiple_threads() {
+        let _lock = test_lock();
+        enable_jit_profiler();
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..25 {
+                        stasis_jit_profile_frame_enter(33);
+                        std::hint::black_box(33);
+                        stasis_jit_profile_frame_leave(33);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("profile worker");
+        }
+        disable_jit_profiler();
+
+        let samples = jit_profile_snapshot();
+        let sample = samples
+            .iter()
+            .find(|sample| sample.function_id == 33)
+            .expect("cross-thread sample");
+        assert_eq!(sample.calls, 100);
+        assert!(sample.inclusive_ns >= sample.exclusive_ns);
+        assert!(sample.max_inclusive_ns > 0);
+    }
+
     extern "C" fn host_entry_one() -> i32 {
         1
     }
 
     extern "C" fn host_entry_two() -> i32 {
         2
+    }
+
+    extern "C" fn add_frame(frame: i32) -> i32 {
+        frame.saturating_add(7)
+    }
+
+    #[test]
+    fn invokes_single_i32_to_i32_guest_abi() {
+        let address = add_frame as *const () as usize;
+        assert_eq!(invoke_i32_to_i32(address, 35), Ok(42));
+        assert!(invoke_i32_to_i32(0, 0)
+            .expect_err("null invocation must fail")
+            .contains("null function pointer"));
     }
 
     #[test]
@@ -5770,9 +8621,9 @@ mod tests {
         let render_trampoline = jit_host_render_trampoline_ptr();
         begin_jit_host_entry_session(JitHostEntryTargets {
             revision: 41,
-            main: host_entry_one as usize,
-            tick: host_entry_one as usize,
-            render: host_entry_one as usize,
+            main: host_entry_one as *const () as usize,
+            tick: host_entry_one as *const () as usize,
+            render: host_entry_one as *const () as usize,
             on_code_swap: None,
         })
         .expect("publish first host-entry table");
@@ -5781,9 +8632,9 @@ mod tests {
 
         publish_jit_host_entry_targets(JitHostEntryTargets {
             revision: 42,
-            main: host_entry_two as usize,
-            tick: host_entry_two as usize,
-            render: host_entry_two as usize,
+            main: host_entry_two as *const () as usize,
+            tick: host_entry_two as *const () as usize,
+            render: host_entry_two as *const () as usize,
             on_code_swap: None,
         })
         .expect("publish second host-entry table");
@@ -5794,9 +8645,9 @@ mod tests {
         assert_eq!(jit_host_entry_targets().unwrap().revision, 42);
         assert!(publish_jit_host_entry_targets(JitHostEntryTargets {
             revision: 41,
-            main: host_entry_one as usize,
-            tick: host_entry_one as usize,
-            render: host_entry_one as usize,
+            main: host_entry_one as *const () as usize,
+            tick: host_entry_one as *const () as usize,
+            render: host_entry_one as *const () as usize,
             on_code_swap: None,
         })
         .expect_err("stale publication")

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "name": "ui_gallery",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "vendor": {
+    "stasis": {
+      "release_id": "development",
+      "sha256": "b18043b126f4fd1dbbb15ac2ae3b637c46db1c94c45a411c22595a575902d43f"
+    }
+  },
+  "android": {
+    "application_id": "com.stasislang.sample.uigallery",
+    "label": "Stasis UI Gallery",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "1.0.0"
+  }
+}

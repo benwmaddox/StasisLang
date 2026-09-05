@@ -15,6 +15,7 @@ interface ToolchainFile {
 interface EditorInfo {
   schema: number;
   release_id: string;
+  build_fingerprint: string;
   target: string;
   protocols: {
     lsp: number;
@@ -23,7 +24,7 @@ interface EditorInfo {
     graphics_abi: number;
   };
   executable: { path: string; sha256: string };
-  graphics_runtime: { path: string; release_id: string; sha256: string };
+  graphics_runtime: { path: string; release_id: string; build_fingerprint: string; sha256: string };
 }
 
 interface EditorInfoEnvelope {
@@ -82,6 +83,7 @@ export async function verifyPackagedToolchain(extensionPath: string): Promise<st
   const actual = await readEditorInfo(executable);
   if (
     actual.release_id !== manifest.identity.release_id ||
+    actual.build_fingerprint !== manifest.identity.build_fingerprint ||
     actual.target !== manifest.identity.target ||
     JSON.stringify(actual.protocols) !== JSON.stringify(manifest.identity.protocols)
   ) {
@@ -95,6 +97,9 @@ export async function verifyPackagedToolchain(extensionPath: string): Promise<st
   }
   if (actual.graphics_runtime.release_id !== actual.release_id) {
     throw new Error("the packaged Stasis executable and graphics runtime have different release identities");
+  }
+  if (actual.graphics_runtime.build_fingerprint !== actual.build_fingerprint) {
+    throw new Error("the packaged Stasis executable and graphics runtime have different build fingerprints");
   }
   return executable;
 }
@@ -167,6 +172,16 @@ async function readEditorInfo(executable: string): Promise<EditorInfo> {
   }
   if (envelope.result.graphics_runtime?.release_id !== envelope.result.release_id) {
     throw new Error("the selected Stasis executable and graphics runtime do not belong to the same release");
+  }
+  const fingerprintPattern = /^[0-9a-f]{64}$/u;
+  if (
+    !fingerprintPattern.test(envelope.result.build_fingerprint) ||
+    !fingerprintPattern.test(envelope.result.graphics_runtime?.build_fingerprint ?? "")
+  ) {
+    throw new Error("the selected Stasis toolchain does not provide a verified build fingerprint");
+  }
+  if (envelope.result.graphics_runtime.build_fingerprint !== envelope.result.build_fingerprint) {
+    throw new Error("the selected Stasis executable and graphics runtime have different build fingerprints");
   }
   return envelope.result;
 }

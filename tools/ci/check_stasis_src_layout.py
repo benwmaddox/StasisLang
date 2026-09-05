@@ -1,12 +1,39 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import sys
 
 
 RE_IMPORT = re.compile(r'^\s*import\s+"([^"]+)"\s*;\s*(?://.*)?$')
+IGNORED_SOURCE_DIRS = {
+    ".git",
+    ".gradle",
+    ".stasis_cache",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+}
+
+
+def discover_stasis_files(scan_roots: list[pathlib.Path]) -> list[pathlib.Path]:
+    """Return application Stasis sources, excluding vendored source trees."""
+    stasis_files: list[pathlib.Path] = []
+    for root in scan_roots:
+        if not root.is_dir():
+            continue
+        for current_root, directories, filenames in os.walk(root):
+            directories[:] = sorted(
+                name for name in directories if name not in IGNORED_SOURCE_DIRS
+            )
+            for filename in sorted(filenames):
+                if filename.endswith(".stasis"):
+                    stasis_files.append(pathlib.Path(current_root) / filename)
+    return sorted(stasis_files, key=lambda path: path.as_posix())
 
 
 def main() -> int:
@@ -37,7 +64,7 @@ def main() -> int:
     testing_dir = stdlib_dir / "testing"
     required_internal = {
         "gfx_cmd.stasis",
-        "host_frame.stasis",
+        "host_frame_raw.stasis",
         "host_window_request.stasis",
     }
     missing_internal = sorted(
@@ -48,8 +75,17 @@ def main() -> int:
         for name in missing_internal:
             print(f"- src/stdlib/internal/{name}", file=sys.stderr)
         return 2
-    if not (testing_dir / "input_testkit.stasis").is_file():
-        print("error: missing src/stdlib/testing/input_testkit.stasis", file=sys.stderr)
+    required_testing = {
+        "input_testkit.stasis",
+        "ui_layout_audit.stasis",
+    }
+    missing_testing = sorted(
+        name for name in required_testing if not (testing_dir / name).is_file()
+    )
+    if missing_testing:
+        print("error: missing canonical stdlib testing modules:", file=sys.stderr)
+        for name in missing_testing:
+            print(f"- src/stdlib/testing/{name}", file=sys.stderr)
         return 2
 
     obsolete_paths = [stdlib_dir / "gfx_cmd.stasis"]
@@ -70,11 +106,7 @@ def main() -> int:
         return 1
 
     scan_roots = [src_dir, repo_root / "samples", repo_root / "tests"]
-    stasis_files: list[pathlib.Path] = []
-    for root in scan_roots:
-        if not root.is_dir():
-            continue
-        stasis_files.extend(root.rglob("*.stasis"))
+    stasis_files = discover_stasis_files(scan_roots)
 
     errors: list[str] = []
     for file_path in stasis_files:
@@ -104,9 +136,14 @@ def main() -> int:
             imports_internal = "/internal/" in norm or norm.startswith("internal/")
             if imports_internal:
                 inside_stdlib = rel_path.parts[:2] == ("src", "stdlib")
-                integration_test = rel_path.as_posix() == (
-                    "tests/stasis/rust_native_tick_input_snapshot.stasis"
-                )
+                integration_test = rel_path.as_posix() in {
+                    "tests/stasis/rust_native_tick_input_snapshot.stasis",
+                    "tests/stasis/seams/gfx_cmd_capacity_probe.stasis",
+                    "tests/stasis/seams/desktop_input_frame_probe.stasis",
+                    "tests/stasis/seams/desktop_display_metrics_probe.stasis",
+                    "tests/stasis/seams/desktop_manifest_assets_probe.stasis",
+                    "tests/stasis/seams/window_request_mailbox_probe.stasis",
+                }
                 if not inside_stdlib and not integration_test:
                     errors.append(
                         f'{rel_path.as_posix()}:{line_no}: private ABI import "{import_path}" '
@@ -114,7 +151,16 @@ def main() -> int:
                     )
 
             imports_testing = "/testing/" in norm or norm.startswith("testing/")
-            if imports_testing and not rel_path.name.endswith(".test.stasis"):
+            diagnostic_sample = rel_path.as_posix() in {
+                "samples/immediate_axis_layout/audit.stasis",
+                "samples/immediate_axis_layout/verify.stasis",
+                "samples/immediate_axis_layout/verify_jit.stasis",
+            }
+            if (
+                imports_testing
+                and not rel_path.name.endswith(".test.stasis")
+                and not diagnostic_sample
+            ):
                 errors.append(
                     f'{rel_path.as_posix()}:{line_no}: test-only import "{import_path}" '
                     "is limited to .test.stasis files"

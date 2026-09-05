@@ -1,0 +1,238 @@
+// This fixture deliberately covers two independent Android audio boundaries:
+// manifest-backed asset playback through the shared decoder/mixer, and the
+// low-level f32 push path used to exercise the AAudio sink lifecycle. Generated
+// projects do not contain a vendored stdlib tree, so the raw host bindings stay
+// private behind the same caller-owned typed surface used by regular projects.
+struct AudioAsset {
+    handle: i32;
+}
+
+struct AudioVoice {
+    handle: i32;
+}
+
+struct AudioStream {
+    active: bool;
+    available: bool;
+    sample_rate: i32;
+    channels: i32;
+    queued_frames: i32;
+    underruns: i32;
+}
+
+function @internal @effects(audio)@extern("audio_init") audio_init_raw(sample_rate: i32, channels: i32, target_latency_frames: i32): bool;
+function @internal @effects(audio)@extern("audio_shutdown") audio_shutdown_raw(): void;
+function @internal @effects(audio)@extern("audio_is_available") audio_is_available_raw(): bool;
+function @internal @effects(audio)@extern("audio_get_sample_rate") audio_get_sample_rate_raw(): i32;
+function @internal @effects(audio)@extern("audio_get_channels") audio_get_channels_raw(): i32;
+function @internal @effects(audio)@extern("audio_get_queued_frames") audio_get_queued_frames_raw(): i32;
+function @internal @effects(audio)@extern("audio_get_underruns") audio_get_underruns_raw(): i32;
+function @internal @effects(audio)@extern("audio_push_f32_interleaved") audio_push_raw(samples: f32[], frame_count: i32): i32;
+function @internal @effects(audio)@extern("stasis_jit_audio_load_music") audio_load_decoded_raw(path: string): i32;
+function @internal @effects(audio)@extern("audio_play") audio_play_raw(asset_handle: i32, loop: bool, volume: f32, pan: f32): i32;
+function @internal @effects(audio)@extern("audio_stop") audio_stop_raw(voice_handle: i32): void;
+
+function open(self: AudioStream, sample_rate: i32, channels: i32, target_latency_frames: i32): bool {
+    self.close();
+    self.active = audio_init_raw(sample_rate, channels, target_latency_frames);
+    self.refresh();
+    return self.active && self.available;
+}
+
+function refresh(self: AudioStream): void {
+    self.available = audio_is_available_raw();
+    self.sample_rate = audio_get_sample_rate_raw();
+    self.channels = audio_get_channels_raw();
+    self.queued_frames = audio_get_queued_frames_raw();
+    self.underruns = audio_get_underruns_raw();
+}
+
+function push(self: AudioStream, samples: f32[], frame_count: i32): i32 {
+    if (!self.active || !self.available) {
+        return 0;
+    }
+    return audio_push_raw(samples, frame_count);
+}
+
+function close(self: AudioStream): void {
+    if (self.active) {
+        audio_shutdown_raw();
+    }
+    self.active = false;
+    self.available = false;
+    self.sample_rate = 0;
+    self.channels = 0;
+    self.queued_frames = 0;
+    self.underruns = 0;
+}
+
+function @asset_path(path) load_audio(self: AudioAsset, path: string): bool {
+    self.handle = audio_load_decoded_raw(path);
+    return self.handle > 0;
+}
+
+function play(self: AudioVoice, asset: AudioAsset, loop: bool, volume: f32, pan: f32): bool {
+    self.stop();
+    self.handle = audio_play_raw(asset.handle, loop, volume, pan);
+    return self.handle > 0;
+}
+
+function stop(self: AudioVoice): void {
+    if (self.handle > 0) {
+        audio_stop_raw(self.handle);
+        self.handle = 0;
+    }
+}
+
+function play_once(self: AudioAsset, volume: f32, pan: f32): bool {
+    return audio_play_raw(self.handle, false, volume, pan) > 0;
+}
+
+extern function sin_fast(value: f32): f32;
+
+const AUDIO_FRAMES_PER_PUSH: i32 = 256;
+const AUDIO_EVENT_NONE: i32 = 0;
+const AUDIO_EVENT_MUSIC: i32 = 1;
+const AUDIO_EVENT_EFFECT: i32 = 2;
+const PI2: f32 = 6.2831855;
+
+global music_handle: i32;
+global effect_handle: i32;
+global manifest_music_ready: bool;
+global manifest_effect_ready: bool;
+global manifest_audio_started: bool;
+global manifest_audio_failed: bool;
+global manifest_music_playing: bool;
+global manifest_effect_played: bool;
+global manifest_audio_event: i32;
+global manifest_audio_ticks: i32;
+global audio_buf: f32[512];
+global audio_ready: bool;
+global audio_sr: i32;
+global audio_phase: f32;
+global music: AudioAsset;
+global effect: AudioAsset;
+global music_voice: AudioVoice;
+global audio_stream: AudioStream;
+
+global GameState {
+    tick_count: i32;
+}
+
+global Render {
+    command_schema_version: i32;
+    command_count: i32;
+    command0_kind: i32;
+    command0_x: i32;
+    command0_y: i32;
+    command0_w: i32;
+    command0_h: i32;
+    command0_color: i32;
+    command0_asset: i32;
+    command0_rotation_degrees: i32;
+    command0_alpha: i32;
+    command0_clip_x: i32;
+    command0_clip_y: i32;
+    command0_clip_w: i32;
+    command0_clip_h: i32;
+}
+
+function fill_audio_chunk(sample_rate: i32): void {
+    let sr_f: f32;
+    sr_f.from_i32(sample_rate);
+    let frame: i32 = 0;
+    for (frame = 0; frame < AUDIO_FRAMES_PER_PUSH; frame = frame + 1) {
+        let sample: f32 = sin_fast(audio_phase) * 0.08;
+        audio_phase = audio_phase +(440.0 / sr_f) * PI2;
+        if (audio_phase > PI2) {
+            audio_phase = audio_phase - PI2;
+        }
+        let index: i32 = frame * 2;
+        audio_buf[index] = sample;
+        audio_buf[index + 1] = sample;
+    }
+}
+
+// Keep this push-only path separate from manifest playback. It is retained so
+// the same fixture continues to prove AAudio ring capacity, pause, and resume.
+function audio_sink_acceptance_update(): void {
+    if (!audio_ready) {
+        return;
+    }
+    let queued: i32 = audio_stream.queued_frames;
+    let target: i32 = audio_sr / 5;
+    let batch: i32 = 0;
+    for (batch = 0; batch < 8 && queued < target; batch = batch + 1) {
+        fill_audio_chunk(audio_sr);
+        let pushed: i32 = audio_stream.push(audio_buf, AUDIO_FRAMES_PER_PUSH);
+        if (pushed < 1) {
+            return;
+        }
+        queued = queued + pushed;
+    }
+}
+
+// Compatibility handles are published synchronously by the shared host. Their
+// positive values are stored as deterministic readiness state, and the integer
+// event sequence makes music-before-effect submission inspectable in a
+// generated-AOT/package seam without a second event queue.
+function manifest_audio_update(): void {
+    if (manifest_audio_failed || manifest_audio_started) {
+        return;
+    }
+    if (!manifest_music_ready || !manifest_effect_ready) {
+        manifest_audio_failed = true;
+        return;
+    }
+    if (!music_voice.play(music, true, 0.18, 0.0)) {
+        manifest_audio_failed = true;
+        return;
+    }
+    manifest_music_playing = true;
+    manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_MUSIC;
+    if (!effect.play_once(0.25, 0.0)) {
+        manifest_audio_failed = true;
+        return;
+    }
+    manifest_effect_played = true;
+    manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_EFFECT;
+    manifest_audio_started = true;
+}
+
+function main(): void {
+    audio_ready = audio_stream.open(48000, 2, 1024);
+    if (audio_ready) {
+        audio_sr = audio_stream.sample_rate;
+    }
+    audio_phase = 0.0;
+    manifest_music_ready = music.load_audio("assets/tone.mp3");
+    manifest_effect_ready = effect.load_audio("assets/tone.wav");
+    music_handle = music.handle;
+    effect_handle = effect.handle;
+    manifest_audio_event = AUDIO_EVENT_NONE;
+    manifest_audio_started = false;
+    manifest_audio_failed = !manifest_music_ready || !manifest_effect_ready;
+}
+
+function tick(): void {
+    GameState.tick_count += 1;
+    audio_stream.refresh();
+    audio_ready = audio_stream.active && audio_stream.available;
+    manifest_audio_update();
+    if (manifest_audio_started) {
+        manifest_audio_ticks += 1;
+    }
+    audio_sink_acceptance_update();
+}
+
+function render(): void {
+    Render.command_schema_version = 2;
+    Render.command_count = 1;
+    Render.command0_kind = 1;
+    Render.command0_x = 40;
+    Render.command0_y = 40;
+    Render.command0_w = 280;
+    Render.command0_h = 80;
+    Render.command0_color = 3385958;
+    Render.command0_alpha = 255;
+}

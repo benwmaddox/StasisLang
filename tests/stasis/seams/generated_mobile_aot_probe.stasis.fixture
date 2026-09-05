@@ -1,0 +1,60 @@
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+global score: i32;
+global lifecycle_mode: i32;
+global entry_trace: i32;
+global tick_host_marker: i32;
+global render_score: i32;
+global forwarded_byte_length: i32;
+global forwarded_char_length: i32;
+
+function emit_text_leaf(text: utf8[]): void {
+    forwarded_byte_length = length_bytes(text);
+    forwarded_char_length = length_chars(text);
+    draw_text(7, text, 12.0, 14.0, 0.8, 0.2, 0.1, 1.0);
+}
+
+function emit_text_middle(text: utf8[]): void {
+    emit_text_leaf(text);
+}
+
+function emit_text_outer(text: utf8[]): void {
+    emit_text_middle(text);
+}
+
+function main(): i32 {
+    entry_trace = 1;
+    score = 10;
+    if (lifecycle_mode == 1) {
+        return 11;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    entry_trace = entry_trace * 10 + 2;
+    tick_host_marker = host_i32[100];
+    score += 5;
+    if (lifecycle_mode == 2) {
+        return 22;
+    }
+    return 0;
+}
+
+function render(): i32 {
+    entry_trace = entry_trace * 10 + 3;
+    render_score = score;
+    begin_frame();
+    clear(0.05, 0.10, 0.15, 1.0);
+    fill_rect(12.0, 14.0, 30.0, 18.0, 0.8, 0.2, 0.1, 1.0);
+    emit_text_outer("Café");
+    end_frame();
+    if (lifecycle_mode == 3) {
+        return 33;
+    }
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

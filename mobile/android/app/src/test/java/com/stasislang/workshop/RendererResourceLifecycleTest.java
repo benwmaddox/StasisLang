@@ -87,4 +87,23 @@ public final class RendererResourceLifecycleTest {
         assertEquals(0, lifecycle.restoreFailures());
         assertTrue(lifecycle.beginRestore());
     }
+
+    @Test
+    public void replacementGenerationPublishesOnlyAfterItsCompleteRestore() {
+        RendererResourceLifecycle lifecycle = new RendererResourceLifecycle();
+        lifecycle.onRendererCreated();
+        assertTrue(lifecycle.beginRestore());
+        lifecycle.finishRestore(true);
+        assertTrue(lifecycle.canPresent());
+
+        lifecycle.onRendererCreated();
+        assertEquals(2, lifecycle.rendererGeneration());
+        assertFalse(lifecycle.canPresent());
+        assertTrue(lifecycle.beginRestore());
+        lifecycle.deferRestore();
+        assertFalse(lifecycle.canPresent());
+        assertTrue(lifecycle.beginRestore());
+        lifecycle.finishRestore(true);
+        assertTrue(lifecycle.canPresent());
+    }
 }

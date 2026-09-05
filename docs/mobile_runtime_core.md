@@ -2,7 +2,7 @@
 
 Android and iOS release apps link the same `stasis_mobile_runtime` static C
 library. The target compiles the existing Stasis graphics, input, audio, and
-asset host APIs with `STASIS_GRAPHICS_SDL_ONLY`; it never links the desktop SDL
+asset host APIs with the canonical SDL renderer; it never links the desktop SDL
 entry shim, DLL runner, dynamic loader, JIT, watcher, or hot-swap code.
 
 ## Shell integration
@@ -23,11 +23,27 @@ StasisMobileGameEntries game = {
 StasisMobileRuntimeConfig config = {1280, 720, "My Stasis Game"};
 
 int status = stasis_mobile_runtime_initialize(&config, &game);
+StasisMobileFramePacer frame_pacer;
+stasis_mobile_frame_pacer_reset(&frame_pacer, SDL_GetTicksNS());
 while (status == STASIS_MOBILE_RUNTIME_OK) {
     status = stasis_mobile_runtime_step();
+    if (status == STASIS_MOBILE_RUNTIME_OK) {
+        uint64_t wait_ns = stasis_mobile_frame_pacer_wait_ns(
+            &frame_pacer, SDL_GetTicksNS());
+        if (wait_ns > 0) {
+            SDL_DelayPrecise(wait_ns);
+        }
+    }
 }
 stasis_mobile_runtime_shutdown();
 ```
+
+The shared shell targets 60 deterministic steps per second independently of
+the display refresh rate. Vsync time counts toward the frame interval, so a
+60 Hz display does not receive an unconditional extra delay while 90 Hz and
+120 Hz displays cannot accelerate game time. If suspension or overload misses
+a complete interval, the pacer resets its absolute deadline and never runs a
+burst of catch-up ticks.
 
 The generated AOT symbol header declares `main`, `tick`, and `render` as
 `int32_t(void)` and is the source of the actual symbol names. The runtime turns

@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=STASIS_RUNTIME_LIBRARY_PATH");
     println!("cargo:rerun-if-env-changed=STASIS_RUNTIME_DLL_PATH");
     println!("cargo:rerun-if-env-changed=STASIS_RELEASE_ID");
+    println!("cargo:rerun-if-env-changed=STASIS_BUILD_FINGERPRINT");
     println!("cargo:rerun-if-env-changed=STASIS_SOURCE_COMMIT");
     println!("cargo:rerun-if-env-changed=STASIS_BUILD_TARGET");
 
@@ -73,18 +74,31 @@ fn runtime_library_candidate_paths() -> Vec<PathBuf> {
         .canonicalize()
         .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."));
 
-    let mut candidates = Vec::new();
-    if let Some(configured) = env::var_os("STASIS_RUNTIME_LIBRARY_PATH") {
-        candidates.push(PathBuf::from(configured));
-    }
-    if let Some(configured) = env::var_os("STASIS_RUNTIME_DLL_PATH") {
-        candidates.push(PathBuf::from(configured));
-    }
-    for file_name in runtime_library_file_names() {
-        candidates.push(repo_root.join(file_name));
-        candidates.push(repo_root.join("build").join(file_name));
-        for build_dir in ["build", "build_ci"] {
-            for configuration in [None, Some("Release"), Some("Debug")] {
+    let configured = [
+        env::var_os("STASIS_RUNTIME_LIBRARY_PATH"),
+        env::var_os("STASIS_RUNTIME_DLL_PATH"),
+    ]
+    .into_iter()
+    .flatten()
+    .map(PathBuf::from);
+    runtime_library_candidate_paths_for(&repo_root, configured, runtime_library_file_names())
+}
+
+/// Build staging prefers runtime binaries from the current checkout over legacy copies.
+///
+/// Keep explicit environment paths first: they are an intentional override for CI and
+/// platform-specific workflows. The runtime build outputs follow in release, unconfigured
+/// (the native build's bin root), and debug order for both regular and CI build trees. Copies
+/// beside the repository root or in its legacy `build` directory are last-resort fallbacks.
+pub fn runtime_library_candidate_paths_for(
+    repo_root: &Path,
+    configured: impl IntoIterator<Item = PathBuf>,
+    file_names: &[&str],
+) -> Vec<PathBuf> {
+    let mut candidates = configured.into_iter().collect::<Vec<_>>();
+    for build_dir in ["build", "build_ci"] {
+        for configuration in [Some("Release"), None, Some("Debug")] {
+            for file_name in file_names {
                 let mut candidate = repo_root.join("runtime").join(build_dir).join("bin");
                 if let Some(configuration) = configuration {
                     candidate.push(configuration);
@@ -93,6 +107,10 @@ fn runtime_library_candidate_paths() -> Vec<PathBuf> {
                 candidates.push(candidate);
             }
         }
+    }
+    for file_name in file_names {
+        candidates.push(repo_root.join(file_name));
+        candidates.push(repo_root.join("build").join(file_name));
     }
     candidates
 }

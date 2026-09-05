@@ -1,0 +1,24 @@
+struct GameState {
+    value: i32;
+}
+
+global state: GameState;
+
+function advance(value: GameState): void {
+    value.value += 1;
+}
+
+function @effects(state) tick(): i32 {
+    state.advance();
+    return 0;
+}
+
+function @effects(graphics) render(): i32 {
+    return state.value;
+}
+
+function main(): i32 {
+    state.value = 41;
+    tick();
+    return render();
+}

@@ -1,10 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+@STASIS_NETWORK_PERMISSION@
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
     <application
         android:allowBackup="false"
+        android:appCategory="game"
         android:label="@STASIS_APP_NAME@"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+        <property
+            android:name="android.window.PROPERTY_COMPAT_ALLOW_ORIENTATION_OVERRIDE"
+            android:value="false" />
+        <property
+            android:name="android.window.PROPERTY_COMPAT_ALLOW_USER_ASPECT_RATIO_OVERRIDE"
+            android:value="false" />
         <activity
             android:name=".MainActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"

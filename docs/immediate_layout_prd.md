@@ -19,7 +19,7 @@ It returns one `f32` coordinate. The caller uses those returned coordinates for 
 
 This design matches the Stasis language surface implemented today. It uses ordinary scalar locals and scalar returns. It does not require function-local arrays, local struct materialization, array returns, hidden allocation, or a retained UI tree.
 
-`f32` is the canonical type for presentation geometry across the proposed public path. Positions, sizes, padding, pointer coordinates, text measurement, flex results, and sprite geometry remain `f32` until a platform renderer explicitly rasterizes them.
+`f32` is the canonical type for presentation geometry across the proposed public path. Positions, sizes, padding, pointer coordinates, text measurement, single-pass rectangle results, and sprite geometry remain `f32` until a platform renderer explicitly rasterizes them.
 
 Stasis is a pre-1.0 language. This work chooses a clear canonical API and removes superseded compatibility aliases in the same change. It does not preserve ambiguous names, duplicate wrappers, deprecated stubs, or old HostFrame fields solely for source or ABI compatibility.
 
@@ -33,7 +33,7 @@ let label_y: f32 = button_y + (button_h - line_h) * 0.5 + 1.0;
 let icon_x: f32 = panel_x + panel_w - icon_w - 12.0;
 ```
 
-These calculations are individually simple, but repeated versions can diverge between screens, drawing, and hit testing. The existing `flex_layout.stasis` distributes multiple sibling rectangles but does not provide a small typed primitive for positioning one item along one axis.
+These calculations are individually simple, but repeated versions can diverge between screens, drawing, and hit testing. The single-pass rectangle flow distributes sibling rectangles, while typed axis placement provides the small primitive for positioning one item within each resulting rectangle.
 
 The shared system should capture that missing operation without introducing a larger UI framework.
 
@@ -48,7 +48,7 @@ V1 must:
 5. Work entirely with supported scalar parameters, locals, and returns.
 6. Support cached text placement using width measured and stored during resource initialization plus an explicit line height.
 7. Support buttons, icons, HUD labels, menu titles, and similar immediate-mode drawing.
-8. Compose with existing flex rows, columns, and grids without replacing them.
+8. Compose with single-pass horizontal and vertical stacks plus game-owned grid placement.
 9. Perform no allocation and no host-side UI registration.
 10. Produce deterministic JIT and AOT behavior.
 11. Remove avoidable `i32`/`f32` conversions from the public presentation path.
@@ -64,10 +64,10 @@ V1 does not provide:
 - functions that write rectangles through `f32[]` output parameters
 - a retained component or widget tree
 - a general constraint solver
-- CSS-compatible flexbox
+- CSS-compatible multi-pass layout
 - automatic text wrapping, ellipsis, or font scaling
 - clipping or scrolling
-- automatic sibling distribution beyond the existing flex helpers
+- automatic sibling distribution beyond the single-pass stack helpers
 - pointer capture, focus, or click lifecycle ownership
 - automatic portrait/landscape redesign
 - automatic overflow resolution
@@ -75,7 +75,7 @@ V1 does not provide:
 - animation ownership
 - replacing integer handles, counts, indices, enum representations, or physical device metadata with floats
 
-Flat arrays remain valid for existing global-backed bulk layout storage, such as the outputs consumed by `flex_row`. They are not required by the v1 single-item placement API.
+Flat arrays remain valid for game-owned global-backed bulk storage. They are not required by either the v1 single-item placement API or the single-pass current-rectangle flow.
 
 ## 5. Product Principles
 
@@ -179,56 +179,24 @@ Sprite handles, rotation policy, and alpha remain unchanged. The graphics comman
 
 Rounding and rasterization then occur in one platform rendering layer. Stasis layout and widget code do not choose an integer rounding policy independently.
 
-### 5.9 Pre-1.0 API replacement policy
+### 5.9 Pre-1.0 HostFrame replacement policy
 
-This is an intentional breaking cleanup. The implementation must remove, not deprecate, compatibility APIs whose names obscure coordinate semantics.
+This is an intentional breaking cleanup. The scalar display and input query
+functions are removed rather than deprecated. `graphics.stasis` transitively
+provides the public `HostFrame` type, callers own one global snapshot, and
+`refresh(self: HostFrame): void` updates it once per tick or frame.
 
-Remove:
+Layout reads `host_frame.display.logical_width`, `logical_height`, `safe_x`,
+`safe_y`, `safe_width`, and `safe_height`. Physical metadata is available as
+the `native_*_px` and `drawable_*_px` fields. Pointer records expose logical
+deltas and positions plus normalized positions without per-field host calls.
 
-```stasis
-gfx_window_width()
-gfx_window_height()
-
-input_viewport_x_px()
-input_viewport_y_px()
-input_viewport_w_px()
-input_viewport_h_px()
-
-input_pointer_x_px(index)
-input_pointer_y_px(index)
-input_pointer_dx_px(index)
-input_pointer_dy_px(index)
-```
-
-The `gfx_window_*` functions are compatibility aliases for logical canvas size. The `input_viewport_*` family is an older ambiguous surface and is not needed by the new layout contract. Pointer values are logical coordinates, so names ending in `_px` incorrectly suggest native or drawable pixels.
-
-Use the canonical replacements:
-
-```stasis
-gfx_logical_width(): f32
-gfx_logical_height(): f32
-
-gfx_safe_viewport_x(): f32
-gfx_safe_viewport_y(): f32
-gfx_safe_viewport_width(): f32
-gfx_safe_viewport_height(): f32
-
-input_pointer_x_logical(index): f32
-input_pointer_y_logical(index): f32
-input_pointer_dx_logical(index): f32
-input_pointer_dy_logical(index): f32
-```
-
-Normalized pointer accessors may retain their explicit `_n` names. Native and drawable queries use names ending in `_px` and return integer physical pixel counts:
-
-```stasis
-gfx_native_width_px(): i32
-gfx_native_height_px(): i32
-gfx_drawable_width_px(): i32
-gfx_drawable_height_px(): i32
-```
-
-The HostFrame version must be bumped. Compatibility fields such as `HOST_I_WINDOW_*` and `HOST_I_VIEWPORT_*` must be removed from the active contract rather than populated indefinitely as aliases. All hosts, fixtures, generated bindings, and consumers migrate atomically. Removed source APIs fail with normal deterministic unknown-function diagnostics; no compatibility implementation remains.
+This public-surface cleanup does not change the raw HostFrame wire layout, so
+its version remains 4. Compatibility fields such as `HOST_I_WINDOW_*` and
+`HOST_I_VIEWPORT_*` were already removed from that active contract rather than
+being populated indefinitely as aliases. Removed source APIs fail with normal
+deterministic unknown-function diagnostics; no compatibility implementation
+remains.
 
 ## 6. Required API
 
@@ -295,6 +263,7 @@ global menu_title_width: f32;
 global play_label_run: i32;
 global play_label_width: f32;
 global button_sprite: i32;
+global host_frame: HostFrame;
 
 function menu_load_ui(): void {
     ui_font = load_font("assets/ui.ttf", 28);
@@ -314,9 +283,9 @@ The title is centered within the safe viewport and placed 24 units below its top
 
 ```stasis
 function menu_draw_title(): void {
-    let safe_x: f32 = gfx_safe_viewport_x();
-    let safe_y: f32 = gfx_safe_viewport_y();
-    let safe_w: f32 = gfx_safe_viewport_width();
+    let safe_x: f32 = host_frame.display.safe_x;
+    let safe_y: f32 = host_frame.display.safe_y;
+    let safe_w: f32 = host_frame.display.safe_width;
 
     let title_w: f32 = menu_title_width;
     let title_h: f32 = 32.0;
@@ -358,10 +327,10 @@ This creates scalar button bounds 20 units from the safe viewport's left edge an
 
 ```stasis
 function menu_draw_play_button(): void {
-    let safe_x: f32 = gfx_safe_viewport_x();
-    let safe_y: f32 = gfx_safe_viewport_y();
-    let safe_w: f32 = gfx_safe_viewport_width();
-    let safe_h: f32 = gfx_safe_viewport_height();
+    let safe_x: f32 = host_frame.display.safe_x;
+    let safe_y: f32 = host_frame.display.safe_y;
+    let safe_w: f32 = host_frame.display.safe_width;
+    let safe_h: f32 = host_frame.display.safe_height;
 
     let button_w: f32 = 180.0;
     let button_h: f32 = 56.0;
@@ -495,10 +464,10 @@ let hit_y: f32 = button_y - hit_pad;
 let hit_w: f32 = button_w + hit_pad * 2.0;
 let hit_h: f32 = button_h + hit_pad * 2.0;
 
-if (input_pointer_count() > 0 && input_pointer_went_up(0)) {
+if (host_frame.pointer_count > 0 && host_frame.pointers[0].went_up) {
     let clicked: bool = ui_point_in_box(
-        input_pointer_x_logical(0),
-        input_pointer_y_logical(0),
+        host_frame.pointers[0].x_logical,
+        host_frame.pointers[0].y_logical,
         hit_x,
         hit_y,
         hit_w,
@@ -509,46 +478,35 @@ if (input_pointer_count() > 0 && input_pointer_went_up(0)) {
 
 This demonstrates geometric reuse, not a final click lifecycle. Pointer capture and stable control IDs remain separate future interaction work.
 
-### 7.7 Using placement with existing flex arrays
+### 7.7 Using placement with the single-pass rectangle flow
 
-Existing flex layout remains array-based because it writes multiple sibling boxes. Storage is global-backed, matching currently demonstrated Stasis behavior:
-
-```stasis
-global footer: f32[4];
-global footer_buttons: f32[8];
-global footer_widths: f32[2];
-global footer_heights: f32[2];
-```
+The single-pass layout owns one ephemeral current rectangle. A horizontal scope advances through sibling boxes without retaining a parallel rectangle array:
 
 ```stasis
 function menu_layout_footer(): void {
-    flex_rect_set(footer, 20.0, 620.0, 320.0, 56.0);
+    let row_w: f32 = 296.0;
+    let row_h: f32 = 52.0;
+    let row_x: f32 = ui_place_x(20.0, 320.0, row_w, UiHorizontal.Center);
+    let row_y: f32 = ui_place_y(620.0, 56.0, row_h, UiVertical.Center);
+    ui_hstack_begin(row_x, row_y, row_w, row_h, 16.0, UiStackDirection.Forward);
 
-    footer_widths[0] = 140.0;
-    footer_widths[1] = 140.0;
-    footer_heights[0] = 52.0;
-    footer_heights[1] = 52.0;
+    ui_hstack_next_fixed(140.0);
+    draw_footer_button(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height());
 
-    flex_row(
-        footer_buttons,
-        footer,
-        footer_widths,
-        footer_heights,
-        2,
-        16.0,
-        FLEX_JUSTIFY_CENTER,
-        FLEX_ALIGN_CENTER
-    );
+    ui_hstack_next_fixed(140.0);
+    draw_footer_button(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height());
+
+    ui_hstack_end();
 }
 ```
 
-Content placement reads scalar values from the flex output and uses the same axis functions:
+Content placement reads the current rectangle immediately and uses the same typed axis functions:
 
 ```stasis
-let button_x: f32 = flex_rect_x(footer_buttons, 1);
-let button_y: f32 = flex_rect_y(footer_buttons, 1);
-let button_w: f32 = flex_rect_w(footer_buttons, 1);
-let button_h: f32 = flex_rect_h(footer_buttons, 1);
+let button_x: f32 = ui_current_x();
+let button_y: f32 = ui_current_y();
+let button_w: f32 = ui_current_width();
+let button_h: f32 = ui_current_height();
 
 let label_x: f32 = ui_place_x(
     button_x,
@@ -566,7 +524,7 @@ let label_y: f32 = ui_place_y(
 label_y += 1.0;
 ```
 
-The new API therefore composes with the existing array-based flex implementation without requiring new rectangle arrays for individual placement.
+Typed axis placement therefore composes directly with the single-pass current-rectangle flow. Callers that need geometry later copy only the scalar values they own; the shared layout layer does not retain per-control rectangles.
 
 ## 8. Text Model
 
@@ -607,28 +565,19 @@ V1 exposes enough scalar information for the caller to detect fit. It does not w
 Adaptive menus and HUDs can read safe viewport scalars directly:
 
 ```stasis
-let safe_x: f32 = gfx_safe_viewport_x();
-let safe_y: f32 = gfx_safe_viewport_y();
-let safe_w: f32 = gfx_safe_viewport_width();
-let safe_h: f32 = gfx_safe_viewport_height();
+host_frame.refresh();
+let safe_x: f32 = host_frame.display.safe_x;
+let safe_y: f32 = host_frame.display.safe_y;
+let safe_w: f32 = host_frame.display.safe_width;
+let safe_h: f32 = host_frame.display.safe_height;
 ```
 
-These public layout-facing functions return `f32`. HostFrame v3 stores logical and safe viewport geometry directly in its `f32` lane; physical native and drawable pixel counts remain `i32` metadata. No `f32[4]` wrapper is required.
-
-Logical presentation dimensions use one canonical public API:
-
-```stasis
-function gfx_logical_width(): f32;
-function gfx_logical_height(): f32;
-function gfx_safe_viewport_x(): f32;
-function gfx_safe_viewport_y(): f32;
-function gfx_safe_viewport_width(): f32;
-function gfx_safe_viewport_height(): f32;
-```
-
-Window creation and resize requests may continue accepting integer logical dimensions because they establish a discrete requested canvas configuration. Native and drawable pixel counts use the explicit `_px` integer APIs defined in section 5.9. They are not used directly as layout coordinates.
-
-There is no new `input_viewport_*` layout API. Safe-area layout uses `gfx_safe_viewport_*`, full-canvas layout uses `gfx_logical_*`, and hit testing uses the logical pointer accessors. Each name identifies its coordinate space.
+The logical, safe viewport, and available presentation fields are `f32`.
+Physical native and drawable pixel counts remain `i32` metadata. Window
+creation and resize requests may continue accepting integer logical dimensions
+because they establish a discrete requested canvas configuration. Hit testing
+reads `x_logical` and `y_logical` from a present pointer in the same refreshed
+snapshot.
 
 ### 9.2 Fixed-design canvas
 
@@ -724,10 +673,10 @@ At least one test or sample must:
 
 Tests must verify that:
 
-- logical canvas and safe viewport accessors return `f32`
+- logical canvas and safe viewport snapshot fields are `f32`
 - removed compatibility display and input APIs are absent from the stdlib surface
-- canonical logical pointer accessors return `f32` in the same coordinate space as logical and safe layout bounds
-- pointer, text, line, flex, placement, and sprite geometry share the `f32` presentation path
+- logical pointer snapshot fields are `f32` in the same coordinate space as logical and safe layout bounds
+- pointer, text, line, single-pass layout, placement, and sprite geometry share the `f32` presentation path
 - sprite command encoding and host decoding agree on the new geometry representation
 - fractional sprite positions and sizes survive command submission until renderer rasterization
 - odd and adjacent sprite bounds follow the documented backend snapping policy without gaps introduced by independent truncation
@@ -746,11 +695,11 @@ All test commands remain bounded to 900 seconds, with lingering processes checke
 
 ### Float presentation boundary
 
-- expose logical canvas and safe viewport geometry as `f32` to Stasis layout callers
-- replace `_px` pointer compatibility names with explicit logical-coordinate accessors
-- remove `gfx_window_*`, `input_viewport_*`, and superseded HostFrame alias fields
-- rename native and drawable queries with explicit `_px` suffixes
-- bump HostFrame and command-buffer versions and migrate every host and fixture atomically
+- expose logical canvas and safe viewport geometry as `f32` HostFrame fields
+- replace pointer compatibility queries with explicit logical-coordinate fields
+- remove superseded scalar queries and HostFrame alias fields
+- expose native and drawable metadata as explicit `_px` fields
+- preserve the HostFrame v4 wire layout while migrating callers to the typed snapshot atomically
 - migrate sprite x/y/width/height parameters and command storage to `f32`
 - update existing sprite callers and parity fixtures
 - verify fractional geometry through a real renderer path
@@ -784,18 +733,18 @@ V1 is complete when:
 6. Realistic examples use supported scalar locals and returns.
 7. No v1 example or API requires function-local fixed arrays or local struct materialization.
 8. Cached text width and explicit line height are sufficient to calculate draw origins.
-9. Existing flex arrays can feed scalar placement without changing their storage model.
+9. Single-pass current rectangles feed scalar placement without retained geometry.
 10. One real menu title, button, and centered button label demonstrate the API.
 11. Drawing and hit testing reuse the same scalar button bounds.
 12. Tests execute the representative path through Cranelift and verify results.
-13. Canonical logical and safe viewport accessors return `f32` without caller-side conversion.
+13. Canonical logical and safe viewport HostFrame fields are `f32` without caller-side conversion.
 14. Sprite x/y/width/height remain `f32` through Stasis command submission.
 15. The graphics command-buffer version and all host decoders agree on the migrated sprite representation.
 16. Raw physical pixel counts, handles, counts, and indices remain `i32` where integer semantics are intrinsic.
-17. `gfx_window_*`, `input_viewport_*`, and logical pointer APIs ending in `_px` are removed rather than deprecated.
-18. Canonical logical pointer accessors share the coordinate space used by `gfx_logical_*` and `gfx_safe_viewport_*`.
-19. Native and drawable integer queries use explicit `_px` names.
-20. The bumped HostFrame contract contains no active compatibility aliases for removed window or viewport fields.
+17. Superseded scalar display and pointer queries are removed rather than deprecated.
+18. Canonical logical pointer fields share the coordinate space used by the logical and safe display fields.
+19. Native and drawable integer HostFrame fields use explicit `_px` names.
+20. The HostFrame v4 contract contains no active compatibility aliases for removed window or viewport fields.
 
 ## 15. Deferred Extensions
 
@@ -825,20 +774,20 @@ Text width comes from cached measurement, text height from an explicit line box,
 
 Stasis currently supports scalar locals and returns cleanly, while `Type[]` is a view over existing fixed storage rather than local temporary array construction. A scalar-return API expresses the needed calculation without pretending that local rectangle values are available.
 
-Using `f32` throughout presentation geometry also matches cached text measurement, pointer input, line commands, flex layout, and scaled canvases. Keeping sprite geometry or layout-facing viewport accessors as `i32` would insert conversion and rounding decisions into ordinary UI code without providing a meaningful performance benefit.
+Using `f32` throughout presentation geometry also matches cached text measurement, pointer input, line commands, single-pass layout, and scaled canvases. Keeping sprite geometry or layout-facing viewport accessors as `i32` would insert conversion and rounding decisions into ordinary UI code without providing a meaningful performance benefit.
 
 The nearest tempting alternative is an output `f32[]` rectangle API. Although array views are supported, that design requires pre-existing storage and makes a simple calculation appear to create a local rectangle. It also encourages unnecessary global scratch layout state.
 
 ### Extension point
 
-A future rectangle type can call the same axis functions internally. Existing flex output can already expose scalar x, y, width, and height through its accessors and feed them into the axis functions.
+A future rectangle type can call the same axis functions internally. The single-pass layout already exposes current scalar x, y, width, and height values that feed directly into the axis functions.
 
 ### Prediction
 
-If this model is sufficient, menu titles, button labels, corner icons, HUD counters, and content inside flex-generated boxes will share `ui_place_x` and `ui_place_y` without needing a general rectangle framework. A request for rectangle values should arise only when multiple downstream consumers genuinely need to pass or store the complete box as one value.
+If this model is sufficient, menu titles, button labels, corner icons, HUD counters, and content inside stack-generated boxes will share `ui_place_x` and `ui_place_y` without needing a general rectangle framework. A request for rectangle values should arise only when multiple downstream consumers genuinely need to pass or store the complete box as one value.
 
 Machine-readable review is a separate concern from placement. The debug-facing
-`ui_layout_audit.stasis` module consumes the final scalar rectangles and measured
+`src/stdlib/testing/ui_layout_audit.stasis` module consumes the final scalar rectangles and measured
 text bounds without changing them, then emits deterministic geometry and
 relationship checks for automated or AI review. See
 `docs/ui_layout_audit.md` and `samples/immediate_axis_layout/audit.stasis`.

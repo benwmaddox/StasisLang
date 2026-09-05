@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
-$jniRoot = Join-Path $scriptRoot "app\src\workshop\jniLibs"
+$jniRoot = Join-Path (Join-Path (Join-Path (Join-Path $scriptRoot "app") "src") "workshop") "jniLibs"
 $manifestPath = Join-Path $jniRoot "stasis-rust-bridge.json"
 $requiredTargets = [ordered]@{
     "arm64-v8a" = "aarch64-linux-android"
@@ -44,7 +44,7 @@ function Get-BridgeEntries([string]$ExpectedProfile) {
     $entries = @()
     foreach ($pair in $requiredTargets.GetEnumerator()) {
         $abi = $pair.Key
-        $bridge = Join-Path $jniRoot "$abi\libstasis_android_bridge.so"
+        $bridge = Join-Path (Join-Path $jniRoot $abi) "libstasis_android_bridge.so"
         if (-not (Test-Path -LiteralPath $bridge)) {
             throw "Workshop Rust bridge is missing ABI $abi."
         }
@@ -101,7 +101,7 @@ foreach ($pair in $requiredTargets.GetEnumerator()) {
             $entry[0].file -ne $expectedFile -or $entry[0].profile -ne $Profile) {
         throw "Workshop Rust bridge provenance is invalid for ABI $abi."
     }
-    $bridge = Join-Path $jniRoot "$abi\libstasis_android_bridge.so"
+    $bridge = Join-Path (Join-Path $jniRoot $abi) "libstasis_android_bridge.so"
     if (-not (Test-Path -LiteralPath $bridge)) {
         throw "Workshop Rust bridge is missing ABI $abi."
     }

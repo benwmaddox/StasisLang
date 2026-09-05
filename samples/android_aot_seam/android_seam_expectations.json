@@ -1,0 +1,13 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "IT-017",
+  "stable_frame": 30,
+  "state_checksum": 1210,
+  "require_command_trace": true,
+  "logical_size": [640, 360],
+  "regions": [
+    {"name": "left_red", "center": [160, 180], "rgb": [230, 31, 41], "tolerance": 30},
+    {"name": "center_yellow", "center": [320, 180], "rgb": [242, 230, 77], "tolerance": 30},
+    {"name": "right_teal", "center": [480, 180], "rgb": [26, 199, 184], "tolerance": 30}
+  ]
+}

@@ -1,0 +1,89 @@
+import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+global seam_sprite_handle: i32;
+global seam_font_handle: i32;
+global seam_cached_handle: i32;
+global seam_audio_handle: i32;
+global seam_voice_handle: i32;
+global seam_music_handle: i32;
+global seam_effect_handle: i32;
+global seam_music_played: bool;
+global seam_effect_played: bool;
+global seam_audio_event_order: i32;
+global seam_sprite: Sprite;
+global seam_cached_text: TextRun;
+global seam_music: AudioAsset;
+global seam_effect: AudioAsset;
+global seam_direct_voice: AudioVoice;
+global seam_music_voice: AudioVoice;
+global seam_direct_width: f32;
+global seam_cached_width: f32;
+
+function main(): i32 {
+    if (!seam_sprite.load_sprite_from("assets/sprite.png", 64, 64)) {
+        return 21;
+    }
+    seam_sprite_handle = seam_sprite.reference();
+    seam_font_handle = load_font("assets/ui.ttf", 24);
+    if (seam_font_handle == 0) {
+        return 22;
+    }
+    if (!seam_cached_text.load_text_from(seam_font_handle, "MOBILE")) {
+        return 23;
+    }
+    seam_cached_handle = seam_cached_text.handle;
+    seam_direct_width = measure_text(seam_font_handle, "BUNDLE");
+    seam_cached_width = seam_cached_text.width;
+    if (seam_direct_width <= 0.0 || seam_cached_width <= 0.0) {
+        return 24;
+    }
+    if (!seam_music.load_audio("assets/music.mp3") || !seam_effect.load_audio("assets/effect.wav")) {
+        return 25;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    if (seam_audio_event_order == 12) {
+        return 0;
+    }
+    if (seam_music.failed() || seam_effect.failed()) {
+        return 25;
+    }
+    if (!seam_music.ready() || !seam_effect.ready()) {
+        return 0;
+    }
+    seam_music_handle = seam_music.handle;
+    seam_effect_handle = seam_effect.handle;
+    seam_audio_handle = seam_effect.handle;
+    if (!seam_direct_voice.play(seam_effect, false, 0.5, 0.0)) {
+        return 26;
+    }
+    seam_voice_handle = seam_direct_voice.handle;
+    if (!seam_music_voice.play(seam_music, true, 0.18, 0.0)) {
+        return 27;
+    }
+    seam_music_played = true;
+    seam_audio_event_order = seam_audio_event_order * 10 + 1;
+    if (!seam_effect.play_once(0.25, 0.0)) {
+        return 28;
+    }
+    seam_effect_played = true;
+    seam_audio_event_order = seam_audio_event_order * 10 + 2;
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.04, 0.07, 0.12, 1.0);
+    seam_sprite.draw(52.0, 28.0, 255, 0);
+    draw_text(seam_font_handle, "BUNDLE", 30.0, 112.0, 1.0, 0.8, 0.1, 1.0);
+    seam_cached_text.draw(175.0, 112.0, 0.1, 0.9, 1.0, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

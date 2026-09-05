@@ -9,7 +9,7 @@ host input -> game intent -> tick systems -> game state -> render commands
 
 The important boundaries are straightforward:
 
-- Read host input once per tick and translate it into game actions.
+- Refresh one caller-owned `HostFrame` once per tick, then translate its input into game actions.
 - During play, change gameplay state only from tick logic.
 - Run gameplay systems in a visible, deliberate order.
 - Make `render()` draw the state that already exists.
@@ -33,7 +33,8 @@ Keep `tick()` short enough to read as the game's update schedule:
 
 ```stasis
 function tick(): i32 {
-    if (should_quit()) { return 1; }
+    host_frame.refresh();
+    if (host_frame.quit_requested) { return 1; }
 
     bind_input();
     handle_screen_actions();
@@ -131,6 +132,7 @@ struct AppState {
 }
 
 global game: AppState;
+global host_frame: HostFrame;
 ```
 
 The groups answer practical questions:
@@ -175,12 +177,12 @@ function push_intent(kind: IntentKind, actor_index: i32,
 function bind_input(): void {
     clear_input();
 
-    if (input_pointer_count() > 0 && input_pointer_went_up(0)) {
+    if (host_frame.pointer_count > 0 && host_frame.pointers[0].went_up) {
         push_intent(
             IntentKind.Move,
             game.ui.selected_actor,
-            f32_to_i32(input_pointer_x_logical(0)),
-            f32_to_i32(input_pointer_y_logical(0))
+            f32_to_i32(host_frame.pointers[0].x_logical),
+            f32_to_i32(host_frame.pointers[0].y_logical)
         );
     }
 }
@@ -421,3 +423,54 @@ Before merging a game change, answer:
 The structure can remain in one file or grow into focused systems. The useful
 part stays the same: bind input once, update explicit state in a visible order,
 and render the result without changing the game.
+
+## Realtime network controls
+
+Realtime games use the bounded contract in
+[`realtime_networking.md`](realtime_networking.md). Raw control changes are
+scheduled for future authoritative simulation ticks, submitted independently
+of the tick loop, and applied in stable order at their exact due tick. Held
+state persists and neutral release is explicit. Missing, delayed, duplicated,
+reordered, stale, conflicting, too-far, and malformed transitions have
+deterministic admission outcomes; a missing packet never stalls simulation or
+rendering. Conflicting pending variants quarantine their shared identity so
+arrival order cannot change the result.
+
+The production transport carries the module's versioned control payload inside
+its existing message envelope. Host-authoritative games correct clients with
+snapshots after due-time loss, while deterministic-peer games must recover a
+lost transition before due and require matching rates, integer state
+transitions, and replay hashes. Rendering may interpolate completed states
+only. Turn-based games keep their existing command path and do not use the
+realtime control API.
+
+Stasis guests import `src/stdlib/realtime_controls.stasis`. Its externs map to
+stable `stasis_realtime_*` native symbols for AOT and explicit JIT adapters in
+`stasis_dynload`; the host retains ownership of queues, clocks, snapshots, and
+replay storage. Guests can build/submit bounded RTC1 payloads, apply scalar-array
+snapshot corrections, attach authoritative hashes, and inspect resync state;
+game-token restoration and replay callbacks stay in Rust. Guest reads return
+the last completed control state and never advance simulation or presentation
+time. The guest ABI intentionally bounds ticks and epochs to `i32::MAX`.
+
+## World-space simulation and camera presentation
+
+Games whose world is larger than the logical display use the shared
+`src/stdlib/world_camera.stasis` presentation helper. Authoritative gameplay
+always stores and updates world-space values. Render code derives an
+inclusively clamped camera from a completed followed point, converts world
+coordinates to the logical viewport, and emits an ordered clip pair. The
+camera and render interpolation history do not feed collision, scoring,
+snapshots, replay, or networking.
+
+Small worlds center in the viewport. Large worlds scroll at the immediately
+adjacent interior value and remain fixed at exact or exterior clamp values.
+Hosts and guests project the same supplied completed state through the same
+module rather than synchronizing camera state. Large maps use its bounded
+half-open tile range, which deterministically coarsens its effective tile size
+instead of truncating visible coverage, and its density-aware 64 MiB residency
+contract, never a full-map texture. The current host renders at the completed
+post-tick phase; a separate deterministic probe models two presentation phases
+per tick until host scheduling consumes the declared presentation rate.
+Detailed semantics, formulas, measured overdraw, and evidence are in
+[`world_camera_viewport.md`](world_camera_viewport.md).

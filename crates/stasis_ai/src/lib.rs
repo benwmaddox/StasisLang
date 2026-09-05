@@ -9,8 +9,25 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_AGENT_TURNS: usize = 15;
-pub const MAX_AGENT_TURNS: usize = 48;
+mod openrouter;
+pub mod task_session;
+
+pub use openrouter::{
+    ConfiguredProvider, OpenRouterConfig, OpenRouterProvider, PreferredThroughputPolicy,
+    ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+};
+
+pub use task_session::{
+    ActionId, ActionKind, ActionRevision, ActionState, ConnectionState, FallbackState,
+    FocusedTestResult, GeneratedImageArtifact, GeneratedImageId, ImageAttribution,
+    ImageHandoffState, ImageReviewState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
+    ScreenshotAttachment, ScreenshotId, ShortcutBinding, ShortcutMapper, Task, TaskAction, TaskId,
+    TaskLifecycle, TaskMetrics, TaskProvenance, TaskSession, TaskSessionCommand, TaskSessionError,
+    ThreadEntry, ThreadEntryKind, UploadState, ValidationStatus, VisionCapability,
+};
+
+pub const DEFAULT_AGENT_TURNS: usize = 50;
+pub const MAX_AGENT_TURNS: usize = 50;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 50;
 pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
@@ -20,7 +37,7 @@ pub const MIN_COMPACTION_BYTES: usize = 256 * 1024;
 pub const MAX_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMPACTION_RETAINED_TURNS: usize = 16;
 const MAX_COMPLETION_REJECTIONS: usize = 3;
-const AGENT_INSTRUCTION: &str = "Use only the supplied Stasis tools. These are host-mediated virtual tools described by tool_specs in the immutable request header, not native Codex registry tools. Invoke them by returning mode=tool_calls with the requested calls in the structured response contract; never search for them in or reject them because of the native callable-tool registry. The first JSONL record is the immutable request header; every following record is the authoritative append-only transcript of an earlier model response and its tool observations. Do not repeat completed inspection. Start with initial_context.initial_symbols, which is the completed compact default list_symbols result for the entry file and its direct imports. Also use initial_context.stdlib_api as the completed catalog of public standard-library signatures; add the listed canonical_import when a needed module is not already imported, and do not spend turns rediscovering stdlib implementation files unless the catalog is ambiguous. Treat every listed project function whose name directly contains the requested behavior noun as a candidate: batch read_symbol and find_references for all of them before editing. Do not skip update, movement, collision, or render candidates merely because one function exposes the visible value. If relevant project symbols are missing, batch multiple narrow list_symbols searches directly suggested by the request, such as the behavior noun plus render or update terms; never enumerate the whole project. A reference lookup does not require a prior source read. Call find_references for behavior-bearing project symbols before writing. For collision or geometry changes, use rendered rectangle bounds as the coordinate source of truth and derive contact test inputs after the update function's movement order instead of copying old collision constants. Put all related source and requested durable-test changes in one contiguous atomic write batch. The write compiles the batch and runs project tests; if it succeeds, return done immediately without a separate test call. If it fails, correct only the reported defect and retry atomically. Return exactly one JSON object matching the response contract.";
+const AGENT_INSTRUCTION: &str = "Stasis is statically typed and C-like. Declarations use import, struct, global, function, and test `name`(): bool. Receivers put self first: function damage(self: Enemy, amount: i32): void; call enemy.damage(5). Read exact local syntax before editing. Use host-mediated tools through structured tool_calls, not native tools. Later JSONL records are completed; do not repeat them. initial_context start actions are lexical leads, not proof; refine them or use list_symbols. Its options expose stdlib discovery and optional baseline tests. Use canonical_import with read_imports/write_imports. Before behavior writes, batch relevant reads and find_references. Submit related symbols/imports/tests in one contiguous atomic tested write batch; its successful receipt proves completion. Tests are default evidence; get runtime/assets capability only when necessary. Return one response-contract object.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfile {
@@ -55,7 +72,9 @@ impl Default for AgentProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCall {
+    #[serde(rename = "action_id")]
     pub tool: String,
     #[serde(default)]
     pub args: Value,
@@ -91,10 +110,22 @@ impl ToolObservation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub tool: String,
+    pub action_id: String,
+    #[serde(rename = "use", alias = "purpose")]
     pub purpose: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "required",
+        alias = "required_args",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub required_args: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "optional",
+        alias = "optional_args",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub optional_args: Vec<String>,
 }
 
@@ -148,10 +179,10 @@ struct ModelRequestHeader<'a> {
     schema_version: u32,
     role: &'a str,
     instruction: &'a str,
-    user_prompt: &'a str,
-    initial_context: &'a Value,
     tool_specs: &'a [ToolSpec],
     response_contract: &'a Value,
+    user_prompt: &'a str,
+    initial_context: &'a Value,
 }
 
 pub trait ModelProvider {
@@ -159,6 +190,10 @@ pub trait ModelProvider {
 
     fn take_usage(&mut self) -> Option<Value> {
         None
+    }
+
+    fn requires_action_ids(&self) -> bool {
+        false
     }
 }
 
@@ -247,24 +282,31 @@ where
             ));
         }
     }
-    let known_tools = tool_specs
+    let mut known_tools = tool_specs
         .iter()
-        .map(|spec| spec.tool.as_str())
+        .map(|spec| spec.tool.clone())
         .collect::<BTreeSet<_>>();
+    let mut validation_tool_specs = tool_specs.clone();
+    if known_tools.contains("get_capability") {
+        validation_tool_specs.extend(asset_tool_specs());
+        validation_tool_specs.extend(runtime_tool_specs());
+    }
+    let mut active_tool_specs = tool_specs.clone();
     let response_contract = response_contract();
     let header = serde_json::to_string(&ModelRequestHeader {
         record: "request",
         schema_version: 1,
         role: &profile.role,
         instruction: &profile.instruction,
-        user_prompt,
-        initial_context: &initial_context,
         tool_specs: &tool_specs,
         response_contract: &response_contract,
+        user_prompt,
+        initial_context: &initial_context,
     })
     .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?;
     let mut transcript = AgentTranscript::new(header);
     let mut completion_rejections = 0_usize;
+    let require_action_ids = provider.requires_action_ids();
     for turn in 1..=profile.max_turns {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
@@ -311,7 +353,7 @@ where
                 emit(AgentEvent::Completed(summary.clone()));
                 return Ok(summary);
             }
-            ModelResponse::ToolCalls { tool_calls, .. } => {
+            ModelResponse::ToolCalls { mut tool_calls, .. } => {
                 if tool_calls.is_empty() {
                     return Err("model returned an empty tool-call batch".to_string());
                 }
@@ -321,24 +363,30 @@ where
                         tool_calls.len()
                     ));
                 }
-                for call in &tool_calls {
-                    if !known_tools.contains(call.tool.as_str()) {
-                        return Err(format!("unsupported AI tool: {}", call.tool));
-                    }
+                for call in &mut tool_calls {
+                    normalize_optional_nulls(call, &validation_tool_specs, require_action_ids);
                 }
                 let validation_errors = tool_calls
                     .iter()
-                    .filter_map(|call| validate_tool_call(call, &tool_specs, &known_tools).err())
+                    .filter_map(|call| {
+                        validate_tool_call(
+                            call,
+                            &validation_tool_specs,
+                            &known_tools,
+                            require_action_ids,
+                        )
+                        .err()
+                        .map(|error| (call.tool.clone(), error))
+                    })
                     .collect::<Vec<_>>();
                 if !validation_errors.is_empty() {
-                    let detail = validation_errors.join("; ");
-                    let observations = tool_calls
-                        .iter()
-                        .map(|call| {
+                    let observations = validation_errors
+                        .into_iter()
+                        .map(|(action_id, error)| {
                             ToolObservation::error(
-                                &call.tool,
+                                action_id,
                                 format!(
-                                    "tool-call batch rejected before execution: {detail}; correct the arguments and retry"
+                                    "action rejected before execution: {error}; replace only this rejected action ID"
                                 ),
                             )
                         })
@@ -348,13 +396,45 @@ where
                     compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
                     continue;
                 }
+                for call in &mut tool_calls {
+                    let spec = resolve_tool_spec(call, &validation_tool_specs, require_action_ids)
+                        .expect("validated action has a tool spec");
+                    call.tool.clone_from(&spec.tool);
+                }
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
                 let observations = bound_observations(executor.execute(&tool_calls, canceled));
                 emit(AgentEvent::Observations(observations.clone()));
+                let mut newly_active_specs = Vec::new();
+                for (call, observation) in tool_calls.iter().zip(&observations) {
+                    if call.tool != "get_capability" || observation.error.is_some() {
+                        continue;
+                    }
+                    let Some(capability) = call.args.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let fallback = match capability {
+                        "assets" => asset_tool_specs(),
+                        "runtime" => runtime_tool_specs(),
+                        _ => Vec::new(),
+                    };
+                    let discovered = observation
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.get("tool_specs"))
+                        .and_then(|specs| {
+                            serde_json::from_value::<Vec<ToolSpec>>(specs.clone()).ok()
+                        })
+                        .filter(|specs| !specs.is_empty())
+                        .unwrap_or(fallback);
+                    newly_active_specs.extend(merge_tool_specs(&mut active_tool_specs, discovered));
+                    known_tools.extend(newly_active_specs.iter().map(|spec| spec.tool.clone()));
+                    validation_tool_specs.extend(newly_active_specs.iter().cloned());
+                }
                 if let Some(error) = executor.terminal_failure() {
                     return Err(error);
                 }
                 transcript.append(&response_record, &observations)?;
+                transcript.append_active_capabilities(&newly_active_specs)?;
                 compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
             }
         }
@@ -368,6 +448,7 @@ where
 struct TranscriptEntry {
     encoded: String,
     compact: Value,
+    retain_during_compaction: bool,
 }
 
 struct AgentTranscript {
@@ -397,6 +478,24 @@ impl AgentTranscript {
         self.entries.push(TranscriptEntry {
             encoded,
             compact: compact_turn(response, observations),
+            retain_during_compaction: false,
+        });
+        Ok(())
+    }
+
+    fn append_active_capabilities(&mut self, specs: &[ToolSpec]) -> Result<(), String> {
+        if specs.is_empty() {
+            return Ok(());
+        }
+        let encoded = serde_json::to_string(&json!({
+            "record": "active_capabilities",
+            "tool_specs": specs,
+        }))
+        .map_err(|error| format!("failed encoding active AI capabilities: {error}"))?;
+        self.entries.push(TranscriptEntry {
+            encoded,
+            compact: Value::Null,
+            retain_during_compaction: true,
         });
         Ok(())
     }
@@ -428,16 +527,35 @@ impl AgentTranscript {
             return Ok(None);
         }
         let mut turns_compacted = 0_usize;
-        while self.entries.len() > policy.retain_recent_turns
+        while self
+            .entries
+            .iter()
+            .filter(|entry| !entry.retain_during_compaction)
+            .count()
+            > policy.retain_recent_turns
             && self.render()?.len() > policy.max_request_bytes
         {
-            let entry = self.entries.remove(0);
+            let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| !entry.retain_during_compaction)
+            else {
+                break;
+            };
+            let entry = self.entries.remove(index);
             self.compacted.push(entry.compact);
             turns_compacted = turns_compacted.saturating_add(1);
         }
         // The retained-turn count is a target, not permission to exceed the hard byte ceiling.
         while !self.entries.is_empty() && self.render()?.len() > policy.max_request_bytes {
-            let entry = self.entries.remove(0);
+            let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| !entry.retain_during_compaction)
+            else {
+                break;
+            };
+            let entry = self.entries.remove(index);
             self.compacted.push(entry.compact);
             turns_compacted = turns_compacted.saturating_add(1);
         }
@@ -512,7 +630,7 @@ fn compact_turn(response: &Value, observations: &[ToolObservation]) -> Value {
                         })
                         .unwrap_or_default();
                     json!({
-                        "tool": call.get("tool").cloned().unwrap_or(Value::Null),
+                        "action_id": call.get("action_id").cloned().unwrap_or(Value::Null),
                         "args": selected_args,
                     })
                 })
@@ -597,28 +715,75 @@ fn validate_working_notes(notes: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn resolve_tool_spec<'a>(
+    call: &ToolCall,
+    specs: &'a [ToolSpec],
+    require_action_id: bool,
+) -> Option<&'a ToolSpec> {
+    specs
+        .iter()
+        .find(|spec| spec.action_id == call.tool || (!require_action_id && spec.tool == call.tool))
+}
+
+fn normalize_optional_nulls(call: &mut ToolCall, specs: &[ToolSpec], require_action_id: bool) {
+    let Some(spec) = resolve_tool_spec(call, specs, require_action_id) else {
+        return;
+    };
+    let Some(args) = call.args.as_object_mut() else {
+        return;
+    };
+    for optional in &spec.optional_args {
+        if args.get(optional).is_some_and(Value::is_null) {
+            args.remove(optional);
+        }
+    }
+}
+
 fn validate_tool_call(
     call: &ToolCall,
     specs: &[ToolSpec],
-    known_tools: &BTreeSet<&str>,
+    known_tools: &BTreeSet<String>,
+    require_action_id: bool,
 ) -> Result<(), String> {
-    if !known_tools.contains(call.tool.as_str()) {
-        return Err(format!("unsupported AI tool: {}", call.tool));
-    }
+    let spec = resolve_tool_spec(call, specs, require_action_id)
+        .filter(|spec| known_tools.contains(spec.tool.as_str()))
+        .ok_or_else(|| format!("unsupported or invented AI action ID: {}", call.tool))?;
     let args = call
         .args
         .as_object()
-        .ok_or_else(|| format!("AI tool {} requires an object args value", call.tool))?;
-    let spec = specs
-        .iter()
-        .find(|spec| spec.tool == call.tool)
-        .expect("known tool has spec");
+        .ok_or_else(|| format!("AI action {} requires an object args value", call.tool))?;
     for required in &spec.required_args {
         if !args.contains_key(required) {
-            return Err(format!("AI tool {} requires arg: {required}", call.tool));
+            return Err(format!("AI action {} requires arg: {required}", call.tool));
         }
     }
+    let allowed = spec
+        .required_args
+        .iter()
+        .chain(&spec.optional_args)
+        .collect::<BTreeSet<_>>();
+    if let Some(unknown) = args.keys().find(|name| !allowed.contains(name)) {
+        return Err(format!(
+            "AI action {} does not accept arg: {unknown}",
+            call.tool
+        ));
+    }
     Ok(())
+}
+
+fn merge_tool_specs(target: &mut Vec<ToolSpec>, additions: Vec<ToolSpec>) -> Vec<ToolSpec> {
+    let mut added = Vec::new();
+    for spec in additions {
+        if target
+            .iter()
+            .any(|existing| existing.action_id == spec.action_id || existing.tool == spec.tool)
+        {
+            continue;
+        }
+        target.push(spec.clone());
+        added.push(spec);
+    }
+    added
 }
 
 fn bound_observations(observations: Vec<ToolObservation>) -> Vec<ToolObservation> {
@@ -656,7 +821,353 @@ pub fn response_contract() -> Value {
     json!({
         "accepted_modes": ["tool_calls", "done"],
         "working_notes": format!("required non-empty string, maximum {MAX_WORKING_NOTES_CHARS} characters"),
-        "tool_calls": {"maximum": MAX_TOOL_CALLS_PER_TURN, "shape": {"tool": "name", "args": "JSON object encoded as a string"}},
+        "tool_calls": {"maximum": MAX_TOOL_CALLS_PER_TURN, "shape": {"action_id": "host-offered opaque action ID", "args": "native JSON object"}},
+    })
+}
+
+pub fn model_response_schema_for(tool_specs: &[ToolSpec]) -> Value {
+    let mut schema = model_response_schema();
+    let action_ids = tool_specs
+        .iter()
+        .map(|spec| Value::String(spec.action_id.clone()))
+        .collect::<Vec<_>>();
+    if !action_ids.is_empty() {
+        let variants = tool_specs
+            .iter()
+            .map(|spec| {
+                json!({
+                    "type": "object",
+                    "required": ["action_id", "args"],
+                    "properties": {
+                        "action_id": {"type": "string", "enum": [spec.action_id]},
+                        "args": tool_args_schema(spec),
+                    },
+                    "additionalProperties": false,
+                })
+            })
+            .collect::<Vec<_>>();
+        schema["properties"]["tool_calls"]["items"] = json!({"anyOf": variants});
+    }
+    schema
+}
+
+fn model_response_schema_for_request(request: &str) -> Result<Value, String> {
+    let mut lines = request.lines();
+    let header: Value = serde_json::from_str(lines.next().unwrap_or_default())
+        .map_err(|error| format!("AI request header is not valid JSON: {error}"))?;
+    let mut specs: Vec<ToolSpec> = serde_json::from_value(
+        header
+            .get("tool_specs")
+            .cloned()
+            .ok_or_else(|| "AI request header omitted tool_specs".to_string())?,
+    )
+    .map_err(|error| format!("AI request tool_specs are invalid: {error}"))?;
+    for line in lines {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record.get("record").and_then(Value::as_str) != Some("active_capabilities") {
+            continue;
+        }
+        let Some(active) = record.get("tool_specs") else {
+            continue;
+        };
+        let Ok(active) = serde_json::from_value::<Vec<ToolSpec>>(active.clone()) else {
+            continue;
+        };
+        merge_tool_specs(&mut specs, active);
+    }
+    Ok(model_response_schema_for(&specs))
+}
+
+fn tool_args_schema(spec: &ToolSpec) -> Value {
+    match spec.tool.as_str() {
+        "list_symbols" => object_schema(
+            &[
+                ("files", array_schema(string_schema(), Some(16))),
+                ("query", string_schema()),
+                ("kind", string_schema()),
+                ("owner", string_schema()),
+                ("page", integer_schema(Some(0), None)),
+                ("limit", integer_schema(Some(1), Some(64))),
+            ],
+            &[],
+        ),
+        "get_stdlib_api" => object_schema(
+            &[
+                ("module", string_schema()),
+                ("query", string_schema()),
+                ("kind", string_schema()),
+                ("page", integer_schema(Some(0), None)),
+                ("limit", integer_schema(Some(1), Some(64))),
+            ],
+            &[],
+        ),
+        "find_references" => object_schema(
+            &[
+                ("symbol", string_schema()),
+                ("limit", integer_schema(Some(1), Some(256))),
+            ],
+            &["symbol"],
+        ),
+        "list_owner_symbols" => object_schema(&[("owner", string_schema())], &["owner"]),
+        "read_symbol" => object_schema(
+            &[
+                ("name", string_schema()),
+                ("kind", string_schema()),
+                ("file", string_schema()),
+                ("owner", string_schema()),
+                ("signature", string_schema()),
+            ],
+            &["name"],
+        ),
+        "write_symbol" => object_schema(
+            &[
+                ("file", string_schema()),
+                ("name", string_schema()),
+                ("new_source", string_schema()),
+                ("operation", enum_schema(&["add", "replace"])),
+                ("kind", string_schema()),
+                ("owner", string_schema()),
+                ("signature", string_schema()),
+                ("expected_source_hash", string_schema()),
+            ],
+            &["file", "name", "new_source"],
+        ),
+        "delete_symbol" => object_schema(
+            &[
+                ("name", string_schema()),
+                ("file", string_schema()),
+                ("kind", string_schema()),
+                ("owner", string_schema()),
+                ("signature", string_schema()),
+                ("expected_source_hash", string_schema()),
+            ],
+            &["name"],
+        ),
+        "read_imports" => object_schema(&[("file", string_schema())], &["file"]),
+        "write_imports" => object_schema(
+            &[
+                ("file", string_schema()),
+                ("imports", array_schema(string_schema(), None)),
+            ],
+            &["file", "imports"],
+        ),
+        "get_diagnostics"
+        | "inspect_runtime_state"
+        | "run_frame"
+        | "take_screenshot"
+        | "list_tests"
+        | "run_tests" => object_schema(&[], &[]),
+        "set_input_state" => object_schema(
+            &[
+                ("x", number_schema()),
+                ("y", number_schema()),
+                ("active", json!({"type": "boolean"})),
+                ("screen_w", number_schema()),
+                ("screen_h", number_schema()),
+            ],
+            &[],
+        ),
+        "read_test_file" => object_schema(&[("file", string_schema())], &["file"]),
+        "write_test_file" => object_schema(
+            &[("file", string_schema()), ("source", string_schema())],
+            &["file", "source"],
+        ),
+        "delete_test_file" => object_schema(&[("file", string_schema())], &["file"]),
+        "get_capability" => {
+            object_schema(&[("name", enum_schema(&["assets", "runtime"]))], &["name"])
+        }
+        "request_imagegen_asset" => object_schema(
+            &[
+                ("filename", string_schema()),
+                ("prompt", string_schema()),
+                ("purpose", string_schema()),
+                ("width", integer_schema(Some(1), Some(2048))),
+                ("height", integer_schema(Some(1), Some(2048))),
+            ],
+            &["filename", "prompt", "purpose"],
+        ),
+        "write_svg_asset" => object_schema(
+            &[
+                ("id", string_schema()),
+                ("path", string_schema()),
+                ("source", string_schema()),
+                ("width", integer_schema(Some(1), Some(4096))),
+                ("height", integer_schema(Some(1), Some(4096))),
+            ],
+            &["id", "path", "source", "width", "height"],
+        ),
+        "write_png_asset" => object_schema(
+            &[
+                ("id", string_schema()),
+                ("path", string_schema()),
+                ("width", integer_schema(Some(1), Some(2048))),
+                ("height", integer_schema(Some(1), Some(2048))),
+                ("background", string_schema()),
+                ("shapes", array_schema(png_shape_schema(), Some(512))),
+            ],
+            &["id", "path", "width", "height", "background", "shapes"],
+        ),
+        "import_png_asset" => object_schema(
+            &[
+                ("id", string_schema()),
+                ("path", string_schema()),
+                ("source_path", string_schema()),
+                ("crop_x", integer_schema(Some(0), None)),
+                ("crop_y", integer_schema(Some(0), None)),
+                ("crop_width", integer_schema(Some(1), None)),
+                ("crop_height", integer_schema(Some(1), None)),
+                ("transparent_color", string_schema()),
+                ("transparent_tolerance", integer_schema(Some(0), Some(255))),
+            ],
+            &["id", "path", "source_path"],
+        ),
+        "delete_asset" => object_schema(
+            &[("path", string_schema()), ("id", string_schema())],
+            &["path"],
+        ),
+        "write_data_asset" => object_schema(
+            &[("path", string_schema()), ("source", string_schema())],
+            &["path", "source"],
+        ),
+        "write_procedural_wav" => object_schema(
+            &[
+                ("id", string_schema()),
+                ("path", string_schema()),
+                ("frequency_hz", integer_schema(Some(20), Some(8000))),
+                ("duration_ms", integer_schema(Some(20), Some(5000))),
+            ],
+            &["id", "path", "frequency_hz", "duration_ms"],
+        ),
+        "record_decision" => object_schema(
+            &[
+                ("kind", string_schema()),
+                ("summary", string_schema()),
+                ("rationale", string_schema()),
+                ("evidence", string_schema()),
+                ("next_step", string_schema()),
+            ],
+            &["kind", "summary", "rationale", "evidence", "next_step"],
+        ),
+        "report_blocked" => object_schema(
+            &[
+                ("reason", string_schema()),
+                ("evidence", string_schema()),
+                ("next_step", string_schema()),
+            ],
+            &["reason", "evidence", "next_step"],
+        ),
+        _ => {
+            let mut properties = Vec::new();
+            for name in spec.required_args.iter().chain(&spec.optional_args) {
+                properties.push((name.as_str(), string_schema()));
+            }
+            let required = spec
+                .required_args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            object_schema(&properties, &required)
+        }
+    }
+}
+
+fn string_schema() -> Value {
+    json!({"type": "string"})
+}
+
+fn number_schema() -> Value {
+    json!({"type": "number"})
+}
+
+fn integer_schema(minimum: Option<u64>, maximum: Option<u64>) -> Value {
+    let mut schema = json!({"type": "integer"});
+    if let Some(minimum) = minimum {
+        schema["minimum"] = json!(minimum);
+    }
+    if let Some(maximum) = maximum {
+        schema["maximum"] = json!(maximum);
+    }
+    schema
+}
+
+fn enum_schema(values: &[&str]) -> Value {
+    json!({"type": "string", "enum": values})
+}
+
+fn array_schema(items: Value, max_items: Option<usize>) -> Value {
+    let mut schema = json!({"type": "array", "items": items});
+    if let Some(max_items) = max_items {
+        schema["maxItems"] = json!(max_items);
+    }
+    schema
+}
+
+fn object_schema(properties: &[(&str, Value)], required: &[&str]) -> Value {
+    let properties = properties
+        .iter()
+        .map(|(name, schema)| {
+            let schema = if required.contains(name) {
+                schema.clone()
+            } else {
+                json!({"anyOf": [schema, {"type": "null"}]})
+            };
+            ((*name).to_string(), schema)
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let required = properties.keys().cloned().collect::<Vec<_>>();
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
+fn png_shape_schema() -> Value {
+    let common = |kind: &str, properties: &[(&str, Value)], required: &[&str]| {
+        let mut all = vec![("kind", enum_schema(&[kind])), ("color", string_schema())];
+        all.extend(
+            properties
+                .iter()
+                .map(|(name, schema)| (*name, schema.clone())),
+        );
+        object_schema(&all, required)
+    };
+    json!({
+        "anyOf": [
+            common(
+                "rect",
+                &[
+                    ("x", integer_schema(None, None)),
+                    ("y", integer_schema(None, None)),
+                    ("width", integer_schema(Some(1), Some(4096))),
+                    ("height", integer_schema(Some(1), Some(4096))),
+                ],
+                &["kind", "color", "x", "y", "width", "height"],
+            ),
+            common(
+                "circle",
+                &[
+                    ("x", integer_schema(None, None)),
+                    ("y", integer_schema(None, None)),
+                    ("radius", integer_schema(Some(1), Some(2048))),
+                ],
+                &["kind", "color", "x", "y", "radius"],
+            ),
+            common(
+                "line",
+                &[
+                    ("x1", integer_schema(None, None)),
+                    ("y1", integer_schema(None, None)),
+                    ("x2", integer_schema(None, None)),
+                    ("y2", integer_schema(None, None)),
+                    ("thickness", integer_schema(Some(1), Some(128))),
+                ],
+                &["kind", "color", "x1", "y1", "x2", "y2", "thickness"],
+            ),
+        ]
     })
 }
 
@@ -674,8 +1185,11 @@ pub fn model_response_schema() -> Value {
                 "maxItems": MAX_TOOL_CALLS_PER_TURN,
                 "items": {
                     "type": "object",
-                    "required": ["tool", "args"],
-                    "properties": {"tool": {"type": "string"}, "args": {"type": "string"}},
+                    "required": ["action_id", "args"],
+                    "properties": {
+                        "action_id": {"type": "string", "pattern": "^a_[0-9a-f]{16}$"},
+                        "args": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}
+                    },
                     "additionalProperties": false
                 }
             }
@@ -686,14 +1200,15 @@ pub fn model_response_schema() -> Value {
 
 pub fn workshop_tool_specs() -> Vec<ToolSpec> {
     vec![
-        spec("list_symbols", "Search compact editable Stasis symbols within explicit starting files. Without files, the project entry file and its direct imports are searched. The response maps every searched file to its direct imports. Pass files as an array of up to 16 project-relative paths to choose a different scope. Symbol items exclude imports and empty global groups, default to 32 items, and never include source or source hashes.", &[], &["files", "query", "kind", "owner", "page", "limit"]),
-        spec("find_references", "Find compact compiler-owned definitions, reads, writes, and calls for a function, global, or dot-qualified field.", &["symbol"], &["limit"]),
+        spec("list_symbols", "List symbols. Defaults to entry plus direct imports; kind=test with no files selects known tests. files accepts 16 paths. Returns 32 items by default and a next action when more exist.", &[], &["files", "query", "kind", "owner", "page", "limit"]),
+        spec("get_stdlib_api", "No module lists valid modules; module returns filtered/paged public signatures, externs, and canonical_import (64 max).", &[], &["module", "query", "kind", "page", "limit"]),
+        spec("find_references", "Group compiler-owned definition/read/write/call uses by containing symbol.", &["symbol"], &["limit"]),
         spec("list_owner_symbols", "List compact symbols owned by one type or group.", &["owner"], &[]),
-        spec("read_symbol", "Read one Stasis symbol. Up to 50 deliberate symbol reads may be batched as separate tool calls in one turn.", &["name"], &["kind", "file", "owner", "signature"]),
-        spec("write_symbol", "Atomically add or replace a symbol; set operation=add for a new symbol. A write batch compiles and tests together.", &["file", "name", "new_source"], &["operation", "kind", "owner", "signature", "expected_source_hash"]),
+        spec("read_symbol", "Read one symbol's full source and reusable expected_source_hash.", &["name"], &["kind", "file", "owner", "signature"]),
+        spec("write_symbol", "Atomically add or replace a symbol; operation=add creates it. The batch compiles and tests.", &["file", "name", "new_source"], &["operation", "kind", "owner", "signature", "expected_source_hash"]),
         spec("delete_symbol", "Atomically delete a symbol.", &["name"], &["file", "kind", "owner", "signature", "expected_source_hash"]),
-        spec("read_imports", "Read one source file's imports.", &["file"], &[]),
-        spec("write_imports", "Atomically replace one source file's imports.", &["file", "imports"], &[]),
+        spec("read_imports", "Read one source file's imports group.", &["file"], &[]),
+        spec("write_imports", "Atomically replace imports from path strings, including canonical_import.", &["file", "imports"], &[]),
         spec("get_diagnostics", "Read the latest compiler diagnostics.", &[], &[]),
         spec("set_input_state", "Set simulated input state.", &[], &["x", "y", "active", "screen_w", "screen_h"]),
         spec("inspect_runtime_state", "Read bounded live scalar state.", &[], &[]),
@@ -703,29 +1218,54 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("read_test_file", "Read one Stasis test file.", &["file"], &[]),
         spec("write_test_file", "Create or replace one Stasis test file.", &["file", "source"], &[]),
         spec("delete_test_file", "Delete one Stasis test file.", &["file"], &[]),
-        spec("run_tests", "Confirm the latest atomic write batch compiled and passed tests.", &[], &[]),
+        spec("run_tests", "Run the optional baseline/current suite; writes compile and test automatically.", &[], &[]),
     ]
 }
 
 pub fn live_tool_specs() -> Vec<ToolSpec> {
     const LIVE_TOOLS: &[&str] = &[
         "list_symbols",
+        "get_stdlib_api",
         "find_references",
         "read_symbol",
         "write_symbol",
         "delete_symbol",
-        "inspect_runtime_state",
-        "run_frame",
+        "read_imports",
+        "write_imports",
+        "run_tests",
     ];
-    workshop_tool_specs()
+    let mut tools = workshop_tool_specs()
         .into_iter()
         .filter(|spec| LIVE_TOOLS.contains(&spec.tool.as_str()))
-        .collect()
+        .collect::<Vec<_>>();
+    tools.push(spec(
+        "get_capability",
+        "Load tools and policy; name must be assets or runtime.",
+        &["name"],
+        &[],
+    ));
+    tools
 }
 
+pub fn action_id_for_tool(tool: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in b"stasis-action-v1:".iter().chain(tool.as_bytes()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("a_{hash:016x}")
+}
+pub fn offered_action(tool: &str, purpose: &str, args: Value) -> Value {
+    json!({
+        "action_id": action_id_for_tool(tool),
+        "purpose": purpose,
+        "args": args,
+    })
+}
 fn spec(tool: &str, purpose: &str, required: &[&str], optional: &[&str]) -> ToolSpec {
     ToolSpec {
         tool: tool.to_string(),
+        action_id: action_id_for_tool(tool),
         purpose: purpose.to_string(),
         required_args: required.iter().map(|value| (*value).to_string()).collect(),
         optional_args: optional.iter().map(|value| (*value).to_string()).collect(),
@@ -768,22 +1308,34 @@ impl Default for CodexExecProvider {
     }
 }
 
+pub fn asset_tool_specs() -> Vec<ToolSpec> {
+    vec![
+        spec("request_imagegen_asset", "Persist a host ImageGen request, wait for one PNG, and return source_path. Dimensions default to 1024x1024 and may be at most 2048x2048.", &["filename", "prompt", "purpose"], &["width", "height"]),
+        spec("write_svg_asset", "Stage one bounded SVG under assets/generated and derive its v2 manifest entry.", &["id", "path", "source", "width", "height"], &[]),
+        spec("write_png_asset", "Stage a deterministic filled-shape PNG and derive its v2 manifest entry. Colors are #RRGGBB or #RRGGBBAA. Shapes: rect: {kind,color,x,y,width,height}; circle: {kind,color,x,y,radius} with center x/y; line: {kind,color,x1,y1,x2,y2,thickness}. fill, stroke, stroke_width, cx/cy, and line width are not supported.", &["id", "path", "width", "height", "background", "shapes"], &[]),
+        spec("import_png_asset", "Validate and stage an ImageGen PNG under assets/generated and derive its v2 manifest entry. Supply all four crop fields together. transparent_color is #RRGGBB; tolerance defaults to 12. Background removal fails if the border stays opaque or the subject is nearly erased.", &["id", "path", "source_path"], &["crop_x", "crop_y", "crop_width", "crop_height", "transparent_color", "transparent_tolerance"]),
+        spec("delete_asset", "Stage deletion of a generated asset and matching manifest entry. id is required for sprites/audio and omitted for manifest-free JSON/CSV.", &["path"], &["id"]),
+        spec("write_data_asset", "Stage bounded JSON or CSV under assets/generated.", &["path", "source"], &[]),
+        spec("write_procedural_wav", "Stage deterministic mono PCM audio and derive its v2 manifest entry.", &["id", "path", "frequency_hz", "duration_ms"], &[]),
+    ]
+}
+
+pub fn runtime_tool_specs() -> Vec<ToolSpec> {
+    workshop_tool_specs()
+        .into_iter()
+        .filter(|spec| matches!(spec.tool.as_str(), "inspect_runtime_state" | "run_frame"))
+        .collect()
+}
+
 pub fn project_ai_tool_specs() -> Vec<ToolSpec> {
-    let mut tools = live_tool_specs();
-    tools.extend([
-        spec("request_imagegen_asset", "Request one host-generated PNG containing one isolated foreground asset or subject on a flat removable background, not an atlas. Prefer ImageGen over primitive SVG or shape-composed PNG for authored game art, including early versions; primitive shapes remain appropriate for basic UI and overlays. Render contract v3 preserves submission order; submit an opaque full-board background sprite before line-rendered gameplay and overlays. The master defaults to 1024x1024; request up to 2048x2048 only when extra detail or crop latitude is needed. Keep it in the controlled ImageGen inbox and derive the game copy later with import_png_asset crop/background-removal options. The host persists the prompt and this call waits for the PNG, then returns its source_path. Request before the atomic asset/source write batch.", &["filename", "prompt", "purpose"], &["width", "height"]),
-        spec("write_svg_asset", "Stage one bounded SVG under assets/generated and derive its v2 manifest entry. Prefer this for basic UI, simple icons, markers, and overlays; do not use primitive vector construction for characters or units by default. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "source", "width", "height"], &[]),
-        spec("write_png_asset", "Generate and stage one deterministic PNG from bounded filled shapes, then derive its v2 manifest entry. Each shape requires kind and color (#RRGGBB or #RRGGBBAA). The only supported shape objects are rect: {kind,color,x,y,width,height}; circle: {kind,color,x,y,radius}, where x/y are the center; and line: {kind,color,x1,y1,x2,y2,thickness}. Rectangles and circles are filled; fill, stroke, stroke_width, cx/cy, and line width are not supported. Prefer it for basic UI and deterministic overlays or a capability fallback; do not use primitive-shape characters or units by default. It must be in the same tool batch immediately before source writes that load or use it.", &["id", "path", "width", "height", "background", "shapes"], &[]),
-        spec("import_png_asset", "Copy a host-generated PNG from build/ai-assets/imagegen or build/gauntlet/imagegen into assets/generated, optionally crop it and remove a flat background color, validate the result, and derive its v2 manifest entry. Supply all four crop fields together. transparent_color is #RRGGBB; transparent_tolerance defaults to 12 and adapts to small provider color variation along the padded isolated-subject border. Removal fails atomically when that border remains opaque or the subject is nearly erased. Render contract v3 preserves submission order; submit opaque full-board background sprites before line-rendered gameplay and overlays. It must be in the same tool batch immediately before source writes that load and visibly draw it; importing an unused PNG does not satisfy an authored-art completion gate.", &["id", "path", "source_path"], &["crop_x", "crop_y", "crop_width", "crop_height", "transparent_color", "transparent_tolerance"]),
-        spec("delete_asset", "Delete one obsolete file under assets/generated and remove its matching manifest entry in the same rollback-safe transaction as source updates and replacement assets. Supply id for manifest-backed sprites or audio; omit it only for generated JSON/CSV files that have no manifest entry. Use deletion before a replacement that reuses the same id only when its old path differs. If a replacement keeps the same stable path, import or write it directly without delete_asset; the transaction overwrites the file and manifest entry.", &["path"], &["id"]),
-        spec("write_data_asset", "Stage bounded JSON or CSV data under assets/generated. It must be in the same tool batch immediately before related source writes.", &["path", "source"], &[]),
-        spec("write_procedural_wav", "Stage deterministic mono PCM audio under assets/generated and derive its v2 manifest entry. It must be in the same tool batch immediately before related source writes.", &["id", "path", "frequency_hz", "duration_ms"], &[]),
-    ]);
-    tools
+    live_tool_specs()
 }
 
 pub fn gauntlet_tool_specs() -> Vec<ToolSpec> {
-    let mut tools = project_ai_tool_specs();
+    let mut tools = live_tool_specs();
+    tools.retain(|spec| spec.tool != "get_capability");
+    tools.extend(runtime_tool_specs());
+    tools.extend(asset_tool_specs());
     tools.push(spec("record_decision", "Persist one concise Gauntlet decision, rationale, evidence summary, and next step for future fresh agents. Record conclusions and tradeoffs, never hidden chain-of-thought.", &["kind", "summary", "rationale", "evidence", "next_step"], &[]));
     tools.push(spec("report_blocked", "Immediately terminate this builder attempt when a non-recoverable environment, harness, permission, or missing-capability condition makes completion impossible with the supplied tools. Do not use this for an ordinary code/test failure that can be corrected.", &["reason", "evidence", "next_step"], &[]));
     tools
@@ -1064,12 +1616,17 @@ fn default_codex_executable() -> PathBuf {
 
 impl ModelProvider for CodexExecProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String> {
-        let source = self.run_codex(request, &model_response_schema(), canceled)?;
+        let schema = model_response_schema_for_request(request)?;
+        let source = self.run_codex(request, &schema, canceled)?;
         decode_codex_response(&source)
     }
 
     fn take_usage(&mut self) -> Option<Value> {
         self.last_usage.take()
+    }
+
+    fn requires_action_ids(&self) -> bool {
+        true
     }
 }
 
@@ -1087,25 +1644,38 @@ fn read_codex_usage(stdout: impl Read) -> Result<Option<Value>, String> {
     Ok(usage)
 }
 
-fn decode_codex_response(source: &str) -> Result<ModelResponse, String> {
-    let mut value: Value = serde_json::from_str(source)
-        .map_err(|error| format!("Codex returned invalid agent JSON: {error}"))?;
-    if let Some(calls) = value.get_mut("tool_calls").and_then(Value::as_array_mut) {
-        for call in calls {
-            let Some(args) = call.get_mut("args") else {
-                continue;
-            };
-            if let Some(encoded) = args.as_str() {
-                if let Ok(decoded) = serde_json::from_str(encoded) {
-                    *args = decoded;
-                }
-            }
+fn decode_model_response(source: &str, provider: &str) -> Result<ModelResponse, String> {
+    let value: Value = serde_json::from_str(source)
+        .map_err(|error| format!("{provider} returned invalid agent JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{provider} returned a non-object agent response"))?;
+    let allowed = ["mode", "working_notes", "summary", "tool_calls"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(field.as_str()))
+    {
+        return Err(format!(
+            "{provider} returned unknown response field: {field}"
+        ));
+    }
+    let response: ModelResponse = serde_json::from_value(value)
+        .map_err(|error| format!("{provider} returned invalid agent response: {error}"))?;
+    if let ModelResponse::ToolCalls { tool_calls, .. } = &response {
+        if tool_calls.iter().any(|call| !call.args.is_object()) {
+            return Err(format!(
+                "{provider} returned tool args that were not native JSON objects"
+            ));
         }
     }
-    serde_json::from_value(value)
-        .map_err(|error| format!("Codex returned invalid agent response: {error}"))
+    Ok(response)
 }
 
+fn decode_codex_response(source: &str) -> Result<ModelResponse, String> {
+    decode_model_response(source, "Codex")
+}
 struct TemporaryRun {
     root: PathBuf,
     schema: PathBuf,
@@ -1286,16 +1856,16 @@ mod tests {
         )
         .expect("fifty-call batch");
 
-        assert_eq!(DEFAULT_AGENT_TURNS, 15);
-        assert_eq!(MAX_AGENT_TURNS, 48);
+        assert_eq!(DEFAULT_AGENT_TURNS, 50);
+        assert_eq!(MAX_AGENT_TURNS, 50);
         assert_eq!(tools.0, 50);
-        assert_eq!(contract_json()["limits"]["default_agent_turns"], 15);
-        assert_eq!(contract_json()["limits"]["maximum_profile_turns"], 48);
+        assert_eq!(contract_json()["limits"]["default_agent_turns"], 50);
+        assert_eq!(contract_json()["limits"]["maximum_profile_turns"], 50);
         assert_eq!(contract_json()["limits"]["tool_calls_per_turn"], 50);
     }
 
     #[test]
-    fn explicit_profiles_can_exceed_the_live_ai_default() {
+    fn explicit_profiles_accept_the_maximum_turn_limit() {
         let mut responses = (0..16)
             .map(|index| ModelResponse::ToolCalls {
                 working_notes: format!("Inspect bounded decision input {index}."),
@@ -1318,7 +1888,7 @@ mod tests {
             &AgentProfile {
                 role: "Gauntlet builder".to_string(),
                 instruction: "Complete the bounded workstream.".to_string(),
-                max_turns: 20,
+                max_turns: 50,
                 model: None,
                 reasoning_effort: None,
                 request_timeout: None,
@@ -1333,6 +1903,28 @@ mod tests {
         .expect("extended profile");
         assert_eq!(result, "extended");
         assert_eq!(tools.0, 16);
+    }
+
+    #[test]
+    fn profiles_reject_turn_limits_above_fifty() {
+        let mut profile = AgentProfile::default();
+        profile.max_turns = 51;
+        let mut provider = Responses(vec![]);
+        let mut tools = Tools::default();
+
+        let error = run_agent_with_profile(
+            &mut provider,
+            &mut tools,
+            &profile,
+            "invalid turn limit",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect_err("51 turns exceeds the shared maximum");
+
+        assert_eq!(error, "AI agent profile max_turns must be between 1 and 50");
     }
 
     #[test]
@@ -1460,6 +2052,47 @@ mod tests {
         assert_eq!(provider.requests[2].lines().count(), 3);
         assert!(provider.requests[1].starts_with(&format!("{}\n", provider.requests[0])));
         assert!(provider.requests[2].starts_with(&format!("{}\n", provider.requests[1])));
+    }
+
+    #[test]
+    fn request_header_serializes_stable_fields_before_dynamic_content() {
+        struct RecordingProvider(Option<String>);
+        impl ModelProvider for RecordingProvider {
+            fn respond(
+                &mut self,
+                request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.0 = Some(request.to_string());
+                Ok(ModelResponse::Done {
+                    working_notes: "The request header order was captured.".to_string(),
+                    summary: "captured".to_string(),
+                })
+            }
+        }
+        let mut provider = RecordingProvider(None);
+        run_agent(
+            &mut provider,
+            &mut Tools::default(),
+            "dynamic user prompt",
+            json!({"dynamic": "initial context"}),
+            live_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("agent");
+
+        let header = provider.0.expect("request header");
+        let positions = [
+            "\"role\":",
+            "\"instruction\":",
+            "\"tool_specs\":",
+            "\"response_contract\":",
+            "\"user_prompt\":",
+            "\"initial_context\":",
+        ]
+        .map(|field| header.find(field).expect("serialized field"));
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
@@ -1785,50 +2418,178 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_tools_before_execution() {
-        let mut provider = Responses(vec![ModelResponse::ToolCalls {
-            working_notes: "Intent: act. Observed: none. Next: shell. Blocker: none.".to_string(),
-            summary: String::new(),
-            tool_calls: vec![ToolCall {
-                tool: "shell".to_string(),
-                args: json!({}),
-            }],
-        }]);
-        let error = run_agent(
+    fn external_provider_concrete_tool_name_cannot_execute() {
+        struct ExternalResponses(Vec<ModelResponse>);
+        impl ModelProvider for ExternalResponses {
+            fn respond(
+                &mut self,
+                _request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                Ok(self.0.remove(0))
+            }
+
+            fn requires_action_ids(&self) -> bool {
+                true
+            }
+        }
+        let mut provider = ExternalResponses(vec![
+            ModelResponse::ToolCalls {
+                working_notes: "Attempt a concrete tool name.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "read_symbol".to_string(),
+                    args: json!({"name":"tick"}),
+                }],
+            },
+            ModelResponse::Done {
+                working_notes: "The concrete name was rejected before execution.".to_string(),
+                summary: "rejected".to_string(),
+            },
+        ]);
+        let mut tools = Tools::default();
+        let mut observations = Vec::new();
+        run_agent(
             &mut provider,
-            &mut Tools::default(),
+            &mut tools,
+            "inspect",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |event| {
+                if let AgentEvent::Observations(values) = event {
+                    observations.extend(values);
+                }
+            },
+        )
+        .expect("provider receives replacement feedback");
+        assert_eq!(tools.0, 0);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].tool, "read_symbol");
+        assert!(observations[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("invented AI action ID"));
+    }
+    #[test]
+    fn rejects_only_invented_action_id_and_retains_accepted_selection() {
+        struct RecordingResponses {
+            responses: Vec<ModelResponse>,
+            requests: Vec<String>,
+        }
+        impl ModelProvider for RecordingResponses {
+            fn respond(
+                &mut self,
+                request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.requests.push(request.to_string());
+                Ok(self.responses.remove(0))
+            }
+        }
+        let read_id = workshop_tool_specs()
+            .into_iter()
+            .find(|spec| spec.tool == "read_symbol")
+            .expect("read spec")
+            .action_id;
+        let rejected_id = "a_0000000000000000";
+        let mut provider = RecordingResponses {
+            responses: vec![
+                ModelResponse::ToolCalls {
+                    working_notes: "Select one valid read and one invalid action.".to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![
+                        ToolCall {
+                            tool: read_id.clone(),
+                            args: json!({"name":"tick"}),
+                        },
+                        ToolCall {
+                            tool: rejected_id.to_string(),
+                            args: json!({}),
+                        },
+                    ],
+                },
+                ModelResponse::Done {
+                    working_notes: "Retain the valid selection and replace the rejected ID."
+                        .to_string(),
+                    summary: "rejected safely".to_string(),
+                },
+            ],
+            requests: Vec::new(),
+        };
+        let mut tools = Tools::default();
+        let mut rejected = Vec::new();
+        let result = run_agent(
+            &mut provider,
+            &mut tools,
             "change",
             json!({}),
             workshop_tool_specs(),
             &AtomicBool::new(false),
-            |_| {},
+            |event| {
+                if let AgentEvent::Observations(observations) = event {
+                    rejected.extend(observations);
+                }
+            },
         )
-        .expect_err("unknown tool");
-        assert_eq!(error, "unsupported AI tool: shell");
+        .expect("agent receives localized rejection");
+        assert_eq!(result, "rejected safely");
+        assert_eq!(tools.0, 0, "invalid batches remain atomic");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].tool, rejected_id);
+        assert!(rejected[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("replace only this rejected action ID"));
+        assert!(provider.requests[1].contains(&read_id));
+        assert!(provider.requests[1].contains(rejected_id));
     }
-
     #[test]
-    fn live_contract_is_a_strict_subset_of_the_workshop_contract() {
+    fn live_contract_is_compact_and_lazily_exposes_rare_tools() {
         let workshop = workshop_tool_specs();
         let live = live_tool_specs();
         assert!(!live.is_empty());
         assert!(live.len() < workshop.len());
         assert!(live
             .iter()
+            .filter(|tool| tool.tool != "get_capability")
             .all(|tool| workshop.iter().any(|candidate| candidate.tool == tool.tool)));
         assert!(live.iter().any(|tool| tool.tool == "write_symbol"));
         assert!(live.iter().any(|tool| tool.tool == "find_references"));
-        assert!(!live.iter().any(|tool| tool.tool == "run_tests"));
+        assert!(live.iter().any(|tool| tool.tool == "get_stdlib_api"));
+        assert!(live.iter().any(|tool| tool.tool == "run_tests"));
+        assert!(!live.iter().any(|tool| tool.tool == "inspect_runtime_state"));
+        assert!(!live.iter().any(|tool| tool.tool == "run_frame"));
+        assert!(live.iter().any(|tool| tool.tool == "get_capability"));
         assert!(!workshop
             .iter()
             .any(|tool| tool.tool == "validate_runtime_state"));
         assert!(!live.iter().any(|tool| tool.tool == "capture_screenshot"));
+        let instruction = AgentProfile::default().instruction;
+        assert!(instruction.contains("successful receipt proves completion"));
+        for syntax in [
+            "import",
+            "struct",
+            "global",
+            "function",
+            "test `name`(): bool",
+        ] {
+            assert!(instruction.contains(syntax));
+        }
+        assert!(instruction.contains("function damage(self: Enemy, amount: i32): void"));
+        assert!(instruction.contains("enemy.damage(5)"));
+        assert!(instruction.contains("runtime/assets capability only when necessary"));
+        assert!(instruction.len() <= 1_000);
     }
 
     #[test]
-    fn project_ai_gets_assets_without_gauntlet_decision_memory() {
+    fn project_ai_discovers_assets_while_gauntlet_gets_them_eagerly() {
+        let live = live_tool_specs();
         let project = project_ai_tool_specs();
-        for expected in [
+        assert!(project.iter().any(|tool| tool.tool == "get_capability"));
+        for hidden in [
             "request_imagegen_asset",
             "write_svg_asset",
             "write_png_asset",
@@ -1837,23 +2598,24 @@ mod tests {
             "write_data_asset",
             "write_procedural_wav",
         ] {
-            assert!(project.iter().any(|tool| tool.tool == expected));
+            assert!(!project.iter().any(|tool| tool.tool == hidden));
         }
         assert!(!project.iter().any(|tool| tool.tool == "record_decision"));
         assert!(!project.iter().any(|tool| tool.tool == "report_blocked"));
-        assert!(project
-            .iter()
-            .find(|tool| tool.tool == "request_imagegen_asset")
-            .is_some_and(|tool| tool.purpose.contains("including early versions")));
-        assert!(project
-            .iter()
-            .find(|tool| tool.tool == "request_imagegen_asset")
-            .is_some_and(|tool| tool.purpose.contains("preserves submission order")));
-        assert!(project
-            .iter()
-            .find(|tool| tool.tool == "import_png_asset")
-            .is_some_and(|tool| tool.purpose.contains("preserves submission order")));
-        let png = project
+        assert_eq!(project, live);
+        let assets = asset_tool_specs();
+        for shared_policy in [
+            "including early versions",
+            "preserves submission order",
+            "contiguous asset-tool",
+            "manifest directly",
+            "visibly drawn",
+        ] {
+            assert!(assets
+                .iter()
+                .all(|tool| !tool.purpose.contains(shared_policy)));
+        }
+        let png = assets
             .iter()
             .find(|tool| tool.tool == "write_png_asset")
             .expect("PNG tool");
@@ -1871,62 +2633,420 @@ mod tests {
         assert!(gauntlet_tool_specs()
             .iter()
             .any(|tool| tool.tool == "report_blocked"));
+        for asset in &assets {
+            assert!(gauntlet_tool_specs()
+                .iter()
+                .any(|tool| tool.tool == asset.tool));
+        }
+        for runtime in runtime_tool_specs() {
+            assert!(gauntlet_tool_specs()
+                .iter()
+                .any(|tool| tool.tool == runtime.tool));
+        }
+        assert!(!gauntlet_tool_specs()
+            .iter()
+            .any(|tool| tool.tool == "get_capability"));
+
+        let live_bytes = serde_json::to_vec(&live).expect("live specs JSON").len();
+        let project_bytes = serde_json::to_vec(&project)
+            .expect("project specs JSON")
+            .len();
+        eprintln!(
+            "serialized context contracts: instruction={} bytes, live_tools={live_bytes} bytes, project_tools={project_bytes} bytes",
+            AgentProfile::default().instruction.len()
+        );
+        assert!(
+            live_bytes <= 2_100,
+            "live tool specs grew to {live_bytes} bytes"
+        );
+        assert!(
+            project_bytes <= 2_500,
+            "project tool specs grew to {project_bytes} bytes"
+        );
+        let write = project
+            .iter()
+            .find(|spec| spec.tool == "write_symbol")
+            .expect("write spec");
+        let encoded = serde_json::to_value(write).expect("serialized tool spec");
+        assert!(encoded.get("use").is_some());
+        assert!(encoded.get("required").is_some());
+        assert!(encoded.get("optional").is_some());
+        assert!(encoded.get("purpose").is_none());
+        assert!(encoded.get("required_args").is_none());
+        let decoded: ToolSpec = serde_json::from_value(encoded).expect("compact tool spec");
+        assert_eq!(decoded, *write);
+        let capability = serde_json::to_value(
+            project
+                .iter()
+                .find(|spec| spec.tool == "get_capability")
+                .expect("capability spec"),
+        )
+        .expect("serialized capability");
+        assert!(capability.get("required").is_some());
+        assert!(capability.get("optional").is_none());
     }
 
     #[test]
-    fn codex_transport_decodes_json_encoded_tool_args() {
-        let response = decode_codex_response(
-            r#"{"mode":"tool_calls","working_notes":"Inspect next.","summary":"","tool_calls":[{"tool":"read_symbol","args":"{\"name\":\"tick\"}"}]}"#,
-        )
-        .expect("response");
-        let ModelResponse::ToolCalls { tool_calls, .. } = response else {
-            panic!("tool calls");
-        };
-        assert_eq!(tool_calls[0].args, json!({"name": "tick"}));
-    }
-
-    #[test]
-    fn malformed_json_encoded_tool_args_are_returned_for_correction() {
-        let malformed = decode_codex_response(
-            r#"{"mode":"tool_calls","working_notes":"Correct the malformed call next.","summary":"","tool_calls":[{"tool":"read_symbol","args":"{\"name\":\"tick\"} {\"extra\":true}"}]}"#,
-        )
-        .expect("transport preserves malformed args for the agent loop");
+    fn rare_tools_activate_only_after_their_capability_discovery() {
         let mut provider = Responses(vec![
-            malformed,
+            ModelResponse::ToolCalls {
+                working_notes: "Discover the authored-presentation capability.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "get_capability".to_string(),
+                    args: json!({"name":"assets"}),
+                }],
+            },
+            ModelResponse::ToolCalls {
+                working_notes: "Use the discovered bounded SVG capability.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "write_svg_asset".to_string(),
+                    args: json!({
+                        "id":"marker", "path":"assets/generated/marker.svg",
+                        "source":"<svg/>", "width":16, "height":16
+                    }),
+                }],
+            },
+            ModelResponse::ToolCalls {
+                working_notes: "Load runtime observation only after asset work.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "get_capability".to_string(),
+                    args: json!({"name":"runtime"}),
+                }],
+            },
+            ModelResponse::ToolCalls {
+                working_notes: "Use the discovered bounded runtime capability.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "run_frame".to_string(),
+                    args: json!({}),
+                }],
+            },
             ModelResponse::Done {
-                working_notes: "The rejected batch was corrected without executing it.".to_string(),
-                summary: "corrected".to_string(),
+                working_notes: "The discovered capability was accepted.".to_string(),
+                summary: "done".to_string(),
             },
         ]);
         let mut tools = Tools::default();
-        let mut errors = Vec::new();
-
-        let result = run_agent(
+        run_agent(
             &mut provider,
             &mut tools,
-            "correct malformed tool arguments",
+            "add authored marker art",
             json!({}),
-            workshop_tool_specs(),
+            project_ai_tool_specs(),
             &AtomicBool::new(false),
-            |event| {
-                if let AgentEvent::Observations(observations) = event {
-                    errors.extend(
-                        observations
-                            .into_iter()
-                            .filter_map(|observation| observation.error),
-                    );
-                }
-            },
+            |_| {},
         )
-        .expect("agent retries after rejected transport args");
-
-        assert_eq!(result, "corrected");
-        assert_eq!(tools.0, 0);
-        assert!(errors
-            .iter()
-            .any(|error| error.contains("batch rejected before execution")));
+        .expect("discovered asset tool");
+        assert_eq!(tools.0, 4);
     }
 
+    #[test]
+    fn external_provider_schema_tracks_capability_records() {
+        struct RecordingProvider {
+            responses: Vec<ModelResponse>,
+            requests: Vec<String>,
+            schemas: Vec<Value>,
+        }
+
+        impl ModelProvider for RecordingProvider {
+            fn respond(
+                &mut self,
+                request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.requests.push(request.to_string());
+                self.schemas
+                    .push(model_response_schema_for_request(request)?);
+                Ok(self.responses.remove(0))
+            }
+
+            fn requires_action_ids(&self) -> bool {
+                true
+            }
+        }
+
+        struct CapabilityExecutor {
+            calls: Vec<String>,
+        }
+
+        impl ToolExecutor for CapabilityExecutor {
+            fn execute(
+                &mut self,
+                calls: &[ToolCall],
+                _canceled: &AtomicBool,
+            ) -> Vec<ToolObservation> {
+                self.calls
+                    .extend(calls.iter().map(|call| call.tool.clone()));
+                calls
+                    .iter()
+                    .map(|call| {
+                        if call.tool == "get_capability"
+                            && call.args.get("name").and_then(Value::as_str) == Some("assets")
+                        {
+                            ToolObservation::result(
+                                &call.tool,
+                                json!({"name":"assets", "tool_specs": asset_tool_specs()}),
+                            )
+                        } else {
+                            ToolObservation::result(&call.tool, json!({"ok": true}))
+                        }
+                    })
+                    .collect()
+            }
+        }
+
+        let capability_id = project_ai_tool_specs()
+            .into_iter()
+            .find(|spec| spec.tool == "get_capability")
+            .expect("capability spec")
+            .action_id;
+        let svg_id = asset_tool_specs()
+            .into_iter()
+            .find(|spec| spec.tool == "write_svg_asset")
+            .expect("SVG spec")
+            .action_id;
+        let mut provider = RecordingProvider {
+            responses: vec![
+                ModelResponse::ToolCalls {
+                    working_notes: "Discover the asset capability before using it.".to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![ToolCall {
+                        tool: capability_id,
+                        args: json!({"name":"assets"}),
+                    }],
+                },
+                ModelResponse::ToolCalls {
+                    working_notes: "Use the newly advertised SVG action.".to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![ToolCall {
+                        tool: svg_id.clone(),
+                        args: json!({
+                            "id":"marker", "path":"assets/generated/marker.svg",
+                            "source":"<svg/>", "width":16, "height":16
+                        }),
+                    }],
+                },
+                ModelResponse::Done {
+                    working_notes: "The capability action completed.".to_string(),
+                    summary: "done".to_string(),
+                },
+            ],
+            requests: Vec::new(),
+            schemas: Vec::new(),
+        };
+        let mut executor = CapabilityExecutor { calls: Vec::new() };
+
+        run_agent(
+            &mut provider,
+            &mut executor,
+            "discover and use assets",
+            json!({}),
+            project_ai_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("external provider capability flow");
+
+        assert_eq!(executor.calls, ["get_capability", "write_svg_asset"]);
+        assert_eq!(provider.schemas.len(), 3);
+        let initial_variants = provider.schemas[0]
+            .pointer("/properties/tool_calls/items/anyOf")
+            .and_then(Value::as_array)
+            .expect("initial variants");
+        assert!(!initial_variants.iter().any(|variant| {
+            variant.pointer("/properties/action_id/enum/0") == Some(&json!(svg_id))
+        }));
+        let discovered_variants = provider.schemas[1]
+            .pointer("/properties/tool_calls/items/anyOf")
+            .and_then(Value::as_array)
+            .expect("discovered variants");
+        assert!(discovered_variants.iter().any(|variant| {
+            variant.pointer("/properties/action_id/enum/0") == Some(&json!(svg_id))
+        }));
+        let active_record = provider.requests[1]
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("transcript record"))
+            .find(|record| record["record"] == "active_capabilities")
+            .expect("active capability record");
+        assert!(active_record["tool_specs"]
+            .as_array()
+            .expect("active tool specs")
+            .iter()
+            .any(|spec| spec["tool"] == "write_svg_asset"));
+        assert!(provider.requests[1].starts_with(&format!("{}\n", provider.requests[0])));
+    }
+
+    #[test]
+    fn action_schemas_close_args_and_nested_png_shapes() {
+        let specs = [
+            workshop_tool_specs()
+                .into_iter()
+                .find(|spec| spec.tool == "read_symbol")
+                .expect("read spec"),
+            workshop_tool_specs()
+                .into_iter()
+                .find(|spec| spec.tool == "write_symbol")
+                .expect("write spec"),
+            live_tool_specs()
+                .into_iter()
+                .find(|spec| spec.tool == "get_capability")
+                .expect("capability spec"),
+            asset_tool_specs()
+                .into_iter()
+                .find(|spec| spec.tool == "write_png_asset")
+                .expect("PNG spec"),
+        ];
+        let schema = model_response_schema_for(&specs);
+        let variants = schema["properties"]["tool_calls"]["items"]["anyOf"]
+            .as_array()
+            .expect("action variants");
+        let args = |tool: &str| {
+            variants
+                .iter()
+                .find(|variant| {
+                    variant["properties"]["action_id"]["enum"][0] == json!(action_id_for_tool(tool))
+                })
+                .expect("tool variant")["properties"]["args"]
+                .clone()
+        };
+        for tool in [
+            "read_symbol",
+            "write_symbol",
+            "get_capability",
+            "write_png_asset",
+        ] {
+            assert_eq!(args(tool)["additionalProperties"], json!(false));
+            assert!(args(tool)["properties"].is_object());
+            assert_eq!(
+                variants
+                    .iter()
+                    .find(|variant| {
+                        variant["properties"]["action_id"]["enum"][0]
+                            == json!(action_id_for_tool(tool))
+                    })
+                    .expect("tool variant")["additionalProperties"],
+                json!(false)
+            );
+        }
+        for tool in [
+            "read_symbol",
+            "write_symbol",
+            "get_capability",
+            "write_png_asset",
+        ] {
+            let args = args(tool);
+            let properties = args["properties"].as_object().expect("arg properties");
+            let required = args["required"].as_array().expect("required args");
+            assert_eq!(required.len(), properties.len());
+            assert!(properties
+                .keys()
+                .all(|name| required.contains(&json!(name))));
+        }
+        assert_eq!(
+            args("read_symbol")["properties"]["file"],
+            json!({"anyOf": [{"type": "string"}, {"type": "null"}]})
+        );
+        assert_eq!(
+            args("write_png_asset")["properties"]["shapes"]["items"]["anyOf"][0]
+                ["additionalProperties"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn codex_transport_rejects_json_encoded_tool_args() {
+        let error = decode_codex_response(
+            r#"{"mode":"tool_calls","working_notes":"Inspect next.","summary":"","tool_calls":[{"action_id":"a_0000000000000000","args":"{\"name\":\"tick\"}"}]}"#,
+        )
+        .expect_err("string args must be rejected");
+        assert!(error.contains("native JSON objects"));
+    }
+
+    #[test]
+    fn host_rejects_unknown_tool_arguments() {
+        let specs = workshop_tool_specs();
+        let known = specs
+            .iter()
+            .map(|spec| spec.tool.clone())
+            .collect::<BTreeSet<_>>();
+        let error = validate_tool_call(
+            &ToolCall {
+                tool: "read_symbol".into(),
+                args: json!({"name":"tick", "invented":true}),
+            },
+            &specs,
+            &known,
+            false,
+        )
+        .expect_err("unknown argument");
+        assert!(error.contains("does not accept arg: invented"));
+    }
+
+    #[test]
+    fn strict_nullable_optional_args_execute_as_omitted() {
+        let specs = workshop_tool_specs();
+        let read = specs
+            .iter()
+            .find(|spec| spec.tool == "read_symbol")
+            .expect("read spec");
+        let mut call = ToolCall {
+            tool: read.action_id.clone(),
+            args: json!({"name": "tick", "file": null}),
+        };
+        normalize_optional_nulls(&mut call, &specs, true);
+        assert_eq!(call.args, json!({"name": "tick"}));
+        validate_tool_call(&call, &specs, &BTreeSet::from([read.tool.clone()]), true)
+            .expect("normalized strict action");
+    }
+    #[test]
+    fn mismatched_action_id_cannot_select_another_tool() {
+        let specs = workshop_tool_specs();
+        let known = specs
+            .iter()
+            .map(|spec| spec.tool.clone())
+            .collect::<BTreeSet<_>>();
+        let write_id = specs
+            .iter()
+            .find(|spec| spec.tool == "write_symbol")
+            .expect("write spec")
+            .action_id
+            .clone();
+        let error = validate_tool_call(
+            &ToolCall {
+                tool: write_id,
+                args: json!({"name":"tick"}),
+            },
+            &specs,
+            &known,
+            true,
+        )
+        .expect_err("write ID cannot invoke read arguments");
+        assert!(error.contains("requires arg: file"));
+    }
+
+    #[test]
+    fn provider_decoder_rejects_unknown_response_fields() {
+        let error = decode_codex_response(
+            r#"{"mode":"done","working_notes":"Complete.","summary":"done","invented":true}"#,
+        )
+        .expect_err("unknown response field");
+        assert!(error.contains("unknown response field: invented"));
+        let error = decode_codex_response(
+            r#"{"mode":"tool_calls","working_notes":"Read.","summary":"","tool_calls":[{"action_id":"a_0000000000000000","args":{},"invented":true}]}"#,
+        )
+        .expect_err("unknown call field");
+        assert!(error.contains("unknown field"));
+    }
+    #[test]
+    fn response_schema_requires_native_object_args() {
+        assert_eq!(
+            model_response_schema().pointer("/properties/tool_calls/items/properties/args/type"),
+            Some(&json!("object"))
+        );
+    }
     #[test]
     fn codex_json_stream_keeps_only_the_exact_reported_usage() {
         let stream = concat!(

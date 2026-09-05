@@ -1,0 +1,32 @@
+{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": [
+    {
+      "id": "brickout_music",
+      "path": "assets/tone.mp3",
+      "content_sha256": "5aa0c29e0cd59ae25af7957e07a0f4cfc2506c63ba10e055ae9e6584187e4a3c",
+      "format": {
+        "kind": "audio",
+        "encoding": "mp3",
+        "channels": 1,
+        "sample_rate": 24000,
+        "duration_frames": 18000
+      },
+      "dependencies": []
+    },
+    {
+      "id": "brickout_effect",
+      "path": "assets/tone.wav",
+      "content_sha256": "e6a12792fdbb340eb48009a5cc1ff5162ec69279787605d73678d41658d836f4",
+      "format": {
+        "kind": "audio",
+        "encoding": "wav",
+        "channels": 1,
+        "sample_rate": 24000,
+        "duration_frames": 18000
+      },
+      "dependencies": []
+    }
+  ]
+}

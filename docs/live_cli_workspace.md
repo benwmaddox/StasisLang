@@ -74,24 +74,35 @@ between-tick boundary. Successful writes return a compact receipt and changed-sy
 than echoing whole before/after files into later model turns. A layout-changing edit remains a
 validated preview and requires explicit user `:apply` approval.
 
-`list_symbols` starts with the entry file and its direct imports when no file is supplied. Its
-compact response includes the direct imports for every searched file, allowing the next search to
-expand deliberately without enumerating the project. Each AI request preloads this default result
-in `initial_context`, avoiding a provider round trip while retaining filtered and paged follow-up
-searches. Explicit file arguments remain an exact scope.
+`list_symbols` starts with the entry file and its direct imports when no file is supplied. Before
+the first model turn, Stasis reads a bounded broad page locally and uses it only to construct
+the `start` section of a slim hypermedia context: bounded, lexical, directly usable `list_symbols`
+and `read_symbol` calls. These suggested actions are leads, not proof. When there is no useful
+lexical match, `start` supplies the executable default `list_symbols` call instead of an arbitrary
+source-ordered page of signatures or passive project metadata. Its `options` pair lazy standard
+library discovery and optional baseline tests with their executable tool calls. A compact stable
+primer identifies Stasis as statically typed and C-like, names its declaration forms and
+receiver-first method syntax, and directs the agent to read exact local syntax before editing.
+The host may use the entry file's loaded direct-import paths to rank these initial actions, but
+that private hint topology is never included in model-visible `list_symbols` observations.
 
 Before changing a behavior-bearing symbol, the AI must use compiler-backed `find_references` to
-locate its definition, reads, writes, and calls without receiving unrelated source bodies. Related
+locate its definition, reads, writes, and calls, grouped by the containing symbol without repeated
+spans, hashes, or unrelated source bodies. Related
 source edits and requested durable tests are submitted as one atomic batch. The normal preparation
 worker compiles that batch and runs project tests before applying it; failure rolls back the whole
 batch. A built-in AI change cannot report completion until one such tested batch is applied. The
 successful write receipt is the completion evidence, so the live AI does not run a second test or
-model-authored runtime-validation loop afterward.
+model-authored runtime-validation loop afterward. Durable tests are the default evidence. When it
+must reproduce or observe live state that tests cannot establish, it calls
+`get_capability(name="runtime")` to load `inspect_runtime_state` and `run_frame`; these tools never
+replace requested durable tests.
 
-The one-shot `stasis ai` command also receives the controlled project-asset tools used by
-Gauntlet. It can reuse the SVG pipeline, compose deterministic PNG files, import a host-generated
-ImageGen PNG, write bounded JSON/CSV data, and synthesize bounded procedural WAV files. Asset calls
-must form one contiguous group immediately before the source writes that load and use them. Stasis derives
+For authored presentation, data, or audio work, the one-shot `stasis ai` command first calls
+`get_capability(name="assets")`. The observation returns the controlled asset-tool specifications and shared
+policy; ordinary logic requests do not pay that initial context cost. Gauntlet builders retain the
+eager asset surface. Asset calls form one contiguous group immediately before source writes that
+load and use them. Stasis derives
 the v2 manifest entries, validates the complete bundle, compiles and tests the related source, and
 rolls the asset and source sides back together on failure; the model never edits the manifest.
 
@@ -127,11 +138,14 @@ Human commands intentionally cover every useful live AI capability:
 | `list_symbols` | `stasis symbol list` / `:symbols` |
 | `find_references` | `stasis symbol references SYMBOL` / `:references SYMBOL` |
 | `read_symbol` | `stasis symbol read SYMBOL` / `:read SYMBOL` |
+| `read_imports`, `write_imports` | `stasis symbol read|update imports` / `:read imports`, `:update imports` |
 | `write_symbol`, `delete_symbol` | `stasis symbol add|update|delete` / `:add`, `:update`, `:delete` |
 | `write_svg_asset`, `write_png_asset`, `import_png_asset`, `delete_asset` | controlled `assets/generated/` transaction (`stasis ai` and Gauntlet) |
 | `write_data_asset`, `write_procedural_wav` | controlled data/audio transaction (`stasis ai` and Gauntlet) |
+| `get_capability` | selects the controlled asset surface or the existing `:inspect` / `:step` runtime surface |
 | `inspect_runtime_state` | `:inspect`; `stasis validate` exposes fresh-run scalar evidence |
 | `run_frame` | `:step`; `stasis validate --frames N` in an isolated CLI run |
+| `run_tests` | `stasis test`; optional baseline/current suite check (writes test automatically) |
 
 `stasis validate` uses the isolated `fresh` baseline and accepts `--frames`, `--setup`, `--tick`,
 and `--render`. TUI `:validate` uses a snapshot of the live game, runs the requested frames, reports
@@ -154,23 +168,43 @@ Provider-reported token usage is written separately to
 Codex `turn.completed` event; Stasis does not estimate or add missing token categories. The Codex
 JSON event stream is consumed in memory and all non-usage transport events are discarded.
 
-AI `list_symbols` calls search only the project entry file by default. The agent can pass `files` as
-an array of up to 16 project-relative paths to widen that starting scope, and can further narrow it
-with `query`, `kind`, `owner`, `page`, and `limit`. Human `stasis symbol list` and TUI `:symbols`
+AI `list_symbols` calls search the project entry file and its direct imports by default. The agent
+can pass `files` as an array of up to 16 project-relative paths to choose a different starting
+scope, and can further narrow it with `query`, `kind`, `owner`, `page`, and `limit`. With no files,
+`kind=test` instead scopes discovery to every compiler-known test-bearing file, including tests
+outside the entry import graph; when none exist it returns an empty listing. Human
+`stasis symbol list` and TUI `:symbols`
 accept repeated `--file` options and use the same entry-file default. Listings return at most 32
 entries by default and omit imports, empty global groups, source bodies, and source hashes. Each
-item contains only its name, kind, signature, file, and owner when applicable. `read_symbol` returns
-the selected source and its hash so a later write can use that hash solely as a stale-write guard.
-An AI request may use up to 15 provider turns. The agent may batch up to 50 deliberate tool calls
+item contains only its name, kind, signature, file, and owner when applicable; when another page
+exists, `next` is a directly executable `list_symbols` call with the current filters. Import
+metadata is not expanded for result files, so unloaded imports outside the requested discovery
+scope cannot make the listing fail. `read_symbol` returns the selected full source and its hash as
+`expected_source_hash`, ready for use solely as a stale-write guard.
+An AI request may use up to 50 provider turns. The agent may batch up to 50 deliberate tool calls
 in each turn, such as reading a related set of functions after targeted discovery. Combined
 observations are bounded to 1 MiB; this supports substantial explicit source reads without making
 whole-project enumeration the default behavior.
 
+Discovery, navigation, pagination, capability, receipt, and error responses target less than 1
+KiB when a compact next action can advance the work. This is not a truncation limit for explicitly
+requested full symbol source, generated content, or caller-selected large result pages.
+
+Standard-library discovery is fully lazy and absent from the first-turn context. Calling
+`get_stdlib_api` without a module returns the deterministic public module-name choices from the
+project-matched library. Calling it again with one choice returns that module's `canonical_import`
+and filterable, paged public API; when another page exists, `next` is an executable call preserving
+the filters. The import value can be passed directly to `write_imports`. The
+host accepts only indexed module names beneath the validated matched stdlib root and never treats
+the module argument as a path. Human users can inspect the same source with `stasis symbol list
+--file` or TUI `:symbols --file`.
+
 Provider requests use JSONL: one immutable request-header record followed by append-only
 `turn_result` records. Each model response and its tool observations appear exactly once, including
 completion-gate feedback. Every later payload is the complete previous payload byte-for-byte plus
-one newline and one new record, so provider prefix caching can reuse the stable instruction,
-context, tools, contract, and prior interactions. All provider turns in one AI request also reuse
+one newline and one new record. Stable role, instruction, tool specifications, and response
+contract precede the dynamic user prompt and initial context in the header, so provider prefix
+caching can reuse the longest stable prefix. All provider turns in one AI request also reuse
 the same isolated temporary working directory so Codex does not see a changing path before this
 stable payload. An atomic multi-symbol write returns its full transaction once; the remaining
 per-symbol observations point to that first result instead of repeating the same source-heavy plan.
@@ -459,3 +493,7 @@ Run a repeatable session without Cargo or repository-only tools:
 ```text
 stasis tui src/main.stasis --live-script live.commands --live-json
 ```
+
+## AI provider configuration
+
+Live workspace AI defaults to the installed Codex subscription and can use OpenRouter without changing host editing or safety semantics. See [AI providers](ai_providers.md) for routing, throughput/cost controls, telemetry, security, and the opt-in Cerebras evaluation.

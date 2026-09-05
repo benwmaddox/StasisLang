@@ -50,6 +50,8 @@
 - Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
 - Keep each test command bounded to 15 minutes max (900 seconds); split/shard runs when needed, and treat overruns as stability regressions.
 - After each edit/test step, check for lingering test processes (for example `target/debug/deps/*.exe`) and clean them up before the next step.
+- Validate user-visible graphical work with reviewable media in addition to automated assertions: use PNG for a representative still state and MP4 when motion, timing, input, animation, or a multi-step interaction matters. Inspect the captured artifact itself; a successful capture command is not proof that the pixels or sequence are correct. These artifacts are especially useful for independent AI review.
+- Every AI-authored work summary must include a `Visual evidence:` line. List the inspected PNG and/or MP4 paths and what each proves, or state `not applicable` for work with no user-visible behavior. If relevant media could not be captured, state that limitation rather than implying visual validation passed.
 - For incremental compilation:
 - Validate file-level invalidation correctness.
 - Validate per-function gating behavior.

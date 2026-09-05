@@ -21,8 +21,8 @@ loading on a hardened developer machine; only that exact denial may skip the two
 assertions locally. GitHub Windows CI permits generated DLLs and therefore enforces all five paths.
 
 Every graphical path must also report that it presented the shared asset-free `STASIS LOADING`
-frame. The runtime pumps initial window events before that presentation, keeping the OpenGL path
-responsive on Windows while using the same startup treatment on SDL, OpenGL, and mobile builds.
+frame. The runtime pumps initial window events before that presentation, keeping the SDL renderer
+responsive on Windows while using the same startup treatment on every native target.
 Generated launchers anchor `STASIS_ASSET_ROOT` to their own directory and reject a graphics DLL
 whose exported runtime ABI does not match the runner, preventing caller working-directory and
 mixed-version installations from degrading into missing assets or undefined runtime behavior.

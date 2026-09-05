@@ -21,6 +21,13 @@ rendering boundaries as the default unless the project documents a concrete reas
 
 ## Inspect narrowly
 
+Semantic symbol queries (`list`, `find`, `read`, and `references`) are read-only and never
+reconcile the checked-in vendor snapshot or materialize the toolchain cache. If a project tracks
+`vendor/stasis`, use `stasis vendor status` to inspect it and the explicit `stasis vendor update`
+command to prepare a missing, locally changed, or stale snapshot. If a project uses
+`"stdlib": "toolchain"`, use the explicit `stasis prepare` command to materialize its cache.
+A failed query leaves the project, vendor, and cache bytes unchanged.
+
 1. Start a code task with `stasis --json symbol list`. Without `--file`, this returns a compact,
    source-free index for the manifest entry file and its direct imports, plus their import map.
 2. If that page is truncated or dominated by unrelated imports, use the import map to select the
@@ -78,6 +85,11 @@ rolls every touched file back on failure. Do not use `--no-tests` unless the use
   isolated runtime, so it is suitable for an integration-style red/green check without depending
   on a currently running game's state. Do not report an observable change complete without a
   passing fresh validation or an equivalent focused integration test.
+- For user-visible graphical behavior, supplement assertions with media that a human or AI reviewer
+  can inspect. Capture PNG for a representative still state. Capture MP4 when the claim depends on
+  motion, timing, animation, input, state transitions, or a multi-step interaction. Inspect the
+  resulting pixels or recording; merely producing the file does not validate the behavior. Prefer
+  deterministic `stasis record` output when available; see `docs/headless_recording.md`.
 - Finish with `stasis fmt --check`, `stasis check`, and `stasis test`. Semantic symbol edits already
   preserve untouched formatting; do not run mutating whole-project formatting as routine cleanup.
 - Keep the generated `.githooks/pre-commit` active. `stasis new` configures it automatically; after
@@ -88,3 +100,8 @@ rolls every touched file back on failure. Do not use `--no-tests` unless the use
 
 Use `stasis ai "PROMPT"` only when the user explicitly wants Stasis's subscription-backed nested
 AI turn. An agent already performing the task should use the commands above directly.
+
+Every AI-authored work summary must include a `Visual evidence:` line. Name each inspected PNG
+and/or MP4 and state what it proves, or write `Visual evidence: not applicable` when the work has no
+user-visible behavior. If relevant capture was not possible, report that limitation and do not imply
+that visual validation passed.

@@ -1,0 +1,22 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "IT-023",
+  "stable_frame": 30,
+  "state_checksum": 2330,
+  "require_command_trace": true,
+  "logical_size": [640, 360],
+  "storage": {
+    "target_path": "files/it023_target/durable_value.i32",
+    "control_path": "files/it023_control/stage.i32",
+    "unrelated_scope_path": "files/it023_other/durable_value.i32",
+    "unrelated_key_path": "files/it023_target/other_key.i32",
+    "escape_paths": ["files/escape.i32", "escape.i32"],
+    "exact_value": 230023,
+    "corrupt_fallback": -2303,
+    "unrelated_scope_fallback": -2311,
+    "unrelated_key_fallback": -2312
+  },
+  "regions": [
+    {"name": "storage_green", "center": [320, 180], "rgb": [31, 166, 97], "tolerance": 30}
+  ]
+}

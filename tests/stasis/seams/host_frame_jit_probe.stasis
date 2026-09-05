@@ -1,0 +1,104 @@
+import "host_frame.stasis";
+
+global frame: HostFrame;
+global probe_i32: i32[34];
+global probe_f32: f32[23];
+
+function bool_i32(value: bool): i32 {
+    if (value) {
+        return 1;
+    }
+    return 0;
+}
+
+function probe_host_frame(): i32 {
+    frame.refresh();
+
+    probe_i32[0] = frame.time_ms;
+    probe_i32[1] = frame.time_us;
+    probe_i32[2] = frame.tick_index;
+    probe_i32[3] = frame.version;
+    probe_i32[4] = frame.flags;
+    probe_i32[5] = frame.tick_hz;
+    probe_i32[6] = bool_i32(frame.window_focused);
+    probe_i32[7] = bool_i32(frame.window_minimized);
+    probe_i32[8] = bool_i32(frame.quit_requested);
+    probe_i32[9] = frame.pointer_count;
+    probe_i32[10] = frame.dropped_pointer_count;
+    probe_i32[11] = bool_i32(frame.display.resized);
+    probe_i32[12] = frame.display.screen_width_px;
+    probe_i32[13] = frame.display.screen_height_px;
+    probe_i32[14] = frame.display.native_width_px;
+    probe_i32[15] = frame.display.native_height_px;
+    probe_i32[16] = frame.display.drawable_width_px;
+    probe_i32[17] = frame.display.drawable_height_px;
+    probe_i32[18] = frame.display.generation;
+    probe_i32[19] = frame.display.density_generation;
+    probe_i32[20] = frame.keys[0];
+    probe_i32[21] = frame.keys[41];
+    probe_i32[22] = frame.keys[511];
+    probe_i32[23] = frame.pointers[0].id;
+    probe_i32[24] = bool_i32(frame.pointers[0].is_down);
+    probe_i32[25] = bool_i32(frame.pointers[0].went_down);
+    probe_i32[26] = bool_i32(frame.pointers[0].went_up);
+    probe_i32[27] = frame.pointers[7].id;
+    probe_i32[28] = bool_i32(frame.pointers[7].is_down);
+    probe_i32[29] = bool_i32(frame.pointers[7].went_down);
+    probe_i32[30] = bool_i32(frame.pointers[7].went_up);
+
+    probe_i32[31] = 0;
+    for (let index: i32 = 0; index < 512; index += 1) {
+        probe_i32[31] += frame.keys[index] *(index + 1);
+    }
+    probe_i32[32] = 0;
+    for (let index: i32 = 0; index < 8; index += 1) {
+        probe_i32[32] += frame.pointers[index].id *(index + 1);
+        probe_i32[32] += bool_i32(frame.pointers[index].is_down) *(index + 9);
+        probe_i32[32] += bool_i32(frame.pointers[index].went_down) *(index + 17);
+        probe_i32[32] += bool_i32(frame.pointers[index].went_up) *(index + 25);
+    }
+
+    probe_f32[0] = frame.display.logical_width;
+    probe_f32[1] = frame.display.logical_height;
+    probe_f32[2] = frame.display.safe_x;
+    probe_f32[3] = frame.display.safe_y;
+    probe_f32[4] = frame.display.safe_width;
+    probe_f32[5] = frame.display.safe_height;
+    probe_f32[6] = frame.display.available_width;
+    probe_f32[7] = frame.display.available_height;
+    probe_f32[8] = frame.display.content_scale;
+    probe_f32[9] = frame.display.raster_scale;
+    probe_f32[10] = frame.pointers[0].x_logical;
+    probe_f32[11] = frame.pointers[0].y_logical;
+    probe_f32[12] = frame.pointers[0].dx_logical;
+    probe_f32[13] = frame.pointers[0].dy_logical;
+    probe_f32[14] = frame.pointers[0].x_normalized;
+    probe_f32[15] = frame.pointers[0].y_normalized;
+    probe_f32[16] = frame.pointers[7].x_logical;
+    probe_f32[17] = frame.pointers[7].y_logical;
+    probe_f32[18] = frame.pointers[7].dx_logical;
+    probe_f32[19] = frame.pointers[7].dy_logical;
+    probe_f32[20] = frame.pointers[7].x_normalized;
+    probe_f32[21] = frame.pointers[7].y_normalized;
+
+    probe_f32[22] = 0.0;
+    for (let index: i32 = 0; index < 8; index += 1) {
+        probe_f32[22] += frame.pointers[index].x_logical;
+        probe_f32[22] += frame.pointers[index].y_logical;
+        probe_f32[22] += frame.pointers[index].dx_logical;
+        probe_f32[22] += frame.pointers[index].dy_logical;
+        probe_f32[22] += frame.pointers[index].x_normalized;
+        probe_f32[22] += frame.pointers[index].y_normalized;
+    }
+
+    probe_i32[33] = 0;
+    for (let index: i32 = 0; index < 33; index += 1) {
+        probe_i32[33] += probe_i32[index] *(index + 1);
+    }
+    for (let index: i32 = 0; index < 23; index += 1) {
+        let scaled: i32 = 0;
+        scaled.from_f32(probe_f32[index] * 8.0);
+        probe_i32[33] += scaled *(index + 34);
+    }
+    return probe_i32[33];
+}

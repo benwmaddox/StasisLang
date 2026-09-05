@@ -1,0 +1,99 @@
+const SCREEN_WIDTH: i32 = 640;
+const SCREEN_HEIGHT: i32 = 360;
+const PADDLE_WIDTH: i32 = 12;
+const PADDLE_HEIGHT: i32 = 72;
+const BALL_SIZE: i32 = 12;
+
+global left_y: i32;
+global right_y: i32;
+global ball_x: i32;
+global ball_y: i32;
+global ball_dx: i32;
+global ball_dy: i32;
+global left_score: i32;
+global right_score: i32;
+
+function @extern("web_begin_frame") web_begin_frame(red: i32, green: i32, blue: i32): void;
+function @extern("web_draw_rect") web_draw_rect(x: i32, y: i32, width: i32, height: i32, red: i32, green: i32, blue: i32): void;
+function @extern("web_draw_text") web_draw_text(x: i32, y: i32, value: i32): void;
+function @extern("web_play_tone") web_play_tone(frequency: i32, duration_ms: i32): void;
+function @extern("web_input_axis") web_input_axis(): i32;
+
+function reset_ball(direction: i32): void {
+    ball_x = SCREEN_WIDTH / 2 - BALL_SIZE / 2;
+    ball_y = SCREEN_HEIGHT / 2 - BALL_SIZE / 2;
+    ball_dx = direction * 4;
+    ball_dy = 3;
+}
+
+function follow_ball(y: i32): i32 {
+    let center: i32 = y + PADDLE_HEIGHT / 2;
+    if (center < ball_y) {
+        y += 3;
+    } else {
+        if (center > ball_y + BALL_SIZE) {
+            y -= 3;
+        }
+    }
+    if (y < 0) {
+        return 0;
+    }
+    if (y > SCREEN_HEIGHT - PADDLE_HEIGHT) {
+        return SCREEN_HEIGHT - PADDLE_HEIGHT;
+    }
+    return y;
+}
+
+function main(): i32 {
+    left_y = 144;
+    right_y = 144;
+    left_score = 0;
+    right_score = 0;
+    reset_ball(1);
+    return 0;
+}
+
+function tick(): i32 {
+    left_y = follow_ball(left_y);
+    right_y = follow_ball(right_y);
+    ball_x += ball_dx;
+    ball_y += ball_dy;
+    if (ball_y <= 0 || ball_y >= SCREEN_HEIGHT - BALL_SIZE) {
+        ball_dy = 0 - ball_dy;
+    }
+    if (ball_x <= 32 && ball_x >= 20 && ball_y + BALL_SIZE >= left_y && ball_y <= left_y + PADDLE_HEIGHT) {
+        ball_dx = 4;
+    }
+    if (ball_x + BALL_SIZE >= 608 && ball_x <= 620 && ball_y + BALL_SIZE >= right_y && ball_y <= right_y + PADDLE_HEIGHT) {
+        ball_dx = -4;
+    }
+    if (ball_x < 0) {
+        right_score += 1;
+        reset_ball(1);
+    }
+    if (ball_x > SCREEN_WIDTH) {
+        left_score += 1;
+        reset_ball(-1);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    web_begin_frame(5, 12, 24);
+    web_draw_rect(20, left_y, PADDLE_WIDTH, PADDLE_HEIGHT, 83, 216, 251);
+    web_draw_rect(608, right_y, PADDLE_WIDTH, PADDLE_HEIGHT, 251, 180, 83);
+    web_draw_rect(ball_x, ball_y, BALL_SIZE, BALL_SIZE, 245, 248, 255);
+    web_draw_rect(318, 0, 4, SCREEN_HEIGHT, 42, 76, 102);
+    web_draw_text(250, 30, left_score);
+    web_draw_text(370, 30, right_score);
+    return 0;
+}
+
+// These functions intentionally prove that unreachable feature dependencies are not linked.
+function unused_audio_feature(): void {
+    web_play_tone(440, 100);
+}
+
+function unused_keyboard_feature(): i32 {
+    return web_input_axis();
+}

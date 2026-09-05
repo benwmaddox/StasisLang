@@ -187,8 +187,8 @@ the initial and fixed-probe pair, so selection, movement, targeting, endings,
 and other project-specific states can be judged from pixels rather than inferred
 from tests.
 
-Ordinary `stasis ai` retains its 15-turn default. Gauntlet builders default to
-30 turns and may be configured from 1 through 48, still bounded by the run's
+Ordinary `stasis ai` uses a 50-turn default. Gauntlet builders default to
+30 turns and may be configured from 1 through 50, still bounded by the run's
 total model-call and wall-time budgets. This gives a difficult workstream room
 for multiple inspect/test/correct cycles without silently granting an
 unlimited session.
@@ -310,7 +310,7 @@ Primitive rendering remains appropriate for basic UI, simple icons,
 selection/range overlays, and deterministic fallbacks. ImageGen remains optional
 for work that is purely logic or basic interface geometry.
 
-The render-v3 command stream preserves game submission order across line
+The current render command stream preserves game submission order across line
 primitives, sprites, and text. An opaque full-board sprite should therefore be
 submitted before gameplay primitives and overlays when it is a background.
 Agents still request isolated foreground subjects on flat removable backgrounds
@@ -519,16 +519,17 @@ may run concurrently over immutable evidence; production builders remain
 serialized because one live runtime and one transactional project state are
 authoritative.
 
-Every ordinary `stasis ai` agent and Gauntlet builder also receives two completed
-discovery payloads before its first model turn. `initial_symbols` contains compact
-signatures for the entry file and its direct imports. `stdlib_api` contains the
-bounded public API catalog for the project-matched Stasis standard library,
-including canonical import paths and function, struct, and constant signatures.
-The catalog includes top-level public modules such as graphics, audio, collision,
-layout, timing, storage, memory, and HUD helpers; it excludes internal host ABI,
-test-only modules, globals, and function bodies. Agents should use this catalog
-directly rather than spending turns rediscovering standard-library implementation
-files.
+Every ordinary `stasis ai` agent and Gauntlet builder receives compact discovery
+context before its first model turn. Its `start` section contains only a bounded set
+of directly usable `list_symbols` and `read_symbol` actions selected lexically
+from the request; they are leads rather than authoritative matches. With no
+useful match it contains the executable default `list_symbols` action. `options`
+exposes executable lazy standard-library discovery and baseline-test actions. Standard
+library choices are fully lazy: builders call `get_stdlib_api` without a module
+to list deterministic public module names, then call it with one choice for
+filtered, paged public signatures and the canonical import path for
+`write_imports`. The host validates module names against the matched stdlib root
+instead of accepting arbitrary paths.
 
 Fresh leads and builders receive a compact chronological projection of the
 latest 48 decision records, capped at 32 KiB. Builders may call

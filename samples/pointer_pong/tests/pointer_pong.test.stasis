@@ -1,0 +1,61 @@
+import "../main.stasis";
+
+test `paddle target centers on pointer`(): bool {
+    let y: f32 = paddle_from_pointer(180.0);
+    if (y != 144.0) {
+        return false;
+    }
+    return true;
+}
+
+test `pointer movement does not require a press`(): bool {
+    if (!pointer_controls_paddle(1)) {
+        return false;
+    }
+    if (pointer_controls_paddle(0)) {
+        return false;
+    }
+    return true;
+}
+
+test `paddle clamp stays inside screen`(): bool {
+    if (clamp_paddle(-4.0) != 0.0) {
+        return false;
+    }
+    if (clamp_paddle(999.0) != SCREEN_H - PADDLE_H) {
+        return false;
+    }
+    return true;
+}
+
+test `score display wraps after two digits`(): bool {
+    if (score_for_display(0) != 0 || score_for_display(7) != 7) {
+        return false;
+    }
+    if (score_for_display(100) != 0 || score_for_display(234) != 34) {
+        return false;
+    }
+    if (score_for_display(-1) != 0) {
+        return false;
+    }
+    build_score_text(left_score_ascii, left_score_text, 0);
+    if (length(left_score_ascii) != 2 || left_score_text.byte_length != 2) {
+        return false;
+    }
+    if (ascii_get(left_score_ascii, 0) != 48 || ascii_get(left_score_ascii, 1) != 48) {
+        return false;
+    }
+    build_score_text(left_score_ascii, left_score_text, 7);
+    if (ascii_get(left_score_ascii, 0) != 48 || ascii_get(left_score_ascii, 1) != 55) {
+        return false;
+    }
+    build_score_text(left_score_ascii, left_score_text, 47);
+    if (ascii_get(left_score_ascii, 0) != 52 || ascii_get(left_score_ascii, 1) != 55) {
+        return false;
+    }
+    build_score_text(left_score_ascii, left_score_text, 100);
+    if (ascii_get(left_score_ascii, 0) != 48 || ascii_get(left_score_ascii, 1) != 48) {
+        return false;
+    }
+    return true;
+}

@@ -1,0 +1,525 @@
+import "/vendor/stasis/stdlib/graphics.stasis";
+import "ui_single_pass.stasis";
+import "gallery_state.stasis";
+import "gallery_common.stasis";
+
+function gallery_draw_stacks(): void {
+    let x: f32 = ui_current_x();
+    let y: f32 = ui_current_y();
+    let w: f32 = ui_current_width();
+    let h: f32 = ui_current_height();
+    ui_inset(x, y, w, h, 0.0, 0.0, 0.0, 0.0);
+    ui_hstack_begin(x, y, w, h, 18.0, UiStackDirection.Forward);
+    ui_hstack_next_fixed(330.0);
+    gallery_panel(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.05, 0.12, 0.18);
+    gallery_label("HORIZONTAL STACK", ui_current_x() + 16.0, ui_current_y() + 14.0, 0.82, 0.94, 1.0, 1.0);
+    gallery_label("fixed + fixed + final rest", ui_current_x() + 16.0, ui_current_y() + 40.0, 0.54, 0.72, 0.82, 1.0);
+    let stack_x: f32 = ui_current_x() + 16.0;
+    let stack_y: f32 = ui_current_y() + 80.0;
+    let stack_w: f32 = ui_current_width() - 32.0;
+    let stack_h: f32 = 52.0;
+    ui_hstack_begin(stack_x, stack_y, stack_w, stack_h, 8.0, UiStackDirection.Forward);
+    ui_hstack_next_fixed(54.0);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.22, 0.60, 0.72, 1.0);
+    ui_hstack_next_fixed(72.0);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.88, 0.54, 0.22, 1.0);
+    ui_hstack_next_rest();
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.30, 0.44, 0.56, 1.0);
+    ui_hstack_end();
+    gallery_label("rest = remaining width", stack_x, stack_y + 66.0, 0.58, 0.78, 0.88, 1.0);
+
+    ui_hstack_next_rest();
+    gallery_panel(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.05, 0.12, 0.18);
+    gallery_label("NESTED VERTICAL STACK", ui_current_x() + 16.0, ui_current_y() + 14.0, 0.82, 0.94, 1.0, 1.0);
+    gallery_label("spacing is explicit and geometry is disposable", ui_current_x() + 16.0, ui_current_y() + 40.0, 0.54, 0.72, 0.82, 1.0);
+    let inner_x: f32 = ui_current_x() + 22.0;
+    let inner_y: f32 = ui_current_y() + 76.0;
+    let inner_w: f32 = ui_current_width() - 44.0;
+    let inner_h: f32 = ui_current_height() - 98.0;
+    ui_vstack_begin(inner_x, inner_y, inner_w, inner_h, 8.0, UiStackDirection.Forward);
+    ui_vstack_next_fixed(42.0);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.18, 0.42, 0.56, 1.0);
+    gallery_label("title", ui_current_x() + 12.0, ui_current_y() + 11.0, 0.9, 0.96, 1.0, 1.0);
+    ui_vstack_next_fixed(42.0);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.18, 0.34, 0.46, 1.0);
+    gallery_label("row", ui_current_x() + 12.0, ui_current_y() + 11.0, 0.8, 0.9, 0.96, 1.0);
+    ui_vstack_next_rest();
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.12, 0.23, 0.32, 1.0);
+    gallery_label("final rest", ui_current_x() + 12.0, ui_current_y() + 11.0, 0.7, 0.84, 0.9, 1.0);
+    ui_vstack_end();
+    ui_hstack_end();
+    gallery_label("No previous-frame x/y is consulted. Resize the window to see both recipes resolve again.", x, y + h - 25.0, 0.62, 0.78, 0.88, 1.0);
+}
+
+function gallery_draw_anchors(): void {
+    let x: f32 = ui_current_x();
+    let y: f32 = ui_current_y();
+    let w: f32 = ui_current_width();
+    let h: f32 = ui_current_height();
+    gallery_panel(x, y, w, h, 0.05, 0.12, 0.18);
+    gallery_label("ANCHORS", x + 16.0, y + 12.0, 0.84, 0.95, 1.0, 1.0);
+    gallery_label("Eight independent placements; use stacks inside panels when siblings are related.", x + 16.0, y + 37.0, 0.56, 0.74, 0.84, 1.0);
+    let demo_x: f32 = x + 22.0;
+    let demo_y: f32 = y + 72.0;
+    let demo_w: f32 = w - 44.0;
+    let demo_h: f32 = h - 112.0;
+    fill_rect(demo_x, demo_y, demo_w, demo_h, 0.07, 0.16, 0.23, 1.0);
+    ui_anchor(demo_x, demo_y, demo_w, demo_h, 112.0, 36.0, UiHorizontal.Left, UiVertical.Top);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.25, 0.64, 0.76, 1.0);
+    gallery_label("TOP LEFT", ui_current_x() + 8.0, ui_current_y() + 9.0, 0.04, 0.12, 0.18, 1.0);
+    ui_anchor(demo_x, demo_y, demo_w, demo_h, 112.0, 36.0, UiHorizontal.Center, UiVertical.Top);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.25, 0.64, 0.76, 1.0);
+    gallery_label("TOP", ui_current_x() + 35.0, ui_current_y() + 9.0, 0.04, 0.12, 0.18, 1.0);
+    ui_anchor(demo_x, demo_y, demo_w, demo_h, 112.0, 36.0, UiHorizontal.Right, UiVertical.Top);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.25, 0.64, 0.76, 1.0);
+    gallery_label("TOP RIGHT", ui_current_x() + 6.0, ui_current_y() + 9.0, 0.04, 0.12, 0.18, 1.0);
+    ui_anchor(demo_x, demo_y, demo_w, demo_h, 112.0, 36.0, UiHorizontal.Left, UiVertical.Center);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.88, 0.54, 0.22, 1.0);
+    gallery_label("LEFT", ui_current_x() + 35.0, ui_current_y() + 9.0, 0.18, 0.08, 0.03, 1.0);
+    ui_anchor(demo_x, demo_y, demo_w, demo_h, 112.0, 36.0, UiHorizontal.Center, UiVertical.Center);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.88, 0.54, 0.22, 1.0);
+    gallery_label("CENTER", ui_current_x() + 22.0, ui_current_y() + 9.0, 0.18, 0.08, 0.03, 1.0);
+    ui_anchor(demo_x, demo_y, demo_w, demo_h, 112.0, 36.0, UiHorizontal.Right, UiVertical.Center);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.88, 0.54, 0.22, 1.0);
+    gallery_label("RIGHT", ui_current_x() + 32.0, ui_current_y() + 9.0, 0.18, 0.08, 0.03, 1.0);
+    ui_anchor(demo_x, demo_y, demo_w, demo_h, 112.0, 36.0, UiHorizontal.Left, UiVertical.Bottom);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.46, 0.70, 0.34, 1.0);
+    gallery_label("BOTTOM LEFT", ui_current_x() + 4.0, ui_current_y() + 9.0, 0.06, 0.16, 0.04, 1.0);
+    ui_anchor(demo_x, demo_y, demo_w, demo_h, 112.0, 36.0, UiHorizontal.Center, UiVertical.Bottom);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.46, 0.70, 0.34, 1.0);
+    gallery_label("BOTTOM", ui_current_x() + 27.0, ui_current_y() + 9.0, 0.06, 0.16, 0.04, 1.0);
+    ui_anchor(demo_x, demo_y, demo_w, demo_h, 112.0, 36.0, UiHorizontal.Right, UiVertical.Bottom);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.46, 0.70, 0.34, 1.0);
+    gallery_label("BOTTOM RIGHT", ui_current_x() + 2.0, ui_current_y() + 9.0, 0.06, 0.16, 0.04, 1.0);
+    gallery_label("Inset the safe area first, then anchor a known-size overlay.", x + 22.0, y + h - 25.0, 0.62, 0.78, 0.88, 1.0);
+}
+
+function gallery_draw_scroll(): void {
+    let x: f32 = ui_current_x();
+    let y: f32 = ui_current_y();
+    let w: f32 = ui_current_width();
+    let h: f32 = ui_current_height();
+    ui_hstack_begin(x, y, w, h, 18.0, UiStackDirection.Forward);
+    ui_hstack_next_fixed(418.0);
+    gallery_panel(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.05, 0.12, 0.18);
+    gallery_label("FIXED-ROW SCROLL AREA", ui_current_x() + 16.0, ui_current_y() + 12.0, 0.84, 0.95, 1.0, 1.0);
+    gallery_label("Drag; release outside keeps capture.", ui_current_x() + 16.0, ui_current_y() + 37.0, 0.56, 0.74, 0.84, 1.0);
+    let list_x: f32 = ui_current_x() + 16.0;
+    let list_y: f32 = ui_current_y() + 72.0;
+    let list_w: f32 = ui_current_width() - 32.0;
+    let list_h: f32 = ui_current_height() - 96.0;
+    fill_rect(list_x, list_y, list_w, list_h, 0.03, 0.08, 0.12, 1.0);
+    ui_scroll_begin(GALLERY_ID_SCROLL_LIST, list_x, list_y, list_w, list_h, 16.0 * 48.0 + 15.0 * 6.0);
+    ui_scroll_clip_begin();
+    let row: i32 = 0;
+    for (row = 0; row < 48; row = row + 1) {
+        if (ui_scroll_item_visible(row, 16.0, 6.0)) {
+            let row_y: f32 = ui_scroll_item_y(row, 16.0, 6.0);
+            if (row % 2 == 0) {
+                fill_rect(list_x + 4.0, row_y, list_w - 8.0, 16.0, 0.12, 0.28, 0.36, 1.0);
+            } else {
+                fill_rect(list_x + 4.0, row_y, list_w - 8.0, 16.0, 0.08, 0.20, 0.28, 1.0);
+            }
+            gallery_label(gallery_row_label(row), list_x + 12.0, row_y + 1.0, 0.74, 0.88, 0.94, 1.0);
+        }
+    }
+    ui_scroll_end();
+    ui_hstack_next_rest();
+    gallery_panel(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.05, 0.12, 0.18);
+    gallery_label("SCROLL CONTRACT", ui_current_x() + 16.0, ui_current_y() + 12.0, 0.84, 0.95, 1.0, 1.0);
+    gallery_label("Persist:", ui_current_x() + 16.0, ui_current_y() + 52.0, 0.65, 0.82, 0.9, 1.0);
+    gallery_label("offset, drag pointer", ui_current_x() + 16.0, ui_current_y() + 74.0, 0.82, 0.92, 0.98, 1.0);
+    gallery_label("Do not persist:", ui_current_x() + 16.0, ui_current_y() + 116.0, 0.65, 0.82, 0.9, 1.0);
+    gallery_label("row rectangles", ui_current_x() + 16.0, ui_current_y() + 138.0, 0.94, 0.66, 0.46, 1.0);
+    gallery_label("Known row height makes", ui_current_x() + 16.0, ui_current_y() + 198.0, 0.58, 0.76, 0.86, 1.0);
+    gallery_label("single-pass extent easy.", ui_current_x() + 16.0, ui_current_y() + 220.0, 0.58, 0.76, 0.86, 1.0);
+    ui_hstack_end();
+}
+
+function gallery_draw_viewport(): void {
+    let x: f32 = ui_current_x();
+    let y: f32 = ui_current_y();
+    let w: f32 = ui_current_width();
+    let h: f32 = ui_current_height();
+    // Reverse flow lets the known-size controls claim the far edge first;
+    // the final rest child then receives the remaining viewport width.
+    ui_hstack_begin(x, y, w, h, 18.0, UiStackDirection.Reverse);
+    ui_hstack_next_fixed(250.0);
+    let controls_x: f32 = ui_current_x();
+    let controls_y: f32 = ui_current_y();
+    let controls_w: f32 = ui_current_width();
+    let controls_h: f32 = ui_current_height();
+    ui_hstack_next_rest();
+    gallery_panel(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.05, 0.12, 0.18);
+    gallery_label("LIVE VIEWPORT", ui_current_x() + 16.0, ui_current_y() + 12.0, 0.84, 0.95, 1.0, 1.0);
+    gallery_label("fit mode: ", ui_current_x() + 16.0, ui_current_y() + 38.0, 0.56, 0.74, 0.84, 1.0);
+    gallery_label(gallery_fit_name(), ui_current_x() + 104.0, ui_current_y() + 38.0, 0.96, 0.74, 0.30, 1.0);
+    let vp_x: f32 = ui_current_x() + 16.0;
+    let vp_y: f32 = ui_current_y() + 72.0;
+    let vp_w: f32 = ui_current_width() - 32.0;
+    let vp_h: f32 = ui_current_height() - 104.0;
+    fill_rect(vp_x, vp_y, vp_w, vp_h, 0.02, 0.05, 0.08, 1.0);
+    ui_viewport_fit(vp_x, vp_y, vp_w, vp_h, 320.0, 180.0, gallery.fit);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.10, 0.25, 0.34, 1.0);
+    let world_x: f32 = ui_current_x();
+    let world_y: f32 = ui_current_y();
+    let world_w: f32 = ui_current_width();
+    let world_h: f32 = ui_current_height();
+    fill_rect(world_x + world_w * 0.5 - 2.0, world_y, 4.0, world_h, 0.22, 0.42, 0.52, 1.0);
+    fill_rect(world_x, world_y + world_h * 0.5 - 2.0, world_w, 4.0, 0.22, 0.42, 0.52, 1.0);
+    let world_scale_x: f32 = world_w / 320.0;
+    let world_scale_y: f32 = world_h / 180.0;
+    fill_rect(
+        world_x + gallery.mapped_x * world_scale_x,
+        world_y + gallery.mapped_y * world_scale_y,
+        12.0 * world_scale_x,
+        12.0 * world_scale_y,
+        0.30,
+        0.82,
+        0.52,
+        1.0
+    );
+    fill_rect(
+        world_x + gallery.world_x * world_scale_x,
+        world_y + gallery.world_y * world_scale_y,
+        18.0 * world_scale_x,
+        18.0 * world_scale_y,
+        0.94,
+        0.64,
+        0.22,
+        1.0
+    );
+    ui_anchor(world_x, world_y, world_w, world_h, 170.0, 28.0, UiHorizontal.Left, UiVertical.Top);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.06, 0.14, 0.20, 0.94);
+    gallery_label("viewport-local HUD", ui_current_x() + 8.0, ui_current_y() + 6.0, 0.76, 0.92, 1.0, 1.0);
+    gallery_panel(controls_x, controls_y, controls_w, controls_h, 0.05, 0.12, 0.18);
+    gallery_label("VIEWPORT FIT", controls_x + 16.0, controls_y + 12.0, 0.84, 0.95, 1.0, 1.0);
+    gallery_label("World: 320 x 180", controls_x + 16.0, controls_y + 48.0, 0.60, 0.78, 0.88, 1.0);
+    gallery_label("Fit + center", controls_x + 16.0, controls_y + 70.0, 0.60, 0.78, 0.88, 1.0);
+    gallery_label("deterministic rule", controls_x + 16.0, controls_y + 92.0, 0.60, 0.78, 0.88, 1.0);
+    gallery_label("click maps target", controls_x + 16.0, controls_y + 126.0, 0.68, 0.90, 0.96, 1.0);
+    gallery_button(controls_x + 16.0, controls_y + 154.0, 218.0, 42.0, GALLERY_ID_FIT, "CYCLE FIT", false);
+    ui_hstack_end();
+}
+
+function gallery_draw_combined(): void {
+    let x: f32 = ui_current_x();
+    let y: f32 = ui_current_y();
+    let w: f32 = ui_current_width();
+    let h: f32 = ui_current_height();
+    // Claim the known-size overlay first in reverse flow; the world is the
+    // final rest child and therefore receives the remaining width.
+    ui_hstack_begin(x, y, w, h, 18.0, UiStackDirection.Reverse);
+    ui_hstack_next_fixed(284.0);
+    let overlay_x: f32 = ui_current_x();
+    let overlay_y: f32 = ui_current_y();
+    let overlay_w: f32 = ui_current_width();
+    let overlay_h: f32 = ui_current_height();
+    ui_hstack_next_rest();
+    let world_panel_x: f32 = ui_current_x();
+    let world_panel_y: f32 = ui_current_y();
+    let world_panel_w: f32 = ui_current_width();
+    let world_panel_h: f32 = ui_current_height();
+    gallery_panel(world_panel_x, world_panel_y, world_panel_w, world_panel_h, 0.05, 0.12, 0.18);
+    ui_viewport_fit(world_panel_x + 12.0, world_panel_y + 42.0, world_panel_w - 24.0, world_panel_h - 54.0, 320.0, 180.0, gallery.fit);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.10, 0.25, 0.34, 1.0);
+    let fitted_x: f32 = ui_current_x();
+    let fitted_y: f32 = ui_current_y();
+    let fitted_w: f32 = ui_current_width();
+    let fitted_h: f32 = ui_current_height();
+    fill_rect(
+        fitted_x + gallery.mapped_x * fitted_w / 320.0,
+        fitted_y + gallery.mapped_y * fitted_h / 180.0,
+        12.0 * fitted_w / 320.0,
+        12.0 * fitted_h / 180.0,
+        0.30,
+        0.82,
+        0.52,
+        1.0
+    );
+    fill_rect(
+        fitted_x + gallery.world_x * fitted_w / 320.0,
+        fitted_y + gallery.world_y * fitted_h / 180.0,
+        18.0 * fitted_w / 320.0,
+        18.0 * fitted_h / 180.0,
+        0.94,
+        0.64,
+        0.22,
+        1.0
+    );
+    gallery_label("PLAYABLE WORLD", world_panel_x + 14.0, world_panel_y + 12.0, 0.84, 0.95, 1.0, 1.0);
+    ui_anchor(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 172.0, 26.0, UiHorizontal.Left, UiVertical.Bottom);
+    fill_rect(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.04, 0.11, 0.16, 0.92);
+    gallery_label("screen + viewport HUD", ui_current_x() + 8.0, ui_current_y() + 5.0, 0.74, 0.90, 1.0, 1.0);
+    gallery_panel(overlay_x, overlay_y, overlay_w, overlay_h, 0.05, 0.12, 0.18);
+    gallery_label("OVERLAY COMPOSITION", overlay_x + 16.0, overlay_y + 12.0, 0.84, 0.95, 1.0, 1.0);
+    gallery_label("HUD passes through", overlay_x + 16.0, overlay_y + 52.0, 0.40, 0.92, 0.72, 1.0);
+    gallery_label("modal captures input", overlay_x + 16.0, overlay_y + 78.0, 0.96, 0.70, 0.30, 1.0);
+    gallery_label("stable semantic IDs", overlay_x + 16.0, overlay_y + 128.0, 0.60, 0.78, 0.88, 1.0);
+    gallery_label("open the modal below", overlay_x + 16.0, overlay_y + 150.0, 0.60, 0.78, 0.88, 1.0);
+    gallery_button(overlay_x + 16.0, overlay_y + 184.0, 250.0, 42.0, GALLERY_ID_MODAL, "OPEN MODAL", false);
+    ui_hstack_end();
+    if (gallery.modal_open) {
+        let modal_w: f32 = 360.0;
+        let modal_h: f32 = 180.0;
+        ui_anchor(x, y, w, h, modal_w, modal_h, UiHorizontal.Center, UiVertical.Center);
+        fill_rect(x, y, w, h, 0.01, 0.03, 0.05, 0.70);
+        gallery_panel(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 0.10, 0.20, 0.28);
+        gallery_label("MODAL LAYER", ui_current_x() + 18.0, ui_current_y() + 18.0, 0.98, 0.78, 0.30, 1.0);
+        gallery_label("This layer owns the pointer.", ui_current_x() + 18.0, ui_current_y() + 52.0, 0.76, 0.88, 0.96, 1.0);
+        gallery_label("Lower UI is blocked.", ui_current_x() + 18.0, ui_current_y() + 76.0, 0.76, 0.88, 0.96, 1.0);
+        ui_anchor_current(128.0, 38.0, UiHorizontal.Right, UiVertical.Bottom);
+        gallery_button(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), GALLERY_ID_CLOSE, "CLOSE", false);
+    }
+}
+
+function gallery_tick_page(pointer_id: i32, pointer_x: f32, pointer_y: f32, pointer_down: bool, went_down: bool, went_up: bool): void {
+    if (gallery.page == GalleryPage.Stacks) {
+        return;
+    }
+    if (gallery.page == GalleryPage.Anchors) {
+        return;
+    }
+    if (gallery.page == GalleryPage.Scroll) {
+        let x: f32 = ui_current_x() + 16.0;
+        let y: f32 = ui_current_y() + 72.0;
+        let w: f32 = 418.0 - 32.0;
+        let h: f32 = ui_current_height() - 96.0;
+        ui_scroll_begin(GALLERY_ID_SCROLL_LIST, x, y, w, h, 16.0 * 48.0 + 15.0 * 6.0);
+        ui_scroll_drag(pointer_id, pointer_x, pointer_y, went_down, pointer_down, went_up);
+        return;
+    }
+    if (gallery.page == GalleryPage.Viewport) {
+        let x: f32 = ui_current_x();
+        let y: f32 = ui_current_y();
+        let w: f32 = ui_current_width();
+        let h: f32 = ui_current_height();
+        ui_hstack_begin(x, y, w, h, 18.0, UiStackDirection.Reverse);
+        ui_hstack_next_fixed(250.0);
+        let controls_x: f32 = ui_current_x();
+        let controls_y: f32 = ui_current_y();
+        ui_hstack_next_rest();
+        let viewport_x: f32 = ui_current_x() + 16.0;
+        let viewport_y: f32 = ui_current_y() + 72.0;
+        let viewport_w: f32 = ui_current_width() - 32.0;
+        let viewport_h: f32 = ui_current_height() - 104.0;
+        ui_viewport_fit(viewport_x, viewport_y, viewport_w, viewport_h, 320.0, 180.0, gallery.fit);
+        if (went_down && ui_viewport_contains(pointer_x, pointer_y)) {
+            let mapped_x: f32 = ui_viewport_map_x(pointer_x, 320.0);
+            let mapped_y: f32 = ui_viewport_map_y(pointer_y, 180.0);
+            if (mapped_x < 0.0) {
+                mapped_x = 0.0;
+            }
+            if (mapped_y < 0.0) {
+                mapped_y = 0.0;
+            }
+            if (mapped_x > 302.0) {
+                mapped_x = 302.0;
+            }
+            if (mapped_y > 162.0) {
+                mapped_y = 162.0;
+            }
+            gallery.mapped_x = mapped_x;
+            gallery.mapped_y = mapped_y;
+        }
+        if (
+            gallery_tick_button(
+                GALLERY_LAYER_SCREEN,
+                GALLERY_ID_FIT,
+                controls_x + 16.0,
+                controls_y + 154.0,
+                218.0,
+                42.0,
+                pointer_id,
+                pointer_x,
+                pointer_y,
+                pointer_down,
+                went_down,
+                went_up
+            )
+        ) {
+            gallery_cycle_fit();
+        }
+        ui_hstack_end();
+        return;
+    }
+    if (gallery.page == GalleryPage.Combined && !gallery.modal_open) {
+        let x: f32 = ui_current_x();
+        let y: f32 = ui_current_y();
+        let w: f32 = ui_current_width();
+        let h: f32 = ui_current_height();
+        ui_hstack_begin(x, y, w, h, 18.0, UiStackDirection.Reverse);
+        ui_hstack_next_fixed(284.0);
+        if (
+            gallery_tick_button(
+                GALLERY_LAYER_SCREEN,
+                GALLERY_ID_MODAL,
+                ui_current_x() + 16.0,
+                ui_current_y() + 184.0,
+                250.0,
+                42.0,
+                pointer_id,
+                pointer_x,
+                pointer_y,
+                pointer_down,
+                went_down,
+                went_up
+            )
+        ) {
+            gallery.modal_open = true;
+        }
+        ui_hstack_end();
+        return;
+    }
+    if (gallery.page == GalleryPage.Combined && gallery.modal_open) {
+        let x: f32 = ui_current_x();
+        let y: f32 = ui_current_y();
+        let w: f32 = ui_current_width();
+        let h: f32 = ui_current_height();
+        ui_anchor(x, y, w, h, 360.0, 180.0, UiHorizontal.Center, UiVertical.Center);
+        ui_anchor_current(128.0, 38.0, UiHorizontal.Right, UiVertical.Bottom);
+        if (
+            gallery_tick_button(
+                GALLERY_LAYER_MODAL,
+                GALLERY_ID_CLOSE,
+                ui_current_x(),
+                ui_current_y(),
+                ui_current_width(),
+                ui_current_height(),
+                pointer_id,
+                pointer_x,
+                pointer_y,
+                pointer_down,
+                went_down,
+                went_up
+            )
+        ) {
+            gallery.modal_open = false;
+        }
+    }
+}
+
+function gallery_tick_layout(pointer_id: i32, pointer_x: f32, pointer_y: f32, pointer_down: bool, went_down: bool, went_up: bool): void {
+    gallery_begin_screen();
+    ui_vstack_next_fixed(42.0);
+    ui_hstack_begin(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 6.0, UiStackDirection.Forward);
+    ui_hstack_next_fixed(116.0);
+    if (
+        gallery_tick_button(
+            GALLERY_LAYER_SCREEN,
+            GALLERY_ID_STACKS,
+            ui_current_x(),
+            ui_current_y(),
+            ui_current_width(),
+            ui_current_height(),
+            pointer_id,
+            pointer_x,
+            pointer_y,
+            pointer_down,
+            went_down,
+            went_up
+        )
+    ) {
+        gallery.page = GalleryPage.Stacks;
+    }
+    ui_hstack_next_fixed(116.0);
+    if (
+        gallery_tick_button(
+            GALLERY_LAYER_SCREEN,
+            GALLERY_ID_ANCHORS,
+            ui_current_x(),
+            ui_current_y(),
+            ui_current_width(),
+            ui_current_height(),
+            pointer_id,
+            pointer_x,
+            pointer_y,
+            pointer_down,
+            went_down,
+            went_up
+        )
+    ) {
+        gallery.page = GalleryPage.Anchors;
+    }
+    ui_hstack_next_fixed(116.0);
+    if (
+        gallery_tick_button(
+            GALLERY_LAYER_SCREEN,
+            GALLERY_ID_SCROLL,
+            ui_current_x(),
+            ui_current_y(),
+            ui_current_width(),
+            ui_current_height(),
+            pointer_id,
+            pointer_x,
+            pointer_y,
+            pointer_down,
+            went_down,
+            went_up
+        )
+    ) {
+        gallery.page = GalleryPage.Scroll;
+    }
+    ui_hstack_next_fixed(116.0);
+    if (
+        gallery_tick_button(
+            GALLERY_LAYER_SCREEN,
+            GALLERY_ID_VIEWPORT,
+            ui_current_x(),
+            ui_current_y(),
+            ui_current_width(),
+            ui_current_height(),
+            pointer_id,
+            pointer_x,
+            pointer_y,
+            pointer_down,
+            went_down,
+            went_up
+        )
+    ) {
+        gallery.page = GalleryPage.Viewport;
+    }
+    ui_hstack_next_rest();
+    if (
+        gallery_tick_button(
+            GALLERY_LAYER_SCREEN,
+            GALLERY_ID_COMBINED,
+            ui_current_x(),
+            ui_current_y(),
+            ui_current_width(),
+            ui_current_height(),
+            pointer_id,
+            pointer_x,
+            pointer_y,
+            pointer_down,
+            went_down,
+            went_up
+        )
+    ) {
+        gallery.page = GalleryPage.Combined;
+    }
+    ui_hstack_end();
+    ui_vstack_next_rest();
+    gallery_tick_page(pointer_id, pointer_x, pointer_y, pointer_down, went_down, went_up);
+    gallery_finish_screen();
+}
+
+function gallery_render_layout(): void {
+    gallery_begin_screen();
+    gallery_draw_header();
+    ui_vstack_next_fixed(42.0);
+    gallery_draw_navigation();
+    ui_vstack_next_rest();
+    if (gallery.page == GalleryPage.Stacks) {
+        gallery_draw_stacks();
+    } else if (gallery.page == GalleryPage.Anchors) {
+        gallery_draw_anchors();
+    } else if (gallery.page == GalleryPage.Scroll) {
+        gallery_draw_scroll();
+    } else if (gallery.page == GalleryPage.Viewport) {
+        gallery_draw_viewport();
+    } else {
+        gallery_draw_combined();
+    }
+    gallery_finish_screen();
+}

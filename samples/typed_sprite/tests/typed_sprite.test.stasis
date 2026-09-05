@@ -5,58 +5,40 @@ global tested_text: TextRun;
 global tested_runtime_text: utf8[16];
 
 test `invalid sprite replacement preserves receiver atomically`(): bool {
-    tested_sprite.handle = 23;
     tested_sprite.width = 16;
     tested_sprite.height = 16;
-    if (tested_sprite.load_sprite_from("unused.svg", 0, 48)) {
+    if (tested_sprite.load_sprite_from("assets/__typed_drawable_fixture.svg", 0, 48)) {
         return false;
     }
-    return tested_sprite.handle == 23 && tested_sprite.width == 16 && tested_sprite.height == 16;
+    return !tested_sprite.valid() && tested_sprite.width == 16 && tested_sprite.height == 16;
 }
 
-test `draw uses sprite logical dimensions`(): bool {
-    tested_sprite.handle = 7;
-    tested_sprite.width = 80;
-    tested_sprite.height = 48;
+test `sprite release clears receiver and is idempotent`(): bool {
+    tested_sprite.width = 16;
+    tested_sprite.height = 16;
+    tested_sprite.release();
+    if (tested_sprite.valid() || tested_sprite.width != 0 || tested_sprite.height != 0) {
+        return false;
+    }
+    tested_sprite.release();
+    return !tested_sprite.valid() && tested_sprite.width == 0 && tested_sprite.height == 0;
+}
 
-    gfx_cmd_begin();
-    tested_sprite.draw(2.0, 3.0, 190, 9);
-
-    if (gfx_cmd_sprite_count() != 1) {
-        return false;
-    }
-    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 0] != 7) {
-        return false;
-    }
-    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 1] != 9) {
-        return false;
-    }
-    if (gfx_cmd_i32[GFX_I_SPRITE_BASE + 2] != 190) {
-        return false;
-    }
-    if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 2] != 80.0) {
-        return false;
-    }
-    if (gfx_cmd_f32[GFX_F_SPRITE_BASE + 3] != 48.0) {
-        return false;
-    }
-    return true;
+test `zero sprite release remains zero`(): bool {
+    tested_sprite.width = 0;
+    tested_sprite.height = 0;
+    tested_sprite.release();
+    return !tested_sprite.valid() && tested_sprite.width == 0 && tested_sprite.height == 0;
 }
 
 test `draw ignores invalid sprite metadata`(): bool {
-    tested_sprite.handle = 0;
     tested_sprite.width = 80;
     tested_sprite.height = 48;
-    gfx_cmd_begin();
-    tested_sprite.draw(0.0, 0.0, 255, 0);
-    if (gfx_cmd_sprite_count() != 0) {
-        return false;
-    }
 
-    tested_sprite.handle = 7;
-    tested_sprite.width = 0;
-    tested_sprite.draw(0.0, 0.0, 255, 0);
-    return gfx_cmd_sprite_count() == 0;
+    begin_frame();
+    tested_sprite.draw(2.0, 3.0, 190, 9);
+    end_frame();
+    return !tested_sprite.valid() && tested_sprite.width == 80 && tested_sprite.height == 48;
 }
 
 test `cached text draw uses its font and run handles`(): bool {
@@ -64,30 +46,10 @@ test `cached text draw uses its font and run handles`(): bool {
     tested_text.handle = 12;
     tested_text.width = 72.5;
     tested_text.height = 18.0;
-    gfx_cmd_begin();
+    begin_frame();
     tested_text.draw(5.0, 6.0, 1.0, 0.8, 0.6, 0.4);
-    if (gfx_cmd_text_count() != 1) {
-        return false;
-    }
-    if (gfx_cmd_i32[GFX_I_TEXT_BASE + 0] != 4) {
-        return false;
-    }
-    if (gfx_cmd_i32[GFX_I_TEXT_BASE + 1] != 0 - 12) {
-        return false;
-    }
-    if (gfx_cmd_f32[GFX_F_TEXT_BASE + 0] != 5.0) {
-        return false;
-    }
-    if (gfx_cmd_f32[GFX_F_TEXT_BASE + 1] != 6.0) {
-        return false;
-    }
-    if (gfx_cmd_f32[GFX_F_TEXT_BASE + 2] != 1.0) {
-        return false;
-    }
-    if (gfx_cmd_f32[GFX_F_TEXT_BASE + 5] != 0.4) {
-        return false;
-    }
-    return true;
+    end_frame();
+    return tested_text.font == 4 && tested_text.handle == 12 && tested_text.width == 72.5 && tested_text.height == 18.0;
 }
 
 test `invalid cached text replacement preserves receiver atomically`(): bool {

@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -13,6 +15,8 @@ REQUIRED_FILES = [
     "mobile/android/app/src/main/AndroidManifest.xml",
     "mobile/android/app/src/workshop/AndroidManifest.xml",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
@@ -22,6 +26,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopFrameBudget.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopPongAssetManifestMigration.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectFormatPolicy.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectBaselinePolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopProjectArchive.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingPolicy.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopOnboardingStore.java",
@@ -109,7 +114,12 @@ REQUIRED_FILES = [
     "mobile/android/README.md",
     "tools/android_ai_agent_host.py",
     "mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java",
+    "mobile/shells/android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java",
     "mobile/shells/android/app/src/main/cpp/stasis_android_assets.c",
+    "tools/ci/test_android_asset_cache.py",
+    "tools/ci/test_android_project_baseline_policy.py",
+    "tools/ci/java/com/stasislang/shell/StasisAssetCacheTest.java",
+    "tools/ci/java/com/stasislang/workshop/WorkshopProjectBaselinePolicyCheck.java",
     "tools/ci/check_android_release_package.py",
     "tests/android/AiQueuePolicyTest.java",
     "tests/android/WorkshopProjectFormatPolicyTest.java",
@@ -165,8 +175,11 @@ def main() -> int:
     assert "stale for the current Rust/Cargo inputs" in rust_bridge_provenance
     assert "aarch64-linux-android" in rust_bridge_script
     assert "x86_64-linux-android" in rust_bridge_script
+    assert "linux-x86_64" in rust_bridge_script
+    assert "[System.IO.Path]::IsPathRooted" in rust_bridge_script
     assert "libstasis_android_bridge.so" in rust_bridge_script
-    assert '"app\\src\\workshop\\jniLibs\\$abi"' in rust_bridge_script
+    assert 'Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $scriptRoot "app") "src") "workshop") "jniLibs") $abi' in rust_bridge_script
+    assert "cargo_cache.py" in rust_bridge_script
     assert 'build_rust_bridge.ps1") -Release' in debug_script
     assert ":app:assembleWorkshopDebug" in debug_script
     assert "package-mobile" in release_script
@@ -370,7 +383,8 @@ def main() -> int:
     assert "MAX_TOOL_CALLS_PER_BATCH = 50" in host_agent
     assert 'DEFAULT_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")' in host_comparison
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
-    assert "private static native int nativeRunFrameInto(String projectRoot" in activity
+    assert "static native int nativeRunFrameInto(String projectRoot" in activity
+    assert "static native String nativeFrameAbiDescriptor()" in activity
     assert "ByteBuffer frameI32" in activity
     assert "ByteBuffer frameF32" in activity
     assert "ByteBuffer frameU8" in activity
@@ -404,6 +418,14 @@ def main() -> int:
     assert "SparseArray<SpriteTexture>" in workshop_textures
     assert "projectChanged(projectRootPath, currentProjectRoot)" in workshop_textures
     assert "clearTextures();" in workshop_textures
+    assert "stasis.workshop_resource_scope.v1" in read(
+        "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopResourceScopeAcceptance.java"
+    )
+    assert "recreateEglContextForAcceptance" in activity
+    assert "setPreserveEGLContextOnPause(false)" in activity
+    assert "acceptanceStaleGenerationRejects" in workshop_textures
+    assert "duplicate_restore_uploads" in workshop_textures
+    assert "lifecycle_renderer_generation" in activity
     assert "private final int[] deletedTexture = new int[1]" in workshop_textures
     assert "extractIntField" in activity
     assert "private final int[] nativeFrameValues = new int[RENDER_FRAME_HEADER_SIZE]" in activity
@@ -951,6 +973,8 @@ def main() -> int:
     assert "StandardCopyOption.REPLACE_EXISTING" in project_registry
     assert "PROJECT_BASELINES_DIR" in activity
     assert "ensureActiveProjectBaseline" in activity
+    assert "WorkshopProjectBaselinePolicy.requiredAction" in activity
+    assert "WorkshopProjectBaselinePolicy.Action.UPDATE_MARKER" in activity
     assert "loadProjectBaselineSnapshot" in activity
     assert "restoreImportedProjectSourceBaseline" in activity
     assert '"import".equals(activeProject.origin)' in activity
@@ -1347,24 +1371,44 @@ def main() -> int:
     assert "setContentView(status)" not in activity
 
     release_activity = read("mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java")
+    release_cache = read("mobile/shells/android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java")
     release_bridge = read("mobile/shells/android/app/src/main/cpp/stasis_android_assets.c")
-    assert "System.loadLibrary(\"SDL3\")" in release_activity
-    assert "System.loadLibrary(\"SDL3_image\")" in release_activity
+    assert "System.loadLibrary(\"SDL3\")" not in release_activity
+    assert "System.loadLibrary(\"SDL3_image\")" not in release_activity
     assert "System.loadLibrary(\"main\")" in release_activity
+    assert 'return new String[] {"main"}' in release_activity
     assert "https://api.openai.com" not in release_activity
     assert "SharedPreferences" not in release_activity
     assert "event.getPointerCount() >= 3" in release_activity
     assert "nativeReadPerformanceMetrics" in release_activity
     assert "nativeReadRuntimeError" in release_activity
-    assert "tick avg=" in release_activity
-    assert "render avg=" in release_activity
+    assert 'appendPhase(hudText, "guest render"' in release_activity
+    assert 'appendPhase(hudText, "host replay"' in release_activity
+    assert 'appendPhase(hudText, "frame work"' in release_activity
+    assert 'appendWorkload(hudText, "commands"' in release_activity
+    assert "percentile(" not in release_activity
+    assert "performanceHud.setSingleLine(false)" in release_activity
     assert "setOnApplyWindowInsetsListener" in release_activity
     assert "getDisplayCutout" in release_activity
-    assert "verifyAssetManifest(staging)" in release_activity
-    assert 'MessageDigest.getInstance("SHA-256")' in release_activity
-    assert "MAX_MANIFEST_ASSETS = 4096" in release_activity
-    assert "MAX_TOTAL_ASSET_BYTES" in release_activity
+    assert "StasisAssetCache.Result" in release_activity
+    assert "new AndroidAssetSource(getAssets())" in release_activity
+    assert "packageInfo.lastUpdateTime" in release_activity
+    assert "INVALID_ASSET_ROOT" in release_activity
+    assert "nativeSetAssetRoot(invalidAssetRoot.getAbsolutePath())" in release_activity
+    assert "Asset cache mode=" in release_activity
+    assert "packaged_read_bytes=" in release_activity
+    assert "CACHE_SCHEMA = \"stasis.android.asset-cache\"" in release_cache
+    assert "MAX_MARKER_BYTES" in release_cache
+    assert "inventoryMatches" in release_cache
+    assert "publicationInterceptor.beforeInstall" in release_cache
+    assert "rename(backup, root)" in release_cache
+    assert "BACKUP_ALT_NAME" in release_cache
+    assert "MAX_COPIED_TREE_BYTES" in release_cache
+    assert 'child.equals(".")' in release_cache
+    assert "stasis asset cache JVM scenarios" in read("tools/ci/java/com/stasislang/shell/StasisAssetCacheTest.java")
     assert "stasis_host_get_latest_performance_metrics" in release_bridge
+    assert "stasis_host_get_latest_performance_metrics_v1" in release_bridge
+    assert "stasis_performance_metrics.h" in release_bridge
     assert "stasis_host_copy_runtime_error" in release_bridge
     assert "drawSprites" in preview_renderer
     assert '"com.stasislang.pong"' in device_script
@@ -1384,18 +1428,37 @@ def main() -> int:
     assert "Codex model is unavailable" in codex_native
     assert "Java_com_stasislang_workshop_MainActivity_nativeStatus" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeCompileProject" in native
-    assert "call_rust_bridge_compile" in native
+    compile_native_start = native.index(
+        "Java_com_stasislang_workshop_MainActivity_nativeCompileProject")
+    compile_native_end = native.index(
+        "Java_com_stasislang_workshop_MainActivity_nativeSourceItems", compile_native_start)
+    compile_native = native[compile_native_start:compile_native_end]
+    assert "char message[" not in compile_native
+    assert 'bridge->compile_project(root, "src/main.stasis")' in compile_native
+    assert "jstring result = (*env)->NewStringUTF(env, message);" in compile_native
+    assert "bridge->free_string(message);" in compile_native
     assert "required Rust Android compiler bridge is unavailable" in native
     assert "dlopen(\"libstasis_android_bridge.so\"" in native
     assert "stasis_android_bridge_compile_project" in native
+    assert "stasis_android_bridge_version" in native
     assert "stasis_android_bridge_set_i32_global" in native
     assert "stasis_android_bridge_get_i32_global" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeSetRuntimeI32" in native
     assert "stasis_android_bridge_free_string" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunTick" in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto" in native
-    assert "bytes_i32 < (jlong)(STASIS_RENDER_I32_COUNT * sizeof(int32_t))" in native
-    assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_tick_frame_v2")' in native
+    assert "STASIS_RENDER_BUFFER_DESCRIPTORS" in native
+    assert "validate_stasis_jni_frame_buffers" in native
+    assert "Java_com_stasislang_workshop_MainActivity_nativeFrameAbiDescriptor" in native
+    assert "stasis_jni_order_mutex" in native
+    assert "stasis_jni_order_ready" in native
+    assert "memory_order_acquire" in native
+    assert "memory_order_release" in native
+    assert "pthread_mutex_lock" in native
+    assert "ExceptionCheck" in native
+    assert "NewGlobalRef" in native
+    assert "clear_stasis_jni_frame_error" in native
+    assert 'dlsym(rust_bridge_api.handle, "stasis_android_bridge_run_render_frame")' in native
     assert "Java_com_stasislang_workshop_MainActivity_nativeRunFrame(JNIEnv" not in native
     assert "scan_stasis_files" not in native
     assert "analyze_stasis_file" not in native
@@ -1424,17 +1487,151 @@ def main() -> int:
     assert "WorkshopReload::FastReload" in bridge
     assert "WorkshopReload::ResetRequired" in bridge
     assert "CompileReady: backend=cranelift-jit" in bridge
+    assert "Stasis Workshop IT-025" in native
+    render_main = read("samples/render_parity/main.stasis")
+    render_frame = read("samples/render_parity/frame.stasis")
+    canonical_graphics_import = 'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";'
+    assert render_main.startswith(canonical_graphics_import)
+    assert render_frame.startswith(canonical_graphics_import)
+    assert "seam_touch_checksum" in render_main
+    assert "render_parity_host_frame.pointers[0].x_normalized * 1000.0" in render_main
+    assert "append_parity_touch_marker" in render_frame
+    assert "marker_active" in render_frame
+    assert "fill_rect(i32_to_f32(marker_x_i32) - 8.0" in render_frame
+    acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java")
+    assert "Stasis Workshop IT-026" in acceptance
+    assert "all_invalid_unchanged" in acceptance
+    assert "isDescriptorEnvelope" in acceptance
+    assert "descriptor.optString(\"schema\")" in acceptance
+    diagnostic_model = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopNativeDiagnostic.java")
+    diagnostic_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopDiagnosticSeamAcceptance.java")
+    assert 'SCHEMA = "stasis.native_diagnostic.v1"' in diagnostic_model
+    assert "fromNative" in diagnostic_model and "causes" in diagnostic_model
+    assert "Stasis Workshop IT-031" in diagnostic_acceptance
+    assert "MISSING_EXTERN" in diagnostic_acceptance
+    assert "runIt031Frame" in activity
+    assert "WorkshopDiagnosticSeamAcceptance.run" in activity
+    touch_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java")
+    assert "Stasis Workshop IT-027" in touch_acceptance
+    assert "ACTION_DOWN" in touch_acceptance and "ACTION_MOVE" in touch_acceptance
+    assert "ACTION_UP" in touch_acceptance
+    assert "java_only" in touch_acceptance
+    assert "nativeValidateFrameAbi" not in acceptance
+    assert "STASIS_RENDER_ACCEPTANCE" in native
+    assert "STASIS_RENDER_I_FRAME_TOKEN" in native
+    assert "IT-025 GLES" in preview_renderer
+    assert "IT-027 GLES" in preview_renderer
+    assert "rect_count" in preview_renderer
+    assert "I_FRAME_TOKEN" in preview_renderer
+    assert "awaitPresentedFrameToken" in preview_renderer
+    assert "ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS" in activity
+    assert "long deadline = System.nanoTime() + timeoutMillis * 1_000_000L" in activity
+    assert "long remainingNanos = deadline - System.nanoTime();" in activity
+    assert activity.count("remainingNanos = deadline - System.nanoTime();") >= 2
+    assert "long waitMillis = Math.min(remainingMillis" in activity
+    assert "return System.nanoTime() <= deadline;" in activity
+    assert "requestRender();" in activity
+    assert "lastAcceptanceGlesEvidenceToken" in preview_renderer
+    assert "frameToken != lastAcceptanceGlesEvidenceToken" in preview_renderer
+    assert "nativeFrameTrace" in native
     assert "Stasis Android native smoke loaded" in native
+    assert "stasis_android_audio_set_paused" in native
+    assert "stasis_android_audio_set_focus" in native
+    assert "stasis_android_bridge_install_audio_api" in native
+    android_audio = read("mobile/android/app/src/main/cpp/stasis_android_audio.c")
+    dynload = read("crates/stasis_dynload/src/lib.rs")
+    dynload_audio_api = dynload[
+        dynload.index("pub struct StasisAudioHostApi"):dynload.index(
+            "static AUDIO_HOST_API", dynload.index("pub struct StasisAudioHostApi"))
+    ]
+    native_audio_api = native[
+        native.index("typedef struct StasisAudioHostApi"):native.index(
+            "} StasisAudioHostApi;", native.index("typedef struct StasisAudioHostApi"))
+    ]
+    audio_api_fields = [
+        ("init", "pub init", "int (*init)"),
+        ("shutdown", "pub shutdown", "void (*shutdown)"),
+        ("is_available", "pub is_available", "int (*is_available)"),
+        ("get_sample_rate", "pub get_sample_rate", "int (*get_sample_rate)"),
+        ("get_channels", "pub get_channels", "int (*get_channels)"),
+        ("get_queued_frames", "pub get_queued_frames", "int (*get_queued_frames)"),
+        ("get_underruns", "pub get_underruns", "int (*get_underruns)"),
+        ("push_f32_interleaved", "pub push_f32_interleaved", "int (*push_f32_interleaved)"),
+        ("load_wav", "pub load_wav", "int (*load_wav)"),
+        ("release", "pub release", "void (*release)"),
+        ("play", "pub play", "int (*play)"),
+        ("stop", "pub stop", "void (*stop)"),
+        ("voice_is_playing", "pub voice_is_playing", "int (*voice_is_playing)"),
+        ("voice_set_paused", "pub voice_set_paused", "void (*voice_set_paused)"),
+        ("voice_set_volume_pan", "pub voice_set_volume_pan", "void (*voice_set_volume_pan)"),
+        ("load_music", "pub load_music", "int (*load_music)"),
+        ("load_effect", "pub load_effect", "int (*load_effect)"),
+        ("play_music", "pub play_music", "int (*play_music)"),
+        ("stop_music", "pub stop_music", "void (*stop_music)"),
+        ("pause_music", "pub pause_music", "void (*pause_music)"),
+        ("set_music_volume", "pub set_music_volume", "void (*set_music_volume)"),
+        ("play_effect", "pub play_effect", "int (*play_effect)"),
+    ]
+    rust_positions = []
+    native_positions = []
+    for _, rust_field, native_field in audio_api_fields:
+        assert rust_field in dynload_audio_api
+        assert native_field in native_audio_api
+        rust_positions.append(dynload_audio_api.index(rust_field))
+        native_positions.append(native_audio_api.index(native_field))
+    assert rust_positions == sorted(rust_positions)
+    assert native_positions == sorted(native_positions)
+    for callback in (
+        "stasis_audio_load_wav",
+        "stasis_audio_release",
+        "stasis_audio_play",
+        "stasis_audio_stop",
+        "stasis_audio_voice_is_playing",
+        "stasis_audio_voice_set_paused",
+        "stasis_audio_voice_set_volume_pan",
+        "stasis_audio_load_music",
+        "stasis_audio_load_effect",
+        "stasis_audio_play_music",
+        "stasis_audio_stop_music",
+        "stasis_audio_pause_music",
+        "stasis_audio_set_music_volume",
+        "stasis_audio_play_effect",
+    ):
+        assert callback in native
+        assert callback in android_audio
+    assert "AAudioStreamBuilder_openStream" in android_audio
+    assert "AAudioStreamBuilder_setFormat" in android_audio
+    assert "AAudioStreamBuilder_setUsage" in android_audio
+    assert "AAudioStreamBuilder_setContentType" in android_audio
+    assert "AAUDIO_USAGE_GAME" in android_audio
+    assert "AAUDIO_CONTENT_TYPE_MUSIC" in android_audio
+    assert "stasis_audio_get_queued_frames" in android_audio
+    assert "stasis_audio_get_underruns" in android_audio
+    assert "stasis_audio_push_f32_interleaved" in android_audio
+    assert "stasis_audio_set_project_root" in android_audio
+    assert "stasis_asset_normalize_relative_path" in android_audio
+    assert "audio_guest_path_escapes_root" in android_audio
+    assert "pthread_mutex_trylock" in android_audio
+    assert "stasis_audio_assets_mix" in android_audio
+    assert "stasis_audio_assets_reset" in android_audio
+    assert "stasis_audio_assets_stop_asset(&audio_assets, asset_handle)" in android_audio
+    assert "return voice_handle > 0;" in android_audio
+    assert "stasis_audio_assets.c" in read("mobile/android/app/src/main/cpp/CMakeLists.txt")
+    assert "stasis_audio_ring" in read("runtime/stasis_audio_ring.c")
 
     cmake = read("mobile/android/app/src/main/cpp/CMakeLists.txt")
     assert "add_library(stasis_mobile_smoke SHARED" in cmake
     assert "stasis_mobile_smoke.c" in cmake
     assert "stasis_android_sprite.c" in cmake
+    assert "stasis_android_audio.c" in cmake
+    assert "stasis_audio_assets.c" in cmake
+    assert "stasis_audio_ring.c" in cmake
     assert "../../../../../../runtime" in cmake
     assert "find_library(math_lib m)" in cmake
     assert "STASIS_ANDROID_PUBLISHED_AOT" not in cmake
     assert "published_aot_objects.cmake" not in cmake
     assert "find_library(dl_lib dl)" in cmake
+    assert "STASIS_RENDER_ACCEPTANCE" in cmake
     assert "${dl_lib}" in cmake
 
     for sample in STASIS_SAMPLE_FILES:
@@ -1463,11 +1660,140 @@ def main() -> int:
     assert '"label": "Stasis Pong"' in pong_project
     assert '"orientation": "sensorLandscape"' in pong_project
     preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
-    assert "function on_code_swap(): void { pong_game_on_code_swap(); pong_host_render(); }" in preview_adapter
+    assert 'import "/vendor/stasis/src/stdlib/graphics.stasis";' in preview_adapter
+    assert "begin_frame();" in preview_adapter
+    assert "PongHost.writer.reserve(4," in preview_adapter
+    assert "PongHost.writer.finalize(4);" in preview_adapter
+    assert "gfx_cmd_i32" not in preview_adapter
+    exploration_host = read("mobile/android/app/src/main/assets/exploration_sample/src/host_runtime.stasis")
+    assert "if (exploration_host_frame.pointer_count > 0)" in exploration_host
+    assert "if (exploration_host_frame.pointers[0].is_down)" in exploration_host
+    assert "Input.touch_active = 1;" in exploration_host
     assert '"encoding": "svg"' in pong_manifest
 
     collision = read("mobile/android/app/src/main/assets/workshop_sample/src/systems/collision.stasis")
     assert "Collision logic lives" in collision
+
+    audio_fixture = read("mobile/android/app/src/main/assets/audio_sink_sample/stasis.json")
+    assert '"name": "brickout_audio"' in audio_fixture
+    assert '"application_id": "com.stasislang.brickoutaudio"' in audio_fixture
+    assert '"entry": "src/main.stasis"' in audio_fixture
+    audio_manifest_text = read(
+        "mobile/android/app/src/main/assets/audio_sink_sample/assets/manifest.json"
+    )
+    audio_manifest = json.loads(audio_manifest_text)
+    assert audio_manifest["schema"] == "stasis-assets"
+    assert audio_manifest["version"] == 1
+    audio_assets = {asset["id"]: asset for asset in audio_manifest["assets"]}
+    assert set(audio_assets) == {"brickout_music", "brickout_effect"}
+    assert audio_assets["brickout_music"]["path"] == "assets/tone.mp3"
+    assert audio_assets["brickout_music"]["content_sha256"] == (
+        "5aa0c29e0cd59ae25af7957e07a0f4cfc2506c63ba10e055ae9e6584187e4a3c"
+    )
+    assert audio_assets["brickout_music"]["format"] == {
+        "kind": "audio",
+        "encoding": "mp3",
+        "channels": 1,
+        "sample_rate": 24000,
+        "duration_frames": 18000,
+    }
+    assert audio_assets["brickout_effect"]["path"] == "assets/tone.wav"
+    assert audio_assets["brickout_effect"]["content_sha256"] == (
+        "e6a12792fdbb340eb48009a5cc1ff5162ec69279787605d73678d41658d836f4"
+    )
+    assert audio_assets["brickout_effect"]["format"] == {
+        "kind": "audio",
+        "encoding": "wav",
+        "channels": 1,
+        "sample_rate": 24000,
+        "duration_frames": 18000,
+    }
+    audio_root = ROOT / "mobile/android/app/src/main/assets/audio_sink_sample"
+    canonical_audio_root = ROOT / "samples/audio_asset_playback/assets"
+    for asset in audio_assets.values():
+        asset_path = audio_root / asset["path"]
+        assert asset_path.is_file()
+        assert hashlib.sha256(asset_path.read_bytes()).hexdigest() == asset["content_sha256"]
+        assert asset_path.read_bytes() == (canonical_audio_root / asset_path.name).read_bytes()
+    audio_source = read("mobile/android/app/src/main/assets/audio_sink_sample/src/main.stasis")
+    assert "struct AudioAsset" in audio_source
+    assert "struct AudioVoice" in audio_source
+    assert "struct AudioStream" in audio_source
+    assert "import \"/vendor/stasis/src/stdlib/audio.stasis\"" not in audio_source
+    assert '"assets/tone.mp3"' in audio_source
+    assert '"assets/tone.wav"' in audio_source
+    assert "function @asset_path(path) load_audio(self: AudioAsset" in audio_source
+    assert "function play(self: AudioVoice, asset: AudioAsset" in audio_source
+    assert "function play_once(self: AudioAsset" in audio_source
+    assert "function open(self: AudioStream" in audio_source
+    assert "function refresh(self: AudioStream" in audio_source
+    assert "function push(self: AudioStream" in audio_source
+    assert "global music_handle: i32" in audio_source
+    assert "global effect_handle: i32" in audio_source
+    assert 'manifest_music_ready = music.load_audio("assets/tone.mp3")' in audio_source
+    assert 'manifest_effect_ready = effect.load_audio("assets/tone.wav")' in audio_source
+    assert "manifest_audio_update" in audio_source
+    assert "music_voice.play(music, true, 0.18, 0.0)" in audio_source
+    assert "effect.play_once(0.25, 0.0)" in audio_source
+    assert "manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_MUSIC" in audio_source
+    assert "manifest_audio_event = manifest_audio_event * 10 + AUDIO_EVENT_EFFECT" in audio_source
+    assert "audio_sink_acceptance_update" in audio_source
+    assert "audio_stream.push(audio_buf, AUDIO_FRAMES_PER_PUSH)" in audio_source
+    audio_test = read(
+        "mobile/android/app/src/main/assets/audio_sink_sample/tests/audio_sink.test.stasis"
+    )
+    assert 'import "../src/main.stasis"' in audio_test
+    assert "audio fixture keeps bounded sink handles and event contracts" in audio_test
+    assert "AUDIO_EVENT_NONE == 0" in audio_test
+    audio_native = read("mobile/android/app/src/main/cpp/stasis_android_audio.c")
+    audio_requested = audio_native[
+        audio_native.index("int stasis_android_audio_is_requested(void)"):audio_native.index(
+            "int stasis_android_audio_is_running(void)")]
+    assert "audio_context_acquire" in audio_requested
+    assert "if (context == NULL) return 0;" in audio_requested
+    assert "context->error" not in audio_requested
+    assert "audio_attempted" not in audio_requested
+    assert "audio_update_running_state();" in audio_requested
+    audio_recovery = audio_native[
+        audio_native.index("static void audio_update_running_state_internal("):audio_native.index(
+            "static void audio_retire_context")]
+    assert "audio_initialize(rate, channels, latency, 0);" in audio_recovery
+    assert "audio_update_running_state_internal(1);" in audio_recovery
+    availability = audio_native[
+        audio_native.index("int stasis_audio_is_available(void)"):audio_native.index(
+            "int stasis_audio_get_sample_rate(void)")]
+    assert "audio_initialize(rate, channels, latency, 0)" in availability
+    explicit_init = audio_native[
+        audio_native.index("int stasis_audio_init("):audio_native.index(
+            "void stasis_audio_shutdown(void)")]
+    assert "audio_initialize(sample_rate, channels, target_latency_frames, 1)" in explicit_init
+    initializer = audio_native[
+        audio_native.index("static int audio_initialize(", audio_native.index(
+            "static void audio_close_context")):audio_native.index("int stasis_audio_init(")]
+    assert "pthread_mutex_lock(&audio_lifecycle_lock);" in initializer
+    assert "pthread_mutex_unlock(&audio_lifecycle_lock);" in initializer
+    assert "!atomic_load_explicit(&audio_attempted" in initializer
+    assert "current->error" in initializer
+    assert "audio_update_running_state_internal(0);" in initializer
+    shutdown = audio_native[
+        audio_native.index("void stasis_audio_shutdown(void)"):audio_native.index(
+            "int stasis_audio_is_available(void)")]
+    assert "pthread_mutex_lock(&audio_lifecycle_lock);" in shutdown
+    assert "pthread_mutex_unlock(&audio_lifecycle_lock);" in shutdown
+    assert shutdown.index("pthread_mutex_lock(&audio_lifecycle_lock);") < shutdown.index(
+        "audio_close_context();")
+    assert shutdown.index("atomic_store_explicit(&audio_attempted, 0") < shutdown.index(
+        "pthread_mutex_unlock(&audio_lifecycle_lock);")
+    activity = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java")
+    assert "private void shutdownGameAudio()" in activity
+    assert "if (audioFocus != null) audioFocus.pause();" in activity
+    assert "nativeAudioShutdown();" in activity
+    activation = activity[activity.index("private boolean activateProject"):activity.index(
+        "private boolean hasPendingSourceEdit")]
+    assert activation.index("WorkshopProjectRegistry.setActive(this, project);") < activation.index(
+        "shutdownGameAudio();")
+    assert "gradle assemblePublishedDebug" not in read("mobile/android/README.md")
+    assert not (ROOT / "mobile/android/games/brickout_audio.gradle").exists()
 
     print("android shell structure ok")
     return 0

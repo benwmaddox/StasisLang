@@ -2,10 +2,16 @@ LIBRARY stasis_graphics
 EXPORTS
     stasis_graphics_runtime_abi_version
     stasis_graphics_release_id
+    stasis_graphics_build_fingerprint
     stasis_set_asset_root
     stasis_host_bulk_init
     stasis_host_bulk_apply_requests
     stasis_host_bulk_step
+    stasis_host_copy_runtime_error
+    stasis_host_performance_metrics_enabled
+    stasis_host_set_performance_metrics_enabled
+    stasis_host_get_latest_performance_metrics
+    stasis_host_get_latest_performance_metrics_v1
     stasis_init_window
     stasis_get_window_size
     stasis_get_display_metrics
@@ -37,6 +43,8 @@ EXPORTS
     stasis_audio_get_queued_frames
     stasis_audio_get_underruns
     stasis_audio_push_f32_interleaved
+    stasis_set_recording_audio_config
+    stasis_recording_audio_pull_f32_interleaved
     stasis_audio_load_wav
     stasis_audio_release
     stasis_audio_play
@@ -53,7 +61,6 @@ EXPORTS
     stasis_audio_play_effect
     stasis_get_startup_test_error
     stasis_get_startup_test_success
-    stasis_set_postfx
     stasis_input_pointer_count
     stasis_input_pointer_id
     stasis_input_pointer_is_down
@@ -67,8 +74,22 @@ EXPORTS
     stasis_input_pointer_y_n
     stasis_input_dropped_pointers
     stasis_host_get_frame
+    stasis_test_push_input_event
+    stasis_test_push_display_event
+    stasis_test_select_presentation_display
+    stasis_test_get_render_submission_state
+    stasis_test_get_sprite_state
     stasis_gfx_notify_file_changed
     stasis_gfx_load_sprite
+    stasis_gfx_set_next_sprite_atlas_eligible
+    stasis_gfx_set_next_sprite_atlas_policy_v3
+    stasis_asset_request_sprite
+    stasis_asset_request_sprite_with_policy
+    stasis_asset_request_sprite_with_policy_v3
+    stasis_asset_request_audio
+    stasis_asset_task_poll
+    stasis_asset_task_take_handle
+    stasis_asset_task_cancel
     stasis_gfx_release_sprite
     stasis_gfx_draw_sprite
     stasis_gfx_submit
@@ -85,6 +106,7 @@ EXPORTS
     stasis_draw_text
     stasis_measure_text
     stasis_gfx_cache_text
+    stasis_gfx_replace_text
     stasis_gfx_draw_text_cached
     stasis_gfx_measure_text_cached
     stasis_gfx_get_resource_lifecycle

@@ -1,0 +1,57 @@
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+import "/vendor/stasis/src/stdlib/storage.stasis";
+
+global ticks: i32;
+global seam_state_checksum: i32;
+global seam_storage_phase: i32;
+global seam_storage_loaded_value: i32;
+global seam_storage_unrelated_scope: i32;
+global seam_storage_unrelated_key: i32;
+global seam_storage_traversal_rejected: i32;
+global seam_storage_checksum: i32;
+
+function main(): i32 {
+    init_window(640, 360, "Stasis Android Storage Seam");
+    ticks = 0;
+    let stage: i32 = storage_load_i32("it023_control", "stage", 0);
+    if (stage == 0) {
+        storage_save_i32("it023_target", "durable_value", 230023);
+        seam_storage_loaded_value = storage_load_i32("it023_target", "durable_value", -2301);
+        storage_save_i32("it023_control", "stage", 1);
+        seam_storage_phase = 1;
+    } else if (stage == 1) {
+        seam_storage_loaded_value = storage_load_i32("it023_target", "durable_value", -2302);
+        storage_save_i32("it023_control", "stage", 2);
+        seam_storage_phase = 2;
+    } else {
+        seam_storage_loaded_value = storage_load_i32("it023_target", "durable_value", -2303);
+        seam_storage_phase = 3;
+    }
+    seam_storage_unrelated_scope = storage_load_i32("it023_other", "durable_value", -2311);
+    seam_storage_unrelated_key = storage_load_i32("it023_target", "other_key", -2312);
+    seam_storage_traversal_rejected = 0;
+    if (!storage_save_i32("..", "escape", 9) && !storage_save_i32("it023_target", "../escape", 9)) {
+        seam_storage_traversal_rejected = 1;
+    }
+    seam_storage_checksum = seam_storage_phase * 1000000 + seam_storage_loaded_value;
+    seam_state_checksum = 2300;
+    return 0;
+}
+
+function tick(): i32 {
+    ticks = ticks + 1;
+    seam_state_checksum = 2300 + ticks;
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.03, 0.06, 0.10, 1.0);
+    fill_rect(80.0, 80.0, 480.0, 200.0, 0.12, 0.65, 0.38, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

@@ -1,0 +1,72 @@
+import "/vendor/stasis/stdlib/graphics.stasis";
+import "ui_single_pass.stasis";
+import "gallery_state.stasis";
+import "gallery_common.stasis";
+import "gallery_pages.stasis";
+
+global ui_gallery_host_frame: HostFrame;
+
+function main(): i32 {
+    init_window(1100, 720, "Stasis UI Gallery");
+    gallery.font = load_font("assets/ui.ttf", 12);
+    gallery.page = GalleryPage.Stacks;
+    gallery.fit = UiViewportFit.Contain;
+    gallery.modal_open = false;
+    gallery.world_tick = 0;
+    gallery.world_x = 38.0;
+    gallery.world_y = 62.0;
+    gallery.mapped_x = 38.0;
+    gallery.mapped_y = 62.0;
+    gallery.score = 0;
+    if (gallery.font == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    ui_gallery_host_frame.refresh();
+    if (ui_gallery_host_frame.quit_requested) {
+        return 1;
+    }
+    gallery.world_tick += 1;
+    gallery.world_x = gallery.world_x + 1.0;
+    if (gallery.world_x > 286.0) {
+        gallery.world_x = 4.0;
+        gallery.score += 1;
+    }
+    if (gallery.modal_open) {
+        ui_modal_set(GALLERY_LAYER_MODAL);
+    } else {
+        ui_modal_set(0);
+    }
+    let pointer_id: i32 = -1;
+    let pointer_x: f32 = 0.0;
+    let pointer_y: f32 = 0.0;
+    let pointer_down: bool = false;
+    let went_down: bool = false;
+    let went_up: bool = false;
+    if (ui_gallery_host_frame.pointer_count > 0) {
+        pointer_id = ui_gallery_host_frame.pointers[0].id;
+        pointer_x = ui_gallery_host_frame.pointers[0].x_logical;
+        pointer_y = ui_gallery_host_frame.pointers[0].y_logical;
+        pointer_down = ui_gallery_host_frame.pointers[0].is_down;
+        went_down = ui_gallery_host_frame.pointers[0].went_down;
+        went_up = ui_gallery_host_frame.pointers[0].went_up;
+    }
+    gallery_tick_layout(pointer_id, pointer_x, pointer_y, pointer_down, went_down, went_up);
+    return 0;
+}
+
+function render(): i32 {
+    ui_gallery_host_frame.refresh();
+    begin_frame();
+    clear(0.02, 0.04, 0.07, 1.0);
+    gallery_render_layout();
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

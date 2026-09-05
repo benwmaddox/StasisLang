@@ -1,6 +1,6 @@
 # Machine-readable UI layout audits
 
-`src/stdlib/ui_layout_audit.stasis` complements framebuffer review with exact
+`src/stdlib/testing/ui_layout_audit.stasis` complements framebuffer review with exact
 logical geometry. It reports the final rectangles that drawing and hit testing
 consume, including runtime `TextRun.width` and `TextRun.height`, then evaluates
 declared relationships such as centering, containment, padding, baselines, and
@@ -18,7 +18,7 @@ The complete executable example is
 the rectangles used for drawing and hit testing, it emits the same geometry:
 
 ```stasis
-import "../../src/stdlib/ui_layout_audit.stasis";
+import "../../src/stdlib/testing/ui_layout_audit.stasis";
 
 ui_audit_rect("play_button", "button", button_x, button_y, button_w, button_h);
 ui_audit_text("play_label", label_x, label_y, play.width, play.height, 24);

@@ -8,33 +8,19 @@
 //
 // The remaining `extern` functions are intended for startup/asset loading (not per-tick).
 
-import "internal/host_frame.stasis";
+import "host_frame.stasis";
 import "internal/gfx_cmd.stasis";
 import "internal/host_window_request.stasis";
+import "asset_tasks.stasis";
 
-extern function sleep_ms(ms: i32): void;
-
-// Hot-path reads are HostFrame snapshot-only (no host calls).
-function get_time_ms(): i32 {
-    return host_time_ms();
-}
-
-function get_time_us(): i32 {
-    return host_time_us();
-}
+extern function @effects(nondeterministic) sleep_ms(ms: i32): void;
 
 // Startup / assets (host calls; avoid in hot paths)
-extern function gfx_poll_reload(handle: i32): bool;
-extern function gfx_dump_bmp(path: string): i32;
-extern function gfx_dump_png(path: string): i32;
-extern function load_font(path: string, size: i32): i32;
-extern function measure_text(font: i32, text: string): f32;
-
-struct Sprite {
-    handle: i32;
-    width: i32;
-    height: i32;
-}
+extern function @effects(graphics) gfx_poll_reload(sprite_ref: SpriteRef): bool;
+extern function @effects(graphics, storage) gfx_dump_bmp(path: string): i32;
+extern function @effects(graphics, storage) gfx_dump_png(path: string): i32;
+extern function @effects(graphics)@asset_path(path) load_font(path: string, size: i32): i32;
+extern function @effects(graphics) measure_text(font: i32, text: string): f32;
 
 struct TextRun {
     font: i32;
@@ -43,20 +29,482 @@ struct TextRun {
     height: f32;
 }
 
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+const ANIMATION_PLAYBACK_ONCE: i32 = 0;
+const ANIMATION_PLAYBACK_LOOP: i32 = 1;
+const ANIMATION_PLAYBACK_PING_PONG: i32 = 2;
+
+struct AnimationClip {
+    first_frame: i32;
+    frame_count: i32;
+    ticks_per_frame: i32;
+    playback_mode: i32;
+}
+
+struct SpriteSheet {
+    sprite_ref: SpriteRef;
+    width: i32;
+    height: i32;
+    columns: i32;
+    rows: i32;
+    cell_width: i32;
+    cell_height: i32;
+}
+
+enum PresentationCommandKind {
+    Empty,
+    Sprite,
+    SolidRect,
+}
+
+// Persistent, bounded semantic commands. Callers may build a list once, patch
+// logical fields, and replay it; only this compiler-owned module translates
+// the commands into the private frame ABI.
+struct PresentationCommand {
+    kind: PresentationCommandKind;
+    sprite_ref: SpriteRef;
+    x: f32;
+    y: f32;
+    width: f32;
+    height: f32;
+    rotation: i32;
+    alpha: i32;
+    r: f32;
+    g: f32;
+    b: f32;
+    a: f32;
+}
+
+struct PresentationList {
+    kinds: PresentationCommandKind[256];
+    sprite_refs: SpriteRef[256];
+    x: f32[256];
+    y: f32[256];
+    width: f32[256];
+    height: f32[256];
+    rotation: i32[256];
+    alpha: i32[256];
+    r: f32[256];
+    g: f32[256];
+    b: f32[256];
+    a: f32[256];
+    count: i32;
+}
+
+function reset_presentation(self: PresentationList): void {
+    self.count = 0;
+}
+
+function append_sprite(self: PresentationList, sprite_ref: SpriteRef, x: f32, y: f32, width: f32, height: f32, rotation: i32, alpha: i32): bool {
+    if (self.count < 0) {
+        self.count = 0;
+    }
+    if (self.count >= 256 || sprite_ref == SpriteRef.Invalid || width <= 0.0 || height <= 0.0) {
+        return false;
+    }
+    let i: i32 = self.count;
+    self.kinds[i] = PresentationCommandKind.Sprite;
+    self.sprite_refs[i] = sprite_ref;
+    self.x[i] = x;
+    self.y[i] = y;
+    self.width[i] = width;
+    self.height[i] = height;
+    self.rotation[i] = rotation;
+    self.alpha[i] = alpha;
+    self.count = i + 1;
+    return true;
+}
+
+function append_solid_rect(self: PresentationList, x: f32, y: f32, width: f32, height: f32, r: f32, g: f32, b: f32, a: f32): bool {
+    if (self.count < 0) {
+        self.count = 0;
+    }
+    if (self.count >= 256 || width <= 0.0 || height <= 0.0) {
+        return false;
+    }
+    let i: i32 = self.count;
+    self.kinds[i] = PresentationCommandKind.SolidRect;
+    self.x[i] = x;
+    self.y[i] = y;
+    self.width[i] = width;
+    self.height[i] = height;
+    self.r[i] = r;
+    self.g[i] = g;
+    self.b[i] = b;
+    self.a[i] = a;
+    self.count = i + 1;
+    return true;
+}
+
+function patch_sprite(
+    self: PresentationList,
+    index: i32,
+    sprite_ref: SpriteRef,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    rotation: i32,
+    alpha: i32
+): bool {
+    if (index < 0 || index >= self.count || index >= 256 || sprite_ref == SpriteRef.Invalid || width <= 0.0 || height <= 0.0) {
+        return false;
+    }
+    self.kinds[index] = PresentationCommandKind.Sprite;
+    self.sprite_refs[index] = sprite_ref;
+    self.x[index] = x;
+    self.y[index] = y;
+    self.width[index] = width;
+    self.height[index] = height;
+    self.rotation[index] = rotation;
+    self.alpha[index] = alpha;
+    return true;
+}
+
+// Public bounded bulk-line storage. Count and storage travel together, so a
+// caller cannot submit a count that describes memory it does not own.
+struct Line {
+    x1: f32;
+    y1: f32;
+    x2: f32;
+    y2: f32;
+    r: f32;
+    g: f32;
+    b: f32;
+    a: f32;
+}
+
+struct LineBatch {
+    x1: f32[512];
+    y1: f32[512];
+    x2: f32[512];
+    y2: f32[512];
+    r: f32[512];
+    g: f32[512];
+    b: f32[512];
+    a: f32[512];
+    count: i32;
+}
+
+function reset_lines(self: LineBatch): void {
+    self.count = 0;
+}
+
+function append(self: LineBatch, line: Line): bool {
+    if (self.count < 0) {
+        self.count = 0;
+    }
+    if (self.count >= 512) {
+        return false;
+    }
+    self.x1[self.count] = line.x1;
+    self.y1[self.count] = line.y1;
+    self.x2[self.count] = line.x2;
+    self.y2[self.count] = line.y2;
+    self.r[self.count] = line.r;
+    self.g[self.count] = line.g;
+    self.b[self.count] = line.b;
+    self.a[self.count] = line.a;
+    self.count = self.count + 1;
+    return true;
+}
+
+function append_line(self: LineBatch, x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32): bool {
+    if (self.count < 0) {
+        self.count = 0;
+    }
+    if (self.count >= 512) {
+        return false;
+    }
+    self.x1[self.count] = x1;
+    self.y1[self.count] = y1;
+    self.x2[self.count] = x2;
+    self.y2[self.count] = y2;
+    self.r[self.count] = r;
+    self.g[self.count] = g;
+    self.b[self.count] = b;
+    self.a[self.count] = a;
+    self.count = self.count + 1;
+    return true;
+}
+
+function draw(self: LineBatch): void {
+    let bounded_count: i32 = self.count;
+    if (bounded_count < 0) {
+        bounded_count = 0;
+    }
+    if (bounded_count > 512) {
+        bounded_count = 512;
+    }
+    for (let i: i32 = 0; i < bounded_count; i += 1) {
+        gfx_cmd_line(
+            self.x1[i],
+            self.y1[i],
+            self.x2[i],
+            self.y2[i],
+            self.r[i],
+            self.g[i],
+            self.b[i],
+            self.a[i]
+        );
+    }
+}
+
+// Caller-owned storage for one direct canonical sprite run. The writer must be
+// global-backed and its storage may persist. Its token is frame-local and must
+// not cross begin_frame/code-swap; reserve and finalize/cancel in one frame.
+struct SpriteRunWriter {
+    token: i32;
+}
+
+function reserve(self: SpriteRunWriter, max_count: i32, clip: i32, material: i32, blend: i32, filter: i32, pass: i32, flags: i32): bool {
+    self.token = gfx_cmd_sprite_run_reserve(max_count, clip, material, blend, filter, pass, flags);
+    return self.token > 0;
+}
+
+function @effects(graphics) write(
+    self: SpriteRunWriter,
+    sprite_ref: SpriteRef,
+    tint_rgba: i32,
+    instance_flags: i32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    src_x: f32,
+    src_y: f32,
+    src_width: f32,
+    src_height: f32,
+    pivot_x: f32,
+    pivot_y: f32,
+    scale_x: f32,
+    scale_y: f32,
+    rotation: f32
+): bool {
+    return gfx_cmd_sprite_run_write(
+        self.token,
+        sprite_ref,
+        tint_rgba,
+        instance_flags,
+        x,
+        y,
+        width,
+        height,
+        src_x,
+        src_y,
+        src_width,
+        src_height,
+        pivot_x,
+        pivot_y,
+        scale_x,
+        scale_y,
+        rotation
+    );
+}
+
+function finalize(self: SpriteRunWriter, actual_count: i32): bool {
+    let success: bool = gfx_cmd_sprite_run_finalize(self.token, actual_count);
+    if (success) {
+        self.token = 0;
+    }
+    return success;
+}
+
+function cancel(self: SpriteRunWriter): bool {
+    let success: bool = gfx_cmd_sprite_run_cancel(self.token);
+    if (success) {
+        self.token = 0;
+    }
+    return success;
+}
+
+function @effects(graphics)@asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(
+    self: Sprite,
+    path: string,
+    width: i32,
+    height: i32
+): bool;
+function @internal @effects(graphics)@extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(
+    self: SpriteSheet,
+    path: string,
+    width: i32,
+    height: i32
+): bool;
+
+function publish(self: ImageAsset, target: Sprite): bool {
+    if (!self.ready()) {
+        return false;
+    }
+    if (target.sprite_ref != SpriteRef.Invalid) {
+        gfx_release_sprite(target.sprite_ref);
+    }
+    target.sprite_ref = self.sprite_ref;
+    target.width = self.width;
+    target.height = self.height;
+    self.sprite_ref = SpriteRef.Invalid;
+    self.width = 0;
+    self.height = 0;
+    self.state = AssetState.None;
+    return true;
+}
 
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {
-    if (self.handle <= 0 || self.width <= 0 || self.height <= 0) {
+    if (self.sprite_ref == SpriteRef.Invalid || self.width <= 0 || self.height <= 0) {
         return;
     }
     let width: f32 = 0.0;
     let height: f32 = 0.0;
     width.from_i32(self.width);
     height.from_i32(self.height);
-    gfx_cmd_sprite(self.handle, x, y, width, height, rotation, alpha);
+    gfx_cmd_sprite(self.sprite_ref, x, y, width, height, rotation, alpha);
 }
 
-function @extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
+function valid(self: Sprite): bool {
+    return self.sprite_ref != SpriteRef.Invalid;
+}
+
+function reference(self: Sprite): SpriteRef {
+    return self.sprite_ref;
+}
+
+function poll_reload(self: Sprite): bool {
+    if (!self.valid()) {
+        return false;
+    }
+    return gfx_poll_reload(self.sprite_ref);
+}
+
+function load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool {
+    if (columns <= 0 || rows <= 0 || cell_width <= 0 || cell_height <= 0) {
+        return false;
+    }
+    if (columns > 2147483647 / rows || columns > 2147483647 / cell_width || rows > 2147483647 / cell_height) {
+        return false;
+    }
+    let total_width: i32 = columns * cell_width;
+    let total_height: i32 = rows * cell_height;
+    if (total_width <= 0 || total_height <= 0) {
+        return false;
+    }
+    if (!self.load_sprite_sheet_asset_from(path, total_width, total_height)) {
+        return false;
+    }
+    self.columns = columns;
+    self.rows = rows;
+    self.cell_width = cell_width;
+    self.cell_height = cell_height;
+    return true;
+}
+
+function draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): void {
+    let width: f32 = 0.0;
+    let height: f32 = 0.0;
+    width.from_i32(self.cell_width);
+    height.from_i32(self.cell_height);
+    self.draw_frame_scaled(frame, x, y, width, height, alpha, rotation);
+}
+
+// Draw one validated row-major frame at caller-selected geometry. Keeping
+// frame selection and UV emission here avoids callers having to patch command
+// buffers after the command is appended (which would reset the frame UV).
+function draw_frame_scaled(self: SpriteSheet, frame: i32, x: f32, y: f32, width: f32, height: f32, alpha: i32, rotation: i32): void {
+    if (self.sprite_ref == SpriteRef.Invalid || self.columns <= 0 || self.rows <= 0 || self.cell_width <= 0 || self.cell_height <= 0) {
+        return;
+    }
+    if (width <= 0.0 || height <= 0.0) {
+        return;
+    }
+    if (self.columns > 2147483647 / self.rows) {
+        return;
+    }
+    let frame_total: i32 = self.columns * self.rows;
+    if (frame < 0 || frame >= frame_total) {
+        return;
+    }
+    let column: i32 = frame % self.columns;
+    let row: i32 = frame / self.columns;
+    let safe_alpha: i32 = alpha;
+    if (safe_alpha < 0) {
+        safe_alpha = 0;
+    }
+    if (safe_alpha > 255) {
+        safe_alpha = 255;
+    }
+    let source_x: f32 = i32_to_f32(column * self.cell_width);
+    let source_y: f32 = i32_to_f32(row * self.cell_height);
+    let source_width: f32 = i32_to_f32(self.cell_width);
+    let source_height: f32 = i32_to_f32(self.cell_height);
+    gfx_cmd_sprite_semantic(
+        self.sprite_ref,
+        x,
+        y,
+        width,
+        height,
+        source_x,
+        source_y,
+        source_width,
+        source_height,
+        width * 0.5,
+        height * 0.5,
+        1.0,
+        1.0,
+        i32_to_f32(rotation),
+        -256 + safe_alpha
+    );
+}
+
+function animation_frame_at(first_frame: i32, frame_count: i32, ticks_per_frame: i32, playback_mode: i32, elapsed_ticks: i32): i32 {
+    let frame: i32 = first_frame;
+    if (first_frame < 0 || frame_count <= 0 || ticks_per_frame <= 0) {
+        return frame;
+    }
+    if (first_frame > 2147483647 -(frame_count - 1)) {
+        return frame;
+    }
+    let elapsed: i32 = elapsed_ticks;
+    if (elapsed < 0) {
+        elapsed = 0;
+    }
+    let step: i32 = elapsed / ticks_per_frame;
+    if (playback_mode == 0) {
+        if (step >= frame_count) {
+            step = frame_count - 1;
+        }
+    } else if (playback_mode == 1) {
+        step = step % frame_count;
+    } else if (frame_count <= 1) {
+        step = 0;
+    } else {
+        if (frame_count > 1073741824) {
+            return first_frame;
+        }
+        let period: i32 = frame_count * 2 - 2;
+        let phase: i32 = step % period;
+        if (phase >= frame_count) {
+            step = period - phase;
+        } else {
+            step = phase;
+        }
+    }
+    return first_frame + step;
+}
+
+function animation_finished(frame_count: i32, ticks_per_frame: i32, playback_mode: i32, elapsed_ticks: i32): bool {
+    if (frame_count <= 0 || ticks_per_frame <= 0) {
+        return true;
+    }
+    return playback_mode == 0 && elapsed_ticks >= 0 && elapsed_ticks / ticks_per_frame >= frame_count;
+}
+
+function frame_at(self: AnimationClip, elapsed_ticks: i32): i32 {
+    return animation_frame_at(self.first_frame, self.frame_count, self.ticks_per_frame, self.playback_mode, elapsed_ticks);
+}
+
+function finished(self: AnimationClip, elapsed_ticks: i32): bool {
+    return animation_finished(self.frame_count, self.ticks_per_frame, self.playback_mode, elapsed_ticks);
+}
+
+function @effects(graphics)@extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
+function @effects(graphics)@extern("stasis_jit_text_run_replace_from") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool;
 
 // Runtime-owned display text, such as a localized store price, uses the same cached
 // UTF-8 path as string literals. The named wrapper makes the bounded-buffer contract
@@ -70,11 +518,6 @@ function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): vo
         return;
     }
     gfx_cmd_text_cached(self.font, self.handle, x, y, r, g, b, a);
-}
-
-function get_desktop_size(out_w: i32[], out_h: i32[]): void {
-    out_w[0] = host_screen_w_px();
-    out_h[0] = host_screen_h_px();
 }
 
 function init_window(width: i32, height: i32, title: string): bool {
@@ -96,6 +539,11 @@ function set_maximized(enabled: i32): i32 {
     return 0;
 }
 
+function set_maximized_canvas(width: i32, height: i32): i32 {
+    host_request_maximized_canvas(width, height);
+    return 0;
+}
+
 // Legacy-ish names retained as pure wrappers (no host calls).
 function begin_frame(): void {
     gfx_cmd_begin();
@@ -113,127 +561,58 @@ function draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a
     gfx_cmd_line(x1, y1, x2, y2, r, g, b, a);
 }
 
-function draw_lines(lines: f32[], count: i32): void {
-    gfx_cmd_lines_from(lines, count);
+function draw_sprite(sprite_ref: SpriteRef, x: f32, y: f32, w: f32, h: f32, rotation: i32, alpha: i32): void {
+    gfx_cmd_sprite(sprite_ref, x, y, w, h, rotation, alpha);
 }
 
-function gfx_draw_sprites(cmd_i32: i32[], cmd_f32: f32[], count: i32): void {
-    gfx_cmd_sprites_from(cmd_i32, cmd_f32, count);
+function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    gfx_cmd_text(font, text, x, y, r, g, b, a);
 }
 
-function gfx_window_resized(): bool {
-    return host_resized();
+function fill_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void {
+    gfx_cmd_rect(x, y, w, h, r, g, b, a);
 }
 
-function gfx_logical_width(): f32 {
-    return host_logical_width();
+function replay(self: PresentationList): void {
+    let bounded_count: i32 = self.count;
+    if (bounded_count < 0) {
+        bounded_count = 0;
+    }
+    if (bounded_count > 256) {
+        bounded_count = 256;
+    }
+    for (let i: i32 = 0; i < bounded_count; i += 1) {
+        if (self.kinds[i] == PresentationCommandKind.Sprite) {
+            draw_sprite(
+                self.sprite_refs[i],
+                self.x[i],
+                self.y[i],
+                self.width[i],
+                self.height[i],
+                self.rotation[i],
+                self.alpha[i]
+            );
+        } else if (self.kinds[i] == PresentationCommandKind.SolidRect) {
+            fill_rect(
+                self.x[i],
+                self.y[i],
+                self.width[i],
+                self.height[i],
+                self.r[i],
+                self.g[i],
+                self.b[i],
+                self.a[i]
+            );
+        }
+    }
 }
 
-function gfx_logical_height(): f32 {
-    return host_logical_height();
+// Ordered logical clipping.  Push/pop entries are interpreted by every
+// renderer in draw order, so nested clips restore the prior state exactly.
+function gfx_push_clip(x: f32, y: f32, w: f32, h: f32): void {
+    gfx_cmd_clip_push(x, y, w, h);
 }
 
-function gfx_native_width_px(): i32 {
-    return host_native_w_px();
-}
-
-function gfx_native_height_px(): i32 {
-    return host_native_h_px();
-}
-
-function gfx_drawable_width_px(): i32 {
-    return host_drawable_w_px();
-}
-
-function gfx_drawable_height_px(): i32 {
-    return host_drawable_h_px();
-}
-
-function gfx_safe_viewport_x(): f32 {
-    return host_safe_x();
-}
-
-function gfx_safe_viewport_y(): f32 {
-    return host_safe_y();
-}
-
-function gfx_safe_viewport_width(): f32 {
-    return host_safe_width();
-}
-
-function gfx_safe_viewport_height(): f32 {
-    return host_safe_height();
-}
-
-function gfx_content_scale(): f32 {
-    return host_content_scale();
-}
-
-function gfx_raster_scale(): f32 {
-    return host_raster_scale();
-}
-
-function gfx_display_generation(): i32 {
-    return host_display_generation();
-}
-
-function gfx_density_generation(): i32 {
-    return host_density_generation();
-}
-
-function is_key_down(scancode: i32): bool {
-    return host_key_down(scancode);
-}
-
-function should_quit(): bool {
-    return host_quit_requested();
-}
-
-// Pointer/query wrappers over HostFrame
-function input_pointer_count(): i32 {
-    return host_pointer_count();
-}
-
-function input_pointer_id(index: i32): i32 {
-    return host_pointer_id(index);
-}
-
-function input_pointer_is_down(index: i32): bool {
-    return host_pointer_is_down(index);
-}
-
-function input_pointer_went_down(index: i32): bool {
-    return host_pointer_went_down(index);
-}
-
-function input_pointer_went_up(index: i32): bool {
-    return host_pointer_went_up(index);
-}
-
-function input_pointer_x_logical(index: i32): f32 {
-    return host_pointer_x_logical(index);
-}
-
-function input_pointer_y_logical(index: i32): f32 {
-    return host_pointer_y_logical(index);
-}
-
-function input_pointer_dx_logical(index: i32): f32 {
-    return host_pointer_dx_logical(index);
-}
-
-function input_pointer_dy_logical(index: i32): f32 {
-    return host_pointer_dy_logical(index);
-}
-
-function input_pointer_x_n(index: i32): f32 {
-    return host_pointer_x_n(index);
-}
-
-function input_pointer_y_n(index: i32): f32 {
-    return host_pointer_y_n(index);
-}
-
-function input_dropped_pointers(): i32 {
-    return host_dropped_pointers();
+function gfx_pop_clip(): void {
+    gfx_cmd_clip_pop();
 }

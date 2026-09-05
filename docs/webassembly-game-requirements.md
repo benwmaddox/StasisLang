@@ -8,6 +8,13 @@ This is based on the current `main` codebase, not on a hypothetical redesign.
 
 ## Executive Summary
 
+Implementation status (2026-08-13): `stasis package --target web` emits a real Wasm guest and a
+static browser-host package. The web backend now covers scalar and
+structured-global fields, fixed collection memory, integer/float expressions, stable string
+handles, and the existing graphics command-buffer ABI. The browser host packages PNG/SVG/font and
+WAV/MP3 assets and implements Canvas and WebAudio. See `docs/web_packaging.md` for remaining compiler
+limits and acceptance fixtures.
+
 Stasis game code is already structurally close to a browser-friendly model:
 
 - gameplay state is explicit
@@ -21,7 +28,7 @@ The main blockers are below:
 
 1. The current dev/runtime path is native and Windows-centric.
 2. The current AOT path emits native object files and native executables, not `.wasm`.
-3. The current runtime is `stasis_graphics` built as a native SDL/OpenGL shared library, not a browser host.
+3. The current runtime is `stasis_graphics` built as a native SDL_Renderer shared library, not a browser host.
 4. Asset loading, audio, timing, and file watching assume native process capabilities.
 
 The shortest credible path is not "port the Windows runner to the browser." The right path is:
@@ -38,7 +45,7 @@ The shortest credible path is not "port the Windows runner to the browser." The 
 These parts are already aligned with a browser-hosted model:
 
 - `README.md` describes the intended game loop as `main()`, then `tick()`, then `render()`.
-- `src/stdlib/internal/host_frame.stasis` defines a host-owned frame snapshot for time, window size, pointers, keyboard state, and quit state.
+- `src/stdlib/internal/host_frame_raw.stasis` defines a host-owned frame snapshot for time, window size, pointers, keyboard state, and quit state.
 - `src/stdlib/internal/host_window_request.stasis` defines guest-to-host window requests as globals.
 - `src/stdlib/internal/gfx_cmd.stasis` defines the single fixed graphics command buffer ABI.
 - `src/stdlib/graphics.stasis` uses host snapshots for reads and command buffers for render output.
@@ -58,8 +65,8 @@ The current runtime and execution path are explicitly native:
 
 - `crates/stasis_dynload/src/lib.rs` loads `stasis_graphics.dll` with `LoadLibraryW` and resolves symbols with `GetProcAddress`.
 - many `stasis_dynload` host calls explicitly return "only supported on windows" outside Windows.
-- `runtime/CMakeLists.txt` builds `stasis_graphics` as a native SDL3/OpenGL library.
-- `runtime/README.md` documents a native SDL3/OpenGL runtime.
+- `runtime/CMakeLists.txt` builds `stasis_graphics` as a native SDL3 renderer library.
+- `runtime/README.md` documents a native SDL3 renderer runtime.
 - `apps/stasis/src/lib.rs` implements `play` as a native loop that:
   - loads the graphics runtime
   - JIT-compiles game code
@@ -219,7 +226,7 @@ That is much more compatible with the existing Stasis design than replacing ever
 
 ## 4. Replace the native graphics runtime with a browser host runtime
 
-Today `stasis_graphics` is a native SDL/OpenGL library.
+Today `stasis_graphics` is a native SDL_Renderer library.
 
 For the web, Stasis needs a browser runtime layer that replaces these responsibilities:
 
@@ -314,7 +321,8 @@ Current code already trends in the right direction because game code uses host-p
 
 For web support:
 
-- the browser host should populate `host_time_ms`, `host_time_us`, and tick index
+- the browser host should populate the frame snapshot lanes surfaced as
+  `HostFrame.time_ms`, `HostFrame.time_us`, and `HostFrame.tick_index`
 - use `performance.now()` or equivalent
 - do not rely on blocking sleep semantics for gameplay
 
@@ -411,20 +419,17 @@ Recommendation:
 
 ## 8. Add a browser audio backend
 
-Current audio is exposed as runtime externs linked through `stasis_graphics`.
+Guest audio uses caller-owned `AudioStream`, `AudioAsset`, and `AudioVoice`
+values linked through `stasis_graphics`.
 
 For web support, that host implementation needs to be replaced with browser audio, likely via WebAudio.
 
 Required work:
 
-- define browser implementation of:
-  - `audio_init`
-  - `audio_is_available`
-  - `audio_get_sample_rate`
-  - `audio_get_channels`
-  - `audio_get_queued_frames`
-  - `audio_get_underruns`
-  - `audio_push_f32_interleaved`
+- implement `AudioStream.open()`, `refresh()`, `push()`, and `close()` over
+  browser audio, including its availability, format, queue, and underrun fields
+- implement `AudioAsset.load_audio()` and `AudioVoice`/`play_once()` playback
+  over browser decoding and voice ownership
 - define buffering policy
 - define browser autoplay/unlock behavior
 - decide whether audio starts only after user interaction
@@ -580,7 +585,7 @@ These should not block first browser support:
 - native-equivalent hot swap
 - `play` parity in the browser
 - asset file watching in browser
-- exact SDL/OpenGL implementation parity
+- exact native SDL and WebGL2 semantic parity
 - browser-side AOT relinking of native artifacts
 - full offline/PWA story
 - multiplayer/networking

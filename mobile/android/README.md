@@ -126,7 +126,51 @@ Run the blocking render end-to-end gate directly with:
 .\test_render_emulator.ps1 -Headless
 ```
 
-This builds the canonical `samples/render_parity` fixture in Workshop with the real x86_64 development JIT. It captures the OpenGL surface, normalizes the letterboxed 640x360 viewport, and checks Android regions for the background, procedural fallback, opaque/translucent/rotated SVG sprites, crossing lines, direct text, and cached text. Three spaced captures, at least 30 rendered frames, and a successful non-empty JIT compile are required. Release packages are checked separately by `build_release.ps1` and can be run on an arm64 device with `validate_device.ps1 -Release`.
+This builds the canonical `samples/render_parity` fixture in Workshop with the real x86_64 development JIT. It captures the OpenGL surface, normalizes the letterboxed 640x360 viewport, and checks Android regions for the background, five resolved atlas-backed sprite instances (including a smaller full-canvas SVG), opaque/translucent/rotated SVG sprites, a filled rectangle, crossing lines, direct text, and cached text. Missing resources use the same GLES atlas placeholder path but are not part of this normal resource fixture. Three spaced captures, at least 30 rendered frames, and a successful non-empty JIT compile are required. Release packages are checked separately by `build_release.ps1` and can be run on an arm64 device with `validate_device.ps1 -Release`.
+The gate also emits `artifacts/android_workshop_seam/e/workshop-workshop-seam.json` for IT-025 through IT-028. IT-025 binds one Java/JNI/dlopen call to the real Rust bridge version, Cranelift `CompileReady`, a guest JIT state checksum, the render command trace, and GLES presentation using the same direct-buffer frame token. IT-026 runs once after the acceptance compile and proves the canonical i32/f32/u8 direct buffers have exact native-order capacities and alignment; per-lane short, oversized, wrong-order, heap, null, and misaligned variants, plus swapped i32/f32 lanes, must fail before Rust and preserve every passed byte and guard canary. IT-027 dispatches exactly one Java `ACTION_DOWN`, `ACTION_MOVE`, and `ACTION_UP` through the preview, verifies the HostFrame logical/normalized/delta/edge lanes in guest JIT state, and waits for GLES to present the matching direct-buffer marker token. IT-028 writes a tagged valid revision, observes one active generation publication with migrated guest state counter values 1, 2, and 3, then proves an invalid source diagnostic leaves the accepted generation, source identity, tick/render revisions, and command trace unchanged; the guest-only counter is excluded from render commands so the accepted/post-invalid traces remain equal. It also requires a successful original-source cleanup receipt/frame before reporting pass. Its three exact-token GLES markers are separate from IT-027. Missing structured ABI/touch/hot-edit evidence, versions, fallback/stub markers, or fatal diagnostics fail the gate. The API 35 nightly workflow runs this check on its own isolated emulator shard, concurrently with the release-shell shard, and builds both real Rust bridge ABIs when the checkout has no ignored JNI artifacts.
+
+After three stable pixel captures, the render-acceptance driver explicitly
+starts one bounded performance sample with 60 warm-up and 180 measured frames.
+It permits one fresh retry after a timeout, malformed report, or threshold
+failure; the second failure fails the gate. Enforce the API 35 emulator
+thresholds with `-MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94`; the output
+directory then contains device/build identity, attempt-specific stage
+percentiles, the complete Workshop logcat, and pixel captures.
+See `docs/android_preview_render_performance.md` for the baseline and ownership
+of the hardware-normalized limits.
+
+The Workshop render-acceptance build runs IT-031 immediately after IT-028. It
+mutates the real packaged source through five ordered cases (parse,
+extern-resolution, runtime-entry, render-schema, and missing-resource), then
+parses the versioned `stasis.native_diagnostic.v1` envelope in Java. Each case
+records the native and UI objects, stable stage/code, available file/symbol or
+resource context, detail, and outer-to-inner causes. The C JNI shim forwards
+the complete Rust string; it does not replace a detailed payload with
+`native preview frame failed`. Render-schema corruption is confined to a
+temporary helper under `tests/stasis`; the packaged source imports and calls
+that explicit test seam without naming private graphics storage. The acceptance
+runner removes the helper, restores the exact packaged source in a
+`finally`-equivalent cleanup, and requires a final healthy native frame before
+reporting pass. The bounded verifier requires the IT-031 marker and rejects
+evidence that omits any ordered case or cleanup receipt.
+
+## Hosted release-shell emulator
+
+The `Android Emulator Seams` GitHub Actions workflow provisions two isolated
+API 35 `x86_64` AVDs on separate `ubuntu-latest` KVM runners. The release-shell
+shard runs IT-017 through IT-020 through the test-only `android-x86_64` AOT
+package, while the Workshop shard runs IT-025 through IT-028; the jobs start
+concurrently and report failures and artifacts independently. CI does not
+depend on an attached phone, a self-hosted runner, or a preinstalled local AVD.
+The workflow retains the lifecycle, touch, orientation, screenshot, and cleanup
+oracles and uploads the established evidence artifacts from each shard. The
+public x86_64 target requires `--development-build`; production packages remain
+`android-arm64`. The release-shell shard also runs IT-022, which rebuilds six
+controlled asset variants and verifies stable Java/native rejection diagnostics
+before launching the pristine package for recovery.
+
+Physical-device runs are optional supplemental release evidence for OEM GPU,
+surface, and density behavior. They are not a CI or task-readiness gate.
 
 Install the repository-owned source-format pre-commit hook once per clone:
 
@@ -209,5 +253,7 @@ Project metadata is format v3 and records bundled template identity. Existing v1
 Sample and imported projects keep separate immutable source baselines. Sample baselines come from packaged assets; imported baselines come from the validated archive contents. Changes, Raw Diffs, Revert, and Reset therefore operate on the active project's own source, and imported projects are not silently filled with sample files. Direct GitHub backup uploads the complete active source set, while PR review remains limited to changes from that project's baseline.
 
 Real-device touch acceptance uses the same packaged Rust/JIT runtime as the preview: an injected Android gesture updates Stasis `Input`, advances game logic, and moves the emitted player-paddle render command. The 2026-07-09 device run advanced 120 ticks during the check and moved the paddle command from Y 811 to Y 1537.
+
+Published and Workshop runtime audio uses an AAudio PCM-float callback on API 26+, with a bounded native frame ring shared by the JIT and AOT bridges. Published apps hold game audio focus only while resumed; focus loss or backgrounding pauses and discards queued frames, while resume/focus gain restarts the stream. The three-finger HUD reports `audio=on/off`, queued frames (`q`), underruns (`u`), and a latched AAudio error code. Guest code owns `AudioStream`, `AudioAsset`, and `AudioVoice` values; the installed Android host resolves asset paths below the active project root, resets decoded assets on root changes/shutdown, and mixes those voices after ring-buffer consumption without blocking the device callback. The self-contained `audio_sink_sample` fixture uses the same typed surface for its manifest MP3 music, PCM16 WAV effect, and AAudio ring/lifecycle probe. From `mobile/android/app/src/main/assets/audio_sink_sample`, build the acceptance package with `stasis package-mobile --target android-arm64 --development-build`, then build its generated generic release shell with `gradle -p dist/brickout_audio-android-arm64/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain`. Automated package, decode, event-order, and ring checks do not substitute for physical-device audible-output or focus/route acceptance.
 
 Failed manual Apply operations carry a structured project-relative file, line, column, span, and symbol from the compiler bridge. `Go to Diagnostic` opens that exact source location, including a file-level fallback when malformed syntax prevents symbol parsing. `Recovery History` keeps the diagnostic location separate from the edited file that can be restored, and `Undo Failed Apply` restores only when that file still matches the failed version, so recovery cannot overwrite newer edits. Failed and malformed Stasis tests use the same project-relative file/test/line navigation contract.
