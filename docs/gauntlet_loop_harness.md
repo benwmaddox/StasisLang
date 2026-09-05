@@ -464,8 +464,11 @@ The version-one live protocol gains three additive primitives:
 
 - `set_input_state` injects a bounded logical pointer snapshot and temporarily
   overrides physical input during deterministic scenarios.
-- `capture_frame` schedules a PNG for the next presented frame using a
-  controller-generated artifact identity.
+- `capture_frame` captures the next presented frame using a controller-generated
+  artifact identity. Its deferred `capture_completed` response verifies the PNG
+  and includes dimensions, byte length, SHA-256, and runtime provenance; scheduling
+  alone is not completion. Retaining the completed image does not step the
+  simulation, so the following inspection describes the same paused game state.
 - `validation_reinitialize` runs the active candidate's `main()`, executes one
   input-free startup tick, and replaces the deterministic validation snapshot
   at the first input-ready state before candidate capture.
