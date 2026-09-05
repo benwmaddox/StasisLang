@@ -3155,6 +3155,16 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "storage_save_i32" | "stasis_storage_save_i32" | "stasis_jit_storage_save_i32" => {
             function_address(stasis_dynload::stasis_jit_storage_save_i32 as *const ())
         }
+        "platform_service_submit"
+        | "stasis_platform_service_submit"
+        | "stasis_jit_platform_service_submit" => {
+            function_address(stasis_dynload::stasis_jit_platform_service_submit as *const ())
+        }
+        "platform_service_poll"
+        | "stasis_platform_service_poll"
+        | "stasis_jit_platform_service_poll" => {
+            function_address(stasis_dynload::stasis_jit_platform_service_poll as *const ())
+        }
         "audio_init" | "stasis_audio_init" | "stasis_jit_audio_init" => {
             function_address(stasis_dynload::stasis_jit_audio_init as *const ())
         }
@@ -5004,6 +5014,32 @@ function main(): i32 {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 30);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_platform_service_mailbox_reports_unsupported_without_adapter() {
+        let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("jit_platform_service_mailbox_sample.stasis");
+        process.upsert_file(
+            sample_path.to_string_lossy().to_string(),
+            "import \"src/stdlib/platform_services.stasis\";\nglobal key: ascii[16];\nglobal fields: i32[5];\nglobal text: utf8[32];\nfunction main(): i32 {\n    key[0] = 112; key[1] = 111; key[2] = 119; key[3] = 101;\n    key[4] = 114; key[5] = 95; key[6] = 117; key[7] = 112;\n    key.length = 8;\n    if (platform_service_submit(1, 2, 77, key) != PLATFORM_SERVICE_SUBMIT_ACCEPTED) { return 91; }\n    if (platform_service_poll(fields, text) != 1) { return 92; }\n    return fields[PLATFORM_SERVICE_RESPONSE_STATUS];\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 4);
     }
 
     #[cfg(windows)]

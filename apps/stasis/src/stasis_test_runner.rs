@@ -733,4 +733,22 @@ mod tests {
 
         fs::remove_dir_all(&root).ok();
     }
+
+    #[test]
+    fn repository_platform_service_fixture_runs_end_to_end() {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture_root = repository_root.join("tests/stasis/platform_services");
+        let mut session = StasisTestRunSession::new();
+        let summary = run_jit_tests_in_directory_with_project_root_and_session(
+            &fixture_root,
+            &repository_root,
+            &mut session,
+        )
+        .expect("run platform service fixture");
+
+        assert_eq!(summary.tests_discovered, 1, "{summary:?}");
+        assert_eq!(summary.tests_run, 1, "{summary:?}");
+        assert_eq!(summary.tests_passed, 1, "{summary:?}");
+        assert_eq!(summary.tests_failed, 0, "{summary:?}");
+    }
 }

@@ -1,0 +1,55 @@
+// Bounded asynchronous guest-to-platform service bridge.
+//
+// Service and action IDs are positive opaque values defined by optional adapters.
+// Request keys are stable printable-ASCII identifiers. Response display text is UTF-8.
+// Calls are intended for menus and lifecycle transitions, not simulation hot paths.
+
+const PLATFORM_SERVICE_SUBMIT_INVALID: i32 = -1;
+const PLATFORM_SERVICE_SUBMIT_BUSY: i32 = 0;
+const PLATFORM_SERVICE_SUBMIT_ACCEPTED: i32 = 1;
+const PLATFORM_SERVICE_RESPONSE_OK: i32 = 1;
+const PLATFORM_SERVICE_RESPONSE_CANCELLED: i32 = 2;
+const PLATFORM_SERVICE_RESPONSE_UNAVAILABLE: i32 = 3;
+const PLATFORM_SERVICE_RESPONSE_UNSUPPORTED: i32 = 4;
+const PLATFORM_SERVICE_RESPONSE_FAILED: i32 = 5;
+const PLATFORM_SERVICE_RESPONSE_SERVICE: i32 = 0;
+const PLATFORM_SERVICE_RESPONSE_ACTION: i32 = 1;
+const PLATFORM_SERVICE_RESPONSE_REQUEST_ID: i32 = 2;
+const PLATFORM_SERVICE_RESPONSE_STATUS: i32 = 3;
+const PLATFORM_SERVICE_RESPONSE_VALUE: i32 = 4;
+const PLATFORM_SERVICE_RESPONSE_FIELD_COUNT: i32 = 5;
+const PLATFORM_SERVICE_KEY_CAPACITY: i32 = 128;
+const PLATFORM_SERVICE_TEXT_CAPACITY: i32 = 512;
+
+function @extern("stasis_jit_platform_service_submit") platform_service_submit_raw(
+    service: i32,
+    action: i32,
+    request_id: i32,
+    key: ascii[],
+    key_length: i32
+): i32;
+function @extern("stasis_jit_platform_service_poll") platform_service_poll_raw(
+    out_fields: i32[],
+    out_field_capacity: i32,
+    out_text: utf8[],
+    out_text_capacity: i32
+): i32;
+
+function platform_service_submit(service: i32, action: i32, request_id: i32, key: ascii[]): i32 {
+    let key_length: i32 = key.length;
+    if (service <= 0 || action <= 0 || request_id <= 0 || key_length <= 0 || key_length > key.max_length || key_length > PLATFORM_SERVICE_KEY_CAPACITY) {
+        return PLATFORM_SERVICE_SUBMIT_INVALID;
+    }
+    return platform_service_submit_raw(service, action, request_id, key, key_length);
+}
+
+// Returns 1 when one response was consumed, 0 when none is ready, and -1 for
+// invalid or undersized output buffers. An undersized buffer does not consume data.
+function platform_service_poll(out_fields: i32[], out_text: utf8[]): i32 {
+    let field_capacity: i32 = out_fields.max_length;
+    let text_capacity: i32 = out_text.max_length;
+    if (field_capacity < PLATFORM_SERVICE_RESPONSE_FIELD_COUNT || text_capacity <= 0) {
+        return PLATFORM_SERVICE_SUBMIT_INVALID;
+    }
+    return platform_service_poll_raw(out_fields, field_capacity, out_text, text_capacity);
+}

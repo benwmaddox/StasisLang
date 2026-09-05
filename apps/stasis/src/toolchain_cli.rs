@@ -94,6 +94,8 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_mobile_runtime.h",
     "stasis_platform_storage.c",
     "stasis_platform_storage.h",
+    "stasis_platform_services.c",
+    "stasis_platform_services.h",
     "stb_truetype.h",
 ];
 const MOBILE_RUNTIME_DIRS: &[&str] = &["third_party/thorvg"];
@@ -9424,6 +9426,8 @@ mod tests {
         assert!(android.join("runtime/stasis_asset_path.h").is_file());
         assert!(android.join("runtime/stasis_platform_storage.c").is_file());
         assert!(android.join("runtime/stasis_platform_storage.h").is_file());
+        assert!(android.join("runtime/stasis_platform_services.c").is_file());
+        assert!(android.join("runtime/stasis_platform_services.h").is_file());
         assert!(android.join("runtime/stasis_render_contract.h").is_file());
         assert!(android
             .join("runtime/stasis_renderer_lifecycle.h")
@@ -9517,6 +9521,7 @@ mod tests {
             2
         );
         assert!(project.contains("stasis_mobile_runtime.c in Sources"));
+        assert!(project.contains("stasis_platform_services.c in Sources"));
         assert!(!project.contains("stasis_platform_storage.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
@@ -9526,6 +9531,8 @@ mod tests {
         assert!(ios.join("runtime/stasis_performance_metrics.h").is_file());
         assert!(ios.join("runtime/stasis_platform_storage.c").is_file());
         assert!(ios.join("runtime/stasis_platform_storage.h").is_file());
+        assert!(ios.join("runtime/stasis_platform_services.c").is_file());
+        assert!(ios.join("runtime/stasis_platform_services.h").is_file());
         assert!(config.contains("@executable_path/Frameworks"));
         assert!(project.contains("Embed SDL frameworks"));
         assert!(ios

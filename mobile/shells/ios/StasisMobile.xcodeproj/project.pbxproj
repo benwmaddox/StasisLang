@@ -13,6 +13,7 @@
 		100000000000000000000005 /* stasis_graphics.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* stasis_graphics.c */; };
 		100000000000000000000012 /* stasis_image_writer.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* stasis_image_writer.c */; };
 		100000000000000000000008 /* stasis_audio_assets.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* stasis_audio_assets.c */; };
+		100000000000000000000013 /* stasis_platform_services.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* stasis_platform_services.c */; };
 		100000000000000000000006 /* published_aot_bindings.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* published_aot_bindings.c */; };
 		100000000000000000000007 /* stasis_game in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* stasis_game */; };
 		110000000000000000000001 /* stasis_svg.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000001 /* stasis_svg.cpp */; };
@@ -65,6 +66,7 @@
 				100000000000000000000005 /* stasis_graphics.c in Sources */,
 				100000000000000000000012 /* stasis_image_writer.c in Sources */,
 				100000000000000000000008 /* stasis_audio_assets.c in Sources */,
+				100000000000000000000013 /* stasis_platform_services.c in Sources */,
 				110000000000000000000001 /* stasis_svg.cpp in Sources */,
 				110000000000000000000002 /* tvgCompressor.cpp in Sources */,
 				110000000000000000000003 /* tvgMath.cpp in Sources */,
@@ -135,6 +137,7 @@
 		200000000000000000000008 /* StasisMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StasisMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000009 /* StasisMobile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = StasisMobile.xcconfig; sourceTree = "<group>"; };
 		200000000000000000000010 /* stasis_audio_assets.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_audio_assets.c; sourceTree = "<group>"; };
+		200000000000000000000013 /* stasis_platform_services.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_platform_services.c; sourceTree = "<group>"; };
 		200000000000000000000011 /* stasis_ios_network.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_network.m; sourceTree = "<group>"; };
 		210000000000000000000001 /* stasis_svg.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/stasis_svg.cpp; sourceTree = "<group>"; };
 		210000000000000000000002 /* tvgCompressor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/common/tvgCompressor.cpp; sourceTree = "<group>"; };
@@ -185,6 +188,7 @@
 				200000000000000000000005 /* stasis_graphics.c */,
 				200000000000000000000012 /* stasis_image_writer.c */,
 				200000000000000000000010 /* stasis_audio_assets.c */,
+				200000000000000000000013 /* stasis_platform_services.c */,
 				210000000000000000000001 /* stasis_svg.cpp */,
 				210000000000000000000002 /* tvgCompressor.cpp */,
 				210000000000000000000003 /* tvgMath.cpp */,
