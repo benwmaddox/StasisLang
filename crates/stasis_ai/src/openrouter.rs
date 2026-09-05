@@ -1,10 +1,10 @@
 use crate::{
     decode_model_response, model_response_schema_for_request, ModelProvider, ModelResponse,
 };
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::Read;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -315,36 +315,53 @@ impl OpenRouterProvider {
         })
     }
 
+    #[cfg(test)]
     fn qualifying_endpoints(
         &self,
         minimum: f64,
         canceled: &AtomicBool,
     ) -> Result<(Vec<String>, Duration), String> {
         let started = Instant::now();
-        if canceled.load(Ordering::Acquire) {
-            return Err("AI request canceled".to_string());
-        }
+        let deadline = started + self.config.timeout;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed configuring OpenRouter async runtime: {error}"))?;
+        runtime.block_on(self.qualifying_endpoints_async(minimum, deadline, canceled))
+    }
+
+    async fn qualifying_endpoints_async(
+        &self,
+        minimum: f64,
+        deadline: Instant,
+        canceled: &AtomicBool,
+    ) -> Result<(Vec<String>, Duration), String> {
+        let started = Instant::now();
+        let timeout = remaining_timeout(deadline, "OpenRouter endpoint preflight")?;
         let url = format!(
             "{}/models/{}/endpoints",
             self.config.base_url.trim_end_matches('/'),
             self.config.model
         );
-        let response = self
-            .client
-            .get(url)
-            .bearer_auth(&self.config.api_key)
-            .timeout(self.config.timeout)
-            .send()
-            .map_err(|error| {
-                sanitized_transport_error("OpenRouter endpoint preflight failed", &error)
-            })?;
+        let response = await_cancelable(
+            self.client
+                .get(url)
+                .bearer_auth(&self.config.api_key)
+                .timeout(timeout)
+                .send(),
+            canceled,
+            deadline,
+            "OpenRouter endpoint preflight",
+        )
+        .await?;
         let status = response.status();
-        let value: Value = response.json().map_err(|error| {
-            sanitized_transport_error(
-                "OpenRouter endpoint preflight returned invalid JSON",
-                &error,
-            )
-        })?;
+        let value: Value = await_cancelable(
+            response.json(),
+            canceled,
+            deadline,
+            "OpenRouter endpoint preflight response",
+        )
+        .await?;
         if !status.is_success() {
             return Err(api_error(
                 "OpenRouter endpoint preflight",
@@ -448,30 +465,16 @@ impl OpenRouterProvider {
 
 impl ModelProvider for OpenRouterProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String> {
+        let turn_started = Instant::now();
+        let deadline = turn_started + self.config.timeout;
         self.call_count = self.call_count.saturating_add(1);
         self.last_usage = None;
         self.config.validate()?;
-        let turn_started = Instant::now();
-        let (hard_only, metadata_time) = match self.config.routing.hard_min_throughput {
-            Some(minimum) => {
-                let (tags, elapsed) = self.qualifying_endpoints(minimum, canceled)?;
-                (Some(tags), elapsed)
-            }
-            None => (None, Duration::ZERO),
-        };
-        if self.config.routing.preferred_throughput_policy == PreferredThroughputPolicy::Fail {
-            if let Some(minimum) = self.config.routing.preferred_min_throughput {
-                let (tags, elapsed) = self.qualifying_endpoints(minimum, canceled)?;
-                return self.send(
-                    request,
-                    Some(tags),
-                    metadata_time + elapsed,
-                    turn_started,
-                    canceled,
-                );
-            }
-        }
-        self.send(request, hard_only, metadata_time, turn_started, canceled)
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed configuring OpenRouter async runtime: {error}"))?;
+        runtime.block_on(self.respond_async(request, canceled, turn_started, deadline))
     }
 
     fn take_usage(&mut self) -> Option<Value> {
@@ -484,17 +487,66 @@ impl ModelProvider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-    fn send(
+    async fn respond_async(
+        &mut self,
+        request: &str,
+        canceled: &AtomicBool,
+        turn_started: Instant,
+        deadline: Instant,
+    ) -> Result<ModelResponse, String> {
+        if canceled.load(Ordering::Acquire) {
+            return Err("AI request canceled".to_string());
+        }
+        let (hard_only, metadata_time) = match self.config.routing.hard_min_throughput {
+            Some(minimum) => {
+                let (tags, elapsed) = self
+                    .qualifying_endpoints_async(minimum, deadline, canceled)
+                    .await?;
+                (Some(tags), elapsed)
+            }
+            None => (None, Duration::ZERO),
+        };
+        if self.config.routing.preferred_throughput_policy == PreferredThroughputPolicy::Fail {
+            if let Some(minimum) = self.config.routing.preferred_min_throughput {
+                let (tags, elapsed) = self
+                    .qualifying_endpoints_async(minimum, deadline, canceled)
+                    .await?;
+                return self
+                    .send(
+                        request,
+                        Some(tags),
+                        metadata_time + elapsed,
+                        turn_started,
+                        deadline,
+                        canceled,
+                    )
+                    .await;
+            }
+        }
+        self.send(
+            request,
+            hard_only,
+            metadata_time,
+            turn_started,
+            deadline,
+            canceled,
+        )
+        .await
+    }
+
+    async fn send(
         &mut self,
         request: &str,
         only: Option<Vec<String>>,
         metadata_time: Duration,
         turn_started: Instant,
+        deadline: Instant,
         canceled: &AtomicBool,
     ) -> Result<ModelResponse, String> {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
         }
+        let timeout = remaining_timeout(deadline, "OpenRouter chat request")?;
         let route = self.route_json(only);
         let schema = model_response_schema_for_request(request)?;
         let body = json!({
@@ -506,21 +558,38 @@ impl OpenRouterProvider {
             "provider": route,
         });
         let request_started = Instant::now();
-        let response = self
-            .client
-            .post(format!(
-                "{}/chat/completions",
-                self.config.base_url.trim_end_matches('/')
-            ))
-            .bearer_auth(&self.config.api_key)
-            .json(&body)
-            .timeout(self.config.timeout)
-            .send()
-            .map_err(|error| sanitized_transport_error("OpenRouter request failed", &error))?;
+        let mut response = await_cancelable(
+            self.client
+                .post(format!(
+                    "{}/chat/completions",
+                    self.config.base_url.trim_end_matches('/')
+                ))
+                .bearer_auth(&self.config.api_key)
+                .json(&body)
+                .timeout(timeout)
+                .send(),
+            canceled,
+            deadline,
+            "OpenRouter request",
+        )
+        .await?;
         let header_time = request_started.elapsed();
         let status = response.status();
         if !status.is_success() {
-            let value = response.json::<Value>().unwrap_or(Value::Null);
+            let value = match await_cancelable(
+                response.json::<Value>(),
+                canceled,
+                deadline,
+                "OpenRouter request error response",
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) if error.contains("timed out") || error == "AI request canceled" => {
+                    return Err(error)
+                }
+                Err(_) => Value::Null,
+            };
             return Err(api_error(
                 "OpenRouter request",
                 status.as_u16(),
@@ -529,8 +598,6 @@ impl OpenRouterProvider {
             ));
         }
         let mut stream = SseDecoder::default();
-        let mut response = response;
-        let mut buffer = [0_u8; 4096];
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut usage = Value::Null;
@@ -541,16 +608,12 @@ impl OpenRouterProvider {
         let mut first_action_ms = None;
         let mut saw_done = false;
         loop {
-            if canceled.load(Ordering::Acquire) {
-                return Err("AI request canceled".to_string());
-            }
-            let count = response
-                .read(&mut buffer)
-                .map_err(|error| sanitized_io_error("OpenRouter stream failed", &error))?;
-            if count == 0 {
+            let Some(bytes) =
+                await_cancelable(response.chunk(), canceled, deadline, "OpenRouter stream").await?
+            else {
                 break;
-            }
-            for event in stream.push(&buffer[..count])? {
+            };
+            for event in stream.push(&bytes)? {
                 if event == "[DONE]" {
                     saw_done = true;
                     continue;
@@ -687,6 +750,42 @@ impl SseDecoder {
     }
 }
 
+fn remaining_timeout(deadline: Instant, context: &str) -> Result<Duration, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(format!(
+            "{context}: timed out before the request could continue"
+        ))
+    } else {
+        Ok(remaining)
+    }
+}
+
+async fn await_cancelable<F, T>(
+    future: F,
+    canceled: &AtomicBool,
+    deadline: Instant,
+    context: &str,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, reqwest::Error>>,
+{
+    tokio::pin!(future);
+    loop {
+        if canceled.load(Ordering::Acquire) {
+            return Err("AI request canceled".to_string());
+        }
+        let remaining = remaining_timeout(deadline, context)?;
+        let poll_interval = remaining.min(Duration::from_millis(10));
+        tokio::select! {
+            result = &mut future => {
+                return result.map_err(|error| sanitized_transport_error(context, &error));
+            }
+            _ = tokio::time::sleep(poll_interval) => {}
+        }
+    }
+}
+
 fn sanitize_label(value: &str) -> String {
     value
         .chars()
@@ -770,16 +869,6 @@ fn sanitized_transport_error(context: &str, error: &reqwest::Error) -> String {
         format!("{context}: connection failed")
     } else {
         format!("{context}: transport error")
-    }
-}
-fn sanitized_io_error(context: &str, error: &std::io::Error) -> String {
-    if matches!(
-        error.kind(),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-    ) {
-        format!("{context}: timed out")
-    } else {
-        format!("{context}: I/O error")
     }
 }
 fn api_error(context: &str, status: u16, value: &Value, secret: &str) -> String {
@@ -974,13 +1063,23 @@ mod tests {
             request.pointer("/response_format/json_schema/strict"),
             Some(&json!(true))
         );
-        assert_eq!(request.pointer("/response_format/json_schema/schema/properties/tool_calls/items/properties/args/type"), Some(&json!("object")));
+        let variants = request
+            .pointer("/response_format/json_schema/schema/properties/tool_calls/items/anyOf")
+            .and_then(Value::as_array)
+            .expect("per-action variants");
+        let read_variant = variants
+            .iter()
+            .find(|variant| {
+                variant.pointer("/properties/action_id/enum/0") == Some(&json!(read_id))
+            })
+            .expect("read-symbol variant");
         assert_eq!(
-            request
-                .pointer("/response_format/json_schema/schema/properties/tool_calls/items/properties/action_id/enum")
-                .and_then(Value::as_array)
-                .map(|ids| ids.contains(&json!(read_id))),
-            Some(true)
+            read_variant.pointer("/properties/args/type"),
+            Some(&json!("object"))
+        );
+        assert_eq!(
+            read_variant.pointer("/properties/args/additionalProperties"),
+            Some(&json!(false))
         );
         assert_eq!(
             request.pointer("/provider/require_parameters"),
@@ -1033,6 +1132,50 @@ mod tests {
     }
 
     #[test]
+    fn preflight_and_generation_share_one_timeout_deadline() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let worker = std::thread::spawn(move || {
+            let (mut metadata_stream, _) = listener.accept().expect("metadata accept");
+            let mut buffer = [0_u8; 2048];
+            let _ = metadata_stream.read(&mut buffer);
+            std::thread::sleep(Duration::from_millis(150));
+            let metadata = json!({"data":{"endpoints":[{
+                "provider":"cerebras", "status":0,
+                "throughput_last_30m":{"p50":1500.0}
+            }]}})
+            .to_string();
+            metadata_stream
+                .write_all(http_response("application/json", &metadata).as_bytes())
+                .expect("metadata response");
+            drop(metadata_stream);
+
+            let (mut chat_stream, _) = listener.accept().expect("chat accept");
+            let _ = chat_stream.read(&mut buffer);
+            std::thread::sleep(Duration::from_millis(250));
+        });
+
+        let mut config = test_config(format!("http://{address}"));
+        config.routing.hard_min_throughput = Some(1000.0);
+        config.timeout = Duration::from_millis(250);
+        let mut provider = OpenRouterProvider::new(config).expect("provider");
+        let started = Instant::now();
+        let error = provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect_err("shared timeout");
+        let elapsed = started.elapsed();
+        assert!(error.contains("timed out"));
+        assert!(
+            elapsed < Duration::from_millis(350),
+            "preflight and generation exceeded one timeout budget: {elapsed:?}"
+        );
+        worker.join().expect("worker");
+    }
+
+    #[test]
     fn stalled_transport_respects_timeout_without_leaking_secret() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -1064,5 +1207,73 @@ mod tests {
             .respond("request", &AtomicBool::new(true))
             .expect_err("canceled");
         assert_eq!(error, "AI request canceled");
+    }
+
+    #[test]
+    fn cancellation_drops_a_headers_then_stalled_stream_promptly() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let (headers_sent, headers_received) = mpsc::channel();
+        let (release_server, server_released) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            let header_end = loop {
+                let count = stream.read(&mut buffer).expect("request headers");
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let count = stream.read(&mut buffer).expect("request body");
+                request.extend_from_slice(&buffer[..count]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n")
+                .expect("response headers");
+            headers_sent.send(()).expect("header notification");
+            let _ = server_released.recv_timeout(Duration::from_secs(2));
+        });
+
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = canceled.clone();
+        let mut config = test_config(format!("http://{address}"));
+        config.timeout = Duration::from_secs(30);
+        let provider = OpenRouterProvider::new(config).expect("provider");
+        let request = test_request();
+        let started = Instant::now();
+        let requester = std::thread::spawn(move || {
+            let mut provider = provider;
+            provider.respond(&request, &worker_canceled)
+        });
+        headers_received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("headers received");
+        canceled.store(true, Ordering::Release);
+        let error = requester
+            .join()
+            .expect("request thread")
+            .expect_err("canceled");
+        assert_eq!(error, "AI request canceled");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        release_server.send(()).expect("release server");
+        worker.join().expect("server thread");
     }
 }
