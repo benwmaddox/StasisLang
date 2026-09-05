@@ -38,6 +38,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 atomic-write-file = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 cranelift-codegen = { version = "0.117", features = ["arm64"] }
 cranelift-frontend = "0.117"

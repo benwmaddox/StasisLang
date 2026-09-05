@@ -9,7 +9,13 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod openrouter;
 pub mod task_session;
+
+pub use openrouter::{
+    ConfiguredProvider, OpenRouterConfig, OpenRouterProvider, PreferredThroughputPolicy,
+    ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+};
 
 pub use task_session::{
     ActionId, ActionKind, ActionRevision, ActionState, ConnectionState, FallbackState,
@@ -66,7 +72,9 @@ impl Default for AgentProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCall {
+    #[serde(rename = "action_id")]
     pub tool: String,
     #[serde(default)]
     pub args: Value,
@@ -102,6 +110,7 @@ impl ToolObservation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub tool: String,
+    pub action_id: String,
     #[serde(rename = "use", alias = "purpose")]
     pub purpose: String,
     #[serde(
@@ -181,6 +190,10 @@ pub trait ModelProvider {
 
     fn take_usage(&mut self) -> Option<Value> {
         None
+    }
+
+    fn requires_action_ids(&self) -> bool {
+        false
     }
 }
 
@@ -278,6 +291,7 @@ where
         validation_tool_specs.extend(asset_tool_specs());
         validation_tool_specs.extend(runtime_tool_specs());
     }
+    let mut active_tool_specs = tool_specs.clone();
     let response_contract = response_contract();
     let header = serde_json::to_string(&ModelRequestHeader {
         record: "request",
@@ -292,6 +306,7 @@ where
     .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?;
     let mut transcript = AgentTranscript::new(header);
     let mut completion_rejections = 0_usize;
+    let require_action_ids = provider.requires_action_ids();
     for turn in 1..=profile.max_turns {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
@@ -338,7 +353,7 @@ where
                 emit(AgentEvent::Completed(summary.clone()));
                 return Ok(summary);
             }
-            ModelResponse::ToolCalls { tool_calls, .. } => {
+            ModelResponse::ToolCalls { mut tool_calls, .. } => {
                 if tool_calls.is_empty() {
                     return Err("model returned an empty tool-call batch".to_string());
                 }
@@ -348,26 +363,30 @@ where
                         tool_calls.len()
                     ));
                 }
-                for call in &tool_calls {
-                    if !known_tools.contains(call.tool.as_str()) {
-                        return Err(format!("unsupported AI tool: {}", call.tool));
-                    }
+                for call in &mut tool_calls {
+                    normalize_optional_nulls(call, &validation_tool_specs, require_action_ids);
                 }
                 let validation_errors = tool_calls
                     .iter()
                     .filter_map(|call| {
-                        validate_tool_call(call, &validation_tool_specs, &known_tools).err()
+                        validate_tool_call(
+                            call,
+                            &validation_tool_specs,
+                            &known_tools,
+                            require_action_ids,
+                        )
+                        .err()
+                        .map(|error| (call.tool.clone(), error))
                     })
                     .collect::<Vec<_>>();
                 if !validation_errors.is_empty() {
-                    let detail = validation_errors.join("; ");
-                    let observations = tool_calls
-                        .iter()
-                        .map(|call| {
+                    let observations = validation_errors
+                        .into_iter()
+                        .map(|(action_id, error)| {
                             ToolObservation::error(
-                                &call.tool,
+                                action_id,
                                 format!(
-                                    "tool-call batch rejected before execution: {detail}; correct the arguments and retry"
+                                    "action rejected before execution: {error}; replace only this rejected action ID"
                                 ),
                             )
                         })
@@ -377,26 +396,45 @@ where
                     compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
                     continue;
                 }
+                for call in &mut tool_calls {
+                    let spec = resolve_tool_spec(call, &validation_tool_specs, require_action_ids)
+                        .expect("validated action has a tool spec");
+                    call.tool.clone_from(&spec.tool);
+                }
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
                 let observations = bound_observations(executor.execute(&tool_calls, canceled));
                 emit(AgentEvent::Observations(observations.clone()));
+                let mut newly_active_specs = Vec::new();
                 for (call, observation) in tool_calls.iter().zip(&observations) {
                     if call.tool != "get_capability" || observation.error.is_some() {
                         continue;
                     }
-                    match call.args.get("name").and_then(Value::as_str) {
-                        Some("assets") => {
-                            known_tools.extend(asset_tool_specs().into_iter().map(|spec| spec.tool))
-                        }
-                        Some("runtime") => known_tools
-                            .extend(runtime_tool_specs().into_iter().map(|spec| spec.tool)),
-                        _ => {}
-                    }
+                    let Some(capability) = call.args.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let fallback = match capability {
+                        "assets" => asset_tool_specs(),
+                        "runtime" => runtime_tool_specs(),
+                        _ => Vec::new(),
+                    };
+                    let discovered = observation
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.get("tool_specs"))
+                        .and_then(|specs| {
+                            serde_json::from_value::<Vec<ToolSpec>>(specs.clone()).ok()
+                        })
+                        .filter(|specs| !specs.is_empty())
+                        .unwrap_or(fallback);
+                    newly_active_specs.extend(merge_tool_specs(&mut active_tool_specs, discovered));
+                    known_tools.extend(newly_active_specs.iter().map(|spec| spec.tool.clone()));
+                    validation_tool_specs.extend(newly_active_specs.iter().cloned());
                 }
                 if let Some(error) = executor.terminal_failure() {
                     return Err(error);
                 }
                 transcript.append(&response_record, &observations)?;
+                transcript.append_active_capabilities(&newly_active_specs)?;
                 compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
             }
         }
@@ -410,6 +448,7 @@ where
 struct TranscriptEntry {
     encoded: String,
     compact: Value,
+    retain_during_compaction: bool,
 }
 
 struct AgentTranscript {
@@ -439,6 +478,24 @@ impl AgentTranscript {
         self.entries.push(TranscriptEntry {
             encoded,
             compact: compact_turn(response, observations),
+            retain_during_compaction: false,
+        });
+        Ok(())
+    }
+
+    fn append_active_capabilities(&mut self, specs: &[ToolSpec]) -> Result<(), String> {
+        if specs.is_empty() {
+            return Ok(());
+        }
+        let encoded = serde_json::to_string(&json!({
+            "record": "active_capabilities",
+            "tool_specs": specs,
+        }))
+        .map_err(|error| format!("failed encoding active AI capabilities: {error}"))?;
+        self.entries.push(TranscriptEntry {
+            encoded,
+            compact: Value::Null,
+            retain_during_compaction: true,
         });
         Ok(())
     }
@@ -470,16 +527,35 @@ impl AgentTranscript {
             return Ok(None);
         }
         let mut turns_compacted = 0_usize;
-        while self.entries.len() > policy.retain_recent_turns
+        while self
+            .entries
+            .iter()
+            .filter(|entry| !entry.retain_during_compaction)
+            .count()
+            > policy.retain_recent_turns
             && self.render()?.len() > policy.max_request_bytes
         {
-            let entry = self.entries.remove(0);
+            let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| !entry.retain_during_compaction)
+            else {
+                break;
+            };
+            let entry = self.entries.remove(index);
             self.compacted.push(entry.compact);
             turns_compacted = turns_compacted.saturating_add(1);
         }
         // The retained-turn count is a target, not permission to exceed the hard byte ceiling.
         while !self.entries.is_empty() && self.render()?.len() > policy.max_request_bytes {
-            let entry = self.entries.remove(0);
+            let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| !entry.retain_during_compaction)
+            else {
+                break;
+            };
+            let entry = self.entries.remove(index);
             self.compacted.push(entry.compact);
             turns_compacted = turns_compacted.saturating_add(1);
         }
@@ -554,7 +630,7 @@ fn compact_turn(response: &Value, observations: &[ToolObservation]) -> Value {
                         })
                         .unwrap_or_default();
                     json!({
-                        "tool": call.get("tool").cloned().unwrap_or(Value::Null),
+                        "action_id": call.get("action_id").cloned().unwrap_or(Value::Null),
                         "args": selected_args,
                     })
                 })
@@ -639,28 +715,75 @@ fn validate_working_notes(notes: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn resolve_tool_spec<'a>(
+    call: &ToolCall,
+    specs: &'a [ToolSpec],
+    require_action_id: bool,
+) -> Option<&'a ToolSpec> {
+    specs
+        .iter()
+        .find(|spec| spec.action_id == call.tool || (!require_action_id && spec.tool == call.tool))
+}
+
+fn normalize_optional_nulls(call: &mut ToolCall, specs: &[ToolSpec], require_action_id: bool) {
+    let Some(spec) = resolve_tool_spec(call, specs, require_action_id) else {
+        return;
+    };
+    let Some(args) = call.args.as_object_mut() else {
+        return;
+    };
+    for optional in &spec.optional_args {
+        if args.get(optional).is_some_and(Value::is_null) {
+            args.remove(optional);
+        }
+    }
+}
+
 fn validate_tool_call(
     call: &ToolCall,
     specs: &[ToolSpec],
     known_tools: &BTreeSet<String>,
+    require_action_id: bool,
 ) -> Result<(), String> {
-    if !known_tools.contains(call.tool.as_str()) {
-        return Err(format!("unsupported AI tool: {}", call.tool));
-    }
+    let spec = resolve_tool_spec(call, specs, require_action_id)
+        .filter(|spec| known_tools.contains(spec.tool.as_str()))
+        .ok_or_else(|| format!("unsupported or invented AI action ID: {}", call.tool))?;
     let args = call
         .args
         .as_object()
-        .ok_or_else(|| format!("AI tool {} requires an object args value", call.tool))?;
-    let spec = specs
-        .iter()
-        .find(|spec| spec.tool == call.tool)
-        .expect("known tool has spec");
+        .ok_or_else(|| format!("AI action {} requires an object args value", call.tool))?;
     for required in &spec.required_args {
         if !args.contains_key(required) {
-            return Err(format!("AI tool {} requires arg: {required}", call.tool));
+            return Err(format!("AI action {} requires arg: {required}", call.tool));
         }
     }
+    let allowed = spec
+        .required_args
+        .iter()
+        .chain(&spec.optional_args)
+        .collect::<BTreeSet<_>>();
+    if let Some(unknown) = args.keys().find(|name| !allowed.contains(name)) {
+        return Err(format!(
+            "AI action {} does not accept arg: {unknown}",
+            call.tool
+        ));
+    }
     Ok(())
+}
+
+fn merge_tool_specs(target: &mut Vec<ToolSpec>, additions: Vec<ToolSpec>) -> Vec<ToolSpec> {
+    let mut added = Vec::new();
+    for spec in additions {
+        if target
+            .iter()
+            .any(|existing| existing.action_id == spec.action_id || existing.tool == spec.tool)
+        {
+            continue;
+        }
+        target.push(spec.clone());
+        added.push(spec);
+    }
+    added
 }
 
 fn bound_observations(observations: Vec<ToolObservation>) -> Vec<ToolObservation> {
@@ -698,7 +821,353 @@ pub fn response_contract() -> Value {
     json!({
         "accepted_modes": ["tool_calls", "done"],
         "working_notes": format!("required non-empty string, maximum {MAX_WORKING_NOTES_CHARS} characters"),
-        "tool_calls": {"maximum": MAX_TOOL_CALLS_PER_TURN, "shape": {"tool": "name", "args": "JSON object encoded as a string"}},
+        "tool_calls": {"maximum": MAX_TOOL_CALLS_PER_TURN, "shape": {"action_id": "host-offered opaque action ID", "args": "native JSON object"}},
+    })
+}
+
+pub fn model_response_schema_for(tool_specs: &[ToolSpec]) -> Value {
+    let mut schema = model_response_schema();
+    let action_ids = tool_specs
+        .iter()
+        .map(|spec| Value::String(spec.action_id.clone()))
+        .collect::<Vec<_>>();
+    if !action_ids.is_empty() {
+        let variants = tool_specs
+            .iter()
+            .map(|spec| {
+                json!({
+                    "type": "object",
+                    "required": ["action_id", "args"],
+                    "properties": {
+                        "action_id": {"type": "string", "enum": [spec.action_id]},
+                        "args": tool_args_schema(spec),
+                    },
+                    "additionalProperties": false,
+                })
+            })
+            .collect::<Vec<_>>();
+        schema["properties"]["tool_calls"]["items"] = json!({"anyOf": variants});
+    }
+    schema
+}
+
+fn model_response_schema_for_request(request: &str) -> Result<Value, String> {
+    let mut lines = request.lines();
+    let header: Value = serde_json::from_str(lines.next().unwrap_or_default())
+        .map_err(|error| format!("AI request header is not valid JSON: {error}"))?;
+    let mut specs: Vec<ToolSpec> = serde_json::from_value(
+        header
+            .get("tool_specs")
+            .cloned()
+            .ok_or_else(|| "AI request header omitted tool_specs".to_string())?,
+    )
+    .map_err(|error| format!("AI request tool_specs are invalid: {error}"))?;
+    for line in lines {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record.get("record").and_then(Value::as_str) != Some("active_capabilities") {
+            continue;
+        }
+        let Some(active) = record.get("tool_specs") else {
+            continue;
+        };
+        let Ok(active) = serde_json::from_value::<Vec<ToolSpec>>(active.clone()) else {
+            continue;
+        };
+        merge_tool_specs(&mut specs, active);
+    }
+    Ok(model_response_schema_for(&specs))
+}
+
+fn tool_args_schema(spec: &ToolSpec) -> Value {
+    match spec.tool.as_str() {
+        "list_symbols" => object_schema(
+            &[
+                ("files", array_schema(string_schema(), Some(16))),
+                ("query", string_schema()),
+                ("kind", string_schema()),
+                ("owner", string_schema()),
+                ("page", integer_schema(Some(0), None)),
+                ("limit", integer_schema(Some(1), Some(64))),
+            ],
+            &[],
+        ),
+        "get_stdlib_api" => object_schema(
+            &[
+                ("module", string_schema()),
+                ("query", string_schema()),
+                ("kind", string_schema()),
+                ("page", integer_schema(Some(0), None)),
+                ("limit", integer_schema(Some(1), Some(64))),
+            ],
+            &[],
+        ),
+        "find_references" => object_schema(
+            &[
+                ("symbol", string_schema()),
+                ("limit", integer_schema(Some(1), Some(256))),
+            ],
+            &["symbol"],
+        ),
+        "list_owner_symbols" => object_schema(&[("owner", string_schema())], &["owner"]),
+        "read_symbol" => object_schema(
+            &[
+                ("name", string_schema()),
+                ("kind", string_schema()),
+                ("file", string_schema()),
+                ("owner", string_schema()),
+                ("signature", string_schema()),
+            ],
+            &["name"],
+        ),
+        "write_symbol" => object_schema(
+            &[
+                ("file", string_schema()),
+                ("name", string_schema()),
+                ("new_source", string_schema()),
+                ("operation", enum_schema(&["add", "replace"])),
+                ("kind", string_schema()),
+                ("owner", string_schema()),
+                ("signature", string_schema()),
+                ("expected_source_hash", string_schema()),
+            ],
+            &["file", "name", "new_source"],
+        ),
+        "delete_symbol" => object_schema(
+            &[
+                ("name", string_schema()),
+                ("file", string_schema()),
+                ("kind", string_schema()),
+                ("owner", string_schema()),
+                ("signature", string_schema()),
+                ("expected_source_hash", string_schema()),
+            ],
+            &["name"],
+        ),
+        "read_imports" => object_schema(&[("file", string_schema())], &["file"]),
+        "write_imports" => object_schema(
+            &[
+                ("file", string_schema()),
+                ("imports", array_schema(string_schema(), None)),
+            ],
+            &["file", "imports"],
+        ),
+        "get_diagnostics"
+        | "inspect_runtime_state"
+        | "run_frame"
+        | "take_screenshot"
+        | "list_tests"
+        | "run_tests" => object_schema(&[], &[]),
+        "set_input_state" => object_schema(
+            &[
+                ("x", number_schema()),
+                ("y", number_schema()),
+                ("active", json!({"type": "boolean"})),
+                ("screen_w", number_schema()),
+                ("screen_h", number_schema()),
+            ],
+            &[],
+        ),
+        "read_test_file" => object_schema(&[("file", string_schema())], &["file"]),
+        "write_test_file" => object_schema(
+            &[("file", string_schema()), ("source", string_schema())],
+            &["file", "source"],
+        ),
+        "delete_test_file" => object_schema(&[("file", string_schema())], &["file"]),
+        "get_capability" => {
+            object_schema(&[("name", enum_schema(&["assets", "runtime"]))], &["name"])
+        }
+        "request_imagegen_asset" => object_schema(
+            &[
+                ("filename", string_schema()),
+                ("prompt", string_schema()),
+                ("purpose", string_schema()),
+                ("width", integer_schema(Some(1), Some(2048))),
+                ("height", integer_schema(Some(1), Some(2048))),
+            ],
+            &["filename", "prompt", "purpose"],
+        ),
+        "write_svg_asset" => object_schema(
+            &[
+                ("id", string_schema()),
+                ("path", string_schema()),
+                ("source", string_schema()),
+                ("width", integer_schema(Some(1), Some(4096))),
+                ("height", integer_schema(Some(1), Some(4096))),
+            ],
+            &["id", "path", "source", "width", "height"],
+        ),
+        "write_png_asset" => object_schema(
+            &[
+                ("id", string_schema()),
+                ("path", string_schema()),
+                ("width", integer_schema(Some(1), Some(2048))),
+                ("height", integer_schema(Some(1), Some(2048))),
+                ("background", string_schema()),
+                ("shapes", array_schema(png_shape_schema(), Some(512))),
+            ],
+            &["id", "path", "width", "height", "background", "shapes"],
+        ),
+        "import_png_asset" => object_schema(
+            &[
+                ("id", string_schema()),
+                ("path", string_schema()),
+                ("source_path", string_schema()),
+                ("crop_x", integer_schema(Some(0), None)),
+                ("crop_y", integer_schema(Some(0), None)),
+                ("crop_width", integer_schema(Some(1), None)),
+                ("crop_height", integer_schema(Some(1), None)),
+                ("transparent_color", string_schema()),
+                ("transparent_tolerance", integer_schema(Some(0), Some(255))),
+            ],
+            &["id", "path", "source_path"],
+        ),
+        "delete_asset" => object_schema(
+            &[("path", string_schema()), ("id", string_schema())],
+            &["path"],
+        ),
+        "write_data_asset" => object_schema(
+            &[("path", string_schema()), ("source", string_schema())],
+            &["path", "source"],
+        ),
+        "write_procedural_wav" => object_schema(
+            &[
+                ("id", string_schema()),
+                ("path", string_schema()),
+                ("frequency_hz", integer_schema(Some(20), Some(8000))),
+                ("duration_ms", integer_schema(Some(20), Some(5000))),
+            ],
+            &["id", "path", "frequency_hz", "duration_ms"],
+        ),
+        "record_decision" => object_schema(
+            &[
+                ("kind", string_schema()),
+                ("summary", string_schema()),
+                ("rationale", string_schema()),
+                ("evidence", string_schema()),
+                ("next_step", string_schema()),
+            ],
+            &["kind", "summary", "rationale", "evidence", "next_step"],
+        ),
+        "report_blocked" => object_schema(
+            &[
+                ("reason", string_schema()),
+                ("evidence", string_schema()),
+                ("next_step", string_schema()),
+            ],
+            &["reason", "evidence", "next_step"],
+        ),
+        _ => {
+            let mut properties = Vec::new();
+            for name in spec.required_args.iter().chain(&spec.optional_args) {
+                properties.push((name.as_str(), string_schema()));
+            }
+            let required = spec
+                .required_args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            object_schema(&properties, &required)
+        }
+    }
+}
+
+fn string_schema() -> Value {
+    json!({"type": "string"})
+}
+
+fn number_schema() -> Value {
+    json!({"type": "number"})
+}
+
+fn integer_schema(minimum: Option<u64>, maximum: Option<u64>) -> Value {
+    let mut schema = json!({"type": "integer"});
+    if let Some(minimum) = minimum {
+        schema["minimum"] = json!(minimum);
+    }
+    if let Some(maximum) = maximum {
+        schema["maximum"] = json!(maximum);
+    }
+    schema
+}
+
+fn enum_schema(values: &[&str]) -> Value {
+    json!({"type": "string", "enum": values})
+}
+
+fn array_schema(items: Value, max_items: Option<usize>) -> Value {
+    let mut schema = json!({"type": "array", "items": items});
+    if let Some(max_items) = max_items {
+        schema["maxItems"] = json!(max_items);
+    }
+    schema
+}
+
+fn object_schema(properties: &[(&str, Value)], required: &[&str]) -> Value {
+    let properties = properties
+        .iter()
+        .map(|(name, schema)| {
+            let schema = if required.contains(name) {
+                schema.clone()
+            } else {
+                json!({"anyOf": [schema, {"type": "null"}]})
+            };
+            ((*name).to_string(), schema)
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let required = properties.keys().cloned().collect::<Vec<_>>();
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
+fn png_shape_schema() -> Value {
+    let common = |kind: &str, properties: &[(&str, Value)], required: &[&str]| {
+        let mut all = vec![("kind", enum_schema(&[kind])), ("color", string_schema())];
+        all.extend(
+            properties
+                .iter()
+                .map(|(name, schema)| (*name, schema.clone())),
+        );
+        object_schema(&all, required)
+    };
+    json!({
+        "anyOf": [
+            common(
+                "rect",
+                &[
+                    ("x", integer_schema(None, None)),
+                    ("y", integer_schema(None, None)),
+                    ("width", integer_schema(Some(1), Some(4096))),
+                    ("height", integer_schema(Some(1), Some(4096))),
+                ],
+                &["kind", "color", "x", "y", "width", "height"],
+            ),
+            common(
+                "circle",
+                &[
+                    ("x", integer_schema(None, None)),
+                    ("y", integer_schema(None, None)),
+                    ("radius", integer_schema(Some(1), Some(2048))),
+                ],
+                &["kind", "color", "x", "y", "radius"],
+            ),
+            common(
+                "line",
+                &[
+                    ("x1", integer_schema(None, None)),
+                    ("y1", integer_schema(None, None)),
+                    ("x2", integer_schema(None, None)),
+                    ("y2", integer_schema(None, None)),
+                    ("thickness", integer_schema(Some(1), Some(128))),
+                ],
+                &["kind", "color", "x1", "y1", "x2", "y2", "thickness"],
+            ),
+        ]
     })
 }
 
@@ -716,8 +1185,11 @@ pub fn model_response_schema() -> Value {
                 "maxItems": MAX_TOOL_CALLS_PER_TURN,
                 "items": {
                     "type": "object",
-                    "required": ["tool", "args"],
-                    "properties": {"tool": {"type": "string"}, "args": {"type": "string"}},
+                    "required": ["action_id", "args"],
+                    "properties": {
+                        "action_id": {"type": "string", "pattern": "^a_[0-9a-f]{16}$"},
+                        "args": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}
+                    },
                     "additionalProperties": false
                 }
             }
@@ -775,9 +1247,25 @@ pub fn live_tool_specs() -> Vec<ToolSpec> {
     tools
 }
 
+pub fn action_id_for_tool(tool: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in b"stasis-action-v1:".iter().chain(tool.as_bytes()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("a_{hash:016x}")
+}
+pub fn offered_action(tool: &str, purpose: &str, args: Value) -> Value {
+    json!({
+        "action_id": action_id_for_tool(tool),
+        "purpose": purpose,
+        "args": args,
+    })
+}
 fn spec(tool: &str, purpose: &str, required: &[&str], optional: &[&str]) -> ToolSpec {
     ToolSpec {
         tool: tool.to_string(),
+        action_id: action_id_for_tool(tool),
         purpose: purpose.to_string(),
         required_args: required.iter().map(|value| (*value).to_string()).collect(),
         optional_args: optional.iter().map(|value| (*value).to_string()).collect(),
@@ -1128,12 +1616,17 @@ fn default_codex_executable() -> PathBuf {
 
 impl ModelProvider for CodexExecProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String> {
-        let source = self.run_codex(request, &model_response_schema(), canceled)?;
+        let schema = model_response_schema_for_request(request)?;
+        let source = self.run_codex(request, &schema, canceled)?;
         decode_codex_response(&source)
     }
 
     fn take_usage(&mut self) -> Option<Value> {
         self.last_usage.take()
+    }
+
+    fn requires_action_ids(&self) -> bool {
+        true
     }
 }
 
@@ -1151,25 +1644,38 @@ fn read_codex_usage(stdout: impl Read) -> Result<Option<Value>, String> {
     Ok(usage)
 }
 
-fn decode_codex_response(source: &str) -> Result<ModelResponse, String> {
-    let mut value: Value = serde_json::from_str(source)
-        .map_err(|error| format!("Codex returned invalid agent JSON: {error}"))?;
-    if let Some(calls) = value.get_mut("tool_calls").and_then(Value::as_array_mut) {
-        for call in calls {
-            let Some(args) = call.get_mut("args") else {
-                continue;
-            };
-            if let Some(encoded) = args.as_str() {
-                if let Ok(decoded) = serde_json::from_str(encoded) {
-                    *args = decoded;
-                }
-            }
+fn decode_model_response(source: &str, provider: &str) -> Result<ModelResponse, String> {
+    let value: Value = serde_json::from_str(source)
+        .map_err(|error| format!("{provider} returned invalid agent JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{provider} returned a non-object agent response"))?;
+    let allowed = ["mode", "working_notes", "summary", "tool_calls"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(field.as_str()))
+    {
+        return Err(format!(
+            "{provider} returned unknown response field: {field}"
+        ));
+    }
+    let response: ModelResponse = serde_json::from_value(value)
+        .map_err(|error| format!("{provider} returned invalid agent response: {error}"))?;
+    if let ModelResponse::ToolCalls { tool_calls, .. } = &response {
+        if tool_calls.iter().any(|call| !call.args.is_object()) {
+            return Err(format!(
+                "{provider} returned tool args that were not native JSON objects"
+            ));
         }
     }
-    serde_json::from_value(value)
-        .map_err(|error| format!("Codex returned invalid agent response: {error}"))
+    Ok(response)
 }
 
+fn decode_codex_response(source: &str) -> Result<ModelResponse, String> {
+    decode_model_response(source, "Codex")
+}
 struct TemporaryRun {
     root: PathBuf,
     schema: PathBuf,
@@ -1912,28 +2418,134 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_tools_before_execution() {
-        let mut provider = Responses(vec![ModelResponse::ToolCalls {
-            working_notes: "Intent: act. Observed: none. Next: shell. Blocker: none.".to_string(),
-            summary: String::new(),
-            tool_calls: vec![ToolCall {
-                tool: "shell".to_string(),
-                args: json!({}),
-            }],
-        }]);
-        let error = run_agent(
+    fn external_provider_concrete_tool_name_cannot_execute() {
+        struct ExternalResponses(Vec<ModelResponse>);
+        impl ModelProvider for ExternalResponses {
+            fn respond(
+                &mut self,
+                _request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                Ok(self.0.remove(0))
+            }
+
+            fn requires_action_ids(&self) -> bool {
+                true
+            }
+        }
+        let mut provider = ExternalResponses(vec![
+            ModelResponse::ToolCalls {
+                working_notes: "Attempt a concrete tool name.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "read_symbol".to_string(),
+                    args: json!({"name":"tick"}),
+                }],
+            },
+            ModelResponse::Done {
+                working_notes: "The concrete name was rejected before execution.".to_string(),
+                summary: "rejected".to_string(),
+            },
+        ]);
+        let mut tools = Tools::default();
+        let mut observations = Vec::new();
+        run_agent(
             &mut provider,
-            &mut Tools::default(),
+            &mut tools,
+            "inspect",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |event| {
+                if let AgentEvent::Observations(values) = event {
+                    observations.extend(values);
+                }
+            },
+        )
+        .expect("provider receives replacement feedback");
+        assert_eq!(tools.0, 0);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].tool, "read_symbol");
+        assert!(observations[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("invented AI action ID"));
+    }
+    #[test]
+    fn rejects_only_invented_action_id_and_retains_accepted_selection() {
+        struct RecordingResponses {
+            responses: Vec<ModelResponse>,
+            requests: Vec<String>,
+        }
+        impl ModelProvider for RecordingResponses {
+            fn respond(
+                &mut self,
+                request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.requests.push(request.to_string());
+                Ok(self.responses.remove(0))
+            }
+        }
+        let read_id = workshop_tool_specs()
+            .into_iter()
+            .find(|spec| spec.tool == "read_symbol")
+            .expect("read spec")
+            .action_id;
+        let rejected_id = "a_0000000000000000";
+        let mut provider = RecordingResponses {
+            responses: vec![
+                ModelResponse::ToolCalls {
+                    working_notes: "Select one valid read and one invalid action.".to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![
+                        ToolCall {
+                            tool: read_id.clone(),
+                            args: json!({"name":"tick"}),
+                        },
+                        ToolCall {
+                            tool: rejected_id.to_string(),
+                            args: json!({}),
+                        },
+                    ],
+                },
+                ModelResponse::Done {
+                    working_notes: "Retain the valid selection and replace the rejected ID."
+                        .to_string(),
+                    summary: "rejected safely".to_string(),
+                },
+            ],
+            requests: Vec::new(),
+        };
+        let mut tools = Tools::default();
+        let mut rejected = Vec::new();
+        let result = run_agent(
+            &mut provider,
+            &mut tools,
             "change",
             json!({}),
             workshop_tool_specs(),
             &AtomicBool::new(false),
-            |_| {},
+            |event| {
+                if let AgentEvent::Observations(observations) = event {
+                    rejected.extend(observations);
+                }
+            },
         )
-        .expect_err("unknown tool");
-        assert_eq!(error, "unsupported AI tool: shell");
+        .expect("agent receives localized rejection");
+        assert_eq!(result, "rejected safely");
+        assert_eq!(tools.0, 0, "invalid batches remain atomic");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].tool, rejected_id);
+        assert!(rejected[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("replace only this rejected action ID"));
+        assert!(provider.requests[1].contains(&read_id));
+        assert!(provider.requests[1].contains(rejected_id));
     }
-
     #[test]
     fn live_contract_is_compact_and_lazily_exposes_rare_tools() {
         let workshop = workshop_tool_specs();
@@ -2044,7 +2656,7 @@ mod tests {
             AgentProfile::default().instruction.len()
         );
         assert!(
-            live_bytes <= 1_900,
+            live_bytes <= 2_100,
             "live tool specs grew to {live_bytes} bytes"
         );
         assert!(
@@ -2132,59 +2744,309 @@ mod tests {
     }
 
     #[test]
-    fn codex_transport_decodes_json_encoded_tool_args() {
-        let response = decode_codex_response(
-            r#"{"mode":"tool_calls","working_notes":"Inspect next.","summary":"","tool_calls":[{"tool":"read_symbol","args":"{\"name\":\"tick\"}"}]}"#,
-        )
-        .expect("response");
-        let ModelResponse::ToolCalls { tool_calls, .. } = response else {
-            panic!("tool calls");
+    fn external_provider_schema_tracks_capability_records() {
+        struct RecordingProvider {
+            responses: Vec<ModelResponse>,
+            requests: Vec<String>,
+            schemas: Vec<Value>,
+        }
+
+        impl ModelProvider for RecordingProvider {
+            fn respond(
+                &mut self,
+                request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.requests.push(request.to_string());
+                self.schemas
+                    .push(model_response_schema_for_request(request)?);
+                Ok(self.responses.remove(0))
+            }
+
+            fn requires_action_ids(&self) -> bool {
+                true
+            }
+        }
+
+        struct CapabilityExecutor {
+            calls: Vec<String>,
+        }
+
+        impl ToolExecutor for CapabilityExecutor {
+            fn execute(
+                &mut self,
+                calls: &[ToolCall],
+                _canceled: &AtomicBool,
+            ) -> Vec<ToolObservation> {
+                self.calls
+                    .extend(calls.iter().map(|call| call.tool.clone()));
+                calls
+                    .iter()
+                    .map(|call| {
+                        if call.tool == "get_capability"
+                            && call.args.get("name").and_then(Value::as_str) == Some("assets")
+                        {
+                            ToolObservation::result(
+                                &call.tool,
+                                json!({"name":"assets", "tool_specs": asset_tool_specs()}),
+                            )
+                        } else {
+                            ToolObservation::result(&call.tool, json!({"ok": true}))
+                        }
+                    })
+                    .collect()
+            }
+        }
+
+        let capability_id = project_ai_tool_specs()
+            .into_iter()
+            .find(|spec| spec.tool == "get_capability")
+            .expect("capability spec")
+            .action_id;
+        let svg_id = asset_tool_specs()
+            .into_iter()
+            .find(|spec| spec.tool == "write_svg_asset")
+            .expect("SVG spec")
+            .action_id;
+        let mut provider = RecordingProvider {
+            responses: vec![
+                ModelResponse::ToolCalls {
+                    working_notes: "Discover the asset capability before using it.".to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![ToolCall {
+                        tool: capability_id,
+                        args: json!({"name":"assets"}),
+                    }],
+                },
+                ModelResponse::ToolCalls {
+                    working_notes: "Use the newly advertised SVG action.".to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![ToolCall {
+                        tool: svg_id.clone(),
+                        args: json!({
+                            "id":"marker", "path":"assets/generated/marker.svg",
+                            "source":"<svg/>", "width":16, "height":16
+                        }),
+                    }],
+                },
+                ModelResponse::Done {
+                    working_notes: "The capability action completed.".to_string(),
+                    summary: "done".to_string(),
+                },
+            ],
+            requests: Vec::new(),
+            schemas: Vec::new(),
         };
-        assert_eq!(tool_calls[0].args, json!({"name": "tick"}));
+        let mut executor = CapabilityExecutor { calls: Vec::new() };
+
+        run_agent(
+            &mut provider,
+            &mut executor,
+            "discover and use assets",
+            json!({}),
+            project_ai_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("external provider capability flow");
+
+        assert_eq!(executor.calls, ["get_capability", "write_svg_asset"]);
+        assert_eq!(provider.schemas.len(), 3);
+        let initial_variants = provider.schemas[0]
+            .pointer("/properties/tool_calls/items/anyOf")
+            .and_then(Value::as_array)
+            .expect("initial variants");
+        assert!(!initial_variants.iter().any(|variant| {
+            variant.pointer("/properties/action_id/enum/0") == Some(&json!(svg_id))
+        }));
+        let discovered_variants = provider.schemas[1]
+            .pointer("/properties/tool_calls/items/anyOf")
+            .and_then(Value::as_array)
+            .expect("discovered variants");
+        assert!(discovered_variants.iter().any(|variant| {
+            variant.pointer("/properties/action_id/enum/0") == Some(&json!(svg_id))
+        }));
+        let active_record = provider.requests[1]
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("transcript record"))
+            .find(|record| record["record"] == "active_capabilities")
+            .expect("active capability record");
+        assert!(active_record["tool_specs"]
+            .as_array()
+            .expect("active tool specs")
+            .iter()
+            .any(|spec| spec["tool"] == "write_svg_asset"));
+        assert!(provider.requests[1].starts_with(&format!("{}\n", provider.requests[0])));
     }
 
     #[test]
-    fn malformed_json_encoded_tool_args_are_returned_for_correction() {
-        let malformed = decode_codex_response(
-            r#"{"mode":"tool_calls","working_notes":"Correct the malformed call next.","summary":"","tool_calls":[{"tool":"read_symbol","args":"{\"name\":\"tick\"} {\"extra\":true}"}]}"#,
-        )
-        .expect("transport preserves malformed args for the agent loop");
-        let mut provider = Responses(vec![
-            malformed,
-            ModelResponse::Done {
-                working_notes: "The rejected batch was corrected without executing it.".to_string(),
-                summary: "corrected".to_string(),
-            },
-        ]);
-        let mut tools = Tools::default();
-        let mut errors = Vec::new();
-
-        let result = run_agent(
-            &mut provider,
-            &mut tools,
-            "correct malformed tool arguments",
-            json!({}),
-            workshop_tool_specs(),
-            &AtomicBool::new(false),
-            |event| {
-                if let AgentEvent::Observations(observations) = event {
-                    errors.extend(
-                        observations
-                            .into_iter()
-                            .filter_map(|observation| observation.error),
-                    );
-                }
-            },
-        )
-        .expect("agent retries after rejected transport args");
-
-        assert_eq!(result, "corrected");
-        assert_eq!(tools.0, 0);
-        assert!(errors
-            .iter()
-            .any(|error| error.contains("batch rejected before execution")));
+    fn action_schemas_close_args_and_nested_png_shapes() {
+        let specs = [
+            workshop_tool_specs()
+                .into_iter()
+                .find(|spec| spec.tool == "read_symbol")
+                .expect("read spec"),
+            workshop_tool_specs()
+                .into_iter()
+                .find(|spec| spec.tool == "write_symbol")
+                .expect("write spec"),
+            live_tool_specs()
+                .into_iter()
+                .find(|spec| spec.tool == "get_capability")
+                .expect("capability spec"),
+            asset_tool_specs()
+                .into_iter()
+                .find(|spec| spec.tool == "write_png_asset")
+                .expect("PNG spec"),
+        ];
+        let schema = model_response_schema_for(&specs);
+        let variants = schema["properties"]["tool_calls"]["items"]["anyOf"]
+            .as_array()
+            .expect("action variants");
+        let args = |tool: &str| {
+            variants
+                .iter()
+                .find(|variant| {
+                    variant["properties"]["action_id"]["enum"][0] == json!(action_id_for_tool(tool))
+                })
+                .expect("tool variant")["properties"]["args"]
+                .clone()
+        };
+        for tool in [
+            "read_symbol",
+            "write_symbol",
+            "get_capability",
+            "write_png_asset",
+        ] {
+            assert_eq!(args(tool)["additionalProperties"], json!(false));
+            assert!(args(tool)["properties"].is_object());
+            assert_eq!(
+                variants
+                    .iter()
+                    .find(|variant| {
+                        variant["properties"]["action_id"]["enum"][0]
+                            == json!(action_id_for_tool(tool))
+                    })
+                    .expect("tool variant")["additionalProperties"],
+                json!(false)
+            );
+        }
+        for tool in [
+            "read_symbol",
+            "write_symbol",
+            "get_capability",
+            "write_png_asset",
+        ] {
+            let args = args(tool);
+            let properties = args["properties"].as_object().expect("arg properties");
+            let required = args["required"].as_array().expect("required args");
+            assert_eq!(required.len(), properties.len());
+            assert!(properties
+                .keys()
+                .all(|name| required.contains(&json!(name))));
+        }
+        assert_eq!(
+            args("read_symbol")["properties"]["file"],
+            json!({"anyOf": [{"type": "string"}, {"type": "null"}]})
+        );
+        assert_eq!(
+            args("write_png_asset")["properties"]["shapes"]["items"]["anyOf"][0]
+                ["additionalProperties"],
+            json!(false)
+        );
     }
 
+    #[test]
+    fn codex_transport_rejects_json_encoded_tool_args() {
+        let error = decode_codex_response(
+            r#"{"mode":"tool_calls","working_notes":"Inspect next.","summary":"","tool_calls":[{"action_id":"a_0000000000000000","args":"{\"name\":\"tick\"}"}]}"#,
+        )
+        .expect_err("string args must be rejected");
+        assert!(error.contains("native JSON objects"));
+    }
+
+    #[test]
+    fn host_rejects_unknown_tool_arguments() {
+        let specs = workshop_tool_specs();
+        let known = specs
+            .iter()
+            .map(|spec| spec.tool.clone())
+            .collect::<BTreeSet<_>>();
+        let error = validate_tool_call(
+            &ToolCall {
+                tool: "read_symbol".into(),
+                args: json!({"name":"tick", "invented":true}),
+            },
+            &specs,
+            &known,
+            false,
+        )
+        .expect_err("unknown argument");
+        assert!(error.contains("does not accept arg: invented"));
+    }
+
+    #[test]
+    fn strict_nullable_optional_args_execute_as_omitted() {
+        let specs = workshop_tool_specs();
+        let read = specs
+            .iter()
+            .find(|spec| spec.tool == "read_symbol")
+            .expect("read spec");
+        let mut call = ToolCall {
+            tool: read.action_id.clone(),
+            args: json!({"name": "tick", "file": null}),
+        };
+        normalize_optional_nulls(&mut call, &specs, true);
+        assert_eq!(call.args, json!({"name": "tick"}));
+        validate_tool_call(&call, &specs, &BTreeSet::from([read.tool.clone()]), true)
+            .expect("normalized strict action");
+    }
+    #[test]
+    fn mismatched_action_id_cannot_select_another_tool() {
+        let specs = workshop_tool_specs();
+        let known = specs
+            .iter()
+            .map(|spec| spec.tool.clone())
+            .collect::<BTreeSet<_>>();
+        let write_id = specs
+            .iter()
+            .find(|spec| spec.tool == "write_symbol")
+            .expect("write spec")
+            .action_id
+            .clone();
+        let error = validate_tool_call(
+            &ToolCall {
+                tool: write_id,
+                args: json!({"name":"tick"}),
+            },
+            &specs,
+            &known,
+            true,
+        )
+        .expect_err("write ID cannot invoke read arguments");
+        assert!(error.contains("requires arg: file"));
+    }
+
+    #[test]
+    fn provider_decoder_rejects_unknown_response_fields() {
+        let error = decode_codex_response(
+            r#"{"mode":"done","working_notes":"Complete.","summary":"done","invented":true}"#,
+        )
+        .expect_err("unknown response field");
+        assert!(error.contains("unknown response field: invented"));
+        let error = decode_codex_response(
+            r#"{"mode":"tool_calls","working_notes":"Read.","summary":"","tool_calls":[{"action_id":"a_0000000000000000","args":{},"invented":true}]}"#,
+        )
+        .expect_err("unknown call field");
+        assert!(error.contains("unknown field"));
+    }
+    #[test]
+    fn response_schema_requires_native_object_args() {
+        assert_eq!(
+            model_response_schema().pointer("/properties/tool_calls/items/properties/args/type"),
+            Some(&json!("object"))
+        );
+    }
     #[test]
     fn codex_json_stream_keeps_only_the_exact_reported_usage() {
         let stream = concat!(

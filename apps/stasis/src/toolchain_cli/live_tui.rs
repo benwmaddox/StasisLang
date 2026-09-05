@@ -9,10 +9,13 @@ use crossterm::terminal::{
     EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use serde_json::Value;
+#[cfg(test)]
+use stasis_ai::action_id_for_tool;
 use stasis_ai::{
-    asset_tool_specs, gauntlet_tool_specs, live_tool_specs, project_ai_tool_specs, run_agent,
-    run_agent_with_profile, runtime_tool_specs, AgentEvent, AgentProfile, CodexExecProvider,
-    ToolCall, ToolExecutor, ToolObservation, DEFAULT_CODEX_MODEL, DEFAULT_REASONING_EFFORT,
+    asset_tool_specs, gauntlet_tool_specs, live_tool_specs, offered_action, project_ai_tool_specs,
+    run_agent, run_agent_with_profile, runtime_tool_specs, AgentEvent, AgentProfile,
+    ConfiguredProvider, ProviderConfig, ToolCall, ToolExecutor, ToolObservation,
+    DEFAULT_REASONING_EFFORT,
 };
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::parser::{
@@ -156,17 +159,24 @@ pub(super) fn run_scripted_ai_profile(
     require_imagegen: bool,
     canceled: &AtomicBool,
 ) -> Result<ScriptedAiOutcome, ScriptedAiFailure> {
-    let mut audit = AiAuditLog::create_with_model(
+    let provider_config = ProviderConfig::from_env()?;
+    let configured_model = profile
+        .model
+        .clone()
+        .unwrap_or_else(|| provider_config.model());
+    let mut audit = AiAuditLog::create_with_provider(
         project_root,
         prompt,
-        profile.model.as_deref(),
+        provider_config.provider_name(),
+        &configured_model,
         profile.reasoning_effort.as_deref(),
     )?;
     let trace_path = audit.path.clone();
     let usage_path = audit.usage_path.clone();
-    let mut provider = CodexExecProvider::default()
-        .with_images(images)
-        .with_web_search(web_search);
+    let mut provider = provider_config
+        .build()?
+        .with_images(images)?
+        .with_web_search(web_search)?;
     if let Some(model) = profile.model.as_deref() {
         provider = provider.with_model(model);
     }
@@ -296,12 +306,19 @@ fn ai_initial_context(project_hints: Value) -> Value {
         "language": "Stasis",
         "start": project_hints,
         "options": {
-            "stdlib": {"tool":"get_stdlib_api", "args":{}},
-            "baseline_tests": {"tool":"run_tests", "args":{}}
+            "stdlib": offered_action(
+                "get_stdlib_api",
+                "Stdlib API.",
+                serde_json::json!({}),
+            ),
+            "baseline_tests": offered_action(
+                "run_tests",
+                "Baseline tests.",
+                serde_json::json!({}),
+            ),
         }
     })
 }
-
 fn load_ai_initial_context(
     tools: &mut LiveAiTools,
     project_root: &Path,
@@ -478,10 +495,11 @@ fn build_project_hints(symbols: &Value, user_prompt: &str) -> Value {
 
     let mut actions = Vec::new();
     if !candidate_files.is_empty() {
-        actions.push(serde_json::json!({
-            "tool": "list_symbols",
-            "args": {"files": candidate_files},
-        }));
+        actions.push(offered_action(
+            "list_symbols",
+            "Matched files.",
+            serde_json::json!({"files": candidate_files}),
+        ));
     }
     actions.extend(
         ranked_symbols
@@ -489,16 +507,20 @@ fn build_project_hints(symbols: &Value, user_prompt: &str) -> Value {
             .take(MAX_PROJECT_HINT_SYMBOLS)
             .map(|(_, item)| {
                 let mut args = serde_json::Map::new();
-                for key in ["name", "kind", "file", "owner", "signature"] {
+                for key in ["name"] {
                     if let Some(value) = item.get(key).and_then(Value::as_str) {
                         args.insert(key.to_string(), Value::String(value.to_string()));
                     }
                 }
-                serde_json::json!({"tool": "read_symbol", "args": args})
+                offered_action("read_symbol", "Matched symbol.", Value::Object(args))
             }),
     );
     if actions.is_empty() {
-        actions.push(serde_json::json!({"tool": "list_symbols", "args": {}}));
+        actions.push(offered_action(
+            "list_symbols",
+            "Project symbols.",
+            serde_json::json!({}),
+        ));
     }
     Value::Array(actions)
 }
@@ -754,14 +776,11 @@ struct AiAuditLog {
 }
 
 impl AiAuditLog {
-    fn create(project_root: &Path, prompt: &str) -> Result<Self, String> {
-        Self::create_with_model(project_root, prompt, None, None)
-    }
-
-    fn create_with_model(
+    fn create_with_provider(
         project_root: &Path,
         prompt: &str,
-        model: Option<&str>,
+        provider: &str,
+        model: &str,
         reasoning_effort: Option<&str>,
     ) -> Result<Self, String> {
         let directory = project_root.join("build/ai-traces");
@@ -803,13 +822,12 @@ impl AiAuditLog {
         };
         log.write(serde_json::json!({
             "event": "request",
-            "provider": "installed_codex_subscription",
-            "model": model.map(str::to_string).unwrap_or_else(|| std::env::var("STASIS_AI_MODEL")
-                .unwrap_or_else(|_| DEFAULT_CODEX_MODEL.to_string())),
+            "provider": provider,
+            "model": model,
             "reasoning_effort": reasoning_effort.map(str::to_string).unwrap_or_else(|| std::env::var("STASIS_AI_REASONING_EFFORT")
                 .unwrap_or_else(|_| DEFAULT_REASONING_EFFORT.to_string())),
             "prompt": prompt,
-            "payload_logging": "exact agent tool calls and observations; Codex transport envelope omitted",
+            "payload_logging": "exact agent tool calls and observations; provider transport envelope and credentials omitted",
         }))?;
         Ok(log)
     }
@@ -1853,7 +1871,29 @@ impl LiveTui {
         let Some(prompt) = self.queued_ai_prompt.take() else {
             return;
         };
-        match AiAuditLog::create(&self.project_root, &prompt) {
+        let provider_config = match ProviderConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                self.status = format!("AI provider unavailable: {error}");
+                self.push_transcript(format!("error: {error}"));
+                return;
+            }
+        };
+        let provider: ConfiguredProvider = match provider_config.clone().build() {
+            Ok(provider) => provider,
+            Err(error) => {
+                self.status = format!("AI provider unavailable: {error}");
+                self.push_transcript(format!("error: {error}"));
+                return;
+            }
+        };
+        match AiAuditLog::create_with_provider(
+            &self.project_root,
+            &prompt,
+            provider_config.provider_name(),
+            &provider_config.model(),
+            None,
+        ) {
             Ok(log) => {
                 self.push_transcript(format!("AI trace: {}", log.path.display()));
                 self.push_transcript(format!("AI usage: {}", log.usage_path.display()));
@@ -1871,7 +1911,7 @@ impl LiveTui {
         let worker_canceled = canceled.clone();
         let (events_tx, events_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
-            let mut provider = CodexExecProvider::default();
+            let mut provider = provider;
             let mut tools = LiveAiTools::new(client);
             let progress = events_tx.clone();
             let result =
@@ -3207,7 +3247,11 @@ impl LiveAiTools {
             }
             next_args.insert("page".into(), serde_json::json!(page.saturating_add(1)));
             next_args.insert("limit".into(), serde_json::json!(limit));
-            result["next"] = serde_json::json!({"tool":"get_stdlib_api", "args":next_args});
+            result["next"] = offered_action(
+                "get_stdlib_api",
+                "Read the next bounded page of this standard-library API.",
+                Value::Object(next_args),
+            );
         }
         ToolObservation::result(&call.tool, result)
     }
@@ -4018,7 +4062,7 @@ fn render_import_statements(args: &serde_json::Map<String, Value>) -> Result<Str
 }
 
 fn audit_tool_call(call: &ToolCall) -> Value {
-    serde_json::to_value(call).expect("tool calls serialize")
+    serde_json::json!({"tool": call.tool, "args": call.args})
 }
 
 fn audit_observation(observation: &ToolObservation) -> Value {
@@ -4851,9 +4895,17 @@ mod tests {
         assert_eq!(context.as_object().unwrap().len(), 3);
         assert_eq!(context["language"], "Stasis");
         assert_eq!(context["start"], json!([]));
-        for key in ["stdlib", "baseline_tests"] {
-            let _: ToolCall = serde_json::from_value(context["options"][key].clone())
-                .expect("initial option is an executable ToolCall");
+        for (key, tool) in [
+            ("stdlib", "get_stdlib_api"),
+            ("baseline_tests", "run_tests"),
+        ] {
+            let action = &context["options"][key];
+            assert_eq!(action["action_id"], action_id_for_tool(tool));
+            assert!(action["purpose"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+            assert_eq!(action["args"], json!({}));
+            assert!(action.get("tool").is_none());
         }
         assert!(serde_json::to_vec(&context).unwrap().len() < 1024);
         assert!(context.get("stdlib_api").is_none());
@@ -5005,19 +5057,21 @@ mod tests {
         let symbols = synthetic_project_symbols(243);
         let hints = build_project_hints(&symbols, "make enemy movement faster");
         let actions = hints.as_array().expect("hint actions");
-        let list: ToolCall = serde_json::from_value(
-            actions
-                .iter()
-                .find(|action| action["tool"] == "list_symbols")
-                .expect("list action")
-                .clone(),
-        )
-        .expect("valid list_symbols ToolCall");
-        assert_eq!(list.args["files"], json!(["src/enemies.stasis"]));
+        let list_id = action_id_for_tool("list_symbols");
+        let read_id = action_id_for_tool("read_symbol");
+        let list = actions
+            .iter()
+            .find(|action| action["action_id"] == list_id)
+            .expect("list action");
+        assert_eq!(list["args"]["files"], json!(["src/enemies.stasis"]));
+        assert!(list["purpose"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
         assert!(actions
             .iter()
-            .any(|action| action["tool"] == "read_symbol"
+            .any(|action| action["action_id"] == read_id
                 && action["args"]["name"] == "update_enemies"));
+        assert!(actions.iter().all(|action| action.get("tool").is_none()));
         assert_eq!(
             hints,
             build_project_hints(&symbols, "make enemy movement faster")
@@ -5042,11 +5096,11 @@ mod tests {
             "synthetic ordinary first request bytes: raw_symbols={raw_bytes}, project_hints={bytes}, initial_context={initial_bytes}, instruction={instruction_bytes}, tools={tool_bytes}, combined={combined_bytes}"
         );
         assert!(
-            initial_bytes <= 500,
+            initial_bytes <= 550,
             "initial project context grew to {initial_bytes} bytes"
         );
         assert!(
-            combined_bytes <= 3_200,
+            combined_bytes <= 3_400,
             "ordinary first request core grew to {combined_bytes} bytes"
         );
         assert!(bytes < raw_bytes);
@@ -5117,21 +5171,24 @@ mod tests {
         .expect("initial context");
         responder.join().expect("initial responder");
 
+        assert_eq!(context["language"], "Stasis");
         assert_eq!(
-            context,
-            json!({
-                "language":"Stasis",
-                "start":[{
-                    "tool":"list_symbols",
-                    "args":{"files":["src/game/systems/enemies.stasis"]}
-                }],
-                "options":{
-                    "stdlib":{"tool":"get_stdlib_api", "args":{}},
-                    "baseline_tests":{"tool":"run_tests", "args":{}}
-                }
-            })
+            context["start"][0]["action_id"],
+            action_id_for_tool("list_symbols")
         );
-
+        assert_eq!(
+            context["start"][0]["args"]["files"],
+            json!(["src/game/systems/enemies.stasis"])
+        );
+        assert!(context["start"][0].get("tool").is_none());
+        assert_eq!(
+            context["options"]["stdlib"]["action_id"],
+            action_id_for_tool("get_stdlib_api")
+        );
+        assert_eq!(
+            context["options"]["baseline_tests"]["action_id"],
+            action_id_for_tool("run_tests")
+        );
         let projected = compact_ai_read_result(
             &ToolCall {
                 tool: "list_symbols".into(),
@@ -5153,11 +5210,16 @@ mod tests {
             "localize dialogue captions in this Stasis project",
         );
 
-        assert_eq!(hints, json!([{"tool":"list_symbols", "args":{}}]));
-        let call: ToolCall =
-            serde_json::from_value(hints[0].clone()).expect("valid default list_symbols ToolCall");
-        assert_eq!(call.tool, "list_symbols");
-        assert_eq!(call.args, json!({}));
+        assert_eq!(
+            hints,
+            json!([offered_action(
+                "list_symbols",
+                "Project symbols.",
+                json!({}),
+            )])
+        );
+        assert_eq!(hints[0]["action_id"], action_id_for_tool("list_symbols"));
+        assert!(hints[0].get("tool").is_none());
     }
 
     #[test]
@@ -5272,10 +5334,11 @@ mod tests {
         );
         assert_eq!(
             first["next"],
-            json!({
-                "tool":"get_stdlib_api",
-                "args":{"module":"graphics", "kind":"function", "page":1, "limit":64}
-            })
+            offered_action(
+                "get_stdlib_api",
+                "Read the next bounded page of this standard-library API.",
+                json!({"module":"graphics", "kind":"function", "page":1, "limit":64}),
+            )
         );
         assert_eq!(first.as_object().unwrap().len(), 3);
 
@@ -6288,7 +6351,14 @@ mod tests {
             "cached_input_tokens": 80,
             "output_tokens": 20,
         });
-        let mut log = AiAuditLog::create(&root, "test prompt").expect("audit log");
+        let mut log = AiAuditLog::create_with_provider(
+            &root,
+            "test prompt",
+            "openrouter",
+            "openai/gpt-oss-120b",
+            None,
+        )
+        .expect("audit log");
         let trace_path = log.path.clone();
         let usage_path = log.usage_path.clone();
         let timing_path = log.timing_path.clone();
@@ -6302,6 +6372,8 @@ mod tests {
             .map(|line| serde_json::from_str::<Value>(line).expect("trace record"))
             .collect::<Vec<_>>();
         assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["provider"], "openrouter");
+        assert_eq!(records[0]["model"], "openai/gpt-oss-120b");
         assert!(records
             .iter()
             .all(|record| record.get("elapsed_ms").is_none()));
