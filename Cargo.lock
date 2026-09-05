@@ -3496,6 +3496,7 @@ name = "stasis_compiler"
 version = "0.1.0"
 dependencies = [
  "atomic-write-file",
+ "cc",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
