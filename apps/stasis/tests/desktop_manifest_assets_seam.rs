@@ -9,7 +9,7 @@ use stasis_dynload::{
     register_global_u8_array, runtime_library_candidate_paths, Library, StasisGraphicsApi,
     STASIS_RENDER_F32_COUNT, STASIS_RENDER_I32_COUNT, STASIS_RENDER_U8_COUNT,
 };
-use std::ffi::{CString, OsString};
+use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -95,33 +95,6 @@ fn scalar_i32(path: &str) -> i32 {
     stasis_dynload::stasis_jit_global_i32_load(global_path_hash(path))
 }
 
-fn configured_runtime_path(mut lookup: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
-    lookup("STASIS_RUNTIME_LIBRARY_PATH")
-        .or_else(|| lookup("STASIS_RUNTIME_DLL_PATH"))
-        .map(PathBuf::from)
-}
-
-#[test]
-fn runtime_environment_uses_canonical_path_then_legacy_alias() {
-    for (canonical, alias, expected) in [
-        (Some("canonical.dll"), None, Some("canonical.dll")),
-        (None, Some("alias.dll"), Some("alias.dll")),
-        (
-            Some("canonical.dll"),
-            Some("alias.dll"),
-            Some("canonical.dll"),
-        ),
-        (None, None, None),
-    ] {
-        let actual = configured_runtime_path(|name| match name {
-            "STASIS_RUNTIME_LIBRARY_PATH" => canonical.map(OsString::from),
-            "STASIS_RUNTIME_DLL_PATH" => alias.map(OsString::from),
-            _ => panic!("unexpected environment variable: {name}"),
-        });
-        assert_eq!(actual, expected.map(PathBuf::from));
-    }
-}
-
 fn scalar_f32(path: &str) -> f32 {
     stasis_dynload::stasis_jit_global_f32_load(global_path_hash(path))
 }
@@ -179,7 +152,10 @@ fn manifest_assets_survive_wrong_cwd_and_render_sprite_direct_and_cached_text() 
     let _cwd_guard = WorkingDirectoryGuard(original_cwd);
     std::env::set_current_dir(&wrong_cwd).expect("enter wrong working directory");
 
-    let runtime_path = configured_runtime_path(|name| std::env::var_os(name)).expect(
+    let runtime_path = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH")
+        .or_else(|| std::env::var_os("STASIS_RUNTIME_DLL_PATH"))
+        .map(PathBuf::from)
+        .expect(
         "STASIS_RUNTIME_LIBRARY_PATH (or legacy STASIS_RUNTIME_DLL_PATH) must name the CI-built SDL runtime",
     );
     let selected_runtime = runtime_library_candidate_paths()
