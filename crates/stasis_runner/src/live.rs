@@ -2,6 +2,8 @@ use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 pub const LIVE_SCHEMA_VERSION: u16 = 1;
@@ -11,6 +13,8 @@ pub const MAX_LIVE_REQUEST_BYTES: usize = 512 * 1024;
 pub const MAX_LIVE_MULTILINE_BYTES: usize = 256 * 1024;
 pub const MAX_SCRATCH_CELLS: usize = 64;
 pub const MAX_LIVE_WATCHES: usize = 64;
+const MAX_LIVE_OUTSTANDING_REQUESTS_PER_CLIENT: usize = 128;
+const MAX_LIVE_OUTSTANDING_REQUESTS_PER_SESSION: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveRequest {
@@ -495,16 +499,286 @@ impl LiveResponse {
     }
 }
 
-#[derive(Clone)]
 pub struct LiveSessionClient {
     requests: Sender<LiveRequest>,
     responses: Receiver<LiveResponse>,
+    routing: Arc<LiveSessionRouting>,
+    owner_id: u64,
 }
 
 pub struct LiveSessionServer {
     requests: Receiver<LiveRequest>,
-    responses: Sender<LiveResponse>,
+    routing: Arc<LiveSessionRouting>,
     output_limit: usize,
+}
+
+struct LiveSessionRouting {
+    next_wire_id: AtomicU64,
+    next_owner_id: AtomicU64,
+    closed: AtomicBool,
+    capacity: usize,
+    state: Mutex<LiveSessionRoutingState>,
+}
+
+struct LiveSessionRoutingState {
+    mailboxes: BTreeMap<u64, Sender<LiveResponse>>,
+    routes: BTreeMap<u64, LiveRequestRoute>,
+    local_requests: BTreeMap<(u64, u64), u64>,
+    primary_owner: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiveRequestRoute {
+    owner_id: u64,
+    caller_request_id: u64,
+}
+
+fn response_keeps_request_route(response: &LiveResponse) -> bool {
+    matches!(
+        response.kind.as_str(),
+        "edit_preparing" | "completion_preparing"
+    )
+}
+
+impl LiveSessionRouting {
+    fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            next_wire_id: AtomicU64::new(1),
+            next_owner_id: AtomicU64::new(1),
+            closed: AtomicBool::new(false),
+            capacity,
+            state: Mutex::new(LiveSessionRoutingState {
+                mailboxes: BTreeMap::new(),
+                routes: BTreeMap::new(),
+                local_requests: BTreeMap::new(),
+                primary_owner: None,
+            }),
+        })
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, LiveSessionRoutingState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn next_id(counter: &AtomicU64, kind: &str) -> Result<u64, String> {
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            if current == 0 {
+                return Err(format!("live session {kind} id space is exhausted"));
+            }
+            let next = current.wrapping_add(1);
+            match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return Ok(current),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn register_client(&self) -> (u64, Receiver<LiveResponse>) {
+        let owner_id = Self::next_id(&self.next_owner_id, "client")
+            .expect("live session client id space is exhausted");
+        let (sender, receiver) = bounded(self.capacity);
+        if !self.closed.load(Ordering::Acquire) {
+            let mut state = self.lock_state();
+            if !self.closed.load(Ordering::Acquire) {
+                if state.primary_owner.is_none() {
+                    state.primary_owner = Some(owner_id);
+                }
+                state.mailboxes.insert(owner_id, sender);
+                return (owner_id, receiver);
+            }
+        }
+        drop(sender);
+        (owner_id, receiver)
+    }
+
+    fn unregister_client(&self, owner_id: u64) {
+        let mut state = self.lock_state();
+        state.mailboxes.remove(&owner_id);
+        state.routes.retain(|_, route| route.owner_id != owner_id);
+        state
+            .local_requests
+            .retain(|(route_owner, _), _| *route_owner != owner_id);
+        if state.primary_owner == Some(owner_id) {
+            state.primary_owner = state.mailboxes.keys().next().copied();
+        }
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        let mut state = self.lock_state();
+        state.routes.clear();
+        state.local_requests.clear();
+        state.primary_owner = None;
+        state.mailboxes.clear();
+    }
+
+    fn submit(
+        &self,
+        owner_id: u64,
+        requests: &Sender<LiveRequest>,
+        mut request: LiveRequest,
+    ) -> Result<(), String> {
+        request.validate()?;
+        let wire_id = Self::next_id(&self.next_wire_id, "request")?;
+        let caller_request_id = request.request_id;
+        let mut state = self.lock_state();
+        if self.closed.load(Ordering::Acquire) || !state.mailboxes.contains_key(&owner_id) {
+            return Err("live session has ended".to_string());
+        }
+        if state
+            .local_requests
+            .contains_key(&(owner_id, caller_request_id))
+        {
+            return Err(format!(
+                "live request_id {caller_request_id} is already pending for this client"
+            ));
+        }
+        let owner_outstanding = state
+            .local_requests
+            .keys()
+            .filter(|(route_owner, _)| *route_owner == owner_id)
+            .count();
+        if owner_outstanding >= MAX_LIVE_OUTSTANDING_REQUESTS_PER_CLIENT {
+            return Err(
+                "live-session outstanding request limit reached for this client".to_string(),
+            );
+        }
+        if state.routes.len() >= MAX_LIVE_OUTSTANDING_REQUESTS_PER_SESSION {
+            return Err("live-session outstanding request limit reached".to_string());
+        }
+        if let LiveCommand::Cancel { request_id } = &mut request.command {
+            if let Some(target_wire_id) = state.local_requests.get(&(owner_id, *request_id)) {
+                *request_id = *target_wire_id;
+            } else {
+                *request_id = 0;
+            }
+        }
+        request.request_id = wire_id;
+        request.validate()?;
+        match requests.try_send(request) {
+            Ok(()) => {
+                state.routes.insert(
+                    wire_id,
+                    LiveRequestRoute {
+                        owner_id,
+                        caller_request_id,
+                    },
+                );
+                state
+                    .local_requests
+                    .insert((owner_id, caller_request_id), wire_id);
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => Err("live-session command queue is full".to_string()),
+            Err(TrySendError::Disconnected(_)) => Err("live session has ended".to_string()),
+        }
+    }
+
+    fn respond(
+        &self,
+        response: LiveResponse,
+        output_limit: usize,
+    ) -> Result<(), LiveResponseSendError> {
+        let mut response = response.bounded(output_limit);
+        let wire_id = response.request_id;
+        let keep_route = response_keeps_request_route(&response);
+        let mut state = self.lock_state();
+        if self.closed.load(Ordering::Acquire) {
+            return Err(LiveResponseSendError::Disconnected);
+        }
+
+        let (owner_id, caller_request_id, sender) = if wire_id == 0 {
+            let owner_id = state
+                .primary_owner
+                .filter(|owner_id| state.mailboxes.contains_key(owner_id))
+                .or_else(|| state.mailboxes.keys().next().copied());
+            let Some(owner_id) = owner_id else {
+                return Err(LiveResponseSendError::Disconnected);
+            };
+            state.primary_owner = Some(owner_id);
+            let sender = state
+                .mailboxes
+                .get(&owner_id)
+                .cloned()
+                .expect("primary mailbox exists while routing is locked");
+            (owner_id, None, sender)
+        } else if let Some(route) = state.routes.get(&wire_id).copied() {
+            let Some(sender) = state.mailboxes.get(&route.owner_id).cloned() else {
+                state.routes.remove(&wire_id);
+                state
+                    .local_requests
+                    .remove(&(route.owner_id, route.caller_request_id));
+                return Err(LiveResponseSendError::Disconnected);
+            };
+            (route.owner_id, Some(route.caller_request_id), sender)
+        } else if !state.mailboxes.is_empty() {
+            // A response for a dropped or already-completed task is stale.
+            // Drop it without taking down the other live clients.
+            return Ok(());
+        } else {
+            return Err(LiveResponseSendError::Disconnected);
+        };
+
+        let wire_response = response.clone();
+        if let Some(caller_request_id) = caller_request_id {
+            response.request_id = caller_request_id;
+            response = response.bounded(output_limit);
+        }
+        match sender.try_send(response) {
+            Ok(()) => {
+                if caller_request_id.is_some() && !keep_route {
+                    let route = state
+                        .routes
+                        .remove(&wire_id)
+                        .expect("request route exists until response delivery");
+                    state
+                        .local_requests
+                        .remove(&(owner_id, route.caller_request_id));
+                }
+                Ok(())
+            }
+            Err(TrySendError::Full(_)) => Err(LiveResponseSendError::Full(wire_response)),
+            Err(TrySendError::Disconnected(_)) => {
+                if caller_request_id.is_some() && !keep_route {
+                    let route = state.routes.remove(&wire_id);
+                    if let Some(route) = route {
+                        state
+                            .local_requests
+                            .remove(&(route.owner_id, route.caller_request_id));
+                    }
+                }
+                Err(LiveResponseSendError::Disconnected)
+            }
+        }
+    }
+}
+
+impl Clone for LiveSessionClient {
+    fn clone(&self) -> Self {
+        let (owner_id, responses) = self.routing.register_client();
+        Self {
+            requests: self.requests.clone(),
+            responses,
+            routing: Arc::clone(&self.routing),
+            owner_id,
+        }
+    }
+}
+
+impl Drop for LiveSessionClient {
+    fn drop(&mut self) {
+        self.routing.unregister_client(self.owner_id);
+    }
+}
+
+impl Drop for LiveSessionServer {
+    fn drop(&mut self) {
+        self.routing.close();
+    }
 }
 
 #[derive(Debug)]
@@ -515,16 +789,19 @@ pub enum LiveResponseSendError {
 
 pub fn live_session(capacity: usize) -> (LiveSessionClient, LiveSessionServer) {
     let capacity = capacity.max(1);
+    let routing = LiveSessionRouting::new(capacity);
     let (request_tx, request_rx) = bounded(capacity);
-    let (response_tx, response_rx) = bounded(capacity);
+    let (owner_id, response_rx) = routing.register_client();
     (
         LiveSessionClient {
             requests: request_tx,
             responses: response_rx,
+            routing: Arc::clone(&routing),
+            owner_id,
         },
         LiveSessionServer {
             requests: request_rx,
-            responses: response_tx,
+            routing,
             output_limit: DEFAULT_LIVE_OUTPUT_BYTES,
         },
     )
@@ -532,13 +809,7 @@ pub fn live_session(capacity: usize) -> (LiveSessionClient, LiveSessionServer) {
 
 impl LiveSessionClient {
     pub fn submit(&self, request: LiveRequest) -> Result<(), String> {
-        request.validate()?;
-        self.requests
-            .try_send(request)
-            .map_err(|error| match error {
-                TrySendError::Full(_) => "live-session command queue is full".to_string(),
-                TrySendError::Disconnected(_) => "live session has ended".to_string(),
-            })
+        self.routing.submit(self.owner_id, &self.requests, request)
     }
 
     pub fn receive_timeout(&self, timeout: Duration) -> Result<LiveResponse, String> {
@@ -561,6 +832,14 @@ impl LiveSessionServer {
         self.output_limit = bytes.max(256);
     }
 
+    pub fn caller_request_id(&self, wire_request_id: u64) -> Option<u64> {
+        self.routing
+            .lock_state()
+            .routes
+            .get(&wire_request_id)
+            .map(|route| route.caller_request_id)
+    }
+
     pub fn drain(&self, limit: usize) -> Vec<LiveRequest> {
         let mut requests = Vec::new();
         while requests.len() < limit {
@@ -573,12 +852,7 @@ impl LiveSessionServer {
     }
 
     pub fn respond(&self, response: LiveResponse) -> Result<(), LiveResponseSendError> {
-        self.responses
-            .try_send(response.bounded(self.output_limit))
-            .map_err(|error| match error {
-                TrySendError::Full(response) => LiveResponseSendError::Full(response),
-                TrySendError::Disconnected(_) => LiveResponseSendError::Disconnected,
-            })
+        self.routing.respond(response, self.output_limit)
     }
 }
 
@@ -1598,12 +1872,255 @@ mod tests {
     }
 
     #[test]
+    fn cloned_clients_have_isolated_mailboxes_and_restore_local_ids() {
+        let (client, server) = live_session(4);
+        let clone = client.clone();
+        client
+            .submit(LiveRequest::new(17, LiveCommand::Status))
+            .expect("root request");
+        clone
+            .submit(LiveRequest::new(17, LiveCommand::Status))
+            .expect("clone request with the same local id");
+
+        let requests = server.drain(2);
+        assert_eq!(requests.len(), 2);
+        assert_ne!(requests[0].request_id, requests[1].request_id);
+
+        server
+            .respond(LiveResponse::success(
+                requests[1].request_id,
+                2,
+                "clone",
+                serde_json::json!({"owner": "clone"}),
+            ))
+            .expect("clone response");
+        server
+            .respond(LiveResponse::success(
+                requests[0].request_id,
+                1,
+                "root",
+                serde_json::json!({"owner": "root"}),
+            ))
+            .expect("root response");
+
+        let root_response = client
+            .receive_timeout(Duration::from_millis(10))
+            .expect("root response delivery");
+        assert_eq!(root_response.request_id, 17);
+        assert_eq!(
+            root_response.data.as_ref().expect("root data")["owner"],
+            "root"
+        );
+        let clone_response = clone
+            .receive_timeout(Duration::from_millis(10))
+            .expect("clone response delivery");
+        assert_eq!(clone_response.request_id, 17);
+        assert_eq!(
+            clone_response.data.as_ref().expect("clone data")["owner"],
+            "clone"
+        );
+        assert_eq!(client.try_receive().expect("root mailbox"), None);
+        assert_eq!(clone.try_receive().expect("clone mailbox"), None);
+    }
+
+    #[test]
+    fn response_queue_full_keeps_wire_id_for_retry() {
+        let (client, server) = live_session(1);
+        client
+            .submit(LiveRequest::new(41, LiveCommand::Status))
+            .expect("first request");
+        let first_wire_id = server.drain(1)[0].request_id;
+        client
+            .submit(LiveRequest::new(42, LiveCommand::Status))
+            .expect("second request");
+        let second_wire_id = server.drain(1)[0].request_id;
+
+        server
+            .respond(LiveResponse::success(
+                first_wire_id,
+                1,
+                "first",
+                serde_json::json!({}),
+            ))
+            .expect("fill response mailbox");
+        let full = server
+            .respond(LiveResponse::success(
+                second_wire_id,
+                2,
+                "second",
+                serde_json::json!({}),
+            ))
+            .expect_err("bounded response mailbox");
+        let LiveResponseSendError::Full(retry) = full else {
+            panic!("expected a retryable full response");
+        };
+        assert_eq!(retry.request_id, second_wire_id);
+
+        assert_eq!(
+            client
+                .receive_timeout(Duration::from_millis(10))
+                .expect("first response")
+                .request_id,
+            41
+        );
+        server.respond(retry).expect("retry response");
+        assert_eq!(
+            client
+                .receive_timeout(Duration::from_millis(10))
+                .expect("second response")
+                .request_id,
+            42
+        );
+    }
+
+    #[test]
+    fn preparing_responses_keep_the_route_for_the_terminal_response() {
+        let (client, server) = live_session(2);
+        client
+            .submit(LiveRequest::new(23, LiveCommand::Status))
+            .expect("request");
+        let wire_id = server.drain(1)[0].request_id;
+
+        server
+            .respond(LiveResponse::success(
+                wire_id,
+                1,
+                "edit_preparing",
+                serde_json::json!({"background": true}),
+            ))
+            .expect("preparing response");
+        assert_eq!(
+            client
+                .receive_timeout(Duration::from_millis(10))
+                .expect("preparing response delivery")
+                .request_id,
+            23
+        );
+
+        server
+            .respond(LiveResponse::success(
+                wire_id,
+                2,
+                "edit_applied",
+                serde_json::json!({}),
+            ))
+            .expect("terminal response");
+        assert_eq!(
+            client
+                .receive_timeout(Duration::from_millis(10))
+                .expect("terminal response delivery")
+                .request_id,
+            23
+        );
+    }
+
+    #[test]
+    fn restored_max_request_id_is_bounded_before_delivery() {
+        let (client, mut server) = live_session(1);
+        server.set_output_limit(1024);
+        client
+            .submit(LiveRequest::new(u64::MAX, LiveCommand::Status))
+            .expect("request");
+        let wire_id = server.drain(1)[0].request_id;
+        let response = (0..10_000).find_map(|size| {
+            let response = LiveResponse::success(
+                wire_id,
+                1,
+                "status",
+                serde_json::json!({"payload": "x".repeat(size)}),
+            )
+            .bounded(1024);
+            let wire_bytes = serde_json::to_vec(&response).expect("wire response").len();
+            let mut restored = response.clone();
+            restored.request_id = u64::MAX;
+            let restored_bytes = serde_json::to_vec(&restored)
+                .expect("restored response")
+                .len();
+            (wire_bytes <= 1024 && restored_bytes > 1024).then_some(response)
+        });
+        let response = response.expect("find a response near the output bound");
+
+        server.respond(response).expect("bounded response");
+        let received = client
+            .receive_timeout(Duration::from_millis(10))
+            .expect("response delivery");
+        assert_eq!(received.request_id, u64::MAX);
+        assert!(received.truncated);
+        assert!(
+            serde_json::to_vec(&received)
+                .expect("encoded response")
+                .len()
+                <= 1024
+        );
+    }
+
+    #[test]
+    fn dropping_a_clone_removes_its_pending_routes() {
+        let (client, server) = live_session(2);
+        let clone = client.clone();
+        clone
+            .submit(LiveRequest::new(9, LiveCommand::Status))
+            .expect("clone request");
+        let wire_id = server.drain(1)[0].request_id;
+        drop(clone);
+
+        server
+            .respond(LiveResponse::success(
+                wire_id,
+                1,
+                "status",
+                serde_json::json!({}),
+            ))
+            .expect("stale response is discarded while root remains");
+        assert_eq!(client.try_receive().expect("root mailbox"), None);
+    }
+
+    #[test]
+    fn dropping_server_disconnects_client_mailboxes() {
+        let (client, server) = live_session(1);
+        drop(server);
+
+        assert!(client
+            .try_receive()
+            .expect_err("closed response mailbox")
+            .contains("ended"));
+        assert!(client
+            .submit(LiveRequest::new(1, LiveCommand::Status))
+            .expect_err("closed request queue")
+            .contains("ended"));
+    }
+
+    #[test]
+    fn cancel_targets_are_remapped_within_the_cloning_client() {
+        let (client, server) = live_session(4);
+        client
+            .submit(LiveRequest::new(10, LiveCommand::Status))
+            .expect("target request");
+        client
+            .submit(LiveRequest::new(11, LiveCommand::Cancel { request_id: 10 }))
+            .expect("cancel request");
+
+        let requests = server.drain(2);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].command,
+            LiveCommand::Cancel {
+                request_id: requests[0].request_id
+            }
+        );
+    }
+
+    #[test]
     fn response_output_is_bounded_and_explicitly_truncated() {
         let (client, mut server) = live_session(1);
         server.set_output_limit(256);
+        client
+            .submit(LiveRequest::new(7, LiveCommand::Status))
+            .expect("request");
+        let first_wire_id = server.drain(1)[0].request_id;
         server
             .respond(LiveResponse::success(
-                7,
+                first_wire_id,
                 9,
                 "symbols",
                 serde_json::json!({"source": "x".repeat(4096)}),
@@ -1616,8 +2133,12 @@ mod tests {
         assert_eq!(response.request_id, 7);
         assert_eq!(response.tick, 9);
 
+        client
+            .submit(LiveRequest::new(8, LiveCommand::Status))
+            .expect("failure request");
+        let second_wire_id = server.drain(1)[0].request_id;
         server
-            .respond(LiveResponse::failure(8, 10, "x".repeat(4096)))
+            .respond(LiveResponse::failure(second_wire_id, 10, "x".repeat(4096)))
             .expect("failure response");
         let failure = client
             .receive_timeout(Duration::from_millis(10))

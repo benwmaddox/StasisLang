@@ -1,0 +1,1064 @@
+use crate::{
+    ConnectionState, ProviderState, TaskId, TaskLifecycle, TaskSession, TaskSessionError,
+    ThreadEntry,
+};
+use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::Instant;
+
+const SAFE_PROVIDER_ERROR: &str = "AI provider request failed";
+const SAFE_SESSION_ERROR: &str = "AI response could not be added to the task";
+const MAX_WORKERS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RequestId(u64);
+
+impl RequestId {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRequest {
+    pub request_id: RequestId,
+    pub task_id: TaskId,
+    pub objective: String,
+    pub project_summary: String,
+    pub relevant_files: Vec<String>,
+    pub relevant_symbols: Vec<String>,
+    pub relevant_tests: Vec<String>,
+    pub context: Vec<ThreadEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub estimated_cost_micros: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderReply {
+    pub text: String,
+    pub provider: ProviderState,
+    pub usage: ProviderUsage,
+}
+
+impl ProviderReply {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            provider: ProviderState::default(),
+            usage: ProviderUsage::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskRequestState {
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRequestSnapshot {
+    pub request_id: RequestId,
+    pub task_id: TaskId,
+    pub state: TaskRequestState,
+    pub elapsed_ms: u64,
+    pub usage: ProviderUsage,
+    pub retry_count: u32,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskControllerEvent {
+    Completed {
+        request_id: RequestId,
+        task_id: TaskId,
+    },
+    Failed {
+        request_id: RequestId,
+        task_id: TaskId,
+        message: String,
+    },
+    Canceled {
+        request_id: RequestId,
+        task_id: TaskId,
+    },
+    Stale {
+        request_id: RequestId,
+        task_id: TaskId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskControllerConfig {
+    pub workers: usize,
+    pub max_context_entries: usize,
+    pub max_context_chars: usize,
+}
+
+impl Default for TaskControllerConfig {
+    fn default() -> Self {
+        Self {
+            workers: 2,
+            max_context_entries: 32,
+            max_context_chars: 32 * 1024,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TaskControllerError {
+    InvalidConfig,
+    TaskBusy(TaskId),
+    TaskClosed(TaskId),
+    TaskDisconnected(TaskId),
+    NoPreviousRequest(TaskId),
+    CapacityReached,
+    Session(TaskSessionError),
+    Unavailable,
+}
+
+impl fmt::Display for TaskControllerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidConfig => f.write_str("invalid task controller configuration"),
+            Self::TaskBusy(id) => write!(f, "task already has an AI request: {id}"),
+            Self::TaskClosed(id) => write!(f, "task is not active: {id}"),
+            Self::TaskDisconnected(id) => write!(f, "task provider is disconnected: {id}"),
+            Self::NoPreviousRequest(id) => write!(f, "task has no AI request to retry: {id}"),
+            Self::CapacityReached => f.write_str("AI provider controller is at capacity"),
+            Self::Session(error) => error.fmt(f),
+            Self::Unavailable => f.write_str("AI provider controller is unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for TaskControllerError {}
+
+impl From<TaskSessionError> for TaskControllerError {
+    fn from(error: TaskSessionError) -> Self {
+        Self::Session(error)
+    }
+}
+
+type ProviderFn = dyn Fn(ProviderRequest, Arc<AtomicBool>) -> Result<ProviderReply, String>
+    + Send
+    + Sync
+    + 'static;
+
+struct Job {
+    client_id: u64,
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    client_alive: Arc<AtomicBool>,
+    admitted: Arc<AtomicBool>,
+    enqueued_at: Instant,
+}
+
+struct Completion {
+    client_id: u64,
+    request_id: RequestId,
+    task_id: TaskId,
+    elapsed_ms: u64,
+    result: Result<ProviderReply, ()>,
+    admitted: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct RequestRecord {
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    started_at: Instant,
+    snapshot: TaskRequestSnapshot,
+}
+
+#[derive(Default)]
+struct SharedState {
+    requests: BTreeMap<(u64, TaskId), RequestRecord>,
+    completions: VecDeque<Completion>,
+    events: VecDeque<(u64, TaskControllerEvent)>,
+    admitted: usize,
+}
+
+pub struct TaskController {
+    client_id: u64,
+    next_client_id: Arc<AtomicU64>,
+    next_request_id: Arc<AtomicU64>,
+    config: TaskControllerConfig,
+    jobs: mpsc::SyncSender<Job>,
+    state: Arc<Mutex<SharedState>>,
+    alive: Arc<AtomicBool>,
+    max_admitted: usize,
+}
+
+impl Clone for TaskController {
+    fn clone(&self) -> Self {
+        Self {
+            client_id: self.next_client_id.fetch_add(1, Ordering::Relaxed),
+            next_client_id: Arc::clone(&self.next_client_id),
+            next_request_id: Arc::clone(&self.next_request_id),
+            config: self.config,
+            jobs: self.jobs.clone(),
+            state: Arc::clone(&self.state),
+            alive: Arc::new(AtomicBool::new(true)),
+            max_admitted: self.max_admitted,
+        }
+    }
+}
+
+impl Drop for TaskController {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Release);
+        let mut state = lock(&self.state);
+        for ((client_id, _), record) in &mut state.requests {
+            if *client_id == self.client_id && record.snapshot.state == TaskRequestState::Running {
+                record.canceled.store(true, Ordering::Release);
+                record.snapshot.state = TaskRequestState::Canceled;
+            }
+        }
+        let mut retained = VecDeque::with_capacity(state.completions.len());
+        while let Some(completion) = state.completions.pop_front() {
+            if completion.client_id == self.client_id {
+                release_admission(&mut state.admitted, &completion.admitted);
+            } else {
+                retained.push_back(completion);
+            }
+        }
+        state.completions = retained;
+        state
+            .events
+            .retain(|(client_id, _)| *client_id != self.client_id);
+        state
+            .requests
+            .retain(|(client_id, _), _| *client_id != self.client_id);
+    }
+}
+
+impl TaskController {
+    pub fn new<F>(provider: F) -> Self
+    where
+        F: Fn(ProviderRequest, Arc<AtomicBool>) -> Result<ProviderReply, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::with_config(provider, TaskControllerConfig::default())
+            .expect("default task controller configuration is valid")
+    }
+
+    pub fn with_config<F>(
+        provider: F,
+        config: TaskControllerConfig,
+    ) -> Result<Self, TaskControllerError>
+    where
+        F: Fn(ProviderRequest, Arc<AtomicBool>) -> Result<ProviderReply, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        if config.workers == 0
+            || config.workers > MAX_WORKERS
+            || config.max_context_entries == 0
+            || config.max_context_chars == 0
+        {
+            return Err(TaskControllerError::InvalidConfig);
+        }
+        let provider: Arc<ProviderFn> = Arc::new(provider);
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let max_admitted = config.workers.saturating_mul(4);
+        let (jobs, receiver) = mpsc::sync_channel::<Job>(max_admitted);
+        let receiver = Arc::new(Mutex::new(receiver));
+        for _ in 0..config.workers {
+            let provider = Arc::clone(&provider);
+            let receiver = Arc::clone(&receiver);
+            let state = Arc::clone(&state);
+            thread::spawn(move || worker_loop(provider, receiver, state));
+        }
+        Ok(Self {
+            client_id: 1,
+            next_client_id: Arc::new(AtomicU64::new(2)),
+            next_request_id: Arc::new(AtomicU64::new(1)),
+            config,
+            jobs,
+            state,
+            alive: Arc::new(AtomicBool::new(true)),
+            max_admitted,
+        })
+    }
+
+    pub fn send_active(&self, session: &TaskSession) -> Result<RequestId, TaskControllerError> {
+        let task_id = session
+            .active_task_id()
+            .cloned()
+            .ok_or(TaskSessionError::NoActiveTask)?;
+        self.send(session, &task_id)
+    }
+
+    pub fn send(
+        &self,
+        session: &TaskSession,
+        task_id: &TaskId,
+    ) -> Result<RequestId, TaskControllerError> {
+        let task = session.task(task_id)?;
+        if task.lifecycle != TaskLifecycle::Active {
+            return Err(TaskControllerError::TaskClosed(task_id.clone()));
+        }
+        if task.connection != ConnectionState::Connected {
+            return Err(TaskControllerError::TaskDisconnected(task_id.clone()));
+        }
+        let key = (self.client_id, task_id.clone());
+        let mut state = lock(&self.state);
+        if state
+            .requests
+            .get(&key)
+            .is_some_and(|request| request.snapshot.state == TaskRequestState::Running)
+        {
+            return Err(TaskControllerError::TaskBusy(task_id.clone()));
+        }
+        if state.admitted >= self.max_admitted {
+            return Err(TaskControllerError::CapacityReached);
+        }
+        let request_id = RequestId(self.next_request_id.fetch_add(1, Ordering::Relaxed));
+        let request = ProviderRequest {
+            request_id,
+            task_id: task_id.clone(),
+            objective: task.objective.clone(),
+            project_summary: task.project_summary.clone(),
+            relevant_files: task.relevant_files.clone(),
+            relevant_symbols: task.relevant_symbols.clone(),
+            relevant_tests: task.relevant_tests.clone(),
+            context: bounded_context(
+                &task.thread,
+                self.config.max_context_entries,
+                self.config.max_context_chars,
+            ),
+        };
+        let canceled = Arc::new(AtomicBool::new(false));
+        let admitted = Arc::new(AtomicBool::new(true));
+        let started_at = Instant::now();
+        let retry_count = state
+            .requests
+            .get(&key)
+            .map_or(0, |record| record.snapshot.retry_count);
+        state.requests.insert(
+            key,
+            RequestRecord {
+                request: request.clone(),
+                canceled: Arc::clone(&canceled),
+                started_at,
+                snapshot: TaskRequestSnapshot {
+                    request_id,
+                    task_id: task_id.clone(),
+                    state: TaskRequestState::Running,
+                    elapsed_ms: 0,
+                    usage: ProviderUsage::default(),
+                    retry_count,
+                    error: None,
+                },
+            },
+        );
+        state.admitted = state.admitted.saturating_add(1);
+        drop(state);
+        if self
+            .jobs
+            .try_send(Job {
+                client_id: self.client_id,
+                request,
+                canceled,
+                client_alive: Arc::clone(&self.alive),
+                admitted: Arc::clone(&admitted),
+                enqueued_at: started_at,
+            })
+            .is_err()
+        {
+            let mut state = lock(&self.state);
+            release_admission(&mut state.admitted, &admitted);
+            if let Some(record) = state.requests.get_mut(&(self.client_id, task_id.clone())) {
+                record.snapshot.state = TaskRequestState::Failed;
+                record.snapshot.error = Some(SAFE_PROVIDER_ERROR.to_string());
+            }
+            return Err(TaskControllerError::CapacityReached);
+        }
+        Ok(request_id)
+    }
+
+    pub fn retry(
+        &self,
+        session: &mut TaskSession,
+        task_id: &TaskId,
+    ) -> Result<RequestId, TaskControllerError> {
+        let mut task = session.task(task_id)?.clone();
+        if task.lifecycle != TaskLifecycle::Active {
+            return Err(TaskControllerError::TaskClosed(task_id.clone()));
+        }
+        if task.connection != ConnectionState::Connected {
+            task.reconnect()?;
+        }
+        let request_id = self.resubmit(task_id, false)?;
+        task.metrics.record_retry();
+        *session
+            .task_mut(task_id)
+            .expect("task was present while retry was validated") = task;
+        Ok(request_id)
+    }
+
+    pub fn cancel(
+        &self,
+        session: &mut TaskSession,
+        task_id: &TaskId,
+    ) -> Result<(), TaskControllerError> {
+        session.task_mut(task_id)?.cancel()?;
+        let mut state = lock(&self.state);
+        if let Some(record) = state.requests.get_mut(&(self.client_id, task_id.clone())) {
+            record.canceled.store(true, Ordering::Release);
+            record.snapshot.state = TaskRequestState::Canceled;
+            record.snapshot.elapsed_ms =
+                u64::try_from(record.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            record.snapshot.error = None;
+            let request_id = record.snapshot.request_id;
+            state.events.push_back((
+                self.client_id,
+                TaskControllerEvent::Canceled {
+                    request_id,
+                    task_id: task_id.clone(),
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn reconnect(
+        &self,
+        session: &mut TaskSession,
+        task_id: &TaskId,
+    ) -> Result<RequestId, TaskControllerError> {
+        let mut task = session.task(task_id)?.clone();
+        task.reconnect()?;
+        let request_id = self.resubmit(task_id, true)?;
+        task.metrics.record_retry();
+        *session
+            .task_mut(task_id)
+            .expect("task was present while reconnect was validated") = task;
+        Ok(request_id)
+    }
+
+    fn resubmit(
+        &self,
+        task_id: &TaskId,
+        replace_running: bool,
+    ) -> Result<RequestId, TaskControllerError> {
+        let key = (self.client_id, task_id.clone());
+        let mut state = lock(&self.state);
+        let prior = state
+            .requests
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| TaskControllerError::NoPreviousRequest(task_id.clone()))?;
+        if prior.snapshot.state == TaskRequestState::Running && !replace_running {
+            return Err(TaskControllerError::TaskBusy(task_id.clone()));
+        }
+        if state.admitted >= self.max_admitted {
+            return Err(TaskControllerError::CapacityReached);
+        }
+        prior.canceled.store(true, Ordering::Release);
+        let request_id = RequestId(self.next_request_id.fetch_add(1, Ordering::Relaxed));
+        let mut request = prior.request;
+        request.request_id = request_id;
+        let canceled = Arc::new(AtomicBool::new(false));
+        let admitted = Arc::new(AtomicBool::new(true));
+        let started_at = Instant::now();
+        let retry_count = prior.snapshot.retry_count.saturating_add(1);
+        state.requests.insert(
+            key,
+            RequestRecord {
+                request: request.clone(),
+                canceled: Arc::clone(&canceled),
+                started_at,
+                snapshot: TaskRequestSnapshot {
+                    request_id,
+                    task_id: task_id.clone(),
+                    state: TaskRequestState::Running,
+                    elapsed_ms: 0,
+                    usage: ProviderUsage::default(),
+                    retry_count,
+                    error: None,
+                },
+            },
+        );
+        state.admitted = state.admitted.saturating_add(1);
+        drop(state);
+        if self
+            .jobs
+            .try_send(Job {
+                client_id: self.client_id,
+                request,
+                canceled,
+                client_alive: Arc::clone(&self.alive),
+                admitted: Arc::clone(&admitted),
+                enqueued_at: started_at,
+            })
+            .is_err()
+        {
+            let mut state = lock(&self.state);
+            release_admission(&mut state.admitted, &admitted);
+            if let Some(record) = state.requests.get_mut(&(self.client_id, task_id.clone())) {
+                record.snapshot.state = TaskRequestState::Failed;
+                record.snapshot.error = Some(SAFE_PROVIDER_ERROR.to_string());
+            }
+            return Err(TaskControllerError::CapacityReached);
+        }
+        Ok(request_id)
+    }
+
+    pub fn snapshot(&self, task_id: &TaskId) -> Option<TaskRequestSnapshot> {
+        lock(&self.state)
+            .requests
+            .get(&(self.client_id, task_id.clone()))
+            .map(|request| {
+                let mut snapshot = request.snapshot.clone();
+                if snapshot.state == TaskRequestState::Running {
+                    snapshot.elapsed_ms =
+                        u64::try_from(request.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                }
+                snapshot
+            })
+    }
+
+    pub fn poll(&self, session: &mut TaskSession) -> Vec<TaskControllerEvent> {
+        let mut events = Vec::new();
+        let mut completions = Vec::new();
+        {
+            let mut state = lock(&self.state);
+            let mut retained_events = VecDeque::with_capacity(state.events.len());
+            while let Some((client_id, event)) = state.events.pop_front() {
+                if client_id == self.client_id {
+                    events.push(event);
+                } else {
+                    retained_events.push_back((client_id, event));
+                }
+            }
+            state.events = retained_events;
+            let mut retained = VecDeque::with_capacity(state.completions.len());
+            while let Some(completion) = state.completions.pop_front() {
+                if completion.client_id == self.client_id {
+                    completions.push(completion);
+                } else {
+                    retained.push_back(completion);
+                }
+            }
+            state.completions = retained;
+        }
+        events.extend(
+            completions
+                .into_iter()
+                .map(|completion| self.apply_completion(session, completion)),
+        );
+        events
+    }
+
+    fn apply_completion(
+        &self,
+        session: &mut TaskSession,
+        completion: Completion,
+    ) -> TaskControllerEvent {
+        let key = (self.client_id, completion.task_id.clone());
+        let mut state = lock(&self.state);
+        release_admission(&mut state.admitted, &completion.admitted);
+        let Some(record) = state.requests.get_mut(&key) else {
+            return stale_event(completion);
+        };
+        if record.snapshot.request_id != completion.request_id
+            || record.snapshot.state != TaskRequestState::Running
+            || record.canceled.load(Ordering::Acquire)
+        {
+            return stale_event(completion);
+        }
+        record.snapshot.elapsed_ms = completion.elapsed_ms;
+        match completion.result {
+            Ok(reply) => {
+                let applied = session
+                    .task(&completion.task_id)
+                    .cloned()
+                    .and_then(|mut task| {
+                        task.append_result(&reply.text)?;
+                        task.set_provider_state(reply.provider.clone())?;
+                        task.record_turn(
+                            completion.elapsed_ms,
+                            reply.usage.input_tokens,
+                            reply.usage.output_tokens,
+                            reply.usage.estimated_cost_micros,
+                        )?;
+                        Ok(task)
+                    });
+                let Ok(updated_task) = applied else {
+                    record.snapshot.state = TaskRequestState::Failed;
+                    record.snapshot.error = Some(SAFE_SESSION_ERROR.to_string());
+                    return TaskControllerEvent::Failed {
+                        request_id: completion.request_id,
+                        task_id: completion.task_id,
+                        message: SAFE_SESSION_ERROR.to_string(),
+                    };
+                };
+                *session
+                    .task_mut(&completion.task_id)
+                    .expect("task was present while response was validated") = updated_task;
+                record.snapshot.state = TaskRequestState::Completed;
+                record.snapshot.usage = reply.usage;
+                TaskControllerEvent::Completed {
+                    request_id: completion.request_id,
+                    task_id: completion.task_id,
+                }
+            }
+            Err(()) => {
+                record.snapshot.state = TaskRequestState::Failed;
+                record.snapshot.error = Some(SAFE_PROVIDER_ERROR.to_string());
+                if let Ok(task) = session.task_mut(&completion.task_id) {
+                    if task.connection == ConnectionState::Connected
+                        && task.lifecycle == TaskLifecycle::Active
+                    {
+                        let _ = task.disconnect();
+                    }
+                }
+                TaskControllerEvent::Failed {
+                    request_id: completion.request_id,
+                    task_id: completion.task_id,
+                    message: SAFE_PROVIDER_ERROR.to_string(),
+                }
+            }
+        }
+    }
+}
+
+fn worker_loop(
+    provider: Arc<ProviderFn>,
+    receiver: Arc<Mutex<mpsc::Receiver<Job>>>,
+    state: Arc<Mutex<SharedState>>,
+) {
+    loop {
+        let job = {
+            let receiver = lock(&receiver);
+            receiver.recv()
+        };
+        let Ok(job) = job else { return };
+        if !job.client_alive.load(Ordering::Acquire) {
+            let mut state = lock(&state);
+            release_admission(&mut state.admitted, &job.admitted);
+            continue;
+        }
+        if job.canceled.load(Ordering::Acquire) {
+            let elapsed_ms =
+                u64::try_from(job.enqueued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            lock(&state).completions.push_back(Completion {
+                client_id: job.client_id,
+                request_id: job.request.request_id,
+                task_id: job.request.task_id,
+                elapsed_ms,
+                result: Err(()),
+                admitted: job.admitted,
+            });
+            continue;
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            provider(job.request.clone(), Arc::clone(&job.canceled))
+        }))
+        .ok()
+        .and_then(Result::ok)
+        .ok_or(());
+        let elapsed_ms = u64::try_from(job.enqueued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut state = lock(&state);
+        if !job.client_alive.load(Ordering::Acquire) {
+            release_admission(&mut state.admitted, &job.admitted);
+            continue;
+        }
+        state.completions.push_back(Completion {
+            client_id: job.client_id,
+            request_id: job.request.request_id,
+            task_id: job.request.task_id,
+            elapsed_ms,
+            result,
+            admitted: job.admitted,
+        });
+    }
+}
+
+fn bounded_context(
+    entries: &[ThreadEntry],
+    max_entries: usize,
+    max_chars: usize,
+) -> Vec<ThreadEntry> {
+    let mut remaining = max_chars;
+    let mut selected = Vec::new();
+    for entry in entries.iter().rev().take(max_entries) {
+        if remaining == 0 {
+            break;
+        }
+        let text: String = entry
+            .text
+            .chars()
+            .rev()
+            .take(remaining)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        remaining = remaining.saturating_sub(text.chars().count());
+        selected.push(ThreadEntry {
+            sequence: entry.sequence,
+            kind: entry.kind,
+            text,
+        });
+    }
+    selected.reverse();
+    selected
+}
+
+fn stale_event(completion: Completion) -> TaskControllerEvent {
+    TaskControllerEvent::Stale {
+        request_id: completion.request_id,
+        task_id: completion.task_id,
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn release_admission(count: &mut usize, admitted: &AtomicBool) {
+    if admitted.swap(false, Ordering::AcqRel) {
+        *count = count.saturating_sub(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FallbackState, RoutingState};
+    use std::sync::Barrier;
+    use std::time::Duration;
+
+    fn session(ids: &[&str]) -> TaskSession {
+        let mut session = TaskSession::new();
+        for id in ids {
+            session
+                .new_task(*id, format!("objective {id}"), "project")
+                .unwrap();
+            session.append_reply(format!("reply {id}")).unwrap();
+        }
+        session
+    }
+
+    fn wait_for(
+        controller: &TaskController,
+        session: &mut TaskSession,
+    ) -> Vec<TaskControllerEvent> {
+        for _ in 0..100 {
+            let events = controller.poll(session);
+            if !events.is_empty() {
+                return events;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("provider did not complete")
+    }
+
+    #[test]
+    fn completions_are_isolated_by_task_and_cloned_client() {
+        let controller =
+            TaskController::new(|request, _| Ok(ProviderReply::new(request.task_id.as_str())));
+        let clone = controller.clone();
+        let mut owner = session(&["one", "two"]);
+        let mut stranger = session(&["other"]);
+        controller.send(&owner, &TaskId::new("one")).unwrap();
+        assert!(clone.poll(&mut stranger).is_empty());
+        let events = wait_for(&controller, &mut owner);
+        assert!(
+            matches!(events[0], TaskControllerEvent::Completed { ref task_id, .. } if task_id.as_str() == "one")
+        );
+        assert_eq!(
+            owner.task("one").unwrap().thread.last().unwrap().text,
+            "one"
+        );
+        assert_eq!(owner.task("two").unwrap().thread.len(), 1);
+    }
+
+    #[test]
+    fn cancellation_rejects_late_completion() {
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_started = Arc::clone(&started);
+        let worker_release = Arc::clone(&release);
+        let controller = TaskController::new(move |_, _| {
+            worker_started.wait();
+            worker_release.wait();
+            Ok(ProviderReply::new("late"))
+        });
+        let mut session = session(&["one"]);
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        started.wait();
+        controller
+            .cancel(&mut session, &TaskId::new("one"))
+            .unwrap();
+        release.wait();
+        let mut events = Vec::new();
+        for _ in 0..100 {
+            events.extend(controller.poll(&mut session));
+            if events
+                .iter()
+                .any(|event| matches!(event, TaskControllerEvent::Stale { .. }))
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TaskControllerEvent::Canceled { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TaskControllerEvent::Stale { .. })));
+        assert_eq!(session.task("one").unwrap().thread.len(), 1);
+    }
+
+    #[test]
+    fn reconnect_replaces_failed_request_and_activates_fallback() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let controller = TaskController::new(move |_, _| {
+            if provider_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err("secret bearer token".to_string());
+            }
+            let mut reply = ProviderReply::new("fallback reply");
+            reply.provider = ProviderState::new(
+                Some("backup".to_string()),
+                Some("model-b".to_string()),
+                RoutingState::Assigned {
+                    route: "fallback".to_string(),
+                },
+                FallbackState::Active {
+                    provider: "backup".to_string(),
+                    model: Some("model-b".to_string()),
+                    route: Some("fallback".to_string()),
+                },
+            )
+            .unwrap();
+            reply.usage = ProviderUsage {
+                input_tokens: 10,
+                output_tokens: 4,
+                estimated_cost_micros: 9,
+            };
+            Ok(reply)
+        });
+        let mut session = session(&["one"]);
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        let failure = wait_for(&controller, &mut session);
+        assert!(
+            matches!(&failure[0], TaskControllerEvent::Failed { message, .. } if message == SAFE_PROVIDER_ERROR)
+        );
+        assert!(!format!("{:?}", controller.snapshot(&TaskId::new("one"))).contains("secret"));
+        controller
+            .reconnect(&mut session, &TaskId::new("one"))
+            .unwrap();
+        let completed = wait_for(&controller, &mut session);
+        assert!(matches!(
+            completed[0],
+            TaskControllerEvent::Completed { .. }
+        ));
+        let task = session.task("one").unwrap();
+        assert!(matches!(
+            task.provider.fallback,
+            FallbackState::Active { .. }
+        ));
+        assert_eq!(task.metrics.input_tokens, 10);
+        assert_eq!(task.metrics.estimated_cost_micros, 9);
+    }
+
+    #[test]
+    fn reconnect_fences_a_running_request() {
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_started = Arc::clone(&started);
+        let worker_release = Arc::clone(&release);
+        let controller = TaskController::new(move |request, _| {
+            if request.request_id.get() == 1 {
+                worker_started.wait();
+                worker_release.wait();
+                Ok(ProviderReply::new("stale"))
+            } else {
+                Ok(ProviderReply::new("fresh"))
+            }
+        });
+        let mut session = session(&["one"]);
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        started.wait();
+        session.task_mut("one").unwrap().disconnect().unwrap();
+        controller
+            .reconnect(&mut session, &TaskId::new("one"))
+            .unwrap();
+        let completed = wait_for(&controller, &mut session);
+        assert!(matches!(
+            completed[0],
+            TaskControllerEvent::Completed { .. }
+        ));
+        release.wait();
+        let stale = wait_for(&controller, &mut session);
+        assert!(matches!(stale[0], TaskControllerEvent::Stale { .. }));
+        let task = session.task("one").unwrap();
+        assert_eq!(task.thread.last().unwrap().text, "fresh");
+        assert_eq!(task.metrics.turn_count, 1);
+    }
+
+    #[test]
+    fn admission_is_bounded_without_blocking_sender() {
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let calls = Arc::new(AtomicU64::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let controller = TaskController::with_config(
+            move |_, _| {
+                if provider_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    worker_barrier.wait();
+                }
+                Ok(ProviderReply::new("done"))
+            },
+            TaskControllerConfig {
+                workers: 1,
+                ..TaskControllerConfig::default()
+            },
+        )
+        .unwrap();
+        let session = session(&["one", "two", "three", "four", "five"]);
+        for id in ["one", "two", "three", "four"] {
+            controller.send(&session, &TaskId::new(id)).unwrap();
+        }
+        assert!(matches!(
+            controller.send(&session, &TaskId::new("five")),
+            Err(TaskControllerError::CapacityReached)
+        ));
+        barrier.wait();
+    }
+
+    #[test]
+    fn repeated_reconnects_cannot_bypass_admission_bound() {
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let calls = Arc::new(AtomicU64::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let controller = TaskController::with_config(
+            move |_, _| {
+                if provider_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                    worker_barrier.wait();
+                }
+                Ok(ProviderReply::new("done"))
+            },
+            TaskControllerConfig {
+                workers: 1,
+                ..TaskControllerConfig::default()
+            },
+        )
+        .unwrap();
+        let mut session = session(&["one"]);
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        for _ in 0..3 {
+            session.task_mut("one").unwrap().disconnect().unwrap();
+            controller
+                .reconnect(&mut session, &TaskId::new("one"))
+                .unwrap();
+        }
+        session.task_mut("one").unwrap().disconnect().unwrap();
+        assert!(matches!(
+            controller.reconnect(&mut session, &TaskId::new("one")),
+            Err(TaskControllerError::CapacityReached)
+        ));
+        assert_eq!(
+            session.task("one").unwrap().connection,
+            ConnectionState::Disconnected
+        );
+        barrier.wait();
+    }
+
+    #[test]
+    fn retry_and_bounded_context_use_a_new_request_id() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider_seen = Arc::clone(&seen);
+        let config = TaskControllerConfig {
+            workers: 1,
+            max_context_entries: 2,
+            max_context_chars: 9,
+        };
+        let controller = TaskController::with_config(
+            move |request, _| {
+                provider_seen.lock().unwrap().push(request.clone());
+                Err("failure".to_string())
+            },
+            config,
+        )
+        .unwrap();
+        let mut session = session(&["one"]);
+        session.switch_task("one").unwrap();
+        session.append_reply("abcdefgh").unwrap();
+        session.append_reply("ijklmnop").unwrap();
+        let first = controller.send(&session, &TaskId::new("one")).unwrap();
+        wait_for(&controller, &mut session);
+        let second = controller.retry(&mut session, &TaskId::new("one")).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(session.task("one").unwrap().metrics.retry_count, 1);
+        wait_for(&controller, &mut session);
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests[0].context.len(), 2);
+        assert!(
+            requests[0]
+                .context
+                .iter()
+                .map(|entry| entry.text.chars().count())
+                .sum::<usize>()
+                <= 9
+        );
+        assert_eq!(
+            controller
+                .snapshot(&TaskId::new("one"))
+                .unwrap()
+                .retry_count,
+            1
+        );
+    }
+
+    #[test]
+    fn invalid_provider_metadata_does_not_publish_a_partial_reply() {
+        let controller = TaskController::new(|_, _| {
+            let mut reply = ProviderReply::new("must not be published");
+            reply.provider.provider = Some(String::new());
+            reply.usage.estimated_cost_micros = 100;
+            Ok(reply)
+        });
+        let mut session = session(&["one"]);
+        let before = session.task("one").unwrap().clone();
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        let events = wait_for(&controller, &mut session);
+        assert!(matches!(&events[0], TaskControllerEvent::Failed { .. }));
+        assert_eq!(session.task("one").unwrap(), &before);
+    }
+
+    #[test]
+    fn callback_panic_settles_as_safe_failure() {
+        let controller =
+            TaskController::new(|_, _| -> Result<ProviderReply, String> { panic!("secret panic") });
+        let mut session = session(&["one"]);
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        let events = wait_for(&controller, &mut session);
+        assert!(
+            matches!(&events[0], TaskControllerEvent::Failed { message, .. } if message == SAFE_PROVIDER_ERROR)
+        );
+    }
+}

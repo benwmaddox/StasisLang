@@ -10,11 +10,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod openrouter;
+pub mod task_controller;
 pub mod task_session;
 
 pub use openrouter::{
     ConfiguredProvider, OpenRouterConfig, OpenRouterProvider, PreferredThroughputPolicy,
     ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+};
+
+pub use task_controller::{
+    ProviderReply, ProviderRequest, ProviderUsage, RequestId, TaskController, TaskControllerConfig,
+    TaskControllerError, TaskControllerEvent, TaskRequestSnapshot, TaskRequestState,
 };
 
 pub use task_session::{

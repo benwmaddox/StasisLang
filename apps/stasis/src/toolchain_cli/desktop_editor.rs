@@ -1,7 +1,13 @@
 use eframe::egui::{self, Color32, RichText};
+use serde_json::{json, Value};
 use stasis_ai::task_session::{
-    ActionState, Key, KeyChord, Modifiers, ShortcutMapper, TaskSession, TaskSessionCommand,
-    ThreadEntryKind,
+    ActionState, FallbackState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
+    ShortcutMapper, TaskId, TaskSession, TaskSessionCommand, ThreadEntryKind,
+};
+use stasis_ai::{
+    run_agent_with_profile, AgentEvent, AgentProfile, ProviderConfig, ProviderReply,
+    ProviderRequest, ProviderUsage, TaskController, TaskControllerEvent, ToolCall, ToolExecutor,
+    ToolObservation,
 };
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveSessionClient};
 use std::path::PathBuf;
@@ -18,6 +24,199 @@ enum FocusArea {
 }
 const EMPTY_TASK: &str = "Create a task";
 
+struct ReplyOnlyTools;
+
+impl ToolExecutor for ReplyOnlyTools {
+    fn execute(&mut self, calls: &[ToolCall], _canceled: &AtomicBool) -> Vec<ToolObservation> {
+        calls
+            .iter()
+            .map(|call| ToolObservation::error(&call.tool, "desktop chat is reply-only"))
+            .collect()
+    }
+}
+
+fn bounded_provider_label(value: Option<&str>, fallback: &str) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback)
+        .chars()
+        .take(96)
+        .collect()
+}
+
+fn usage_u64(usage: &Value, pointers: &[&str]) -> u64 {
+    pointers
+        .iter()
+        .find_map(|pointer| usage.pointer(pointer).and_then(Value::as_u64))
+        .unwrap_or(0)
+}
+
+fn configured_provider_state(config: &ProviderConfig) -> ProviderState {
+    let (route, fallback) = match config {
+        ProviderConfig::Codex => ("direct".to_string(), FallbackState::Unconfigured),
+        ProviderConfig::OpenRouter(openrouter) => {
+            let route = if !openrouter.routing.only.is_empty() {
+                format!("only:{}", openrouter.routing.only.join(","))
+            } else if !openrouter.routing.order.is_empty() {
+                format!("order:{}", openrouter.routing.order.join(","))
+            } else {
+                format!("openrouter:{:?}", openrouter.routing.sort).to_ascii_lowercase()
+            };
+            let fallback = if openrouter.routing.allow_fallbacks {
+                FallbackState::Ready {
+                    provider: "openrouter".to_string(),
+                    model: Some(bounded_provider_label(
+                        Some(&openrouter.model),
+                        "configured",
+                    )),
+                    route: Some(bounded_provider_label(Some(&route), "openrouter")),
+                }
+            } else {
+                FallbackState::Unconfigured
+            };
+            (route, fallback)
+        }
+    };
+    ProviderState {
+        provider: Some(config.provider_name().to_string()),
+        model: Some(bounded_provider_label(Some(&config.model()), "configured")),
+        routing: RoutingState::Assigned {
+            route: bounded_provider_label(Some(&route), "direct"),
+        },
+        fallback,
+    }
+}
+
+fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> ProviderState {
+    let provider = bounded_provider_label(
+        usage
+            .and_then(|value| value.get("resolved_provider"))
+            .and_then(Value::as_str),
+        config.provider_name(),
+    );
+    let model = bounded_provider_label(
+        usage
+            .and_then(|value| value.get("resolved_model"))
+            .and_then(Value::as_str),
+        &config.model(),
+    );
+    let route = match usage.and_then(|value| value.get("route")) {
+        Some(Value::String(route)) => bounded_provider_label(Some(route), "direct"),
+        Some(Value::Object(_)) => bounded_provider_label(
+            Some(&format!("{}:{provider}", config.provider_name())),
+            "direct",
+        ),
+        _ => {
+            let RoutingState::Assigned { route } = configured_provider_state(config).routing else {
+                unreachable!("configured provider route is always assigned")
+            };
+            route
+        }
+    };
+    let fallback = if usage
+        .and_then(|value| value.get("fallback"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        FallbackState::Active {
+            provider: provider.clone(),
+            model: Some(model.clone()),
+            route: Some(route.clone()),
+        }
+    } else {
+        configured_provider_state(config).fallback
+    };
+    ProviderState {
+        provider: Some(provider),
+        model: Some(model),
+        routing: RoutingState::Assigned { route },
+        fallback,
+    }
+}
+
+fn provider_reply_usage(usage: Option<&Value>) -> ProviderUsage {
+    let input_tokens = usage
+        .map(|value| {
+            usage_u64(
+                value,
+                &["/tokens/input_tokens", "/tokens/prompt", "/input_tokens"],
+            )
+        })
+        .unwrap_or(0);
+    let output_tokens = usage
+        .map(|value| {
+            usage_u64(
+                value,
+                &[
+                    "/tokens/output_tokens",
+                    "/tokens/completion",
+                    "/output_tokens",
+                ],
+            )
+        })
+        .unwrap_or(0);
+    let estimated_cost_micros = usage
+        .and_then(|value| value.get("cost"))
+        .and_then(Value::as_f64)
+        .filter(|cost| cost.is_finite() && *cost > 0.0)
+        .map(|cost| (cost * 1_000_000.0).round() as u64)
+        .unwrap_or(0);
+    ProviderUsage {
+        input_tokens,
+        output_tokens,
+        estimated_cost_micros,
+    }
+}
+
+fn run_reply_provider(
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+) -> Result<ProviderReply, String> {
+    let config = ProviderConfig::from_env()?;
+    let mut provider = config.clone().build()?;
+    let prompt = request
+        .context
+        .last()
+        .map(|entry| entry.text.trim())
+        .filter(|text| !text.is_empty())
+        .unwrap_or(request.objective.as_str())
+        .to_string();
+    let initial_context = json!({
+        "task_id": request.task_id,
+        "objective": request.objective,
+        "project_summary": request.project_summary,
+        "relevant_files": request.relevant_files,
+        "relevant_symbols": request.relevant_symbols,
+        "relevant_tests": request.relevant_tests,
+        "thread": request.context,
+    });
+    let profile = AgentProfile {
+        role: "Stasis desktop task assistant".to_string(),
+        instruction: "Answer the user's task-scoped message. Do not edit files or claim that actions were executed. Keep the response concise and self-contained.".to_string(),
+        max_turns: 1,
+        ..AgentProfile::default()
+    };
+    let mut usage = None;
+    let text = run_agent_with_profile(
+        &mut provider,
+        &mut ReplyOnlyTools,
+        &profile,
+        &prompt,
+        initial_context,
+        Vec::new(),
+        &canceled,
+        |event| {
+            if let AgentEvent::ProviderUsage(value) = event {
+                usage = Some(value);
+            }
+        },
+    )?;
+    let mut reply = ProviderReply::new(text);
+    reply.provider = provider_reply_state(&config, usage.as_ref());
+    reply.usage = provider_reply_usage(usage.as_ref());
+    Ok(reply)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorIntent {
     SendReply(String, String),
@@ -27,14 +226,15 @@ enum EditorIntent {
     GenerateImage(String),
     ImportImage(String, String),
     Cancel(String),
+    Retry(String),
     Reconnect(String),
 }
 
 struct DesktopEditor {
     state: EditorState,
+    controller: TaskController,
     client: LiveSessionClient,
     project_root: PathBuf,
-    next_request: u64,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -42,9 +242,9 @@ impl DesktopEditor {
     fn new(client: LiveSessionClient, project_root: PathBuf, shutdown: Arc<AtomicBool>) -> Self {
         Self {
             state: EditorState::default(),
+            controller: TaskController::new(run_reply_provider),
             client,
             project_root,
-            next_request: 1,
             shutdown,
         }
     }
@@ -68,18 +268,82 @@ impl DesktopEditor {
         let mut pending = Vec::with_capacity(intents.len());
         for intent in intents {
             match intent {
+                EditorIntent::SendReply(task, text) => {
+                    let task = TaskId::new(task);
+                    let mut candidate = self.state.session.clone();
+                    let accepted = candidate
+                        .task_mut(&task)
+                        .and_then(|task| task.append_reply(&text))
+                        .map_err(|error| error.to_string())
+                        .and_then(|()| {
+                            if let Ok(config) = ProviderConfig::from_env() {
+                                candidate
+                                    .task_mut(&task)
+                                    .and_then(|task| {
+                                        task.set_provider_state(configured_provider_state(&config))
+                                    })
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            Ok(())
+                        })
+                        .and_then(|()| {
+                            self.controller
+                                .send(&candidate, &task)
+                                .map_err(|error| error.to_string())
+                        });
+                    match accepted {
+                        Ok(_) => self.state.session = candidate,
+                        Err(error) => {
+                            if self.state.session.active_task_id() == Some(&task)
+                                && self.state.reply.is_empty()
+                            {
+                                self.state.reply = text;
+                            }
+                            self.state.notice = Some(error);
+                        }
+                    }
+                }
+                EditorIntent::Retry(task) => {
+                    let task = TaskId::new(task);
+                    if let Err(error) = self.controller.retry(&mut self.state.session, &task) {
+                        self.state.notice = Some(error.to_string());
+                    }
+                }
+                EditorIntent::Cancel(task) => {
+                    let task = TaskId::new(task);
+                    if let Err(error) = self.controller.cancel(&mut self.state.session, &task) {
+                        self.state.notice = Some(error.to_string());
+                    }
+                }
                 EditorIntent::Reconnect(task) => {
-                    let request = LiveRequest::new(self.next_request, LiveCommand::Status);
-                    self.next_request = self.next_request.saturating_add(1);
-                    if let Err(error) = self.client.submit(request) {
-                        self.state.notice = Some(error);
-                        pending.push(EditorIntent::Reconnect(task));
+                    let task = TaskId::new(task);
+                    if let Err(error) = self.controller.reconnect(&mut self.state.session, &task) {
+                        self.state.notice = Some(error.to_string());
                     }
                 }
                 intent => pending.push(intent),
             }
         }
         self.state.intents = pending;
+    }
+
+    fn poll_controller(&mut self) {
+        for event in self.controller.poll(&mut self.state.session) {
+            self.state.notice = match event {
+                TaskControllerEvent::Completed { task_id, .. } => {
+                    Some(format!("AI reply completed for {task_id}"))
+                }
+                TaskControllerEvent::Failed {
+                    task_id, message, ..
+                } => Some(format!("AI reply failed for {task_id}: {message}")),
+                TaskControllerEvent::Canceled { task_id, .. } => {
+                    Some(format!("AI reply canceled for {task_id}"))
+                }
+                TaskControllerEvent::Stale { task_id, .. } => {
+                    Some(format!("Ignored an obsolete AI reply for {task_id}"))
+                }
+            };
+        }
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -119,8 +383,18 @@ impl DesktopEditor {
             })
             .collect::<Vec<_>>();
         for (id, objective, lifecycle, connection, elapsed, cost, retries) in cards {
-            let label = format!("{objective}\n{lifecycle:?} | {connection:?} | {elapsed}ms | ${:.4} | retry {retries}",
-                cost as f64 / 1_000_000.0);
+            let request = self.controller.snapshot(&TaskId::new(&id));
+            let request_status = request
+                .as_ref()
+                .map(|snapshot| format!(" | {:?}", snapshot.state))
+                .unwrap_or_default();
+            let retries = request
+                .as_ref()
+                .map_or(retries, |snapshot| snapshot.retry_count);
+            let label = format!(
+                "{objective}\n{lifecycle:?} | {connection:?}{request_status} | {elapsed}ms | ${:.4} | retry {retries}",
+                cost as f64 / 1_000_000.0
+            );
             if ui
                 .selectable_label(active.as_deref() == Some(&id), label)
                 .clicked()
@@ -289,9 +563,6 @@ impl EditorState {
                 if text.is_empty() {
                     return Err("Reply is empty.".into());
                 }
-                self.session
-                    .append_reply(&text)
-                    .map_err(|e| e.to_string())?;
                 self.intents.push(EditorIntent::SendReply(task, text));
                 self.reply.clear();
                 Ok(())
@@ -328,7 +599,11 @@ impl EditorState {
                 self.intents.push(EditorIntent::Test(task));
                 Ok(())
             }
-            TaskSessionCommand::Retry => self.session.retry().map_err(|e| e.to_string()),
+            TaskSessionCommand::Retry => {
+                let task = self.active_id()?;
+                self.intents.push(EditorIntent::Retry(task));
+                Ok(())
+            }
             TaskSessionCommand::AttachScreenshot => {
                 let task = self.active_id()?;
                 self.intents.push(EditorIntent::Screenshot(task));
@@ -354,13 +629,11 @@ impl EditorState {
             TaskSessionCommand::MarkDone => self.session.mark_done().map_err(|e| e.to_string()),
             TaskSessionCommand::Cancel => {
                 let task = self.active_id()?;
-                self.session.cancel().map_err(|e| e.to_string())?;
                 self.intents.push(EditorIntent::Cancel(task));
                 Ok(())
             }
             TaskSessionCommand::Reconnect => {
                 let task = self.active_id()?;
-                self.session.reconnect().map_err(|e| e.to_string())?;
                 self.intents.push(EditorIntent::Reconnect(task));
                 Ok(())
             }
@@ -440,6 +713,28 @@ impl DesktopEditor {
             task.provider.routing,
             task.provider.fallback
         ));
+        ui.label(format!(
+            "{}ms | {} input / {} output tokens | ${:.4} | {} retries",
+            task.metrics.elapsed_ms,
+            task.metrics.input_tokens,
+            task.metrics.output_tokens,
+            task.metrics.estimated_cost_micros as f64 / 1_000_000.0,
+            task.metrics.retry_count,
+        ));
+        if let Some(request) = self.controller.snapshot(&task.id) {
+            ui.label(format!(
+                "Request {} | {:?} | {}ms | retry {}{}",
+                request.request_id.get(),
+                request.state,
+                request.elapsed_ms,
+                request.retry_count,
+                request
+                    .error
+                    .as_deref()
+                    .map(|error| format!(" | {error}"))
+                    .unwrap_or_default(),
+            ));
+        }
         ui.separator();
         egui::ScrollArea::vertical()
             .id_source("task-thread")
@@ -477,6 +772,9 @@ impl DesktopEditor {
                 ("Accept  Ctrl+Y", TaskSessionCommand::AcceptAction),
                 ("Apply  Ctrl+Alt+Enter", TaskSessionCommand::ApplyAction),
                 ("Test  Ctrl+T", TaskSessionCommand::RunFocusedTests),
+                ("Retry  Ctrl+R", TaskSessionCommand::Retry),
+                ("Cancel  Ctrl+Esc", TaskSessionCommand::Cancel),
+                ("Reconnect  Ctrl+Shift+R", TaskSessionCommand::Reconnect),
                 ("Done  Ctrl+Shift+D", TaskSessionCommand::MarkDone),
             ] {
                 if ui.button(label).clicked() {
@@ -558,6 +856,7 @@ impl eframe::App for DesktopEditor {
             return;
         }
         context.request_repaint_after(Duration::from_millis(100));
+        self.poll_controller();
         self.process_shortcuts(context);
         egui::TopBottomPanel::top("top-bar").show(context, |ui| {
             ui.horizontal(|ui| {
@@ -634,6 +933,7 @@ mod tests {
         ConnectionState, FocusedTestResult, TaskLifecycle, ValidationStatus,
     };
     use stasis_runner::live::live_session;
+    use std::sync::Barrier;
 
     fn task_state() -> EditorState {
         let mut state = EditorState::default();
@@ -664,21 +964,20 @@ mod tests {
     }
 
     #[test]
-    fn independent_tasks_keep_replies_scoped() {
+    fn independent_tasks_keep_queued_replies_scoped() {
         let mut state = task_state();
         state.reply = "First reply".into();
         state.handle(TaskSessionCommand::SendReply).unwrap();
-        let first = state.active_id().unwrap();
         state.objective = "Change enemy art".into();
         state.create_task().unwrap();
         state.reply = "Second reply".into();
         state.handle(TaskSessionCommand::SendReply).unwrap();
-        assert_eq!(state.session.active_task().unwrap().thread.len(), 1);
-        state.session.switch_task(first).unwrap();
-        assert_eq!(
-            state.session.active_task().unwrap().thread[0].text,
-            "First reply"
-        );
+        assert!(matches!(
+            state.intents.as_slice(),
+            [EditorIntent::SendReply(first, first_text), EditorIntent::SendReply(second, second_text)]
+                if first == "task-1" && first_text == "First reply"
+                    && second == "task-2" && second_text == "Second reply"
+        ));
     }
 
     #[test]
@@ -723,13 +1022,13 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_cancel_and_completion_follow_task_state() {
+    fn reconnect_and_cancel_commands_target_the_active_task() {
         let mut state = task_state();
         state.session.disconnect().unwrap();
         state.handle(TaskSessionCommand::Reconnect).unwrap();
         assert!(matches!(
-            state.session.active_task().unwrap().connection,
-            ConnectionState::Connected
+            state.intents.last(),
+            Some(EditorIntent::Reconnect(task)) if task == "task-1"
         ));
         state.session.begin_focused_tests().unwrap();
         state
@@ -745,8 +1044,8 @@ mod tests {
         state.create_task().unwrap();
         state.handle(TaskSessionCommand::Cancel).unwrap();
         assert!(matches!(
-            state.session.active_task().unwrap().lifecycle,
-            TaskLifecycle::Canceled
+            state.intents.last(),
+            Some(EditorIntent::Cancel(task)) if task == "task-2"
         ));
     }
 
@@ -775,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_removes_reconnect_after_status_submission() {
+    fn reconnect_without_a_request_preserves_disconnected_state() {
         let (client, server) = live_session(4);
         let mut editor =
             DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
@@ -787,17 +1086,81 @@ mod tests {
         editor.flush_intents();
 
         assert!(editor.state.intents.is_empty());
-        let requests = server.drain(4);
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].command, LiveCommand::Status);
+        assert!(matches!(
+            editor.state.session.active_task().unwrap().connection,
+            ConnectionState::Disconnected
+        ));
+        assert!(editor
+            .state
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("no AI request"));
+        assert!(server.drain(4).is_empty());
     }
 
     #[test]
-    fn flush_keeps_reconnect_when_status_submission_fails() {
+    fn provider_usage_reads_both_supported_transport_shapes() {
+        let openrouter = serde_json::json!({
+            "tokens": {"prompt": 12, "completion": 7},
+            "cost": 0.00125
+        });
+        assert_eq!(
+            provider_reply_usage(Some(&openrouter)),
+            ProviderUsage {
+                input_tokens: 12,
+                output_tokens: 7,
+                estimated_cost_micros: 1_250,
+            }
+        );
+        let codex = serde_json::json!({
+            "tokens": {"input_tokens": 20, "output_tokens": 5}
+        });
+        assert_eq!(provider_reply_usage(Some(&codex)).input_tokens, 20);
+        assert_eq!(provider_reply_usage(Some(&codex)).output_tokens, 5);
+        let codex_state = provider_reply_state(
+            &ProviderConfig::Codex,
+            Some(&serde_json::json!({
+                "resolved_provider": "installed_codex_subscription",
+                "resolved_model": "test-model",
+                "route": "direct"
+            })),
+        );
+        assert!(matches!(
+            codex_state.routing,
+            RoutingState::Assigned { route } if route == "direct"
+        ));
+    }
+
+    #[test]
+    fn openrouter_response_displays_the_resolved_route_without_raw_route_json() {
+        let config = ProviderConfig::OpenRouter(stasis_ai::OpenRouterConfig {
+            api_key: "test-only".into(),
+            base_url: "https://example.invalid".into(),
+            model: "example/model".into(),
+            routing: stasis_ai::RoutingConfig::default(),
+            timeout: Duration::from_secs(1),
+        });
+        let usage = serde_json::json!({
+            "resolved_provider": "cerebras",
+            "resolved_model": "example/model",
+            "route": {"sort": "throughput", "allow_fallbacks": true},
+            "fallback": true
+        });
+
+        let state = provider_reply_state(&config, Some(&usage));
+
+        assert_eq!(state.provider.as_deref(), Some("cerebras"));
+        assert!(matches!(
+            state.routing,
+            RoutingState::Assigned { route } if route == "openrouter:cerebras"
+        ));
+        assert!(matches!(state.fallback, FallbackState::Active { .. }));
+    }
+
+    #[test]
+    fn flush_does_not_send_reconnect_to_the_live_game_queue() {
         let (client, server) = live_session(1);
-        client
-            .submit(LiveRequest::new(99, LiveCommand::Status))
-            .unwrap();
         let mut editor =
             DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
         editor.state.objective = "Reconnect task".into();
@@ -807,15 +1170,39 @@ mod tests {
 
         editor.flush_intents();
 
-        assert!(matches!(
-            editor.state.intents.as_slice(),
-            [EditorIntent::Reconnect(task)] if task == "task-1"
-        ));
-        assert_eq!(
-            editor.state.notice.as_deref(),
-            Some("live-session command queue is full")
-        );
-        assert_eq!(server.drain(1).len(), 1);
+        assert!(editor.state.intents.is_empty());
+        assert!(server.drain(1).is_empty());
+    }
+
+    #[test]
+    fn busy_task_restores_the_unsent_reply_draft() {
+        let (client, _server) = live_session(1);
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.controller = TaskController::new(move |_, _| {
+            worker_barrier.wait();
+            Ok(ProviderReply::new("finished"))
+        });
+        editor.state.objective = "Busy task".into();
+        editor.state.create_task().unwrap();
+        editor.state.reply = "first".into();
+        editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+        editor.flush_intents();
+        editor.state.reply = "keep this draft".into();
+        editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+
+        editor.flush_intents();
+
+        assert_eq!(editor.state.reply, "keep this draft");
+        assert_eq!(editor.state.session.active_task().unwrap().thread.len(), 1);
+        assert!(editor
+            .state
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("already has an AI request")));
+        barrier.wait();
     }
 
     fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {

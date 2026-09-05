@@ -70,6 +70,29 @@ python tools/cargo_cache.py run -- cargo run -p stasis_ai --example openrouter_c
 
 This evaluation is paid and mutates the named project; it is never run by normal tests. A successful provider transport is not code-validity success: the command succeeds only after the host reports its tested atomic-write receipt. Inspect the disposable project and `build/ai-traces/*.jsonl` plus `*.usage.jsonl`. Neither credentialed evaluation has been run as part of repository validation. If any action ID or arguments are invalid, the host executes none of that batch, retains every selection in the transcript, and asks the model to replace only the rejected IDs.
 
+## Desktop task replies
+
+The desktop editor sends replies through the UI-neutral `stasis_ai::task_controller`
+controller. Each request captures bounded context from one task and carries an
+immutable task ID and request ID. Switching the selected task never changes the
+destination of an in-flight reply. Provider work runs off the UI thread; polling
+only collects completed work. Reply requests offer no editing tools.
+
+Cancellation and reconnect invalidate the old request before another response can
+be accepted. A late response cannot append to the thread or update its metrics.
+Retry is a provider operation and does not reset focused-test validation. Worker
+capacity includes canceled calls until they exit, so repeated cancellation cannot
+create an unbounded number of background workers. Provider failures use a safe
+display message rather than forwarding transport errors or credentials.
+
+Live-session client clones have separate response ownership. Caller request IDs
+are local to each clone; the session assigns wire IDs and restores the caller ID
+only when delivering to its owner. Ownership survives `edit_preparing` and
+`completion_preparing` progress messages until the final reply, so cancellation
+can still target a preparing edit.
+Existing request validation, bounded output,
+queue backpressure, and host execution gates still apply.
+
 ## Security
 
 Keep `OPENROUTER_API_KEY` only in the process environment or a secret manager. Never place it in prompts, project files, command transcripts, or bug reports. Stasis uses the key only as the Authorization header and sanitizes transport errors; audit logs omit provider envelopes and credentials. Treat prompts, source, tool observations, and model output as data sent to the selected provider. Review provider retention and privacy terms before enabling a remote transport.
