@@ -224,7 +224,7 @@ in Maddox Tasks as Backlog children of the integration-test program.
 | IT-007 | 2 | Resize across odd, fractional, minimized, and restored drawable sizes and round-trip metrics through HostFrame and gfx metadata. | Dimensions, generations, pointer transform | Native |
 | IT-008 | 1 | Load a manifest sprite, font, and cached text from Stasis and render them through the real desktop runtime. | Asset identities, handles, trace, named pixel regions | Native |
 | IT-009 | 2 | Submit bad magic/version/count/text/order frames between valid frames and prove rejection does not poison the next frame. | Structured rejection followed by valid trace | Native |
-| IT-010 | 1 | Compile a live tick/render edit while frames run and prove one frame window never mixes entry-table generations. | Per-frame generation and trace pairs | Native |
+| IT-010 | 1 | Compile a live tick/render edit while frames run and prove one frame window never mixes entry-table generations. | Per-frame generation and guest trace pairs; edit-local rejection logs and post-rejection frames, independent of watcher event counts | Native |
 | IT-011 | 1 | Replay identical host snapshots through JIT and linked AOT and compare state checksum, entry results, and command trace at every tick. | Per-tick parity record | Native |
 
 ### Generated AOT and shared mobile runtime

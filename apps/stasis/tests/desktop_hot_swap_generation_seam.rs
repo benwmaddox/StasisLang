@@ -17,7 +17,6 @@ const REJECT: &str =
     include_str!("../../../tests/stasis/seams/desktop_hot_swap_generation_reject.stasis");
 const PUBLIC_GRAPHICS_IMPORT: &str =
     "import \"/.stasis_cache/toolchain/src/stdlib/graphics.stasis\";";
-const COMPILE_REJECTED_SWAP_REVISION: u64 = 2;
 
 #[derive(Clone, Debug, Deserialize)]
 struct FrameEvidence {
@@ -140,6 +139,48 @@ fn aborted_swap_revision_after(log: &str, minimum_revision: u64) -> Option<u64> 
         .max()
 }
 
+fn rejection_revision(log: &str, hook_abort: bool) -> Option<u64> {
+    if hook_abort {
+        return aborted_swap_revision_after(log, 0);
+    }
+    log.lines()
+        .filter_map(|line| {
+            let remainder = line.trim().strip_prefix("[swap] revision ")?;
+            let (revision, reason) = remainder.split_once(" rejected: ")?;
+            if reason.is_empty() {
+                return None;
+            }
+            revision.parse::<u64>().ok()
+        })
+        .max()
+}
+
+fn published_edit_frames(frames: &[FrameEvidence], old_trace: u32) -> bool {
+    frames.len() >= 8
+        && frames
+            .iter()
+            .rev()
+            .take(8)
+            .all(|frame| frame.entry_revision > 1 && frame.guest_trace != old_trace)
+}
+
+fn preserved_edit_frames(
+    frames: &[FrameEvidence],
+    after_frame: u64,
+    revision: u64,
+    trace: u32,
+) -> bool {
+    frames
+        .iter()
+        .filter(|frame| frame.frame > after_frame)
+        .count()
+        >= 8
+        && frames
+            .iter()
+            .filter(|frame| frame.frame > after_frame)
+            .all(|frame| frame.entry_revision == revision && frame.guest_trace == trace)
+}
+
 fn wait_for(
     description: &str,
     child: &mut Child,
@@ -186,7 +227,7 @@ fn frame_generation_error(frame: &FrameEvidence, v1_trace: u32, v2_trace: u32) -
     }
     let expected_guest_trace = match frame.entry_revision {
         1 => v1_trace,
-        2 => v2_trace,
+        2.. => v2_trace,
         revision => return Some(format!("unexpected entry revision {revision}")),
     };
     (frame.guest_trace != expected_guest_trace).then(|| {
@@ -222,7 +263,7 @@ fn aborted_swap_revision_parser_is_strict_and_tolerates_superseded_events() {
     assert_eq!(
         aborted_swap_revision_after(
             "[swap] revision 2 rejected: compile failure\n[swap] revision 3 aborted: hook requested rejection\n",
-            COMPILE_REJECTED_SWAP_REVISION,
+            2,
         ),
         Some(3)
     );
@@ -231,10 +272,7 @@ fn aborted_swap_revision_parser_is_strict_and_tolerates_superseded_events() {
 [swap] revision 4 queued, superseding in-flight revision 3\n\
 [swap] revision 3 discarded as superseded\n\
 [swap] revision 4 aborted (compile=6ms package=0ms commit=251ms): hook requested rejection\n";
-    assert_eq!(
-        aborted_swap_revision_after(superseded, COMPILE_REJECTED_SWAP_REVISION),
-        Some(4)
-    );
+    assert_eq!(aborted_swap_revision_after(superseded, 2), Some(4));
 
     for malformed in [
         "aborted",
@@ -250,11 +288,59 @@ fn aborted_swap_revision_parser_is_strict_and_tolerates_superseded_events() {
         "[swap] revision 4 aborted later",
     ] {
         assert_eq!(
-            aborted_swap_revision_after(malformed, COMPILE_REJECTED_SWAP_REVISION),
+            aborted_swap_revision_after(malformed, 2),
             None,
             "malformed log must not satisfy hook abort: {malformed}"
         );
     }
+}
+
+#[test]
+fn duplicate_watch_events_do_not_control_generation_waits() {
+    let log = "[watch] queued revision 1\n[watch] queued revision 2\n\
+[watch] discarded superseded revision 1 (latest 2)\n\
+[swap] revision 2 published re_jit=2 reused=0\n";
+    let mut frames = (1..=8)
+        .map(|frame| FrameEvidence {
+            frame,
+            entry_revision: if frame < 5 { 2 } else { 3 },
+            accepted: 3,
+            rejected: 0,
+            presented: 3,
+            validation: 0,
+            guest_trace: 222,
+            trace: 999,
+        })
+        .collect::<Vec<_>>();
+    assert!(!log.contains("[swap] revision 1 published"));
+    assert!(published_edit_frames(&frames, 111));
+    assert!(frames
+        .iter()
+        .all(|frame| frame_generation_error(frame, 111, 222).is_none()));
+    assert!(!preserved_edit_frames(&frames, 8, 3, 222));
+    for frame in 9..=16 {
+        let mut next = frames.last().unwrap().clone();
+        next.frame = frame;
+        frames.push(next);
+    }
+    assert!(preserved_edit_frames(&frames, 8, 3, 222));
+    frames.last_mut().unwrap().entry_revision = 4;
+    assert!(!preserved_edit_frames(&frames, 8, 3, 222));
+    frames.last_mut().unwrap().entry_revision = 3;
+    frames.last_mut().unwrap().guest_trace = 333;
+    assert!(!preserved_edit_frames(&frames, 8, 3, 222));
+    let rejected = "[watch] discarded superseded revision 3 (latest 5)\n\
+[swap] revision 5 rejected: parse error\n";
+    assert_eq!(rejection_revision(log, false), None);
+    assert_eq!(rejection_revision(rejected, false), Some(5));
+    assert_eq!(rejection_revision(rejected, true), None);
+    assert_eq!(
+        rejection_revision(
+            "[swap] revision 8 aborted (compile=6ms): hook requested rejection\n",
+            true
+        ),
+        Some(8)
+    );
 }
 
 #[test]
@@ -321,59 +407,49 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
         &mut child,
         &log_path,
         &frames_path,
-        |log, frames| {
-            log.contains("[swap] revision 1 published")
-                && frames
-                    .iter()
-                    .filter(|frame| frame.entry_revision == 2)
-                    .count()
-                    >= 8
-        },
+        |_, frames| published_edit_frames(frames, v1_trace),
     );
-    let v2_trace = sole_trace(&v2_frames, 2);
+    let v2_trace = v2_frames.last().expect("v2 frame").guest_trace;
     assert_ne!(
         v2_trace, v1_trace,
         "the accepted edit must change the frame"
     );
 
-    fs::write(&source, INVALID).expect("write malformed source");
-    let (_, after_compile_failure) = wait_for(
-        "compile rejection and continued v2 frames",
-        &mut child,
-        &log_path,
-        &frames_path,
-        |log, frames| {
-            log.contains("[swap] revision 2 rejected")
-                && frames
-                    .iter()
-                    .rev()
-                    .take(8)
-                    .all(|frame| frame.entry_revision == 2 && frame.guest_trace == v2_trace)
-        },
-    );
-    let failure_frame = after_compile_failure.last().expect("failure frame").frame;
-
-    fs::write(&source, REJECT).expect("write hook-rejecting source");
-    let (final_log, final_frames) = wait_for(
-        "on_code_swap abort and continued v2 frames",
-        &mut child,
-        &log_path,
-        &frames_path,
-        |log, frames| {
-            aborted_swap_revision_after(log, COMPILE_REJECTED_SWAP_REVISION).is_some()
-                && frames
-                    .last()
-                    .is_some_and(|frame| frame.frame >= failure_frame + 8)
-                && frames
-                    .iter()
-                    .rev()
-                    .take(8)
-                    .all(|frame| frame.entry_revision == 2 && frame.guest_trace == v2_trace)
-        },
-    );
-    let hook_rejection_revision =
-        aborted_swap_revision_after(&final_log, COMPILE_REJECTED_SWAP_REVISION)
-            .expect("later hook-aborted swap revision");
+    let mut rejection_revisions = Vec::new();
+    let mut preserved_revisions = Vec::new();
+    let mut final_log = String::new();
+    let mut final_frames = Vec::new();
+    for (fixture, hook_abort) in [(INVALID, false), (REJECT, true)] {
+        // A stage-local log suffix excludes earlier failures without assuming event counts.
+        let log_start = read_log(&log_path).len();
+        fs::write(&source, fixture).expect("write rejecting source");
+        let (log, frames) = wait_for(
+            "edit rejection",
+            &mut child,
+            &log_path,
+            &frames_path,
+            |log, _| {
+                rejection_revision(log.get(log_start..).unwrap_or_default(), hook_abort).is_some()
+            },
+        );
+        rejection_revisions.push(
+            rejection_revision(log.get(log_start..).unwrap_or_default(), hook_abort)
+                .expect("observed rejection"),
+        );
+        let rejection_frame = frames.last().expect("frame at rejection");
+        let preserved_revision = rejection_frame.entry_revision;
+        preserved_revisions.push(preserved_revision);
+        let rejection_frame = rejection_frame.frame;
+        (final_log, final_frames) = wait_for(
+            "eight preserved v2 frames after rejection",
+            &mut child,
+            &log_path,
+            &frames_path,
+            |_, frames| {
+                preserved_edit_frames(frames, rejection_frame, preserved_revision, v2_trace)
+            },
+        );
+    }
 
     child.kill().expect("stop completed seam runner");
     let _ = child.wait().expect("reap seam runner");
@@ -407,13 +483,18 @@ fn desktop_watch_frames_never_mix_tick_and_render_generations() {
         "status": "passed",
         "target": "windows-sdl-native-jit-watch",
         "frames": final_frames.len(),
-        "entry_trace_pairs": [
-            {"entry_revision": 1, "trace": v1_trace},
-            {"entry_revision": 2, "trace": v2_trace}
-        ],
-        "compile_failure_preserved_revision": COMPILE_REJECTED_SWAP_REVISION,
-        "hook_rejection_revision": hook_rejection_revision,
-        "hook_rejection_preserved_revision": 2,
+        "entry_trace_pairs": final_frames.iter()
+            .map(|frame| (frame.entry_revision, frame.guest_trace))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|(revision, trace)| json!({"entry_revision": revision, "trace": trace}))
+            .collect::<Vec<_>>(),
+        "compile_rejection_watch_revision": rejection_revisions[0],
+        "compile_failure_preserved_trace": v2_trace,
+        "compile_failure_preserved_revision": preserved_revisions[0],
+        "hook_rejection_watch_revision": rejection_revisions[1],
+        "hook_rejection_preserved_trace": v2_trace,
+        "hook_rejection_preserved_revision": preserved_revisions[1],
         "oracle": {"mixed_generation_frames": 0, "source_frames": frame_evidence_path}
     });
     let evidence_path = evidence_dir.join("it-010-desktop-hot-swap-generations.json");
