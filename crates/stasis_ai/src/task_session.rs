@@ -16,6 +16,7 @@ pub const MAX_THREAD_TEXT_CHARS: usize = 4_096;
 pub const MAX_ACTIONS: usize = 64;
 pub const MAX_ACTION_TEXT_CHARS: usize = 1_024;
 pub const MAX_ACTION_REVISIONS: usize = 16;
+pub const MAX_ACTION_PAYLOAD_BYTES: usize = 256 * 1024;
 pub const MAX_SCREENSHOTS: usize = 16;
 pub const MAX_IMAGES: usize = 16;
 pub const MAX_ARTIFACT_SOURCE_CHARS: usize = 512;
@@ -134,6 +135,18 @@ impl fmt::Display for TaskSessionError {
 }
 
 impl std::error::Error for TaskSessionError {}
+
+fn validate_action_payload(payload: &serde_json::Value) -> Result<(), TaskSessionError> {
+    let actual = payload.to_string().len();
+    if actual > MAX_ACTION_PAYLOAD_BYTES {
+        return Err(TaskSessionError::FieldTooLong {
+            field: "action payload bytes",
+            max: MAX_ACTION_PAYLOAD_BYTES,
+            actual,
+        });
+    }
+    Ok(())
+}
 
 fn validate_text(field: &'static str, value: &str, max: usize) -> Result<String, TaskSessionError> {
     let value = value.trim();
@@ -393,6 +406,8 @@ impl ActionState {
 pub struct ActionRevision {
     pub description: String,
     pub state: ActionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,6 +417,8 @@ pub struct TaskAction {
     pub description: String,
     pub state: ActionState,
     pub revisions: Vec<ActionRevision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }
 impl TaskAction {
     pub fn was_accepted(&self) -> bool {
@@ -522,6 +539,8 @@ pub struct Task {
     pub thread: Vec<ThreadEntry>,
     pub actions: BTreeMap<ActionId, TaskAction>,
     pub validation: ValidationStatus,
+    #[serde(default)]
+    pub validation_run_id: u64,
     pub provider: ProviderState,
     pub metrics: TaskMetrics,
     pub screenshots: BTreeMap<ScreenshotId, ScreenshotAttachment>,
@@ -552,6 +571,7 @@ impl Task {
             thread: Vec::new(),
             actions: BTreeMap::new(),
             validation: ValidationStatus::default(),
+            validation_run_id: 0,
             provider: ProviderState::default(),
             metrics: TaskMetrics::default(),
             screenshots: BTreeMap::new(),
@@ -651,7 +671,9 @@ impl Task {
             test,
             "relevant test",
             MAX_RELEVANT_TESTS,
-        )
+        )?;
+        self.validation = ValidationStatus::NotRun;
+        Ok(())
     }
 
     pub fn set_provider_state(&mut self, state: ProviderState) -> Result<(), TaskSessionError> {
@@ -710,8 +732,23 @@ impl Task {
                 description,
                 state: ActionState::Proposed,
                 revisions: Vec::new(),
+                payload: None,
             },
         );
+        Ok(())
+    }
+
+    pub fn propose_action_with_payload(
+        &mut self,
+        id: impl Into<ActionId>,
+        kind: ActionKind,
+        description: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Result<(), TaskSessionError> {
+        validate_action_payload(&payload)?;
+        let id = ActionId::try_new(id.into().into_inner())?;
+        self.propose_action_with_kind(id.clone(), kind, description)?;
+        self.action_mut(id)?.payload = Some(payload);
         Ok(())
     }
 
@@ -761,6 +798,7 @@ impl Task {
         match &action.state {
             ActionState::Accepted => {
                 action.state = ActionState::Applied;
+                self.validation = ValidationStatus::NotRun;
                 Ok(())
             }
             state => Err(invalid_transition("action", "apply", state.label())),
@@ -789,8 +827,10 @@ impl Task {
                 action.revisions.push(ActionRevision {
                     description: action.description.clone(),
                     state: action.state.clone(),
+                    payload: action.payload.clone(),
                 });
                 action.state = ActionState::NeedsRepair { reason };
+                self.validation = ValidationStatus::NotRun;
                 Ok(())
             }
             state => Err(invalid_transition("action", "repair", state.label())),
@@ -824,9 +864,12 @@ impl Task {
                 action.revisions.push(ActionRevision {
                     description: action.description.clone(),
                     state: action.state.clone(),
+                    payload: action.payload.clone(),
                 });
                 action.description = description;
+                action.payload = None;
                 action.state = ActionState::Proposed;
+                self.validation = ValidationStatus::NotRun;
                 Ok(())
             }
             state => Err(invalid_transition("action", "repair", state.label())),
@@ -835,6 +878,18 @@ impl Task {
 
     pub fn pending_actions(&self) -> impl Iterator<Item = &TaskAction> {
         self.actions.values().filter(|action| action.is_pending())
+    }
+
+    pub fn repair_action_with_payload(
+        &mut self,
+        id: impl AsRef<str>,
+        description: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Result<(), TaskSessionError> {
+        validate_action_payload(&payload)?;
+        self.repair_action(id.as_ref(), description)?;
+        self.action_mut(id)?.payload = Some(payload);
+        Ok(())
     }
 
     pub fn accepted_actions(&self) -> impl Iterator<Item = &TaskAction> {
@@ -1018,6 +1073,7 @@ impl Task {
         match (&image.review, &image.handoff) {
             (ImageReviewState::Approved, ImageHandoffState::Pending) => {
                 image.handoff = ImageHandoffState::Imported;
+                self.validation = ValidationStatus::NotRun;
                 Ok(())
             }
             (_, ImageHandoffState::Imported) => {
@@ -1055,10 +1111,30 @@ impl Task {
         if self.validation.is_running() {
             return Err(invalid_transition("focused tests", "begin", "running"));
         }
+        self.validation_run_id = self
+            .validation_run_id
+            .checked_add(1)
+            .ok_or_else(|| invalid_transition("focused tests", "begin", "run IDs exhausted"))?;
         self.validation = ValidationStatus::Running;
         Ok(())
     }
 
+    pub fn finish_focused_test_run<R: Into<FocusedTestResult>>(
+        &mut self,
+        run_id: u64,
+        result: R,
+    ) -> Result<(), TaskSessionError> {
+        if run_id != self.validation_run_id {
+            return Err(invalid_transition(
+                "focused tests",
+                "finish",
+                "obsolete run",
+            ));
+        }
+        self.finish_focused_tests(result)
+    }
+
+    /// Synchronous completion; background callers must use `finish_focused_test_run`.
     pub fn finish_focused_tests<R: Into<FocusedTestResult>>(
         &mut self,
         result: R,
@@ -1103,6 +1179,9 @@ impl Task {
         match self.lifecycle {
             TaskLifecycle::Active => {
                 self.lifecycle = TaskLifecycle::Canceled;
+                if self.validation.is_running() {
+                    self.validation = ValidationStatus::NotRun;
+                }
                 Ok(())
             }
             TaskLifecycle::Canceled => Err(invalid_transition("task", "cancel", "canceled")),
@@ -1897,12 +1976,118 @@ mod tests {
         session.accept_action("edit").expect("accept");
         assert!(session.mark_done().is_err());
         session.apply_action("edit").expect("apply");
+        assert!(session.mark_done().is_err(), "pre-edit validation is stale");
+        pass_tests(&mut session);
         session.mark_done().expect("complete");
         assert_eq!(
             session.active_task().expect("task").lifecycle,
             TaskLifecycle::Completed
         );
         assert!(session.append_reply("too late").is_err());
+    }
+
+    #[test]
+    fn changing_work_invalidates_in_flight_validation() {
+        let mut session = session_with_task();
+        session.propose_action("edit", "safe edit").unwrap();
+        session.accept_action("edit").unwrap();
+        session.begin_focused_tests().unwrap();
+        session.apply_action("edit").unwrap();
+        assert!(session
+            .finish_focused_tests(FocusedTestResult::passed("old run"))
+            .is_err());
+        pass_tests(&mut session);
+        session
+            .mark_action_for_repair("edit", "fix the edge case")
+            .unwrap();
+        session
+            .reject_action("edit", "keep the existing implementation")
+            .unwrap();
+        assert!(session.mark_done().is_err());
+        pass_tests(&mut session);
+        session.mark_done().unwrap();
+    }
+
+    #[test]
+    fn obsolete_test_result_cannot_finish_a_newer_run() {
+        let mut task = Task::new("task", "edit", "project").unwrap();
+        task.begin_focused_tests().unwrap();
+        let old_run = task.validation_run_id;
+        task.add_relevant_test("tests/new.test.stasis").unwrap();
+        task.begin_focused_tests().unwrap();
+        let current_run = task.validation_run_id;
+        assert!(task
+            .finish_focused_test_run(old_run, FocusedTestResult::passed("obsolete"))
+            .is_err());
+        assert!(task.validation.is_running());
+        task.finish_focused_test_run(current_run, FocusedTestResult::failed("current failure"))
+            .unwrap();
+        assert!(!task.validation.is_passing());
+    }
+
+    #[test]
+    fn expanding_test_scope_requires_fresh_validation() {
+        let mut session = session_with_task();
+        session
+            .add_relevant_test("tests/first.test.stasis")
+            .unwrap();
+        pass_tests(&mut session);
+        assert!(session
+            .add_relevant_test("tests/first.test.stasis")
+            .is_err());
+        assert!(session.active_task().unwrap().validation.is_passing());
+        session
+            .add_relevant_test("tests/second.test.stasis")
+            .unwrap();
+        assert!(session.mark_done().is_err());
+    }
+
+    #[test]
+    fn payload_repairs_retain_the_accepted_revision_and_require_approval() {
+        let mut task = Task::new("task", "edit", "project").unwrap();
+        let original = serde_json::json!({"edits": ["original"]});
+        let repaired = serde_json::json!({"edits": ["repaired"]});
+        task.propose_action_with_payload(" edit ", ActionKind::Edit, "original", original.clone())
+            .unwrap();
+        task.accept_action("edit").unwrap();
+        task.mark_action_for_repair("edit", "conflict").unwrap();
+        task.repair_action_with_payload("edit", "repair", repaired.clone())
+            .unwrap();
+        let action = &task.actions["edit"];
+        assert_eq!(action.payload, Some(repaired));
+        assert_eq!(action.revisions[0].payload, Some(original));
+        assert_eq!(action.revisions[0].state, ActionState::Accepted);
+        assert!(task.apply_action("edit").is_err());
+        task.accept_action("edit").unwrap();
+        task.apply_action("edit").unwrap();
+        task.repair_action("edit", "description only").unwrap();
+        assert_eq!(task.actions["edit"].payload, None);
+    }
+
+    #[test]
+    fn oversized_payload_does_not_mutate_task() {
+        let mut task = Task::new("task", "edit", "project").unwrap();
+        let before = task.clone();
+        assert!(task
+            .propose_action_with_payload(
+                "edit",
+                ActionKind::Edit,
+                "large",
+                serde_json::Value::String("x".repeat(MAX_ACTION_PAYLOAD_BYTES))
+            )
+            .is_err());
+        assert_eq!(task, before);
+    }
+
+    #[test]
+    fn legacy_actions_deserialize_without_executable_payloads() {
+        let action: TaskAction = serde_json::from_value(serde_json::json!({
+            "id": "old", "kind": "Edit", "description": "legacy action",
+            "state": "Accepted", "revisions": [{"description": "old revision", "state": "Proposed"}]
+        }))
+        .unwrap();
+        assert_eq!(action.payload, None);
+        assert_eq!(action.revisions[0].payload, None);
     }
 
     #[test]

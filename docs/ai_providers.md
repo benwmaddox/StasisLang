@@ -76,7 +76,29 @@ The desktop editor sends replies through the UI-neutral `stasis_ai::task_control
 controller. Each request captures bounded context from one task and carries an
 immutable task ID and request ID. Switching the selected task never changes the
 destination of an in-flight reply. Provider work runs off the UI thread; polling
-only collects completed work. Reply requests offer no editing tools.
+only collects completed work. Editing tools produce task-owned semantic proposals;
+they do not write source during a provider turn. Accept approves a proposal, and
+Apply submits the approved payload to the host's atomic semantic-edit path.
+
+Each action retains its payload and prior revisions. Provider repair responses
+may replace only rejected actions or actions marked for repair; they cannot
+regenerate accepted or applied work. Repaired proposals require fresh acceptance.
+Legacy task records without payloads remain readable but cannot execute edits.
+
+Applying an edit invalidates prior focused-test validation. Changing the test
+scope or repairing an action also invalidates it, including a run already in
+flight. Background test results carry a run ID, so an obsolete result cannot
+finish a newer validation run. Provider context contains compact action metadata;
+executable payloads and revision history stay in the task rather than being
+copied into every request. Done requires resolved actions and passing validation
+for current project sources. Host results and failure replies belong to the originating task even
+when another task is selected.
+
+Host operations are serialized. Cancellation stops queued work; an atomic edit
+already executing finishes or rolls back, and any committed receipt is retained
+on its originating task. Source conflicts and failed edit tests preserve the
+previous source and return a repairable failure. An empty focused-test selection
+cannot unlock Done.
 
 Cancellation and reconnect invalidate the old request before another response can
 be accepted. A late response cannot append to the thread or update its metrics.

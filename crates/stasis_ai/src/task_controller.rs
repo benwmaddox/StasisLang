@@ -1,7 +1,8 @@
 use crate::{
-    ConnectionState, ProviderState, TaskId, TaskLifecycle, TaskSession, TaskSessionError,
-    ThreadEntry,
+    ActionId, ActionKind, ActionState, ConnectionState, ProviderState, TaskId, TaskLifecycle,
+    TaskSession, TaskSessionError, ThreadEntry,
 };
+use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -33,6 +34,14 @@ pub struct ProviderRequest {
     pub relevant_symbols: Vec<String>,
     pub relevant_tests: Vec<String>,
     pub context: Vec<ThreadEntry>,
+    pub actions: Vec<ProviderActionContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProviderActionContext {
+    pub id: ActionId,
+    pub state: &'static str,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -47,6 +56,16 @@ pub struct ProviderReply {
     pub text: String,
     pub provider: ProviderState,
     pub usage: ProviderUsage,
+    pub proposals: Vec<ProviderActionProposal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderActionProposal {
+    pub id: String,
+    pub kind: ActionKind,
+    pub description: String,
+    pub payload: Value,
+    pub repair: bool,
 }
 
 impl ProviderReply {
@@ -55,6 +74,7 @@ impl ProviderReply {
             text: text.into(),
             provider: ProviderState::default(),
             usage: ProviderUsage::default(),
+            proposals: Vec::new(),
         }
     }
 }
@@ -83,6 +103,7 @@ pub enum TaskControllerEvent {
     Completed {
         request_id: RequestId,
         task_id: TaskId,
+        proposals: Vec<ProviderActionProposal>,
     },
     Failed {
         request_id: RequestId,
@@ -342,6 +363,25 @@ impl TaskController {
                 self.config.max_context_entries,
                 self.config.max_context_chars,
             ),
+            actions: task
+                .actions
+                .values()
+                .map(|action| ProviderActionContext {
+                    id: action.id.clone(),
+                    state: match action.state {
+                        ActionState::Proposed => "proposed",
+                        ActionState::Accepted => "accepted",
+                        ActionState::Applied => "applied",
+                        ActionState::Rejected { .. } => "rejected",
+                        ActionState::NeedsRepair { .. } => "needs_repair",
+                    },
+                    description: action
+                        .description
+                        .chars()
+                        .take((self.config.max_context_chars / task.actions.len().max(1)).min(256))
+                        .collect(),
+                })
+                .collect(),
         };
         let canceled = Arc::new(AtomicBool::new(false));
         let admitted = Arc::new(AtomicBool::new(true));
@@ -586,6 +626,7 @@ impl TaskController {
         record.snapshot.elapsed_ms = completion.elapsed_ms;
         match completion.result {
             Ok(reply) => {
+                let proposals = reply.proposals.clone();
                 let applied = session
                     .task(&completion.task_id)
                     .cloned()
@@ -598,6 +639,43 @@ impl TaskController {
                             reply.usage.output_tokens,
                             reply.usage.estimated_cost_micros,
                         )?;
+                        for proposal in &reply.proposals {
+                            if proposal.repair {
+                                let state = task
+                                    .actions
+                                    .get(proposal.id.as_str())
+                                    .ok_or_else(|| {
+                                        TaskSessionError::ActionNotFound(
+                                            proposal.id.as_str().into(),
+                                        )
+                                    })?
+                                    .state
+                                    .clone();
+                                if !matches!(
+                                    state,
+                                    crate::ActionState::Rejected { .. }
+                                        | crate::ActionState::NeedsRepair { .. }
+                                ) {
+                                    return Err(TaskSessionError::InvalidTransition {
+                                        entity: "action",
+                                        action: "repair",
+                                        state: "accepted work is retained".to_string(),
+                                    });
+                                }
+                                task.repair_action_with_payload(
+                                    proposal.id.as_str(),
+                                    &proposal.description,
+                                    proposal.payload.clone(),
+                                )?;
+                            } else {
+                                task.propose_action_with_payload(
+                                    proposal.id.as_str(),
+                                    proposal.kind.clone(),
+                                    &proposal.description,
+                                    proposal.payload.clone(),
+                                )?;
+                            }
+                        }
                         Ok(task)
                     });
                 let Ok(updated_task) = applied else {
@@ -617,6 +695,7 @@ impl TaskController {
                 TaskControllerEvent::Completed {
                     request_id: completion.request_id,
                     task_id: completion.task_id,
+                    proposals,
                 }
             }
             Err(()) => {
