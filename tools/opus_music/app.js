@@ -37,6 +37,7 @@ function render() {
   const track=current();
   order=state.orders[track.id];
   const saved=state.ratings[ratingKey()];
+  const revealed=Boolean(state.ratings[`${track.id}:isolated`] && state.ratings[`${track.id}:gameplay`]);
   $('versions').replaceChildren(); $('fields').replaceChildren();
   const button = (label,path) => {
     const b=document.createElement('button'); b.textContent=label;
@@ -44,7 +45,7 @@ function render() {
   };
   button('Reference',track.reference);
   for (const [index,bitrate] of order.entries()) {
-    const label=`Version ${String.fromCharCode(65+index)}${saved ? ` (${bitrate} kbps)` : ''}`;
+    const label=`Version ${String.fromCharCode(65+index)}${revealed ? ` (${bitrate} kbps)` : ''}`;
     button(label,track.variants.find(v=>v.bitrateKbps===bitrate).path);
     const field=document.createElement('fieldset');
     field.innerHTML=`<legend>${label}</legend>
@@ -55,7 +56,7 @@ function render() {
     if(saved) for(const name of ['score','acceptable','percent']) field.querySelector(`[name="${name}-${bitrate}"]`).value=saved[bitrate][name];
   }
   player.volume=$('mode').value==='gameplay' ? 10**(-15/20) : 1;
-  $('status').textContent=saved ? 'Saved ratings revealed for this mode.' : 'Bitrates hidden until all versions in this mode are scored.';
+  $('status').textContent=revealed ? 'Both listening modes saved. Bitrates revealed for this track.' : 'Bitrates hidden until both listening modes are saved for this track.';
   report();
 }
 function report() {

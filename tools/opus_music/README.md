@@ -14,7 +14,8 @@ not change Stasis playback or choose a production bitrate without listening data
 5. Select Reference or a blind version, press Play, and switch versions while
    listening. Playback resumes at approximately the previous timestamp after
    loading; this is not a gapless crossfade. Native controls provide pause/seek.
-6. Score every version, save to reveal, and repeat in gameplay-background mode.
+6. Score every version, save, and repeat in gameplay-background mode. Bitrate
+   labels stay hidden until both modes are saved for the track, in either order.
    This mode lowers music 15 dB; it does not simulate a running game or effects.
 7. Download `ratings.json` and `summary.html` into a local `results/` folder.
    Allow multiple downloads if prompted. Ratings and blind order also persist
@@ -52,4 +53,4 @@ in JSON but gameplay scores drive the decision. This is one listener's result,
 not a population estimate. No result is claimed before Ben listens.
 
 Validation: `python -m unittest discover -s tools/opus_music -p "test_*.py"`
-and `node --test tools/opus_music/report.test.mjs`.
+and `node --test tools/opus_music/*.test.mjs`.
