@@ -296,6 +296,20 @@ jobs:
           cp -R src target/vscode-e2e-toolchain/
           "$STASIS_E2E_EXECUTABLE" --json editor-info
 
+      - name: Test macOS Retina display metrics seam
+        timeout-minutes: 15
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p target/vscode-e2e
+          export STASIS_RUNTIME_DLL_PATH="$STASIS_RUNTIME_LIBRARY_PATH"
+          export STASIS_GFX_LOG_SPRITES=1
+          set -o pipefail
+          python3 tools/cargo_cache.py run -- cargo test -p stasis --test desktop_display_metrics_seam -- --test-threads=1 --nocapture 2>&1 | tee target/vscode-e2e/desktop-display-metrics-seam.log
+          grep -E 'kind=sprite.*logical=20x12 raster=40x24.*density_generation=7' target/vscode-e2e/desktop-display-metrics-seam.log
+          grep -E 'kind=font.*logical_size=18 raster_size=36 atlas=1024x1024.*density_generation=7' target/vscode-e2e/desktop-display-metrics-seam.log
+          cp build/codex-cargo-target/seam-tests/it-007-desktop-display-metrics.json target/vscode-e2e/
+
       - name: Install extension dependencies
         working-directory: vscode-stasis
         run: npm ci
@@ -321,6 +335,8 @@ jobs:
           path: |
             target/vscode-e2e/frame.png
             target/vscode-e2e/extension-host.log
+            target/vscode-e2e/desktop-display-metrics-seam.log
+            target/vscode-e2e/it-007-desktop-display-metrics.json
             vscode-stasis/.vsix/stasislang.stasis.vsix
 
   android-package-link:

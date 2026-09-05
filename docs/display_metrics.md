@@ -237,6 +237,14 @@ desktop packages preserve the same app-bundle contract with a game-specific
 resolution-doubled low-density surface. The runtime applies the same drawable
 scale and density-sensitive resource rebuild policy used on Windows.
 
+The macOS arm64 VS Code E2E lane also runs the native IT-007 display-metrics
+seam against its freshly built `libstasis_graphics.dylib`. The uploaded artifact
+keeps the real `target/vscode-e2e/frame.png` capture beside the focused seam log
+and deterministic `it-007-desktop-display-metrics.json` receipt. The injected
+Retina metrics verify geometry and resource preparation; they do not substitute
+for standard/Retina cross-display game captures and cost measurements, which
+remain parent/sibling acceptance work on real macOS hardware.
+
 ## Android physical raster preparation
 
 The Android Workshop keeps game layout, safe-area calculations, input, and replay state in

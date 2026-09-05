@@ -1,4 +1,4 @@
-#![cfg(any(target_os = "windows", target_os = "linux"))]
+#![cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 
 use serde_json::json;
 use stasis_compiler::backend::jit::JitProcess;
@@ -101,6 +101,19 @@ const RESTORED_SCALE: DisplaySample = DisplaySample {
     density_generation: 3,
 };
 
+const RETINA_LANDSCAPE: DisplaySample = DisplaySample {
+    logical: [1280, 720],
+    native: [1280, 720],
+    drawable: [2560, 1440],
+    safe_native: [0, 0, 1280, 720],
+    safe_logical: [0.0, 0.0, 1280.0, 720.0],
+    safe_rounded: [0, 0, 1280, 720],
+    content_scale: 2.0,
+    raster_scale: 2.0,
+    display_generation: 11,
+    density_generation: 7,
+};
+
 type PushDisplay =
     extern "system" fn(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) -> i32;
 type SelectDisplay = extern "system" fn(u32, u32) -> u32;
@@ -114,6 +127,7 @@ struct NativeSurfaceHarness {
     load_sprite: extern "system" fn(*const c_char, i32, i32) -> i32,
     release_sprite: extern "system" fn(i32),
     get_sprite_state: extern "system" fn(i32, *mut i32, i32) -> i32,
+    measure_text: extern "system" fn(i32, *const c_char) -> f32,
 }
 
 impl NativeSurfaceHarness {
@@ -168,6 +182,13 @@ impl NativeSurfaceHarness {
                     .expect("resolve gated sprite-state seam"),
             )
         };
+        let measure_text = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_measure_text")
+                    .expect("resolve font measurement seam"),
+            )
+        };
         Self {
             _library: library,
             push_display,
@@ -177,6 +198,7 @@ impl NativeSurfaceHarness {
             load_sprite,
             release_sprite,
             get_sprite_state,
+            measure_text,
         }
     }
 
@@ -239,6 +261,13 @@ impl NativeSurfaceHarness {
 
     fn release_sprite(&self, handle: i32) {
         (self.release_sprite)(handle);
+    }
+
+    fn measure_text(&self, handle: i32, value: &str) -> f32 {
+        let value = CString::new(value).expect("font measurement CString");
+        let width = (self.measure_text)(handle, value.as_ptr());
+        assert!(width > 0.0, "native font measurement failed");
+        width
     }
 }
 
@@ -825,6 +854,7 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
     }
 
     let sprite_path = repository_root().join("samples/windows_launch_smoke/assets/smoke.png");
+    let font_path = repository_root().join("samples/windows_launch_smoke/assets/smoke.ttf");
     let one_x = density_sample([400, 300], 8, 4);
     native.display(DISPLAY_CHANGED, one_x);
     native.pointer(POINTER_DOWN, 300.0, 225.0);
@@ -847,6 +877,10 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
         &native.sprite_state(sprite)[0..12],
         &[1, 1, 0, 1, 0, 0, 0, 20, 12, 0, 20, 12]
     );
+    let font = gfx
+        .load_font(&font_path, 18)
+        .expect("load density test font");
+    let one_x_text_width = native.measure_text(font, "Retina");
 
     native.display(DISPLAY_CHANGED, one_x);
     run_frame(
@@ -867,7 +901,7 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
     let density_tiers = [
         (density_sample([500, 375], 9, 5), [25, 15]),
         (density_sample([600, 450], 10, 6), [30, 18]),
-        (density_sample([800, 600], 11, 7), [40, 24]),
+        (RETINA_LANDSCAPE, [40, 24]),
     ];
     for (index, (sample, expected_raster)) in density_tiers.iter().enumerate() {
         native.display(DISPLAY_CHANGED, *sample);
@@ -886,6 +920,18 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
         );
         assert_close(scalar_f32("metric_pointer_x"), 300.0, "tier pointer x");
         assert_close(scalar_f32("metric_pointer_y"), 225.0, "tier pointer y");
+        if sample.logical == RETINA_LANDSCAPE.logical {
+            assert_close(
+                scalar_f32("metric_pointer_x_n"),
+                300.0 / 1280.0,
+                "Retina pointer normalized x",
+            );
+            assert_close(
+                scalar_f32("metric_pointer_y_n"),
+                225.0 / 720.0,
+                "Retina pointer normalized y",
+            );
+        }
         assert_eq!(native.load_sprite(&sprite_path, [20, 12]), sprite);
         let state = native.sprite_state(sprite);
         assert_eq!(state[1], index as i32 + 2, "tier sprite ref count");
@@ -895,7 +941,32 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
         );
         assert_eq!(&state[7..9], expected_raster, "tier current raster");
         assert_eq!(state[9], 0, "tier current raster must be clean");
+        let text_width = native.measure_text(font, "Retina");
+        assert!(
+            (text_width - one_x_text_width).abs() < 2.0,
+            "density preparation must preserve logical text width: 1x={one_x_text_width} tier={text_width}"
+        );
     }
+
+    let retina_sprite_state = native.sprite_state(sprite);
+    let retina_text_width = native.measure_text(font, "Retina");
+    native.display(DISPLAY_CHANGED, RETINA_LANDSCAPE);
+    run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        RETINA_LANDSCAPE,
+        false,
+        false,
+    );
+    assert_eq!(native.sprite_state(sprite), retina_sprite_state);
+    assert_eq!(native.measure_text(font, "Retina"), retina_text_width);
+    assert_eq!(host_i32[30], 11, "duplicate Retina display generation");
+    assert_eq!(host_i32[31], 7, "duplicate Retina density generation");
 
     let downscaled = density_sample([500, 375], 12, 8);
     native.display(DISPLAY_CHANGED, downscaled);
@@ -917,6 +988,11 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
     assert_eq!(downscaled_state[3], 1);
     assert_eq!(&downscaled_state[7..9], &[25, 15]);
     assert_eq!(downscaled_state[9], 0);
+    let downscaled_text_width = native.measure_text(font, "Retina");
+    assert!(
+        (downscaled_text_width - one_x_text_width).abs() < 2.0,
+        "downscale must preserve logical text width"
+    );
     let two_x_bytes = 40 * 24 * 4;
     let current_bytes = downscaled_state[7] * downscaled_state[8] * 4;
     assert_eq!(current_bytes, 25 * 15 * 4);
@@ -943,7 +1019,8 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
             {"stage": "landscape_down", "logical": ORIENTATION_LANDSCAPE.logical, "native": ORIENTATION_LANDSCAPE.native, "drawable": ORIENTATION_LANDSCAPE.drawable, "display_generation": 5, "density_generation": 4, "pointer_went_down": 0, "pointer_went_up": 0, "release_actions": 1, "trace": landscape_down_trace},
             {"stage": "landscape_release", "logical": ORIENTATION_LANDSCAPE.logical, "native": ORIENTATION_LANDSCAPE.native, "drawable": ORIENTATION_LANDSCAPE.drawable, "display_generation": 5, "density_generation": 4, "pointer_went_up": 1, "release_actions": 2, "trace": landscape_release_trace},
             {"stage": "restored_portrait", "logical": RESTORED_PORTRAIT.logical, "native": RESTORED_PORTRAIT.native, "drawable": RESTORED_PORTRAIT.drawable, "display_generation": 6, "density_generation": 4, "pointer_went_up": 0, "release_actions": 2, "trace": restored_portrait_trace},
-            {"stage": "quiet", "logical": RESTORED_PORTRAIT.logical, "native": RESTORED_PORTRAIT.native, "drawable": RESTORED_PORTRAIT.drawable, "display_generation": 6, "density_generation": 4, "pointer_went_up": 0, "release_actions": 2, "trace": quiet_trace}
+            {"stage": "quiet", "logical": RESTORED_PORTRAIT.logical, "native": RESTORED_PORTRAIT.native, "drawable": RESTORED_PORTRAIT.drawable, "display_generation": 6, "density_generation": 4, "pointer_went_up": 0, "release_actions": 2, "trace": quiet_trace},
+            {"stage": "retina_landscape", "logical": RETINA_LANDSCAPE.logical, "native": RETINA_LANDSCAPE.native, "drawable": RETINA_LANDSCAPE.drawable, "display_generation": 11, "density_generation": 7, "sprite_raster": [40, 24], "font_raster_size": 36, "font_atlas_extent": 1024, "duplicate_invalidations": 0}
         ],
         "oracle": {"renderer_lifecycle": initial_lifecycle, "restoration_generation_advances": 1, "pointer_round_trip_tolerance": 0.002, "orientation_release_actions": 2, "density_tiers": [1.0, 1.25, 1.5, 2.0, 1.25], "density_generations": [4, 5, 6, 7, 8], "current_sprite_raster": [25, 15], "current_sprite_rgba_bytes": current_bytes, "replaced_two_x_rgba_bytes": two_x_bytes}
     });
