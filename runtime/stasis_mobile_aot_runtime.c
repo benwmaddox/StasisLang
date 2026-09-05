@@ -638,6 +638,45 @@ static char *resolve_text(int32_t id) {
     return text;
 }
 
+static int stasis_valid_utf8(const unsigned char *text) {
+    const unsigned char *cursor = text;
+    if (cursor == NULL) return 0;
+    while (*cursor != 0) {
+        uint32_t codepoint;
+        uint32_t minimum;
+        int remaining;
+        if (*cursor <= 0x7f) {
+            cursor += 1;
+            continue;
+        }
+        if (*cursor >= 0xc2 && *cursor <= 0xdf) {
+            codepoint = (uint32_t)(*cursor & 0x1f);
+            minimum = 0x80;
+            remaining = 1;
+        } else if (*cursor >= 0xe0 && *cursor <= 0xef) {
+            codepoint = (uint32_t)(*cursor & 0x0f);
+            minimum = 0x800;
+            remaining = 2;
+        } else if (*cursor >= 0xf0 && *cursor <= 0xf4) {
+            codepoint = (uint32_t)(*cursor & 0x07);
+            minimum = 0x10000;
+            remaining = 3;
+        } else {
+            return 0;
+        }
+        cursor += 1;
+        while (remaining > 0) {
+            if (*cursor < 0x80 || *cursor > 0xbf) return 0;
+            codepoint = (codepoint << 6) | (uint32_t)(*cursor & 0x3f);
+            cursor += 1;
+            remaining -= 1;
+        }
+        if (codepoint < minimum || (codepoint >= 0xd800 && codepoint <= 0xdfff) ||
+            codepoint > 0x10ffff) return 0;
+    }
+    return 1;
+}
+
 int stasis_jit_audio_init(int32_t rate, int32_t channels, int32_t latency) {
     return stasis_audio_init(rate, channels, latency);
 }
@@ -738,7 +777,9 @@ int stasis_jit_gfx_dump_png(int32_t path) {
 }
 int stasis_jit_gfx_cache_text(int32_t font, int32_t text) {
     char *value = resolve_text(text);
-    int result = value == NULL ? 0 : stasis_gfx_cache_text(font, value);
+    int result = value == NULL || !stasis_valid_utf8((const unsigned char *)value)
+        ? 0
+        : stasis_gfx_cache_text(font, value);
     free(value);
     return result;
 }
