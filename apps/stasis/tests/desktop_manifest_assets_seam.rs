@@ -84,11 +84,43 @@ fn repository_root() -> PathBuf {
         .expect("canonical repository root")
 }
 
-fn evidence_root() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
+fn evidence_root(target_dir: Option<PathBuf>, original_cwd: &Path) -> PathBuf {
+    target_dir
+        .map(|target| original_cwd.join(target))
         .unwrap_or_else(|| repository_root().join("target"))
         .join("seam-tests")
+}
+
+#[test]
+fn evidence_root_resolves_relative_target_before_chdir() {
+    let original_cwd = repository_root();
+    let relative_target = PathBuf::from("target/it-008-relative");
+    let evidence = evidence_root(Some(relative_target.clone()), &original_cwd);
+    let expected = original_cwd.join(relative_target).join("seam-tests");
+    assert!(evidence.is_absolute());
+    assert_eq!(evidence, expected);
+    let wrong_cwd = expected.join("it-008-wrong-working-directory");
+    for name in [
+        "it-008-desktop-manifest-assets.png",
+        "it-008-desktop-manifest-assets.json",
+    ] {
+        assert_eq!(wrong_cwd.join(evidence.join(name)), expected.join(name));
+    }
+}
+
+#[test]
+fn evidence_root_preserves_absolute_and_default_targets() {
+    let repository = repository_root();
+    let original_cwd = repository.join("unrelated-cwd");
+    let target = repository.join("custom-target");
+    assert_eq!(
+        evidence_root(Some(target.clone()), &original_cwd),
+        target.join("seam-tests")
+    );
+    assert_eq!(
+        evidence_root(None, &original_cwd),
+        repository.join("target/seam-tests")
+    );
 }
 
 fn scalar_i32(path: &str) -> i32 {
@@ -145,10 +177,13 @@ fn manifest_assets_survive_wrong_cwd_and_render_sprite_direct_and_cached_text() 
             .expect("canonical font path")
     );
 
-    let evidence_root = evidence_root();
+    let original_cwd = std::env::current_dir().expect("read original working directory");
+    let evidence_root = evidence_root(
+        std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
+        &original_cwd,
+    );
     let wrong_cwd = evidence_root.join("it-008-wrong-working-directory");
     fs::create_dir_all(&wrong_cwd).expect("create isolated wrong working directory");
-    let original_cwd = std::env::current_dir().expect("read original working directory");
     let _cwd_guard = WorkingDirectoryGuard(original_cwd);
     std::env::set_current_dir(&wrong_cwd).expect("enter wrong working directory");
 
