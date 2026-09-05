@@ -1,0 +1,13 @@
+{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": [
+    {
+      "id": "ui_font",
+      "path": "assets/ui.ttf",
+      "content_sha256": "034c77f1f05ec89421e4a63f0e3a4ca1ecf852cc6d2bf611f126f275728e017d",
+      "format": {"kind": "font", "encoding": "ttf"},
+      "dependencies": []
+    }
+  ]
+}

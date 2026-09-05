@@ -1,0 +1,27 @@
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+global seam_main_calls: i32;
+global seam_tick_calls: i32;
+global seam_render_calls: i32;
+
+function main(): i32 {
+    seam_main_calls = seam_main_calls + 1;
+    return 0;
+}
+
+function tick(): i32 {
+    seam_tick_calls = seam_tick_calls + 1;
+    return 0;
+}
+
+function render(): i32 {
+    seam_render_calls = seam_render_calls + 1;
+    begin_frame();
+    clear(0.7, 0.1, 0.1, 1.0);
+    end_frame();
+    return 43;
+}
+
+function on_code_swap(): void {
+    return;
+}

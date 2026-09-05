@@ -18,8 +18,9 @@ Every renderer moves through the same states:
 Surface resize and orientation advance `surface_generation` without invalidating
 device-local resources. Renderer/context creation, `SDL_RENDER_TARGETS_RESET`, and
 `SDL_RENDER_DEVICE_RESET` advance both `surface_generation` and
-`renderer_generation`. Generations skip zero. A sprite, fallback texture, font
-atlas, or text texture can be submitted only when its renderer generation matches.
+`renderer_generation`. Generations skip zero. A sprite atlas region, same-path
+missing-resource placeholder region, font atlas, or text texture can be submitted
+only when its renderer generation matches.
 Android pause/resume is a visibility transition: the Workshop asks GLSurfaceView to
 preserve its EGL context and retains textures when that context survives. A later
 `onSurfaceCreated` callback is the authoritative signal that the context was lost.
@@ -34,7 +35,8 @@ handles before rebuilding them.
 ## Restore transaction
 
 Before the first post-context-loss game frame is presented, the native renderer
-rebuilds all active sprites, the procedural fallback, every active font atlas, and
+rebuilds all active sprite atlas pages (including their white-solid and
+missing-resource placeholder regions), every active font atlas, and
 cached text geometry. A failure keeps the lifecycle retryable and withholds that
 game frame. The Android GLES adapter first presents a context-local `STASIS LOADING`
 marker drawn only with clears and scissor rectangles, before shaders, fonts,
@@ -66,7 +68,7 @@ deferrals. This makes asset-heavy games such as Chess TD diagnosable from logcat
 Generated SDL mobile packages present the same asset-free `STASIS LOADING` pixel
 marker immediately after renderer creation and again on SDL target/device reset.
 The marker remains in the presented framebuffer while the synchronous SDL resource
-transaction rebuilds every sprite, fallback, font atlas, and cached text run. A
+transaction rebuilds every sprite atlas page, placeholder region, font atlas, and cached text run. A
 normal game frame is presented only after that transaction succeeds. Ordinary
 Android foreground resume preserves resources unless SDL reports an actual reset.
 
@@ -79,3 +81,19 @@ Android foreground resume preserves resources unless SDL reports an actual reset
 - `mobile/android/test_emulator.ps1` installs Workshop, launches it, rotates it,
   backgrounds/resumes it, forces Activity/process recreation, requires multiple
   successful restoration markers with no restore failure, and force-stops the app.
+- The IT-020 generated release-shell fixture performs the same sequence with a
+  packaged SVG sprite, the same renderer's missing-resource placeholder region,
+  a font atlas, and cached text.
+  Its `stasis.seam_test.v1` lifecycle markers include state, surface and
+  renderer generations, restore attempts/failures, and the transition reason;
+  each stage also retains a named-region capture and process identity.
+  Resume is validated within the original process: presented/accepted counters
+  must advance while a preserved renderer generation may remain unchanged. A
+  forced Activity restart starts a new process epoch, so its positive
+  generations are checked independently rather than treated as monotonic with
+  the prior process. Same-process surface/device reset reasons must advance
+  the renderer generation. The fixture's compositor oracle counts target-color
+  pixels in inset resource bounds, including glyph-colored pixels for cached
+  text; lane backgrounds and fill-rectangle edges cannot satisfy it. Accepted
+  and presented counters only gate render progress; the captured Android
+  framebuffer is the actual presentation oracle.

@@ -20,6 +20,11 @@ Run `stasis version` and `stasis env` to verify the selected installation. Upgra
 extract a newer versioned archive and update `PATH`. Keeping two extracted versions is supported;
 the first executable on `PATH` wins.
 
+On Windows, a source checkout can build and install one verified CLI/runtime pair with
+`scripts/install_local_toolchain.ps1`. It derives a shared build fingerprint from the clean source
+revision, validates `stasis --json editor-info`, runs a bounded headless record smoke, and promotes
+the complete staged bundle to `bin` only after validation.
+
 ## Create and use a project
 
 ```text
@@ -36,8 +41,13 @@ stasis build --mode release
 stasis package --target desktop
 stasis package-mobile --target android-arm64
 stasis package-mobile --target ios-arm64
+stasis prepare
 stasis inspect
 stasis inspect --capacity state.enemies=512
+stasis signing status
+stasis signing provision
+stasis signing sign path\to\artifact.exe
+stasis signing verify path\to\artifact.exe
 ```
 
 `stasis init --name brick_game .` initializes an existing directory. The built-in template copies
@@ -59,6 +69,10 @@ project root and nested directories. `--workspace PATH` selects a project explic
   "entry": "src/main.stasis",
   "tests": "tests",
   "output": "build",
+  "web": {
+    "loading_font": "/assets/fonts/display.ttf",
+    "viewport": { "width": 1600, "height": 900 }
+  },
   "vendor": {
     "stasis": {
       "release_id": "nightly-20260805-123",
@@ -67,6 +81,16 @@ project root and nested directories. `--workspace PATH` selects a project explic
   }
 }
 ```
+
+The optional `web.loading_font` value must identify an existing `.ttf`, `.otf`, `.woff`, or
+`.woff2` file under the project `assets/` directory. Both `/assets/...` and `assets/...` forms are
+accepted; web packaging normalizes them to a package-relative URL for the static loading shell.
+
+The optional `web.viewport` object sets the authored logical game size used when the browser shell
+starts. Both dimensions must be integers from 1 through 8192. A Sheep Herder build authored at 1600 by 900 can use
+`{"width":1600,"height":900}` to keep its 1600-by-900 world coordinates stable while the browser
+uniformly fits and centers that 16:9 view. Projects without this setting keep the 640-by-360
+default.
 
 The vendor release and hash describe the exact checked-in `vendor/stasis` snapshot.
 `manifest_version` versions the JSON schema and is independent of the selected toolchain release.
@@ -78,10 +102,20 @@ The content hash still detects rebuilt development executables whose release ID 
 Git is the review and rollback mechanism, so synchronization does not prompt. Review and commit the
 vendor and manifest changes together with the compiler upgrade.
 
+The semantic symbol queries `list`, `find`, `read`, and `references` are strictly read-only. They
+never reconcile, create, or rewrite the project manifest, vendor tree, or toolchain state. If a
+tracked vendor snapshot is missing, locally changed, or stale for the selected executable, the
+query reports the condition without changing files. For a vendor-backed project, prepare the
+workspace with `stasis vendor status`, then run the explicit `stasis vendor update` before retrying
+the query. For a project using `"stdlib": "toolchain"`, run the explicit `stasis prepare`
+command instead; queries never materialize or repair that cache.
+
 Projects that should always use the standard library shipped with the selected toolchain can add
-`"stdlib": "toolchain"`. Before a workspace command starts, that exact stdlib and its matching
-runtime modules are synchronized transactionally into `.stasis_cache/toolchain/src/`; source imports
-it with paths such as `/.stasis_cache/toolchain/src/stdlib/storage.stasis`. This keeps
+`"stdlib": "toolchain"`. Run `stasis prepare` to transactionally materialize that exact stdlib and
+its matching runtime modules into `.stasis_cache/toolchain/src/`; source imports it with paths such
+as `/.stasis_cache/toolchain/src/stdlib/storage.stasis`. Normal mutating workspace commands may
+still synchronize this cache before they run, but semantic symbol queries require the explicit
+preparation and never write it. This keeps
 CLI, LSP, TUI, and VS Code play on one compiler/stdlib build without checking a dated toolchain
 archive into the project.
 
@@ -102,9 +136,33 @@ staged Stasis changes. A retry then commits the canonical source. Git must be av
 cloning a generated repository, reactivate the checked-in hook with
 `git config --local core.hooksPath .githooks`.
 
+### Generated GitHub Actions
+
+`stasis new NAME` adds `.github/workflows/stasis-pr.yml`,
+`.github/workflows/stasis-weekly.yml`, and two PowerShell restore/resolution helpers under `tools/`.
+`stasis init` does not add them. Conflicting or linked workflow/tool directories fail preflight
+without a partial scaffold.
+
+The PR workflow runs for every pull request without path filters. It resolves the newest complete
+published nightly at CI runtime and reports the selected release in the step summary. The job
+verifies GitHub's published SHA-256 asset digest and installed toolchain identity,
+checks `vendor/stasis`, and runs `stasis check`. The scheduled Friday and manually dispatched weekly
+workflow selects the newest non-draft nightly containing Linux x64, Windows x64, and macOS arm64
+assets. Its three-host matrix runs vendor update, format check, check, test, and desktop package, then
+uploads short-lived per-platform artifacts. It never creates a tag or release, publishes or signs a
+package, or builds Android, iOS, or web targets.
+
+`stasis.json` continues to record the release identity and hash of the checked-in `vendor/stasis`
+snapshot. That identity does not pin either generated CI workflow's toolchain.
+
+All templates are embedded in `stasis`, so project creation itself remains offline. Only the
+generated Actions jobs access the public `benwmaddox/StasisLang` GitHub releases to resolve and
+restore release assets.
+
 ## Commands and outputs
 
-- `new` / `init`: create the manifest and built-in starter template without network access.
+- `new` / `init`: create the manifest and built-in starter template without network access. `new`
+  also generates GitHub Actions; `init` leaves existing repository automation unchanged.
 - `fmt [--check] [PATH ...]` / `format [--check] [PATH ...]`: apply the canonical Stasis source layout described below.
   `format` is an alias for `fmt`; both emit `fmt` as the canonical JSON command name. The operation
   is idempotent and never follows symlinks. With explicit file or directory paths, formatting works
@@ -113,13 +171,42 @@ cloning a generated repository, reactivate the checked-in hook with
   editor integrations; it does not require a manifest and cannot be combined with `--check`,
   explicit paths, `--workspace`, or `--json`.
 - `check`: run the shared frontend and Cranelift JIT compilation path without executing `main`.
-- `test [PATH]`: run Stasis tests in one isolated JIT session.
-- `run [--headless]`: JIT-compile and execute no-argument `main(): i32` or `main(): void`; an
-  `i32` result is the process exit code. Headless execution is the default.
+- `test [PATH]`: discover project `data/` JSON/CSV pairs with matching `.struct-meta.json` metadata and apply them before running Stasis tests, then run schema-v1 `*.scenario.json` simulation cases. Binding is strict and invalid or missing metadata fails the command; a project without data is unchanged. Each scenario
+  starts from fresh `main()`, applies its optional saved state, and restores one bounded runtime
+  snapshot before every property seed.
+- `run [--headless] [--ticks COUNT] [--fast-forward]`: JIT-compile and execute no-argument
+  `main(): i32` or `main(): void`; an `i32` result is the process exit code. Headless execution is
+  the default. `--ticks` invokes `tick()` exactly `COUNT` times without calling `render()` or
+  loading the graphics runtime. `--fast-forward` makes the no-pacing contract explicit and
+  requires a positive tick count.
+- `record [ENTRY] --output PATH --width PX --height PX --fps FPS (--frames N|--duration S) [--before-tick FUNCTION]`:
+  execute the normal desktop JIT/render path on a hidden fixed-size SDL software presentation.
+  An extensionless output path publishes an exact, numbered PNG sequence; an `.mp4` path stages
+  those PNGs and the existing mixed game audio, then invokes FFmpeg H.264/yuv420p plus AAC at
+  the requested rate. An `.mp3` path stages only the existing mixed game audio and invokes
+  FFmpeg `libmp3lame` for a 48 kHz stereo audio-only artifact. Audio is rendered offline as deterministic 48 kHz stereo PCM16 using
+  cumulative `floor(frame * 48000 / fps)` sample boundaries; no physical device, microphone, or
+  system audio is used. Recording starts after `main()`, uses zero tick sleep, applies the existing
+  `--input-script` timeline, and preserves logical-canvas fit/letterboxing. With `--before-tick`,
+  the required guest function must be `function name(frame: i32): i32`; it receives zero-based
+  frames once after input/live overrides and before tick, render, and capture/mix. Hook state changes
+  are visible to the normal tick and render. Dimensions, rates,
+  counts, output format, staged frame/WAV validation, encoder failures, and partial-output cleanup
+  are bounded and diagnosed. See
+  [Deterministic headless recording](headless_recording.md).
+- `replay RECORDING [--entry ENTRY] [--tick-sleep-us N]`: validate the recording identity,
+  rebuild each complete HostFrame from sparse exact-bit changes, execute the normal JIT `tick()`
+  and `render()` entries, and stop at the first simulation-state hash divergence. `play` accepts
+  `--record-replay PATH` and `--replay PATH`; `record` accepts the same session modes so a replay
+  can be rendered directly to PNG or MP4. See [Record and replay](record_replay.md).
 - `play [ENTRY]`: launch the graphical hot-swap runtime. Without an entry override, discover the
   nearest ancestor `stasis.json` from the current directory and use its project-relative `entry`
   and display `name`. Explicit entries discover their own ancestor manifest, so project-root
   imports and asset preparation remain anchored to the project even when play starts in `src/`.
+  The desktop loop uses `--tick-sleep-us` as an absolute tick interval: input, simulation,
+  rendering, and a potentially vsynced present consume that interval, and the host sleeps only for
+  the remaining budget. An overrun adds no delay, while a pause of at least one whole interval
+  resets the deadline instead of producing a catch-up burst. Passing zero disables this pacing.
 - `run --watch`: launch the existing graphical runner and hot-swap pipeline for game projects.
   The window title uses the manifest project name. Because it is an unbounded graphical session,
   watch mode rejects `--json` and `--headless`.
@@ -138,14 +225,30 @@ cloning a generated repository, reactivate the checked-in hook with
 - `build --mode dev`: compile through JIT and write `build/dev-build.json` as a deterministic
   receipt.
 - `build --mode release`: use the shared Cranelift AOT pipeline and write the native executable to
-  `build/`.
+  `build/`. On Windows, `--signing required` makes unavailable signer/certificate configuration
+  fail before the artifact is accepted; `auto` preserves optional legacy hook behavior.
+- `signing status|provision|sign|verify`: inspect Windows signer discovery, explicitly provision a
+  CurrentUser-only development certificate, sign explicit executable/toolchain paths, or verify
+  Authenticode signatures. These commands do not require `stasis.json`; `provision` is never a
+  production credential path. Stasis-controlled signing requests SHA-256 file digests and page
+  hashes. The explicit sign/verify operations require a Windows host; `STASIS_AOT_SIGN_TOOL`
+  remains supported as a one-argument external hook for existing cross-platform build flows.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
   assets, graphics runtime when present, and verified release provenance. Windows packages keep
   the game-named executable as the only root file and place all support files under `app/`.
 - `package-mobile --target android-arm64|ios-arm64 [--entry PATH]`: atomically assemble the
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
-  Xcode app shell.
+  Xcode app shell. Network-enabled iOS packages require macOS/Xcode, stage and link the
+  `stasis_network` arm64 static library, and include the local-network privacy declaration;
+  direct TCP/unicast does not require Bonjour discovery entitlements. Official archives resolve
+  prebuilt network libraries from `mobile/network/<target>/` beside the installed executable;
+  nightly archives contain all Android arm64/x86_64 and iOS arm64 support libraries, while source
+  checkouts may build them from the workspace as a development fallback.
 - `package --target android-arm64|ios-arm64`: compatibility spelling that uses the manifest entry.
+- Successful human-readable `build`, `package`, and `package-mobile` commands end with a
+  `Completed in ...` line. Durations use milliseconds for sub-second work, seconds for work under
+  one minute, and minutes plus seconds for longer builds. JSON output remains deterministic and
+  does not include wall-clock timing.
 - `inspect [--capacity PATH=COUNT] [--mobile-budget-bytes N]`: compile the manifest entry and
   report the canonical direct-storage model: bytes and alignment by state path/field, struct
   rollups, capacity versus active count, snapshot size, the eight largest pools, recognized
@@ -157,13 +260,62 @@ cloning a generated repository, reactivate the checked-in hook with
 - `vendor status`: compare the manifest, checked-in vendor tree, and selected executable.
 - `vendor update`: transactionally restore `vendor/stasis` from the selected executable and update
   its manifest identity immediately.
+- `prepare`: for `"stdlib": "toolchain"` projects, transactionally materialize the selected
+  toolchain stdlib into `.stasis_cache/toolchain/src/`; otherwise report that no preparation is
+  needed. It never enables vendor mode.
 
-`replay` and `verify` intentionally return deterministic unsupported diagnostics until the replay
-runtime contract lands; they do not fake successful behavior.
+`verify` remains reserved for a future non-presenting batch verifier. `replay` performs verification
+while presenting every reconstructed tick.
+
+### Headless scenarios
+
+Scenario files live under the manifest's test directory and end in `.scenario.json`. They are
+bounded host descriptions that use the normal JIT compiler, not a second Stasis language or
+execution path:
+
+```json
+{
+  "schema_version": 1,
+  "name": "seeded headless simulation",
+  "ticks": 4,
+  "state_file": "baseline.state.json",
+  "state": {"optional_inline_scalar": 3},
+  "invariants": [
+    {"path": "world.score", "op": "gte", "value": 0},
+    {"path": "world.enemies[0].hp", "op": "gt", "value": 0}
+  ],
+  "property": {"seed_path": "world.seed", "seeds": [1, 7, 42]},
+  "expected_hashes": []
+}
+```
+
+`state_file` is relative to the scenario and contains a JSON object from scalar or indexed state
+paths to values. Inline `state` entries are applied after the file and duplicate paths are rejected.
+The runtime calls `main()`, applies that saved state, captures one bounded full JIT snapshot, and
+restores it before each seed. Every case executes at most 1,000,000 ticks, while one invocation is
+preflighted before execution and limited to 1,024 cases and 10,000,000 total ticks. Discovery
+rejects links/reparse points and bounds directories, total entries, scenarios, seeds, invariants,
+state entries, and source bytes.
+
+Invariants run after every tick using the same typed scalar inspection and comparison operators as
+live validation. Optional `expected_hashes` contains one SHA-256 hash per tick and is intended for
+same-profile replay regressions. Hash input is compiler-owned scalar/collection layout plus exact
+value bits. Host input snapshots, host request mailboxes, and graphics/audio command buffers are
+excluded, so presentation extraction cannot change the simulation identity. Ordinary floating
+point remains same-target deterministic only; use the Q16.16 intrinsics for cross-architecture
+hash claims.
+
+On a failed invariant or hash, `stasis test` writes a bounded
+`<output>/headless-replays/*.replay.json` receipt with the scenario path, seed, failing tick,
+reason, observed hashes, a quoted rerun command, and exact `rerun_argv`. Receipt names include a
+scenario-path digest so distinct files cannot overwrite each other. General input-stream recording and the public
+`replay`/`verify` commands remain deliberately reserved for the separate replay-runtime slice.
+See `samples/headless_scenario` for an executable fixture.
 
 Official packaging fails if the installed compiler or renderer sources differ from the release
-manifest. When working from a source checkout, pass `--development-build` to `package` or
-`package-mobile`; the resulting package is permanently labeled non-release. See
+manifest. Without an installed release manifest, source-built toolchains generate optimized local
+releases with `build_class: "local_release"` and content-addressed provenance. Pass
+`--development-build` to explicitly request visibly labeled development output. See
 [Release and package provenance](release_provenance.md).
 
 Add `--json` to receive one stable JSON result object. Usage errors exit 2, command/compile/test
@@ -183,7 +335,8 @@ Global declarations are currently represented by their editable `globals` group 
 individually readable declaration items.
 
 `symbol references SYMBOL` has a different contract: it accepts one to eight dot-separated Stasis
-identifiers and compiler-lexes the editable project files for matching occurrences. Each result has
+identifiers and compiler-lexes the loaded module graph, including checked-in vendor imports, for
+matching occurrences. Each result has
 an exact UTF-8 byte span and is classified as `definition`, `read`, `write`, or `call`, together with
 its containing declaration. Function, struct, and test declaration occurrences are classified as
 definitions. Qualified typed field paths—including indexed receivers such as

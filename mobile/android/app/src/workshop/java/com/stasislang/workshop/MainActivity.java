@@ -91,6 +91,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.TreeSet;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
@@ -173,6 +174,8 @@ public final class MainActivity extends Activity {
     private static final int IMPORT_AUDIO_REQUEST = 74;
     private static final int EXPORT_SUPPORT_BUNDLE_REQUEST = 75;
     private static final int RENDER_FRAME_HEADER_SIZE = 22;
+    private static final String RENDER_PERFORMANCE_ACCEPTANCE_EXTRA =
+            "stasis_render_performance";
     private TextView sourceTitle;
     private LinearLayout selectedSourcePanel;
     private LinearLayout manualEditBody;
@@ -317,8 +320,15 @@ public final class MainActivity extends Activity {
     private final RollingMetric tickMetric = new RollingMetric();
     private final RollingMetric syncMetric = new RollingMetric();
     private final RollingMetric renderMetric = new RollingMetric();
+    private AndroidAudioFocus audioFocus;
     private boolean compileReady;
     private boolean compileAttempted;
+    private boolean jniFrameAbiAcceptanceRun;
+    private boolean workshopTouchAcceptanceRun;
+    private boolean workshopHotEditAcceptanceRun;
+    private boolean workshopResourceScopeAcceptanceRun;
+    private boolean workshopTestRunnerAcceptanceRun;
+    private boolean workshopDiagnosticSeamAcceptanceRun;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private int aiSimTouchX;
@@ -341,6 +351,10 @@ public final class MainActivity extends Activity {
     }
 
     private static native String nativeStatus();
+    private static native void nativeAudioSetPaused(boolean paused);
+    private static native void nativeAudioSetFocus(boolean focused);
+    private static native void nativeAudioShutdown();
+    private static native boolean nativeAudioRequested();
     private static native String nativeCompileProject(String projectRoot);
     private static native int nativeSetStorageRoot(String storageRoot);
     private static native String nativeSourceItems(String projectRoot);
@@ -348,10 +362,14 @@ public final class MainActivity extends Activity {
     private static native String nativeSemanticEdit(String projectRoot, String requestJson,
                                                     boolean dryRun, boolean validate, boolean runTests);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
-    private static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
+    static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
-    private static native String nativeLastFrameError();
+    static native String nativeFrameAbiDescriptor();
+    static native int nativeFrameTrace(ByteBuffer frameI32, ByteBuffer frameF32, ByteBuffer frameU8);
+    private static native String nativeDrainSpriteReleases();
+    private static native String nativePollSpriteReleaseCancellations();
+    static native String nativeLastFrameError();
     private static native String nativeInspectRuntimeState(String projectRoot);
     private static native String nativeSetRuntimeI32(String projectRoot, String path, int value);
     private static native String nativeGetRuntimeI32(String projectRoot, String path);
@@ -377,6 +395,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        audioFocus = new AndroidAudioFocus(this, MainActivity::nativeAudioSetFocus);
         if (nativeSetStorageRoot(new File(getFilesDir(), "stasis_preferences").getAbsolutePath()) == 0) {
             throw new IllegalStateException("Unable to initialize preference storage");
         }
@@ -415,6 +434,7 @@ public final class MainActivity extends Activity {
             projectRegistryError = "baseline: " + error.getMessage();
         }
         setContentView(createWorkshopView(project));
+        handleRenderPerformanceAcceptanceIntent(getIntent());
         registerNetworkMonitoring();
         registerPowerMonitoring();
         markInterruptedAiOutcomeIfNeeded();
@@ -445,8 +465,25 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleRenderPerformanceAcceptanceIntent(intent);
+    }
+
+    private void handleRenderPerformanceAcceptanceIntent(Intent intent) {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || intent == null
+                || !intent.getBooleanExtra(RENDER_PERFORMANCE_ACCEPTANCE_EXTRA, false)) {
+            return;
+        }
+        intent.removeExtra(RENDER_PERFORMANCE_ACCEPTANCE_EXTRA);
+        if (gamePreview != null) gamePreview.startPerformanceSamplingForAcceptance();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+        nativeAudioSetPaused(false);
         if (gamePreview != null) gamePreview.onHostResume();
         codexLoginLifecycle.onResume();
         refreshPhoneNativeCodexStatus();
@@ -458,6 +495,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (audioFocus != null) audioFocus.pause();
+        nativeAudioSetPaused(true);
         if (gamePreview != null) gamePreview.onHostPause();
         codexLoginLifecycle.onPause();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
@@ -512,6 +551,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         activityDestroyed = true;
+        shutdownGameAudio();
         stopVoiceRecognition();
         gameLoopHandler.removeCallbacks(codexStatusPoll);
         gameLoopHandler.removeCallbacks(githubAutoSyncRequest);
@@ -1335,6 +1375,112 @@ public final class MainActivity extends Activity {
                     compileReady = isRunnableCompile(compileResult);
                     compileAttempted = true;
                     setStatusText(compileResult);
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady && !jniFrameAbiAcceptanceRun) {
+                    String abiResult = WorkshopJniFrameAbiAcceptance.run(projectRootPath());
+                    jniFrameAbiAcceptanceRun = true;
+                    boolean abiPassed = false;
+                    try {
+                        abiPassed = "passed".equals(new JSONObject(abiResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!abiPassed) {
+                        compileReady = false;
+                        setStatusText("IT-026 JNI frame ABI acceptance failed: " + abiResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && !workshopTouchAcceptanceRun) {
+                    String touchResult = WorkshopTouchAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopTouchAcceptanceRun = true;
+                    boolean touchPassed = false;
+                    try {
+                        touchPassed = "passed".equals(new JSONObject(touchResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!touchPassed) {
+                        compileReady = false;
+                        setStatusText("IT-027 Workshop touch acceptance failed: " + touchResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopTouchAcceptanceRun && !workshopHotEditAcceptanceRun) {
+                    String hotEditResult = WorkshopHotEditAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopHotEditAcceptanceRun = true;
+                    boolean hotEditPassed = false;
+                    try {
+                        hotEditPassed = "passed".equals(new JSONObject(hotEditResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!hotEditPassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-028 Workshop hot-edit acceptance failed: " + hotEditResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopHotEditAcceptanceRun && !workshopResourceScopeAcceptanceRun) {
+                    String resourceScopeResult = WorkshopResourceScopeAcceptance.run(
+                            MainActivity.this);
+                    workshopResourceScopeAcceptanceRun = true;
+                    boolean resourceScopePassed = false;
+                    try {
+                        resourceScopePassed = "passed".equals(
+                                new JSONObject(resourceScopeResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!resourceScopePassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-029 resource-scope acceptance failed: "
+                                + resourceScopeResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopResourceScopeAcceptanceRun
+                        && !workshopTestRunnerAcceptanceRun) {
+                    String testRunnerResult = WorkshopTestRunnerAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopTestRunnerAcceptanceRun = true;
+                    boolean testRunnerPassed = false;
+                    try {
+                        testRunnerPassed = "passed".equals(
+                                new JSONObject(testRunnerResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!testRunnerPassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-030 Workshop test-runner acceptance failed: "
+                                + testRunnerResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopTestRunnerAcceptanceRun
+                        && !workshopDiagnosticSeamAcceptanceRun) {
+                    String diagnosticResult = WorkshopDiagnosticSeamAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopDiagnosticSeamAcceptanceRun = true;
+                    boolean diagnosticPassed = false;
+                    try {
+                        diagnosticPassed = "passed".equals(
+                                new JSONObject(diagnosticResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!diagnosticPassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-031 diagnostic seam acceptance failed: "
+                                + diagnosticResult);
+                    }
                 }
                 if (compileReady || gameRuntimeActive) {
                     runNativeTick();
@@ -2711,7 +2857,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private boolean activateProject(WorkshopProjectRegistry.ProjectInfo project) {
+    boolean activateProject(WorkshopProjectRegistry.ProjectInfo project) {
         if (aiRunActive || isGitHubOperationActive() || projectIoActive || audioRecordingActive
                 || pendingExportProject != null || !pendingImportProjectName.isEmpty()) {
             setStatusText("Project switch blocked while AI, GitHub, or project I/O is active");
@@ -2723,6 +2869,7 @@ public final class MainActivity extends Activity {
         }
         try {
             WorkshopProjectRegistry.setActive(this, project);
+            shutdownGameAudio();
             activeProject = project;
             lastExplorationAudioSerial = 0;
             projectRootFile = project.root;
@@ -2766,6 +2913,11 @@ public final class MainActivity extends Activity {
             setStatusText("Project switch failed: " + error.getMessage());
             return false;
         }
+    }
+
+    private void shutdownGameAudio() {
+        if (audioFocus != null) audioFocus.pause();
+        nativeAudioShutdown();
     }
 
     private boolean hasPendingSourceEdit() {
@@ -4924,6 +5076,368 @@ public final class MainActivity extends Activity {
         gameRuntimeActive = true;
         recordOnboardingProjectStep(WorkshopOnboardingPolicy.Step.PROJECT_RAN);
         updateGameDebugText();
+    }
+
+    // Acceptance-only bridge for the fixed IT-027 gesture. The frame still
+    // enters through GamePreviewView and the normal JNI direct-buffer path;
+    // this method only packages evidence after GLES has consumed its token.
+    String runIt027Frame(String projectRoot, int logicalX, int logicalY, int action,
+            int touchActive, int sequence) {
+        if (gamePreview == null) {
+            return "{\"status\":\"failed\",\"error\":\"preview unavailable\"}";
+        }
+        int screenWidth = Math.max(1, gamePreview.getWidth());
+        int screenHeight = Math.max(1, gamePreview.getHeight());
+        float scale = Math.min(screenWidth / 640.0f, screenHeight / 360.0f);
+        int viewportWidth = Math.max(1, Math.round(640.0f * scale));
+        int viewportHeight = Math.max(1, Math.round(360.0f * scale));
+        float viewportX = (screenWidth - viewportWidth) / 2.0f;
+        float viewportY = (screenHeight - viewportHeight) / 2.0f;
+        float nativeX = viewportX + logicalX * scale;
+        float nativeY = viewportY + logicalY * scale;
+        try {
+            gamePreview.dispatchAcceptanceTouch(action, nativeX, nativeY);
+            int viewTouchActive = gamePreview.touchActive();
+            if (viewTouchActive != touchActive) {
+                return "{\"status\":\"failed\",\"error\":\"view touch state mismatch\"}";
+            }
+            int status = gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
+                    gamePreview.touchY(), viewTouchActive, screenWidth, screenHeight,
+                    nativeFrameValues);
+            if (status != 0) {
+                return "{\"status\":\"failed\",\"error\":"
+                        + JSONObject.quote(nativeLastFrameError()) + "}";
+            }
+            int token = gamePreview.frameToken();
+            long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
+            boolean presented = gamePreview.awaitPresentedFrameToken(token, 5_000L);
+            if (!presented) {
+                return "{\"status\":\"failed\",\"error\":\"GLES token timeout\"}";
+            }
+            JSONObject guest = new JSONObject();
+            String[] names = {"x", "y", "dx", "dy", "x_norm_x1000", "y_norm_x1000",
+                    "active", "down_edge", "up_edge", "marker_active", "checksum"};
+            String[] paths = {"seam_touch_x", "seam_touch_y", "seam_touch_dx", "seam_touch_dy",
+                    "seam_touch_x_norm_x1000", "seam_touch_y_norm_x1000", "seam_touch_active",
+                    "seam_touch_down_edge", "seam_touch_up_edge", "seam_touch_marker_active",
+                    "seam_touch_checksum"};
+            for (int index = 0; index < names.length; index += 1) {
+                String state = nativeGetRuntimeI32(projectRoot, paths[index]);
+                guest.put(names[index], extractIntField(state, "value", Integer.MIN_VALUE));
+            }
+            JSONObject marker = new JSONObject();
+            int rectCount = gamePreview.rectCount();
+            boolean markerActive = rectCount >= 2;
+            marker.put("active", markerActive);
+            if (markerActive) {
+                int base = StasisPreviewRenderer.F_RECT_REVERSE_BASE - 8;
+                marker.put("x", gamePreview.acceptanceFrameF32(base));
+                marker.put("y", gamePreview.acceptanceFrameF32(base + 1));
+                marker.put("w", gamePreview.acceptanceFrameF32(base + 2));
+                marker.put("h", gamePreview.acceptanceFrameF32(base + 3));
+                marker.put("r", gamePreview.acceptanceFrameF32(base + 4));
+                marker.put("g", gamePreview.acceptanceFrameF32(base + 5));
+                marker.put("b", gamePreview.acceptanceFrameF32(base + 6));
+                marker.put("a", gamePreview.acceptanceFrameF32(base + 7));
+            }
+            return new JSONObject().put("schema", "stasis.workshop_touch_roundtrip.v1")
+                    .put("test_id", "IT-027").put("event", "case")
+                    .put("status", "passed").put("sequence", sequence)
+                    .put("phase", action == MotionEvent.ACTION_DOWN ? "down"
+                            : action == MotionEvent.ACTION_MOVE ? "move" : "up")
+                    .put("input", new JSONObject().put("x", logicalX).put("y", logicalY)
+                            .put("active", touchActive).put("action", action))
+                    .put("guest", guest)
+                    .put("render", new JSONObject().put("frame_token", token)
+                            .put("trace", trace)
+                            .put("rect_count", rectCount)
+                            .put("marker", marker))
+                    .put("gles_presented", true).put("gles_frame_token", token)
+                    .put("java_only", false).toString();
+        } catch (Exception error) {
+            return "{\"status\":\"failed\",\"error\":"
+                    + JSONObject.quote(error.getMessage() == null ? error.getClass().getSimpleName()
+                            : error.getMessage()) + "}";
+        }
+    }
+
+    String runIt028Frame(String projectRoot, String phase, int sequence) {
+        if (gamePreview == null) {
+            return "{\"status\":\"failed\",\"error\":\"preview unavailable\"}";
+        }
+        int screenWidth = Math.max(1, gamePreview.getWidth());
+        int screenHeight = Math.max(1, gamePreview.getHeight());
+        try {
+            int status = gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
+                    screenWidth, screenHeight, nativeFrameValues);
+            if (status != 0) {
+                return "{\"status\":\"failed\",\"error\":"
+                        + JSONObject.quote(nativeLastFrameError()) + "}";
+            }
+            int token = gamePreview.frameToken();
+            long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
+            if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
+                return "{\"status\":\"failed\",\"error\":\"GLES token timeout\"}";
+            }
+            JSONObject runtime = new JSONObject(nativeInspectRuntimeState(projectRoot));
+            JSONObject guest = new JSONObject();
+            String[] names = {"tick_revision", "render_revision", "state_counter"};
+            String[] paths = {"seam_it028_tick_marker", "seam_it028_render_marker",
+                    "seam_it028_state_counter"};
+            for (int index = 0; index < names.length; index += 1) {
+                String state = nativeGetRuntimeI32(projectRoot, paths[index]);
+                guest.put(names[index], extractIntField(state, "value", Integer.MIN_VALUE));
+            }
+            JSONObject marker = new JSONObject();
+            int rectCount = gamePreview.rectCount();
+            boolean markerActive = rectCount >= 2;
+            marker.put("active", markerActive);
+            if (markerActive) {
+                int base = StasisPreviewRenderer.F_RECT_REVERSE_BASE - 8;
+                marker.put("x", gamePreview.acceptanceFrameF32(base));
+                marker.put("y", gamePreview.acceptanceFrameF32(base + 1));
+                marker.put("w", gamePreview.acceptanceFrameF32(base + 2));
+                marker.put("h", gamePreview.acceptanceFrameF32(base + 3));
+                marker.put("r", gamePreview.acceptanceFrameF32(base + 4));
+                marker.put("g", gamePreview.acceptanceFrameF32(base + 5));
+                marker.put("b", gamePreview.acceptanceFrameF32(base + 6));
+                marker.put("a", gamePreview.acceptanceFrameF32(base + 7));
+            }
+            return new JSONObject().put("schema", "stasis.workshop_hot_edit.v1")
+                    .put("test_id", "IT-028").put("event", "case")
+                    .put("status", "passed").put("phase", phase).put("sequence", sequence)
+                    .put("runtime", runtime).put("guest", guest)
+                    .put("render", new JSONObject().put("frame_token", token)
+                            .put("trace", trace).put("rect_count", rectCount)
+                            .put("marker", marker))
+                    .put("gles_presented", true).put("gles_frame_token", token)
+                    .put("java_only", false).put("fallback", 0).put("stub", 0).toString();
+        } catch (Exception error) {
+            return "{\"status\":\"failed\",\"error\":"
+                    + JSONObject.quote(error.getMessage() == null ? error.getClass().getSimpleName()
+                            : error.getMessage()) + "}";
+        }
+    }
+
+    JSONObject runIt029Frame(String projectRoot, String phase, int sequence) throws Exception {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || gamePreview == null) {
+            throw new IllegalStateException("IT-029 preview unavailable");
+        }
+        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
+                Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
+                nativeFrameValues);
+        if (status != 0) throw new IllegalStateException(nativeLastFrameError());
+        int token = gamePreview.frameToken();
+        long commandTrace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
+        if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
+            throw new IllegalStateException("IT-029 GLES token timeout");
+        }
+        final Bitmap[] captured = new Bitmap[1];
+        final String[] captureError = new String[1];
+        final StasisPreviewRenderer.LogicalFrameSnapshot[] logical =
+                new StasisPreviewRenderer.LogicalFrameSnapshot[1];
+        CountDownLatch captureReady = new CountDownLatch(1);
+        gamePreview.captureFrame((bitmap, error, frame) -> {
+            captured[0] = bitmap;
+            captureError[0] = error;
+            logical[0] = frame;
+            captureReady.countDown();
+        });
+        long captureDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+        while (captureReady.getCount() != 0L && System.nanoTime() < captureDeadline) {
+            gamePreview.requestRender();
+            long remaining = captureDeadline - System.nanoTime();
+            if (remaining > 0L) {
+                captureReady.await(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(100L)),
+                        TimeUnit.NANOSECONDS);
+            }
+        }
+        if (captureReady.getCount() != 0L || captured[0] == null) {
+            throw new IllegalStateException("IT-029 capture failed: "
+                    + (captureError[0] == null ? "timeout" : captureError[0]));
+        }
+        byte[] png;
+        try {
+            png = encodeBitmapPng(captured[0]);
+        } finally {
+            captured[0].recycle();
+        }
+        File captureDirectory = new File(getExternalFilesDir(null), "it029");
+        if (!captureDirectory.isDirectory() && !captureDirectory.mkdirs()) {
+            throw new IOException("IT-029 capture directory could not be created");
+        }
+        File capture = new File(captureDirectory, phase + ".png");
+        FileOutputStream output = new FileOutputStream(capture);
+        try {
+            output.write(png);
+            output.getFD().sync();
+        } finally {
+            output.close();
+        }
+        StasisPreviewRenderer.LogicalFrameSnapshot frame = logical[0];
+        JSONArray sprites = new JSONArray();
+        for (int index = 0; index + 2 < frame.sprites.length; index += 3) {
+            sprites.put(frame.sprites[index]);
+        }
+        JSONArray fonts = new JSONArray();
+        JSONArray cachedText = new JSONArray();
+        for (int index = 0; index + 2 < frame.textMetadata.length; index += 3) {
+            fonts.put(frame.textMetadata[index]);
+            if (frame.textMetadata[index + 1] < 0) {
+                cachedText.put(0 - frame.textMetadata[index + 1]);
+            }
+        }
+        JSONObject resources = gamePreview.resourceScopeSnapshot();
+        return new JSONObject()
+                .put("schema", "stasis.workshop_resource_scope.v1")
+                .put("test_id", "IT-029").put("event", "case")
+                .put("status", "passed").put("phase", phase).put("sequence", sequence)
+                .put("project_root", new File(projectRoot).getCanonicalPath())
+                .put("frame_token", token).put("gles_presented", true)
+                .put("command_trace", commandTrace)
+                .put("sprite_handles", sprites).put("font_handles", fonts)
+                .put("cached_text_handles", cachedText)
+                .put("direct_text_sha256", sha256Bytes(frame.textBytes))
+                .put("capture_path", capture.getAbsolutePath())
+                .put("capture_sha256", sha256Bytes(png))
+                .put("resources", resources)
+                .put("java_only", false).put("fallback", 0).put("stub", 0);
+    }
+
+    void resetIt029ResourceMetrics() {
+        if (gamePreview != null) gamePreview.resetResourceScopeMetrics();
+    }
+
+    boolean recreateIt029Surface() {
+        return gamePreview != null && gamePreview.recreateEglContextForAcceptance(5_000L);
+    }
+
+    String acceptanceReadSource(String projectRoot) throws IOException {
+        return readTextFile(new File(projectRoot, "src/main.stasis"));
+    }
+
+    void acceptanceReplaceSource(String projectRoot, String source) throws IOException {
+        replaceTextFileAtomically(new File(projectRoot, "src/main.stasis"), source);
+    }
+
+    String acceptanceCompile(String projectRoot) {
+        return nativeCompileProject(projectRoot);
+    }
+
+    JSONObject acceptanceRuntimeState(String projectRoot) throws Exception {
+        return new JSONObject(nativeInspectRuntimeState(projectRoot));
+    }
+
+    JSONObject acceptanceActivateRuntime(String projectRoot) throws Exception {
+        if (gamePreview == null) {
+            throw new IllegalStateException("IT-030 runtime activation requires the preview");
+        }
+        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
+                gamePreview.touchY(), gamePreview.touchActive(),
+                Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
+                nativeFrameValues);
+        if (status != 0) {
+            throw new IllegalStateException("IT-030 runtime activation failed: "
+                    + nativeLastFrameError());
+        }
+        JSONObject runtime = acceptanceRuntimeState(projectRoot);
+        if (runtime.optBoolean("pending_candidate", true)) {
+            throw new IllegalStateException("IT-030 runtime activation left a pending candidate");
+        }
+        runtime.put("activation", "native_frame");
+        return runtime;
+    }
+
+    String acceptanceRunTests(String projectRoot) {
+        return nativeRunTests(projectRoot);
+    }
+
+    WorkshopAiProjectTransaction.Snapshot acceptanceCaptureProject(String projectRoot)
+            throws Exception {
+        return WorkshopAiProjectTransaction.capture(new File(projectRoot));
+    }
+
+    void acceptanceRestoreProject(String projectRoot,
+            WorkshopAiProjectTransaction.Snapshot snapshot) throws Exception {
+        WorkshopAiProjectTransaction.restore(new File(projectRoot), snapshot);
+    }
+
+    String acceptanceProjectFingerprint(WorkshopAiProjectTransaction.Snapshot snapshot)
+            throws Exception {
+        return WorkshopAiProjectTransaction.fingerprint(snapshot);
+    }
+
+    void acceptanceWriteTest(String projectRoot, String relativePath, String source)
+            throws Exception {
+        String normalized = relativePath.replace('\\', '/');
+        if (!normalized.startsWith("tests/") || !normalized.endsWith(".test.stasis")
+                || normalized.contains("..")) {
+            throw new IllegalArgumentException("IT-030 test path is invalid");
+        }
+        File root = new File(projectRoot).getCanonicalFile();
+        File target = new File(root, normalized.replace('/', File.separatorChar)).getCanonicalFile();
+        if (!target.getPath().startsWith(root.getPath() + File.separator)) {
+            throw new IllegalArgumentException("IT-030 test path escaped project");
+        }
+        replaceTextFileAtomically(target, source);
+    }
+
+    String acceptanceSetRuntimeI32(String projectRoot, String path, int value) {
+        return nativeSetRuntimeI32(projectRoot, path, value);
+    }
+
+    JSONObject acceptanceCompileDiagnostic(String compileResult) throws Exception {
+        return compileResultToJson(compileResult);
+    }
+
+    WorkshopNativeDiagnostic acceptanceNativeDiagnostic(String nativeMessage) {
+        return WorkshopNativeDiagnostic.fromNative(nativeMessage);
+    }
+
+    JSONObject acceptanceDisplayDiagnostic(String nativeMessage) throws Exception {
+        setStatusText(nativeMessage);
+        String displayedText = reloadStatus == null
+                ? compactStatusText(nativeMessage)
+                : reloadStatus.getText().toString();
+        WorkshopNativeDiagnostic displayed = WorkshopNativeDiagnostic.fromNative(displayedText);
+        return new JSONObject().put("diagnostic", displayed == null ? JSONObject.NULL
+                : displayed.toJson()).put("displayed_text", displayedText);
+    }
+
+    String runIt031Frame(String projectRoot) {
+        if (gamePreview == null) return "";
+        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
+                gamePreview.touchY(), gamePreview.touchActive(),
+                Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
+                nativeFrameValues);
+        if (status != 0) return "RunError: " + nativeLastFrameError();
+        return "passed";
+    }
+
+    JSONObject acceptanceRecoverAfterHealthyFrame(String compileResult) throws Exception {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || !isRunnableCompile(compileResult)
+                || gamePreview == null
+                || nativeFrameValues[0] != StasisPreviewRenderer.RENDER_MAGIC
+                || nativeFrameValues[1] != StasisPreviewRenderer.RENDER_VERSION) {
+            throw new IllegalStateException("IT-031 UI recovery requires a healthy compile and frame");
+        }
+        compileReady = true;
+        compileAttempted = true;
+        gameRuntimeActive = true;
+        lastCompileResult = compileResult;
+        setStatusText(compileResult);
+        String displayedStatus = reloadStatus == null
+                ? compactStatusText(compileResult) : reloadStatus.getText().toString();
+        boolean blockingVisible = blockingErrorPanel != null
+                && blockingErrorPanel.getVisibility() == View.VISIBLE;
+        boolean statusHealthy = !blockingVisible && !displayedStatus.startsWith("CompileError")
+                && !displayedStatus.startsWith("RunError");
+        return new JSONObject().put("blocking_error_visible", blockingVisible)
+                .put("status_healthy", statusHealthy)
+                .put("displayed_status", displayedStatus)
+                .put("compile_ready", compileReady)
+                .put("compile_attempted", compileAttempted)
+                .put("game_runtime_active", gameRuntimeActive);
     }
 
     private static int extractIntField(String text, String key, int fallback) {
@@ -7367,6 +7881,7 @@ public final class MainActivity extends Activity {
         if (frame == null) return new JSONObject().put("status", "unavailable");
         JSONArray header = jsonArray(frame.header);
         JSONArray lines = jsonArray(frame.lines);
+        JSONArray rectangles = jsonArray(frame.rectangles);
         JSONArray sprites = jsonArray(frame.sprites);
         JSONArray textMetadata = jsonArray(frame.textMetadata);
         JSONArray textValues = jsonArray(frame.textValues);
@@ -7377,11 +7892,13 @@ public final class MainActivity extends Activity {
                 .put("version", frame.header[1])
                 .put("flags", frame.header[2])
                 .put("line_count", frame.header[3])
+                .put("rectangle_count", frame.header[24])
                 .put("sprite_count", frame.header[4])
                 .put("text_count", frame.header[7])
                 .put("text_bytes_used", frame.header[9])
                 .put("header_i32", header)
                 .put("line_f32", lines)
+                .put("rectangle_f32", rectangles)
                 .put("sprite_i32", sprites)
                 .put("text_i32", textMetadata)
                 .put("text_f32", textValues)
@@ -10029,8 +10546,16 @@ public final class MainActivity extends Activity {
         String templateId = activeProject == null ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID
                 : activeProject.templateId;
         String expectedReady = "format=3\ntemplate_id=" + templateId
-                + "\nrenderer=gfx_cmd_v1\n";
-        if (readyFile.isFile() && expectedReady.equals(readTextFile(readyFile))) return;
+                + "\nrenderer=gfx_cmd\nrenderer_schema=7\n";
+        boolean readyExists = readyFile.isFile();
+        boolean readyMatches = readyExists && expectedReady.equals(readTextFile(readyFile));
+        WorkshopProjectBaselinePolicy.Action action = WorkshopProjectBaselinePolicy.requiredAction(
+                activeProject != null && "import".equals(activeProject.origin), readyExists, readyMatches);
+        if (action == WorkshopProjectBaselinePolicy.Action.KEEP) return;
+        if (action == WorkshopProjectBaselinePolicy.Action.UPDATE_MARKER) {
+            writeTextFile(readyFile, expectedReady);
+            return;
+        }
         ProjectSnapshot baseline = activeProject != null && "import".equals(activeProject.origin)
                 ? current : loadBundledAssetSnapshot();
         deleteBaselineDirectory(baselineRoot);
@@ -10588,6 +11113,14 @@ public final class MainActivity extends Activity {
                         // The recursive load below includes files that were seeded successfully.
                     }
                 }
+                for (WorkshopTemplateCatalog.DirectoryMount mount : template.directoryMounts) {
+                    try {
+                        ensureProjectDirectory(assets, mount.assetDirectory,
+                                new File(projectRoot, mount.projectDirectory));
+                    } catch (IOException ignored) {
+                        // The recursive load below includes directory files that were seeded successfully.
+                    }
+                }
                 for (String file : template.auxiliaryFiles) {
                     try {
                         ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
@@ -10787,6 +11320,32 @@ public final class MainActivity extends Activity {
             }
         } finally {
             if (temporary.exists()) temporary.delete();
+        }
+    }
+
+    private void ensureProjectDirectory(AssetManager assets, String assetPath, File diskDirectory)
+            throws IOException {
+        if (diskDirectory.exists() && !diskDirectory.isDirectory()) {
+            throw new IOException("project directory path is a file: "
+                    + diskDirectory.getAbsolutePath());
+        }
+        if (!diskDirectory.isDirectory() && !diskDirectory.mkdirs()) {
+            throw new IOException("failed to create " + diskDirectory.getAbsolutePath());
+        }
+        String[] children = assets.list(assetPath);
+        if (children == null || children.length == 0) {
+            throw new IOException("packaged asset directory is empty: " + assetPath);
+        }
+        Arrays.sort(children);
+        for (String child : children) {
+            String childAssetPath = assetPath + "/" + child;
+            File childDiskPath = new File(diskDirectory, child);
+            String[] grandchildren = assets.list(childAssetPath);
+            if (grandchildren != null && grandchildren.length > 0) {
+                ensureProjectDirectory(assets, childAssetPath, childDiskPath);
+            } else {
+                ensureProjectFile(assets, childAssetPath, childDiskPath);
+            }
         }
     }
 
@@ -11739,6 +12298,8 @@ public final class MainActivity extends Activity {
 
         private final MainActivity activity;
         private final StasisPreviewRenderer renderer;
+        private final WorkshopTextureProvider textureProvider;
+        private static final long ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS = 100L;
         private int touchX;
         private int touchY;
         private boolean touchActive;
@@ -11750,8 +12311,8 @@ public final class MainActivity extends Activity {
             this.activity = activity;
             setEGLContextClientVersion(2);
             setPreserveEGLContextOnPause(true);
-            renderer = new StasisPreviewRenderer(
-                    new WorkshopTextureProvider(activity),
+            textureProvider = new WorkshopTextureProvider(activity);
+            renderer = new StasisPreviewRenderer(textureProvider,
                     activity::recordRenderTimeNanos);
             setRenderer(renderer);
             setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
@@ -11770,6 +12331,107 @@ public final class MainActivity extends Activity {
             return touchActive ? 1 : 0;
         }
 
+        void dispatchAcceptanceTouch(int action, float x, float y) {
+            long now = SystemClock.uptimeMillis();
+            MotionEvent event = MotionEvent.obtain(now, now, action, x, y, 0);
+            try {
+                onTouchEvent(event);
+            } finally {
+                event.recycle();
+            }
+        }
+
+        int acceptanceTrace() {
+            synchronized (renderer) {
+                return renderer.acceptanceTrace();
+            }
+        }
+
+        int frameToken() {
+            synchronized (renderer) {
+                return renderer.frameToken();
+            }
+        }
+
+        int rectCount() {
+            synchronized (renderer) {
+                return renderer.rectCount();
+            }
+        }
+
+        void resetResourceScopeMetrics() {
+            synchronized (renderer) {
+                textureProvider.resetAcceptanceMetrics();
+            }
+        }
+
+        void startPerformanceSamplingForAcceptance() {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
+            queueEvent(renderer::startPerformanceSamplingForAcceptance);
+            requestRender();
+        }
+
+        JSONObject resourceScopeSnapshot() throws Exception {
+            synchronized (renderer) {
+                JSONObject snapshot = textureProvider.acceptanceSnapshot();
+                snapshot.put("lifecycle_surface_generation", renderer.surfaceGeneration());
+                snapshot.put("lifecycle_renderer_generation", renderer.rendererGeneration());
+                snapshot.put("resources_ready", renderer.resourcesReady());
+                return snapshot;
+            }
+        }
+
+        int rendererGeneration() {
+            synchronized (renderer) {
+                return renderer.rendererGeneration();
+            }
+        }
+
+        boolean recreateEglContextForAcceptance(long timeoutMillis) {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return false;
+            int previous = rendererGeneration();
+            setPreserveEGLContextOnPause(false);
+            try {
+                onHostPause();
+                onHostResume();
+                long deadline = SystemClock.uptimeMillis() + timeoutMillis;
+                while (SystemClock.uptimeMillis() < deadline) {
+                    requestRender();
+                    if (rendererGeneration() > previous) return true;
+                    SystemClock.sleep(10L);
+                }
+                return false;
+            } finally {
+                setPreserveEGLContextOnPause(true);
+            }
+        }
+
+        float acceptanceFrameF32(int index) {
+            synchronized (renderer) {
+                return renderer.acceptanceFrameF32(index);
+            }
+        }
+
+        boolean awaitPresentedFrameToken(int token, long timeoutMillis) {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || timeoutMillis <= 0L) {
+                return renderer.awaitPresentedFrameToken(token, timeoutMillis);
+            }
+            long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
+            while (true) {
+                long remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0L) return false;
+                requestRender();
+                remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0L) return false;
+                long remainingMillis = (remainingNanos + 999_999L) / 1_000_000L;
+                long waitMillis = Math.min(remainingMillis,
+                        ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS);
+                if (renderer.awaitPresentedFrameToken(token, waitMillis)) {
+                    return System.nanoTime() <= deadline;
+                }
+            }
+        }
+
         void onHostPause() {
             renderer.onHostPaused();
             onPause();
@@ -11783,18 +12445,49 @@ public final class MainActivity extends Activity {
 
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
                 int screenWidth, int screenHeight, int[] header) {
+            return runNativeFrameInternal(projectRoot, inputX, inputY, inputActive,
+                    screenWidth, screenHeight, header, false);
+        }
+
+        int runNativeAcceptanceFrame(String projectRoot, int inputX, int inputY, int inputActive,
+                int screenWidth, int screenHeight, int[] header) {
+            return runNativeFrameInternal(projectRoot, inputX, inputY, inputActive,
+                    screenWidth, screenHeight, header, true);
+        }
+
+        private int runNativeFrameInternal(String projectRoot, int inputX, int inputY,
+                int inputActive, int screenWidth, int screenHeight, int[] header,
+                boolean acceptance) {
             int status;
+            boolean releaseBatchEnqueued = false;
+            boolean releaseCancellationApplied = false;
             long requested = System.nanoTime();
             synchronized (renderer) {
                 long started = System.nanoTime();
                 lastRendererSyncWaitNanos = started - requested;
+                boolean drainReleases = !renderer.hasPendingSpriteReleases();
                 status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
                         screenWidth, screenHeight, renderer.frameI32Bytes(),
                         renderer.frameF32Bytes(), renderer.frameU8Bytes());
+                if (activity.audioFocus != null && nativeAudioRequested()) activity.audioFocus.resume();
+                releaseCancellationApplied = renderer.cancelPendingSpriteReleases(
+                        nativePollSpriteReleaseCancellations());
+                if (!drainReleases && releaseCancellationApplied) {
+                    drainReleases = !renderer.hasPendingSpriteReleases();
+                }
+                if (drainReleases) {
+                    releaseBatchEnqueued = renderer.enqueuePendingSpriteReleases(
+                            nativeDrainSpriteReleases());
+                }
                 lastNativeFrameDurationNanos = System.nanoTime() - started;
                 renderer.copyFrameHeaderInto(header);
+                if (acceptance && status == 0) {
+                    renderer.setAcceptanceTrace(renderer.frameToken(),
+                            MainActivity.nativeFrameTrace(renderer.frameI32Bytes(),
+                                    renderer.frameF32Bytes(), renderer.frameU8Bytes()));
+                }
             }
-            if (status == 0) requestRender();
+            if (status == 0 || releaseBatchEnqueued || releaseCancellationApplied) requestRender();
             return status;
         }
 

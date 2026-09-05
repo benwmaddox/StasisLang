@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Standard JavaScript Pong</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, Consolas, monospace; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #07111f; }
+    main { width: min(960px, 100vw); }
+    canvas { display: block; width: 100%; aspect-ratio: 16 / 9; background: #050c18; }
+  </style>
+</head>
+<body>
+  <main>
+    <canvas id="pong" width="640" height="360" aria-label="Autonomous Pong game"></canvas>
+  </main>
+  <script type="module" src="game.js"></script>
+</body>
+</html>

@@ -3,33 +3,59 @@
 
 mod compiler_backend;
 mod events;
+mod frame_pacer;
 mod host_set_registry;
 mod live_workspace;
+mod mobile_aot_bindings;
+mod play_error_toasts;
+mod record_replay;
 mod runtime_exec;
 mod stasis_test_runner;
 mod watch;
 mod window_config;
+pub mod windows_signing;
 
 pub use compiler_backend::build_aot_direct_storage_source;
 pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
+pub use compiler_backend::sign_output_artifact_if_configured;
 pub use events::RunnerEvent;
-pub use live_workspace::LiveRunConfig;
+pub use live_workspace::{run_project_tests_bounded, LiveRunConfig};
+pub use mobile_aot_bindings::{
+    audit_mobile_aot_bindings, escape_mobile_c_string_literal, mobile_aot_function_for,
+    write_mobile_aot_bindings_source, write_mobile_aot_bindings_source_with_profile,
+    write_mobile_aot_bindings_source_with_profile_and_assets,
+};
+pub use record_replay::{simulation_state_hash, PlayReplayConfig};
 pub use stasis_test_runner::{
-    run_jit_tests_in_directory, run_jit_tests_in_directory_with_project_root_and_session,
+    natural_path_cmp, run_jit_tests_in_directory,
+    run_jit_tests_in_directory_with_project_root_and_session,
+    run_jit_tests_in_directory_with_project_root_session_and_validator,
     run_jit_tests_in_directory_with_session, StasisTestRunSession, StasisTestRunSummary,
 };
 pub use window_config::WindowConfig;
+pub use windows_signing::{
+    provision_local_certificate, sign_artifacts, signing_required, status as signing_status,
+    verify_artifacts, ProvisionResult, SigningOptions, SigningStatus,
+};
 
 use compiler_backend::{IncrementalCompilerBackend, PreparedJitSwap};
+use frame_pacer::FramePacer;
 use live_workspace::LiveWorkspace;
+use play_error_toasts::{EmbeddedToastFont, PlayErrorToasts};
+use record_replay::{ReplayPlayer, ReplayRecorder};
 use runtime_exec::RuntimeLauncher;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
 };
-use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
+#[cfg(test)]
+use stasis_compiler::backend::development_swap::DevelopmentSwapStatus;
+use stasis_compiler::backend::development_swap::{
+    commit_development_swap, DevelopmentSwapDescriptor, DevelopmentSwapHost, DevelopmentSwapReceipt,
+};
+use stasis_compiler::backend::jit::{JitEnginePackage, JitExternProfile, JitProcess};
 use stasis_compiler::backend::state_migration::{
     activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
     MAX_STATE_SNAPSHOT_BYTES,
@@ -45,8 +71,9 @@ use stasis_runner::swap::contracts::{
 use stasis_runner::swap::pipeline::{CompilerBackend, DevHotSwapPipeline};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -54,6 +81,359 @@ use watch::WatchService;
 
 const SWAP_FLASH_TICKS_MAX: u32 = 180;
 const TICK_BUDGET_SAMPLE_LIMIT: usize = 4096;
+const DESKTOP_FRAME_EVIDENCE_ENV: &str = "STASIS_DESKTOP_FRAME_EVIDENCE";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayProfileConfig {
+    pub functions: Vec<String>,
+    pub warmup_ticks: u64,
+    pub output_path: Option<PathBuf>,
+}
+
+/// Fixed-rate capture inserted into the existing JIT play loop.
+///
+/// The runtime owns presentation and PNG encoding; the host only schedules one
+/// pre-present capture for each committed rendered frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayFrameCaptureConfig {
+    pub output_dir: Option<PathBuf>,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub frame_count: u64,
+    pub audio_output: Option<PathBuf>,
+    pub before_tick_function: Option<String>,
+}
+
+const RECORDING_AUDIO_SAMPLE_RATE: u64 = 48_000;
+const RECORDING_AUDIO_CHANNELS: u16 = 2;
+
+fn recording_audio_target_samples(frame: u64, fps: u32) -> Result<u64, String> {
+    if fps == 0 {
+        return Err("recording audio stage requires a positive frame rate".to_string());
+    }
+    frame
+        .checked_mul(RECORDING_AUDIO_SAMPLE_RATE)
+        .ok_or_else(|| "recording audio stage sample schedule overflow".to_string())
+        .map(|samples| samples / u64::from(fps))
+}
+
+struct RecordingAudioSink {
+    file: fs::File,
+    frame_count: u64,
+}
+
+struct RecordingAudioTeardown<'a> {
+    gfx: &'a stasis_dynload::StasisGraphicsApi,
+}
+
+impl Drop for RecordingAudioTeardown<'_> {
+    fn drop(&mut self) {
+        let _ = self.gfx.set_recording_audio_config(false);
+    }
+}
+
+impl RecordingAudioSink {
+    fn create(path: &Path) -> Result<Self, String> {
+        let mut file = fs::File::create(path).map_err(|error| {
+            format!(
+                "recording audio stage failed to create {}: {error}",
+                path.display()
+            )
+        })?;
+        file.write_all(&[0u8; 44]).map_err(|error| {
+            format!(
+                "recording audio stage failed to reserve WAV header {}: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Self {
+            file,
+            frame_count: 0,
+        })
+    }
+
+    fn append(&mut self, samples: &[f32]) -> Result<(), String> {
+        if samples.len() % usize::from(RECORDING_AUDIO_CHANNELS) != 0 {
+            return Err("recording audio mix returned non-stereo sample count".to_string());
+        }
+        let mut pcm = Vec::with_capacity(samples.len() * 2);
+        for sample in samples {
+            let clamped = sample.clamp(-1.0, 1.0);
+            let value = if clamped <= -1.0 {
+                i16::MIN
+            } else {
+                (clamped * f32::from(i16::MAX)).round() as i16
+            };
+            pcm.extend_from_slice(&value.to_le_bytes());
+        }
+        self.file.write_all(&pcm).map_err(|error| {
+            format!("recording audio stage failed to write WAV samples: {error}")
+        })?;
+        self.frame_count = self
+            .frame_count
+            .saturating_add((samples.len() / usize::from(RECORDING_AUDIO_CHANNELS)) as u64);
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        let data_bytes = self
+            .frame_count
+            .checked_mul(u64::from(RECORDING_AUDIO_CHANNELS) * 2)
+            .ok_or_else(|| "recording audio WAV size overflow".to_string())?;
+        let riff_size = 36u64
+            .checked_add(data_bytes)
+            .ok_or_else(|| "recording audio WAV RIFF size overflow".to_string())?;
+        if data_bytes > u64::from(u32::MAX) || riff_size > u64::from(u32::MAX) {
+            return Err("recording audio WAV exceeds RIFF size limit".to_string());
+        }
+        let mut header = Vec::with_capacity(44);
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(riff_size as u32).to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes());
+        header.extend_from_slice(&RECORDING_AUDIO_CHANNELS.to_le_bytes());
+        header.extend_from_slice(&(RECORDING_AUDIO_SAMPLE_RATE as u32).to_le_bytes());
+        header.extend_from_slice(&(RECORDING_AUDIO_SAMPLE_RATE as u32 * 4).to_le_bytes());
+        header.extend_from_slice(&4u16.to_le_bytes());
+        header.extend_from_slice(&16u16.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&(data_bytes as u32).to_le_bytes());
+        self.file
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| self.file.write_all(&header))
+            .and_then(|_| self.file.flush())
+            .map_err(|error| format!("recording audio stage failed to finalize WAV: {error}"))
+    }
+}
+
+struct PlayCaptureEnvironment {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+static PLAY_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct PlayCurrentDirectoryGuard {
+    path: PathBuf,
+}
+
+impl Drop for PlayCurrentDirectoryGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.path);
+    }
+}
+
+impl PlayCaptureEnvironment {
+    fn install(config: &PlayFrameCaptureConfig) -> Result<Self, String> {
+        if config.width == 0 || config.height == 0 || config.fps == 0 || config.frame_count == 0 {
+            return Err(
+                "recording capture requires positive dimensions and frame count".to_string(),
+            );
+        }
+        let lock = PLAY_CAPTURE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "recording capture process lock is poisoned".to_string())?;
+        if let Some(output_dir) = config.output_dir.as_ref() {
+            fs::create_dir_all(output_dir).map_err(|error| {
+                format!(
+                    "failed to create recording staging directory {}: {error}",
+                    output_dir.display()
+                )
+            })?;
+        }
+        let names = [
+            "STASIS_RECORDING_WIDTH",
+            "STASIS_RECORDING_HEIGHT",
+            "STASIS_RECORDING_FPS",
+            "STASIS_RECORDING_PRESENTATION",
+            "STASIS_WINDOW_HIDDEN",
+            "STASIS_GFX_VSYNC",
+            "SDL_VIDEODRIVER",
+            "SDL_RENDER_DRIVER",
+        ];
+        let previous = names
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect();
+        std::env::set_var("STASIS_RECORDING_WIDTH", config.width.to_string());
+        std::env::set_var("STASIS_RECORDING_HEIGHT", config.height.to_string());
+        std::env::set_var("STASIS_RECORDING_FPS", config.fps.to_string());
+        std::env::set_var("STASIS_RECORDING_PRESENTATION", "1");
+        std::env::set_var("STASIS_WINDOW_HIDDEN", "1");
+        std::env::set_var("STASIS_GFX_VSYNC", "0");
+        std::env::set_var("SDL_VIDEODRIVER", "dummy");
+        std::env::set_var("SDL_RENDER_DRIVER", "software");
+        stasis_dynload::set_recording_clock(config.fps, 0);
+        Ok(Self {
+            previous,
+            _lock: lock,
+        })
+    }
+}
+
+impl Drop for PlayCaptureEnvironment {
+    fn drop(&mut self) {
+        stasis_dynload::clear_recording_clock();
+        for (name, value) in self.previous.drain(..).rev() {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PlayProfileRow {
+    function_id: u32,
+    function: String,
+    source: String,
+    calls: u64,
+    inclusive_ns: u64,
+    exclusive_ns: u64,
+    average_inclusive_ns: u64,
+    max_inclusive_ns: u64,
+}
+
+struct JitProfilerGuard;
+
+impl Drop for JitProfilerGuard {
+    fn drop(&mut self) {
+        stasis_dynload::disable_jit_profiler();
+    }
+}
+
+fn finish_play_profile(jit: &JitProcess, config: &PlayProfileConfig) -> Result<(), String> {
+    stasis_dynload::disable_jit_profiler();
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "profiled play session has no program snapshot".to_string())?;
+    let functions_by_id: BTreeMap<u32, (&str, &str)> = snapshot
+        .functions()
+        .iter()
+        .filter_map(|function| {
+            snapshot
+                .files()
+                .get(function.file_id as usize)
+                .map(|file| (function.id, (function.name.as_str(), file.path.as_str())))
+        })
+        .collect();
+    let mut rows: Vec<PlayProfileRow> = stasis_dynload::jit_profile_snapshot()
+        .into_iter()
+        .filter_map(|sample| {
+            let (name, source) = functions_by_id.get(&sample.function_id).copied()?;
+            Some(PlayProfileRow {
+                function_id: sample.function_id,
+                function: name.to_string(),
+                source: source.to_string(),
+                calls: sample.calls,
+                inclusive_ns: sample.inclusive_ns,
+                exclusive_ns: sample.exclusive_ns,
+                average_inclusive_ns: sample.inclusive_ns / sample.calls.max(1),
+                max_inclusive_ns: sample.max_inclusive_ns,
+            })
+        })
+        .collect();
+    rows.sort_by(|left, right| {
+        right
+            .exclusive_ns
+            .cmp(&left.exclusive_ns)
+            .then_with(|| right.inclusive_ns.cmp(&left.inclusive_ns))
+            .then_with(|| left.function.cmp(&right.function))
+    });
+
+    println!("PROFILE|function|calls|inclusive_us|exclusive_us|avg_inclusive_ns|max_inclusive_ns");
+    for row in &rows {
+        println!(
+            "PROFILE|{}|{}|{}|{}|{}|{}",
+            row.function,
+            row.calls,
+            row.inclusive_ns / 1_000,
+            row.exclusive_ns / 1_000,
+            row.average_inclusive_ns,
+            row.max_inclusive_ns
+        );
+    }
+    for requested in &config.functions {
+        if !rows.iter().any(|row| row.function == *requested) {
+            eprintln!(
+                "PROFILE_WARNING|function={requested}|reason=no completed calls; verify spelling, reachability, warmup, and @inline lowering"
+            );
+        }
+    }
+    if let Some(path) = config.output_path.as_ref() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create profile output directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        let document = serde_json::json!({
+            "schema_version": 1,
+            "clock": "native_monotonic",
+            "units": "nanoseconds",
+            "warmup_ticks": config.warmup_ticks,
+            "functions": rows,
+        });
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&document)
+                .map_err(|error| format!("failed to encode profile report: {error}"))?,
+        )
+        .map_err(|error| format!("failed to write profile report {}: {error}", path.display()))?;
+        println!("PROFILE_OUTPUT|{}", path.display());
+    }
+    Ok(())
+}
+
+struct DesktopFrameEvidence {
+    file: fs::File,
+}
+
+impl DesktopFrameEvidence {
+    fn from_env() -> Result<Option<Self>, String> {
+        let Some(path) = std::env::var_os(DESKTOP_FRAME_EVIDENCE_ENV).map(PathBuf::from) else {
+            return Ok(None);
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create frame evidence directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        let file = fs::File::create(&path).map_err(|error| {
+            format!(
+                "failed to create frame evidence {}: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Some(Self { file }))
+    }
+
+    fn record(
+        &mut self,
+        frame: u64,
+        entry_revision: u64,
+        guest_trace: u32,
+        submission: [i32; 5],
+    ) -> Result<(), String> {
+        writeln!(
+            self.file,
+            "{{\"schema\":\"stasis.desktop_frame.v1\",\"frame\":{frame},\"entry_revision\":{entry_revision},\"accepted\":{},\"rejected\":{},\"presented\":{},\"validation\":{},\"guest_trace\":{guest_trace},\"trace\":{}}}",
+            submission[0], submission[1], submission[2], submission[3], submission[4] as u32
+        )
+        .and_then(|_| self.file.flush())
+        .map_err(|error| format!("failed to write desktop frame evidence: {error}"))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TickBudgetDiagnostics {
@@ -140,6 +520,20 @@ struct PendingAotCompileMetadata {
     linked_image_path: Option<PathBuf>,
     linked_image_size_bytes: Option<u64>,
     function_symbols: Option<Vec<AotFunctionSymbol>>,
+    hot_render_policy: Option<crate::compiler_backend::HotRenderRuntimePolicy>,
+}
+
+fn publish_committed_aot_hot_render_policy(
+    target_mode: TargetMode,
+    status: &SwapCommitStatus,
+    metadata: Option<&PendingAotCompileMetadata>,
+) {
+    if target_mode != TargetMode::AotProd || *status != SwapCommitStatus::Success {
+        return;
+    }
+    if let Some(policy) = metadata.and_then(|metadata| metadata.hot_render_policy.as_ref()) {
+        policy.publish();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +653,7 @@ pub fn run_with_default_backend(config: RunnerConfig) -> RunnerSummary {
                 request.request_id,
                 vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
+                    code: None,
                     message: "simulated compile failure".to_string(),
                     path: request.changed_files.first().cloned(),
                     line: Some(1),
@@ -719,7 +1114,7 @@ fn resolve_play_sidecar_path(path: &Path, launch_dir: &Path) -> PathBuf {
     launch_dir.join(path)
 }
 
-fn resolve_play_data_binding_paths(
+pub fn resolve_play_data_binding_paths(
     watch_file: &Path,
     launch_dir: &Path,
     data_bind_json: Option<&Path>,
@@ -1278,9 +1673,24 @@ fn apply_play_data_binding_value(
     Ok(())
 }
 
-fn load_and_apply_play_data_bindings(
+pub fn load_and_apply_play_data_bindings(
     paths: &[(PathBuf, PathBuf)],
     jit: Option<&JitProcess>,
+) -> Result<(), String> {
+    load_and_apply_play_data_bindings_with_scope(paths, jit, false)
+}
+
+pub fn load_and_apply_play_data_bindings_for_test(
+    paths: &[(PathBuf, PathBuf)],
+    jit: &JitProcess,
+) -> Result<(), String> {
+    load_and_apply_play_data_bindings_with_scope(paths, Some(jit), true)
+}
+
+fn load_and_apply_play_data_bindings_with_scope(
+    paths: &[(PathBuf, PathBuf)],
+    jit: Option<&JitProcess>,
+    skip_missing_global_roots: bool,
 ) -> Result<(), String> {
     let mut loaded = Vec::new();
     for (data_path, meta_path) in paths {
@@ -1346,10 +1756,18 @@ fn load_and_apply_play_data_bindings(
     for (_, data_root, metadata) in &loaded {
         validate_play_binding_source(data_root, metadata)?;
         if let Some(jit) = jit {
+            if skip_missing_global_roots && !jit.has_global_path(&metadata.global_name) {
+                continue;
+            }
             validate_play_binding_targets(metadata, jit)?;
         }
     }
     for (_, json_root, metadata) in loaded {
+        if skip_missing_global_roots
+            && jit.is_some_and(|jit| !jit.has_global_path(&metadata.global_name))
+        {
+            continue;
+        }
         apply_play_data_binding_value(&json_root, &metadata)?;
     }
     Ok(())
@@ -1412,6 +1830,60 @@ fn prepare_play_asset_working_dir(watch_dir: &Path) -> Result<PathBuf, String> {
         )
     })?;
     Ok(prepared_watch_dir)
+}
+
+fn prepared_play_asset_root(project_root: &Path, asset_working_dir: &Path) -> Option<PathBuf> {
+    let prepared_root = project_root.join(".stasis_cache/play-assets");
+    asset_working_dir
+        .starts_with(&prepared_root)
+        .then_some(prepared_root)
+}
+
+fn refresh_play_asset_file(
+    project_root: &Path,
+    prepared_asset_root: Option<&Path>,
+    source_path: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let source_path = normalize_watch_path_for_compare(source_path);
+    let project_root_abs = normalize_watch_path_for_compare(project_root);
+    let relative = source_path.strip_prefix(&project_root_abs).map_err(|_| {
+        format!(
+            "asset change is outside project root: {}",
+            source_path.display()
+        )
+    })?;
+    let relative_text = relative.to_string_lossy().replace('\\', "/");
+    if relative_text != "assets" && !relative_text.starts_with("assets/") {
+        return Ok(None);
+    }
+    let runtime_path = prepared_asset_root
+        .map(|root| root.join(relative))
+        .unwrap_or_else(|| source_path.clone());
+    if source_path.is_file() {
+        if let Some(parent) = runtime_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create staged asset directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::copy(&source_path, &runtime_path).map_err(|error| {
+            format!(
+                "failed to stage changed asset {} -> {}: {error}",
+                source_path.display(),
+                runtime_path.display()
+            )
+        })?;
+    } else if runtime_path.exists() {
+        fs::remove_file(&runtime_path).map_err(|error| {
+            format!(
+                "failed to remove deleted staged asset {}: {error}",
+                runtime_path.display()
+            )
+        })?;
+    }
+    Ok(Some(runtime_path))
 }
 
 fn resolve_play_asset_source_dir(watch_file: &Path, watch_dir: &Path) -> PathBuf {
@@ -1705,6 +2177,9 @@ pub fn run_play_in_process(
         max_ticks,
         None,
         None,
+        None,
+        None,
+        None,
     )
 }
 
@@ -1739,6 +2214,9 @@ pub fn run_play_in_process_with_window_title(
         tick_sleep_micros,
         max_ticks,
         Some(window_title),
+        None,
+        None,
+        None,
         None,
     )
 }
@@ -1775,7 +2253,7 @@ pub fn run_play_in_process_with_input_script_and_window_title(
     max_ticks: Option<u64>,
     window_title: Option<&str>,
 ) -> Result<(), String> {
-    run_play_in_process_inner(
+    run_play_in_process_with_input_script_window_title_and_profile(
         watch_file,
         watch_dir,
         data_bind_json,
@@ -1785,6 +2263,93 @@ pub fn run_play_in_process_with_input_script_and_window_title(
         max_ticks,
         window_title,
         None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_input_script_window_title_profile_and_capture(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+    profile: Option<PlayProfileConfig>,
+    capture: PlayFrameCaptureConfig,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
+        profile,
+        None,
+        Some(capture),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_input_script_window_title_and_profile(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+    profile: Option<PlayProfileConfig>,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
+        profile,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_replay(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+    profile: Option<PlayProfileConfig>,
+    capture: Option<PlayFrameCaptureConfig>,
+    replay: PlayReplayConfig,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
+        profile,
+        None,
+        capture,
+        Some(replay),
     )
 }
 
@@ -1828,7 +2393,10 @@ pub fn run_live_in_process_with_data(
         tick_sleep_micros,
         max_ticks,
         None,
+        None,
         Some((server, config)),
+        None,
+        None,
     )
 }
 
@@ -1840,13 +2408,54 @@ fn run_play_in_process_inner(
     data_bind_struct_meta: Option<&Path>,
     input_script: Option<&Path>,
     tick_sleep_micros: u64,
-    max_ticks: Option<u64>,
+    mut max_ticks: Option<u64>,
     window_title: Option<&str>,
+    mut profile: Option<PlayProfileConfig>,
     live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
+    capture: Option<PlayFrameCaptureConfig>,
+    replay: Option<PlayReplayConfig>,
 ) -> Result<(), String> {
     let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
     let launch_dir = std::env::current_dir()
         .map_err(|error| format!("failed to read current directory before play launch: {error}"))?;
+    let _current_directory_guard = PlayCurrentDirectoryGuard {
+        path: launch_dir.clone(),
+    };
+    let replay = replay.map(|mode| match mode {
+        PlayReplayConfig::Record(path) => {
+            PlayReplayConfig::Record(resolve_play_sidecar_path(&path, &launch_dir))
+        }
+        PlayReplayConfig::Replay(path) => {
+            PlayReplayConfig::Replay(resolve_play_sidecar_path(&path, &launch_dir))
+        }
+    });
+    if input_script.is_some() && matches!(replay, Some(PlayReplayConfig::Replay(_))) {
+        return Err("--input-script cannot be combined with replay playback".to_string());
+    }
+    if live.is_some() && replay.is_some() {
+        return Err("live editing cannot be combined with record/replay".to_string());
+    }
+    let mut replay_player = match replay.as_ref() {
+        Some(PlayReplayConfig::Replay(path)) => Some(ReplayPlayer::load(path)?),
+        _ => None,
+    };
+    if let Some(player) = replay_player.as_ref() {
+        let frame_count = player.frame_count();
+        if max_ticks.is_some_and(|ticks| ticks != frame_count) {
+            return Err(format!(
+                "replay contains {frame_count} ticks; requested tick count must match"
+            ));
+        }
+        max_ticks = Some(frame_count);
+    }
+    if let Some(output_path) = profile
+        .as_mut()
+        .and_then(|profile| profile.output_path.as_mut())
+    {
+        if output_path.is_relative() {
+            *output_path = launch_dir.join(&*output_path);
+        }
+    }
     let data_binding_paths = resolve_play_data_binding_paths(
         watch_file,
         &launch_dir,
@@ -1911,6 +2520,7 @@ fn run_play_in_process_inner(
 
     let asset_source_dir = resolve_play_asset_source_dir(&root_path, &watch_dir_abs);
     let asset_working_dir = prepare_play_asset_working_dir(&asset_source_dir)?;
+    let prepared_asset_root = prepared_play_asset_root(&project_root, &asset_working_dir);
     std::env::set_current_dir(&asset_working_dir).map_err(|error| {
         format!(
             "failed to set current directory to {}: {error}",
@@ -1924,8 +2534,8 @@ fn run_play_in_process_inner(
     // Allocate and register all global buffers used by HostFrame / gfx_cmd + window requests.
     let mut host_i32: Vec<i32> = vec![0; 768];
     let mut host_f32: Vec<f32> = vec![0.0; 64];
-    let mut gfx_cmd_i32: Vec<i32> = vec![0; 34608];
-    let mut gfx_cmd_f32: Vec<f32> = vec![0.0; 108676];
+    let mut gfx_cmd_i32: Vec<i32> = vec![0; stasis_dynload::STASIS_RENDER_I32_COUNT];
+    let mut gfx_cmd_f32: Vec<f32> = vec![0.0; stasis_dynload::STASIS_RENDER_F32_COUNT];
     let mut gfx_cmd_u8: Vec<u8> = vec![0; 65536];
 
     let mut host_req_seq: i32 = 0;
@@ -1978,7 +2588,33 @@ fn run_play_in_process_inner(
         &mut host_req_window_h_px,
     );
 
+    let _capture_environment = capture
+        .as_ref()
+        .map(PlayCaptureEnvironment::install)
+        .transpose()?;
     let gfx = stasis_dynload::StasisGraphicsApi::load_default()?;
+    if let Some(capture) = capture.as_ref() {
+        gfx.set_recording_config(capture.width, capture.height, capture.fps)?;
+    }
+    let _recording_audio_teardown = capture
+        .as_ref()
+        .filter(|capture| capture.audio_output.is_some())
+        .map(|_| {
+            gfx.set_recording_audio_config(true)?;
+            Ok::<_, String>(RecordingAudioTeardown { gfx: &gfx })
+        })
+        .transpose()?;
+    let mut recording_audio = capture
+        .as_ref()
+        .and_then(|capture| capture.audio_output.as_deref())
+        .map(RecordingAudioSink::create)
+        .transpose()?;
+    let renderer_asset_root = prepared_asset_root
+        .as_deref()
+        .unwrap_or(&project_root)
+        .to_path_buf();
+    gfx.set_asset_root(&renderer_asset_root)?;
+    let mut frame_evidence = DesktopFrameEvidence::from_env()?;
     let configured_title = window_title.or_else(|| {
         live.as_ref()
             .and_then(|(_, config)| config.window_title.as_deref())
@@ -1987,15 +2623,49 @@ fn run_play_in_process_inner(
     // Create a small default window up-front so runtime calls (fonts/sprites) succeed during guest main().
     // Guest `init_window(...)` requests will be applied immediately after main returns.
     let _ = gfx.init_window(800, 600, &title)?;
+    let (toast_font_file, toast_font_handle) = match EmbeddedToastFont::stage(&renderer_asset_root)
+        .and_then(|font| {
+            gfx.load_font(font.runtime_path(), 16)
+                .map(|handle| (font, handle))
+        }) {
+        Ok((font, handle)) => (Some(font), Some(handle)),
+        Err(error) => {
+            println!("[toast] disabled: {error}");
+            (None, None)
+        }
+    };
+    let _toast_font_file = toast_font_file;
+    let mut play_error_toasts = PlayErrorToasts::new(toast_font_handle);
 
     let mut jit = JitProcess::new();
+    if let Some(profile) = profile.as_ref() {
+        jit.set_profile_functions(profile.functions.clone())?;
+    }
+    if capture.is_some() {
+        jit.set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)?;
+    }
     jit.set_project_root(project_root.to_string_lossy())?;
+    if let Some(function) = capture
+        .as_ref()
+        .and_then(|capture| capture.before_tick_function.as_deref())
+    {
+        jit.set_required_emit_roots(&[function.to_string()]);
+    }
     let root_source = fs::read_to_string(&root_path)
         .map_err(|error| format!("failed to read {}: {error}", root_path.display()))?;
     jit.upsert_file(root_path_str.clone(), root_source);
     let _ = jit
         .compile()
         .map_err(|error| format!("initial JIT compile failed: {error:?}"))?;
+    publish_jit_hot_render_policy(&jit)?;
+    if let Some(function) = capture
+        .as_ref()
+        .and_then(|capture| capture.before_tick_function.as_deref())
+    {
+        jit.validate_i32_onearg_by_name(function)
+            .map_err(|error| format!("before-tick hook '{function}' validation failed: {error}"))?;
+    }
+    let mut watch_asset_paths = collect_watch_asset_paths(&project_root, jit.program_snapshot());
     let mut tick_budget_generation = 0u64;
     let mut tick_budget = jit
         .tick_budget_us()?
@@ -2026,9 +2696,30 @@ fn run_play_in_process_inner(
         return Err(format!("guest main() returned non-zero status {main_rc}"));
     }
 
+    if let Some(player) = replay_player.as_ref() {
+        player.initialize(&jit)?;
+    }
+    let mut replay_recorder = match replay.as_ref() {
+        Some(PlayReplayConfig::Record(path)) => Some(ReplayRecorder::start(
+            path.clone(),
+            &jit,
+            host_i32.len(),
+            host_f32.len(),
+        )?),
+        _ => None,
+    };
+
+    if max_ticks == Some(0) && matches!(replay, Some(PlayReplayConfig::Record(_))) {
+        return Err("record/replay requires at least one completed tick".to_string());
+    }
     if max_ticks == Some(0) {
         return Ok(());
     }
+
+    let _profiler_guard = profile.as_ref().map(|_| {
+        stasis_dynload::enable_jit_profiler();
+        JitProfilerGuard
+    });
 
     stasis_dynload::begin_jit_host_entry_session(package.host_entry_targets(1)?)?;
     let mut tick_code_ptr = stasis_dynload::jit_host_tick_trampoline_ptr() as u64;
@@ -2041,6 +2732,7 @@ fn run_play_in_process_inner(
         .transpose()?;
 
     let mut ticks_executed: u64 = 0;
+    let mut frame_pacer = FramePacer::from_micros(tick_sleep_micros, Instant::now())?;
     loop {
         if let Some(live) = live.as_mut() {
             live.process_boundary(
@@ -2075,7 +2767,14 @@ fn run_play_in_process_inner(
                 );
             } else {
                 match result {
-                    Err(error) => println!("[swap] revision {} rejected: {error}", job.revision),
+                    Err(error) => {
+                        println!("[swap] revision {} rejected: {error}", job.revision);
+                        play_error_toasts.enqueue_error(
+                            "Live compile failed",
+                            &error,
+                            Instant::now(),
+                        );
+                    }
                     Ok(prepared) => {
                         let emitted = prepared
                             .candidate
@@ -2090,21 +2789,35 @@ fn run_play_in_process_inner(
                         let commit_result = commit_play_candidate_between_ticks(
                             &mut jit,
                             prepared.candidate,
-                            prepared.package.symbol_code_ptrs.keys().cloned().collect(),
                             &prepared.package,
                         );
                         let commit_ms = commit_started.elapsed().as_millis();
                         match commit_result {
-                            Err(error) => println!(
-                                "[swap] revision {} aborted (compile={}ms package={}ms commit={}ms): {error}",
-                                prepared.revision,
-                                prepared.compile_ms,
-                                prepared.package_ms,
-                                commit_ms
-                            ),
+                            Err(error) => {
+                                println!(
+                                    "[swap] revision {} aborted (compile={}ms package={}ms commit={}ms): {error}",
+                                    prepared.revision,
+                                    prepared.compile_ms,
+                                    prepared.package_ms,
+                                    commit_ms
+                                );
+                                play_error_toasts.enqueue_error(
+                                    "Live swap failed",
+                                    &error,
+                                    Instant::now(),
+                                );
+                            }
                             Ok(entrypoints) => {
+                                debug_assert!(entrypoints.swap_receipt.is_some());
                                 tick_code_ptr = entrypoints.tick_code_ptr;
                                 render_code_ptr = entrypoints.render_code_ptr;
+                                if profile.is_some() {
+                                    stasis_dynload::reset_jit_profile();
+                                    eprintln!(
+                                        "PROFILE_RESET|reason=code_swap|revision={}",
+                                        prepared.revision
+                                    );
+                                }
                                 if let Ok(Some(candidate_tick_budget)) = candidate_tick_budget {
                                     if let Some(report) = update_tick_budget_after_swap(
                                         &mut tick_budget,
@@ -2116,6 +2829,7 @@ fn run_play_in_process_inner(
                                     }
                                 }
                                 watch_dependency_paths = Some(prepared.dependency_paths);
+                                watch_asset_paths = prepared.asset_paths;
                                 if let Some(live) = live.as_mut() {
                                     live.refresh_after_external_edit(&jit);
                                 }
@@ -2146,6 +2860,11 @@ fn run_play_in_process_inner(
                 Err(error) => {
                     finished_watch_revision = requested_watch_revision;
                     println!("[watch] failed starting background compile: {error}");
+                    play_error_toasts.enqueue_error(
+                        "Live compile unavailable",
+                        &error,
+                        Instant::now(),
+                    );
                 }
             }
         }
@@ -2153,6 +2872,7 @@ fn run_play_in_process_inner(
         let mut needs_recompile = false;
         let mut ignored_changes: u32 = 0;
         let mut triggered_paths: Vec<String> = Vec::new();
+        let mut changed_asset_paths: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut watch_events = watcher.drain_stasis_changes();
         for data_watcher in &mut data_watchers {
             watch_events.extend(data_watcher.drain_stasis_changes());
@@ -2172,7 +2892,17 @@ fn run_play_in_process_inner(
                     || event_path == normalize_watch_path_for_log(meta_path)
             });
             if is_data_event {
+                if replay.is_some() {
+                    return Err("record/replay aborted because project data changed".to_string());
+                }
                 needs_data_reload = true;
+                continue;
+            }
+            if watch_asset_paths.contains(&event_path) {
+                if replay.is_some() {
+                    return Err("record/replay aborted because a project asset changed".to_string());
+                }
+                changed_asset_paths.entry(event_path).or_insert(event.path);
                 continue;
             }
             let submit = should_submit_watch_event(
@@ -2181,16 +2911,55 @@ fn run_play_in_process_inner(
                 watch_dependency_paths.as_ref(),
             );
             if submit {
+                if replay.is_some() {
+                    return Err("record/replay aborted because source code changed".to_string());
+                }
                 needs_recompile = true;
                 triggered_paths.push(normalize_watch_path_for_log(&event.path));
             } else {
                 ignored_changes = ignored_changes.saturating_add(1);
             }
         }
+        for (_, asset_path) in changed_asset_paths {
+            match refresh_play_asset_file(
+                &project_root,
+                prepared_asset_root.as_deref(),
+                &asset_path,
+            ) {
+                Ok(Some(runtime_path)) => match gfx.notify_file_changed(&runtime_path) {
+                    Ok(()) => println!(
+                        "[asset] refreshed {}",
+                        normalize_watch_path_for_log(&asset_path)
+                    ),
+                    Err(error) => {
+                        println!(
+                            "[asset] refreshed {}, but runtime notification failed: {error}",
+                            normalize_watch_path_for_log(&asset_path)
+                        );
+                        play_error_toasts.enqueue_error(
+                            "Asset reload failed",
+                            &error,
+                            Instant::now(),
+                        );
+                    }
+                },
+                Ok(None) => {}
+                Err(error) => {
+                    println!(
+                        "[asset] refresh rejected {}: {error}",
+                        normalize_watch_path_for_log(&asset_path)
+                    );
+                    play_error_toasts.enqueue_error("Asset refresh failed", &error, Instant::now());
+                }
+            }
+        }
         if needs_data_reload {
             match load_and_apply_play_data_bindings(&data_binding_paths, Some(&jit)) {
                 Ok(()) => println!("[data] rebound {} file(s)", data_binding_paths.len()),
-                Err(error) => println!("[data] reload rejected: {error}"),
+                Err(error) => {
+                    println!("[data] reload rejected: {error}");
+                    play_error_toasts.enqueue_error("Data reload failed", &error, Instant::now());
+                }
             }
         }
         if ignored_changes > 0 && !needs_recompile {
@@ -2214,20 +2983,26 @@ fn run_play_in_process_inner(
             );
         }
 
+        if capture.is_some() {
+            stasis_dynload::set_recording_clock_frame(ticks_executed);
+        }
         gfx.host_get_frame(&mut host_i32, &mut host_f32)?;
-        if host_i32.get(9).copied().unwrap_or(0) != 0 {
-            break;
+        let next_tick = ticks_executed.saturating_add(1);
+        if let Some(player) = replay_player.as_mut() {
+            player.apply_next(next_tick, &mut host_i32, &mut host_f32)?;
+        } else {
+            if host_i32.get(9).copied().unwrap_or(0) != 0 {
+                break;
+            }
+            if let Some(timeline) = input_timeline.as_mut() {
+                apply_play_input_frame(timeline, next_tick, &mut host_i32, &mut host_f32)?;
+            }
+            if let Some(live) = live.as_ref() {
+                live.apply_input_override(&mut host_i32, &mut host_f32)?;
+            }
         }
-        if let Some(timeline) = input_timeline.as_mut() {
-            apply_play_input_frame(
-                timeline,
-                ticks_executed.saturating_add(1),
-                &mut host_i32,
-                &mut host_f32,
-            )?;
-        }
-        if let Some(live) = live.as_ref() {
-            live.apply_input_override(&mut host_i32, &mut host_f32)?;
+        if let Some(recorder) = replay_recorder.as_mut() {
+            recorder.begin_tick(next_tick, &host_i32, &host_f32)?;
         }
         gfx.host_bulk_apply_requests(
             &host_req_seq,
@@ -2236,35 +3011,140 @@ fn run_play_in_process_inner(
             &host_req_window_h_px,
         )?;
 
+        if let Some(function) = capture
+            .as_ref()
+            .and_then(|capture| capture.before_tick_function.as_deref())
+        {
+            let frame = i32::try_from(ticks_executed)
+                .map_err(|_| format!("before-tick hook '{function}' frame index overflow"))?;
+            let result = jit
+                .execute_i32_onearg_by_name(function, frame)
+                .map_err(|error| {
+                    format!(
+                        "before-tick hook '{function}' failed at frame {ticks_executed}: {error}"
+                    )
+                })?;
+            if result != 0 {
+                return Err(format!(
+                    "before-tick hook '{function}' returned non-zero status {result} at frame {ticks_executed}"
+                ));
+            }
+        }
+
         let run_tick = live.as_ref().is_none_or(LiveWorkspace::should_run_tick);
+        let measure_hud = gfx.host_performance_metrics_enabled()?;
         let mut tick_micros = 0;
         if run_tick {
-            let tick_started = Instant::now();
+            let measure_tick = measure_hud || tick_budget.is_some();
+            let tick_started = measure_tick.then(Instant::now);
             let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
-            tick_micros = tick_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            if let Some(tick_started) = tick_started {
+                tick_micros = tick_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            }
             if let Some(budget) = tick_budget.as_mut() {
                 budget.record(tick_micros);
             }
             if tick_rc != 0 {
+                if replay_player.is_some() {
+                    return Err(format!(
+                        "replay diverged at tick {next_tick}: guest tick() exited with status {tick_rc}"
+                    ));
+                }
+                if let Some(recorder) = replay_recorder.as_mut() {
+                    recorder.discard_tick(next_tick)?;
+                }
                 break;
             }
         }
-        let render_started = Instant::now();
+        let render_started = measure_hud.then(Instant::now);
         let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?;
-        let render_micros = render_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        let render_micros = render_started
+            .map(|started| started.elapsed().as_micros().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
         if render_rc != 0 {
+            if replay_player.is_some() {
+                return Err(format!(
+                    "replay diverged at tick {next_tick}: guest render() exited with status {render_rc}"
+                ));
+            }
+            if let Some(recorder) = replay_recorder.as_mut() {
+                recorder.discard_tick(next_tick)?;
+            }
             break;
         }
-
-        gfx.host_set_performance_metrics(tick_micros, render_micros)?;
-        gfx.gfx_submit_u8(&gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
-        if tick_sleep_micros > 0 {
-            let ms = (tick_sleep_micros / 1000) as i32;
-            if ms > 0 {
-                gfx.sleep_ms(ms)?;
-            }
+        if let Some(recorder) = replay_recorder.as_mut() {
+            recorder.finish_tick(&jit)?;
+        }
+        if let Some(player) = replay_player.as_ref() {
+            player.verify_tick(next_tick, &jit)?;
         }
 
+        if measure_hud {
+            gfx.host_set_performance_metrics(tick_micros, render_micros)?;
+        }
+        if let Some(capture) = capture.as_ref() {
+            let frame = ticks_executed.saturating_add(1);
+            if frame <= capture.frame_count {
+                if let Some(output_dir) = capture.output_dir.as_ref() {
+                    let path = output_dir.join(format!("frame-{frame:06}.png"));
+                    stasis_dynload::schedule_runtime_screenshot(&path).map_err(|error| {
+                        format!(
+                            "recording capture stage failed for frame {frame} at {} ({}x{}): {error}",
+                            path.display(),
+                            capture.width,
+                            capture.height
+                        )
+                    })?;
+                }
+            }
+        }
+        let guest_trace = frame_evidence
+            .as_ref()
+            .map(|_| stasis_dynload::current_render_trace(&gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8));
+        play_error_toasts.append_to_buffers(
+            &mut gfx_cmd_i32,
+            &mut gfx_cmd_f32,
+            &mut gfx_cmd_u8,
+            Instant::now(),
+        );
+        gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
+        if let (Some(capture), Some(audio)) = (capture.as_ref(), recording_audio.as_mut()) {
+            let frame = ticks_executed.saturating_add(1);
+            let target_samples = recording_audio_target_samples(frame, capture.fps)?;
+            let delta = target_samples.saturating_sub(audio.frame_count);
+            let sample_count = delta
+                .checked_mul(u64::from(RECORDING_AUDIO_CHANNELS))
+                .ok_or_else(|| "recording audio stage buffer size overflow".to_string())?;
+            let sample_count = usize::try_from(sample_count)
+                .map_err(|_| "recording audio stage buffer is too large".to_string())?;
+            let mut samples = vec![0.0f32; sample_count];
+            gfx.pull_recording_audio_f32_interleaved(&mut samples)
+                .map_err(|error| {
+                    format!("recording audio mix stage failed at frame {frame}: {error}")
+                })?;
+            audio.append(&samples).map_err(|error| {
+                format!("recording audio WAV stage failed at frame {frame}: {error}")
+            })?;
+        }
+        if let Some(evidence) = frame_evidence.as_mut() {
+            let submission = gfx.test_render_submission_state()?.ok_or_else(|| {
+                format!(
+                    "{DESKTOP_FRAME_EVIDENCE_ENV} requires a graphics runtime with STASIS_ENABLE_TEST_INPUT=1"
+                )
+            })?;
+            let entry_revision = stasis_dynload::jit_host_entry_targets()
+                .map(|targets| targets.revision)
+                .ok_or_else(|| "desktop frame has no published JIT entry table".to_string())?;
+            evidence.record(
+                ticks_executed.saturating_add(1),
+                entry_revision,
+                guest_trace.expect("frame evidence guest trace must be captured before overlays"),
+                submission,
+            )?;
+        }
+        if let Some(frame_pacer) = frame_pacer.as_mut() {
+            frame_pacer.wait();
+        }
         if let Some(live) = live.as_mut() {
             if run_tick {
                 ticks_executed = ticks_executed.saturating_add(1);
@@ -2279,6 +3159,12 @@ fn run_play_in_process_inner(
                 break;
             }
         }
+        if profile
+            .as_ref()
+            .is_some_and(|profile| ticks_executed == profile.warmup_ticks)
+        {
+            stasis_dynload::reset_jit_profile();
+        }
     }
 
     if let Some(job) = watch_patch_job.take() {
@@ -2287,51 +3173,110 @@ fn run_play_in_process_inner(
     if let Some(budget) = tick_budget {
         println!("{}", budget.report());
     }
+    if let Some(profile) = profile.as_ref() {
+        finish_play_profile(&jit, profile)?;
+    }
+    let audio_finish = recording_audio
+        .take()
+        .map(RecordingAudioSink::finish)
+        .transpose();
+    audio_finish?;
+    if let Some(recorder) = replay_recorder {
+        let path = recorder.publish()?;
+        println!("replay_recording={}", path.display());
+    }
 
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PlayEntrypoints {
     tick_code_ptr: u64,
     render_code_ptr: u64,
+    swap_receipt: Option<DevelopmentSwapReceipt>,
+}
+
+struct PlayHostEntryPublication {
+    candidate: stasis_dynload::JitHostEntryTargets,
+}
+
+fn publish_jit_hot_render_policy(jit: &JitProcess) -> Result<(), String> {
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "accepted JIT program is missing hot-render metadata".to_string())?;
+    crate::compiler_backend::snapshot_hot_render_policy(snapshot).publish();
+    Ok(())
+}
+
+struct StagedPlayHostPublication {
+    previous_targets: Option<stasis_dynload::JitHostEntryTargets>,
+    previous_hot_render_images: Vec<stasis_dynload::HotRenderRuntimeImage>,
+    candidate_hot_render_policy: crate::compiler_backend::HotRenderRuntimePolicy,
+}
+
+impl DevelopmentSwapHost for PlayHostEntryPublication {
+    type Staged = StagedPlayHostPublication;
+
+    fn stage(
+        &mut self,
+        candidate: &JitProcess,
+        _descriptor: &DevelopmentSwapDescriptor,
+    ) -> Result<Self::Staged, String> {
+        stasis_dynload::validate_jit_host_entry_targets(&self.candidate)?;
+        let snapshot = candidate
+            .program_snapshot()
+            .ok_or_else(|| "candidate is missing hot-render metadata".to_string())?;
+        Ok(StagedPlayHostPublication {
+            previous_targets: stasis_dynload::jit_host_entry_targets(),
+            previous_hot_render_images: stasis_dynload::snapshot_hot_render_metadata(),
+            candidate_hot_render_policy: crate::compiler_backend::snapshot_hot_render_policy(
+                snapshot,
+            ),
+        })
+    }
+
+    fn publish(&mut self, staged: &mut Self::Staged) -> Result<(), String> {
+        stasis_dynload::publish_jit_host_entry_targets(self.candidate)?;
+        staged.candidate_hot_render_policy.publish();
+        Ok(())
+    }
+
+    fn restore(&mut self, staged: Self::Staged) -> Result<(), String> {
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &staged.previous_hot_render_images,
+        );
+        if let Some(previous) = staged.previous_targets {
+            stasis_dynload::begin_jit_host_entry_session(previous)?;
+        }
+        Ok(())
+    }
 }
 
 fn commit_play_candidate_between_ticks(
     active: &mut JitProcess,
     candidate: JitProcess,
-    changed_functions: Vec<String>,
     package: &JitEnginePackage,
 ) -> Result<PlayEntrypoints, String> {
     let revision = stasis_dynload::jit_host_entry_targets()
         .map_or(1, |targets| targets.revision.saturating_add(1));
     let targets = package.host_entry_targets(revision)?;
-    stasis_dynload::validate_jit_host_entry_targets(&targets)?;
-    let mut preview = plan_state_migration(
-        &active.state_layout(),
-        &candidate.state_layout(),
-        changed_functions,
-        false,
-        None,
-    )?;
-    finalize_runtime_preview(&candidate, &mut preview);
-    activate_candidate_transactionally(
-        Some(&*active),
+    let mut publication = PlayHostEntryPublication { candidate: targets };
+    let descriptor = DevelopmentSwapDescriptor::for_candidate(
         &candidate,
-        &preview,
         package.on_code_swap_code_ptr.is_some(),
-        || {
+    );
+    let swap_receipt =
+        commit_development_swap(active, candidate, descriptor, &mut publication, |_| {
             package.on_code_swap_code_ptr.map_or(Ok(()), |code_ptr| {
                 stasis_dynload::invoke_code_swap_hook(code_ptr as usize)
             })
-        },
-        Result::is_ok,
-    )??;
-    stasis_dynload::publish_jit_host_entry_targets(targets)?;
-    active.accept_staged_candidate(candidate);
+        })
+        .map_err(|failure| failure.error)?;
     Ok(PlayEntrypoints {
         tick_code_ptr: stasis_dynload::jit_host_tick_trampoline_ptr() as u64,
         render_code_ptr: stasis_dynload::jit_host_render_trampoline_ptr() as u64,
+        swap_receipt: Some(swap_receipt),
     })
 }
 
@@ -2342,6 +3287,7 @@ struct PreparedWatchPatch {
     compile_ms: u128,
     package_ms: u128,
     dependency_paths: BTreeSet<String>,
+    asset_paths: BTreeSet<String>,
 }
 
 struct WatchPatchJob {
@@ -2377,6 +3323,8 @@ fn start_watch_patch_job(
                     .map_err(|error| format!("build_engine_package failed: {error}"))?;
                 let package_ms = package_started.elapsed().as_millis();
                 let dependency_paths = collect_watch_dependency_paths(&project_root, &root_path)?;
+                let asset_paths =
+                    collect_watch_asset_paths(&project_root, candidate.program_snapshot());
                 Ok(PreparedWatchPatch {
                     revision,
                     candidate,
@@ -2384,6 +3332,7 @@ fn start_watch_patch_job(
                     compile_ms,
                     package_ms,
                     dependency_paths,
+                    asset_paths,
                 })
             })();
             let _ = sender.send(result);
@@ -2584,6 +3533,47 @@ fn collect_watch_dependency_paths(
         .keys()
         .map(|path| normalize_watch_path_for_log(&project_root.join(path)))
         .collect())
+}
+
+fn collect_watch_asset_paths(
+    project_root: &Path,
+    snapshot: Option<&stasis_compiler::backend::program_snapshot::ProgramSnapshot>,
+) -> BTreeSet<String> {
+    let Some(snapshot) = snapshot else {
+        return BTreeSet::new();
+    };
+    let source_base_dirs = snapshot
+        .module_graph()
+        .roots()
+        .iter()
+        .filter_map(|root| Path::new(root).parent().map(Path::to_path_buf))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let validation = stasis_compiler::backend::assets::validate_asset_references(
+        project_root,
+        &source_base_dirs,
+        snapshot.asset_references(),
+        None,
+        &BTreeSet::new(),
+    );
+    let mut paths = validation
+        .references
+        .into_iter()
+        .map(|reference| normalize_watch_path_for_log(&reference.absolute_path))
+        .collect::<BTreeSet<_>>();
+    // Static references resolve to concrete paths above. Dynamic @asset_path calls are
+    // intentionally bounded by manifest.dynamic_assets, so include that conservative set too.
+    // The manifest is read opportunistically: a malformed manifest must not make source watching
+    // fail, and the normal compiler/package validation will report that error separately.
+    if let Ok(manifest) = load_project_asset_manifest(project_root, AssetLimits::default()) {
+        for project_path in manifest.dynamic_assets {
+            paths.insert(normalize_watch_path_for_log(
+                &project_root.join(project_path),
+            ));
+        }
+    }
+    paths
 }
 
 fn should_submit_watch_event(
@@ -2896,6 +3886,11 @@ fn run_with_backend_and_prepared_swaps<B: CompilerBackend>(
         if let Some((request_id, status)) = new_commit {
             let aot_metadata = pending_aot_metadata.remove(&request_id);
             pending_jit_code_ptr_overrides.remove(&request_id);
+            publish_committed_aot_hot_render_policy(
+                config.target_mode,
+                &status,
+                aot_metadata.as_ref(),
+            );
             if status == SwapCommitStatus::Success {
                 swap_indicator_armed_count += 1;
                 swap_flash_ticks_remaining = SWAP_FLASH_TICKS_MAX;
@@ -3031,6 +4026,11 @@ fn run_with_backend_and_prepared_swaps<B: CompilerBackend>(
         if let Some((request_id, status)) = new_commit {
             let aot_metadata = pending_aot_metadata.remove(&request_id);
             pending_jit_code_ptr_overrides.remove(&request_id);
+            publish_committed_aot_hot_render_policy(
+                config.target_mode,
+                &status,
+                aot_metadata.as_ref(),
+            );
             if status == SwapCommitStatus::Success {
                 swap_indicator_armed_count += 1;
                 swap_flash_ticks_remaining = SWAP_FLASH_TICKS_MAX;
@@ -3146,6 +4146,9 @@ fn capture_pending_aot_compile_metadata(
             linked_image_path: result.aot_linked_image_path.clone(),
             linked_image_size_bytes: result.aot_linked_image_size_bytes,
             function_symbols: result.aot_function_symbols.clone(),
+            hot_render_policy: result.aot_linked_image_path.as_deref().and_then(|path| {
+                crate::compiler_backend::load_manifest_hot_render_policy(path).ok()
+            }),
         });
 }
 
@@ -3241,14 +4244,33 @@ fn apply_prepared_jit_transaction(
     let mut preview =
         plan_state_migration(&active_layout, &incoming_layout, Vec::new(), false, None)?;
     finalize_runtime_preview(&candidate, &mut preview);
+    let previous_hot_render_images = stasis_dynload::snapshot_hot_render_metadata();
+    let candidate_hot_render_policy = candidate
+        .program_snapshot()
+        .map(crate::compiler_backend::snapshot_hot_render_policy);
     let result = activate_candidate_transactionally(
         active.as_ref(),
         &candidate,
         &preview,
         hook_may_mutate_state,
-        apply,
+        || {
+            if let Some(policy) = candidate_hot_render_policy.as_ref() {
+                policy.publish();
+            }
+            apply()
+        },
         |result| result.status == SwapCommitStatus::Success,
-    )?;
+    );
+    if !matches!(
+        result.as_ref(),
+        Ok(result) if result.status == SwapCommitStatus::Success
+    ) {
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &previous_hot_render_images,
+        );
+    }
+    let result = result?;
     if result.status == SwapCommitStatus::Success {
         *active = Some(candidate);
     }
@@ -3747,6 +4769,145 @@ mod tests {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    const WINDOW_REQUEST_MAILBOX_FIXTURE: &str =
+        include_str!("../../../tests/stasis/seams/window_request_mailbox_probe.stasis");
+
+    #[test]
+    fn recording_audio_sample_schedule_has_no_fractional_drift() {
+        let targets = (0..60)
+            .map(|frame| recording_audio_target_samples(frame, 59).expect("sample target"))
+            .collect::<Vec<_>>();
+        assert_eq!(targets[0], 0);
+        assert_eq!(targets[1], 48_000 / 59);
+        assert_eq!(targets[59], 59 * 48_000 / 59);
+        assert_eq!(
+            recording_audio_target_samples(60, 59).unwrap(),
+            60 * 48_000 / 59
+        );
+        assert!(targets.windows(2).all(|pair| pair[1] >= pair[0]));
+    }
+
+    #[test]
+    fn recording_audio_sink_writes_pcm16_stereo_wav() {
+        let path = std::env::temp_dir().join(format!(
+            "stasis-recording-audio-{}-{}.wav",
+            std::process::id(),
+            UNIX_EPOCH.elapsed().unwrap_or_default().as_nanos()
+        ));
+        let mut sink = RecordingAudioSink::create(&path).expect("create WAV sink");
+        sink.append(&[0.5, -0.5, 0.0, 1.0])
+            .expect("write WAV samples");
+        sink.finish().expect("finish WAV sink");
+        let bytes = fs::read(&path).expect("read WAV sink");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(u16::from_le_bytes([bytes[22], bytes[23]]), 2);
+        assert_eq!(
+            u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+            48_000
+        );
+        assert_eq!(u16::from_le_bytes([bytes[34], bytes[35]]), 16);
+        assert_eq!(
+            u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]),
+            8
+        );
+        assert_eq!(bytes.len(), 52);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn recording_audio_sink_uses_exact_cumulative_59fps_length() {
+        let path = std::env::temp_dir().join(format!(
+            "stasis-recording-audio-59fps-{}-{}.wav",
+            std::process::id(),
+            UNIX_EPOCH.elapsed().unwrap_or_default().as_nanos()
+        ));
+        let mut sink = RecordingAudioSink::create(&path).expect("create 59 fps WAV sink");
+        let mut written = 0u64;
+        for frame in 1..=60 {
+            let target = recording_audio_target_samples(frame, 59).unwrap();
+            let delta = target - written;
+            sink.append(&vec![0.0; delta as usize * 2])
+                .expect("write 59 fps samples");
+            written = target;
+        }
+        sink.finish().expect("finish 59 fps WAV sink");
+        let bytes = fs::metadata(&path).expect("stat 59 fps WAV").len();
+        assert_eq!(written, 60 * 48_000 / 59);
+        assert_eq!(bytes, 44 + written * 4);
+        fs::remove_file(path).ok();
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct AppliedWindowRequest {
+        sequence: i32,
+        mode: &'static str,
+        width: i32,
+        height: i32,
+    }
+
+    #[derive(Default)]
+    struct RecordingWindowHost {
+        last_sequence: i32,
+        applications: Vec<AppliedWindowRequest>,
+    }
+
+    impl RecordingWindowHost {
+        fn establish_baseline(&mut self, jit: &JitProcess) {
+            self.last_sequence = jit.read_i32_global_path("host_req_seq");
+        }
+
+        fn apply_pending(&mut self, jit: &JitProcess) {
+            let sequence = jit.read_i32_global_path("host_req_seq");
+            if sequence == self.last_sequence {
+                return;
+            }
+            self.last_sequence = sequence;
+            let flags = jit.read_i32_global_path("host_req_flags");
+            self.applications.push(AppliedWindowRequest {
+                sequence,
+                mode: if flags & 1 != 0 {
+                    "windowed"
+                } else if flags & 2 != 0 {
+                    "fullscreen"
+                } else {
+                    "unknown"
+                },
+                width: jit.read_i32_global_path("host_req_window_w_px"),
+                height: jit.read_i32_global_path("host_req_window_h_px"),
+            });
+        }
+    }
+
+    fn expected_window_requests() -> Vec<AppliedWindowRequest> {
+        vec![
+            AppliedWindowRequest {
+                sequence: 1,
+                mode: "windowed",
+                width: 960,
+                height: 540,
+            },
+            AppliedWindowRequest {
+                sequence: 2,
+                mode: "fullscreen",
+                width: 960,
+                height: 540,
+            },
+            AppliedWindowRequest {
+                sequence: 3,
+                mode: "windowed",
+                width: 1280,
+                height: 720,
+            },
+            AppliedWindowRequest {
+                sequence: 4,
+                mode: "windowed",
+                width: 1280,
+                height: 720,
+            },
+        ]
+    }
+
     #[test]
     fn tick_budget_diagnostics_report_bounded_average_p99_and_overruns() {
         let mut diagnostics = TickBudgetDiagnostics::new(100, 7);
@@ -3849,6 +5010,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../runtime/stasis_render_contract.h"
     ));
+    const STASIS_PERFORMANCE_METRICS_HEADER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../runtime/stasis_performance_metrics.h"
+    ));
     const BETWEEN_TICK_LAYOUT_V1: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../samples/between_tick_layout_migration/v1.stasis"
@@ -3867,6 +5032,149 @@ mod tests {
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
+    fn hot_render_test_image(path: &str) -> stasis_dynload::HotRenderRuntimeImage {
+        stasis_dynload::HotRenderRuntimeImage {
+            logical_path: path.to_string(),
+            logical_width: 256,
+            logical_height: 256,
+            max_renders_per_render: Some(8),
+            atlas_eligible: true,
+            grouping_key: "batch-v3:test".to_string(),
+            estimated_distinct_transitions: 8,
+            group_member_count: 2,
+            group_logical_pixel_area: 131_072,
+            group_max_logical_width: 256,
+            group_max_logical_height: 256,
+            backend_constraints: "rgba8-premultiplied;linear-filter;runtime-page-limits"
+                .to_string(),
+        }
+    }
+
+    fn hot_render_test_jit(path_a: &str, path_b: &str) -> JitProcess {
+        let draws =
+            "sprites.a.draw(0.0, 0.0, 255, 0); sprites.b.draw(0.0, 0.0, 255, 0); ".repeat(8);
+        let source = format!(
+            r#"
+struct Sprite {{ handle: i32; width: i32; height: i32; }}
+global sprites {{ a: Sprite; b: Sprite; }}
+function load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool {{ return true; }}
+function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {{ return; }}
+function main(): i32 {{ sprites.a.load_sprite_from("{path_a}", 256, 256); sprites.b.load_sprite_from("{path_b}", 256, 256); return 0; }}
+function render(): void {{ {draws} return; }}
+"#
+        );
+        let mut jit = JitProcess::new();
+        jit.upsert_file("hot_render_policy.stasis", source);
+        jit.compile().expect("compile hot-render policy fixture");
+        jit
+    }
+
+    #[test]
+    fn initial_jit_policy_is_published_before_guest_startup() {
+        let _global_lock = jit_global_table_lock().lock().expect("acquire global lock");
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &[],
+        );
+        let jit = hot_render_test_jit("assets/initial-a.png", "assets/initial-b.png");
+
+        publish_jit_hot_render_policy(&jit).expect("publish accepted initial policy");
+
+        assert!(stasis_dynload::hot_render_atlas_eligible(
+            "assets/initial-a.png",
+            256,
+            256
+        ));
+    }
+
+    #[test]
+    fn prepared_jit_hook_observes_candidate_policy_and_rejection_restores_previous() {
+        let _global_lock = jit_global_table_lock().lock().expect("acquire global lock");
+        let previous = vec![hot_render_test_image("assets/previous.png")];
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &previous,
+        );
+        let candidate = hot_render_test_jit("assets/candidate-a.png", "assets/candidate-b.png");
+        let mut active = None;
+
+        let result = apply_prepared_jit_transaction(
+            RequestId(91),
+            Some(candidate),
+            &mut active,
+            false,
+            || {
+                assert!(stasis_dynload::hot_render_atlas_eligible(
+                    "assets/candidate-a.png",
+                    256,
+                    256
+                ));
+                SwapCommitResult::failed(RequestId(91), "reject candidate")
+            },
+        )
+        .expect("transaction returns coordinator rejection");
+
+        assert_eq!(result.status, SwapCommitStatus::Failed);
+        assert!(stasis_dynload::hot_render_atlas_eligible(
+            "assets/previous.png",
+            256,
+            256
+        ));
+        assert!(!stasis_dynload::hot_render_atlas_eligible(
+            "assets/candidate-a.png",
+            256,
+            256
+        ));
+    }
+
+    #[test]
+    fn aot_hot_render_policy_publishes_only_for_successful_commit() {
+        let _global_lock = jit_global_table_lock().lock().expect("acquire global lock");
+        let previous = vec![hot_render_test_image("assets/aot-previous.png")];
+        stasis_dynload::replace_hot_render_metadata(
+            stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            &previous,
+        );
+        let metadata = PendingAotCompileMetadata {
+            hot_render_policy: Some(crate::compiler_backend::HotRenderRuntimePolicy::for_test(
+                vec![hot_render_test_image("assets/aot-candidate.png")],
+            )),
+            ..PendingAotCompileMetadata::default()
+        };
+
+        publish_committed_aot_hot_render_policy(
+            TargetMode::AotProd,
+            &SwapCommitStatus::Failed,
+            Some(&metadata),
+        );
+        assert!(stasis_dynload::hot_render_atlas_eligible(
+            "assets/aot-previous.png",
+            256,
+            256
+        ));
+        assert!(!stasis_dynload::hot_render_atlas_eligible(
+            "assets/aot-candidate.png",
+            256,
+            256
+        ));
+
+        publish_committed_aot_hot_render_policy(
+            TargetMode::AotProd,
+            &SwapCommitStatus::Success,
+            Some(&metadata),
+        );
+        assert!(stasis_dynload::hot_render_atlas_eligible(
+            "assets/aot-candidate.png",
+            256,
+            256
+        ));
+        assert!(!stasis_dynload::hot_render_atlas_eligible(
+            "assets/aot-previous.png",
+            256,
+            256
+        ));
+    }
+
     static REJECTING_HOOK_PATH_HASH: std::sync::atomic::AtomicI32 =
         std::sync::atomic::AtomicI32::new(0);
 
@@ -3882,23 +5190,63 @@ mod tests {
     }
 
     #[test]
-    fn windows_performance_hud_uses_frame_work_and_60_fps_budget() {
+    fn performance_hud_uses_additive_snapshot_and_excludes_present_wait() {
         for required in [
             "event.key.key == SDLK_F3",
+            "stasis_host_performance_metrics_enabled",
             "stasis_host_set_performance_metrics",
             "g_perf_pending_guest_render_us",
-            "stasis_perf_elapsed_us(g_perf_render_started_counter, now)",
-            "budget@60fps=%d%%",
-            "const double total_ms = tick_ms + render_ms",
+            "stasis_host_get_latest_performance_metrics_v1",
+            "frame_work_us",
+            "present_wait_us",
+            "stasis_perf_finish_render_sample(stasis_perf_elapsed_us(",
+            "SDL_RenderDebugText",
+            "g_ios_three_finger_latched",
         ] {
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
                 "Windows performance HUD contract should contain {required}"
             );
         }
+        assert!(STASIS_GRAPHICS_SOURCE.contains("host_started_counter"));
+        assert!(STASIS_GRAPHICS_SOURCE.contains("g_perf_render_started_counter, host_finished"));
+        let finger_up = STASIS_GRAPHICS_SOURCE
+            .split_once("case SDL_EVENT_FINGER_UP:")
+            .and_then(|(_, source)| source.split_once("default:").map(|(section, _)| section))
+            .expect("finger-up event source section");
+        let release_offset = finger_up
+            .find("stasis_release_finger_slot(event.tfinger.fingerID)")
+            .expect("finger-up should release its slot");
+        let reset_offset = finger_up
+            .find("stasis_ios_active_finger_count() < 3")
+            .expect("finger-up should reset the iOS three-finger latch below three active fingers");
         assert!(
-            STASIS_RUNNER_SOURCE.contains("host_set_performance_metrics(tick_us, render_us)"),
-            "Windows AOT runner should feed tick and render timing into the shared HUD"
+            release_offset < reset_offset,
+            "finger-up must release its slot before checking the active-finger latch reset"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains(
+                "if (stasis_ios_active_finger_count() >= 3 && !g_ios_three_finger_latched)"
+            ),
+            "iOS three-finger latch should use the shared active-finger count helper"
+        );
+        assert!(
+            !STASIS_GRAPHICS_SOURCE.contains(
+                "case SDL_EVENT_FINGER_MOTION:\n                {\n                    int active_fingers"
+            ),
+            "iOS three-finger latch should not reset from motion events"
+        );
+        assert!(STASIS_PERFORMANCE_METRICS_HEADER.contains("STASIS_PERF_UNAVAILABLE"));
+        assert!(STASIS_PERFORMANCE_METRICS_HEADER.contains("STASIS_PERF_METRICS_VERSION"));
+        assert!(STASIS_PERFORMANCE_METRICS_HEADER.contains("size"));
+        assert!(!STASIS_GRAPHICS_SOURCE.contains("N/A"));
+        assert!(
+            STASIS_RUNNER_SOURCE.contains("const int measure_hud = host_performance_metrics_enabled")
+                && STASIS_RUNNER_SOURCE.contains("if (measure_hud) QueryPerformanceCounter")
+                && STASIS_RUNNER_SOURCE.contains(
+                    "if (measure_hud && host_set_performance_metrics)"
+                ),
+            "Windows AOT runner should only measure tick and render while the shared HUD is visible"
         );
     }
 
@@ -3983,6 +5331,104 @@ mod tests {
         assert!(
             baseline < guest_main && guest_main < initial_rebind && initial_rebind < initial_apply,
             "Unix packaged AOT must baseline before main and apply after binding"
+        );
+    }
+
+    fn verify_window_request_log(actual: &[AppliedWindowRequest]) -> Result<(), String> {
+        let expected = expected_window_requests();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "window request application order mismatch: expected {expected:?}, actual {actual:?}"
+            ))
+        }
+    }
+
+    fn compile_window_request_fixture(jit: &mut JitProcess) {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        jit.set_project_root(repository_root.to_string_lossy())
+            .expect("set mailbox fixture project root");
+        jit.upsert_file(
+            "tests/stasis/seams/window_request_mailbox_probe.stasis",
+            WINDOW_REQUEST_MAILBOX_FIXTURE,
+        );
+        jit.compile().expect("compile mailbox fixture");
+    }
+
+    #[test]
+    fn stasis_window_requests_apply_once_after_pre_main_baseline() {
+        use std::cell::RefCell;
+
+        let jit = RefCell::new(JitProcess::new());
+        compile_window_request_fixture(&mut jit.borrow_mut());
+        let host = RefCell::new(RecordingWindowHost::default());
+
+        let main_result = run_guest_main_with_initial_host_requests(
+            || {
+                host.borrow_mut().establish_baseline(&jit.borrow());
+                Ok(())
+            },
+            || {
+                jit.borrow_mut()
+                    .execute_i32_noarg_by_name("main")
+                    .map_err(|error| error.to_string())
+            },
+            || {
+                host.borrow_mut().apply_pending(&jit.borrow());
+                Ok(())
+            },
+        )
+        .expect("run guest main with request boundary");
+        assert_eq!(main_result, 0);
+
+        for _ in 0..4 {
+            host.borrow_mut().apply_pending(&jit.borrow());
+            host.borrow_mut().apply_pending(&jit.borrow());
+            assert_eq!(
+                jit.borrow_mut()
+                    .execute_i32_noarg_by_name("tick")
+                    .expect("execute mailbox tick"),
+                0
+            );
+        }
+        host.borrow_mut().apply_pending(&jit.borrow());
+        host.borrow_mut().apply_pending(&jit.borrow());
+        verify_window_request_log(&host.borrow().applications).expect("ordered request log");
+
+        let evidence_path = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .join("seam-tests/it-005-window-request.json");
+        fs::create_dir_all(evidence_path.parent().expect("evidence directory"))
+            .expect("create evidence directory");
+        fs::write(
+            &evidence_path,
+            format!(
+                "{{\"schema\":\"stasis.seam_test.v1\",\"test\":\"IT-005\",\"fixture\":\"window-request-v1\",\"target\":\"{}-{}\",\"backend\":\"jit\",\"baseline\":0,\"events\":[[1,\"windowed\",960,540],[2,\"fullscreen\",960,540],[3,\"windowed\",1280,720],[4,\"windowed\",1280,720]],\"final_sequence\":4,\"final_mode\":\"windowed\",\"final_width\":1280,\"final_height\":720}}\n",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+            ),
+        )
+        .expect("write window request evidence");
+        drop(jit);
+
+        let mut inverted_jit = JitProcess::new();
+        compile_window_request_fixture(&mut inverted_jit);
+        assert_eq!(
+            inverted_jit
+                .execute_i32_noarg_by_name("main")
+                .expect("execute inverted guest main"),
+            0
+        );
+        let mut inverted_host = RecordingWindowHost::default();
+        inverted_host.establish_baseline(&inverted_jit);
+        inverted_host.apply_pending(&inverted_jit);
+        let inversion = verify_window_request_log(&inverted_host.applications)
+            .expect_err("post-main baseline must lose main's request");
+        assert!(
+            inversion.contains("actual []"),
+            "unexpected inversion: {inversion}"
         );
     }
 
@@ -4228,13 +5674,11 @@ mod tests {
     }
 
     #[test]
-    fn graphics_runtime_presents_asset_free_loading_on_sdl_and_opengl() {
+    fn graphics_runtime_presents_asset_free_loading_on_sdl() {
         let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
         for required in [
             "static void stasis_present_gpu_loading(void)",
             "SDL_RenderPresent(g_renderer);",
-            "SDL_GL_SwapWindow(g_window);",
-            "g_use_sdl_renderer ? \"sdl\" : \"gl\"",
         ] {
             assert!(
                 graphics_source.contains(required),
@@ -4250,7 +5694,7 @@ mod tests {
         );
         assert!(
             graphics_source.contains("SDL_PumpEvents();\n    stasis_present_gpu_loading();"),
-            "every desktop backend must pump initial window messages before presenting loading"
+            "the native renderer must pump initial window messages before presenting loading"
         );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("stasis_graphics_runtime_abi_version(void)"),
@@ -4283,15 +5727,135 @@ mod tests {
     }
 
     #[test]
-    fn windows_runtime_uses_physical_drawable_pixels_at_monitor_density() {
+    fn sdl_frame_start_clears_the_logical_canvas() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let clear_start = graphics_source
+            .find("STASIS_EXPORT void stasis_clear(")
+            .expect("SDL frame-start clear helper");
+        let clear_body = graphics_source[clear_start..]
+            .split_once("\n}\n")
+            .map(|(body, _)| body)
+            .expect("complete SDL frame-start clear helper");
+        assert!(clear_body.contains("SDL_RenderClear(g_renderer)"));
+        assert!(clear_body.contains("SDL_RenderFillRect(g_renderer, &logical_canvas)"));
+    }
+
+    #[test]
+    fn desktop_runtime_uses_physical_drawable_pixels_at_monitor_density() {
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("SDL_WINDOW_HIGH_PIXEL_DENSITY")
-                && STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowSizeInPixels("),
-            "SDL3 runtime should request high-density windows and read physical pixels"
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("SDL_GetRenderOutputSize(g_renderer, &drawable_w, &drawable_h)")
+                && !STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowSizeInPixels("),
+            "SDL3 runtime should request high-density windows and sample the renderer output"
         );
         assert!(
             !STASIS_GRAPHICS_SOURCE.contains("stasis_renderer_lifecycle_surface_changed("),
             "SDL3 window metric events must not invalidate renderer-owned textures"
+        );
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let sync_start = graphics_source
+            .find("static void stasis_sync_display_metrics(void) {")
+            .expect("display metric synchronization helper");
+        let sync_end = graphics_source[sync_start..]
+            .find("static void stasis_window_to_logical(")
+            .expect("display metric synchronization boundary")
+            + sync_start;
+        let sync_source = &graphics_source[sync_start..sync_end];
+        assert!(
+            sync_source.contains("SDL_GetRenderOutputSize(g_renderer, &drawable_w, &drawable_h)"),
+            "SDL renderer metrics must sample the complete physical backing"
+        );
+        assert!(
+            !sync_source.contains("SDL_GetCurrentRenderOutputSize("),
+            "logical-presentation-adjusted output can be stale during a canvas transition"
+        );
+        let preparation_key = sync_source
+            .find("const StasisDisplayPreparationScale next_preparation_scale =")
+            .expect("exact resource preparation scale key");
+        let density_change = sync_source
+            .find("stasis_display_preparation_scale_changed(")
+            .expect("exact preparation key comparison");
+        let density_dirty = sync_source
+            .find("stasis_mark_density_resources_dirty();")
+            .expect("density resource invalidation");
+        assert!(
+            preparation_key < density_change && density_change < density_dirty,
+            "the exact bounded preparation key must drive density invalidation"
+        );
+        let dirty_start = graphics_source
+            .find("static void stasis_mark_density_resources_dirty(void) {")
+            .expect("density invalidation helper");
+        let dirty_end = graphics_source[dirty_start..]
+            .find("static int stasis_current_scaled_extent(")
+            .expect("density invalidation helper boundary")
+            + dirty_start;
+        let dirty_source = &graphics_source[dirty_start..dirty_end];
+        assert!(
+            dirty_source.contains("g_sprites[i].needs_reraster = 1;")
+                && dirty_source.contains("g_fonts[i].needs_reraster = 1;"),
+            "an exact preparation key change must invalidate existing sprites and fonts"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains(
+                "Stasis resource preparation: kind=sprite event=%s handle=%d path=%s logical=%dx%d raster=%dx%d source_bytes=%llu density_generation=%d"
+            ) && STASIS_GRAPHICS_SOURCE.contains(
+                "Stasis resource preparation: kind=font event=%s handle=%d path=%s logical_size=%d raster_size=%d atlas=%dx%d source_bytes=%llu density_generation=%d"
+            ),
+            "opt-in receipts must expose current sprite and font preparations at one density generation"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("if (!gfx_should_log_sprite_loads() || !entry) return;")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("if (!gfx_should_log_sprite_loads() || !font) return;"),
+            "resource preparation receipts must remain behind STASIS_GFX_LOG_SPRITES"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("stasis_log_sprite_preparation(e, path, replaces_existing);")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("stasis_log_font_preparation(font, replaces_existing);"),
+            "successful replacements must publish current preparation receipts"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("stasis_current_scaled_extent(font->font_size)"),
+            "resource preparation must derive from the full-backing density scale"
+        );
+        let capture_start = graphics_source
+            .find("static int stasis_gfx_dump_image(")
+            .expect("framebuffer capture helper");
+        let capture_end = graphics_source[capture_start..]
+            .find("STASIS_EXPORT int stasis_gfx_dump_bmp(")
+            .expect("framebuffer capture helper boundary")
+            + capture_start;
+        let capture_source = &graphics_source[capture_start..capture_end];
+        assert!(
+            capture_source.contains("SDL_RenderReadPixels(g_renderer, NULL)")
+                && capture_source.contains("SDL_ConvertSurface(readback, SDL_PIXELFORMAT_BGRA32)")
+                && capture_source.contains("int w = bgra ? bgra->w : 0;")
+                && capture_source.contains("int h = bgra ? bgra->h : 0;"),
+            "ordinary capture dimensions must come from the converted SDL readback surface"
+        );
+        assert!(
+            capture_source.contains("w != g_recording_width || h != g_recording_height")
+                && capture_source
+                    .contains("recording readback dimensions mismatch: got=%dx%d expected=%dx%d"),
+            "fixed recording targets must reject readbacks outside their configured extent"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE
+                .contains("display_scale=%.3f display_generation=%d density_generation=%d"),
+            "desktop presentation receipts must join display and density generations"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("SDL_GetWindowDisplayScale(g_window)")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_GetDisplayContentScale(")
+                && STASIS_GRAPHICS_SOURCE.contains("SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED")
+                && STASIS_GRAPHICS_SOURCE.contains("stasis_apply_x11_window_scale(0);")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("stasis_display_scaled_window_extent(width, display_scale)"),
+            "X11 content scale must size the physical window on the shared desktop path"
         );
         assert!(
             STASIS_RUNTIME_CMAKE
@@ -4318,6 +5882,9 @@ mod tests {
         let desktop_maximized = graphics_source
             .find("window_flags |= SDL_WINDOW_MAXIMIZED;")
             .expect("desktop window creation should request a maximized window");
+        let scale_control_guard = graphics_source[..desktop_maximized]
+            .rfind("if (!g_recording_presentation && !g_x11_scale_controlled_window) {")
+            .expect("desktop maximization should exclude explicit X11 scale control");
         let platform_guard_end = graphics_source[desktop_maximized..]
             .find("#endif")
             .expect("desktop window policy should remain platform guarded")
@@ -4327,6 +5894,27 @@ mod tests {
             mobile_fullscreen < desktop_maximized && desktop_maximized < platform_guard_end,
             "desktop maximization must be the non-mobile branch of window creation"
         );
+        assert!(
+            mobile_fullscreen < scale_control_guard && scale_control_guard < desktop_maximized,
+            "ordinary desktop launch should maximize unless explicit X11 scale control owns a windowed backing"
+        );
+    }
+
+    #[test]
+    fn explicit_x11_scale_control_owns_a_windowed_launch() {
+        for required in [
+            "SDL_VIDEO_X11_SCALING_FACTOR",
+            "stasis_display_scale_control_is_valid(",
+            "g_x11_scale_controlled_window = stasis_x11_scale_controlled_launch();",
+            "if (!g_recording_presentation && !g_x11_scale_controlled_window)",
+            "if (g_x11_scale_controlled_window) {\n        maximized = 0;",
+            "stasis_apply_x11_window_scale(1);",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "scale-controlled X11 launch should contain {required}"
+            );
+        }
     }
 
     #[test]
@@ -4344,8 +5932,34 @@ mod tests {
             .find("SDL_RestoreWindow(g_window);")
             .expect("an explicit size should restore a maximized or minimized window");
         let resize = resize_source
-            .find("SDL_SetWindowSize(g_window, width, height);")
-            .expect("an explicit size should resize the restored window");
+            .find("stasis_apply_x11_window_scale(1);")
+            .expect("an explicit size should apply the platform-owned window scale");
+
+        let scaled_resize_start = graphics_source
+            .find("static void stasis_apply_x11_window_scale(int explicit_window_request) {")
+            .expect("X11 window scale helper");
+        let scaled_resize_end = graphics_source[scaled_resize_start..]
+            .find("static void stasis_query_available_presentation(")
+            .expect("X11 window scale helper boundary")
+            + scaled_resize_start;
+        let scaled_resize_source = &graphics_source[scaled_resize_start..scaled_resize_end];
+        assert!(
+            scaled_resize_source.contains("SDL_SetWindowSize(")
+                && scaled_resize_source.contains("stasis_display_should_apply_windowed_extent(")
+                && scaled_resize_source
+                    .contains("stasis_display_scaled_window_extent(g_window_width, scale)")
+                && scaled_resize_source
+                    .contains("stasis_display_scaled_window_extent(g_window_height, scale)"),
+            "platform-owned resize must apply bounded scaled extents to the physical window"
+        );
+
+        assert!(
+            resize_source.contains("stasis_apply_x11_window_scale(1);")
+                && STASIS_GRAPHICS_SOURCE.contains(
+                    "stasis_apply_x11_window_scale(0);"
+                ),
+            "explicit window requests must override stale restored flags without letting display-scale events resize a maximized surface"
+        );
 
         assert!(
             restore < resize
@@ -4360,7 +5974,12 @@ mod tests {
             STASIS_WINDOW_REQUEST_STDLIB.contains("const HOST_REQ_FLAG_MAXIMIZED: i32 = 4;")
                 && STASIS_WINDOW_REQUEST_STDLIB
                     .contains("function host_request_maximized(enabled: i32): void")
-                && STASIS_GRAPHICS_STDLIB.contains("function set_maximized(enabled: i32): i32"),
+                && STASIS_WINDOW_REQUEST_STDLIB.contains(
+                    "function host_request_maximized_canvas(width: i32, height: i32): void"
+                )
+                && STASIS_GRAPHICS_STDLIB.contains("function set_maximized(enabled: i32): i32")
+                && STASIS_GRAPHICS_STDLIB
+                    .contains("function set_maximized_canvas(width: i32, height: i32): i32"),
             "stdlib should expose a first-class maximized presentation request"
         );
 
@@ -4431,7 +6050,11 @@ mod tests {
             "StasisMobileI32Entry tick_entry",
             "StasisMobileI32Entry render_entry",
             "stasis_mobile_runtime_last_entry_result(void)",
-            "STASIS_MOBILE_RUNTIME_ABI_VERSION 1",
+            "stasis_mobile_runtime_last_entry(void)",
+            "STASIS_MOBILE_RUNTIME_ABI_VERSION 2",
+            "STASIS_MOBILE_RUNTIME_ENTRY_MAIN = 1",
+            "STASIS_MOBILE_RUNTIME_ENTRY_TICK = 2",
+            "STASIS_MOBILE_RUNTIME_ENTRY_RENDER = 3",
         ] {
             assert!(
                 STASIS_MOBILE_RUNTIME_HEADER.contains(required),
@@ -4443,6 +6066,9 @@ mod tests {
             "runtime_state.entries.main_entry()",
             "runtime_state.entries.tick_entry()",
             "runtime_state.entries.render_entry()",
+            "runtime_state.last_entry = STASIS_MOBILE_RUNTIME_ENTRY_MAIN",
+            "runtime_state.last_entry = STASIS_MOBILE_RUNTIME_ENTRY_TICK",
+            "runtime_state.last_entry = STASIS_MOBILE_RUNTIME_ENTRY_RENDER",
             "runtime_state.last_entry_result != 0",
             "stasis_should_quit()",
             "stasis_mobile_poll_events()",
@@ -4455,8 +6081,8 @@ mod tests {
             );
         }
         assert!(
-            STASIS_RUNTIME_CMAKE.contains("configure_stasis_target(stasis_mobile_runtime ON TRUE)"),
-            "mobile target should be static, SDL-only, and exclude the SDL desktop main shim"
+            STASIS_RUNTIME_CMAKE.contains("configure_stasis_target(stasis_mobile_runtime ON)"),
+            "mobile target should be static and exclude the SDL desktop main shim"
         );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("stasis_storage_load_i32")
@@ -4465,6 +6091,11 @@ mod tests {
                     .contains("stasis_mobile_aot_runtime.c\n        stasis_platform_storage.c")
                 && !STASIS_MOBILE_MAIN_SOURCE.contains("stasis_storage_set_root"),
             "graphical mobile packages must use the single SDL preference host"
+        );
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("#if defined(__ANDROID__)\n    written = snprintf(path, capacity, \"%s%s\", root, scope);")
+                && STASIS_GRAPHICS_SOURCE.contains("\"%s%s/%s.%s\", root, scope, key, extension"),
+            "Android storage must add the validated scope below the app-private SDL preference root"
         );
         assert!(
             !STASIS_MOBILE_RUNTIME_SOURCE.contains("stasis_dynload")
@@ -4520,22 +6151,22 @@ mod tests {
     fn shipping_renderers_share_one_versioned_sdl_command_process() {
         let runtime_cmake = STASIS_RUNTIME_CMAKE.replace("\r\n", "\n");
         for required in [
-            "STASIS_RENDER_V2_MAGIC 0x47584631",
-            "STASIS_RENDER_V2_VERSION 2",
-            "STASIS_RENDER_V3_VERSION 3",
-            "STASIS_RENDER_CURRENT_VERSION STASIS_RENDER_V3_VERSION",
-            "STASIS_RENDER_V2_TRACE_VERSION 2",
-            "STASIS_RENDER_V3_TRACE_VERSION 3",
+            "STASIS_RENDER_MAGIC 0x47584631",
+            "STASIS_RENDER_VERSION 7",
+            "STASIS_RENDER_TRACE_VERSION 7",
             "STASIS_RENDER_I_ORDER_BASE",
+            "STASIS_RENDER_I_RECT_COUNT",
             "STASIS_RENDER_MAX_ORDER",
-            "STASIS_RENDER_SPRITE_F32_STRIDE 4",
+            "STASIS_RENDER_ORDER_RECT",
+            "STASIS_RENDER_ORDER_CLIP_PUSH",
+            "STASIS_RENDER_ORDER_CLIP_POP",
+            "STASIS_RENDER_SPRITE_F32_STRIDE 13",
             "STASIS_RENDER_I32_COUNT",
             "STASIS_RENDER_F32_COUNT",
             "stasis_render_validate",
             "stasis_render_validation_name",
             "stasis_render_is_valid",
             "stasis_render_trace",
-            "stasis_render_v2_trace",
         ] {
             assert!(
                 STASIS_RENDER_CONTRACT_HEADER.contains(required),
@@ -4543,10 +6174,10 @@ mod tests {
             );
         }
         assert!(
-            runtime_cmake.contains(
-                "Build the canonical SDL_Renderer runtime (disable only for legacy GL conformance)"
-            ) && runtime_cmake.contains("    ON\n)"),
-            "shipping runtime should default to the canonical SDL backend"
+            runtime_cmake.contains("Build pinned SDL3 and SDL3_image into the graphics runtime")
+                && !runtime_cmake.contains("GLEW")
+                && !runtime_cmake.contains("OpenGL"),
+            "native runtime configuration should expose only the canonical SDL backend"
         );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("stasis_render_validate(cmd_i32, cmd_f32)")
@@ -4569,6 +6200,62 @@ mod tests {
     }
 
     #[test]
+    fn sdl_cached_text_batches_glyphs_without_crossing_text_run_order() {
+        let start = STASIS_GRAPHICS_SOURCE
+            .find("static void stasis_draw_cached_text_sdl(")
+            .expect("cached SDL text batch helper");
+        let end = STASIS_GRAPHICS_SOURCE[start..]
+            .find("/* Cache a text run")
+            .map(|offset| start + offset)
+            .expect("cached text helper boundary");
+        let helper = &STASIS_GRAPHICS_SOURCE[start..end];
+        assert!(helper.contains("SDL_RenderGeometry("));
+        assert!(helper.contains("STASIS_TEXT_GEOMETRY_BATCH_QUADS"));
+        assert!(helper.contains("vertices[vertex].color = color;"));
+        assert!(!helper.contains("SDL_RenderTexture("));
+
+        let cached_start = STASIS_GRAPHICS_SOURCE
+            .find("static void stasis_draw_text_cached_internal(")
+            .expect("cached text draw entry");
+        let cached_end = STASIS_GRAPHICS_SOURCE[cached_start..]
+            .find("STASIS_EXPORT void stasis_gfx_draw_text_cached")
+            .map(|offset| cached_start + offset)
+            .expect("cached text draw boundary");
+        let cached_draw = &STASIS_GRAPHICS_SOURCE[cached_start..cached_end];
+        assert!(cached_draw.contains("run, font, x, y, color_r, color_g, color_b, color_a);"));
+    }
+
+    #[test]
+    fn mixed_solids_sample_one_white_texel_while_sprites_keep_ranged_uvs() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
+        let rect_start = graphics_source
+            .find("static void stasis_mixed_add_rect(")
+            .expect("mixed solid helper");
+        let rect_end = graphics_source[rect_start..]
+            .find("static int stasis_mixed_add_sprite(")
+            .expect("mixed solid helper boundary")
+            + rect_start;
+        let rect_source = &graphics_source[rect_start..rect_end];
+        assert!(rect_source
+            .contains("const float white_u = ((float)page->white_x + 0.5f) / (float)page->width;"));
+        assert!(rect_source.contains(
+            "const float white_v = ((float)page->white_y + 0.5f) / (float)page->height;"
+        ));
+        assert!(rect_source.contains("quad, points, color, white_u, white_v, white_u, white_v"));
+
+        let sprite_start = rect_end;
+        let sprite_end = graphics_source[sprite_start..]
+            .find("static int stasis_draw_mixed_order_span(")
+            .expect("mixed sprite helper boundary")
+            + sprite_start;
+        let sprite_source = &graphics_source[sprite_start..sprite_end];
+        assert!(sprite_source.contains("entry->atlas_x + crop.x"));
+        assert!(sprite_source.contains("entry->atlas_x + crop.x + crop.w"));
+        assert!(sprite_source.contains("entry->atlas_y + crop.y"));
+        assert!(sprite_source.contains("entry->atlas_y + crop.y + crop.h"));
+    }
+
+    #[test]
     fn live_runtime_exposes_repeatable_pre_present_png_capture() {
         assert!(
             STASIS_GRAPHICS_SOURCE
@@ -4582,21 +6269,151 @@ mod tests {
     }
 
     #[test]
-    fn sprite_runtime_clears_reused_atlas_padding_before_mipmap_regeneration() {
+    fn recording_runtime_keeps_fixed_hidden_surface_and_logical_letterbox() {
+        for required in [
+            "STASIS_RECORDING_PRESENTATION",
+            "STASIS_RECORDING_FPS",
+            "stasis_set_recording_config",
+            "stasis_set_recording_audio_config",
+            "stasis_recording_audio_pull_f32_interleaved",
+            "SDL_WINDOW_HIDDEN",
+            "SDL_SetRenderVSync(g_renderer, g_recording_presentation ? 0 : 1)",
+            "SDL_LOGICAL_PRESENTATION_LETTERBOX",
+            "if (g_recording_presentation)",
+            "stasis_recording_clock_us",
+            "micros > (uint64_t)INT_MAX ? INT_MAX",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "recording runtime contract should contain {required}"
+            );
+        }
+        let fullscreen = STASIS_GRAPHICS_SOURCE
+            .find("STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {")
+            .expect("fullscreen export");
+        let fullscreen_body = &STASIS_GRAPHICS_SOURCE[fullscreen..];
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains(
-                "unsigned char* clear_pixels = (unsigned char*)calloc(pixel_count, 4);"
-            ),
-            "runtime sprite upload should zero the reused atlas allocation before writing sprite pixels"
+            fullscreen_body[..fullscreen_body
+                .find("bool result = SDL_SetWindowFullscreen")
+                .expect("fullscreen platform call")]
+                .contains("if (g_recording_presentation)"),
+            "recording fullscreen requests must not touch the hidden surface"
+        );
+    }
+
+    #[test]
+    fn sprite_runtime_uploads_edge_extruded_atlas_padding() {
+        let upload_start = STASIS_GRAPHICS_SOURCE
+            .find("static int stasis_sprite_atlas_upload(")
+            .expect("sprite atlas upload helper");
+        let upload_end = STASIS_GRAPHICS_SOURCE[upload_start..]
+            .find("static int sprite_publish_pixels_into_entry(")
+            .expect("sprite atlas upload helper boundary")
+            + upload_start;
+        let upload_source = &STASIS_GRAPHICS_SOURCE[upload_start..upload_end];
+        for required in [
+            "const int padded_w = alloc_w;",
+            "const int padded_h = alloc_h;",
+            "if (padded_w < w + 2 || padded_h < h + 2) return 0;",
+            "int sy = py - 1;",
+            "int sx = px - 1;",
+            "SDL_Rect rect = {x - 1, y - 1, padded_w, padded_h};",
+            "g_sprite_atlas_pages[page_index].texture, &rect, padded, padded_w * 4",
+        ] {
+            assert!(
+                upload_source.contains(required),
+                "atlas upload should edge-extrude through the padded upload rectangle: {required}"
+            );
+        }
+        assert!(!upload_source.contains("clear"));
+        assert!(!upload_source.contains("mipmap"));
+    }
+
+    #[test]
+    fn sprite_runtime_uses_grouped_cold_and_dedicated_atlas_pages() {
+        for required in [
+            "stasis_gfx_set_next_sprite_atlas_policy_v3",
+            "stasis_asset_request_sprite_with_policy_v3",
+            "task->atlas_policy",
+            "stasis_sprite_atlas_page_size_v3",
+            "#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512",
+            "if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE",
+            "if (!page->texture || page->dedicated || page->group_id != group_id) continue;",
+            "stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0)",
+            "if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))",
+            "if (!stasis_sprite_atlas_is_cold_page(page)) continue;",
+            "stasis_sprite_atlas_create_page(width, height, group_id, 1)",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "runtime hot-render policy should contain {required}"
+            );
+        }
+        let allocation_start = STASIS_GRAPHICS_SOURCE
+            .find("static int stasis_sprite_atlas_allocate(")
+            .expect("sprite atlas allocation helper");
+        let allocation_end = STASIS_GRAPHICS_SOURCE[allocation_start..]
+            .find("static int stasis_sprite_atlas_upload(")
+            .expect("sprite atlas allocation helper boundary")
+            + allocation_start;
+        let allocation_source = &STASIS_GRAPHICS_SOURCE[allocation_start..allocation_end];
+        let eligible_branch = allocation_source
+            .find("if (eligible &&")
+            .expect("compiler-eligible group allocation");
+        let cold_branch = allocation_source
+            .find("if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))")
+            .expect("standalone cold-page allocation");
+        let dedicated_branch = allocation_source
+            .find("stasis_sprite_atlas_create_page(width, height, group_id, 1)")
+            .expect("oversized standalone allocation");
+        assert!(
+            eligible_branch < cold_branch && cold_branch < dedicated_branch,
+            "eligible groups must keep v3 sizing, fitting standalone sprites must use cold pages, and oversized standalone sprites must remain dedicated"
+        );
+        let publish_start = STASIS_GRAPHICS_SOURCE
+            .find("static int sprite_publish_pixels_into_entry(")
+            .expect("sprite publication helper");
+        let publish_end = STASIS_GRAPHICS_SOURCE[publish_start..]
+            .find("static int sprite_build_into_entry_sized(")
+            .expect("sprite publication helper boundary")
+            + publish_start;
+        let publish_source = &STASIS_GRAPHICS_SOURCE[publish_start..publish_end];
+        assert!(
+            publish_source.contains("stasis_sprite_atlas_is_cold_page("),
+            "standalone reloads must retain compatible shared cold or dedicated allocations"
+        );
+        let failure = publish_source
+            .find("if (page_index < 0 ||")
+            .expect("atlas allocation/upload failure branch");
+        let failure_return = publish_source[failure..]
+            .find("return 0;")
+            .expect("atlas failure return")
+            + failure;
+        let publication = publish_source
+            .find("e->page_index = page_index;")
+            .expect("atlas page publication");
+        assert!(
+            failure < failure_return && failure_return < publication,
+            "atlas allocation or upload failure must return without publishing a different page"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains(
-                "atlas_page_clear_region(page, alloc_x, alloc_y, alloc_w, alloc_h);"
-            ) && STASIS_GRAPHICS_SOURCE.contains(
-                "atlas_page_upload_region(page, sprite_x, sprite_y, w, h, pixels)"
-            ),
-            "runtime sprite upload should clear padded texels before updating the sprite interior and regenerating mipmaps"
+            !publish_source.contains("sprite_upload_standalone")
+                && !publish_source.contains("SDL_CreateRenderer")
+                && !publish_source.contains("SDL_SetRenderTarget"),
+            "atlas failure must not switch resources or renderers"
         );
+    }
+
+    #[test]
+    fn sprite_runtime_reuses_cached_entry_when_atlas_policy_changes() {
+        let lookup = STASIS_GRAPHICS_SOURCE
+            .find("const StasisSpriteAtlasPolicyV3 previous_atlas_policy = cached->atlas_policy;")
+            .expect("cached policy migration");
+        let tail = &STASIS_GRAPHICS_SOURCE[lookup..];
+        assert!(tail.contains("cached->atlas_policy = atlas_policy;"));
+        assert!(tail.contains("cached->needs_reraster = 1;"));
+        assert!(tail.contains("cached->atlas_policy = previous_atlas_policy;"));
+        assert!(tail.contains("cached->ref_count++;"));
     }
 
     #[test]
@@ -4616,8 +6433,8 @@ mod tests {
             );
         }
         let scaled_extent = STASIS_GRAPHICS_SOURCE
-            .find("const int raster_w = stasis_display_scaled_extent(max_w, g_pixel_scale);")
-            .expect("scaled sprite extent");
+            .find("const int raster_w = stasis_current_scaled_extent(max_w);")
+            .expect("current-density sprite extent");
         let bounds_check = STASIS_GRAPHICS_SOURCE
             .find("sprite_source_within_limits(path, raster_w, raster_h)")
             .expect("scaled sprite bounds check");
@@ -4632,13 +6449,38 @@ mod tests {
 
     #[test]
     fn sprite_reload_preserves_previous_gpu_resource_until_replacement_succeeds() {
+        let publish_start = STASIS_GRAPHICS_SOURCE
+            .find("static int sprite_publish_pixels_into_entry(")
+            .expect("sprite publication helper");
+        let publish_end = STASIS_GRAPHICS_SOURCE[publish_start..]
+            .find("static int sprite_build_into_entry_sized(")
+            .expect("sprite publication helper boundary")
+            + publish_start;
+        let publish_source = &STASIS_GRAPHICS_SOURCE[publish_start..publish_end];
+        let allocation = publish_source
+            .find("page_index = stasis_sprite_atlas_allocate(")
+            .expect("atlas allocation");
+        let upload = publish_source
+            .find("!stasis_sprite_atlas_upload(")
+            .expect("atlas upload");
+        let failure_return = publish_source[upload..]
+            .find("return 0;")
+            .expect("failed upload return")
+            + upload;
+        let page_publication = publish_source
+            .find("e->page_index = page_index;")
+            .expect("atlas page publication");
+        let texture_publication = publish_source
+            .find("e->sdl_tex = page->texture;")
+            .expect("atlas texture publication");
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("SDL_Texture* previous = e->sdl_tex;")
-                && STASIS_GRAPHICS_SOURCE.contains("if (previous) SDL_DestroyTexture(previous);")
-                && STASIS_GRAPHICS_SOURCE.contains("const int can_reuse_existing = 0;")
-                && STASIS_GRAPHICS_SOURCE.contains("sprite_gpu_upload_failed"),
-            "sprite reload should publish a completed replacement before releasing the previous resource"
+            allocation < upload
+                && upload < failure_return
+                && failure_return < page_publication
+                && page_publication < texture_publication,
+            "sprite reload must allocate and upload successfully before publishing entry fields and the page texture"
         );
+        assert!(!publish_source[..failure_return].contains("e->sdl_tex = page->texture;"));
     }
 
     #[test]
@@ -4659,19 +6501,33 @@ mod tests {
     }
 
     #[test]
-    fn invalid_sprite_draws_use_a_procedural_fallback_resource() {
+    fn invalid_sprite_draws_use_the_atlas_page_placeholder() {
         for required in [
             "static SpriteEntry g_sprite_fallback",
-            "static const unsigned char pixels[16]",
             "if (!e) e = sprite_fallback_get()",
-            "SDL_CreateTexture(",
-            "atlas_alloc(2, 2, \"<fallback>\"",
+            "next.atlas_x = page->placeholder_x;",
+            "next.atlas_y = page->placeholder_y;",
+            "next.u0 = (float)page->placeholder_x / (float)page->width;",
+            "next.v0 = (float)page->placeholder_y / (float)page->height;",
+            "next.u1 = (float)(page->placeholder_x + 2) / (float)page->width;",
+            "next.v1 = (float)(page->placeholder_y + 2) / (float)page->height;",
+            "next.sdl_tex = page->texture;",
         ] {
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
-                "fallback sprite path should contain {required}"
+                "fallback sprite should use the atlas page placeholder: {required}"
             );
         }
+        let fallback_start = STASIS_GRAPHICS_SOURCE
+            .find("static SpriteEntry* sprite_fallback_get(void) {")
+            .expect("fallback sprite helper");
+        let fallback_end = STASIS_GRAPHICS_SOURCE[fallback_start..]
+            .find("STASIS_EXPORT void stasis_gfx_release_sprite")
+            .expect("fallback sprite helper boundary")
+            + fallback_start;
+        let fallback_source = &STASIS_GRAPHICS_SOURCE[fallback_start..fallback_end];
+        assert!(!fallback_source.contains("SDL_CreateTexture("));
+        assert!(!fallback_source.contains("sprite_upload_standalone"));
     }
 
     fn decode_zero_terminated_utf8(bytes: &[u8]) -> String {
@@ -5471,6 +7327,7 @@ mod tests {
         let active_entrypoints = PlayEntrypoints {
             tick_code_ptr: stasis_dynload::jit_host_tick_trampoline_ptr() as u64,
             render_code_ptr: stasis_dynload::jit_host_render_trampoline_ptr() as u64,
+            swap_receipt: None,
         };
         assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(0));
         assert_eq!(
@@ -5492,13 +7349,15 @@ mod tests {
         let package = candidate
             .build_engine_package(&EngineEntrypoints::runtime_default())
             .expect("build staged v2 package");
-        let published = commit_play_candidate_between_ticks(
-            &mut active,
-            candidate,
-            package.symbol_code_ptrs.keys().cloned().collect(),
-            &package,
-        )
-        .expect("commit and publish v2 at the production between-tick boundary");
+        let published = commit_play_candidate_between_ticks(&mut active, candidate, &package)
+            .expect("commit and publish v2 at the production between-tick boundary");
+        assert_eq!(
+            published
+                .swap_receipt
+                .as_ref()
+                .map(|receipt| receipt.status),
+            Some(DevelopmentSwapStatus::Accepted)
+        );
         assert_eq!(published.tick_code_ptr, active_entrypoints.tick_code_ptr);
         assert_eq!(
             published.render_code_ptr,
@@ -5602,13 +7461,8 @@ mod tests {
         )
         .expect("simulate live edit publishing while watch compile is pending");
 
-        commit_play_candidate_between_ticks(
-            &mut active,
-            prepared.candidate,
-            prepared.package.symbol_code_ptrs.keys().cloned().collect(),
-            &prepared.package,
-        )
-        .expect("publish v2");
+        commit_play_candidate_between_ticks(&mut active, prepared.candidate, &prepared.package)
+            .expect("publish v2");
         assert_eq!(
             stasis_dynload::jit_host_tick_trampoline_ptr(),
             tick_trampoline
@@ -5646,6 +7500,7 @@ mod tests {
         let active_entrypoints = PlayEntrypoints {
             tick_code_ptr: active_package.tick_code_ptr,
             render_code_ptr: active_package.render_code_ptr,
+            swap_receipt: None,
         };
         assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(0));
         assert_eq!(
@@ -5669,13 +7524,8 @@ mod tests {
         let package = candidate
             .build_engine_package(&EngineEntrypoints::runtime_default())
             .expect("build rejecting package");
-        let error = commit_play_candidate_between_ticks(
-            &mut active,
-            candidate,
-            package.symbol_code_ptrs.keys().cloned().collect(),
-            &package,
-        )
-        .expect_err("swap hook must reject at the production boundary");
+        let error = commit_play_candidate_between_ticks(&mut active, candidate, &package)
+            .expect_err("swap hook must reject at the production boundary");
         assert!(error.contains("rejection"));
 
         assert_eq!(
@@ -5780,7 +7630,7 @@ mod tests {
             &candidate,
             &preview,
             true,
-            || stasis_dynload::invoke_code_swap_hook(mutating_rejecting_hook as usize),
+            || stasis_dynload::invoke_code_swap_hook(mutating_rejecting_hook as *const () as usize),
             Result::is_ok,
         )
         .expect("runtime transaction should execute")
@@ -5886,7 +7736,7 @@ mod tests {
             request_id,
             vec![JitCodePtrOverride {
                 fn_id: hook_fn_id,
-                code_ptr: mutating_rejecting_hook as usize as u64,
+                code_ptr: mutating_rejecting_hook as *const () as usize as u64,
             }],
         )]);
 
@@ -6809,6 +8659,7 @@ mod tests {
                 linked_image_path: Some(linked_image.clone()),
                 linked_image_size_bytes: compiled.aot_linked_image_size_bytes,
                 function_symbols: Some(symbols),
+                hot_render_policy: None,
             },
         );
         let pending_jit_code_ptr_overrides: BTreeMap<RequestId, Vec<JitCodePtrOverride>> =
@@ -7670,6 +9521,110 @@ mod tests {
         ));
 
         fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
+    fn watch_asset_paths_follow_reachable_asset_loader_references() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project_root = std::env::temp_dir().join(format!("stasis_watch_assets_{stamp}"));
+        let source_dir = project_root.join("src");
+        let asset_dir = project_root.join("assets");
+        fs::create_dir_all(&source_dir).expect("source directory");
+        fs::create_dir_all(&asset_dir).expect("asset directory");
+        let entry = source_dir.join("main.stasis");
+        let used = asset_dir.join("piece.svg");
+        let dynamic = asset_dir.join("dynamic.svg");
+        let unused = asset_dir.join("unused.svg");
+        fs::write(&used, "<svg/>").expect("used asset");
+        fs::write(&dynamic, "<svg><circle/></svg>").expect("dynamic asset");
+        fs::write(&unused, "<svg/>").expect("unused asset");
+        let manifest = serde_json::json!({
+            "schema": "stasis-assets",
+            "version": 2,
+            "dynamic_assets": ["assets/dynamic.svg"],
+            "assets": [
+                {
+                    "id": "piece",
+                    "path": "assets/piece.svg",
+                    "content_sha256": stasis_assets::sha256_bytes(b"<svg/>"),
+                    "format": { "kind": "sprite", "encoding": "svg", "width": 1, "height": 1 },
+                    "dependencies": []
+                },
+                {
+                    "id": "dynamic",
+                    "path": "assets/dynamic.svg",
+                    "content_sha256": stasis_assets::sha256_bytes(b"<svg><circle/></svg>"),
+                    "format": { "kind": "sprite", "encoding": "svg", "width": 1, "height": 1 },
+                    "dependencies": []
+                }
+            ]
+        });
+        fs::write(
+            project_root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            serde_json::to_vec_pretty(&manifest).expect("encode asset manifest"),
+        )
+        .expect("asset manifest");
+        fs::write(
+            &entry,
+            "function @asset_path(path) request_sprite(self: i32, path: string, width: i32, height: i32): bool { return true; }\nfunction @asset_path(path) request_dynamic(self: i32, path: string, width: i32, height: i32): bool { return true; }\nfunction use_dynamic(path: string): bool { return request_dynamic(0, path, 32, 32); }\nfunction main(): i32 { if (request_sprite(0, \"../assets/piece.svg\", 32, 32) && use_dynamic(\"../assets/dynamic.svg\")) { return 1; } return 0; }\n",
+        )
+        .expect("entry source");
+
+        let mut jit = JitProcess::new();
+        jit.set_project_root(project_root.to_string_lossy())
+            .expect("project root");
+        jit.upsert_file(
+            entry.to_string_lossy().to_string(),
+            fs::read_to_string(&entry).expect("read entry"),
+        );
+        jit.compile().expect("compile asset watcher fixture");
+
+        let paths = collect_watch_asset_paths(&project_root, jit.program_snapshot());
+        assert!(paths.contains(&normalize_watch_path_for_log(&used)));
+        assert!(paths.contains(&normalize_watch_path_for_log(&dynamic)));
+        assert!(!paths.contains(&normalize_watch_path_for_log(&unused)));
+
+        fs::create_dir_all(project_root.join(".stasis_cache/play-assets/src"))
+            .expect("staged source directory");
+        fs::create_dir_all(project_root.join(".stasis_cache/play-assets/assets"))
+            .expect("staged asset directory");
+        let staged = project_root.join(".stasis_cache/play-assets/assets/piece.svg");
+        fs::copy(&used, &staged).expect("initial staged asset");
+        let staged_loader_path =
+            project_root.join(".stasis_cache/play-assets/src/../assets/piece.svg");
+        assert_eq!(
+            normalize_watch_path_for_log(&staged_loader_path),
+            normalize_watch_path_for_log(&staged),
+            "staged ../assets loader path must identify the same runtime cache entry"
+        );
+        fs::write(&used, "<svg><path/></svg>").expect("updated asset");
+        let runtime_path = refresh_play_asset_file(
+            &project_root,
+            Some(&project_root.join(".stasis_cache/play-assets")),
+            &used,
+        )
+        .expect("refresh asset")
+        .expect("asset under project root");
+        assert_eq!(runtime_path, staged);
+        assert_eq!(
+            fs::read_to_string(staged).expect("read staged asset"),
+            "<svg><path/></svg>"
+        );
+
+        fs::remove_dir_all(&project_root).ok();
+    }
+
+    #[test]
+    fn runtime_asset_notification_forces_native_sprite_cache_invalidation() {
+        assert!(STASIS_GRAPHICS_SOURCE.contains("stasis_gfx_notify_file_changed"));
+        assert!(STASIS_GRAPHICS_SOURCE.contains("g_asset_watch_force_reload"));
+        assert!(STASIS_GRAPHICS_SOURCE
+            .contains("if (!force_reload && !path_matches && (!mt || mt <= e->mtime)) continue;"));
+        assert!(STASIS_GRAPHICS_SOURCE.contains("_fullpath(canonical, out, sizeof(canonical))"));
+        assert!(STASIS_GRAPHICS_SOURCE.contains("conservatively invalidate all entries"));
     }
 
     #[test]

@@ -1,0 +1,29 @@
+import "../../src/stdlib/asset_tasks.stasis";
+
+global progress: LoadingProgress;
+
+test `loading progress protects empty batches`(): bool {
+    progress.reset();
+    let displayed_percent: i32 = progress.advance(0, 0, 0);
+    return progress.percent == 0 && progress.displayed_percent == 0 && progress.in_progress_count == 0 && progress.complete() && progress.successful();
+}
+
+test `loading progress counts loaded and failed tasks as complete`(): bool {
+    progress.reset();
+    let displayed_percent: i32 = progress.advance(20, 2, 1);
+    if (progress.percent != 15 || progress.in_progress_count != 17) {
+        return false;
+    }
+    if (progress.displayed_percent != 1 || progress.complete() || progress.successful()) {
+        return false;
+    }
+
+    displayed_percent = progress.advance(20, 20, 0);
+    return progress.percent == 100 && progress.displayed_percent == 2 && progress.complete() && progress.successful();
+}
+
+test `loading progress completes failed batches without calling them successful`(): bool {
+    progress.reset();
+    let displayed_percent: i32 = progress.advance(3, 2, 1);
+    return progress.percent == 100 && progress.displayed_percent == 1 && progress.complete() && !progress.successful();
+}

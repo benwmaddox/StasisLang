@@ -1,0 +1,9 @@
+{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": [
+    {"id": "resource_sprite", "path": "assets/resource_sprite.svg", "content_sha256": "d19f86b655e7cecfd87718817d152ef40b5839f570eac662a36f0169f99ca797", "format": {"kind": "sprite", "encoding": "svg", "width": 64, "height": 64}, "dependencies": []},
+    {"id": "fallback_sprite", "path": "assets/fallback_sprite.svg", "content_sha256": "5afc55f564f0ccc95c62d32670bb7ae21a3f2f9d8697136012e7380f0d1ac511", "format": {"kind": "sprite", "encoding": "svg", "width": 64, "height": 64}, "dependencies": []},
+    {"id": "resource_font", "path": "assets/resource.ttf", "content_sha256": "17ec668bd0cd62e934f97563287ed72a4a8599ae716d20c1a93c82f1876dde47", "format": {"kind": "font", "encoding": "ttf"}, "dependencies": []}
+  ]
+}

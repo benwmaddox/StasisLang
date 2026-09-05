@@ -1,0 +1,4560 @@
+//! Browser WebAssembly emission for the scalar Stasis lane.
+//!
+//! This intentionally consumes the same parsed HIR as JIT/AOT. Unsupported
+//! storage or expression shapes fail at package time instead of receiving a
+//! target-specific substitute implementation.
+
+use crate::backend::compile_analysis::{
+    are_call_argument_and_param_compatible, build_compile_analysis_cache,
+    compute_files_fingerprint, is_i32_numeric_type, resolve_extern_call_signatures_with,
+    ConstantValue,
+};
+use crate::backend::emit::hash_global_path;
+use crate::backend::program_snapshot::ProgramSnapshot;
+use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
+use crate::frontend::types::{
+    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+    TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
+};
+use crate::ir::hir::FunctionHIR;
+use crate::ir::hir::{
+    AssignOp, AssignTarget, ComparisonOp, SimpleCondition, SimpleExpr, SimpleStmt,
+};
+use std::collections::{BTreeMap, BTreeSet};
+
+mod binary;
+
+use binary::{append_name_section, section, sleb, sleb64, string, uleb, F32, F64, I32};
+
+pub fn wasm_global_hash(path: &str) -> i32 {
+    hash_global_path(path)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WasmProcess {
+    compiler: Compiler,
+    required_roots: Vec<String>,
+    module: Vec<u8>,
+    string_literals: BTreeMap<i32, String>,
+    memory_layout: BTreeMap<String, WasmMemoryLayout>,
+    struct_views: BTreeMap<i32, BTreeMap<String, String>>,
+    debug_symbols: bool,
+    global_types: BTreeMap<String, TypeId>,
+    imported_symbols: BTreeSet<String>,
+    program_snapshot: Option<ProgramSnapshot>,
+}
+
+impl WasmProcess {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_project_root(&mut self, root: impl Into<String>) -> Result<(), String> {
+        self.compiler.set_project_root(root)
+    }
+
+    pub fn set_required_emit_roots(&mut self, roots: &[String]) {
+        self.required_roots = roots.to_vec();
+        self.compiler.set_analysis_required_roots(roots);
+    }
+
+    pub fn set_debug_symbols(&mut self, enabled: bool) {
+        self.debug_symbols = enabled;
+    }
+
+    pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
+        self.compiler.upsert_file(path, content);
+    }
+
+    pub fn module_bytes(&self) -> &[u8] {
+        &self.module
+    }
+
+    pub fn string_literals(&self) -> &BTreeMap<i32, String> {
+        &self.string_literals
+    }
+
+    pub fn memory_layout(&self) -> &BTreeMap<String, WasmMemoryLayout> {
+        &self.memory_layout
+    }
+
+    pub fn struct_views(&self) -> &BTreeMap<i32, BTreeMap<String, String>> {
+        &self.struct_views
+    }
+
+    pub fn global_types(&self) -> &BTreeMap<String, TypeId> {
+        &self.global_types
+    }
+
+    pub fn imported_symbols(&self) -> &BTreeSet<String> {
+        &self.imported_symbols
+    }
+
+    pub fn program_snapshot(&self) -> Option<&ProgramSnapshot> {
+        self.program_snapshot.as_ref()
+    }
+
+    pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
+        self.compiler.last_source_diagnostic()
+    }
+
+    pub fn compile(&mut self) -> CompileResult<CompileReport> {
+        let index = self.compiler.check()?;
+        let mut types = self.compiler.types().clone();
+        let source_revision =
+            crate::backend::program_snapshot::semantic_revision_with_required_roots(
+                compute_files_fingerprint(self.compiler.files()),
+                &self.required_roots,
+            );
+        let analysis = build_compile_analysis_cache(
+            self.compiler.files(),
+            self.compiler.functions(),
+            &mut types,
+            source_revision,
+            |signatures| {
+                resolve_extern_call_signatures_with(signatures, |_signature, _candidate| Some(0))
+            },
+        )
+        .map_err(CompileError::Backend)?;
+        *self.compiler.types_mut() = types.clone();
+
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            self.compiler.functions(),
+            &self.required_roots,
+        );
+        let function_ids = self
+            .compiler
+            .functions()
+            .iter()
+            .filter(|function| reachable.contains(&function.id))
+            .map(|function| function.id)
+            .collect::<Vec<_>>();
+        let mut lowered = Vec::new();
+        let emit = self
+            .compiler
+            .emit_pass_for_ids_with(&function_ids, &mut |meta, hir, _| {
+                lowered.push((meta.clone(), hir.clone()));
+                Ok(())
+            })?;
+
+        for root in &self.required_roots {
+            if root == "on_code_swap" {
+                continue;
+            }
+            if !lowered.iter().any(|(function, _)| &function.name == root) {
+                return Err(CompileError::Backend(format!(
+                    "web package requires entry function '{root}'"
+                )));
+            }
+        }
+
+        self.string_literals = collect_string_literals(&lowered, &analysis.constant_values);
+        let (memory_bindings, _) =
+            build_memory_bindings(&analysis, &types).map_err(CompileError::Backend)?;
+        self.memory_layout = memory_bindings
+            .into_iter()
+            .map(|(path, binding)| {
+                let byte_backed =
+                    is_byte_backed_memory_path(&path, binding.type_id, &analysis, &types);
+                (
+                    path,
+                    WasmMemoryLayout {
+                        offset: binding.offset,
+                        type_id: binding.type_id,
+                        length: binding.len,
+                        stride: binding.stride,
+                        byte_backed,
+                    },
+                )
+            })
+            .collect();
+        self.struct_views.clear();
+        self.global_types = analysis.global_path_types.clone();
+        for (path, collection) in &analysis.collection_infos {
+            if !collection.field_types.is_empty() {
+                self.struct_views.insert(
+                    hash_global_path(path),
+                    collection
+                        .field_types
+                        .keys()
+                        .map(|suffix| (suffix.clone(), format!("{path}.{suffix}")))
+                        .collect(),
+                );
+            }
+        }
+        for (path, type_id) in &analysis.global_path_types {
+            if let Some(fields) = analysis.named_struct_field_types.get(type_id) {
+                self.struct_views.insert(
+                    hash_global_path(path),
+                    fields
+                        .keys()
+                        .map(|suffix| (suffix.clone(), format!("{path}.{suffix}")))
+                        .collect(),
+                );
+            }
+        }
+        (self.module, self.imported_symbols) = encode_module(
+            &lowered,
+            &analysis,
+            &types,
+            &self.string_literals,
+            self.debug_symbols,
+        )
+        .map_err(CompileError::Backend)?;
+        let function_hirs = self.compiler.analysis_hirs(&self.required_roots)?;
+        self.program_snapshot = Some(
+            ProgramSnapshot::build(
+                source_revision,
+                self.compiler.files(),
+                self.compiler.module_graph(),
+                self.compiler.functions(),
+                &types,
+                self.compiler.data_flow_summaries_shared(),
+                &self.required_roots,
+                &function_hirs,
+                analysis,
+            )
+            .map_err(CompileError::Backend)?,
+        );
+        Ok(CompileReport { index, emit })
+    }
+}
+
+#[derive(Clone)]
+struct Signature {
+    params: Vec<TypeId>,
+    result: TypeId,
+}
+
+type WasmImport = (String, String, Signature);
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct WasmSignature {
+    params: Vec<u8>,
+    result: Option<u8>,
+}
+
+fn lower_wasm_signature(
+    signature: &Signature,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+) -> Result<WasmSignature, String> {
+    let mut params = Vec::with_capacity(physical_param_count(&signature.params, named_structs));
+    for type_id in &signature.params {
+        if is_struct_view_type(*type_id, named_structs) {
+            params.extend([I32, I32, I32]);
+        } else {
+            params.push(wasm_value_type(*type_id)?);
+        }
+    }
+    let result = (signature.result != TYPE_ID_VOID)
+        .then(|| wasm_value_type(signature.result))
+        .transpose()?;
+    Ok(WasmSignature { params, result })
+}
+
+fn intern_wasm_signature(
+    signature: WasmSignature,
+    indices: &mut BTreeMap<WasmSignature, u32>,
+    signatures: &mut Vec<WasmSignature>,
+) -> u32 {
+    if let Some(index) = indices.get(&signature) {
+        return *index;
+    }
+    let index = signatures.len() as u32;
+    indices.insert(signature.clone(), index);
+    signatures.push(signature);
+    index
+}
+
+fn is_i32_lane(type_id: TypeId) -> bool {
+    matches!(
+        type_id,
+        TYPE_ID_I32 | TYPE_ID_BOOL | TYPE_ID_U8 | TYPE_ID_U16 | TYPE_ID_U32
+    )
+}
+
+fn is_web_index_type(type_id: TypeId, context: &EncodeContext<'_>) -> bool {
+    wasm_value_type(type_id).is_ok_and(|value_type| value_type == I32)
+        && !is_struct_view_type(type_id, context.named_structs)
+        && context.types.indexed_element_type_id(type_id).is_none()
+}
+
+fn wasm_value_type(type_id: TypeId) -> Result<u8, String> {
+    if is_i32_lane(type_id) {
+        Ok(I32)
+    } else if type_id == TYPE_ID_F32 {
+        Ok(F32)
+    } else if type_id == TYPE_ID_F64 {
+        Ok(F64)
+    } else if type_id != TYPE_ID_VOID {
+        // String/view handles and opaque host handles cross the web ABI as i32.
+        Ok(I32)
+    } else {
+        Err("void is not a WebAssembly value".to_string())
+    }
+}
+
+fn validate_signature(name: &str, signature: &Signature) -> Result<(), String> {
+    for type_id in &signature.params {
+        wasm_value_type(*type_id)
+            .map_err(|_| format!("web backend does not support parameter type for '{name}'"))?;
+    }
+    if signature.result != TYPE_ID_VOID {
+        wasm_value_type(signature.result)
+            .map_err(|_| format!("web backend does not support return type for '{name}'"))?;
+    }
+    Ok(())
+}
+
+fn is_struct_view_type(
+    type_id: TypeId,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+) -> bool {
+    named_structs.contains_key(&type_id)
+}
+
+fn physical_param_count(
+    params: &[TypeId],
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+) -> usize {
+    params
+        .iter()
+        .map(|type_id| {
+            usize::from(!is_struct_view_type(*type_id, named_structs))
+                + 3 * usize::from(is_struct_view_type(*type_id, named_structs))
+        })
+        .sum()
+}
+
+#[derive(Debug, Clone)]
+struct MemoryBinding {
+    offset: u32,
+    type_id: TypeId,
+    len: i32,
+    width: u32,
+    stride: u32,
+    scalar: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StringLiteralMemoryBinding {
+    offset: u32,
+    byte_len: i32,
+    char_len: i32,
+}
+
+#[derive(Debug, Clone)]
+struct StructCollectionBinding {
+    base: i32,
+    type_id: TypeId,
+    len: i32,
+    fields: BTreeMap<String, MemoryBinding>,
+}
+
+#[derive(Debug, Clone)]
+struct StructScalarBinding {
+    base: i32,
+    type_id: TypeId,
+    fields: BTreeMap<String, MemoryBinding>,
+}
+
+fn build_struct_scalars(
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
+    memory: &BTreeMap<String, MemoryBinding>,
+) -> BTreeMap<String, StructScalarBinding> {
+    let mut out = BTreeMap::new();
+    for (path, type_id) in &analysis.global_path_types {
+        let Some(field_types) = analysis.named_struct_field_types.get(type_id) else {
+            continue;
+        };
+        let scalar_fields = field_types
+            .iter()
+            .filter_map(|(suffix, field_type)| {
+                memory
+                    .get(&format!("{path}.{suffix}"))
+                    .filter(|binding| binding.scalar && binding.type_id == *field_type)
+                    .cloned()
+                    .map(|binding| (suffix.clone(), binding))
+            })
+            .collect::<BTreeMap<_, _>>();
+        out.insert(
+            path.clone(),
+            StructScalarBinding {
+                base: hash_global_path(path),
+                type_id: *type_id,
+                fields: scalar_fields,
+            },
+        );
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmMemoryLayout {
+    pub offset: u32,
+    pub type_id: TypeId,
+    pub length: i32,
+    pub stride: u32,
+    pub byte_backed: bool,
+}
+
+fn is_byte_backed_type(type_id: TypeId, types: &TypeTable) -> bool {
+    if type_id == TYPE_ID_U8 {
+        return true;
+    }
+    matches!(
+        types.type_info(type_id).map(|info| info.category),
+        Some(
+            TypeCategory::AsciiFixed
+                | TypeCategory::AsciiView
+                | TypeCategory::Utf8Fixed
+                | TypeCategory::Utf8View
+        )
+    )
+}
+
+fn is_byte_backed_memory_path(
+    path: &str,
+    type_id: TypeId,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
+    types: &TypeTable,
+) -> bool {
+    is_byte_backed_type(type_id, types)
+        || analysis
+            .collection_infos
+            .get(path)
+            .is_some_and(|collection| matches!(collection.element_shape.as_str(), "ascii" | "utf8"))
+}
+
+fn storage_width(
+    type_id: TypeId,
+    types: &TypeTable,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+) -> Result<u32, String> {
+    match type_id {
+        TYPE_ID_BOOL | TYPE_ID_U8 => Ok(1),
+        TYPE_ID_U16 => Ok(2),
+        TYPE_ID_I32 | TYPE_ID_U32 | TYPE_ID_F32 => Ok(4),
+        TYPE_ID_F64 => Ok(8),
+        _ if named_structs.contains_key(&type_id) => Err(format!(
+            "web memory requires flattened fields for struct type id {type_id}"
+        )),
+        _ => match types.type_info(type_id).map(|info| info.category) {
+            Some(TypeCategory::Named)
+            | Some(TypeCategory::ArrayView)
+            | Some(TypeCategory::AsciiView)
+            | Some(TypeCategory::Utf8View) => Ok(4),
+            Some(category) => Err(format!(
+                "web memory does not support {category:?} element type id {type_id}"
+            )),
+            None => Err(format!(
+                "web memory found unknown element type id {type_id}"
+            )),
+        },
+    }
+}
+
+fn align_up(value: u32, alignment: u32) -> Result<u32, String> {
+    value
+        .checked_add(alignment - 1)
+        .map(|value| value / alignment * alignment)
+        .ok_or_else(|| "web memory layout overflow".to_string())
+}
+
+fn struct_memory_scalar_paths(
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
+) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for (struct_path, type_id) in &analysis.global_path_types {
+        let Some(fields) = analysis.named_struct_field_types.get(type_id) else {
+            continue;
+        };
+        paths.extend(
+            fields
+                .keys()
+                .map(|suffix| format!("{struct_path}.{suffix}")),
+        );
+        let prefix = format!("{struct_path}.");
+        for collection_path in analysis
+            .collection_infos
+            .keys()
+            .filter(|path| path.starts_with(&prefix))
+        {
+            let collection_prefix = format!("{collection_path}.");
+            paths.extend(
+                analysis
+                    .global_path_types
+                    .keys()
+                    .filter(|path| path.starts_with(&collection_prefix))
+                    .cloned(),
+            );
+        }
+    }
+    paths
+}
+
+fn build_memory_bindings(
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
+    types: &TypeTable,
+) -> Result<(BTreeMap<String, MemoryBinding>, u32), String> {
+    let mut offset = 0u32;
+    let mut bindings = BTreeMap::new();
+    for (path, collection) in &analysis.collection_infos {
+        if let Some(type_id) = collection.element_type {
+            let width = storage_width(type_id, types, &analysis.named_struct_field_types).map_err(
+                |error| format!("web collection '{path}' has unsupported element storage: {error}"),
+            )?;
+            offset = align_up(offset, width)?;
+            bindings.insert(
+                path.clone(),
+                MemoryBinding {
+                    offset,
+                    type_id,
+                    len: collection.len,
+                    width,
+                    stride: width,
+                    scalar: false,
+                },
+            );
+            offset = offset
+                .checked_add(
+                    u32::try_from(collection.len)
+                        .map_err(|_| format!("negative web collection length for '{path}'"))?
+                        .checked_mul(width)
+                        .ok_or_else(|| "web memory layout overflow".to_string())?,
+                )
+                .ok_or_else(|| "web memory layout overflow".to_string())?;
+        }
+        for (field, type_id) in &collection.field_types {
+            let width = storage_width(*type_id, types, &analysis.named_struct_field_types)
+                .map_err(|error| {
+                    format!(
+                        "web collection '{path}.{field}' has unsupported field storage: {error}"
+                    )
+                })?;
+            offset = align_up(offset, width)?;
+            let field_path = format!("{path}.{field}");
+            bindings.insert(
+                field_path,
+                MemoryBinding {
+                    offset,
+                    type_id: *type_id,
+                    len: collection.len,
+                    width,
+                    stride: width,
+                    scalar: false,
+                },
+            );
+            offset = offset
+                .checked_add(
+                    u32::try_from(collection.len)
+                        .map_err(|_| format!("negative web collection length for '{path}'"))?
+                        .checked_mul(width)
+                        .ok_or_else(|| "web memory layout overflow".to_string())?,
+                )
+                .ok_or_else(|| "web memory layout overflow".to_string())?;
+        }
+    }
+    for path in struct_memory_scalar_paths(analysis) {
+        if bindings.contains_key(&path) {
+            continue;
+        }
+        let type_id = analysis.global_path_types[&path];
+        if analysis.named_struct_field_types.contains_key(&type_id) {
+            continue;
+        }
+        let Some(info) = types.type_info(type_id) else {
+            return Err(format!(
+                "web backend found unknown state field type id {type_id}"
+            ));
+        };
+        if matches!(
+            info.category,
+            TypeCategory::ArrayFixed
+                | TypeCategory::ArrayView
+                | TypeCategory::AsciiFixed
+                | TypeCategory::AsciiView
+                | TypeCategory::Utf8Fixed
+                | TypeCategory::Utf8View
+        ) {
+            continue;
+        }
+        let width =
+            storage_width(type_id, types, &analysis.named_struct_field_types).map_err(|error| {
+                format!("web state field '{path}' has unsupported storage: {error}")
+            })?;
+        offset = align_up(offset, width)?;
+        bindings.insert(
+            path.clone(),
+            MemoryBinding {
+                offset,
+                type_id,
+                len: 1,
+                width,
+                stride: width,
+                scalar: true,
+            },
+        );
+        offset = offset
+            .checked_add(width)
+            .ok_or_else(|| "web memory layout overflow".to_string())?;
+    }
+    Ok((bindings, offset))
+}
+
+fn build_string_literal_memory(
+    string_literals: &BTreeMap<i32, String>,
+    start_offset: u32,
+) -> Result<(BTreeMap<i32, StringLiteralMemoryBinding>, u32), String> {
+    let mut offset = start_offset;
+    let mut bindings = BTreeMap::new();
+    for (handle, literal) in string_literals {
+        let byte_len = i32::try_from(literal.len())
+            .map_err(|_| "web string literal byte length exceeds i32 range".to_string())?;
+        let char_len = i32::try_from(literal.chars().count())
+            .map_err(|_| "web string literal character length exceeds i32 range".to_string())?;
+        bindings.insert(
+            *handle,
+            StringLiteralMemoryBinding {
+                offset,
+                byte_len,
+                char_len,
+            },
+        );
+        offset = offset
+            .checked_add(byte_len as u32)
+            .ok_or_else(|| "web string literal memory layout overflow".to_string())?;
+    }
+    Ok((bindings, offset))
+}
+
+fn initial_i32_for_path(
+    path: &str,
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
+) -> Option<i32> {
+    [".length", ".max_length"].iter().find_map(|suffix| {
+        path.strip_suffix(suffix)
+            .and_then(|collection_path| analysis.collection_infos.get(collection_path))
+            .map(|collection| collection.len)
+    })
+}
+
+fn build_struct_collections(
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
+    types: &TypeTable,
+    memory: &BTreeMap<String, MemoryBinding>,
+) -> Result<BTreeMap<String, StructCollectionBinding>, String> {
+    let mut out = BTreeMap::new();
+    for (path, collection) in &analysis.collection_infos {
+        if collection.field_types.is_empty() {
+            continue;
+        }
+        let collection_type = analysis
+            .global_path_types
+            .get(path)
+            .copied()
+            .ok_or_else(|| format!("web struct collection '{path}' has no declared type"))?;
+        let type_id = types
+            .indexed_element_type_id(collection_type)
+            .ok_or_else(|| format!("web struct collection '{path}' has no indexed element type"))?;
+        if !analysis.named_struct_field_types.contains_key(&type_id) {
+            return Err(format!(
+                "web struct collection '{path}' element type {type_id} has no field layout"
+            ));
+        }
+        let mut fields = BTreeMap::new();
+        for suffix in collection.field_types.keys() {
+            let field_path = format!("{path}.{suffix}");
+            fields.insert(
+                suffix.clone(),
+                memory
+                    .get(&field_path)
+                    .cloned()
+                    .ok_or_else(|| format!("missing web SoA field plane '{field_path}'"))?,
+            );
+        }
+        out.insert(
+            path.clone(),
+            StructCollectionBinding {
+                base: hash_global_path(path),
+                type_id,
+                len: collection.len,
+                fields,
+            },
+        );
+    }
+    Ok(out)
+}
+
+fn collect_imports(
+    functions: &[(FunctionMeta, FunctionHIR)],
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
+) -> Result<(BTreeSet<String>, Vec<WasmImport>), String> {
+    let mut called = BTreeSet::new();
+    for (_, hir) in functions {
+        collect_calls(&hir.statements, &mut called);
+    }
+    let mut imports = Vec::new();
+    for signature in &analysis.resolved_extern_signatures {
+        if !called.contains(&signature.name) {
+            continue;
+        }
+        let value = Signature {
+            params: signature.params.clone(),
+            result: signature.return_type,
+        };
+        validate_signature(&signature.name, &value)?;
+        imports.push((signature.name.clone(), signature.symbol.clone(), value));
+    }
+    for name in ["sin_fast", "cos_fast"] {
+        if called.contains(name) {
+            imports.push((
+                name.to_string(),
+                name.to_string(),
+                Signature {
+                    params: vec![TYPE_ID_F32],
+                    result: TYPE_ID_F32,
+                },
+            ));
+        }
+    }
+    for name in ["print_i32", "print_int", "print_char", "print_string"] {
+        if called.contains(name) {
+            imports.push((
+                name.to_string(),
+                name.to_string(),
+                Signature {
+                    params: vec![TYPE_ID_I32],
+                    result: TYPE_ID_VOID,
+                },
+            ));
+        }
+    }
+    imports.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok((called, imports))
+}
+
+fn encode_module(
+    functions: &[(FunctionMeta, FunctionHIR)],
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
+    types: &TypeTable,
+    string_literals: &BTreeMap<i32, String>,
+    debug_symbols: bool,
+) -> Result<(Vec<u8>, BTreeSet<String>), String> {
+    let mut internal_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, (function, _)) in functions.iter().enumerate() {
+        internal_by_name
+            .entry(function.name.clone())
+            .or_default()
+            .push(index);
+        internal_by_name
+            .entry(format!("{}.{}", function.module_alias, function.name))
+            .or_default()
+            .push(index);
+    }
+
+    let (called, imports) = collect_imports(functions, analysis)?;
+
+    let imported_names = imports
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    for target in &called {
+        if !internal_by_name.contains_key(target)
+            && !imported_names.contains(target)
+            && !is_inline_intrinsic(target)
+        {
+            return Err(format!("unresolved web call target '{target}'"));
+        }
+    }
+
+    let mut signatures = imports
+        .iter()
+        .map(|(_, _, signature)| signature.clone())
+        .collect::<Vec<_>>();
+    for (function, _) in functions {
+        let signature = Signature {
+            params: function.params.clone(),
+            result: function.return_type,
+        };
+        validate_signature(&function.name, &signature)?;
+        signatures.push(signature);
+    }
+
+    let (memory_bindings, memory_bytes) = build_memory_bindings(analysis, types)?;
+    let (string_literal_memory, total_memory_bytes) =
+        build_string_literal_memory(string_literals, memory_bytes)?;
+    let has_memory = memory_bytes > 0 || !string_literal_memory.is_empty();
+    let struct_collections = build_struct_collections(analysis, types, &memory_bindings)?;
+    let mut globals = Vec::new();
+    for (name, type_id) in &analysis.global_path_types {
+        if memory_bindings.contains_key(name) {
+            continue;
+        }
+        let Some(info) = types.type_info(*type_id) else {
+            return Err(format!(
+                "web backend found unknown global type id {type_id}"
+            ));
+        };
+        if (info.category == TypeCategory::Named
+            && analysis.named_struct_field_types.contains_key(type_id))
+            || matches!(
+                info.category,
+                TypeCategory::ArrayFixed
+                    | TypeCategory::ArrayView
+                    | TypeCategory::AsciiFixed
+                    | TypeCategory::AsciiView
+                    | TypeCategory::Utf8Fixed
+                    | TypeCategory::Utf8View
+            )
+        {
+            continue;
+        }
+        if wasm_value_type(*type_id).is_err() {
+            return Err(format!(
+                "web backend does not support global '{name}' with type {}",
+                info.name
+            ));
+        }
+        let initial_i32 = initial_i32_for_path(name, analysis);
+        globals.push((name.clone(), *type_id, initial_i32));
+    }
+    let global_indices = globals
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _, _))| (name.clone(), index as u32))
+        .collect::<BTreeMap<_, _>>();
+    let struct_scalars = build_struct_scalars(analysis, &memory_bindings);
+
+    let accessor_signatures = [
+        WasmSignature {
+            params: vec![I32],
+            result: Some(I32),
+        },
+        WasmSignature {
+            params: vec![I32, I32],
+            result: Some(I32),
+        },
+        WasmSignature {
+            params: vec![I32],
+            result: Some(F32),
+        },
+        WasmSignature {
+            params: vec![I32, F32],
+            result: Some(I32),
+        },
+    ];
+    let mut wasm_signatures = Vec::new();
+    let mut wasm_signature_indices = BTreeMap::new();
+    let signature_type_indices = signatures
+        .iter()
+        .map(|signature| {
+            lower_wasm_signature(signature, &analysis.named_struct_field_types).map(|signature| {
+                intern_wasm_signature(signature, &mut wasm_signature_indices, &mut wasm_signatures)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let accessor_type_indices = accessor_signatures.map(|signature| {
+        intern_wasm_signature(signature, &mut wasm_signature_indices, &mut wasm_signatures)
+    });
+
+    let import_indices = imports
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _, _))| (name.clone(), index as u32))
+        .collect::<BTreeMap<_, _>>();
+    let mut internal_indices = BTreeMap::new();
+    for (index, (function, _)) in functions.iter().enumerate() {
+        let function_index = (imports.len() + index) as u32;
+        for name in [
+            function.name.clone(),
+            format!("{}.{}", function.module_alias, function.name),
+        ] {
+            if internal_by_name
+                .get(&name)
+                .is_some_and(|candidates| candidates.len() == 1)
+            {
+                internal_indices.insert(name, function_index);
+            }
+        }
+    }
+    let internal_overloads = internal_by_name
+        .iter()
+        .filter(|(_, candidates)| candidates.len() > 1)
+        .map(|(name, candidates)| {
+            (
+                name.clone(),
+                candidates
+                    .iter()
+                    .map(|index| (imports.len() + index) as u32)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+
+    let mut type_section = Vec::new();
+    uleb(wasm_signatures.len() as u32, &mut type_section);
+    for signature in &wasm_signatures {
+        type_section.push(0x60);
+        uleb(signature.params.len() as u32, &mut type_section);
+        type_section.extend(&signature.params);
+        match signature.result {
+            Some(result) => type_section.extend([1, result]),
+            None => type_section.push(0),
+        }
+    }
+    section(1, type_section, &mut module);
+
+    if !imports.is_empty() {
+        let mut import_section = Vec::new();
+        uleb(imports.len() as u32, &mut import_section);
+        for (index, (_, symbol, _)) in imports.iter().enumerate() {
+            string("env", &mut import_section);
+            string(symbol, &mut import_section);
+            import_section.push(0);
+            uleb(signature_type_indices[index], &mut import_section);
+        }
+        section(2, import_section, &mut module);
+    }
+    let mut function_section = Vec::new();
+    uleb(functions.len() as u32 + 4, &mut function_section);
+    for index in 0..functions.len() {
+        uleb(
+            signature_type_indices[imports.len() + index],
+            &mut function_section,
+        );
+    }
+    for index in accessor_type_indices {
+        uleb(index, &mut function_section);
+    }
+    section(3, function_section, &mut module);
+
+    if has_memory {
+        let mut memory_section = vec![1, 0];
+        uleb(
+            total_memory_bytes.div_ceil(65_536).max(1),
+            &mut memory_section,
+        );
+        section(5, memory_section, &mut module);
+    }
+
+    if !globals.is_empty() {
+        let mut global_section = Vec::new();
+        uleb(globals.len() as u32, &mut global_section);
+        for (_, type_id, initial_i32) in &globals {
+            global_section.extend([wasm_value_type(*type_id)?, 1]);
+            if let Some(value) = initial_i32 {
+                global_section.push(0x41);
+                sleb(*value, &mut global_section);
+            } else {
+                encode_zero(*type_id, &mut global_section)?;
+            }
+            global_section.push(0x0b);
+        }
+        section(6, global_section, &mut module);
+    }
+
+    let mut export_section = Vec::new();
+    uleb(
+        functions
+            .iter()
+            .filter(|(function, _)| {
+                matches!(
+                    function.name.as_str(),
+                    "main" | "tick" | "render" | "on_code_swap"
+                )
+            })
+            .count() as u32
+            + if debug_symbols {
+                globals.len() as u32
+            } else {
+                0
+            }
+            + u32::from(has_memory)
+            + 4,
+        &mut export_section,
+    );
+    for (index, (function, _)) in functions.iter().enumerate() {
+        if !matches!(
+            function.name.as_str(),
+            "main" | "tick" | "render" | "on_code_swap"
+        ) {
+            continue;
+        }
+        string(&function.name, &mut export_section);
+        export_section.push(0);
+        uleb((imports.len() + index) as u32, &mut export_section);
+    }
+    if debug_symbols {
+        for (index, (name, _, _)) in globals.iter().enumerate() {
+            string(name, &mut export_section);
+            export_section.push(3);
+            uleb(index as u32, &mut export_section);
+        }
+    }
+    if has_memory {
+        string("memory", &mut export_section);
+        export_section.push(2);
+        uleb(0, &mut export_section);
+    }
+    let accessor_base = (imports.len() + functions.len()) as u32;
+    for (offset, name) in [
+        "__stasis_global_get_i32",
+        "__stasis_global_set_i32",
+        "__stasis_global_get_f32",
+        "__stasis_global_set_f32",
+    ]
+    .iter()
+    .enumerate()
+    {
+        string(name, &mut export_section);
+        export_section.push(0);
+        uleb(accessor_base + offset as u32, &mut export_section);
+    }
+    section(7, export_section, &mut module);
+
+    let mut code_section = Vec::new();
+    uleb(functions.len() as u32 + 4, &mut code_section);
+    for (function, hir) in functions {
+        let body = encode_function(
+            function,
+            hir,
+            &analysis.constant_values,
+            &global_indices,
+            &analysis.global_path_types,
+            &memory_bindings,
+            &string_literal_memory,
+            &struct_collections,
+            &struct_scalars,
+            &analysis.named_struct_field_types,
+            types,
+            &import_indices,
+            &internal_indices,
+            &internal_overloads,
+            &signatures,
+        )?;
+        uleb(body.len() as u32, &mut code_section);
+        code_section.extend(body);
+    }
+    for (lane, setter) in [(I32, false), (I32, true), (F32, false), (F32, true)] {
+        let body = encode_global_accessor(&globals, &memory_bindings, lane, setter)?;
+        uleb(body.len() as u32, &mut code_section);
+        code_section.extend(body);
+    }
+    section(10, code_section, &mut module);
+    let mut initial_memory = memory_bindings
+        .iter()
+        .filter_map(|(path, binding)| {
+            binding
+                .scalar
+                .then(|| initial_i32_for_path(path, analysis))
+                .flatten()
+                .map(|value| (binding, value))
+        })
+        .collect::<Vec<_>>();
+    initial_memory.sort_by_key(|(binding, _)| binding.offset);
+    let literal_segments = string_literal_memory
+        .iter()
+        .filter(|(_, binding)| binding.byte_len > 0)
+        .collect::<Vec<_>>();
+    if !initial_memory.is_empty() || !literal_segments.is_empty() {
+        let mut data_section = Vec::new();
+        uleb(
+            (initial_memory.len() + literal_segments.len()) as u32,
+            &mut data_section,
+        );
+        for (binding, value) in initial_memory {
+            data_section.push(0);
+            data_section.push(0x41);
+            sleb(binding.offset as i32, &mut data_section);
+            data_section.push(0x0b);
+            let bytes = match binding.width {
+                1 => vec![value as u8],
+                2 => (value as u16).to_le_bytes().to_vec(),
+                4 => value.to_le_bytes().to_vec(),
+                width => {
+                    return Err(format!(
+                        "web state field initializer has unsupported width {width}"
+                    ))
+                }
+            };
+            uleb(bytes.len() as u32, &mut data_section);
+            data_section.extend(bytes);
+        }
+        for (handle, binding) in literal_segments {
+            let bytes = string_literals
+                .get(handle)
+                .ok_or_else(|| format!("missing web string literal bytes for handle {handle}"))?
+                .as_bytes();
+            data_section.push(0);
+            data_section.push(0x41);
+            sleb(binding.offset as i32, &mut data_section);
+            data_section.push(0x0b);
+            uleb(bytes.len() as u32, &mut data_section);
+            data_section.extend(bytes);
+        }
+        section(11, data_section, &mut module);
+    }
+    let function_names = if debug_symbols {
+        let mut names = imports
+            .iter()
+            .enumerate()
+            .map(|(index, (_, symbol, _))| (index as u32, symbol.clone()))
+            .collect::<Vec<_>>();
+        names.extend(functions.iter().enumerate().map(|(index, (function, _))| {
+            (
+                (imports.len() + index) as u32,
+                format!("{}.{}", function.module_alias, function.name),
+            )
+        }));
+        names
+    } else {
+        functions
+            .iter()
+            .enumerate()
+            .filter(|(_, (function, _))| {
+                matches!(
+                    function.name.as_str(),
+                    "main" | "tick" | "render" | "on_code_swap"
+                )
+            })
+            .map(|(index, (function, _))| ((imports.len() + index) as u32, function.name.clone()))
+            .collect()
+    };
+    append_name_section(&function_names, &mut module);
+    let imported_symbols = imports.into_iter().map(|(_, symbol, _)| symbol).collect();
+    Ok((module, imported_symbols))
+}
+
+#[derive(Clone)]
+enum ScalarAccessorStorage {
+    Global(u32),
+    Memory(MemoryBinding),
+}
+
+#[derive(Clone)]
+struct ScalarAccessorBinding {
+    name: String,
+    storage: ScalarAccessorStorage,
+}
+
+fn encode_global_accessor(
+    globals: &[(String, TypeId, Option<i32>)],
+    memory: &BTreeMap<String, MemoryBinding>,
+    lane: u8,
+    setter: bool,
+) -> Result<Vec<u8>, String> {
+    fn branch(
+        bindings: &[ScalarAccessorBinding],
+        lane: u8,
+        setter: bool,
+        out: &mut Vec<u8>,
+    ) -> Result<(), String> {
+        let Some((binding, rest)) = bindings.split_first() else {
+            if setter || lane == I32 {
+                out.extend([0x41, 0]);
+            } else {
+                out.push(0x43);
+                out.extend(0.0f32.to_le_bytes());
+            }
+            return Ok(());
+        };
+        out.extend([0x20, 0, 0x41]);
+        sleb(hash_global_path(&binding.name), out);
+        out.extend([0x46, 0x04, if setter { I32 } else { lane }]);
+        match (&binding.storage, setter) {
+            (ScalarAccessorStorage::Global(index), true) => {
+                out.extend([0x20, 1, 0x24]);
+                uleb(*index, out);
+                out.extend([0x41, 1]);
+            }
+            (ScalarAccessorStorage::Global(index), false) => {
+                out.push(0x23);
+                uleb(*index, out);
+            }
+            (ScalarAccessorStorage::Memory(memory), true) => {
+                out.push(0x41);
+                sleb(memory.offset as i32, out);
+                out.extend([0x20, 1]);
+                encode_memory_store(memory.type_id, out)?;
+                out.extend([0x41, 1]);
+            }
+            (ScalarAccessorStorage::Memory(memory), false) => {
+                out.push(0x41);
+                sleb(memory.offset as i32, out);
+                encode_memory_load(memory.type_id, out)?;
+            }
+        }
+        out.push(0x05);
+        branch(rest, lane, setter, out)?;
+        out.push(0x0b);
+        Ok(())
+    }
+
+    let mut matching = globals
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, type_id, _))| wasm_value_type(*type_id).is_ok_and(|value| value == lane))
+        .map(|(index, (name, _, _))| ScalarAccessorBinding {
+            name: name.clone(),
+            storage: ScalarAccessorStorage::Global(index as u32),
+        })
+        .collect::<Vec<_>>();
+    matching.extend(memory.iter().filter_map(|(name, binding)| {
+        (binding.scalar && wasm_value_type(binding.type_id).is_ok_and(|value| value == lane)).then(
+            || ScalarAccessorBinding {
+                name: name.clone(),
+                storage: ScalarAccessorStorage::Memory(binding.clone()),
+            },
+        )
+    }));
+    matching.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut body = vec![0];
+    branch(&matching, lane, setter, &mut body)?;
+    body.push(0x0b);
+    Ok(body)
+}
+
+fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
+    fn expression(value: &SimpleExpr, out: &mut BTreeSet<String>) {
+        match value {
+            SimpleExpr::Call { target, args } => {
+                out.insert(target.clone());
+                for arg in args {
+                    expression(arg, out);
+                }
+            }
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                expression(lhs, out);
+                expression(rhs, out);
+            }
+            SimpleExpr::Condition(condition) => condition_calls(condition, out),
+            SimpleExpr::IndexedPath { index, .. } => expression(index, out),
+            _ => {}
+        }
+    }
+    fn condition_calls(value: &SimpleCondition, out: &mut BTreeSet<String>) {
+        match value {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                expression(lhs, out);
+                expression(rhs, out);
+            }
+            SimpleCondition::Expr(value) => expression(value, out),
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                condition_calls(lhs, out);
+                condition_calls(rhs, out);
+            }
+            SimpleCondition::Not(value) => condition_calls(value, out),
+        }
+    }
+    for statement in statements {
+        match statement {
+            SimpleStmt::Let {
+                expression: value, ..
+            }
+            | SimpleStmt::Assign {
+                expression: value, ..
+            }
+            | SimpleStmt::Expr(value)
+            | SimpleStmt::Return(value) => expression(value, out),
+            SimpleStmt::Convert { source, .. } => expression(source, out),
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                condition_calls(condition, out);
+                collect_calls(then_statements, out);
+                if let Some(values) = else_statements {
+                    collect_calls(values, out);
+                }
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                collect_calls(std::slice::from_ref(init), out);
+                condition_calls(condition, out);
+                collect_calls(std::slice::from_ref(step), out);
+                collect_calls(body_statements, out);
+            }
+            SimpleStmt::Foreach {
+                body_statements, ..
+            } => collect_calls(body_statements, out),
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_function(
+    function: &FunctionMeta,
+    hir: &FunctionHIR,
+    constants: &BTreeMap<String, ConstantValue>,
+    globals: &BTreeMap<String, u32>,
+    global_types: &BTreeMap<String, TypeId>,
+    memory: &BTreeMap<String, MemoryBinding>,
+    string_literal_memory: &BTreeMap<i32, StringLiteralMemoryBinding>,
+    struct_collections: &BTreeMap<String, StructCollectionBinding>,
+    struct_scalars: &BTreeMap<String, StructScalarBinding>,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+    types: &TypeTable,
+    imports: &BTreeMap<String, u32>,
+    internals: &BTreeMap<String, u32>,
+    internal_overloads: &BTreeMap<String, Vec<u32>>,
+    signatures: &[Signature],
+) -> Result<Vec<u8>, String> {
+    let mut local_declarations = Vec::new();
+    collect_locals(&hir.statements, &mut local_declarations)?;
+    let mut locals = BTreeMap::new();
+    let mut physical_cursor = 0u32;
+    for (name, type_id) in function.param_names.iter().zip(function.params.iter()) {
+        let struct_view =
+            is_struct_view_type(*type_id, named_structs).then_some(StructViewBinding {
+                index: physical_cursor + 1,
+                len: physical_cursor + 2,
+            });
+        locals.insert(
+            name.clone(),
+            LocalBinding {
+                index: physical_cursor,
+                type_id: *type_id,
+                struct_view,
+            },
+        );
+        physical_cursor += if struct_view.is_some() { 3 } else { 1 };
+    }
+    for (name, type_id) in &local_declarations {
+        if locals.contains_key(name) {
+            return Err(format!("duplicate local '{name}' in '{}'", function.name));
+        }
+        locals.insert(
+            name.clone(),
+            LocalBinding {
+                index: physical_cursor,
+                type_id: *type_id,
+                struct_view: is_struct_view_type(*type_id, named_structs).then_some(
+                    StructViewBinding {
+                        index: physical_cursor + 1,
+                        len: physical_cursor + 2,
+                    },
+                ),
+            },
+        );
+        physical_cursor += if is_struct_view_type(*type_id, named_structs) {
+            3
+        } else {
+            1
+        };
+    }
+
+    let mut local_types = Vec::new();
+    for (_, type_id) in &local_declarations {
+        if is_struct_view_type(*type_id, named_structs) {
+            for _ in 0..3 {
+                local_types.push(I32);
+            }
+        } else {
+            local_types.push(wasm_value_type(*type_id)?);
+        }
+    }
+    let scratch_index = physical_cursor;
+    let scratch_address = scratch_index + 1;
+    let scratch_i32 = scratch_index + 2;
+    let scratch_i32_b = scratch_index + 3;
+    let scratch_i32_c = scratch_index + 4;
+    let scratch_f32 = scratch_index + 5;
+    let scratch_f64 = scratch_index + 6;
+    local_types.extend([I32, I32, I32, I32, I32, F32, F64]);
+    let mut body = Vec::new();
+    encode_local_declarations(&local_types, &mut body);
+    let context = EncodeContext {
+        locals: &locals,
+        globals,
+        global_types,
+        memory,
+        string_literal_memory,
+        struct_collections,
+        struct_scalars,
+        named_structs,
+        types,
+        constants,
+        imports,
+        internals,
+        internal_overloads,
+        signatures,
+        scratch_index,
+        scratch_address,
+        return_type: function.return_type,
+        scratch_i32,
+        scratch_i32_b,
+        scratch_i32_c,
+        scratch_f32,
+        scratch_f64,
+        foreach: BTreeMap::new(),
+        continue_depth: None,
+    };
+    encode_statements(&hir.statements, &context, &mut body)?;
+    // Structured statements use void block types, so only a direct return proves that
+    // the function end does not need its declared result on the operand stack.
+    if function.return_type != TYPE_ID_VOID && !ends_with_explicit_return(&hir.statements) {
+        encode_zero(function.return_type, &mut body)?;
+    }
+    body.push(0x0b);
+    Ok(body)
+}
+
+fn encode_local_declarations(types: &[u8], out: &mut Vec<u8>) {
+    let mut runs = Vec::new();
+    for &value_type in types {
+        if let Some((count, previous)) = runs.last_mut() {
+            if *previous == value_type {
+                *count += 1;
+                continue;
+            }
+        }
+        runs.push((1u32, value_type));
+    }
+    uleb(runs.len() as u32, out);
+    for (count, value_type) in runs {
+        uleb(count, out);
+        out.push(value_type);
+    }
+}
+
+fn ends_with_explicit_return(statements: &[SimpleStmt]) -> bool {
+    matches!(
+        statements.last(),
+        Some(SimpleStmt::Return(_) | SimpleStmt::ReturnVoid)
+    )
+}
+
+fn collect_locals(
+    statements: &[SimpleStmt],
+    out: &mut Vec<(String, TypeId)>,
+) -> Result<(), String> {
+    for statement in statements {
+        match statement {
+            SimpleStmt::Let { name, type_id, .. } => {
+                let type_id = type_id.ok_or_else(|| {
+                    format!("web backend requires an explicit type for local '{name}'")
+                })?;
+                wasm_value_type(type_id)?;
+                collect_local(name, type_id, out)?;
+            }
+            SimpleStmt::If {
+                then_statements,
+                else_statements,
+                ..
+            } => {
+                collect_locals(then_statements, out)?;
+                if let Some(values) = else_statements {
+                    collect_locals(values, out)?;
+                }
+            }
+            SimpleStmt::For {
+                init,
+                step,
+                body_statements,
+                ..
+            } => {
+                collect_locals(std::slice::from_ref(init), out)?;
+                collect_locals(std::slice::from_ref(step), out)?;
+                collect_locals(body_statements, out)?;
+            }
+            SimpleStmt::Foreach {
+                item_name,
+                index_name,
+                body_statements,
+                ..
+            } => {
+                let index_name = foreach_index_name(item_name, index_name.as_deref());
+                collect_local(&index_name, TYPE_ID_I32, out)?;
+                collect_locals(body_statements, out)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_local(
+    name: &str,
+    type_id: TypeId,
+    out: &mut Vec<(String, TypeId)>,
+) -> Result<(), String> {
+    if let Some((_, existing)) = out.iter().find(|(existing, _)| existing == name) {
+        if *existing == type_id {
+            return Ok(());
+        }
+        return Err(format!(
+            "web local '{name}' is redeclared with conflicting types {existing} and {type_id}"
+        ));
+    }
+    out.push((name.to_string(), type_id));
+    Ok(())
+}
+
+#[derive(Clone)]
+struct EncodeContext<'a> {
+    locals: &'a BTreeMap<String, LocalBinding>,
+    globals: &'a BTreeMap<String, u32>,
+    global_types: &'a BTreeMap<String, TypeId>,
+    memory: &'a BTreeMap<String, MemoryBinding>,
+    string_literal_memory: &'a BTreeMap<i32, StringLiteralMemoryBinding>,
+    struct_collections: &'a BTreeMap<String, StructCollectionBinding>,
+    struct_scalars: &'a BTreeMap<String, StructScalarBinding>,
+    named_structs: &'a crate::backend::compile_analysis::NamedStructFieldTypeMap,
+    types: &'a TypeTable,
+    constants: &'a BTreeMap<String, ConstantValue>,
+    imports: &'a BTreeMap<String, u32>,
+    internals: &'a BTreeMap<String, u32>,
+    internal_overloads: &'a BTreeMap<String, Vec<u32>>,
+    signatures: &'a [Signature],
+    scratch_index: u32,
+    scratch_address: u32,
+    return_type: TypeId,
+    scratch_i32: u32,
+    scratch_i32_b: u32,
+    scratch_i32_c: u32,
+    scratch_f32: u32,
+    scratch_f64: u32,
+    foreach: BTreeMap<String, WebForeachBinding>,
+    continue_depth: Option<u32>,
+}
+
+fn nested_control_context<'a>(context: &EncodeContext<'a>) -> Result<EncodeContext<'a>, String> {
+    let mut nested = context.clone();
+    nested.continue_depth = context
+        .continue_depth
+        .map(|depth| {
+            depth
+                .checked_add(1)
+                .ok_or_else(|| "web control-flow nesting exceeds branch depth limits".to_string())
+        })
+        .transpose()?;
+    Ok(nested)
+}
+
+fn loop_body_context<'a>(context: &EncodeContext<'a>) -> EncodeContext<'a> {
+    let mut nested = context.clone();
+    nested.continue_depth = Some(0);
+    nested
+}
+
+#[derive(Debug, Clone)]
+struct WebForeachBinding {
+    collection_path: String,
+    index_name: String,
+}
+
+fn foreach_index_name(item_name: &str, index_name: Option<&str>) -> String {
+    index_name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("__web_foreach_index_{item_name}"))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalBinding {
+    index: u32,
+    type_id: TypeId,
+    struct_view: Option<StructViewBinding>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StructViewBinding {
+    index: u32,
+    len: u32,
+}
+
+fn set_struct_view_locals(base: u32, view: StructViewBinding, out: &mut Vec<u8>) {
+    for index in [view.len, view.index, base] {
+        out.push(0x21);
+        uleb(index, out);
+    }
+}
+
+fn require_same_struct_type(expected: TypeId, actual: TypeId, context: &str) -> Result<(), String> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(format!(
+            "web {context} struct type mismatch: expected {expected}, found {actual}"
+        ))
+    }
+}
+
+fn encode_statements(
+    statements: &[SimpleStmt],
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    for statement in statements {
+        match statement {
+            SimpleStmt::Noop => {}
+            SimpleStmt::Let {
+                name, expression, ..
+            } => {
+                let binding = local_binding(context, name)?;
+                if let Some(view) = binding.struct_view {
+                    let value_type = encode_struct_view_expr(expression, context, out)?;
+                    require_same_struct_type(binding.type_id, value_type, "local initializer")?;
+                    set_struct_view_locals(binding.index, view, out);
+                    continue;
+                }
+                let value_type = encode_expr_as(expression, Some(binding.type_id), context, out)?;
+                require_same_type(binding.type_id, value_type, "local initializer")?;
+                out.push(0x21);
+                uleb(binding.index, out);
+            }
+            SimpleStmt::Assign {
+                target,
+                op,
+                expression,
+            } => {
+                if *op == AssignOp::Set {
+                    if let AssignTarget::IndexedPath {
+                        collection_path,
+                        index,
+                        suffix,
+                    } = target
+                    {
+                        if suffix.is_empty()
+                            && context.struct_collections.contains_key(collection_path)
+                        {
+                            encode_struct_collection_copy(
+                                collection_path,
+                                index,
+                                expression,
+                                context,
+                                out,
+                            )?;
+                            continue;
+                        }
+                    }
+                }
+                if *op != AssignOp::Set
+                    && encode_receiver_array_compound_assignment(
+                        target, *op, expression, context, out,
+                    )?
+                {
+                    continue;
+                }
+                let target_type = target_type(target, context)?;
+                if *op == AssignOp::Set && is_struct_view_type(target_type, context.named_structs) {
+                    let AssignTarget::Local(name) = target else {
+                        return Err(
+                            "web struct views can only be assigned to local bindings".to_string()
+                        );
+                    };
+                    let binding = local_binding(context, name)?;
+                    let view = binding.struct_view.ok_or_else(|| {
+                        format!("web struct local '{name}' is missing view storage")
+                    })?;
+                    let value_type = encode_struct_view_expr(expression, context, out)?;
+                    require_same_struct_type(target_type, value_type, "assignment")?;
+                    set_struct_view_locals(binding.index, view, out);
+                    continue;
+                }
+                if *op != AssignOp::Set {
+                    encode_target_get(target, context, out)?;
+                }
+                let value_type = encode_expr_as(expression, Some(target_type), context, out)?;
+                require_same_type(target_type, value_type, "assignment")?;
+                if *op != AssignOp::Set {
+                    out.push(arithmetic_opcode(*op, target_type)?);
+                }
+                encode_target_set(target, context, out)?;
+            }
+            SimpleStmt::Expr(expression) => {
+                encode_expr(expression, context, out)?;
+                if expression_returns_value(expression, context)? {
+                    out.push(0x1a);
+                }
+            }
+            SimpleStmt::Return(expression) => {
+                encode_expr_as(expression, Some(context.return_type), context, out)?;
+                out.push(0x0f);
+            }
+            SimpleStmt::ReturnVoid => out.push(0x0f),
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                encode_condition(condition, context, out)?;
+                out.extend([0x04, 0x40]);
+                let nested = nested_control_context(context)?;
+                encode_statements(then_statements, &nested, out)?;
+                if let Some(values) = else_statements {
+                    out.push(0x05);
+                    encode_statements(values, &nested, out)?;
+                }
+                out.push(0x0b);
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                encode_statements(std::slice::from_ref(init), context, out)?;
+                out.extend([0x02, 0x40, 0x03, 0x40]);
+                encode_condition(condition, context, out)?;
+                out.extend([0x45, 0x0d, 0x01]);
+                out.extend([0x02, 0x40]);
+                let nested = loop_body_context(context);
+                encode_statements(body_statements, &nested, out)?;
+                out.push(0x0b);
+                encode_statements(std::slice::from_ref(step), context, out)?;
+                out.extend([0x0c, 0x00, 0x0b, 0x0b]);
+            }
+            SimpleStmt::Continue => {
+                let depth = context
+                    .continue_depth
+                    .ok_or_else(|| "continue statement is only valid inside loops".to_string())?;
+                out.push(0x0c);
+                uleb(depth, out);
+            }
+            SimpleStmt::Convert { target, source, .. } => {
+                let target_type = target_type(target, context)?;
+                let source_type = encode_expr(source, context, out)?;
+                encode_conversion(source_type, target_type, out)?;
+                encode_target_set(target, context, out)?;
+            }
+            SimpleStmt::Foreach {
+                item_name,
+                index_name,
+                collection_path,
+                body_statements,
+            } => {
+                let index_name = foreach_index_name(item_name, index_name.as_deref());
+                let index = local_binding(context, &index_name)?;
+                let len = collection_len(context, collection_path)?;
+                out.extend([0x41, 0, 0x21]);
+                uleb(index.index, out);
+                out.extend([0x02, 0x40, 0x03, 0x40, 0x20]);
+                uleb(index.index, out);
+                out.push(0x41);
+                sleb(len, out);
+                out.extend([0x4e, 0x0d, 0x01]);
+                let mut nested = context.clone();
+                nested.foreach.insert(
+                    item_name.clone(),
+                    WebForeachBinding {
+                        collection_path: collection_path.clone(),
+                        index_name: index_name.clone(),
+                    },
+                );
+                nested.continue_depth = Some(0);
+                out.extend([0x02, 0x40]);
+                encode_statements(body_statements, &nested, out)?;
+                out.push(0x0b);
+                out.extend([0x20]);
+                uleb(index.index, out);
+                out.extend([0x41, 1, 0x6a, 0x21]);
+                uleb(index.index, out);
+                out.extend([0x0c, 0x00, 0x0b, 0x0b]);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_receiver_array_compound_assignment(
+    target: &AssignTarget,
+    op: AssignOp,
+    expression: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<bool, String> {
+    let AssignTarget::IndexedPath {
+        collection_path,
+        index,
+        suffix,
+    } = target
+    else {
+        return Ok(false);
+    };
+    let Some(binding) = receiver_array_binding(context, collection_path, suffix)? else {
+        return Ok(false);
+    };
+
+    encode_receiver_array_address(&binding, index, context, out)?;
+    out.push(0x21);
+    uleb(context.scratch_address, out);
+    out.push(0x20);
+    uleb(context.scratch_address, out);
+    encode_memory_load(binding.element_type, out)?;
+    let value_type = encode_expr_as(expression, Some(binding.element_type), context, out)?;
+    require_same_type(binding.element_type, value_type, "assignment")?;
+    out.push(arithmetic_opcode(op, binding.element_type)?);
+
+    let value_local = scratch_local(context, binding.element_type)?;
+    out.push(0x21);
+    uleb(value_local, out);
+    out.push(0x20);
+    uleb(context.scratch_address, out);
+    out.push(0x20);
+    uleb(value_local, out);
+    encode_memory_store(binding.element_type, out)?;
+    Ok(true)
+}
+
+fn encode_conversion(from: TypeId, to: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
+    let from = wasm_value_type(from)?;
+    let to = wasm_value_type(to)?;
+    if from == to {
+        return Ok(());
+    }
+    out.push(match (from, to) {
+        (I32, F32) => 0xb2,
+        (I32, F64) => 0xb7,
+        (F32, I32) => 0xa8,
+        (F64, I32) => 0xaa,
+        (F32, F64) => 0xbb,
+        (F64, F32) => 0xb6,
+        _ => return Err("unsupported web conversion".to_string()),
+    });
+    Ok(())
+}
+
+fn arithmetic_opcode(op: AssignOp, type_id: TypeId) -> Result<u8, String> {
+    match (op, wasm_value_type(type_id)?) {
+        (AssignOp::Add, I32) => Ok(0x6a),
+        (AssignOp::Sub, I32) => Ok(0x6b),
+        (AssignOp::Mul, I32) => Ok(0x6c),
+        (AssignOp::Div, I32) => Ok(0x6d),
+        (AssignOp::Mod, I32) => Ok(0x6f),
+        (AssignOp::Add, F32) => Ok(0x92),
+        (AssignOp::Sub, F32) => Ok(0x93),
+        (AssignOp::Mul, F32) => Ok(0x94),
+        (AssignOp::Div, F32) => Ok(0x95),
+        (AssignOp::Add, F64) => Ok(0xa0),
+        (AssignOp::Sub, F64) => Ok(0xa1),
+        (AssignOp::Mul, F64) => Ok(0xa2),
+        (AssignOp::Div, F64) => Ok(0xa3),
+        (AssignOp::Mod, F32 | F64) => Err("web float remainder is unsupported".to_string()),
+        (AssignOp::Set, _) => Err("set has no arithmetic opcode".to_string()),
+        _ => Err("unsupported web arithmetic lane".to_string()),
+    }
+}
+
+fn encode_target_get(
+    target: &AssignTarget,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    match target {
+        AssignTarget::Local(name) => {
+            if let Some((binding, suffix)) = foreach_path(context, name) {
+                encode_foreach_load(binding, suffix, context, out)
+            } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                let candidates = collection_meta_candidates(context, suffix);
+                encode_collection_meta_load(
+                    binding.index,
+                    suffix,
+                    &candidates,
+                    context.string_literal_memory,
+                    out,
+                )?;
+                Ok(TYPE_ID_I32)
+            } else if let Some((binding, suffix)) = local_struct_path(context, name) {
+                encode_struct_field_load(binding, suffix, context, out)
+            } else if let Some(binding) = context.locals.get(name) {
+                out.push(0x20);
+                uleb(binding.index, out);
+                Ok(binding.type_id)
+            } else if let Some(binding) = scalar_memory_binding(context, name) {
+                encode_scalar_memory_load(binding, out)?;
+                Ok(binding.type_id)
+            } else {
+                out.push(0x23);
+                uleb(global(context, name)?, out);
+                global_type(context, name)
+            }
+        }
+        AssignTarget::GlobalPath(name) => {
+            if let Some((binding, suffix)) = foreach_path(context, name) {
+                encode_foreach_load(binding, suffix, context, out)
+            } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                let candidates = collection_meta_candidates(context, suffix);
+                encode_collection_meta_load(
+                    binding.index,
+                    suffix,
+                    &candidates,
+                    context.string_literal_memory,
+                    out,
+                )?;
+                Ok(TYPE_ID_I32)
+            } else if let Some((binding, suffix)) = local_struct_path(context, name) {
+                encode_struct_field_load(binding, suffix, context, out)
+            } else if let Some(binding) = scalar_memory_binding(context, name) {
+                encode_scalar_memory_load(binding, out)?;
+                Ok(binding.type_id)
+            } else {
+                out.push(0x23);
+                uleb(global(context, name)?, out);
+                global_type(context, name)
+            }
+        }
+        AssignTarget::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            if suffix.is_empty() {
+                if let Some(local) = context.locals.get(collection_path).copied() {
+                    return encode_local_collection_load(local, index, context, out);
+                }
+            }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                encode_receiver_array_address(&binding, index, context, out)?;
+                encode_memory_load(binding.element_type, out)?;
+                return Ok(binding.element_type);
+            }
+            let binding = memory_binding(context, collection_path, suffix)?;
+            encode_memory_address(binding, index, context, out)?;
+            encode_memory_load(binding.type_id, out)?;
+            Ok(binding.type_id)
+        }
+    }
+}
+
+fn encode_target_set(
+    target: &AssignTarget,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    match target {
+        AssignTarget::Local(name) => {
+            if let Some((binding, suffix)) = foreach_path(context, name) {
+                encode_foreach_store(binding, suffix, context, out)
+            } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                if !matches!(suffix, "length" | "char_length") {
+                    return Err(format!("web collection {suffix} is read-only"));
+                }
+                out.push(0x21);
+                uleb(context.scratch_i32, out);
+                let candidates = collection_meta_candidates(context, suffix);
+                encode_collection_meta_store(binding.index, context.scratch_i32, &candidates, out)?;
+                Ok(())
+            } else if let Some((binding, suffix)) = local_struct_path(context, name) {
+                let field_type = context.named_structs[&binding.type_id][suffix];
+                let temp = scratch_local(context, field_type)?;
+                out.push(0x21);
+                uleb(temp, out);
+                encode_struct_field_store_from_local(binding, suffix, temp, context, out)
+            } else if let Some(binding) = context.locals.get(name) {
+                out.push(0x21);
+                uleb(binding.index, out);
+                Ok(())
+            } else if let Some(binding) = scalar_memory_binding(context, name) {
+                encode_scalar_memory_store_from_stack(binding, context, out)
+            } else {
+                out.push(0x24);
+                uleb(global(context, name)?, out);
+                Ok(())
+            }
+        }
+        AssignTarget::GlobalPath(name) => {
+            if let Some((binding, suffix)) = foreach_path(context, name) {
+                encode_foreach_store(binding, suffix, context, out)
+            } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                if !matches!(suffix, "length" | "char_length") {
+                    return Err(format!("web collection {suffix} is read-only"));
+                }
+                out.push(0x21);
+                uleb(context.scratch_i32, out);
+                let candidates = collection_meta_candidates(context, suffix);
+                encode_collection_meta_store(binding.index, context.scratch_i32, &candidates, out)?;
+                Ok(())
+            } else if let Some((binding, suffix)) = local_struct_path(context, name) {
+                let field_type = context.named_structs[&binding.type_id][suffix];
+                let temp = scratch_local(context, field_type)?;
+                out.push(0x21);
+                uleb(temp, out);
+                encode_struct_field_store_from_local(binding, suffix, temp, context, out)
+            } else if let Some(binding) = scalar_memory_binding(context, name) {
+                encode_scalar_memory_store_from_stack(binding, context, out)
+            } else {
+                out.push(0x24);
+                uleb(global(context, name)?, out);
+                Ok(())
+            }
+        }
+        AssignTarget::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            if suffix.is_empty() {
+                if let Some(local) = context.locals.get(collection_path).copied() {
+                    let element_type = context
+                        .types
+                        .indexed_element_type_id(local.type_id)
+                        .ok_or_else(|| {
+                            format!("web local type {} is not indexable", local.type_id)
+                        })?;
+                    let temp = scratch_local(context, element_type)?;
+                    out.push(0x21);
+                    uleb(temp, out);
+                    return encode_local_collection_store(local, index, temp, context, out);
+                }
+            }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                let temp = scratch_local(context, binding.element_type)?;
+                out.push(0x21);
+                uleb(temp, out);
+                encode_receiver_array_address(&binding, index, context, out)?;
+                out.push(0x20);
+                uleb(temp, out);
+                return encode_memory_store(binding.element_type, out);
+            }
+            let binding = memory_binding(context, collection_path, suffix)?;
+            let temp_index = scratch_local(context, binding.type_id)?;
+            out.push(0x21);
+            uleb(temp_index, out);
+            encode_memory_address(binding, index, context, out)?;
+            out.push(0x20);
+            uleb(temp_index, out);
+            encode_memory_store(binding.type_id, out)
+        }
+    }
+}
+
+fn scratch_local(context: &EncodeContext<'_>, type_id: TypeId) -> Result<u32, String> {
+    match wasm_value_type(type_id)? {
+        I32 => Ok(context.scratch_i32),
+        F32 => Ok(context.scratch_f32),
+        F64 => Ok(context.scratch_f64),
+        _ => Err("unsupported web scratch type".to_string()),
+    }
+}
+
+fn local_binding(context: &EncodeContext<'_>, name: &str) -> Result<LocalBinding, String> {
+    context
+        .locals
+        .get(name)
+        .copied()
+        .ok_or_else(|| format!("unknown web local '{name}'"))
+}
+
+fn global(context: &EncodeContext<'_>, name: &str) -> Result<u32, String> {
+    context
+        .globals
+        .get(name)
+        .copied()
+        .ok_or_else(|| format!("unknown web global '{name}'"))
+}
+
+fn global_type(context: &EncodeContext<'_>, name: &str) -> Result<TypeId, String> {
+    context
+        .global_types
+        .get(name)
+        .copied()
+        .ok_or_else(|| format!("unknown web global type '{name}'"))
+}
+
+fn scalar_memory_binding<'a>(
+    context: &'a EncodeContext<'_>,
+    name: &str,
+) -> Option<&'a MemoryBinding> {
+    context.memory.get(name).filter(|binding| binding.scalar)
+}
+
+fn encode_scalar_memory_load(binding: &MemoryBinding, out: &mut Vec<u8>) -> Result<(), String> {
+    out.push(0x41);
+    sleb(binding.offset as i32, out);
+    encode_memory_load(binding.type_id, out)
+}
+
+fn encode_scalar_memory_store_from_stack(
+    binding: &MemoryBinding,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let temp = scratch_local(context, binding.type_id)?;
+    out.push(0x21);
+    uleb(temp, out);
+    out.push(0x41);
+    sleb(binding.offset as i32, out);
+    out.push(0x20);
+    uleb(temp, out);
+    encode_memory_store(binding.type_id, out)
+}
+
+fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<TypeId, String> {
+    match target {
+        AssignTarget::Local(name) => {
+            if let Some((binding, suffix)) = foreach_path(context, name) {
+                Ok(memory_binding(context, &binding.collection_path, suffix)?.type_id)
+            } else if local_collection_meta(context, name).is_some() {
+                Ok(TYPE_ID_I32)
+            } else if let Some((binding, suffix)) = local_struct_path(context, name) {
+                context.named_structs[&binding.type_id]
+                    .get(suffix)
+                    .copied()
+                    .ok_or_else(|| {
+                        format!("unknown web struct field '{}.{suffix}'", binding.type_id)
+                    })
+            } else {
+                context
+                    .locals
+                    .get(name)
+                    .map(|binding| binding.type_id)
+                    .or_else(|| context.global_types.get(name).copied())
+                    .ok_or_else(|| format!("unknown web assignment target '{name}'"))
+            }
+        }
+        AssignTarget::GlobalPath(name) => {
+            if let Some((binding, suffix)) = foreach_path(context, name) {
+                Ok(memory_binding(context, &binding.collection_path, suffix)?.type_id)
+            } else if local_collection_meta(context, name).is_some() {
+                Ok(TYPE_ID_I32)
+            } else if let Some((binding, suffix)) = local_struct_path(context, name) {
+                context.named_structs[&binding.type_id]
+                    .get(suffix)
+                    .copied()
+                    .ok_or_else(|| {
+                        format!("unknown web struct field '{}.{suffix}'", binding.type_id)
+                    })
+            } else {
+                global_type(context, name)
+            }
+        }
+        AssignTarget::IndexedPath {
+            collection_path,
+            suffix,
+            ..
+        } => {
+            if suffix.is_empty() {
+                if let Some(local) = context.locals.get(collection_path) {
+                    return context
+                        .types
+                        .indexed_element_type_id(local.type_id)
+                        .ok_or_else(|| {
+                            format!("web local type {} is not indexable", local.type_id)
+                        });
+                }
+            }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                return Ok(binding.element_type);
+            }
+            Ok(memory_binding(context, collection_path, suffix)?.type_id)
+        }
+    }
+}
+
+struct ReceiverArrayCandidate<'a> {
+    base: i32,
+    memory: &'a MemoryBinding,
+}
+
+struct ReceiverArrayBinding<'a> {
+    receiver: &'a LocalBinding,
+    element_type: TypeId,
+    candidates: Vec<ReceiverArrayCandidate<'a>>,
+}
+
+fn receiver_array_binding<'a>(
+    context: &'a EncodeContext<'_>,
+    collection_path: &str,
+    suffix: &str,
+) -> Result<Option<ReceiverArrayBinding<'a>>, String> {
+    let Some((receiver_name, field_name)) = collection_path.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(receiver) = context
+        .locals
+        .get(receiver_name)
+        .filter(|binding| binding.struct_view.is_some())
+    else {
+        return Ok(None);
+    };
+    let field_type = context
+        .named_structs
+        .get(&receiver.type_id)
+        .and_then(|fields| fields.get(field_name))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "unknown web struct array field '{}.{field_name}'",
+                receiver.type_id
+            )
+        })?;
+    let collection_element_type = context
+        .types
+        .indexed_element_type_id(field_type)
+        .ok_or_else(|| {
+            format!(
+                "web struct field '{}.{field_name}' is not indexable",
+                receiver.type_id
+            )
+        })?;
+    let element_type = if suffix.is_empty() {
+        collection_element_type
+    } else {
+        context
+            .named_structs
+            .get(&collection_element_type)
+            .and_then(|fields| fields.get(suffix))
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "unknown web receiver array element field '{collection_element_type}.{suffix}'"
+                )
+            })?
+    };
+
+    let mut candidates = Vec::new();
+    for (instance_path, instance_type) in context.global_types {
+        if *instance_type != receiver.type_id {
+            continue;
+        }
+        let memory_path = if suffix.is_empty() {
+            format!("{instance_path}.{field_name}")
+        } else {
+            format!("{instance_path}.{field_name}.{suffix}")
+        };
+        let Some(memory) = context.memory.get(&memory_path) else {
+            continue;
+        };
+        if memory.scalar || memory.type_id != element_type {
+            return Err(format!(
+                "web struct array storage '{memory_path}' does not match field type {field_type}"
+            ));
+        }
+        let base = hash_global_path(instance_path);
+        if candidates
+            .iter()
+            .any(|candidate: &ReceiverArrayCandidate<'_>| candidate.base == base)
+        {
+            return Err(format!(
+                "web struct array field '{}.{field_name}' has ambiguous caller identity {base}",
+                receiver.type_id
+            ));
+        }
+        candidates.push(ReceiverArrayCandidate { base, memory });
+    }
+    if candidates.is_empty() {
+        return Err(format!(
+            "web struct array field '{}.{field_name}' has no caller-owned storage",
+            receiver.type_id
+        ));
+    }
+    Ok(Some(ReceiverArrayBinding {
+        receiver,
+        element_type,
+        candidates,
+    }))
+}
+
+fn encode_receiver_array_address(
+    binding: &ReceiverArrayBinding<'_>,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(index_type, context) {
+        return Err(format!(
+            "web collection index must be i32-compatible, found type {index_type}"
+        ));
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+
+    fn select(
+        receiver_base: u32,
+        index_local: u32,
+        candidates: &[ReceiverArrayCandidate<'_>],
+        out: &mut Vec<u8>,
+    ) {
+        let Some((candidate, rest)) = candidates.split_first() else {
+            out.push(0x00);
+            return;
+        };
+        out.push(0x20);
+        uleb(receiver_base, out);
+        out.push(0x41);
+        sleb(candidate.base, out);
+        out.extend([0x46, 0x04, I32]);
+        emit_index_bounds_check(index_local, candidate.memory.len, out);
+        out.push(0x41);
+        sleb(candidate.memory.offset as i32, out);
+        out.push(0x20);
+        uleb(index_local, out);
+        out.push(0x41);
+        sleb(candidate.memory.width as i32, out);
+        out.extend([0x6c, 0x6a, 0x05]);
+        select(receiver_base, index_local, rest, out);
+        out.push(0x0b);
+    }
+
+    select(
+        binding.receiver.index,
+        context.scratch_index,
+        &binding.candidates,
+        out,
+    );
+    Ok(())
+}
+
+fn memory_binding<'a>(
+    context: &'a EncodeContext<'_>,
+    collection_path: &str,
+    suffix: &str,
+) -> Result<&'a MemoryBinding, String> {
+    let path = if suffix.is_empty() {
+        collection_path.to_string()
+    } else {
+        format!("{collection_path}.{suffix}")
+    };
+    context
+        .memory
+        .get(&path)
+        .ok_or_else(|| format!("unknown web collection storage '{path}'"))
+}
+
+fn collection_len(context: &EncodeContext<'_>, collection_path: &str) -> Result<i32, String> {
+    context
+        .memory
+        .get(collection_path)
+        .or_else(|| {
+            let prefix = format!("{collection_path}.");
+            context
+                .memory
+                .iter()
+                .find_map(|(path, binding)| path.starts_with(&prefix).then_some(binding))
+        })
+        .map(|binding| binding.len)
+        .ok_or_else(|| format!("unknown web foreach collection '{collection_path}'"))
+}
+
+fn foreach_path<'a>(
+    context: &'a EncodeContext<'_>,
+    path: &'a str,
+) -> Option<(&'a WebForeachBinding, &'a str)> {
+    let (alias, suffix) = path.split_once('.').unwrap_or((path, ""));
+    context.foreach.get(alias).map(|binding| (binding, suffix))
+}
+
+fn local_struct_path<'a>(
+    context: &'a EncodeContext<'_>,
+    path: &'a str,
+) -> Option<(&'a LocalBinding, &'a str)> {
+    let (name, suffix) = path.split_once('.')?;
+    let binding = context.locals.get(name)?;
+    binding.struct_view.map(|_| (binding, suffix))
+}
+
+fn local_collection_meta<'a>(
+    context: &'a EncodeContext<'_>,
+    path: &'a str,
+) -> Option<(&'a LocalBinding, &'a str)> {
+    let (name, suffix) = path.split_once('.')?;
+    if !matches!(suffix, "length" | "max_length" | "char_length") {
+        return None;
+    }
+    let binding = context.locals.get(name)?;
+    context
+        .types
+        .indexed_element_type_id(binding.type_id)
+        .map(|_| (binding, suffix))
+}
+
+#[derive(Clone, Copy)]
+enum CollectionMetaBacking<'a> {
+    Global(u32),
+    Memory(&'a MemoryBinding),
+}
+
+type CollectionMetaCandidate<'a> = (&'a MemoryBinding, Option<CollectionMetaBacking<'a>>);
+
+fn collection_meta_candidates<'a>(
+    context: &'a EncodeContext<'_>,
+    suffix: &str,
+) -> Vec<CollectionMetaCandidate<'a>> {
+    context
+        .memory
+        .iter()
+        .filter(|(path, _)| {
+            context
+                .global_types
+                .get(*path)
+                .is_some_and(|type_id| context.types.indexed_element_type_id(*type_id).is_some())
+        })
+        .map(|(path, collection)| {
+            let metadata_path = format!("{path}.{suffix}");
+            let backing = if matches!(suffix, "length" | "char_length") {
+                context
+                    .globals
+                    .get(&metadata_path)
+                    .copied()
+                    .map(CollectionMetaBacking::Global)
+                    .or_else(|| {
+                        context
+                            .memory
+                            .get(&metadata_path)
+                            .map(CollectionMetaBacking::Memory)
+                    })
+            } else {
+                None
+            };
+            (collection, backing)
+        })
+        .collect()
+}
+
+fn encode_collection_meta_load(
+    base_local: u32,
+    suffix: &str,
+    candidates: &[CollectionMetaCandidate<'_>],
+    string_literal_memory: &BTreeMap<i32, StringLiteralMemoryBinding>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some(((memory, backing), rest)) = candidates.split_first() else {
+        let mut literal_candidates = string_literal_memory.iter();
+        return encode_string_literal_meta_load(base_local, suffix, &mut literal_candidates, out);
+    };
+    out.push(0x20);
+    uleb(base_local, out);
+    out.push(0x41);
+    sleb(memory.offset as i32, out);
+    out.extend([0x46, 0x04, I32]);
+    if matches!(suffix, "length" | "char_length") {
+        match *backing {
+            Some(CollectionMetaBacking::Global(global)) => {
+                out.push(0x23);
+                uleb(global, out);
+            }
+            Some(CollectionMetaBacking::Memory(metadata)) => {
+                out.push(0x41);
+                sleb(metadata.offset as i32, out);
+                encode_memory_load(metadata.type_id, out)?;
+            }
+            None if suffix == "length" => {
+                out.push(0x41);
+                sleb(memory.len, out);
+            }
+            None => out.push(0x00),
+        }
+    } else {
+        out.push(0x41);
+        sleb(memory.len, out);
+    }
+    out.push(0x05);
+    encode_collection_meta_load(base_local, suffix, rest, string_literal_memory, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_string_literal_meta_load<'a>(
+    base_local: u32,
+    suffix: &str,
+    candidates: &mut impl Iterator<Item = (&'a i32, &'a StringLiteralMemoryBinding)>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((handle, binding)) = candidates.next() else {
+        out.push(0x00);
+        return Ok(());
+    };
+    let value = match suffix {
+        "length" | "max_length" => binding.byte_len,
+        "char_length" => binding.char_len,
+        _ => return Err(format!("unsupported web collection metadata '{suffix}'")),
+    };
+    out.push(0x20);
+    uleb(base_local, out);
+    out.push(0x41);
+    sleb(*handle, out);
+    out.extend([0x46, 0x04, I32]);
+    out.push(0x41);
+    sleb(value, out);
+    out.push(0x05);
+    encode_string_literal_meta_load(base_local, suffix, candidates, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_collection_meta_store(
+    base_local: u32,
+    value_local: u32,
+    candidates: &[CollectionMetaCandidate<'_>],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some(((memory, backing), rest)) = candidates.split_first() else {
+        out.push(0x00);
+        return Ok(());
+    };
+    out.push(0x20);
+    uleb(base_local, out);
+    out.push(0x41);
+    sleb(memory.offset as i32, out);
+    out.extend([0x46, 0x04, 0x40]);
+    match *backing {
+        Some(CollectionMetaBacking::Global(global)) => {
+            out.push(0x20);
+            uleb(value_local, out);
+            out.push(0x24);
+            uleb(global, out);
+        }
+        Some(CollectionMetaBacking::Memory(metadata)) => {
+            out.push(0x41);
+            sleb(metadata.offset as i32, out);
+            out.push(0x20);
+            uleb(value_local, out);
+            encode_memory_store(metadata.type_id, out)?;
+        }
+        None => out.push(0x00),
+    }
+    out.push(0x05);
+    encode_collection_meta_store(base_local, value_local, rest, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_struct_view_expr(
+    value: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    match value {
+        SimpleExpr::Identifier(name) => {
+            if let Some(binding) = context.locals.get(name) {
+                let view = binding
+                    .struct_view
+                    .ok_or_else(|| format!("web value '{name}' is not a struct view"))?;
+                for index in [binding.index, view.index, view.len] {
+                    out.push(0x20);
+                    uleb(index, out);
+                }
+                return Ok(binding.type_id);
+            }
+            if let Some(binding) = context.foreach.get(name) {
+                let collection = context
+                    .struct_collections
+                    .get(&binding.collection_path)
+                    .ok_or_else(|| {
+                        format!("web foreach '{name}' is not over a struct collection")
+                    })?;
+                out.push(0x41);
+                sleb(collection.base, out);
+                let index = local_binding(context, &binding.index_name)?;
+                out.push(0x20);
+                uleb(index.index, out);
+                out.push(0x41);
+                sleb(collection.len, out);
+                return Ok(collection.type_id);
+            }
+            if let Some(binding) = context.struct_scalars.get(name) {
+                out.push(0x41);
+                sleb(binding.base, out);
+                out.push(0x41);
+                sleb(-1, out);
+                out.extend([0x41, 0]);
+                return Ok(binding.type_id);
+            }
+            Err(format!("unknown web struct view '{name}'"))
+        }
+        SimpleExpr::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } if suffix.is_empty() => {
+            let collection = context
+                .struct_collections
+                .get(collection_path)
+                .ok_or_else(|| format!("unknown web struct collection '{collection_path}'"))?;
+            out.push(0x41);
+            sleb(collection.base, out);
+            let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
+            if !is_web_index_type(index_type, context) {
+                return Err("web struct collection index must be i32-compatible".to_string());
+            }
+            out.push(0x41);
+            sleb(collection.len, out);
+            Ok(collection.type_id)
+        }
+        _ => Err("web struct value must be a collection element or existing view".to_string()),
+    }
+}
+
+fn encode_struct_collection_copy(
+    collection_path: &str,
+    target_index: &SimpleExpr,
+    source: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let collection = context
+        .struct_collections
+        .get(collection_path)
+        .ok_or_else(|| format!("unknown web struct collection '{collection_path}'"))?;
+    let source_type = encode_struct_view_expr(source, context, out)?;
+    require_same_struct_type(collection.type_id, source_type, "collection assignment")?;
+    for local in [
+        context.scratch_i32_c,
+        context.scratch_i32_b,
+        context.scratch_i32,
+    ] {
+        out.push(0x21);
+        uleb(local, out);
+    }
+    let target_type = encode_expr_as(target_index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(target_type, context) {
+        return Err("web struct collection index must be i32-compatible".to_string());
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+    emit_index_bounds_check(context.scratch_index, collection.len, out);
+
+    let source_binding = LocalBinding {
+        index: context.scratch_i32,
+        type_id: source_type,
+        struct_view: Some(StructViewBinding {
+            index: context.scratch_i32_b,
+            len: context.scratch_i32_c,
+        }),
+    };
+    for (suffix, target_field) in &collection.fields {
+        out.push(0x41);
+        sleb(target_field.offset as i32, out);
+        out.push(0x20);
+        uleb(context.scratch_index, out);
+        out.push(0x41);
+        sleb(target_field.stride as i32, out);
+        out.extend([0x6c, 0x6a]);
+        let source_field_type = encode_struct_field_load(&source_binding, suffix, context, out)?;
+        require_same_type(
+            target_field.type_id,
+            source_field_type,
+            "struct collection field assignment",
+        )?;
+        encode_memory_store(target_field.type_id, out)?;
+    }
+    Ok(())
+}
+
+fn emit_index_bounds_check(index_local: u32, len: i32, out: &mut Vec<u8>) {
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x41);
+    sleb(len, out);
+    out.extend([0x4f, 0x04, 0x40, 0x00, 0x0b]);
+}
+
+fn struct_field_binding<'a>(
+    context: &'a EncodeContext<'_>,
+    type_id: TypeId,
+    suffix: &str,
+) -> Result<Vec<&'a StructCollectionBinding>, String> {
+    let field_type = context
+        .named_structs
+        .get(&type_id)
+        .and_then(|fields| fields.get(suffix))
+        .copied()
+        .ok_or_else(|| format!("unknown web struct field type {type_id}.{suffix}"))?;
+    let candidates = context
+        .struct_collections
+        .values()
+        .filter(|collection| {
+            collection.type_id == type_id
+                && collection
+                    .fields
+                    .get(suffix)
+                    .is_some_and(|field| field.type_id == field_type)
+        })
+        .collect::<Vec<_>>();
+    Ok(candidates)
+}
+
+fn encode_selected_field_offset(
+    base_local: u32,
+    suffix: &str,
+    candidates: &[&StructCollectionBinding],
+    out: &mut Vec<u8>,
+) -> Result<MemoryBinding, String> {
+    let first = candidates[0]
+        .fields
+        .get(suffix)
+        .cloned()
+        .ok_or_else(|| format!("missing web SoA field '{suffix}'"))?;
+    fn branch(
+        base_local: u32,
+        suffix: &str,
+        candidates: &[&StructCollectionBinding],
+        out: &mut Vec<u8>,
+    ) -> Result<(), String> {
+        let Some((candidate, rest)) = candidates.split_first() else {
+            out.push(0x00);
+            return Ok(());
+        };
+        out.push(0x20);
+        uleb(base_local, out);
+        out.push(0x41);
+        sleb(candidate.base, out);
+        out.extend([0x46, 0x04, I32]);
+        out.push(0x41);
+        sleb(candidate.fields[suffix].offset as i32, out);
+        out.push(0x05);
+        branch(base_local, suffix, rest, out)?;
+        out.push(0x0b);
+        Ok(())
+    }
+    branch(base_local, suffix, candidates, out)?;
+    Ok(first)
+}
+
+fn encode_struct_field_address(
+    binding: &LocalBinding,
+    suffix: &str,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<MemoryBinding, String> {
+    let view = binding
+        .struct_view
+        .ok_or_else(|| "web struct binding has no view metadata".to_string())?;
+    out.push(0x20);
+    uleb(view.index, out);
+    out.extend([0x41, 0, 0x48, 0x04, 0x40, 0x00, 0x0b]);
+    out.push(0x20);
+    uleb(view.index, out);
+    out.push(0x20);
+    uleb(view.len, out);
+    out.extend([0x4e, 0x04, 0x40, 0x00, 0x0b]);
+    let candidates = struct_field_binding(context, binding.type_id, suffix)?;
+    if candidates.is_empty() {
+        let field_type = context.named_structs[&binding.type_id][suffix];
+        let width = storage_width(field_type, context.types, context.named_structs)?;
+        // A scalar-only struct receiver can never arrive with a collection index.
+        // Keep the unreachable collection arm valid without inventing storage.
+        out.push(0x00);
+        return Ok(MemoryBinding {
+            offset: 0,
+            type_id: field_type,
+            len: 0,
+            width,
+            stride: width,
+            scalar: false,
+        });
+    }
+    let field = encode_selected_field_offset(binding.index, suffix, &candidates, out)?;
+    out.push(0x20);
+    uleb(view.index, out);
+    out.push(0x41);
+    sleb(field.stride as i32, out);
+    out.extend([0x6c, 0x6a]);
+    Ok(field)
+}
+
+fn scalar_field_candidates<'a>(
+    binding: &LocalBinding,
+    suffix: &str,
+    context: &'a EncodeContext<'_>,
+) -> Vec<&'a StructScalarBinding> {
+    context
+        .struct_scalars
+        .values()
+        .filter(|scalar| scalar.type_id == binding.type_id && scalar.fields.contains_key(suffix))
+        .collect()
+}
+
+fn encode_scalar_field_load(
+    base_local: u32,
+    suffix: &str,
+    candidates: &[&StructScalarBinding],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((candidate, rest)) = candidates.split_first() else {
+        out.push(0x00);
+        return Ok(());
+    };
+    let field = &candidate.fields[suffix];
+    out.push(0x20);
+    uleb(base_local, out);
+    out.push(0x41);
+    sleb(candidate.base, out);
+    out.extend([0x46, 0x04, wasm_value_type(field.type_id)?]);
+    encode_scalar_memory_load(field, out)?;
+    out.push(0x05);
+    encode_scalar_field_load(base_local, suffix, rest, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_struct_field_load(
+    binding: &LocalBinding,
+    suffix: &str,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let field_type = context.named_structs[&binding.type_id][suffix];
+    let view = binding
+        .struct_view
+        .ok_or_else(|| "web struct binding has no view metadata".to_string())?;
+    out.push(0x20);
+    uleb(view.index, out);
+    out.extend([0x41, 0, 0x48, 0x04, wasm_value_type(field_type)?]);
+    let scalar_candidates = scalar_field_candidates(binding, suffix, context);
+    encode_scalar_field_load(binding.index, suffix, &scalar_candidates, out)?;
+    out.push(0x05);
+    let field = encode_struct_field_address(binding, suffix, context, out)?;
+    encode_memory_load(field.type_id, out)?;
+    out.push(0x0b);
+    Ok(field_type)
+}
+
+fn encode_scalar_field_store(
+    base_local: u32,
+    suffix: &str,
+    value_local: u32,
+    candidates: &[&StructScalarBinding],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((candidate, rest)) = candidates.split_first() else {
+        out.push(0x00);
+        return Ok(());
+    };
+    let field = &candidate.fields[suffix];
+    out.push(0x20);
+    uleb(base_local, out);
+    out.push(0x41);
+    sleb(candidate.base, out);
+    out.extend([0x46, 0x04, 0x40, 0x41]);
+    sleb(field.offset as i32, out);
+    out.push(0x20);
+    uleb(value_local, out);
+    encode_memory_store(field.type_id, out)?;
+    out.push(0x05);
+    encode_scalar_field_store(base_local, suffix, value_local, rest, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_struct_field_store_from_local(
+    binding: &LocalBinding,
+    suffix: &str,
+    value_local: u32,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let view = binding
+        .struct_view
+        .ok_or_else(|| "web struct binding has no view metadata".to_string())?;
+    out.push(0x20);
+    uleb(view.index, out);
+    out.extend([0x41, 0, 0x48, 0x04, 0x40]);
+    let scalar_candidates = scalar_field_candidates(binding, suffix, context);
+    encode_scalar_field_store(binding.index, suffix, value_local, &scalar_candidates, out)?;
+    out.push(0x05);
+    let field = encode_struct_field_address(binding, suffix, context, out)?;
+    out.push(0x20);
+    uleb(value_local, out);
+    encode_memory_store(field.type_id, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_foreach_load(
+    binding: &WebForeachBinding,
+    suffix: &str,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let memory = memory_binding(context, &binding.collection_path, suffix)?;
+    encode_memory_address(
+        memory,
+        &SimpleExpr::Identifier(binding.index_name.clone()),
+        context,
+        out,
+    )?;
+    encode_memory_load(memory.type_id, out)?;
+    Ok(memory.type_id)
+}
+
+fn encode_foreach_store(
+    binding: &WebForeachBinding,
+    suffix: &str,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let memory = memory_binding(context, &binding.collection_path, suffix)?;
+    let temp_index = scratch_local(context, memory.type_id)?;
+    out.push(0x21);
+    uleb(temp_index, out);
+    encode_memory_address(
+        memory,
+        &SimpleExpr::Identifier(binding.index_name.clone()),
+        context,
+        out,
+    )?;
+    out.push(0x20);
+    uleb(temp_index, out);
+    encode_memory_store(memory.type_id, out)
+}
+
+fn encode_memory_address(
+    binding: &MemoryBinding,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let index_type = encode_expr(index, context, out)?;
+    if !is_web_index_type(index_type, context) {
+        return Err(format!(
+            "web collection index must be i32-compatible, found type {index_type}"
+        ));
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+    emit_index_bounds_check(context.scratch_index, binding.len, out);
+    out.push(0x41);
+    sleb(binding.offset as i32, out);
+    out.push(0x20);
+    uleb(context.scratch_index, out);
+    out.push(0x41);
+    sleb(binding.width as i32, out);
+    out.push(0x6c);
+    out.push(0x6a);
+    Ok(())
+}
+
+fn local_collection_memory_candidates<'a>(
+    context: &'a EncodeContext<'_>,
+    element_type: TypeId,
+) -> Result<Vec<&'a MemoryBinding>, String> {
+    let element_lane = wasm_value_type(element_type)?;
+    let mut candidates = Vec::new();
+    for (path, binding) in context.memory {
+        if binding.scalar
+            || context
+                .global_types
+                .get(path)
+                .and_then(|type_id| context.types.indexed_element_type_id(*type_id))
+                .is_none()
+        {
+            continue;
+        }
+        if wasm_value_type(binding.type_id)? == element_lane {
+            candidates.push(binding);
+        }
+    }
+    Ok(candidates)
+}
+
+fn is_text_collection_type(type_id: TypeId, types: &TypeTable) -> bool {
+    types.type_info(type_id).is_some_and(|info| {
+        matches!(
+            info.category,
+            TypeCategory::AsciiFixed
+                | TypeCategory::AsciiView
+                | TypeCategory::Utf8Fixed
+                | TypeCategory::Utf8View
+        )
+    })
+}
+
+fn encode_local_collection_index(
+    binding: LocalBinding,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let element_type = context
+        .types
+        .indexed_element_type_id(binding.type_id)
+        .ok_or_else(|| format!("web local type {} is not indexable", binding.type_id))?;
+    storage_width(element_type, context.types, context.named_structs)?;
+    let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(index_type, context) {
+        return Err("web local collection index must be i32-compatible".to_string());
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+    Ok(element_type)
+}
+
+fn encode_registered_collection_store(
+    handle_local: u32,
+    index_local: u32,
+    value_local: u32,
+    element_type: TypeId,
+    candidates: &[&MemoryBinding],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((memory, rest)) = candidates.split_first() else {
+        out.push(0x00);
+        return Ok(());
+    };
+    out.push(0x20);
+    uleb(handle_local, out);
+    out.push(0x41);
+    sleb(memory.offset as i32, out);
+    out.extend([0x46, 0x04, 0x40]);
+    if wasm_value_type(memory.type_id)? != wasm_value_type(element_type)? {
+        return Err(format!(
+            "web collection store lane mismatch: view type {element_type}, storage type {}",
+            memory.type_id
+        ));
+    }
+    emit_index_bounds_check(index_local, memory.len, out);
+    out.push(0x41);
+    sleb(memory.offset as i32, out);
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x41);
+    sleb(memory.stride as i32, out);
+    out.extend([0x6c, 0x6a]);
+    out.push(0x20);
+    uleb(value_local, out);
+    encode_memory_store(memory.type_id, out)?;
+    out.push(0x05);
+    encode_registered_collection_store(
+        handle_local,
+        index_local,
+        value_local,
+        element_type,
+        rest,
+        out,
+    )?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_local_collection_store(
+    binding: LocalBinding,
+    index: &SimpleExpr,
+    value_local: u32,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let element_type = encode_local_collection_index(binding, index, context, out)?;
+    let candidates = local_collection_memory_candidates(context, element_type)?;
+    encode_registered_collection_store(
+        binding.index,
+        context.scratch_index,
+        value_local,
+        element_type,
+        &candidates,
+        out,
+    )
+}
+
+fn encode_string_literal_element_load<'a>(
+    handle_local: u32,
+    index_local: u32,
+    candidates: &mut impl Iterator<Item = (&'a i32, &'a StringLiteralMemoryBinding)>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((handle, binding)) = candidates.next() else {
+        out.push(0x00);
+        return Ok(());
+    };
+    out.push(0x20);
+    uleb(handle_local, out);
+    out.push(0x41);
+    sleb(*handle, out);
+    out.extend([0x46, 0x04, I32]);
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x41);
+    sleb(binding.byte_len, out);
+    out.extend([0x49, 0x04, I32]);
+    out.push(0x41);
+    sleb(binding.offset as i32, out);
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x6a);
+    encode_memory_load(TYPE_ID_U8, out)?;
+    out.extend([0x05, 0x41, 0x00, 0x0b, 0x05]);
+    encode_string_literal_element_load(handle_local, index_local, candidates, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_registered_collection_load(
+    handle_local: u32,
+    index_local: u32,
+    element_type: TypeId,
+    allow_string_literals: bool,
+    candidates: &[&MemoryBinding],
+    string_literal_memory: &BTreeMap<i32, StringLiteralMemoryBinding>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((memory, rest)) = candidates.split_first() else {
+        if allow_string_literals {
+            let mut literal_candidates = string_literal_memory.iter();
+            return encode_string_literal_element_load(
+                handle_local,
+                index_local,
+                &mut literal_candidates,
+                out,
+            );
+        }
+        out.push(0x00);
+        return Ok(());
+    };
+    out.push(0x20);
+    uleb(handle_local, out);
+    out.push(0x41);
+    sleb(memory.offset as i32, out);
+    let element_lane = wasm_value_type(element_type)?;
+    let memory_lane = wasm_value_type(memory.type_id)?;
+    if memory_lane != element_lane {
+        return Err(format!(
+            "web collection load lane mismatch: view type {element_type}, storage type {}",
+            memory.type_id
+        ));
+    }
+    out.extend([0x46, 0x04, element_lane]);
+    emit_index_bounds_check(index_local, memory.len, out);
+    out.push(0x41);
+    sleb(memory.offset as i32, out);
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x41);
+    sleb(memory.stride as i32, out);
+    out.extend([0x6c, 0x6a]);
+    encode_memory_load(memory.type_id, out)?;
+    out.push(0x05);
+    encode_registered_collection_load(
+        handle_local,
+        index_local,
+        element_type,
+        allow_string_literals,
+        rest,
+        string_literal_memory,
+        out,
+    )?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_local_collection_load(
+    binding: LocalBinding,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let element_type = encode_local_collection_index(binding, index, context, out)?;
+    let candidates = local_collection_memory_candidates(context, element_type)?;
+    let allow_string_literals = is_text_collection_type(binding.type_id, context.types);
+    if allow_string_literals && wasm_value_type(element_type)? != I32 {
+        return Err(format!(
+            "web text collection element type {element_type} is not i32-compatible"
+        ));
+    }
+    encode_registered_collection_load(
+        binding.index,
+        context.scratch_index,
+        element_type,
+        allow_string_literals,
+        &candidates,
+        context.string_literal_memory,
+        out,
+    )?;
+    Ok(element_type)
+}
+
+fn encode_memory_load(type_id: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
+    let (opcode, align) = match type_id {
+        TYPE_ID_BOOL | TYPE_ID_U8 => (0x2d, 0),
+        TYPE_ID_U16 => (0x2f, 1),
+        TYPE_ID_I32 | TYPE_ID_U32 => (0x28, 2),
+        TYPE_ID_F32 => (0x2a, 2),
+        TYPE_ID_F64 => (0x2b, 3),
+        _ if wasm_value_type(type_id)? == I32 => (0x28, 2),
+        _ => return Err(format!("unsupported web memory load type id {type_id}")),
+    };
+    out.push(opcode);
+    uleb(align, out);
+    uleb(0, out);
+    Ok(())
+}
+
+fn encode_memory_store(type_id: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
+    let (opcode, align) = match type_id {
+        TYPE_ID_BOOL | TYPE_ID_U8 => (0x3a, 0),
+        TYPE_ID_U16 => (0x3b, 1),
+        TYPE_ID_I32 | TYPE_ID_U32 => (0x36, 2),
+        TYPE_ID_F32 => (0x38, 2),
+        TYPE_ID_F64 => (0x39, 3),
+        _ if wasm_value_type(type_id)? == I32 => (0x36, 2),
+        _ => return Err(format!("unsupported web memory store type id {type_id}")),
+    };
+    out.push(opcode);
+    uleb(align, out);
+    uleb(0, out);
+    Ok(())
+}
+
+fn require_same_type(expected: TypeId, actual: TypeId, context: &str) -> Result<(), String> {
+    if wasm_value_type(expected)? == wasm_value_type(actual)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "web {context} type mismatch: expected {expected}, found {actual}"
+        ))
+    }
+}
+
+fn integer_binary_result_type(
+    expected: Option<TypeId>,
+    lhs: TypeId,
+    rhs: TypeId,
+    types: &TypeTable,
+) -> TypeId {
+    if let Some(expected) = expected.filter(|type_id| types.is_integer(*type_id)) {
+        return expected;
+    }
+    if lhs == rhs && types.is_integer(lhs) {
+        lhs
+    } else {
+        TYPE_ID_I32
+    }
+}
+
+fn numeric_binary_result_type(
+    expected: Option<TypeId>,
+    lhs: TypeId,
+    rhs: TypeId,
+    types: &TypeTable,
+) -> Result<TypeId, String> {
+    let lhs_integer = is_i32_numeric_type(lhs, types);
+    let rhs_integer = is_i32_numeric_type(rhs, types);
+    if lhs_integer && rhs_integer {
+        return Ok(integer_binary_result_type(expected, lhs, rhs, types));
+    }
+    let lhs_float = matches!(lhs, TYPE_ID_F32 | TYPE_ID_F64);
+    let rhs_float = matches!(rhs, TYPE_ID_F32 | TYPE_ID_F64);
+    if (lhs_integer || lhs_float) && (rhs_integer || rhs_float) {
+        return Ok(if lhs == TYPE_ID_F64 || rhs == TYPE_ID_F64 {
+            TYPE_ID_F64
+        } else {
+            TYPE_ID_F32
+        });
+    }
+    Err(format!(
+        "web binary expression requires numeric operands, found {lhs} and {rhs}"
+    ))
+}
+
+fn encode_numeric_promotion(
+    from: TypeId,
+    to: TypeId,
+    types: &TypeTable,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    if wasm_value_type(from)? == wasm_value_type(to)? {
+        return Ok(());
+    }
+    let unsigned = types.unsigned_integer_bits(from).is_some();
+    let opcode = match (wasm_value_type(from)?, wasm_value_type(to)?) {
+        (I32, F32) if is_i32_numeric_type(from, types) => {
+            if unsigned {
+                0xb3
+            } else {
+                0xb2
+            }
+        }
+        (I32, F64) if is_i32_numeric_type(from, types) => {
+            if unsigned {
+                0xb8
+            } else {
+                0xb7
+            }
+        }
+        (F32, F64) => 0xbb,
+        _ => {
+            return Err(format!(
+                "unsupported web numeric promotion from type {from} to {to}"
+            ))
+        }
+    };
+    out.push(opcode);
+    Ok(())
+}
+
+fn encode_binary_operands(
+    lhs: &SimpleExpr,
+    rhs: &SimpleExpr,
+    expected: Option<TypeId>,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let child_expected = match expected {
+        Some(TYPE_ID_F32) => Some(TYPE_ID_F32),
+        Some(TYPE_ID_F64) => Some(TYPE_ID_F64),
+        Some(type_id) if context.types.is_integer(type_id) => Some(type_id),
+        _ => None,
+    };
+    let mut lhs_bytes = Vec::new();
+    let mut rhs_bytes = Vec::new();
+    let (lhs_type, rhs_type) = if child_expected.is_none() && matches!(lhs, SimpleExpr::Int(_)) {
+        let rhs_type = encode_expr_as(rhs, None, context, &mut rhs_bytes)?;
+        let lhs_expected = context
+            .types
+            .unsigned_integer_bits(rhs_type)
+            .is_some()
+            .then_some(rhs_type);
+        let lhs_type = encode_expr_as(lhs, lhs_expected, context, &mut lhs_bytes)?;
+        (lhs_type, rhs_type)
+    } else {
+        let lhs_type = encode_expr_as(lhs, child_expected, context, &mut lhs_bytes)?;
+        let rhs_expected = child_expected.or_else(|| {
+            context
+                .types
+                .unsigned_integer_bits(lhs_type)
+                .is_some()
+                .then_some(lhs_type)
+        });
+        let rhs_type = encode_expr_as(rhs, rhs_expected, context, &mut rhs_bytes)?;
+        (lhs_type, rhs_type)
+    };
+    let result_type = numeric_binary_result_type(expected, lhs_type, rhs_type, context.types)?;
+    out.extend(lhs_bytes);
+    encode_numeric_promotion(lhs_type, result_type, context.types, out)?;
+    out.extend(rhs_bytes);
+    encode_numeric_promotion(rhs_type, result_type, context.types, out)?;
+    Ok(result_type)
+}
+
+fn encode_expr(
+    value: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    encode_expr_as(value, None, context, out)
+}
+
+fn encode_call_arguments(
+    target: &str,
+    args: &[SimpleExpr],
+    signature: &Signature,
+    context: &EncodeContext<'_>,
+) -> Result<Vec<u8>, String> {
+    if args.len() != signature.params.len() {
+        return Err(format!(
+            "web call '{target}' expected {} arguments, found {}",
+            signature.params.len(),
+            args.len()
+        ));
+    }
+    let mut encoded = Vec::new();
+    for (arg, param_type) in args.iter().zip(signature.params.iter()) {
+        if is_struct_view_type(*param_type, context.named_structs) {
+            let actual = encode_struct_view_expr(arg, context, &mut encoded)?;
+            require_same_struct_type(*param_type, actual, "call argument")?;
+        } else {
+            let actual = encode_expr_as(arg, Some(*param_type), context, &mut encoded)?;
+            if !are_call_argument_and_param_compatible(
+                actual,
+                *param_type,
+                context.types,
+                context.named_structs,
+            ) {
+                return Err(format!(
+                    "web call argument type mismatch: expected {param_type}, found {actual}"
+                ));
+            }
+        }
+    }
+    Ok(encoded)
+}
+
+fn resolve_call(
+    target: &str,
+    args: &[SimpleExpr],
+    expected: Option<TypeId>,
+    context: &EncodeContext<'_>,
+) -> Result<(u32, Vec<u8>), String> {
+    if let Some(index) = context
+        .imports
+        .get(target)
+        .or_else(|| context.internals.get(target))
+        .copied()
+    {
+        let signature = context
+            .signatures
+            .get(index as usize)
+            .ok_or_else(|| format!("missing web signature for '{target}'"))?;
+        return Ok((
+            index,
+            encode_call_arguments(target, args, signature, context)?,
+        ));
+    }
+    let Some(candidates) = context.internal_overloads.get(target) else {
+        return Err(format!("unknown web call '{target}'"));
+    };
+    let mut argument_types = Vec::with_capacity(args.len());
+    for argument in args {
+        if let Some(type_id) = infer_struct_view_type(argument, context) {
+            argument_types.push(type_id);
+            continue;
+        }
+        let type_id = if matches!(argument, SimpleExpr::StringLiteral(_)) {
+            context
+                .types
+                .string_literal_type_id()
+                .unwrap_or(TYPE_ID_I32)
+        } else {
+            encode_expr_as(argument, None, context, &mut Vec::new())?
+        };
+        argument_types.push(type_id);
+    }
+    let mut matches = Vec::new();
+    for index in candidates {
+        let Some(signature) = context.signatures.get(*index as usize) else {
+            continue;
+        };
+        if signature.params.len() != argument_types.len() {
+            continue;
+        }
+        if expected.is_some_and(|expected_type| {
+            !are_call_argument_and_param_compatible(
+                signature.result,
+                expected_type,
+                context.types,
+                context.named_structs,
+            )
+        }) {
+            continue;
+        }
+        if argument_types
+            .iter()
+            .zip(signature.params.iter())
+            .all(|(argument, parameter)| {
+                are_call_argument_and_param_compatible(
+                    *argument,
+                    *parameter,
+                    context.types,
+                    context.named_structs,
+                )
+            })
+        {
+            matches.push(*index);
+        }
+    }
+    match matches.len() {
+        1 => {
+            let index = matches.pop().expect("one web overload match");
+            let signature = context
+                .signatures
+                .get(index as usize)
+                .ok_or_else(|| format!("missing web signature for '{target}'"))?;
+            Ok((
+                index,
+                encode_call_arguments(target, args, signature, context)?,
+            ))
+        }
+        0 => Err(format!(
+            "web call '{target}' does not match any of {} overloads",
+            candidates.len()
+        )),
+        count => Err(format!(
+            "web call '{target}' is ambiguous across {count} overloads"
+        )),
+    }
+}
+
+fn infer_struct_view_type(value: &SimpleExpr, context: &EncodeContext<'_>) -> Option<TypeId> {
+    match value {
+        SimpleExpr::Identifier(name) => context
+            .locals
+            .get(name)
+            .filter(|binding| binding.struct_view.is_some())
+            .map(|binding| binding.type_id)
+            .or_else(|| {
+                context
+                    .foreach
+                    .get(name)
+                    .and_then(|binding| context.struct_collections.get(&binding.collection_path))
+                    .map(|binding| binding.type_id)
+            })
+            .or_else(|| {
+                context
+                    .struct_scalars
+                    .get(name)
+                    .map(|binding| binding.type_id)
+            }),
+        SimpleExpr::IndexedPath {
+            collection_path,
+            suffix,
+            ..
+        } if suffix.is_empty() => context
+            .struct_collections
+            .get(collection_path)
+            .map(|binding| binding.type_id),
+        _ => None,
+    }
+}
+
+fn encode_expr_as(
+    value: &SimpleExpr,
+    expected: Option<TypeId>,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    match value {
+        SimpleExpr::DefaultValue(type_id) => {
+            match *type_id {
+                TYPE_ID_F32 => {
+                    out.push(0x43);
+                    out.extend(0.0_f32.to_le_bytes());
+                }
+                TYPE_ID_F64 => {
+                    out.push(0x44);
+                    out.extend(0.0_f64.to_le_bytes());
+                }
+                _ => out.extend([0x41, 0x00]),
+            }
+            Ok(*type_id)
+        }
+        SimpleExpr::Int(value) => {
+            out.push(0x41);
+            sleb(*value as i32, out);
+            Ok(expected
+                .filter(|type_id| is_i32_lane(*type_id))
+                .unwrap_or(TYPE_ID_I32))
+        }
+        SimpleExpr::Float(value) => {
+            let type_id = expected
+                .filter(|type_id| matches!(*type_id, TYPE_ID_F32 | TYPE_ID_F64))
+                .unwrap_or(TYPE_ID_F32);
+            if type_id == TYPE_ID_F64 {
+                out.push(0x44);
+                out.extend(value.to_le_bytes());
+            } else {
+                out.push(0x43);
+                out.extend((*value as f32).to_le_bytes());
+            }
+            Ok(type_id)
+        }
+        SimpleExpr::Bool(value) => {
+            out.extend([0x41, u8::from(*value)]);
+            Ok(TYPE_ID_BOOL)
+        }
+        SimpleExpr::StringLiteral(value) => {
+            out.push(0x41);
+            sleb(crate::backend::emit::hash_string_literal(value), out);
+            Ok(expected.unwrap_or(TYPE_ID_I32))
+        }
+        SimpleExpr::Identifier(name) => {
+            if let Some((binding, suffix)) = foreach_path(context, name) {
+                encode_foreach_load(binding, suffix, context, out)
+            } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                let candidates = collection_meta_candidates(context, suffix);
+                encode_collection_meta_load(
+                    binding.index,
+                    suffix,
+                    &candidates,
+                    context.string_literal_memory,
+                    out,
+                )?;
+                Ok(TYPE_ID_I32)
+            } else if let Some((binding, suffix)) = local_struct_path(context, name) {
+                encode_struct_field_load(binding, suffix, context, out)
+            } else if let Some(binding) = context.locals.get(name) {
+                if binding.struct_view.is_some() {
+                    return Err(format!(
+                        "web struct view '{name}' requires a struct parameter or field access"
+                    ));
+                }
+                out.push(0x20);
+                uleb(binding.index, out);
+                Ok(binding.type_id)
+            } else if let Some(binding) = context.memory.get(name) {
+                if binding.scalar {
+                    encode_scalar_memory_load(binding, out)?;
+                    Ok(binding.type_id)
+                } else {
+                    out.push(0x41);
+                    sleb(binding.offset as i32, out);
+                    Ok(expected.unwrap_or(TYPE_ID_I32))
+                }
+            } else if let Some(index) = context.globals.get(name) {
+                out.push(0x23);
+                uleb(*index, out);
+                global_type(context, name)
+            } else if let Some(value) = context.constants.get(name) {
+                encode_constant(value, expected, out)
+            } else {
+                Err(format!("unknown web value '{name}'"))
+            }
+        }
+        SimpleExpr::Call { target, args } => {
+            if is_inline_intrinsic(target) {
+                return encode_inline_intrinsic(target, args, context, out);
+            }
+            let (index, encoded_args) = resolve_call(target, args, expected, context)?;
+            let signature = context
+                .signatures
+                .get(index as usize)
+                .ok_or_else(|| format!("missing web signature for '{target}'"))?;
+            out.extend(encoded_args);
+            out.push(0x10);
+            uleb(index, out);
+            Ok(signature.result)
+        }
+        SimpleExpr::Binary { lhs, op, rhs } => {
+            let result_type = encode_binary_operands(lhs, rhs, expected, context, out)?;
+            let assign_op = match op {
+                '+' => AssignOp::Add,
+                '-' => AssignOp::Sub,
+                '*' => AssignOp::Mul,
+                '/' => AssignOp::Div,
+                '%' => AssignOp::Mod,
+                other => return Err(format!("unsupported web binary operator '{other}'")),
+            };
+            out.push(arithmetic_opcode(assign_op, result_type)?);
+            Ok(result_type)
+        }
+        SimpleExpr::Condition(condition) => {
+            encode_condition(condition, context, out)?;
+            Ok(TYPE_ID_BOOL)
+        }
+        SimpleExpr::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            if suffix.is_empty()
+                && expected
+                    .is_some_and(|type_id| is_struct_view_type(type_id, context.named_structs))
+            {
+                return Err(format!(
+                    "web struct collection element '{collection_path}' requires view context"
+                ));
+            }
+            if suffix.is_empty() {
+                if let Some(local) = context.locals.get(collection_path).copied() {
+                    return encode_local_collection_load(local, index, context, out);
+                }
+            }
+            if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
+                encode_receiver_array_address(&binding, index, context, out)?;
+                encode_memory_load(binding.element_type, out)?;
+                return Ok(binding.element_type);
+            }
+            let binding = memory_binding(context, collection_path, suffix)?;
+            encode_memory_address(binding, index, context, out)?;
+            encode_memory_load(binding.type_id, out)?;
+            Ok(binding.type_id)
+        }
+    }
+}
+
+fn is_inline_intrinsic(target: &str) -> bool {
+    matches!(
+        target,
+        "i32_to_f32"
+            | "f32_to_i32"
+            | "fixed32_from_i32"
+            | "fixed32_to_i32"
+            | "fixed32_mul"
+            | "fixed32_div"
+            | "fixed32_from_ratio"
+    )
+}
+
+fn encode_inline_intrinsic(
+    target: &str,
+    args: &[SimpleExpr],
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let expected = if matches!(target, "fixed32_mul" | "fixed32_div" | "fixed32_from_ratio") {
+        2
+    } else {
+        1
+    };
+    if args.len() != expected {
+        return Err(format!(
+            "web intrinsic '{target}' expects {expected} argument(s), found {}",
+            args.len()
+        ));
+    }
+    match target {
+        "i32_to_f32" => {
+            let actual = encode_expr_as(&args[0], Some(TYPE_ID_I32), context, out)?;
+            require_same_type(TYPE_ID_I32, actual, "intrinsic argument")?;
+            out.push(0xb2);
+            Ok(TYPE_ID_F32)
+        }
+        "f32_to_i32" => {
+            let actual = encode_expr_as(&args[0], Some(TYPE_ID_F32), context, out)?;
+            require_same_type(TYPE_ID_F32, actual, "intrinsic argument")?;
+            out.push(0xa8);
+            Ok(TYPE_ID_I32)
+        }
+        "fixed32_from_i32" => {
+            encode_exact_i32_arg(&args[0], context, out)?;
+            out.extend([0x41, 16, 0x74]);
+            Ok(TYPE_ID_I32)
+        }
+        "fixed32_to_i32" => {
+            encode_exact_i32_arg(&args[0], context, out)?;
+            out.push(0x41);
+            sleb(65_536, out);
+            out.push(0x6d);
+            Ok(TYPE_ID_I32)
+        }
+        "fixed32_mul" => {
+            encode_exact_i32_arg(&args[0], context, out)?;
+            out.push(0xac);
+            encode_exact_i32_arg(&args[1], context, out)?;
+            out.extend([0xac, 0x7e, 0x42]);
+            sleb64(65_536, out);
+            out.extend([0x7f, 0xa7]);
+            Ok(TYPE_ID_I32)
+        }
+        "fixed32_div" | "fixed32_from_ratio" => {
+            encode_exact_i32_arg(&args[0], context, out)?;
+            out.extend([0xac, 0x42]);
+            sleb64(16, out);
+            out.push(0x86);
+            encode_exact_i32_arg(&args[1], context, out)?;
+            out.extend([0xac, 0x7f, 0xa7]);
+            Ok(TYPE_ID_I32)
+        }
+        _ => Err(format!("unknown web intrinsic '{target}'")),
+    }
+}
+
+fn encode_exact_i32_arg(
+    value: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let actual = encode_expr_as(value, Some(TYPE_ID_I32), context, out)?;
+    if actual != TYPE_ID_I32 {
+        return Err(format!(
+            "web deterministic numeric intrinsic requires exact i32 argument, found {actual}"
+        ));
+    }
+    Ok(())
+}
+
+fn encode_constant(
+    value: &ConstantValue,
+    expected: Option<TypeId>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    match value {
+        ConstantValue::I32 { value, type_id } => {
+            out.push(0x41);
+            sleb(*value, out);
+            Ok(*type_id)
+        }
+        ConstantValue::Bool(value) => {
+            out.extend([0x41, u8::from(*value)]);
+            Ok(TYPE_ID_BOOL)
+        }
+        ConstantValue::F32(value) => {
+            out.push(0x43);
+            out.extend(value.to_le_bytes());
+            Ok(TYPE_ID_F32)
+        }
+        ConstantValue::F64(value) => {
+            out.push(0x44);
+            out.extend(value.to_le_bytes());
+            Ok(TYPE_ID_F64)
+        }
+        ConstantValue::String { value, type_id } => {
+            out.push(0x41);
+            sleb(crate::backend::emit::hash_string_literal(value), out);
+            Ok(expected.unwrap_or(*type_id))
+        }
+    }
+}
+
+fn encode_condition(
+    value: &SimpleCondition,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    match value {
+        SimpleCondition::Comparison { lhs, op, rhs } => {
+            let lhs_type = encode_expr(lhs, context, out)?;
+            let rhs_type = encode_expr_as(rhs, Some(lhs_type), context, out)?;
+            require_same_type(lhs_type, rhs_type, "comparison")?;
+            out.push(comparison_opcode(*op, lhs_type)?);
+        }
+        SimpleCondition::Expr(value) => {
+            encode_expr(value, context, out)?;
+        }
+        SimpleCondition::And(lhs, rhs) => {
+            encode_condition(lhs, context, out)?;
+            out.extend([0x04, I32]);
+            encode_condition(rhs, context, out)?;
+            out.extend([0x05, 0x41, 0, 0x0b]);
+        }
+        SimpleCondition::Or(lhs, rhs) => {
+            encode_condition(lhs, context, out)?;
+            out.extend([0x04, I32, 0x41, 1, 0x05]);
+            encode_condition(rhs, context, out)?;
+            out.push(0x0b);
+        }
+        SimpleCondition::Not(value) => {
+            encode_condition(value, context, out)?;
+            out.push(0x45);
+        }
+    }
+    Ok(())
+}
+
+fn comparison_opcode(op: ComparisonOp, type_id: TypeId) -> Result<u8, String> {
+    match (op, wasm_value_type(type_id)?) {
+        (ComparisonOp::Eq, I32) => Ok(0x46),
+        (ComparisonOp::Ne, I32) => Ok(0x47),
+        (ComparisonOp::Lt, I32) => Ok(0x48),
+        (ComparisonOp::Gt, I32) => Ok(0x4a),
+        (ComparisonOp::Le, I32) => Ok(0x4c),
+        (ComparisonOp::Ge, I32) => Ok(0x4e),
+        (ComparisonOp::Eq, F32) => Ok(0x5b),
+        (ComparisonOp::Ne, F32) => Ok(0x5c),
+        (ComparisonOp::Lt, F32) => Ok(0x5d),
+        (ComparisonOp::Gt, F32) => Ok(0x5e),
+        (ComparisonOp::Le, F32) => Ok(0x5f),
+        (ComparisonOp::Ge, F32) => Ok(0x60),
+        (ComparisonOp::Eq, F64) => Ok(0x61),
+        (ComparisonOp::Ne, F64) => Ok(0x62),
+        (ComparisonOp::Lt, F64) => Ok(0x63),
+        (ComparisonOp::Gt, F64) => Ok(0x64),
+        (ComparisonOp::Le, F64) => Ok(0x65),
+        (ComparisonOp::Ge, F64) => Ok(0x66),
+        _ => Err("unsupported web comparison lane".to_string()),
+    }
+}
+
+fn expression_returns_value(
+    value: &SimpleExpr,
+    context: &EncodeContext<'_>,
+) -> Result<bool, String> {
+    if let SimpleExpr::Call { target, args } = value {
+        let (index, _) = resolve_call(target, args, None, context)?;
+        return Ok(context.signatures[index as usize].result != TYPE_ID_VOID);
+    }
+    Ok(true)
+}
+
+fn encode_zero(type_id: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
+    match wasm_value_type(type_id)? {
+        I32 => out.extend([0x41, 0]),
+        F32 => {
+            out.push(0x43);
+            out.extend(0.0f32.to_le_bytes());
+        }
+        F64 => {
+            out.push(0x44);
+            out.extend(0.0f64.to_le_bytes());
+        }
+        _ => return Err("unsupported web zero value".to_string()),
+    }
+    Ok(())
+}
+
+fn collect_string_literals(
+    functions: &[(FunctionMeta, FunctionHIR)],
+    constants: &BTreeMap<String, ConstantValue>,
+) -> BTreeMap<i32, String> {
+    fn expression(
+        value: &SimpleExpr,
+        constants: &BTreeMap<String, ConstantValue>,
+        out: &mut BTreeMap<i32, String>,
+    ) {
+        match value {
+            SimpleExpr::StringLiteral(value) => {
+                out.insert(
+                    crate::backend::emit::hash_string_literal(value),
+                    value.clone(),
+                );
+            }
+            SimpleExpr::Identifier(name) => {
+                if let Some(ConstantValue::String { value, .. }) = constants.get(name) {
+                    out.insert(
+                        crate::backend::emit::hash_string_literal(value),
+                        value.clone(),
+                    );
+                }
+            }
+            SimpleExpr::Condition(value) => condition(value, constants, out),
+            SimpleExpr::IndexedPath { index, .. } => expression(index, constants, out),
+            SimpleExpr::Call { args, .. } => {
+                for arg in args {
+                    expression(arg, constants, out);
+                }
+            }
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                expression(lhs, constants, out);
+                expression(rhs, constants, out);
+            }
+            _ => {}
+        }
+    }
+    fn condition(
+        value: &SimpleCondition,
+        constants: &BTreeMap<String, ConstantValue>,
+        out: &mut BTreeMap<i32, String>,
+    ) {
+        match value {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                expression(lhs, constants, out);
+                expression(rhs, constants, out);
+            }
+            SimpleCondition::Expr(value) => expression(value, constants, out),
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                condition(lhs, constants, out);
+                condition(rhs, constants, out);
+            }
+            SimpleCondition::Not(value) => condition(value, constants, out),
+        }
+    }
+    fn statements(
+        values: &[SimpleStmt],
+        constants: &BTreeMap<String, ConstantValue>,
+        out: &mut BTreeMap<i32, String>,
+    ) {
+        for value in values {
+            match value {
+                SimpleStmt::Let {
+                    expression: value, ..
+                }
+                | SimpleStmt::Assign {
+                    expression: value, ..
+                }
+                | SimpleStmt::Expr(value)
+                | SimpleStmt::Return(value) => expression(value, constants, out),
+                SimpleStmt::Convert { source, .. } => expression(source, constants, out),
+                SimpleStmt::If {
+                    condition: value,
+                    then_statements,
+                    else_statements,
+                } => {
+                    condition(value, constants, out);
+                    statements(then_statements, constants, out);
+                    if let Some(values) = else_statements {
+                        statements(values, constants, out);
+                    }
+                }
+                SimpleStmt::For {
+                    init,
+                    condition: value,
+                    step,
+                    body_statements,
+                } => {
+                    statements(std::slice::from_ref(init), constants, out);
+                    condition(value, constants, out);
+                    statements(std::slice::from_ref(step), constants, out);
+                    statements(body_statements, constants, out);
+                }
+                SimpleStmt::Foreach {
+                    body_statements, ..
+                } => statements(body_statements, constants, out),
+                SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    for (_, hir) in functions {
+        statements(&hir.statements, constants, &mut out);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn read_test_uleb(bytes: &[u8], cursor: &mut usize) -> u32 {
+        let mut value = 0;
+        let mut shift = 0;
+        loop {
+            let byte = bytes[*cursor];
+            *cursor += 1;
+            value |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+
+    fn section_entry_count(module: &[u8], expected_section_id: u8) -> u32 {
+        let mut cursor = 8;
+        while cursor < module.len() {
+            let section_id = module[cursor];
+            cursor += 1;
+            let section_len = read_test_uleb(module, &mut cursor) as usize;
+            if section_id == expected_section_id {
+                return read_test_uleb(module, &mut cursor);
+            }
+            cursor += section_len;
+        }
+        0
+    }
+
+    #[test]
+    fn encodes_one_unsigned_bounds_trap_for_both_invalid_regions() {
+        let mut bytes = Vec::new();
+        emit_index_bounds_check(3, 7, &mut bytes);
+        assert_eq!(bytes, [0x20, 3, 0x41, 7, 0x4f, 0x04, 0x40, 0x00, 0x0b]);
+        for index in [-1, 0, 6, 7, i32::MAX] {
+            assert_eq!(
+                (index as u32) >= 7,
+                index < 0 || index >= 7,
+                "unsigned comparison changed bounds semantics for {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn groups_adjacent_wasm_local_types() {
+        let mut bytes = Vec::new();
+        encode_local_declarations(&[I32, I32, I32, F32, F64, F64], &mut bytes);
+        assert_eq!(bytes, [3, 3, I32, 1, F32, 2, F64]);
+    }
+
+    #[test]
+    fn omits_fallback_only_after_an_explicit_return() {
+        let return_zero = SimpleStmt::Return(SimpleExpr::Int(0));
+        assert!(ends_with_explicit_return(std::slice::from_ref(
+            &return_zero
+        )));
+        assert!(!ends_with_explicit_return(&[SimpleStmt::If {
+            condition: SimpleCondition::Expr(SimpleExpr::Bool(true)),
+            then_statements: vec![return_zero.clone()],
+            else_statements: Some(vec![return_zero]),
+        }]));
+        assert!(!ends_with_explicit_return(&[SimpleStmt::If {
+            condition: SimpleCondition::Expr(SimpleExpr::Bool(true)),
+            then_statements: vec![SimpleStmt::Return(SimpleExpr::Int(0))],
+            else_statements: None,
+        }]));
+    }
+
+    #[test]
+    fn emits_valid_wasm_header_and_real_entry_exports() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "web.stasis",
+            "global x: i32; function truth(value: bool): i32 { if (value) { return 1; } return 0; } function main(): i32 { print_i32(1); print_int(2); x = 3; return x + truth(true); } function tick(): i32 { x += 1; return x; } function render(): i32 { return x; }",
+        );
+        process.compile().expect("compile web module");
+        assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+        assert_eq!(
+            section_entry_count(process.module_bytes(), 1),
+            6,
+            "equivalent import, internal, and accessor signatures should share Wasm types"
+        );
+        assert_eq!(
+            process
+                .program_snapshot()
+                .expect("web ProgramSnapshot")
+                .global_type_ids()["x"],
+            TYPE_ID_I32
+        );
+        for name in ["main", "tick", "render"] {
+            assert!(process
+                .module_bytes()
+                .windows(name.len())
+                .any(|window| window == name.as_bytes()));
+        }
+    }
+
+    #[test]
+    fn collects_reachable_string_constants_and_inline_literals() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "string_constants.stasis",
+            r#"
+const USED_PATH: string = "/assets/used.svg";
+const UNUSED_PATH: string = "/assets/unused.svg";
+extern function consume(path: string): i32;
+function main(): i32 { return consume(USED_PATH); }
+function tick(): i32 { return consume("direct literal"); }
+function render(): i32 { return 0; }
+"#,
+        );
+        process.compile().expect("compile string constants");
+
+        let strings = process.string_literals();
+        assert_eq!(
+            strings.get(&crate::backend::emit::hash_string_literal(
+                "/assets/used.svg"
+            )),
+            Some(&"/assets/used.svg".to_string())
+        );
+        assert_eq!(
+            strings.get(&crate::backend::emit::hash_string_literal("direct literal")),
+            Some(&"direct literal".to_string())
+        );
+        assert!(!strings.values().any(|value| value == "/assets/unused.svg"));
+    }
+
+    #[test]
+    fn rejects_continue_outside_a_loop() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "invalid_continue.stasis",
+            "function main(): i32 { continue; return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        let error = process.compile().expect_err("reject continue outside loop");
+        assert!(
+            format!("{error:?}").contains("continue statement is only valid inside loops"),
+            "unexpected web continue diagnostic: {error:?}"
+        );
+    }
+
+    #[test]
+    fn reports_only_imports_called_by_reachable_functions() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "imports.stasis",
+            "extern function live(): i32; extern function dead(): i32; function main(): i32 { return live(); } function tick(): i32 { return 0; } function render(): i32 { return 0; } function unused(): i32 { return dead(); }",
+        );
+        process.compile().expect("compile reachable web imports");
+        assert_eq!(
+            process.imported_symbols(),
+            &BTreeSet::from(["live".to_string()])
+        );
+        assert!(!process
+            .module_bytes()
+            .windows("dead".len())
+            .any(|window| window == b"dead"));
+    }
+
+    #[test]
+    fn release_wasm_keeps_internal_global_names_private() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "release.stasis",
+            "global internal_score: i32; function main(): i32 { internal_score = 4; return internal_score; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile release web module");
+        assert!(!process
+            .module_bytes()
+            .windows("internal_score".len())
+            .any(|window| window == b"internal_score"));
+        for exported in [
+            "__stasis_global_get_i32",
+            "__stasis_global_set_i32",
+            "main",
+            "tick",
+            "render",
+        ] {
+            assert!(process
+                .module_bytes()
+                .windows(exported.len())
+                .any(|window| window == exported.as_bytes()));
+        }
+    }
+
+    #[test]
+    fn passes_fixed_collection_offsets_to_array_view_host_imports() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "audio.stasis",
+            "global samples: f32[4]; extern function audio_push_f32_interleaved(values: f32[], frames: i32): i32; function main(): i32 { samples[0] = 0.25; return audio_push_f32_interleaved(samples, 2); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile web audio view module");
+        assert_eq!(process.memory_layout()["samples"].offset, 0);
+        assert!(process
+            .module_bytes()
+            .windows("audio_push_f32_interleaved".len())
+            .any(|window| window == b"audio_push_f32_interleaved"));
+    }
+
+    #[test]
+    fn indexes_and_updates_internal_collection_views() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "views.stasis",
+            "global text: ascii[8]; function update(s: ascii[]): i32 { s[0] = 65; s.length = 1; return s[0] + s.length + s.max_length; } function main(): i32 { return update(text); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile web collection views");
+    }
+
+    #[test]
+    fn reads_and_updates_utf8_view_char_lengths() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "utf8_views.stasis",
+            "global text: utf8[8]; function update(s: utf8[]): i32 { s.char_length = 2; return s.char_length + s.max_length; } function main(): i32 { return update(text); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile mutable UTF-8 view metadata");
+    }
+
+    #[test]
+    fn lowers_foreach_over_struct_collection_storage() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "foreach.stasis",
+            "struct Item { value: i32; active: bool; } global items: Item[4]; function main(): i32 { items[2].value = 7; items[2].active = true; return 0; } function tick(): i32 { foreach (let item, i in items) { if (item.active) { item.value += i; } } return items[2].value; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile web foreach module");
+        assert_eq!(process.memory_layout()["items.value"].length, 4);
+        assert_eq!(process.memory_layout()["items.active"].length, 4);
+    }
+
+    #[test]
+    fn passes_struct_collection_elements_as_native_shape_views() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "views.stasis",
+            "struct Item { value: i32; active: bool; } global items: Item[4]; global chosen: Item; function read(item: Item): i32 { if (item.active) { return item.value; } return 0; } function main(): i32 { chosen.value = 3; chosen.active = true; items[2].value = 7; items[2].active = true; items[1] = items[2]; let selected: Item = items[1]; selected.value += read(chosen); return read(selected); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile web struct views");
+        assert_eq!(process.memory_layout()["items.value"].length, 4);
+        assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+    }
+
+    #[test]
+    fn reads_and_writes_receiver_array_fields_across_struct_instances() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "receiver_arrays.stasis",
+            r#"
+const CAP: i32 = 4;
+
+struct Batch {
+    values: f32[CAP];
+}
+
+global first: Batch;
+global second: Batch;
+
+function write(self: Batch, index: i32, value: f32): void {
+    self.values[index] = value;
+    self.values[index] += 0.5;
+}
+
+function read(self: Batch, index: i32): f32 {
+    return self.values[index];
+}
+
+function main(): i32 {
+    first.write(1, 2.0);
+    second.write(2, 4.0);
+    return f32_to_i32(first.read(1) + second.read(2));
+}
+
+function tick(): i32 { return 0; }
+function render(): i32 { return 0; }
+"#,
+        );
+        process
+            .compile()
+            .expect("compile receiver array field reads and writes for web");
+        assert_eq!(process.memory_layout()["first.values"].length, 4);
+        assert_eq!(process.memory_layout()["second.values"].length, 4);
+        assert_ne!(
+            process.memory_layout()["first.values"].offset,
+            process.memory_layout()["second.values"].offset
+        );
+    }
+
+    #[test]
+    fn reads_and_writes_receiver_struct_array_fields_across_instances() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "receiver_struct_arrays.stasis",
+            r#"
+struct Pointer {
+    id: i32;
+    active: bool;
+    x: f32;
+}
+
+struct Frame {
+    pointers: Pointer[2];
+}
+
+global first: Frame;
+global second: Frame;
+
+function write(self: Frame, index: i32, id: i32, active: bool, x: f32): void {
+    self.pointers[index].id = id;
+    self.pointers[index].active = active;
+    self.pointers[index].x = x;
+}
+
+function score(self: Frame, index: i32): i32 {
+    let result: i32 = self.pointers[index].id + f32_to_i32(self.pointers[index].x * 2.0);
+    if (self.pointers[index].active) {
+        result += 100;
+    }
+    return result;
+}
+
+function main(): i32 {
+    first.write(1, 11, true, 1.5);
+    second.write(1, 22, false, 4.5);
+    return first.score(1) + second.score(1);
+}
+
+function tick(): i32 { return 0; }
+function render(): i32 { return 0; }
+"#,
+        );
+        process
+            .compile()
+            .expect("compile receiver struct array field reads and writes for web");
+        for field in ["id", "active", "x"] {
+            let first = &process.memory_layout()[&format!("first.pointers.{field}")];
+            let second = &process.memory_layout()[&format!("second.pointers.{field}")];
+            assert_eq!(first.length, 2);
+            assert_eq!(second.length, 2);
+            assert_ne!(first.offset, second.offset);
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_receiver_struct_array_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write receiver struct array wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for receiver struct array wasm");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "145");
+    }
+
+    #[test]
+    fn evaluates_receiver_array_compound_index_once() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "receiver_array_index.stasis",
+            r#"
+const CAP: i32 = 4;
+struct Batch { values: f32[CAP]; }
+global batch: Batch;
+global calls: i32;
+
+function next_index(): i32 {
+    calls += 1;
+    return 1;
+}
+
+function update(self: Batch): void {
+    self.values[next_index()] += self.values[0];
+}
+
+function main(): i32 {
+    batch.values[0] = 0.5;
+    batch.values[1] = 2.0;
+    batch.update();
+    return calls * 10 + f32_to_i32(batch.values[1] * 2.0);
+}
+
+function tick(): i32 { return 0; }
+function render(): i32 { return 0; }
+"#,
+        );
+        process
+            .compile()
+            .expect("compile single-evaluation receiver compound assignment");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_receiver_compound_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write receiver compound wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for receiver compound wasm");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "15");
+    }
+
+    #[test]
+    fn resolves_internal_overloads_from_struct_receiver_types() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "overloads.stasis",
+            "struct ImageAsset { image_handle: i32; } struct AudioAsset { audio_handle: i32; } global image: ImageAsset; global audio: AudioAsset; function ready(self: ImageAsset): bool { return self.image_handle == 1; } function ready(self: AudioAsset): bool { return self.audio_handle == 2; } function main(): i32 { image.image_handle = 1; audio.audio_handle = 2; if (image.ready() && audio.ready()) { return 0; } return 1; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile receiver overloads for web");
+    }
+
+    #[test]
+    fn resolves_internal_overloads_from_enum_receiver_types() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "enum_overloads.stasis",
+            "enum ImageState { None, Ready } enum AudioState { None, Ready } global image: ImageState; global audio: AudioState; function ready(self: ImageState): bool { return self == ImageState.Ready; } function ready(self: AudioState): bool { return self == AudioState.Ready; } function main(): i32 { image = ImageState.Ready; audio = AudioState.Ready; if (image.ready() && audio.ready()) { return 0; } return 1; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile enum receiver overloads for web");
+    }
+
+    #[test]
+    fn resolves_internal_overloads_before_encoding_float_literals() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "float_overloads.stasis",
+            "function select(value: f32): i32 { return 1; } function select(value: f64): i32 { return 2; } function main(): i32 { return select(1.0); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile semantic float overload for web");
+    }
+
+    #[test]
+    fn stores_flattened_struct_state_in_linear_memory() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "linear_state.stasis",
+            "struct Inner { value: i32; } struct State { inner: Inner; enabled: bool; values: i32[4]; } global state: State; global standalone: i32; function main(): i32 { state.inner.value = 7; state.enabled = true; state.values.length = 2; standalone = 9; return state.inner.value + state.values.length + standalone; } function tick(): i32 { return state.values.max_length; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile linear struct state module");
+
+        for path in [
+            "state.inner.value",
+            "state.enabled",
+            "state.values.length",
+            "state.values.max_length",
+        ] {
+            let binding = &process.memory_layout()[path];
+            assert_eq!(binding.length, 1, "{path} should be scalar memory");
+        }
+        assert_eq!(
+            section_entry_count(process.module_bytes(), 6),
+            1,
+            "only the true top-level scalar should remain a Wasm global"
+        );
+        assert_eq!(
+            section_entry_count(process.module_bytes(), 11),
+            2,
+            "collection length metadata should receive memory initializers"
+        );
+    }
+
+    #[test]
+    fn lowers_numeric_intrinsics_without_fake_host_calls() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "intrinsics.stasis",
+            "function main(): i32 { let scaled: i32 = fixed32_mul(fixed32_from_i32(3), fixed32_from_ratio(1, 2)); let value: f32 = i32_to_f32(fixed32_to_i32(scaled)); return f32_to_i32(value); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile web intrinsic module");
+        assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+    }
+
+    #[test]
+    fn promotes_mixed_numeric_binary_operands_like_the_jit() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "mixed_numeric.stasis",
+            "function blend(count: i32, scale: f32): f32 { return count * scale + scale * count; } function main(): i32 { return f32_to_i32(blend(2, 0.5)); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile mixed numeric binary expressions");
+        assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+    }
+
+    #[test]
+    fn uses_signed_and_unsigned_wasm_numeric_promotions() {
+        let types = TypeTable::new();
+        let mut bytes = Vec::new();
+        encode_numeric_promotion(TYPE_ID_I32, TYPE_ID_F32, &types, &mut bytes)
+            .expect("promote signed i32 to f32");
+        encode_numeric_promotion(TYPE_ID_U32, TYPE_ID_F32, &types, &mut bytes)
+            .expect("promote unsigned i32 lane to f32");
+        encode_numeric_promotion(TYPE_ID_I32, TYPE_ID_F64, &types, &mut bytes)
+            .expect("promote signed i32 to f64");
+        encode_numeric_promotion(TYPE_ID_U32, TYPE_ID_F64, &types, &mut bytes)
+            .expect("promote unsigned i32 lane to f64");
+        encode_numeric_promotion(TYPE_ID_F32, TYPE_ID_F64, &types, &mut bytes)
+            .expect("promote f32 to f64");
+        assert_eq!(bytes, [0xb2, 0xb3, 0xb7, 0xb8, 0xbb]);
+    }
+
+    #[test]
+    fn reuses_same_typed_local_names_from_disjoint_scopes() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "scopes.stasis",
+            "function main(): i32 { if (true) { let row: i32 = 2; } else { let row: i32 = 3; } if (true) { let row: i32 = 4; return row; } return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile repeated scoped locals");
+    }
+
+    #[test]
+    fn lowers_boolean_conditions_with_native_short_circuit_semantics() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "short_circuit.stasis",
+            "global values: i32[2]; function main(): i32 { let index: i32 = -1; if (index >= 0 && values[index] == 0) { return 1; } if (index < 0 || values[index] == 0) { return 2; } return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile short-circuit conditions");
+    }
+}

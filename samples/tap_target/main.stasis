@@ -1,0 +1,63 @@
+import ".stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+const SCREEN_W: f32 = 360.0;
+const SCREEN_H: f32 = 640.0;
+const TARGET_SIZE: f32 = 72.0;
+
+struct TargetState {
+    x: f32;
+    y: f32;
+    taps: i32;
+}
+
+global state: TargetState;
+global tap_target_host_frame: HostFrame;
+
+function target_contains(x: f32, y: f32): bool {
+    return x >= state.x && x <= state.x + TARGET_SIZE && y >= state.y && y <= state.y + TARGET_SIZE;
+}
+
+function move_target(): void {
+    // A fixed sequence keeps every platform and test deterministic.
+    if (state.taps % 3 == 0) {
+        state.x = 48.0;
+        state.y = 180.0;
+    } else if (state.taps % 3 == 1) {
+        state.x = 240.0;
+        state.y = 320.0;
+    } else {
+        state.x = 112.0;
+        state.y = 456.0;
+    }
+}
+
+function main(): i32 {
+    init_window(360, 640, "Stasis Tap Target");
+    state.taps = 0;
+    move_target();
+    return 0;
+}
+
+function tick(): i32 {
+    tap_target_host_frame.refresh();
+    if (tap_target_host_frame.quit_requested) {
+        return 1;
+    }
+    if (tap_target_host_frame.pointer_count > 0 && tap_target_host_frame.pointers[0].went_down) {
+        if (target_contains(tap_target_host_frame.pointers[0].x_logical, tap_target_host_frame.pointers[0].y_logical)) {
+            state.taps = state.taps + 1;
+            move_target();
+        }
+    }
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.04, 0.06, 0.10, 1.0);
+    fill_rect(0.0, 0.0, SCREEN_W, SCREEN_H, 0.04, 0.06, 0.10, 1.0);
+    fill_rect(state.x, state.y, TARGET_SIZE, TARGET_SIZE, 0.95, 0.25, 0.48, 1.0);
+    fill_rect(state.x + 12.0, state.y + 12.0, TARGET_SIZE - 24.0, TARGET_SIZE - 24.0, 1.0, 0.82, 0.30, 1.0);
+    end_frame();
+    return 0;
+}

@@ -1,8 +1,36 @@
 # Stasis Asset Manifest v2
 
-`assets/manifest.json` is the shared project contract for asset identity, integrity, and optional build-time raster preparation. Desktop, JIT, AOT, Android Workshop, and published runtimes consume this contract rather than inventing platform-specific asset IDs or accepting arbitrary filesystem paths.
+`assets/manifest.json` is the optional authored project contract for asset identity,
+integrity, dynamic asset closure, and build-time raster preparation. Statically
+referenced sprites and fonts do not require a source manifest: Stasis derives their
+canonical paths, formats, dimensions, hashes, deterministic IDs, and stable handles
+from the compiler's reachable asset references and the files themselves. The resolved
+manifest remains in memory until a prepared or published runtime needs a serialized
+package index.
 
-Version 1 manifests remain valid and package their files unchanged. Version 2 adds optional display and sprite preparation metadata.
+An authored manifest still takes precedence when present. Use one for dynamically
+constructed asset paths, explicit IDs that must remain stable across path renames,
+dependencies, preparation/display policy, or asset metadata that Stasis cannot yet
+infer safely. Audio currently remains in that last category.
+
+Version 1 manifests remain valid and package their files unchanged. Version 2 adds optional display and sprite preparation metadata. Sprite-sheet layout metadata is optional and is also accepted by version 1 manifests for backward-compatible asset description.
+
+## Packaged manifest identity
+
+Every staged package that contains `assets/manifest.json` also contains
+`stasis_asset_package.json` beside the asset root. Version 1 has exactly four
+fields: schema `stasis.asset_package`, version `1`, manifest path
+`assets/manifest.json`, and the lowercase SHA-256 of the exact packaged
+manifest bytes. It does not repeat asset rows: `assets/manifest.json` remains
+the sole asset inventory and retains its v1/v2 compatibility rules.
+
+Prepared bundles compute the identity after rewriting preparation hashes and
+dimensions, so the digest identifies the bytes consumers actually receive.
+Development Web runtime metadata carries the same identity for inspection.
+Release Web packages keep it out of `game.js`: the external sidecar and the
+complete metadata copied into `stasis_provenance.json` are the audit contract.
+Package provenance verification rejects a sidecar whose manifest is missing or
+whose digest no longer matches.
 
 ## Prepared sprite example
 
@@ -17,6 +45,7 @@ Version 1 manifests remain valid and package their files unchanged. Version 2 ad
     "max_physical_height": 3200,
     "scale_mode": "fit"
   },
+  "dynamic_assets": ["assets/images/seasonal.png"],
   "assets": [
     {
       "id": "white_queen",
@@ -50,15 +79,40 @@ Each prepared axis is the ceiling of `maximum logical axis * display scale * max
 
 Only PNG resizing is implemented initially. Other sprite encodings and assets without `prepare` are copied unchanged. SVG remains resolution-independent. PNG masters are resized with a Lanczos3 filter in linear-light, premultiplied-alpha space so gradients retain their brightness and transparent edge colors do not bleed into visible pixels. Opaque prepared PNGs are encoded as RGB; images with any transparency retain alpha.
 
+## Sprite-sheet layout
+
+A sprite may declare a uniform row-major atlas grid in its `format`:
+
+```json
+"format": {
+  "kind": "sprite",
+  "encoding": "png",
+  "width": 512,
+  "height": 256,
+  "layout": { "columns": 4, "rows": 2 }
+}
+```
+
+`columns` and `rows` are the number of equal-width and equal-height cells in
+the complete image. Each axis must be nonzero, no greater than 256, and divide
+the corresponding declared sprite dimension exactly. The resulting cell
+dimensions are therefore `width / columns` by `height / rows`. The metadata is
+preserved in resolved and prepared manifests. When a prepared PNG is resized,
+Stasis rounds the scaled cell dimensions first and then rebuilds the complete
+image from those whole cells, keeping frame boundaries exact and dimensions
+divisible by the declared grid.
+
 Fonts use `{"kind":"font","encoding":"ttf"}` or
 `{"kind":"font","encoding":"otf"}`. They are hash-validated and copied unchanged; sprite
 preparation metadata is not valid for fonts.
 
 Audio uses `{"kind":"audio","encoding":"wav","sample_rate":24000,"channels":1,"duration_frames":24000}`.
-The first runtime playback slice accepts bounded little-endian PCM16 WAV files. Other manifest audio
-encodings remain valid for storage and packaging but are rejected by `audio_load_music` and
-`audio_load_effect` until a matching shared decoder lands; the runtime never guesses an encoding
-from content that contradicts its extension.
+The shared runtime playback slice accepts bounded little-endian PCM16 WAV and MP3 files through
+`AudioAsset.load_audio()`. Ogg and M4A remain valid for storage and packaging but
+are rejected until a matching shared decoder lands; the runtime never guesses an encoding from
+content that contradicts its extension. Audio metadata is descriptive and is checked by the shared
+resolver before packaging; the decoder independently checks the bounded file and decoded sample
+limits before publishing a runtime handle.
 
 ## Generated package contract
 
@@ -66,7 +120,26 @@ Preparation writes only beneath the build output; project masters and the source
 
 `stasis play` prepares the same bundle beneath `.stasis_cache/play-assets` before guest startup and mirrors the source directory's position relative to the project root. Existing source-relative paths such as `../assets/images/hero.png` therefore resolve to prepared output without source rewriting. Resized cache hits do not decode the master again. Development builds stage the complete declared manifest so iterative and optional paths remain available.
 
-Release builds and mobile packages scan the entry module's reachable import graph and stage only declared assets named by string literals that resolve beneath the project `assets/` directory, plus their transitive manifest dependencies. Paths such as `../assets/images/hero.png` resolve relative to the selected entry file's directory, including when the literal appears in an imported module; project-root paths such as `assets/images/hero.png` are also accepted. These are the same resolution rules used at runtime. The generated manifest is rewritten to the same exact subset. Runtime asset paths therefore need to be static string literals in reachable production source; dynamically constructed paths are not a supported release-packaging contract. Test-only and unreachable modules do not enlarge a release package.
+Static `@asset_path` validation uses the active program entry's source directory as that same runtime boundary, including when the annotated loader call lives in a nested imported module. The declaring module and project root remain compatibility fallbacks, but they do not replace the entry boundary used by play and packaging. A leading `/assets/...` is a portable virtual project-root spelling: it is treated exactly like the canonical `assets/...` path and never as a host filesystem root. It is resolved only against the project's canonical `assets/` directory, including when the annotated call lives in a nested module.
+
+`stasis check`, tests, development builds, release builds, and mobile/desktop packages
+consume one compiler-owned asset-reference result. Asset loader declarations mark their path
+parameter with `@asset_path(path)`; standard sprite, font, and audio loaders already carry that
+metadata, and supported legacy loader names remain compatible. Arbitrary string literals are not
+treated as assets.
+
+Static references in the entry module's reachable graph are validated before output publication.
+Each relative path resolves first relative to its declaring source module and then from the project root;
+each `/assets/...` path resolves from the project root only. Every path must remain beneath `assets/`,
+must name a regular file with exact disk casing on every host, and,
+when a manifest exists, must name a declared entry. Release outputs retain only those validated
+paths plus transitive manifest dependencies. Test roots use the same rules; test-only and
+unreachable production modules do not enlarge a release package.
+
+A dynamically constructed loader argument is rejected unless the manifest supplies a bounded
+`dynamic_assets` list. Every list item must be the exact `assets/...` path of a declared entry.
+When a reachable dynamic loader is present, those entries form its conservative package set.
+This is intentionally a bounded escape hatch, not unrestricted runtime filesystem discovery.
 
 Once a project has an asset manifest, every runtime-loaded asset must be declared. Source-only provenance files may remain elsewhere in the project, but undeclared files are not copied into prepared play or build output.
 
@@ -74,22 +147,53 @@ The package contains only the selected display envelope's output, not multiple r
 
 ## Identity and validation
 
+`content_sha256` is the SHA-256 digest of the exact raw master-file bytes on
+disk. Stasis hashes those bytes as-is; the verifier does not normalize text or
+line endings. Consequently, line endings are part of an asset's identity even
+when LF and CRLF render identically.
+
+Fresh Git projects created with `stasis new` include this narrow policy in
+`.gitattributes`:
+
+```gitattributes
+*.[sS][vV][gG] text eol=lf
+```
+
+For an existing repository, migrate SVGs before generating or updating
+manifest hashes:
+
+1. Add `*.[sS][vV][gG] text eol=lf` to `.gitattributes`.
+2. Convert every existing SVG in the working tree to LF bytes, or commit the
+   policy and use a fresh normalized checkout. `git add --renormalize -- '*.[sS][vV][gG]'`
+   updates the index but does not convert current working files by itself.
+3. Verify the working-tree bytes contain no CR, then renormalize and stage the
+   SVGs (and `.gitattributes`) with `git add --renormalize -- '*.[sS][vV][gG]'`.
+4. Verify the staged files and Git `eol` attributes, then regenerate the
+   manifest hashes from those LF working-tree bytes.
+
+This is an asset-integrity policy only. Stasis source formatting remains
+line-ending-neutral and does not require LF for `.stasis` files. At the
+verifier boundary, an SVG containing any raw CR byte is rejected with
+`asset_svg_line_endings_not_lf`, even if its manifest hash matches those CRLF
+or lone-CR bytes. Other asset formats remain governed by their exact raw hash
+and are not subject to this SVG-only line-ending check.
+
 - IDs are 1-128 ASCII letters, digits, `.`, `_`, or `-` and are unique within a project.
 - Runtime handles are the nonzero FNV-1a 32-bit hash of `<kind>:<id>`. Load fails if two entries collide; platforms must not repair or renumber collisions independently.
-- Paths use forward slashes, start with `assets/`, contain only normal path components, and must resolve to a regular file under the canonical project root.
+- Manifest paths use forward slashes, start with `assets/`, contain only normal path components, and must resolve to a regular file under the canonical project `assets/` directory. Source `@asset_path` literals may additionally use the rooted `/assets/...` spelling. URI paths, drive paths, UNC paths, any embedded backslash separator, and leading slash paths other than `/assets/...` are compile errors; dynamic manifest paths remain canonical `assets/...` paths.
 - SHA-256 is checked against the complete bounded file before the asset is accepted.
 - Declared encodings must match file extensions. Sprite dimensions, audio metadata, font encoding, display dimensions, manifest size, entry count, and individual file size are bounded by the shared resolver.
 - Sprite preparation requires a version 2 manifest and top-level `display` metadata.
 - Dependencies must name manifest entries, cannot repeat or reference themselves, and must be acyclic.
 - Unknown fields, schemas, and future versions fail with stable diagnostic codes.
+- `dynamic_assets` entries must name declared asset paths; undeclared or missing entries fail
+  manifest loading before compilation output is published.
 
 ## Mobile packaging
 
-- The AOT bundle command resolves and verifies the source manifest, then invokes the shared `stasis_assets` preparation path and packages the generated manifest and files under `assets/stasis_game/`.
+- The AOT bundle command resolves and verifies an authored source manifest when one exists. Otherwise it derives the statically reachable sprite/font closure in memory. Both paths invoke the shared `stasis_assets` preparation path and serialize the generated package manifest and files under `assets/stasis_game/`; the inferred path does not create `assets/manifest.json` in the source project.
 - Android and iOS apply the same reachable-source asset closure as desktop release builds; platform packaging does not carry unused manifest entries or alternate prepared sizes.
-- Declared fonts use the shared manifest path. As a compatibility supplement for projects that
-  have not declared their path-based `load_font` assets yet, mobile packaging also scans compiled
-  `.stasis` source string literals for `.ttf` and `.otf` paths and copies only referenced regular
-  font files beneath the canonical project `assets/` directory.
-- Android uses one GL texture per resolved sprite and batches only consecutive commands that share texture and clip state. Atlas layout remains backend-private, so atlas coordinates never enter the manifest or render-command ABI.
+- Declared fonts use the same compiler-owned reference set and manifest closure as every other
+  asset. Mobile packaging does not scan arbitrary string literals or copy undeclared font files.
+- Android uses one GL texture per resolved sprite and batches only consecutive commands that share texture and clip state. The optional uniform grid is exposed as asset metadata for tooling; runtime atlas coordinates remain backend-private and never enter the render-command ABI.
 - Missing, corrupt, oversized, hash-mismatched, or unsupported packaged sprites render the deterministic magenta checker fallback.

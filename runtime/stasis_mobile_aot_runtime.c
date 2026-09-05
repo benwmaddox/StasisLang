@@ -2,16 +2,25 @@
 #include "stasis_platform_services.h"
 
 #include <math.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #define STASIS_MOBILE_MAX_SCALARS 2048
 #define STASIS_MOBILE_MAX_ARRAYS 512
 #define STASIS_MOBILE_MAX_FUNCTIONS 1024
-#define STASIS_MOBILE_MAX_STRINGS 512
+#define STASIS_MOBILE_INITIAL_STRING_CAPACITY 512
 #define STASIS_MOBILE_MAX_ARRAY_LENGTH 1048576
+#define STASIS_MOBILE_MAX_PROFILE_FUNCTIONS 64
+#define STASIS_MOBILE_MAX_PROFILE_DEPTH 256
 
 int stasis_audio_init(int sample_rate, int channels, int target_latency_frames);
 void stasis_audio_shutdown(void);
@@ -36,10 +45,16 @@ void stasis_audio_pause_music(int asset_handle, int paused);
 void stasis_audio_set_music_volume(int asset_handle, float volume);
 int stasis_audio_play_effect(int asset_handle, float volume);
 int stasis_gfx_load_sprite(const char *path, int max_w, int max_h);
+int stasis_asset_request_sprite(const char *path, int max_w, int max_h);
+int stasis_asset_request_audio(const char *path);
+int stasis_asset_task_poll(int task);
+int stasis_asset_task_take_handle(int task);
+void stasis_asset_task_cancel(int task);
 void stasis_gfx_release_sprite(int handle);
 int stasis_gfx_dump_bmp(const char *path);
 int stasis_gfx_dump_png(const char *path);
 int stasis_gfx_cache_text(int font, const char *text);
+int stasis_gfx_replace_text(int handle, int font, const char *text);
 int stasis_gfx_poll_reload(int handle);
 float stasis_gfx_measure_text_cached(int handle);
 float stasis_gfx_measure_text_cached_height(int handle);
@@ -52,6 +67,28 @@ int stasis_storage_load_ascii(const char *scope, const char *key, char *out, int
 int stasis_storage_save_ascii(const char *scope, const char *key, const char *value, int length);
 int stasis_clipboard_load_ascii(char *out, int capacity);
 int stasis_clipboard_save_ascii(const char *value, int length);
+void stasis_host_log_message(const char *message);
+
+typedef struct StasisNetworkHost StasisNetworkHost;
+#if defined(STASIS_NETWORK_ENABLED)
+typedef struct StasisNetworkEvent {
+    uint32_t kind;
+    uint32_t connection;
+    uint32_t length;
+    unsigned char payload[64u * 1024u];
+} StasisNetworkEvent;
+extern int32_t stasis_network_supported(void);
+extern int32_t stasis_network_random_seed(void);
+extern StasisNetworkHost *stasis_network_host_start_bind(uint16_t port, uint32_t bind_ipv4,
+    const unsigned char *bundle, size_t bundle_length, uint16_t *out_port);
+extern int32_t stasis_network_host_poll(StasisNetworkHost *, StasisNetworkEvent *);
+extern int32_t stasis_network_host_send(StasisNetworkHost *, uint32_t, const unsigned char *, size_t);
+extern int32_t stasis_network_host_status(StasisNetworkHost *);
+extern uint32_t stasis_network_host_overflow_count(StasisNetworkHost *);
+extern uint16_t stasis_network_host_port(StasisNetworkHost *);
+extern int32_t stasis_network_host_copy_join_url(StasisNetworkHost *, char *, size_t, size_t *);
+extern void stasis_network_host_stop(StasisNetworkHost *);
+#endif
 
 typedef union StasisScalarValue {
     int32_t i32_value;
@@ -100,8 +137,181 @@ static StasisArray arrays[STASIS_MOBILE_MAX_ARRAYS];
 static size_t array_count;
 static StasisCodePtr code_ptrs[STASIS_MOBILE_MAX_FUNCTIONS];
 static size_t code_ptr_count;
-static StasisStringLiteral strings[STASIS_MOBILE_MAX_STRINGS];
+static StasisStringLiteral *strings;
 static size_t string_count;
+static size_t string_capacity;
+
+typedef struct StasisProfileAggregate {
+    int32_t function_id;
+    const char *name;
+    _Atomic uint64_t calls;
+    _Atomic uint64_t inclusive_ns;
+    _Atomic uint64_t exclusive_ns;
+    _Atomic uint64_t max_inclusive_ns;
+} StasisProfileAggregate;
+
+typedef struct StasisProfileFrame {
+    size_t aggregate_index;
+    uint64_t started_ns;
+    uint64_t child_ns;
+} StasisProfileFrame;
+
+static StasisProfileAggregate profile_aggregates[STASIS_MOBILE_MAX_PROFILE_FUNCTIONS];
+static size_t profile_aggregate_count;
+static int32_t profile_warmup_frames;
+static int32_t profile_sample_frames;
+static int32_t profile_frame_index;
+static _Atomic int profile_enabled;
+static _Thread_local StasisProfileFrame profile_stack[STASIS_MOBILE_MAX_PROFILE_DEPTH];
+static _Thread_local size_t profile_stack_depth;
+
+static uint64_t stasis_profile_now_ns(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER counter;
+    LARGE_INTEGER frequency;
+    if (!QueryPerformanceCounter(&counter) || !QueryPerformanceFrequency(&frequency) ||
+        frequency.QuadPart <= 0) return 0;
+    return (uint64_t)(counter.QuadPart / frequency.QuadPart) * UINT64_C(1000000000) +
+        (uint64_t)((counter.QuadPart % frequency.QuadPart) * UINT64_C(1000000000) /
+            frequency.QuadPart);
+#else
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+#endif
+}
+
+static void stasis_profile_reset_samples(void) {
+    size_t index;
+    for (index = 0; index < profile_aggregate_count; index += 1) {
+        atomic_store_explicit(&profile_aggregates[index].calls, 0, memory_order_relaxed);
+        atomic_store_explicit(&profile_aggregates[index].inclusive_ns, 0, memory_order_relaxed);
+        atomic_store_explicit(&profile_aggregates[index].exclusive_ns, 0, memory_order_relaxed);
+        atomic_store_explicit(&profile_aggregates[index].max_inclusive_ns, 0, memory_order_relaxed);
+    }
+}
+
+static void stasis_profile_reset(void) {
+    atomic_store_explicit(&profile_enabled, 0, memory_order_release);
+    memset(profile_aggregates, 0, sizeof(profile_aggregates));
+    profile_aggregate_count = 0;
+    profile_warmup_frames = 0;
+    profile_sample_frames = 0;
+    profile_frame_index = 0;
+    profile_stack_depth = 0;
+}
+
+static size_t stasis_profile_find(int32_t function_id) {
+    size_t index;
+    for (index = 0; index < profile_aggregate_count; index += 1) {
+        if (profile_aggregates[index].function_id == function_id) return index;
+    }
+    return STASIS_MOBILE_MAX_PROFILE_FUNCTIONS;
+}
+
+void stasis_jit_profile_register_function(int32_t function_id, const char *name) {
+    StasisProfileAggregate *aggregate;
+    if (name == NULL || stasis_profile_find(function_id) < profile_aggregate_count ||
+        profile_aggregate_count >= STASIS_MOBILE_MAX_PROFILE_FUNCTIONS) return;
+    aggregate = &profile_aggregates[profile_aggregate_count++];
+    aggregate->function_id = function_id;
+    aggregate->name = name;
+}
+
+void stasis_jit_profile_configure(int32_t warmup_frames, int32_t sample_frames) {
+    profile_warmup_frames = warmup_frames < 0 ? 0 : warmup_frames;
+    profile_sample_frames = sample_frames < 0 ? 0 : sample_frames;
+    profile_frame_index = 0;
+    profile_stack_depth = 0;
+    stasis_profile_reset_samples();
+    atomic_store_explicit(&profile_enabled, 0, memory_order_release);
+}
+
+void stasis_jit_profile_frame_begin(void) {
+    char line[160];
+    if (profile_aggregate_count == 0 || profile_sample_frames <= 0) return;
+    if (profile_frame_index == profile_warmup_frames) {
+        profile_stack_depth = 0;
+        stasis_profile_reset_samples();
+        atomic_store_explicit(&profile_enabled, 1, memory_order_release);
+        snprintf(line, sizeof(line),
+            "STASIS_PROFILE_START|warmup_frames=%d|sample_frames=%d|functions=%zu",
+            profile_warmup_frames, profile_sample_frames, profile_aggregate_count);
+        stasis_host_log_message(line);
+    }
+}
+
+static void stasis_profile_report(void) {
+    size_t index;
+    char line[512];
+    for (index = 0; index < profile_aggregate_count; index += 1) {
+        StasisProfileAggregate *aggregate = &profile_aggregates[index];
+        snprintf(line, sizeof(line),
+            "STASIS_PROFILE|%s|%" PRIu64 "|%" PRIu64 "|%" PRIu64 "|%" PRIu64,
+            aggregate->name,
+            atomic_load_explicit(&aggregate->calls, memory_order_relaxed),
+            atomic_load_explicit(&aggregate->inclusive_ns, memory_order_relaxed),
+            atomic_load_explicit(&aggregate->exclusive_ns, memory_order_relaxed),
+            atomic_load_explicit(&aggregate->max_inclusive_ns, memory_order_relaxed));
+        stasis_host_log_message(line);
+    }
+    snprintf(line, sizeof(line), "STASIS_PROFILE_DONE|frames=%d", profile_sample_frames);
+    stasis_host_log_message(line);
+}
+
+void stasis_jit_profile_frame_end(void) {
+    if (profile_aggregate_count == 0 || profile_sample_frames <= 0) return;
+    profile_frame_index += 1;
+    if (profile_frame_index == profile_warmup_frames + profile_sample_frames) {
+        atomic_store_explicit(&profile_enabled, 0, memory_order_release);
+        profile_stack_depth = 0;
+        stasis_profile_report();
+    }
+}
+
+void stasis_jit_profile_frame_enter(int32_t function_id) {
+    size_t aggregate_index;
+    StasisProfileFrame *frame;
+    if (!atomic_load_explicit(&profile_enabled, memory_order_acquire) ||
+        profile_stack_depth >= STASIS_MOBILE_MAX_PROFILE_DEPTH) return;
+    aggregate_index = stasis_profile_find(function_id);
+    if (aggregate_index >= profile_aggregate_count) return;
+    frame = &profile_stack[profile_stack_depth++];
+    frame->aggregate_index = aggregate_index;
+    frame->started_ns = stasis_profile_now_ns();
+    frame->child_ns = 0;
+}
+
+void stasis_jit_profile_frame_leave(int32_t function_id) {
+    StasisProfileFrame frame;
+    StasisProfileAggregate *aggregate;
+    uint64_t finished_ns;
+    uint64_t inclusive_ns;
+    uint64_t exclusive_ns;
+    uint64_t observed_max;
+    if (!atomic_load_explicit(&profile_enabled, memory_order_acquire) ||
+        profile_stack_depth == 0) return;
+    frame = profile_stack[--profile_stack_depth];
+    aggregate = &profile_aggregates[frame.aggregate_index];
+    if (aggregate->function_id != function_id) {
+        profile_stack_depth = 0;
+        return;
+    }
+    finished_ns = stasis_profile_now_ns();
+    inclusive_ns = finished_ns >= frame.started_ns ? finished_ns - frame.started_ns : 0;
+    exclusive_ns = inclusive_ns >= frame.child_ns ? inclusive_ns - frame.child_ns : 0;
+    if (profile_stack_depth > 0) {
+        profile_stack[profile_stack_depth - 1].child_ns += inclusive_ns;
+    }
+    atomic_fetch_add_explicit(&aggregate->calls, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&aggregate->inclusive_ns, inclusive_ns, memory_order_relaxed);
+    atomic_fetch_add_explicit(&aggregate->exclusive_ns, exclusive_ns, memory_order_relaxed);
+    observed_max = atomic_load_explicit(&aggregate->max_inclusive_ns, memory_order_relaxed);
+    while (observed_max < inclusive_ns &&
+        !atomic_compare_exchange_weak_explicit(
+            &aggregate->max_inclusive_ns, &observed_max, inclusive_ns,
+            memory_order_relaxed, memory_order_relaxed)) {}
+}
 
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity) {
     static const char hex[] = "0123456789abcdef";
@@ -230,17 +440,20 @@ static void register_array(
 
 void stasis_mobile_aot_reset(void) {
     size_t index;
+    stasis_profile_reset();
     for (index = 0; index < array_count; index += 1) {
         if (!arrays[index].external) free(arrays[index].data);
     }
     memset(scalars, 0, sizeof(scalars));
     memset(arrays, 0, sizeof(arrays));
     memset(code_ptrs, 0, sizeof(code_ptrs));
-    memset(strings, 0, sizeof(strings));
+    free(strings);
+    strings = NULL;
     scalar_count = 0;
     array_count = 0;
     code_ptr_count = 0;
     string_count = 0;
+    string_capacity = 0;
     stasis_platform_service_reset();
 }
 
@@ -353,19 +566,35 @@ float stasis_jit_call_f32_8(int32_t fn, float a0, float a1, float a2, float a3, 
 float stasis_jit_call_f32_i32_1(int32_t fn, int32_t a0) { CALL_OR_ZERO(fn, F32I32Call1, target(a0)); }
 
 void stasis_jit_clear_string_literal_table(void) {
-    memset(strings, 0, sizeof(strings));
+    if (strings != NULL && string_count > 0) {
+        memset(strings, 0, string_count * sizeof(*strings));
+    }
     string_count = 0;
 }
 
 void stasis_jit_upsert_string_literal(int32_t id, const char *value) {
     size_t index;
+    size_t next_capacity;
+    StasisStringLiteral *next;
     for (index = 0; index < string_count; index += 1) {
         if (strings[index].id == id) {
             strings[index].value = value;
             return;
         }
     }
-    if (string_count >= STASIS_MOBILE_MAX_STRINGS) return;
+    if (string_count >= string_capacity) {
+        next_capacity = string_capacity == 0
+            ? STASIS_MOBILE_INITIAL_STRING_CAPACITY
+            : string_capacity * 2;
+        if (next_capacity <= string_capacity ||
+            next_capacity > SIZE_MAX / sizeof(*strings)) {
+            return;
+        }
+        next = (StasisStringLiteral *)realloc(strings, next_capacity * sizeof(*strings));
+        if (next == NULL) return;
+        strings = next;
+        string_capacity = next_capacity;
+    }
     strings[string_count++] = (StasisStringLiteral){id, value};
 }
 
@@ -479,6 +708,23 @@ int stasis_jit_gfx_load_sprite(int32_t path, int32_t max_w, int32_t max_h) {
     free(value);
     return result;
 }
+int stasis_jit_asset_request_sprite(int32_t path, int32_t max_w, int32_t max_h) {
+    char *value = resolve_text(path);
+    int result = value == NULL ? 0 : stasis_asset_request_sprite(value, max_w, max_h);
+    free(value);
+    return result;
+}
+int stasis_jit_asset_request_audio(int32_t path) {
+    char *value = resolve_text(path);
+    int result = value == NULL ? 0 : stasis_asset_request_audio(value);
+    free(value);
+    return result;
+}
+int stasis_jit_asset_task_poll(int32_t task) { return stasis_asset_task_poll(task); }
+int stasis_jit_asset_task_take_handle(int32_t task) {
+    return stasis_asset_task_take_handle(task);
+}
+void stasis_jit_asset_task_cancel(int32_t task) { stasis_asset_task_cancel(task); }
 void stasis_jit_gfx_release_sprite(int32_t handle) { stasis_gfx_release_sprite(handle); }
 int stasis_jit_gfx_dump_bmp(int32_t path) {
     char *value = resolve_text(path);
@@ -602,11 +848,11 @@ int stasis_jit_sprite_load_from(int32_t base, int32_t index, int32_t len, int32_
     if (width <= 0 || height <= 0 || (index >= 0 && index >= len)) return 0;
     loaded_handle = stasis_jit_gfx_load_sprite(path, width, height);
     if (loaded_handle == 0) return 0;
-    old_handle = stasis_struct_i32_load(base, index, "handle");
-    stasis_struct_i32_store(base, index, len, "handle", loaded_handle);
+    old_handle = stasis_struct_i32_load(base, index, "sprite_ref");
+    stasis_struct_i32_store(base, index, len, "sprite_ref", loaded_handle);
     stasis_struct_i32_store(base, index, len, "width", width);
     stasis_struct_i32_store(base, index, len, "height", height);
-    if (old_handle != 0 && old_handle != loaded_handle) stasis_jit_gfx_release_sprite(old_handle);
+    if (old_handle != 0) stasis_jit_gfx_release_sprite(old_handle);
     return 1;
 }
 
@@ -614,6 +860,23 @@ int stasis_jit_text_run_load_from(int32_t base, int32_t index, int32_t len, int3
     int32_t loaded_handle;
     if (font <= 0 || (index >= 0 && index >= len)) return 0;
     loaded_handle = stasis_jit_gfx_cache_text(font, text);
+    if (loaded_handle <= 0) return 0;
+    stasis_struct_i32_store(base, index, len, "font", font);
+    stasis_struct_i32_store(base, index, len, "handle", loaded_handle);
+    stasis_struct_f32_store(base, index, len, "width", stasis_jit_gfx_measure_text_cached(loaded_handle));
+    stasis_struct_f32_store(base, index, len, "height", stasis_jit_gfx_measure_text_cached_height(loaded_handle));
+    return 1;
+}
+int stasis_jit_text_run_replace_from(int32_t base, int32_t index, int32_t len, int32_t font, int32_t text) {
+    int32_t old_handle;
+    int32_t loaded_handle;
+    char *value;
+    if (font <= 0 || (index >= 0 && index >= len)) return 0;
+    value = resolve_text(text);
+    if (value == NULL) return 0;
+    old_handle = stasis_struct_i32_load(base, index, "handle");
+    loaded_handle = stasis_gfx_replace_text(old_handle, font, value);
+    free(value);
     if (loaded_handle <= 0) return 0;
     stasis_struct_i32_store(base, index, len, "font", font);
     stasis_struct_i32_store(base, index, len, "handle", loaded_handle);
@@ -718,6 +981,213 @@ int stasis_jit_storage_save_i32(int32_t scope, int32_t key, int32_t value) {
     return result;
 }
 
+/* Optional network capability. The mobile AOT runtime owns this handle; the
+ * Rust library remains absent from ordinary builds and every operation then
+ * returns the explicit unsupported result. */
+static StasisNetworkHost *stasis_network_handle;
+
+int32_t stasis_jit_network_supported(void) {
+#if defined(STASIS_NETWORK_ENABLED)
+    return stasis_network_supported();
+#else
+    return 0;
+#endif
+}
+int32_t stasis_jit_network_host_random_seed(void) {
+#if defined(STASIS_NETWORK_ENABLED)
+    return stasis_network_random_seed();
+#else
+    return 0;
+#endif
+}
+int32_t stasis_jit_network_host_start(int32_t content_id, int32_t content_length) {
+    return stasis_jit_network_host_start_bind(content_id, content_length, 0);
+}
+static int32_t stasis_jit_network_host_start_bytes(const uint8_t *bundle, size_t length, int32_t bind_ipv4) {
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_network_handle != NULL || bundle == NULL || length == 0 || length > 32 * 1024 * 1024) return -1;
+    uint16_t port = 0;
+    StasisNetworkHost *host = stasis_network_host_start_bind(0, (uint32_t)bind_ipv4, bundle, length, &port);
+    if (host == NULL) return -3;
+    stasis_network_handle = host;
+    return (int32_t)port;
+#else
+    (void)bundle; (void)length; (void)bind_ipv4; return -4;
+#endif
+}
+int32_t stasis_jit_network_host_start_bind(int32_t content_id, int32_t content_length, int32_t bind_ipv4) {
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_network_handle != NULL || content_length <= 0 || content_length > 32 * 1024 * 1024) return -1;
+    uint8_t *bundle = stasis_jit_global_u8_array_ptr(content_id, 0, content_length);
+    if (bundle == NULL) return -1;
+    uint16_t port = 0;
+    StasisNetworkHost *host = stasis_network_host_start_bind(0, (uint32_t)bind_ipv4, bundle, (size_t)content_length, &port);
+    if (host == NULL) return -3;
+    stasis_network_handle = host;
+    return (int32_t)port;
+#else
+    (void)content_id; (void)content_length; (void)bind_ipv4; return -4;
+#endif
+}
+int32_t stasis_jit_network_host_start_text(int32_t content_id) {
+#if defined(STASIS_NETWORK_ENABLED)
+    char *bundle = resolve_text(content_id);
+    if (bundle == NULL) return -1;
+    int32_t result = stasis_jit_network_host_start_bytes(
+        (const uint8_t *)bundle, strlen(bundle), 0x7f000001);
+    free(bundle);
+    return result;
+#else
+    (void)content_id; return -4;
+#endif
+}
+int32_t stasis_jit_network_host_start_bind_text(int32_t content_id, int32_t bind_ipv4) {
+#if defined(STASIS_NETWORK_ENABLED)
+    char *bundle = resolve_text(content_id);
+    if (bundle == NULL) return -1;
+    int32_t result = stasis_jit_network_host_start_bytes(
+        (const uint8_t *)bundle, strlen(bundle), bind_ipv4);
+    free(bundle);
+    return result;
+#else
+    (void)content_id; (void)bind_ipv4; return -4;
+#endif
+}
+int32_t stasis_jit_network_host_status(void) {
+#if defined(STASIS_NETWORK_ENABLED)
+    return stasis_network_handle == NULL ? 0 : stasis_network_host_status(stasis_network_handle);
+#else
+    return 0;
+#endif
+}
+int32_t stasis_jit_network_host_overflow_count(void) {
+#if defined(STASIS_NETWORK_ENABLED)
+    return stasis_network_handle == NULL ? 0 : (int32_t)stasis_network_host_overflow_count(stasis_network_handle);
+#else
+    return 0;
+#endif
+}
+int32_t stasis_jit_network_host_port(void) {
+#if defined(STASIS_NETWORK_ENABLED)
+    return stasis_network_handle == NULL ? 0 : (int32_t)stasis_network_host_port(stasis_network_handle);
+#else
+    return 0;
+#endif
+}
+int32_t stasis_jit_network_host_poll(int32_t fields_id, int32_t field_capacity, int32_t payload_id, int32_t payload_capacity) {
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_network_handle == NULL || field_capacity < 3 || payload_capacity < 0) return -1;
+    StasisNetworkEvent event;
+    int32_t result = stasis_network_host_poll(stasis_network_handle, &event);
+    if (result <= 0) return result;
+    if ((int32_t)event.length > payload_capacity) return -1;
+    stasis_jit_global_i32_array_store(fields_id, 0, 0, (int32_t)event.kind);
+    stasis_jit_global_i32_array_store(fields_id, 0, 1, (int32_t)event.connection);
+    stasis_jit_global_i32_array_store(fields_id, 0, 2, (int32_t)event.length);
+    for (uint32_t index = 0; index < event.length; index += 1) stasis_jit_global_i32_array_store(payload_id, 0, (int32_t)index, (int32_t)event.payload[index]);
+    return result;
+#else
+    (void)fields_id; (void)field_capacity; (void)payload_id; (void)payload_capacity; return -4;
+#endif
+}
+int32_t stasis_mobile_network_copy_i32_payload(
+    int32_t payload_id,
+    int32_t payload_length,
+    uint8_t *out,
+    int32_t out_capacity
+) {
+    if (payload_length < 0 || out == NULL || out_capacity < payload_length) return -1;
+    /* Validate the complete source first so a malformed i32 mailbox never
+     * produces a partially narrowed network frame. */
+    for (int32_t index = 0; index < payload_length; index += 1) {
+        int32_t value = stasis_jit_global_i32_array_load(payload_id, 0, index);
+        if (value < 0 || value > 255) return -1;
+    }
+    for (int32_t index = 0; index < payload_length; index += 1) {
+        out[index] = (uint8_t)stasis_jit_global_i32_array_load(payload_id, 0, index);
+    }
+    return payload_length;
+}
+int32_t stasis_jit_network_host_send(int32_t connection, int32_t payload_id, int32_t payload_length) {
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_network_handle == NULL || connection <= 0 || payload_length < 0 || payload_length > 64 * 1024) return -1;
+    /* The host mailbox contract uses i32[] so poll and send share one Stasis
+     * buffer type. Match the desktop/JIT bridge by validating and narrowing
+     * every element at this native boundary. */
+    size_t allocation = payload_length == 0 ? 1u : (size_t)payload_length;
+    uint8_t *payload = (uint8_t *)malloc(allocation);
+    if (payload == NULL) return -1;
+    if (stasis_mobile_network_copy_i32_payload(
+        payload_id, payload_length, payload, payload_length
+    ) != payload_length) {
+        free(payload);
+        return -1;
+    }
+    int32_t result = stasis_network_host_send(
+        stasis_network_handle,
+        (uint32_t)connection,
+        payload,
+        (size_t)payload_length
+    );
+    free(payload);
+    return result;
+#else
+    (void)connection; (void)payload_id; (void)payload_length; return -4;
+#endif
+}
+void stasis_jit_network_host_stop(void) {
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_network_handle != NULL) { stasis_network_host_stop(stasis_network_handle); stasis_network_handle = NULL; }
+#endif
+}
+
+int32_t stasis_mobile_network_start_from_asset_root(void) {
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_network_handle != NULL) return -2;
+    const char *root = getenv("STASIS_ASSET_ROOT");
+    if (root == NULL || root[0] == '\0') return -1;
+    char path[2048];
+    int written = snprintf(path, sizeof(path), "%s/network_guest.bundle", root);
+    if (written < 0 || (size_t)written >= sizeof(path)) return -1;
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return -1;
+    if (fseek(file, 0, SEEK_END) != 0) { fclose(file); return -1; }
+    long size = ftell(file);
+    if (size <= 0 || size > 32L * 1024L * 1024L || fseek(file, 0, SEEK_SET) != 0) { fclose(file); return -1; }
+    unsigned char *bundle = (unsigned char *)malloc((size_t)size);
+    if (bundle == NULL || fread(bundle, 1, (size_t)size, file) != (size_t)size) {
+        free(bundle); fclose(file); return -1;
+    }
+    fclose(file);
+    uint16_t port = 0;
+    StasisNetworkHost *host = stasis_network_host_start_bind(0, 0, bundle, (size_t)size, &port);
+    free(bundle);
+    if (host == NULL) return -3;
+    stasis_network_handle = host;
+    return (int32_t)port;
+#else
+    return -4;
+#endif
+}
+
+int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity) {
+    if (out == NULL || capacity == 0) return -1;
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_network_handle == NULL) { out[0] = '\0'; return -3; }
+    size_t length = 0;
+    int32_t result = stasis_network_host_copy_join_url(stasis_network_handle, out, capacity, &length);
+    if (result != 0) { out[0] = '\0'; return result; }
+    return (int32_t)length;
+#else
+    out[0] = '\0';
+    return -4;
+#endif
+}
+
+void stasis_mobile_network_stop(void) {
+    stasis_jit_network_host_stop();
+}
+
 #define DEFINE_SCALAR_ACCESSORS(name, type, kind, member) \
 type stasis_jit_global_##name##_load(int32_t hash) { \
     StasisScalar *entry = find_scalar(hash, kind, 0); \
@@ -820,9 +1290,66 @@ static int32_t collection_meta_hash(int32_t hash, int32_t kind) {
     return (int32_t)value;
 }
 
+static int utf8_continuation(unsigned char value) {
+    return value >= 0x80 && value <= 0xbf;
+}
+
+static size_t utf8_sequence_length(const unsigned char *cursor, size_t remaining) {
+    const unsigned char first = cursor[0];
+    if (first <= 0x7f) return 1;
+    if (remaining >= 2 && first >= 0xc2 && first <= 0xdf &&
+        utf8_continuation(cursor[1])) return 2;
+    if (remaining >= 3 && first == 0xe0 && cursor[1] >= 0xa0 && cursor[1] <= 0xbf &&
+        utf8_continuation(cursor[2])) return 3;
+    if (remaining >= 3 && first >= 0xe1 && first <= 0xec && utf8_continuation(cursor[1]) &&
+        utf8_continuation(cursor[2])) return 3;
+    if (remaining >= 3 && first == 0xed && cursor[1] >= 0x80 && cursor[1] <= 0x9f &&
+        utf8_continuation(cursor[2])) return 3;
+    if (remaining >= 3 && first >= 0xee && first <= 0xef && utf8_continuation(cursor[1]) &&
+        utf8_continuation(cursor[2])) return 3;
+    if (remaining >= 4 && first == 0xf0 && cursor[1] >= 0x90 && cursor[1] <= 0xbf &&
+        utf8_continuation(cursor[2]) && utf8_continuation(cursor[3])) return 4;
+    if (remaining >= 4 && first >= 0xf1 && first <= 0xf3 && utf8_continuation(cursor[1]) &&
+        utf8_continuation(cursor[2]) && utf8_continuation(cursor[3])) return 4;
+    if (remaining >= 4 && first == 0xf4 && cursor[1] >= 0x80 && cursor[1] <= 0x8f &&
+        utf8_continuation(cursor[2]) && utf8_continuation(cursor[3])) return 4;
+    return 1;
+}
+
+static int32_t utf8_char_length(const char *text) {
+    const unsigned char *cursor = (const unsigned char *)text;
+    const size_t byte_length = strlen(text);
+    size_t offset = 0;
+    size_t count = 0;
+    while (offset < byte_length) {
+        const size_t remaining = byte_length - offset;
+        const size_t sequence_length = utf8_sequence_length(cursor, remaining);
+        if (count >= (size_t)INT32_MAX) return INT32_MAX;
+        count += 1;
+        cursor += sequence_length;
+        offset += sequence_length;
+    }
+    return (int32_t)count;
+}
+
+static int32_t saturated_i32_length(size_t length) {
+    return length > (size_t)INT32_MAX ? INT32_MAX : (int32_t)length;
+}
+
 int32_t stasis_jit_collection_i32_load(int32_t hash, int32_t kind) {
     int32_t derived = collection_meta_hash(hash, kind);
-    return derived == 0 ? 0 : stasis_jit_global_i32_load(derived);
+    StasisScalar *metadata;
+    const char *literal;
+
+    if (derived == 0) return 0;
+    metadata = find_scalar(derived, STASIS_VALUE_I32, 0);
+    if (metadata != NULL) return stasis_jit_global_i32_load(derived);
+
+    literal = find_string(hash);
+    if (literal == NULL) return 0;
+    if (kind == 1 || kind == 2) return saturated_i32_length(strlen(literal));
+    if (kind == 3) return utf8_char_length(literal);
+    return 0;
 }
 void stasis_jit_collection_i32_store(int32_t hash, int32_t kind, int32_t value) {
     int32_t derived = collection_meta_hash(hash, kind);
@@ -854,6 +1381,53 @@ static void copy_i32_values(int32_t dst, int32_t di, int32_t src, int32_t si, in
     }
 }
 
+static int mobile_text_array_is_registered(int32_t collection_hash) {
+    return find_array(collection_hash, 0, STASIS_VALUE_U8, 0) != NULL ||
+        find_array(collection_hash, 0, STASIS_VALUE_I32, 0) != NULL;
+}
+
+static int32_t saturating_index_add(int32_t base, int32_t offset) {
+    int64_t value = (int64_t)base + (int64_t)offset;
+    if (value > INT32_MAX) return INT32_MAX;
+    if (value < INT32_MIN) return INT32_MIN;
+    return (int32_t)value;
+}
+
+static void copy_u8_values(int32_t dst, int32_t di, int32_t src, int32_t si, int32_t count) {
+    int32_t *values;
+    int32_t offset;
+    const char *literal = NULL;
+
+    if (count <= 0) return;
+    if (!mobile_text_array_is_registered(src)) literal = find_string(src);
+    if (literal != NULL) {
+        const size_t byte_length = strlen(literal);
+        for (offset = 0; offset < count; offset += 1) {
+            const int32_t source_index = saturating_index_add(si, offset);
+            const int32_t destination_index = saturating_index_add(di, offset);
+            int32_t value = 0;
+            if (source_index >= 0 && (size_t)source_index < byte_length) {
+                value = (unsigned char)literal[source_index];
+            }
+            stasis_jit_global_i32_array_store(dst, 0, destination_index, value);
+        }
+        return;
+    }
+
+    if ((size_t)count > SIZE_MAX / sizeof(*values)) return;
+    values = (int32_t *)malloc((size_t)count * sizeof(*values));
+    if (values == NULL) return;
+    for (offset = 0; offset < count; offset += 1) {
+        values[offset] = stasis_jit_global_i32_array_load(
+            src, 0, saturating_index_add(si, offset));
+    }
+    for (offset = 0; offset < count; offset += 1) {
+        stasis_jit_global_i32_array_store(
+            dst, 0, saturating_index_add(di, offset), values[offset]);
+    }
+    free(values);
+}
+
 static void copy_f32_values(int32_t dst, int32_t di, int32_t src, int32_t si, int32_t count) {
     int32_t index;
     if (count <= 0 || di < 0 || si < 0) return;
@@ -870,12 +1444,12 @@ static void copy_f32_values(int32_t dst, int32_t di, int32_t src, int32_t si, in
     }
 }
 
-void stasis_jit_sys_memcpy_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
+void stasis_jit_sys_memcpy_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_u8_values(d, di, s, si, n); }
 void stasis_jit_sys_memcpy_i32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
 void stasis_jit_sys_memcpy_f32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_f32_values(d, di, s, si, n); }
 
 /* Mobile AOT has no live swap coordinator; retain the shared import contract as a no-op. */
 void stasis_jit_reject_code_swap(void) {}
-void stasis_jit_sys_memmove_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
+void stasis_jit_sys_memmove_u8(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_u8_values(d, di, s, si, n); }
 void stasis_jit_sys_memmove_i32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_i32_values(d, di, s, si, n); }
 void stasis_jit_sys_memmove_f32(int32_t d, int32_t di, int32_t s, int32_t si, int32_t n) { copy_f32_values(d, di, s, si, n); }

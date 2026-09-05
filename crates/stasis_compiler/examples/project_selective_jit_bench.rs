@@ -248,6 +248,7 @@ fn main() -> Result<(), String> {
                         | PatchReason::AddedOrSignatureChanged
                         | PatchReason::BecameReachable
                         | PatchReason::LoweredContractChanged
+                        | PatchReason::CompilerLayoutChanged
                 )
             })
             .count();

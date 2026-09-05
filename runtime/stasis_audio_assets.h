@@ -34,10 +34,23 @@ typedef struct {
     int next_voice_handle;
 } StasisAudioAssetStore;
 
+typedef struct {
+    int sample_rate;
+    int channels;
+    int frame_count;
+    int16_t* samples;
+} StasisDecodedAudio;
+
 void stasis_audio_assets_reset(StasisAudioAssetStore* store);
 int stasis_audio_assets_load(StasisAudioAssetStore* store, const char* path);
 int stasis_audio_assets_load_wav(StasisAudioAssetStore* store, const char* path);
 int stasis_audio_assets_load_mp3(StasisAudioAssetStore* store, const char* path);
+int stasis_audio_decode(const char* path, StasisDecodedAudio* decoded);
+void stasis_audio_decoded_free(StasisDecodedAudio* decoded);
+int stasis_audio_assets_store_decoded(
+    StasisAudioAssetStore* store,
+    StasisDecodedAudio* decoded
+);
 void stasis_audio_assets_release(StasisAudioAssetStore* store, int asset_handle);
 int stasis_audio_assets_play(
     StasisAudioAssetStore* store,

@@ -1,0 +1,159 @@
+import "../../src/stdlib/ui_single_pass.stasis";
+
+test `vertical stack applies spacing and one rest child`(): bool {
+    ui_begin_frame(10.0, 20.0, 100.0, 100.0);
+    ui_vstack_begin(10.0, 20.0, 100.0, 100.0, 5.0, UiStackDirection.Forward);
+    ui_vstack_next_fixed(20.0);
+    if (ui_current_x() != 10.0 || ui_current_y() != 20.0 || ui_current_width() != 100.0 || ui_current_height() != 20.0) {
+        return false;
+    }
+    ui_vstack_next_fixed(10.0);
+    if (ui_current_y() != 45.0 || ui_current_height() != 10.0) {
+        return false;
+    }
+    ui_vstack_next_rest();
+    if (ui_current_y() != 60.0 || ui_current_height() != 60.0) {
+        return false;
+    }
+    ui_vstack_end();
+    return ui_stack_level() == 0 && ui_status() == 0;
+}
+
+test `horizontal reverse stack flows from the far edge`(): bool {
+    ui_begin_frame(0.0, 0.0, 100.0, 20.0);
+    ui_hstack_begin(0.0, 0.0, 100.0, 20.0, 5.0, UiStackDirection.Reverse);
+    ui_hstack_next_fixed(20.0);
+    if (ui_current_x() != 80.0 || ui_current_width() != 20.0) {
+        return false;
+    }
+    ui_hstack_next_fixed(10.0);
+    if (ui_current_x() != 65.0 || ui_current_width() != 10.0) {
+        return false;
+    }
+    ui_hstack_next_rest();
+    if (ui_current_x() != 0.0 || ui_current_width() != 60.0) {
+        return false;
+    }
+    ui_hstack_end();
+    return ui_status() == 0;
+}
+
+test `stack flags overflow and repeated rest deterministically`(): bool {
+    ui_begin_frame(0.0, 0.0, 40.0, 40.0);
+    ui_vstack_begin(0.0, 0.0, 40.0, 40.0, 4.0, UiStackDirection.Forward);
+    ui_vstack_next_fixed(50.0);
+    if (ui_current_height() != 50.0 || ui_status() != UI_STATUS_OVERFLOW) {
+        return false;
+    }
+    ui_vstack_next_rest();
+    ui_vstack_next_rest();
+    ui_vstack_end();
+    return ui_status() == UI_STATUS_OVERFLOW + UI_STATUS_REST_REPEATED;
+}
+
+test `inset anchors and intersection share current rectangle`(): bool {
+    ui_begin_frame(0.0, 0.0, 100.0, 80.0);
+    ui_inset(0.0, 0.0, 100.0, 80.0, 10.0, 5.0, 20.0, 15.0);
+    if (ui_current_x() != 10.0 || ui_current_y() != 5.0 || ui_current_width() != 70.0 || ui_current_height() != 60.0) {
+        return false;
+    }
+    ui_anchor_current(20.0, 10.0, UiHorizontal.Right, UiVertical.Bottom);
+    if (ui_current_x() != 60.0 || ui_current_y() != 55.0) {
+        return false;
+    }
+    ui_intersection(60.0, 55.0, 20.0, 10.0, 50.0, 50.0, 5.0, 20.0);
+    return ui_current_x() == 60.0 && ui_current_y() == 55.0 && ui_current_width() == 0.0;
+}
+
+test `viewport fits map screen coordinates deterministically`(): bool {
+    ui_begin_frame(0.0, 0.0, 100.0, 100.0);
+    ui_viewport_fit(0.0, 0.0, 100.0, 100.0, 200.0, 100.0, UiViewportFit.Contain);
+    if (ui_current_x() != 0.0 || ui_current_y() != 25.0 || ui_current_width() != 100.0 || ui_current_height() != 50.0) {
+        return false;
+    }
+    if (ui_viewport_map_x(50.0, 200.0) != 100.0 || ui_viewport_map_y(50.0, 100.0) != 50.0) {
+        return false;
+    }
+    ui_viewport_fit(0.0, 0.0, 100.0, 100.0, 200.0, 100.0, UiViewportFit.Cover);
+    if (ui_current_x() != -50.0 || ui_current_y() != 0.0 || ui_current_width() != 200.0 || ui_current_height() != 100.0) {
+        return false;
+    }
+    ui_viewport_fit(0.0, 0.0, 500.0, 300.0, 200.0, 100.0, UiViewportFit.IntegerScale);
+    return ui_current_x() == 50.0 && ui_current_y() == 50.0 && ui_current_width() == 400.0 && ui_current_height() == 200.0;
+}
+
+test `button capture survives leaving its rectangle`(): bool {
+    ui_begin_frame(0.0, 0.0, 100.0, 100.0);
+    ui_modal_set(0);
+    if (ui_button(1, 77, 10.0, 10.0, 30.0, 20.0, 4, 20.0, 20.0, true, true, false)) {
+        return false;
+    }
+    ui_begin_frame(0.0, 0.0, 100.0, 100.0);
+    if (ui_button(1, 77, 10.0, 10.0, 30.0, 20.0, 4, 90.0, 90.0, true, false, false)) {
+        return false;
+    }
+    if (!ui_pointer_capture_active() || ui_pointer_capture_id() != 4) {
+        return false;
+    }
+    ui_begin_frame(0.0, 0.0, 100.0, 100.0);
+    if (!ui_button(1, 77, 10.0, 10.0, 30.0, 20.0, 4, 20.0, 20.0, false, false, true)) {
+        return false;
+    }
+    return !ui_pointer_capture_active();
+}
+
+test `modal layer blocks lower layer and accepts its own button`(): bool {
+    ui_begin_frame(0.0, 0.0, 200.0, 100.0);
+    ui_modal_set(9);
+    if (ui_button(1, 10, 20.0, 20.0, 80.0, 40.0, 1, 40.0, 40.0, true, true, false)) {
+        return false;
+    }
+    if (ui_button(9, 90, 20.0, 20.0, 80.0, 40.0, 1, 40.0, 40.0, true, true, false)) {
+        return false;
+    }
+    ui_begin_frame(0.0, 0.0, 200.0, 100.0);
+    ui_modal_set(9);
+    return ui_button(9, 90, 20.0, 20.0, 80.0, 40.0, 1, 40.0, 40.0, false, false, true);
+}
+
+test `scroll drag clamps and exposes translated rows`(): bool {
+    ui_begin_frame(0.0, 0.0, 120.0, 60.0);
+    ui_scroll_begin(900, 10.0, 5.0, 100.0, 50.0, 200.0);
+    if (ui_scroll_max_offset() != 150.0 || ui_scroll_offset() != 0.0) {
+        return false;
+    }
+    ui_scroll_drag(2, 50.0, 20.0, true, true, false);
+    ui_begin_frame(0.0, 0.0, 120.0, 60.0);
+    ui_scroll_begin(900, 10.0, 5.0, 100.0, 50.0, 200.0);
+    ui_scroll_drag(2, 50.0, -200.0, false, true, false);
+    if (ui_scroll_offset() != 150.0 || ui_scroll_item_y(3, 20.0, 5.0) != -70.0) {
+        return false;
+    }
+    ui_scroll_drag(2, 50.0, -200.0, false, false, true);
+    return !ui_scroll_is_dragging();
+}
+
+test `the same recipe moves cleanly with a resized safe area`(): bool {
+    ui_begin_frame(20.0, 10.0, 300.0, 200.0);
+    ui_vstack_begin(20.0, 10.0, 300.0, 200.0, 8.0, UiStackDirection.Forward);
+    ui_vstack_next_fixed(24.0);
+    let first_x: f32 = ui_current_x();
+    let first_y: f32 = ui_current_y();
+    ui_vstack_end();
+    ui_begin_frame(40.0, 30.0, 600.0, 400.0);
+    ui_vstack_begin(40.0, 30.0, 600.0, 400.0, 8.0, UiStackDirection.Forward);
+    ui_vstack_next_fixed(24.0);
+    return first_x == 20.0 && first_y == 10.0 && ui_current_x() == 40.0 && ui_current_y() == 30.0;
+}
+
+test `scroll render clip emits an ordered push and pop`(): bool {
+    gfx_cmd_begin();
+    ui_begin_frame(0.0, 0.0, 100.0, 60.0);
+    ui_scroll_begin(901, 4.0, 6.0, 80.0, 40.0, 100.0);
+    ui_scroll_clip_begin();
+    if (gfx_cmd_clip_count() != 1 || gfx_cmd_order_count() != 1) {
+        return false;
+    }
+    ui_scroll_end();
+    return gfx_cmd_clip_count() == 1 && gfx_cmd_order_count() == 2;
+}

@@ -1,9 +1,16 @@
+use crate::backend::compile_analysis::{
+    build_compile_analysis_cache_from_resolved_externs, collect_supported_extern_call_signatures,
+    compute_files_fingerprint, resolve_extern_call_signatures_with_index, CallSignatureMap,
+    CollectionInfoMap, CompileAnalysisCache, ConstantValueMap, ExternCallSignature,
+    ExternSymbolAddressMap, GlobalPathTypeMap, NamedStructFieldTypeMap,
+    ResolvedExternCallSignature,
+};
 use crate::backend::emit::{
-    debug_variable_slot, AssignTarget, CompileAnalysisCache, DirectStorageBinding,
-    DirectStorageBindings, RuntimeHelperLinkage, SimpleCondition, SimpleExpr, SimpleStmt,
+    debug_variable_slot, DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage,
 };
 use crate::backend::patch_plan::{
-    capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReasonChain,
+    capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReason,
+    PatchReasonChain,
 };
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
 use crate::backend::state_layout::{build_state_memory_report, is_named_scalar_state_path};
@@ -17,6 +24,7 @@ use crate::frontend::types::{
     TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
     TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
+use crate::ir::hir::{AssignTarget, SimpleCondition, SimpleExpr, SimpleStmt};
 use crate::ir::hir::{DebugStatement, FunctionHIR};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -47,6 +55,29 @@ pub use crate::backend::state_layout::{
 const MAX_STATE_QUERY_SCAN: usize = 4096;
 const MAX_STATE_QUERY_MATCHES: usize = 64;
 
+#[cfg(test)]
+pub(crate) const RECEIVER_ARRAY_COMPOUND_TEST_SOURCE: &str = r#"
+const CAP: i32 = 4;
+struct Batch { values: f32[CAP]; }
+global first: Batch;
+global second: Batch;
+
+function update(self: Batch, index: i32, value: f32): void {
+    self.values[index] = value;
+    self.values[index] += 0.5;
+}
+
+function read(self: Batch, index: i32): f32 {
+    return self.values[index];
+}
+
+function main(): i32 {
+    first.update(1, 2.0);
+    second.update(1, 4.0);
+    return f32_to_i32(first.read(1) * 10.0 + second.read(1));
+}
+"#;
+
 fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
@@ -55,7 +86,6 @@ fn elapsed_micros(started: Instant) -> u64 {
 struct FunctionLoweringReferences {
     paths: BTreeSet<String>,
     calls: BTreeSet<String>,
-    type_ids: BTreeSet<crate::frontend::types::TypeId>,
 }
 
 fn path_is_local(path: &str, scopes: &[BTreeSet<String>]) -> bool {
@@ -123,7 +153,8 @@ fn collect_expression_references(
         SimpleExpr::Condition(condition) => {
             collect_condition_references(condition, references, scopes)
         }
-        SimpleExpr::Int(_)
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_) => {}
@@ -136,29 +167,8 @@ fn collect_target_references(
     scopes: &[BTreeSet<String>],
 ) {
     match target {
-        AssignTarget::Local(path) => {
-            if !path_is_local(path, scopes) {
-                references.paths.insert(path.clone());
-            }
-        }
-        AssignTarget::GlobalPath(path) => {
-            if !path_is_local(path, scopes) {
-                references.paths.insert(path.clone());
-            }
-        }
-        AssignTarget::IndexedPath {
-            collection_path,
-            index,
-            suffix,
-        } => {
-            if !path_is_local(collection_path, scopes) {
-                references.paths.insert(collection_path.clone());
-                if !suffix.is_empty() {
-                    references
-                        .paths
-                        .insert(format!("{collection_path}.{suffix}"));
-                }
-            }
+        AssignTarget::Local(_) | AssignTarget::GlobalPath(_) => {}
+        AssignTarget::IndexedPath { index, .. } => {
             collect_expression_references(index, references, scopes);
         }
     }
@@ -172,12 +182,9 @@ fn collect_statement_references(
     for statement in statements {
         match statement {
             SimpleStmt::Let {
-                name,
-                type_id,
-                expression,
+                name, expression, ..
             } => {
                 collect_expression_references(expression, references, scopes);
-                references.type_ids.extend(*type_id);
                 scopes
                     .last_mut()
                     .expect("function dependency scope")
@@ -229,12 +236,9 @@ fn collect_statement_references(
             SimpleStmt::Foreach {
                 item_name,
                 index_name,
-                collection_path,
                 body_statements,
+                ..
             } => {
-                if !path_is_local(collection_path, scopes) {
-                    references.paths.insert(collection_path.clone());
-                }
                 scopes.push(BTreeSet::from_iter(
                     std::iter::once(item_name.clone()).chain(index_name.clone()),
                 ));
@@ -246,85 +250,26 @@ fn collect_statement_references(
     }
 }
 
-fn paths_overlap(reference: &str, contract_path: &str) -> bool {
-    reference == contract_path
-        || contract_path
-            .strip_prefix(reference)
-            .is_some_and(|suffix| suffix.starts_with('.'))
-        || reference
-            .strip_prefix(contract_path)
-            .is_some_and(|suffix| suffix.starts_with('.'))
-}
-
 fn function_lowering_contract_hash(
-    function: &FunctionMeta,
     references: &FunctionLoweringReferences,
     analysis: &CompileAnalysisCache,
-    type_table: &TypeTable,
+    parameter_storage_kinds: Option<&[crate::data_flow::ParameterStorageKind]>,
 ) -> u64 {
-    let mut type_ids: BTreeSet<_> = function
-        .params
-        .iter()
-        .copied()
-        .chain(std::iter::once(function.return_type))
-        .chain(references.type_ids.iter().copied())
-        .collect();
-
-    let mut facts = Vec::new();
+    let mut facts = vec![format!("parameter_storage:{parameter_storage_kinds:?}")];
     for path in &references.paths {
         if let Some(value) = analysis.constant_values.get(path) {
             facts.push(format!("constant:{path}:{value:?}"));
         }
     }
-    for (path, type_id) in &analysis.global_path_types {
-        if references
-            .paths
-            .iter()
-            .any(|reference| paths_overlap(reference, path))
-        {
-            facts.push(format!("global:{path}:{type_id:?}"));
-            type_ids.insert(*type_id);
-        }
-    }
-    for (path, info) in &analysis.collection_infos {
-        if references
-            .paths
-            .iter()
-            .any(|reference| paths_overlap(reference, path))
-        {
-            facts.push(format!("collection:{path}:{info:?}"));
-            type_ids.extend(info.element_type);
-            type_ids.extend(info.field_types.values().copied());
-        }
-    }
     for signature in &analysis.resolved_extern_signatures {
         if references.calls.contains(&signature.name) {
             facts.push(format!("extern:{signature:?}"));
-            type_ids.extend(signature.params.iter().copied());
-            type_ids.insert(signature.return_type);
             if let Some(address) = analysis.extern_symbol_addresses.get(&signature.symbol) {
                 facts.push(format!("extern_address:{}:{address}", signature.symbol));
             }
         }
     }
 
-    let mut pending_types: Vec<_> = type_ids.iter().copied().collect();
-    let mut seen_types = BTreeSet::new();
-    while let Some(type_id) = pending_types.pop() {
-        if !seen_types.insert(type_id) {
-            continue;
-        }
-        if let Some(info) = type_table.type_info(type_id) {
-            facts.push(format!("type:{type_id:?}:{info:?}"));
-        }
-        if let Some(element_type) = type_table.indexed_element_type_id(type_id) {
-            pending_types.push(element_type);
-        }
-        if let Some(fields) = analysis.named_struct_field_types.get(&type_id) {
-            facts.push(format!("struct:{type_id:?}:{fields:?}"));
-            pending_types.extend(fields.values().copied());
-        }
-    }
     facts.sort();
     hash_text(&facts.join("\n"))
 }
@@ -490,6 +435,20 @@ pub struct JitDebugFunctionMetadata {
     pub variables: BTreeMap<u32, String>,
 }
 
+/// Host-side extern bindings that are intentionally selected before a JIT
+/// generation is compiled.
+///
+/// The native JIT has no default implementation for the browser-only network
+/// mailbox ABI. Recording opts into the deterministic offline profile so an
+/// imported `network_client` module remains compilable without turning a
+/// capture into a network client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JitExternProfile {
+    #[default]
+    Default,
+    DeterministicOfflineWebNetwork,
+}
+
 pub struct JitProcess {
     compiler: Compiler,
     active_compiler: Option<Compiler>,
@@ -511,6 +470,8 @@ pub struct JitProcess {
     required_emit_roots: Vec<String>,
     local_runtime_helper_trampolines: bool,
     debug_instrumentation: bool,
+    profile_function_names: BTreeSet<String>,
+    extern_profile: JitExternProfile,
     debug_metadata: BTreeMap<FunctionId, JitDebugFunctionMetadata>,
     #[cfg(test)]
     _test_guard: Option<MutexGuard<'static, ()>>,
@@ -560,7 +521,6 @@ pub struct JitGenerationMetadata {
     pub retained_dependencies: Vec<FunctionKey>,
     pub host_export_signatures: BTreeMap<String, String>,
     pub host_export_code_ptrs: BTreeMap<String, u64>,
-    pub diagnostics: Vec<String>,
     pub code_owner_revision: u64,
     pub data_owner_layout_hash: u64,
     pub codegen_micros: u64,
@@ -609,6 +569,8 @@ impl JitProcess {
             required_emit_roots: Vec::new(),
             local_runtime_helper_trampolines: false,
             debug_instrumentation: false,
+            profile_function_names: BTreeSet::new(),
+            extern_profile: JitExternProfile::Default,
             debug_metadata: BTreeMap::new(),
             #[cfg(test)]
             _test_guard,
@@ -623,6 +585,35 @@ impl JitProcess {
             );
         }
         self.debug_instrumentation = enabled;
+        Ok(())
+    }
+
+    pub fn set_profile_functions(
+        &mut self,
+        names: impl IntoIterator<Item = String>,
+    ) -> Result<(), String> {
+        if self.program_snapshot.is_some() || self.active_program_snapshot.is_some() {
+            return Err(
+                "JIT function profiling must be configured before the first compilation"
+                    .to_string(),
+            );
+        }
+        self.profile_function_names = names
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        Ok(())
+    }
+
+    /// Select the native extern profile before the first compilation.
+    pub fn set_extern_profile(&mut self, profile: JitExternProfile) -> Result<(), String> {
+        if self.program_snapshot.is_some() || self.active_program_snapshot.is_some() {
+            return Err(
+                "JIT extern profile must be configured before the first compilation".to_string(),
+            );
+        }
+        self.extern_profile = profile;
         Ok(())
     }
 
@@ -657,6 +648,8 @@ impl JitProcess {
             .set_analysis_required_roots(&candidate.required_emit_roots);
         candidate.local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
         candidate.debug_instrumentation = self.debug_instrumentation;
+        candidate.profile_function_names = self.profile_function_names.clone();
+        candidate.extern_profile = self.extern_profile;
         candidate.debug_metadata = self.debug_metadata.clone();
         candidate
     }
@@ -842,7 +835,9 @@ impl JitProcess {
     }
 
     fn compile_internal(&mut self) -> CompileResult<CompileReport> {
-        let index = self.compiler.index_pass()?;
+        // Program validity is a whole-program contract. Reachability may gate backend work, but
+        // it must never hide invalid source that can become live after a later edit.
+        let index = self.compiler.check()?;
         self.validate_host_aliases()
             .map_err(crate::compiler::CompileError::Backend)?;
         self.compiler
@@ -865,6 +860,7 @@ impl JitProcess {
             .as_ref()
             .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         if snapshot_miss {
+            let function_hirs = self.compiler.analysis_hirs(&self.required_emit_roots)?;
             let extern_signatures = collect_supported_extern_call_signatures(
                 self.compiler.files(),
                 &mut analysis_type_table,
@@ -872,7 +868,21 @@ impl JitProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
             let (resolved_extern_signatures, extern_symbol_addresses) = self
                 .resolve_extern_call_signatures(&extern_signatures)
-                .map_err(crate::compiler::CompileError::Backend)?;
+                .map_err(|(index, error)| {
+                    if let Some(signature) = extern_signatures.get(index) {
+                        self.compiler.set_external_source_diagnostic(
+                            crate::SourceDiagnostic::new(
+                                signature.source_path.clone(),
+                                signature.source_start,
+                                signature.source_end,
+                                signature.name.clone(),
+                                error.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::UnresolvedExtern),
+                        );
+                    }
+                    crate::compiler::CompileError::Backend(error)
+                })?;
             let next_cache = build_compile_analysis_cache_from_resolved_externs(
                 self.compiler.files(),
                 self.compiler.functions(),
@@ -891,6 +901,7 @@ impl JitProcess {
                     &analysis_type_table,
                     self.compiler.data_flow_summaries_shared(),
                     &self.required_emit_roots,
+                    &function_hirs,
                     next_cache,
                 )
                 .map_err(crate::compiler::CompileError::Backend)?,
@@ -913,6 +924,12 @@ impl JitProcess {
         let mut lowering_references = BTreeMap::new();
         let mut lowering_contracts = BTreeMap::new();
         let mut lowered_contract_changes = BTreeSet::new();
+        let compiler_layout_changed =
+            self.active_program_snapshot
+                .as_ref()
+                .is_some_and(|accepted| {
+                    accepted.compiler_layout_digest() != snapshot.compiler_layout_digest()
+                });
         for function_id in &reachable_ids {
             let function = self
                 .compiler
@@ -930,12 +947,18 @@ impl JitProcess {
                     function.name
                 ))
             })?;
+            if compiler_layout_changed {
+                lowered_contract_changes.insert(key.clone());
+            }
             if let Some(references) = self.accepted_lowering_references.get(key) {
                 let hash = function_lowering_contract_hash(
-                    function,
                     references,
                     &analysis,
-                    self.compiler.types(),
+                    self.compiler
+                        .function_data_flow_summaries()
+                        .iter()
+                        .find(|summary| summary.internal_function_id == function.storage_index)
+                        .map(|summary| summary.parameter_storage_kinds.as_slice()),
                 );
                 if self.accepted_lowering_contracts.get(key) != Some(&hash) {
                     lowered_contract_changes.insert(key.clone());
@@ -960,6 +983,13 @@ impl JitProcess {
             &lowered_contract_changes,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
+        let mut patch_plan = patch_plan;
+        if compiler_layout_changed {
+            for reason in &mut patch_plan.reasons {
+                reason.reason = PatchReason::CompilerLayoutChanged;
+                reason.path_from_change.clear();
+            }
+        }
         let plan_micros = elapsed_micros(plan_started);
         let emit_function_ids = patch_plan.re_jit_ids.clone();
         let source_paths = self
@@ -968,6 +998,7 @@ impl JitProcess {
             .iter()
             .map(|file| file.path.clone())
             .collect::<Vec<_>>();
+        let data_flow_summaries = self.compiler.data_flow_summaries_shared();
         let mut staged_debug_metadata = self.debug_metadata.clone();
         for function_id in &emit_function_ids {
             staged_debug_metadata.remove(function_id);
@@ -998,6 +1029,7 @@ impl JitProcess {
         }
         let local_runtime_helper_trampolines = self.local_runtime_helper_trampolines;
         let debug_instrumentation = self.debug_instrumentation;
+        let profile_function_names = self.profile_function_names.clone();
         let mut staged_module = if emit_function_ids.is_empty() {
             None
         } else {
@@ -1020,6 +1052,10 @@ impl JitProcess {
                         .insert(meta.id, debug_function_metadata(meta, hir, file)?);
                 }
                 let symbol = format!("jit_fn_{}", meta.id);
+                let profile_instrumentation = profile_function_names.contains(&meta.name);
+                let data_flow_summary = data_flow_summaries
+                    .iter()
+                    .find(|summary| summary.internal_function_id == meta.storage_index);
                 let mut type_table = lowered_types.clone();
                 type_table.ensure_utf8_view_id()?;
                 type_table.ensure_ascii_view_id()?;
@@ -1038,10 +1074,12 @@ impl JitProcess {
                         &analysis.constant_values,
                         &analysis.collection_infos,
                         &analysis.named_struct_field_types,
+                        data_flow_summary,
                         &analysis.extern_symbol_addresses,
                         &direct_storage,
                         local_runtime_helper_trampolines,
                         debug_instrumentation,
+                        profile_instrumentation,
                         &mut defined_runtime_helper_trampolines,
                     )
                 }));
@@ -1065,8 +1103,11 @@ impl JitProcess {
                     .cloned()
                     .ok_or_else(|| format!("emitted function '{}' has no stable key", meta.name))?;
                 let references = collect_function_lowering_references(meta, hir);
-                let contract_hash =
-                    function_lowering_contract_hash(meta, &references, &analysis, lowered_types);
+                let contract_hash = function_lowering_contract_hash(
+                    &references,
+                    &analysis,
+                    data_flow_summary.map(|summary| summary.parameter_storage_kinds.as_slice()),
+                );
                 lowering_references.insert(function_key.clone(), references);
                 lowering_contracts.insert(function_key.clone(), contract_hash);
                 staged_functions.push((
@@ -1223,7 +1264,6 @@ impl JitProcess {
             retained_dependencies: patch_plan.retained_dependencies.clone(),
             host_export_signatures,
             host_export_code_ptrs,
-            diagnostics: Vec::new(),
             code_owner_revision: files_fingerprint,
             data_owner_layout_hash: layout_hash,
             codegen_micros,
@@ -1365,6 +1405,30 @@ impl JitProcess {
             .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
         let raw = stasis_dynload::invoke_noarg_u64(artifact.code_ptr as usize)?;
         Ok((raw as u32) as i32)
+    }
+
+    /// Validate the narrow host ABI used by deterministic recording hooks.
+    ///
+    /// Name lookup goes through the accepted program snapshot so duplicate
+    /// aliases are rejected instead of selecting an arbitrary declaration.
+    pub fn validate_i32_onearg_by_name(&self, name: &str) -> Result<(), String> {
+        let function = self.unique_function_by_name(name)?;
+        if function.return_type != TYPE_ID_I32 || function.params.as_slice() != [TYPE_ID_I32] {
+            return Err(format!(
+                "before-tick hook '{name}' signature mismatch; expected `function {name}(frame: i32): i32`, actual return type id {}, parameter types {:?}",
+                function.return_type, function.params
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn execute_i32_onearg_by_name(&self, name: &str, frame: i32) -> Result<i32, String> {
+        self.validate_i32_onearg_by_name(name)?;
+        let function = self.unique_function_by_name(name)?;
+        let artifact = self
+            .artifact_for_function_id(function.id)
+            .ok_or_else(|| format!("compiled artifact missing for before-tick hook '{name}'"))?;
+        stasis_dynload::invoke_i32_to_i32(artifact.code_ptr as usize, frame)
     }
 
     pub fn execute_void_noarg_by_name(&self, name: &str) -> Result<(), String> {
@@ -2307,8 +2371,8 @@ impl JitProcess {
     fn resolve_extern_call_signatures(
         &mut self,
         extern_signatures: &[ExternCallSignature],
-    ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), String> {
-        resolve_extern_call_signatures_with(extern_signatures, |_signature, candidate| {
+    ) -> Result<(Vec<ResolvedExternCallSignature>, ExternSymbolAddressMap), (usize, String)> {
+        resolve_extern_call_signatures_with_index(extern_signatures, |_signature, candidate| {
             self.resolve_host_symbol_address(candidate)
         })
     }
@@ -2316,6 +2380,17 @@ impl JitProcess {
     fn resolve_host_symbol_address(&mut self, symbol: &str) -> Option<usize> {
         if let Some(existing) = self.runtime_symbol_cache.get(symbol).copied() {
             return Some(existing);
+        }
+        if let Some(address) = offline_web_network_symbol_address(self.extern_profile, symbol) {
+            self.runtime_symbol_cache
+                .insert(symbol.to_string(), address);
+            return Some(address);
+        }
+        // Browser-only imports are deliberately unresolved in the default
+        // native profile, even if a future runtime library happens to export a
+        // similarly named symbol. This keeps ordinary play/live fail-closed.
+        if is_web_network_symbol(symbol) {
+            return None;
         }
         if let Some(address) = builtin_host_symbol_address(symbol) {
             self.runtime_symbol_cache
@@ -2680,15 +2755,15 @@ fn array_storage_kind(
     if type_id == TYPE_ID_U16 {
         return Some(stasis_dynload::JitStorageKind::U16);
     }
-    if crate::backend::emit::is_i32_abi_compatible_type(type_id, type_table) {
+    if crate::backend::compile_analysis::is_i32_abi_compatible_type(type_id, type_table) {
         return Some(stasis_dynload::JitStorageKind::I32);
     }
     scalar_storage_kind(type_table, type_id)
 }
 
 fn build_direct_storage_bindings(
-    global_path_types: &crate::backend::emit::GlobalPathTypeMap,
-    collection_infos: &crate::backend::emit::CollectionInfoMap,
+    global_path_types: &crate::backend::compile_analysis::GlobalPathTypeMap,
+    collection_infos: &crate::backend::compile_analysis::CollectionInfoMap,
     type_table: &TypeTable,
     provision: bool,
 ) -> Result<DirectStorageBindings, String> {
@@ -2746,7 +2821,7 @@ fn build_direct_storage_bindings(
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Absolute(address),
                     storage_bytes: storage_kind_bytes(kind),
-                    static_len: None,
+                    static_len: Some(info.len as usize),
                 },
             );
         }
@@ -2770,7 +2845,7 @@ fn build_direct_storage_bindings(
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Absolute(address),
                     storage_bytes: storage_kind_bytes(kind),
-                    static_len: None,
+                    static_len: Some(info.len as usize),
                 },
             );
         }
@@ -2822,6 +2897,54 @@ fn function_address(function: *const ()) -> usize {
     function as usize
 }
 
+fn is_web_network_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "stasis_web_network_supported"
+            | "stasis_web_network_connect"
+            | "stasis_web_network_status"
+            | "stasis_web_network_poll"
+            | "stasis_web_network_send"
+            | "stasis_web_network_resume_seat"
+            | "stasis_web_network_last_sequence"
+            | "stasis_web_network_checkpoint"
+    )
+}
+
+fn offline_web_network_symbol_address(profile: JitExternProfile, symbol: &str) -> Option<usize> {
+    if profile != JitExternProfile::DeterministicOfflineWebNetwork {
+        return None;
+    }
+    let address = match symbol {
+        "stasis_web_network_supported" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_supported as *const ())
+        }
+        "stasis_web_network_connect" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_connect as *const ())
+        }
+        "stasis_web_network_status" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_status as *const ())
+        }
+        "stasis_web_network_poll" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_poll as *const ())
+        }
+        "stasis_web_network_send" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_send as *const ())
+        }
+        "stasis_web_network_resume_seat" => function_address(
+            stasis_dynload::stasis_jit_offline_web_network_resume_seat as *const (),
+        ),
+        "stasis_web_network_last_sequence" => function_address(
+            stasis_dynload::stasis_jit_offline_web_network_last_sequence as *const (),
+        ),
+        "stasis_web_network_checkpoint" => {
+            function_address(stasis_dynload::stasis_jit_offline_web_network_checkpoint as *const ())
+        }
+        _ => return None,
+    };
+    Some(address)
+}
+
 fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
     let address = match symbol {
         "print_i32" | "stasis_jit_print_i32" => {
@@ -2833,7 +2956,22 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_load_sprite" | "stasis_gfx_load_sprite" => {
             function_address(stasis_dynload::stasis_jit_gfx_load_sprite as *const ())
         }
-        "gfx_release_sprite" | "stasis_gfx_release_sprite" => {
+        "stasis_jit_asset_request_sprite" | "asset_request_sprite" => {
+            function_address(stasis_dynload::stasis_jit_asset_request_sprite as *const ())
+        }
+        "stasis_jit_asset_request_audio" | "asset_request_audio" => {
+            function_address(stasis_dynload::stasis_jit_asset_request_audio as *const ())
+        }
+        "stasis_jit_asset_task_poll" | "asset_task_poll" => {
+            function_address(stasis_dynload::stasis_jit_asset_task_poll as *const ())
+        }
+        "stasis_jit_asset_task_take_handle" | "asset_task_take_handle" => {
+            function_address(stasis_dynload::stasis_jit_asset_task_take_handle as *const ())
+        }
+        "stasis_jit_asset_task_cancel" | "asset_task_cancel" => {
+            function_address(stasis_dynload::stasis_jit_asset_task_cancel as *const ())
+        }
+        "gfx_release_sprite" | "stasis_gfx_release_sprite" | "stasis_jit_gfx_release_sprite" => {
             function_address(stasis_dynload::stasis_jit_gfx_release_sprite as *const ())
         }
         "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
@@ -2870,6 +3008,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "stasis_jit_text_run_load_from" => {
             function_address(stasis_dynload::stasis_jit_text_run_load_from as *const ())
         }
+        "stasis_jit_text_run_replace_from" => {
+            function_address(stasis_dynload::stasis_jit_text_run_replace_from as *const ())
+        }
         "time" | "stasis_time" | "stasis_jit_time" | "stasis_get_time_ms" => {
             function_address(stasis_dynload::stasis_get_time_ms as *const ())
         }
@@ -2892,6 +3033,119 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "storage_load_ascii" | "stasis_storage_load_ascii" | "stasis_jit_storage_load_ascii" => {
             function_address(stasis_dynload::stasis_jit_storage_load_ascii as *const ())
         }
+        "network_supported" | "stasis_network_supported" | "stasis_jit_network_supported" => {
+            function_address(stasis_dynload::stasis_jit_network_supported as *const ())
+        }
+        "network_host_random_seed"
+        | "stasis_network_host_random_seed"
+        | "stasis_jit_network_host_random_seed" => {
+            function_address(stasis_dynload::stasis_jit_network_host_random_seed as *const ())
+        }
+        "network_host_start" | "stasis_network_host_start" | "stasis_jit_network_host_start" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start as *const ())
+        }
+        "network_host_start_text"
+        | "stasis_network_host_start_text"
+        | "stasis_jit_network_host_start_text" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start_text as *const ())
+        }
+        "network_host_start_bind"
+        | "stasis_network_host_start_bind"
+        | "stasis_jit_network_host_start_bind" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start_bind as *const ())
+        }
+        "network_host_start_bind_text"
+        | "stasis_network_host_start_bind_text"
+        | "stasis_jit_network_host_start_bind_text" => {
+            function_address(stasis_dynload::stasis_jit_network_host_start_bind_text as *const ())
+        }
+        "network_host_poll" | "stasis_network_host_poll" | "stasis_jit_network_host_poll" => {
+            function_address(stasis_dynload::stasis_jit_network_host_poll as *const ())
+        }
+        "network_host_send" | "stasis_network_host_send" | "stasis_jit_network_host_send" => {
+            function_address(stasis_dynload::stasis_jit_network_host_send as *const ())
+        }
+        "network_host_status" | "stasis_network_host_status" | "stasis_jit_network_host_status" => {
+            function_address(stasis_dynload::stasis_jit_network_host_status as *const ())
+        }
+        "network_host_overflow_count"
+        | "stasis_network_host_overflow_count"
+        | "stasis_jit_network_host_overflow_count" => {
+            function_address(stasis_dynload::stasis_jit_network_host_overflow_count as *const ())
+        }
+        "network_host_port" | "stasis_network_host_port" | "stasis_jit_network_host_port" => {
+            function_address(stasis_dynload::stasis_jit_network_host_port as *const ())
+        }
+        "network_host_stop" | "stasis_network_host_stop" | "stasis_jit_network_host_stop" => {
+            function_address(stasis_dynload::stasis_jit_network_host_stop as *const ())
+        }
+        "realtime_start" | "stasis_realtime_start" | "stasis_jit_realtime_start" => {
+            function_address(stasis_dynload::stasis_jit_realtime_start as *const ())
+        }
+        "realtime_stop" | "stasis_realtime_stop" | "stasis_jit_realtime_stop" => {
+            function_address(stasis_dynload::stasis_jit_realtime_stop as *const ())
+        }
+        "realtime_submit_payload"
+        | "stasis_realtime_submit_payload"
+        | "stasis_jit_realtime_submit_payload" => {
+            function_address(stasis_dynload::stasis_jit_realtime_submit_payload as *const ())
+        }
+        "realtime_build_payload"
+        | "stasis_realtime_build_payload"
+        | "stasis_jit_realtime_build_payload" => {
+            function_address(stasis_dynload::stasis_jit_realtime_build_payload as *const ())
+        }
+        "realtime_resync_required"
+        | "stasis_realtime_resync_required"
+        | "stasis_jit_realtime_resync_required" => {
+            function_address(stasis_dynload::stasis_jit_realtime_resync_required as *const ())
+        }
+        "realtime_record_hash"
+        | "stasis_realtime_record_hash"
+        | "stasis_jit_realtime_record_hash" => {
+            function_address(stasis_dynload::stasis_jit_realtime_record_hash as *const ())
+        }
+        "realtime_apply_snapshot"
+        | "stasis_realtime_apply_snapshot"
+        | "stasis_jit_realtime_apply_snapshot" => {
+            function_address(stasis_dynload::stasis_jit_realtime_apply_snapshot as *const ())
+        }
+        "realtime_current_tick"
+        | "stasis_realtime_current_tick"
+        | "stasis_jit_realtime_current_tick" => {
+            function_address(stasis_dynload::stasis_jit_realtime_current_tick as *const ())
+        }
+        "realtime_current_epoch"
+        | "stasis_realtime_current_epoch"
+        | "stasis_jit_realtime_current_epoch" => {
+            function_address(stasis_dynload::stasis_jit_realtime_current_epoch as *const ())
+        }
+        "realtime_schedule" | "stasis_realtime_schedule" | "stasis_jit_realtime_schedule" => {
+            function_address(stasis_dynload::stasis_jit_realtime_schedule as *const ())
+        }
+        "realtime_advance" | "stasis_realtime_advance" | "stasis_jit_realtime_advance" => {
+            function_address(stasis_dynload::stasis_jit_realtime_advance as *const ())
+        }
+        "realtime_read_control"
+        | "stasis_realtime_read_control"
+        | "stasis_jit_realtime_read_control" => {
+            function_address(stasis_dynload::stasis_jit_realtime_read_control as *const ())
+        }
+        "realtime_disconnect" | "stasis_realtime_disconnect" | "stasis_jit_realtime_disconnect" => {
+            function_address(stasis_dynload::stasis_jit_realtime_disconnect as *const ())
+        }
+        "realtime_reconnect" | "stasis_realtime_reconnect" | "stasis_jit_realtime_reconnect" => {
+            function_address(stasis_dynload::stasis_jit_realtime_reconnect as *const ())
+        }
+        "realtime_pause" | "stasis_realtime_pause" | "stasis_jit_realtime_pause" => {
+            function_address(stasis_dynload::stasis_jit_realtime_pause as *const ())
+        }
+        "realtime_focus_lost" | "stasis_realtime_focus_lost" | "stasis_jit_realtime_focus_lost" => {
+            function_address(stasis_dynload::stasis_jit_realtime_focus_lost as *const ())
+        }
+        "realtime_rematch" | "stasis_realtime_rematch" | "stasis_jit_realtime_rematch" => {
+            function_address(stasis_dynload::stasis_jit_realtime_rematch as *const ())
+        }
         "storage_load_i32" | "stasis_storage_load_i32" | "stasis_jit_storage_load_i32" => {
             function_address(stasis_dynload::stasis_jit_storage_load_i32 as *const ())
         }
@@ -2911,28 +3165,34 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         | "stasis_jit_platform_service_poll" => {
             function_address(stasis_dynload::stasis_jit_platform_service_poll as *const ())
         }
-        "audio_init" | "stasis_audio_init" => {
+        "audio_init" | "stasis_audio_init" | "stasis_jit_audio_init" => {
             function_address(stasis_dynload::stasis_jit_audio_init as *const ())
         }
-        "audio_shutdown" | "stasis_audio_shutdown" => {
+        "audio_shutdown" | "stasis_audio_shutdown" | "stasis_jit_audio_shutdown" => {
             function_address(stasis_dynload::stasis_jit_audio_shutdown as *const ())
         }
-        "audio_is_available" | "stasis_audio_is_available" => {
+        "audio_is_available" | "stasis_audio_is_available" | "stasis_jit_audio_is_available" => {
             function_address(stasis_dynload::stasis_jit_audio_is_available as *const ())
         }
-        "audio_get_sample_rate" | "stasis_audio_get_sample_rate" => {
+        "audio_get_sample_rate"
+        | "stasis_audio_get_sample_rate"
+        | "stasis_jit_audio_get_sample_rate" => {
             function_address(stasis_dynload::stasis_jit_audio_get_sample_rate as *const ())
         }
-        "audio_get_channels" | "stasis_audio_get_channels" => {
+        "audio_get_channels" | "stasis_audio_get_channels" | "stasis_jit_audio_get_channels" => {
             function_address(stasis_dynload::stasis_jit_audio_get_channels as *const ())
         }
-        "audio_get_queued_frames" | "stasis_audio_get_queued_frames" => {
+        "audio_get_queued_frames"
+        | "stasis_audio_get_queued_frames"
+        | "stasis_jit_audio_get_queued_frames" => {
             function_address(stasis_dynload::stasis_jit_audio_get_queued_frames as *const ())
         }
-        "audio_get_underruns" | "stasis_audio_get_underruns" => {
+        "audio_get_underruns" | "stasis_audio_get_underruns" | "stasis_jit_audio_get_underruns" => {
             function_address(stasis_dynload::stasis_jit_audio_get_underruns as *const ())
         }
-        "audio_push_f32_interleaved" | "stasis_audio_push_f32_interleaved" => {
+        "audio_push_f32_interleaved"
+        | "stasis_audio_push_f32_interleaved"
+        | "stasis_jit_audio_push_f32_interleaved" => {
             function_address(stasis_dynload::stasis_jit_audio_push_f32_interleaved as *const ())
         }
         "audio_load_wav" | "stasis_audio_load_wav" => {
@@ -2941,19 +3201,25 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "audio_release" | "stasis_audio_release" => {
             function_address(stasis_dynload::stasis_jit_audio_release as *const ())
         }
-        "audio_play" | "stasis_audio_play" => {
+        "audio_play" | "stasis_audio_play" | "stasis_jit_audio_play" => {
             function_address(stasis_dynload::stasis_jit_audio_play as *const ())
         }
-        "audio_stop" | "stasis_audio_stop" => {
+        "audio_stop" | "stasis_audio_stop" | "stasis_jit_audio_stop" => {
             function_address(stasis_dynload::stasis_jit_audio_stop as *const ())
         }
-        "audio_voice_is_playing" | "stasis_audio_voice_is_playing" => {
+        "audio_voice_is_playing"
+        | "stasis_audio_voice_is_playing"
+        | "stasis_jit_audio_voice_is_playing" => {
             function_address(stasis_dynload::stasis_jit_audio_voice_is_playing as *const ())
         }
-        "audio_voice_set_paused" | "stasis_audio_voice_set_paused" => {
+        "audio_voice_set_paused"
+        | "stasis_audio_voice_set_paused"
+        | "stasis_jit_audio_voice_set_paused" => {
             function_address(stasis_dynload::stasis_jit_audio_voice_set_paused as *const ())
         }
-        "audio_voice_set_volume_pan" | "stasis_audio_voice_set_volume_pan" => {
+        "audio_voice_set_volume_pan"
+        | "stasis_audio_voice_set_volume_pan"
+        | "stasis_jit_audio_voice_set_volume_pan" => {
             function_address(stasis_dynload::stasis_jit_audio_voice_set_volume_pan as *const ())
         }
         "stasis_jit_audio_load_music" | "audio_load_music" | "stasis_audio_load_music" => {
@@ -3030,8 +3296,8 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "reject_code_swap" | "stasis_jit_reject_code_swap" => {
             function_address(stasis_dynload::stasis_jit_reject_code_swap as *const ())
         }
-        "stasis_jit_render_v2_trace" => {
-            function_address(stasis_dynload::stasis_jit_render_v2_trace as *const ())
+        "stasis_jit_render_trace" => {
+            function_address(stasis_dynload::stasis_jit_render_trace as *const ())
         }
         _ => return None,
     };
@@ -3145,6 +3411,8 @@ fn runtime_helper_addresses() -> BTreeMap<String, usize> {
         stasis_jit_debug_values_begin,
         stasis_jit_debug_value_i64,
         stasis_jit_debug_value_f64,
+        stasis_jit_profile_frame_enter,
+        stasis_jit_profile_frame_leave,
     );
     out
 }
@@ -3182,10 +3450,12 @@ fn compile_function_into_jit_module(
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
+    data_flow_summary: Option<&crate::data_flow::FunctionDataFlowSummary>,
     extern_symbol_addresses: &ExternSymbolAddressMap,
     direct_storage: &DirectStorageBindings,
     local_runtime_helper_trampolines: bool,
     debug_instrumentation: bool,
+    profile_instrumentation: bool,
     defined_runtime_helper_trampolines: &mut BTreeSet<String>,
 ) -> Result<(JITModule, cranelift_module::FuncId, String, usize), String> {
     let runtime_helper_addresses = local_runtime_helper_trampolines.then(|| {
@@ -3217,9 +3487,11 @@ fn compile_function_into_jit_module(
         constant_values,
         collection_infos,
         named_struct_field_types,
+        data_flow_summary,
         Some(direct_storage),
         Some(defined_runtime_helper_trampolines),
         debug_instrumentation,
+        profile_instrumentation,
         |_| Ok(()),
         move |_, function| {
             *clif_capture.borrow_mut() = function.display().to_string();
@@ -3243,13 +3515,261 @@ fn compile_function_into_jit_module(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jit_rejects_invalid_unreachable_function_body() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "dead.stasis",
+            "function main(): i32 { return 0; }\nfunction unfinished(): i32 { while (true) { return 1; } }\n",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject invalid dead code");
+        assert!(
+            format!("{error:?}").contains("while"),
+            "unexpected diagnostic: {error:?}"
+        );
+        assert!(process.program_snapshot().is_none());
+        assert!(process.artifacts().is_empty());
+    }
+
+    #[test]
+    fn async_asset_task_externs_resolve_to_builtin_bridges() {
+        assert!(builtin_host_symbol_address("stasis_jit_asset_request_sprite").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_asset_request_audio").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_asset_task_poll").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_asset_task_take_handle").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_asset_task_cancel").is_some());
+    }
+
+    #[test]
+    fn canonical_audio_runtime_shims_resolve_to_builtin_bridges() {
+        for (symbol, expected) in [
+            (
+                "stasis_jit_audio_init",
+                function_address(stasis_dynload::stasis_jit_audio_init as *const ()),
+            ),
+            (
+                "stasis_jit_audio_shutdown",
+                function_address(stasis_dynload::stasis_jit_audio_shutdown as *const ()),
+            ),
+            (
+                "stasis_jit_audio_is_available",
+                function_address(stasis_dynload::stasis_jit_audio_is_available as *const ()),
+            ),
+            (
+                "stasis_jit_audio_get_sample_rate",
+                function_address(stasis_dynload::stasis_jit_audio_get_sample_rate as *const ()),
+            ),
+            (
+                "stasis_jit_audio_get_channels",
+                function_address(stasis_dynload::stasis_jit_audio_get_channels as *const ()),
+            ),
+            (
+                "stasis_jit_audio_get_queued_frames",
+                function_address(stasis_dynload::stasis_jit_audio_get_queued_frames as *const ()),
+            ),
+            (
+                "stasis_jit_audio_get_underruns",
+                function_address(stasis_dynload::stasis_jit_audio_get_underruns as *const ()),
+            ),
+            (
+                "stasis_jit_audio_push_f32_interleaved",
+                function_address(
+                    stasis_dynload::stasis_jit_audio_push_f32_interleaved as *const (),
+                ),
+            ),
+            (
+                "stasis_jit_audio_play",
+                function_address(stasis_dynload::stasis_jit_audio_play as *const ()),
+            ),
+            (
+                "stasis_jit_audio_stop",
+                function_address(stasis_dynload::stasis_jit_audio_stop as *const ()),
+            ),
+            (
+                "stasis_jit_audio_voice_is_playing",
+                function_address(stasis_dynload::stasis_jit_audio_voice_is_playing as *const ()),
+            ),
+            (
+                "stasis_jit_audio_voice_set_paused",
+                function_address(stasis_dynload::stasis_jit_audio_voice_set_paused as *const ()),
+            ),
+            (
+                "stasis_jit_audio_voice_set_volume_pan",
+                function_address(
+                    stasis_dynload::stasis_jit_audio_voice_set_volume_pan as *const (),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                builtin_host_symbol_address(symbol),
+                Some(expected),
+                "{symbol}"
+            );
+        }
+    }
+
+    const WEB_NETWORK_EXTERN_FIXTURE: &str = r#"
+function @extern("stasis_web_network_supported") web_supported(): i32;
+function @extern("stasis_web_network_connect") web_connect(): i32;
+function @extern("stasis_web_network_status") web_status(): i32;
+function @extern("stasis_web_network_poll") web_poll(out: u8[], capacity: i32): i32;
+function @extern("stasis_web_network_send") web_send(payload: u8[], length: i32): i32;
+function @extern("stasis_web_network_resume_seat") web_resume_seat(): i32;
+function @extern("stasis_web_network_last_sequence") web_last_sequence(): i32;
+function @extern("stasis_web_network_checkpoint") web_checkpoint(seat: i32, last_sequence: i32): i32;
+global bytes: u8[4];
+function main(): i32 {
+    if (web_supported() != 0) { return 1; }
+    if (web_connect() != -4) { return 2; }
+    if (web_status() != -4) { return 3; }
+    if (web_poll(bytes, bytes.max_length) != -4) { return 4; }
+    if (web_send(bytes, bytes.max_length) != -4) { return 5; }
+    if (web_resume_seat() != -1) { return 6; }
+    if (web_last_sequence() != 0) { return 7; }
+    if (web_checkpoint(-1, 0) != -4) { return 8; }
+    return 0;
+}
+"#;
+
+    #[test]
+    fn default_native_jit_rejects_browser_only_network_externs() {
+        let mut process = JitProcess::new();
+        process.upsert_file("network_client.stasis", WEB_NETWORK_EXTERN_FIXTURE);
+        let error = process
+            .compile()
+            .expect_err("default native JIT must keep browser-only imports unresolved");
+        assert!(
+            format!("{error:?}").contains("stasis_web_network_supported"),
+            "unexpected unresolved extern diagnostic: {error:?}"
+        );
+    }
+
+    #[test]
+    fn deterministic_offline_web_network_profile_links_every_extern() {
+        let mut process = JitProcess::new();
+        process
+            .set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)
+            .expect("configure offline network profile before compile");
+        process.upsert_file("network_client.stasis", WEB_NETWORK_EXTERN_FIXTURE);
+        process.compile().expect("offline network externs compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute offline network extern fixture"),
+            0
+        );
+    }
+
+    #[test]
+    fn offline_web_network_profile_is_copied_to_staged_candidates() {
+        let mut active = JitProcess::new();
+        active
+            .set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)
+            .expect("configure offline network profile before compile");
+        active.upsert_file(
+            "network_client.stasis",
+            "function main(): i32 { return 0; }\n",
+        );
+        active.compile().expect("compile baseline");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file("network_client.stasis", WEB_NETWORK_EXTERN_FIXTURE);
+        candidate
+            .compile()
+            .expect("staged candidate keeps offline network profile");
+        assert_eq!(candidate.execute_i32_noarg_by_name("main"), Ok(0));
+    }
+
+    #[test]
+    fn extern_profile_cannot_change_after_compilation() {
+        let mut process = JitProcess::new();
+        process.upsert_file("sample.stasis", "function main(): i32 { return 0; }\n");
+        process.compile().expect("compile baseline");
+        assert!(process
+            .set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)
+            .expect_err("extern profile must be fixed before compilation")
+            .contains("before the first compilation"));
+    }
+
     use crate::backend::EngineEntrypoints;
 
     #[test]
-    fn collection_contract_edit_rejits_only_consumers_and_callers() {
+    fn before_tick_hook_requires_unique_i32_to_i32_signature() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["before".to_string()]);
+        process.upsert_file(
+            "hook.stasis",
+            "function before(frame: i32): i32 { return frame + 1; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+        );
+        process.compile().expect("compile valid hook");
+        process
+            .validate_i32_onearg_by_name("before")
+            .expect("valid hook signature");
+        drop(process);
+
+        let mut missing = JitProcess::new();
+        missing.upsert_file(
+            "missing.stasis",
+            "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+        );
+        missing.compile().expect("compile missing-hook program");
+        assert!(missing
+            .validate_i32_onearg_by_name("before")
+            .expect_err("missing hook")
+            .contains("function 'before' not found"));
+        drop(missing);
+
+        for source in [
+            "function before(frame: f32): i32 { return 1; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+            "function before(frame: i32): void { }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+        ] {
+            let mut invalid = JitProcess::new();
+            invalid.set_required_emit_roots(&["before".to_string()]);
+            invalid.upsert_file("invalid_hook.stasis", source);
+            invalid.compile().expect("compile invalid-hook program");
+            assert!(invalid
+                .validate_i32_onearg_by_name("before")
+                .is_err());
+        }
+
+        let mut ambiguous = JitProcess::new();
+        ambiguous.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\";\nfunction before(frame: i32): i32 { return frame; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction main(): i32 { return 0; }\n",
+        );
+        ambiguous.upsert_file(
+            "helper.stasis",
+            "function before(frame: i32): i32 { return frame + 1; }\n",
+        );
+        ambiguous.compile().expect("compile ambiguous-hook program");
+        assert!(ambiguous
+            .validate_i32_onearg_by_name("before")
+            .expect_err("ambiguous hook")
+            .contains("ambiguous"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn before_tick_hook_executes_i32_frame_argument() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["before".to_string()]);
+        process.upsert_file(
+            "hook.stasis",
+            "function before(frame: i32): i32 { return frame + 1; }\n",
+        );
+        process.compile().expect("compile valid hook");
+        assert_eq!(process.execute_i32_onearg_by_name("before", 41), Ok(42));
+    }
+
+    #[test]
+    fn collection_layout_edit_rejits_every_reachable_function() {
         fn source(capacity: usize) -> String {
             format!(
-                "global values: i32[{capacity}];\nfunction read_value(): i32 {{ return values[0]; }}\nfunction untouched(): i32 {{ return 7; }}\nfunction tick(): i32 {{ return read_value(); }}\nfunction render(): i32 {{ return untouched(); }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
+                "global values: i32[{capacity}];\nfunction read_value(): i32 {{ return values.max_length; }}\nfunction untouched(): i32 {{ return 7; }}\nfunction tick(): i32 {{ return read_value(); }}\nfunction render(): i32 {{ return untouched(); }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
             )
         }
 
@@ -3281,8 +3801,12 @@ mod tests {
             .collect();
         assert_eq!(
             emitted_names,
-            BTreeSet::from(["main", "read_value", "tick"])
+            BTreeSet::from(["main", "read_value", "render", "tick", "untouched"])
         );
+        assert!(metadata
+            .patch_reasons
+            .iter()
+            .all(|reason| reason.reason == PatchReason::CompilerLayoutChanged));
         let reused_names: BTreeSet<_> = metadata
             .reused_function_ids
             .iter()
@@ -3297,7 +3821,7 @@ mod tests {
                     .as_str()
             })
             .collect();
-        assert_eq!(reused_names, BTreeSet::from(["render", "untouched"]));
+        assert!(reused_names.is_empty());
         for artifact in process.artifacts() {
             if reused_names.contains(artifact.function_key.name.as_str()) {
                 assert_eq!(
@@ -3308,12 +3832,61 @@ mod tests {
                 );
             }
         }
-        assert_eq!(report.emit.emitted_functions, 3);
+        assert_eq!(report.emit.emitted_functions, 5);
         assert_eq!(
             process
                 .execute_i32_noarg_by_name("main")
                 .expect("execute changed layout"),
-            7
+            10
+        );
+    }
+
+    #[test]
+    fn non_state_struct_layout_edit_rejits_every_reachable_function() {
+        fn source(extra_field: bool) -> String {
+            let fields = if extra_field {
+                "value: i32; extra: f32;"
+            } else {
+                "value: i32;"
+            };
+            format!(
+                "struct LocalOnly {{ {fields} }}\nfunction tick(): i32 {{ return 1; }}\nfunction render(): i32 {{ return 2; }}\nfunction main(): i32 {{ return tick() + render(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("local_layout.stasis", source(false));
+        process.compile().expect("compile initial local layout");
+        process.upsert_file("local_layout.stasis", source(true));
+        let report = process.compile().expect("compile changed local layout");
+
+        let metadata = process.generation_metadata().expect("generation metadata");
+        let emitted_names: BTreeSet<_> = metadata
+            .emitted_function_ids
+            .iter()
+            .map(|id| {
+                process
+                    .compiler
+                    .functions()
+                    .iter()
+                    .find(|function| function.id == *id)
+                    .expect("emitted identity")
+                    .name
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(emitted_names, BTreeSet::from(["main", "render", "tick"]));
+        assert!(metadata
+            .patch_reasons
+            .iter()
+            .all(|reason| reason.reason == PatchReason::CompilerLayoutChanged));
+        assert!(metadata.reused_function_ids.is_empty());
+        assert_eq!(report.emit.emitted_functions, 3);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute changed local layout"),
+            3
         );
     }
 
@@ -3364,7 +3937,7 @@ mod tests {
     }
 
     #[test]
-    fn dotted_local_assignment_does_not_depend_on_same_named_global() {
+    fn global_struct_layout_change_rejits_local_and_global_consumers() {
         fn source(extra_field: bool) -> String {
             let global_fields = if extra_field {
                 "flag: i32; extra: i32;"
@@ -3379,11 +3952,6 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file("local_global.stasis", source(false));
         process.compile().expect("compile initial global layout");
-        let old_pointers: BTreeMap<_, _> = process
-            .artifacts()
-            .iter()
-            .map(|artifact| (artifact.function_key.name.clone(), artifact.code_ptr))
-            .collect();
         process.upsert_file("local_global.stasis", source(true));
         process.compile().expect("compile changed global layout");
 
@@ -3402,17 +3970,11 @@ mod tests {
                     .as_str()
             })
             .collect();
-        assert_eq!(emitted_names, BTreeSet::from(["main", "render"]));
-        for artifact in process.artifacts() {
-            if matches!(artifact.function_key.name.as_str(), "local_user" | "tick") {
-                assert_eq!(
-                    old_pointers.get(&artifact.function_key.name),
-                    Some(&artifact.code_ptr),
-                    "{} pointer",
-                    artifact.function_key.name
-                );
-            }
-        }
+        assert_eq!(
+            emitted_names,
+            BTreeSet::from(["local_user", "main", "render", "tick"])
+        );
+        assert!(metadata.reused_function_ids.is_empty());
     }
 
     #[test]
@@ -3466,10 +4028,27 @@ mod tests {
             let clif = process
                 .clif_for_function_name(caller)
                 .unwrap_or_else(|| panic!("missing CLIF for {caller}"));
+            let called_functions: Vec<_> = clif
+                .lines()
+                .filter_map(|line| {
+                    let (_, call) = line.split_once("call fn")?;
+                    let argument_start = call.find('(')?;
+                    Some(format!("fn{}", &call[..argument_start]))
+                })
+                .collect();
             assert!(
-                clif.contains("call fn"),
+                !called_functions.is_empty(),
                 "expected direct call in {caller}:\n{clif}"
             );
+            for callee in called_functions {
+                assert!(
+                    !clif.lines().any(|line| {
+                        line.trim_start()
+                            .starts_with(&format!("{callee} = colocated "))
+                    }),
+                    "cross-function JIT declaration {callee} assumed colocated in {caller}:\n{clif}"
+                );
+            }
         }
         assert!(process.clif_for_function_name("unreachable").is_none());
 
@@ -3589,7 +4168,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_foreach_caps_iteration_at_rebound_storage_length() {
+    fn direct_foreach_rejects_backing_shorter_than_fixed_capacity() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "rebound_foreach.stasis",
@@ -3626,7 +4205,11 @@ mod tests {
             weights.len(),
         );
 
-        assert_eq!(process.execute_i32_noarg_by_name("main").unwrap(), 15);
+        assert_eq!(
+            process.execute_i32_noarg_by_name("main").unwrap(),
+            0,
+            "short host arrays must not replace fixed-capacity backing"
+        );
     }
 
     #[test]
@@ -3635,8 +4218,8 @@ mod tests {
         let mut process = JitProcess::new();
         process.set_local_runtime_helper_trampolines(true);
         process.upsert_file(
-            "sample.stasis",
-            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let width: f32 = gfx_measure_text_cached(0); let audio_ready: bool = audio_is_available(); if (audio_ready) { ms += 0; } if (gfx_poll_reload(0) || width != 0.0) { return 2; } if (ms == 0 && us == 0) { return 0; } return 1; }\n",
+            "tests/stasis/compiler/preview_externs.stasis",
+            "extern function time(): i32;\nextern function time_us(): i32;\nextern function gfx_poll_reload(handle: i32): bool;\nextern function gfx_measure_text_cached(handle: i32): f32;\nextern function audio_is_available(): bool;\nfunction main(): i32 { let ms: i32 = time(); let us: i32 = time_us(); let reloaded: bool = gfx_poll_reload(0); let width: f32 = gfx_measure_text_cached(0); let audio: bool = audio_is_available(); return 1; }\n",
         );
         process
             .compile()
@@ -3685,14 +4268,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected compile error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("unknown call target 'helper'")
-                        || message.contains("unsupported call arity 3"),
+                    message.contains("cannot resolve call 'helper'"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -3713,8 +4295,8 @@ mod tests {
         assert!(
             matches!(
                 error,
-                crate::compiler::CompileError::Backend(ref message)
-                    if message.contains("unknown call target 'leaf'")
+                crate::compiler::CompileError::Frontend(ref message)
+                    if message.contains("cannot resolve call 'leaf'")
             ),
             "unexpected error: {error:?}"
         );
@@ -3850,6 +4432,67 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 5);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_inlines_eligible_expression_and_keeps_real_function() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function @inline helper(value: i32): i32 { return value + 1; }\nfunction main(): i32 { return helper(9); }\n",
+        );
+        process.compile().expect("compile inline fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute inline fixture"),
+            10
+        );
+        let main = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(
+            !main.lines().any(|line| line.contains("call fn")),
+            "eligible @inline call remained in JIT CLIF:\n{main}"
+        );
+        assert!(
+            process.clif_for_function_name("helper").is_some(),
+            "the real inline function must remain independently callable"
+        );
+
+        process.upsert_file(
+            "sample.stasis",
+            "function @inline helper(value: i32): i32 { return value + 2; }\nfunction main(): i32 { return helper(9); }\n",
+        );
+        process.compile().expect("hot patch inline callee");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute patched inline fixture"),
+            11,
+            "changing an inline callee must regenerate callers that embed its body"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_inline_preserves_overloads_and_indexed_struct_fields() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nstruct Player { score: i32; }\nglobal enemies: Enemy[2];\nglobal player: Player;\nfunction @inline hp(enemy: Enemy): i32 { return enemy.hp; }\nfunction @inline value(item: Enemy): i32 { return item.hp + 100; }\nfunction value(item: Player): i32 { return item.score; }\nfunction main(): i32 { enemies[0].hp = 7; player.score = 5; return hp(enemies[0]) + value(player); }\n",
+        );
+        process.compile().expect("compile inline review fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute inline review fixture"),
+            12
+        );
+        let main = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(
+            main.lines().any(|line| line.contains("call fn")),
+            "same-arity overload call must remain for typed backend selection:\n{main}"
+        );
     }
 
     #[cfg(windows)]
@@ -4246,6 +4889,25 @@ mod tests {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 90);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_indexes_ascii_string_literal_view_bytes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let view: ascii[] = \"%\"; return view[0]; }\n",
+        );
+        process
+            .compile()
+            .expect("compile string literal view fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute string literal view fixture"),
+            37
+        );
     }
 
     #[cfg(windows)]
@@ -4748,17 +5410,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_executes_continue_in_for_loop() {
+    fn jit_process_executes_continue_in_for_and_foreach_loops() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function main(): i32 { let count: i32 = 0; for (let i: i32 = 0; i < 5; i += 1) { if (i == 2) { continue; } count += 1; } return count; }\n",
+            include_str!("../../../../tests/stasis/seams/continue_loop_parity.stasis"),
         );
         process.compile().expect("compile");
         let value = process
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
-        assert_eq!(value, 4);
+        assert_eq!(value, 434);
     }
 
     #[cfg(windows)]
@@ -4770,10 +5432,301 @@ mod tests {
             "struct Enemy { hp: i32; }\nglobal enemies: Enemy[2];\nfunction bad(arr: Enemy[2]): i32 {\n    let enemy = arr[0];\n    enemy.hp = 10;\n    return arr[0].hp;\n}\nfunction main(): i32 { return bad(enemies); }\n",
         );
         process.compile().expect("compile");
+        let clif = process
+            .clif_for_function_name("bad")
+            .expect("bad function CLIF");
+        assert!(
+            !clif.contains("brif"),
+            "known SoA alias retained storage dispatch:\n{clif}"
+        );
+        assert!(
+            !clif.contains("icmp"),
+            "known SoA alias retained storage test:\n{clif}"
+        );
         let value = process
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 10);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_specializes_nested_struct_array_alias_as_soa() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nstruct Game { enemies: Enemy[2]; }\nglobal State { game: Game; }\nfunction main(): i32 {\n    let enemy: Enemy = State.game.enemies[1];\n    enemy.hp = 17;\n    return enemy.hp;\n}\n",
+        );
+        process.compile().expect("compile");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        let has_call_instruction = clif.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("call ") || line.contains(" = call ")
+        });
+        assert!(
+            !has_call_instruction,
+            "known nested SoA alias lost direct storage:\n{clif}"
+        );
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 17);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_specializes_global_struct_alias_as_aos() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Pipe { active: bool; }\nstruct StateData { pipe: Pipe; }\nglobal State: StateData;\nfunction main(): i32 {\n    let alias: Pipe = State.pipe;\n    alias.active = true;\n    if (alias.active) { return 1; }\n    return 0;\n}\n",
+        );
+        process.compile().expect("compile");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert_eq!(
+            clif.matches("brif").count(),
+            1,
+            "known AoS alias added storage dispatch:\n{clif}"
+        );
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_retains_dynamic_dispatch_for_struct_parameter() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Pipe { active: bool; }\nglobal pipe: Pipe;\nglobal pipes: Pipe[1];\nfunction read_active(value: Pipe): i32 { if (value.active) { return 1; } return 0; }\nfunction main(): i32 {\n    pipe.active = true;\n    pipes[0].active = true;\n    return read_active(pipe) + read_active(pipes[0]);\n}\n",
+        );
+        process.compile().expect("compile");
+        let clif = process
+            .clif_for_function_name("read_active")
+            .expect("read_active CLIF");
+        assert!(
+            clif.matches("brif").count() >= 2,
+            "mixed struct parameter lost storage dispatch:\n{clif}"
+        );
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_propagates_soa_struct_parameter_through_helper_chain() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { items[0].value = 7; return middle(items[0]); }\n",
+        );
+        process.compile().expect("compile");
+        let summaries = process.compiler.data_flow_summaries_shared();
+        for function in ["leaf", "middle"] {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.function == function)
+                .expect("helper summary");
+            assert_eq!(
+                summary.parameter_storage_kinds,
+                vec![crate::data_flow::ParameterStorageKind::Soa],
+                "unexpected {function} provenance; summaries={summaries:#?}"
+            );
+        }
+        for function in ["leaf", "middle"] {
+            let clif = process
+                .clif_for_function_name(function)
+                .expect("helper CLIF");
+            assert!(
+                !clif.contains("brif"),
+                "known SoA provenance retained storage dispatch in {function}:\n{clif}"
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            7
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_propagates_aos_struct_parameter_through_helper_chain() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { item.value = 8; return middle(item); }\n",
+        );
+        process.compile().expect("compile");
+        let summaries = process.compiler.data_flow_summaries_shared();
+        for function in ["leaf", "middle"] {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.function == function)
+                .expect("helper summary");
+            assert_eq!(
+                summary.parameter_storage_kinds,
+                vec![crate::data_flow::ParameterStorageKind::Aos],
+                "unexpected {function} provenance; summaries={summaries:#?}"
+            );
+            let clif = process
+                .clif_for_function_name(function)
+                .expect("helper CLIF");
+            assert!(
+                !clif.contains("brif"),
+                "known AoS provenance retained storage dispatch in {function}:\n{clif}"
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            8
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_propagates_soa_struct_parameter_through_recursive_cycle() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal items: Sample[1];\nfunction even(value: Sample, depth: i32): i32 { if (depth <= 0) { return value.value; } return odd(value, depth - 1); }\nfunction odd(value: Sample, depth: i32): i32 { if (depth <= 0) { return value.value; } return even(value, depth - 1); }\nfunction main(): i32 { items[0].value = 9; return even(items[0], 3); }\n",
+        );
+        process.compile().expect("compile");
+        let summaries = process.compiler.data_flow_summaries_shared();
+        for function in ["even", "odd"] {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.function == function)
+                .expect("recursive helper summary");
+            assert_eq!(
+                summary.parameter_storage_kinds[0],
+                crate::data_flow::ParameterStorageKind::Soa,
+                "unexpected {function} provenance; summaries={summaries:#?}"
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            9
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_keeps_mixed_struct_parameter_provenance_dynamic() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction middle(value: Sample): i32 { return leaf(value); }\nfunction main(): i32 { item.value = 3; items[0].value = 4; return middle(item) + middle(items[0]); }\n",
+        );
+        process.compile().expect("compile");
+        let summaries = process.compiler.data_flow_summaries_shared();
+        for function in ["leaf", "middle"] {
+            let summary = summaries
+                .iter()
+                .find(|summary| summary.function == function)
+                .expect("helper summary");
+            assert_eq!(
+                summary.parameter_storage_kinds,
+                vec![crate::data_flow::ParameterStorageKind::Dynamic],
+                "unexpected {function} provenance; summaries={summaries:#?}"
+            );
+        }
+        let leaf_clif = process.clif_for_function_name("leaf").expect("leaf CLIF");
+        assert!(
+            leaf_clif.contains("brif"),
+            "mixed provenance incorrectly specialized leaf:\n{leaf_clif}"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            7
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_storage_specialization_preserves_live_aliases() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nfunction observe(first: Sample, second: Sample): i32 { let before: i32 = first.value; second.value = 9; return before + first.value; }\nfunction main(): i32 { item.value = 2; return observe(item, item); }\n",
+        );
+        process.compile().expect("compile");
+        let summary = process
+            .compiler
+            .data_flow_summaries_shared()
+            .iter()
+            .find(|summary| summary.function == "observe")
+            .cloned()
+            .expect("observe summary");
+        assert_eq!(
+            summary.parameter_storage_kinds,
+            vec![
+                crate::data_flow::ParameterStorageKind::Aos,
+                crate::data_flow::ParameterStorageKind::Aos,
+            ]
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            11
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_recompiles_helper_when_call_storage_provenance_changes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction main(): i32 { items[0].value = 7; return leaf(items[0]); }\n",
+        );
+        process.compile().expect("initial compile");
+        let initial_leaf_ptr = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "leaf")
+            .expect("initial leaf artifact")
+            .code_ptr;
+        assert!(!process
+            .clif_for_function_name("leaf")
+            .expect("initial leaf CLIF")
+            .contains("brif"));
+
+        process.upsert_file(
+            "sample.stasis",
+            "struct Sample { value: i32; }\nglobal item: Sample;\nglobal items: Sample[1];\nfunction leaf(value: Sample): i32 { return value.value; }\nfunction main(): i32 { item.value = 3; items[0].value = 4; return leaf(item) + leaf(items[0]); }\n",
+        );
+        let report = process.compile().expect("mixed-provenance patch");
+        assert_eq!(report.emit.emitted_functions, 2);
+        let patched_leaf_ptr = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "leaf")
+            .expect("patched leaf artifact")
+            .code_ptr;
+        assert_ne!(initial_leaf_ptr, patched_leaf_ptr);
+        assert!(process
+            .clif_for_function_name("leaf")
+            .expect("patched leaf CLIF")
+            .contains("brif"));
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute patched main"),
+            7
+        );
     }
 
     #[cfg(windows)]
@@ -5504,7 +6457,7 @@ mod tests {
         let mut process = JitProcess::new();
         process.upsert_file(
             "direct_storage.stasis",
-            "struct Enemy { hp: i32; speed: f32; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ints: i32[2];\nglobal floats: f32[2];\nglobal doubles: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction main(): i32 {\n    count = 7;\n    ratio = 1.5;\n    precise = 2.5;\n    ints[0] = 11;\n    floats[1] = 3.5;\n    doubles[0] = 4.5;\n    bytes[2] = 250;\n    enemies[0].hp = 13;\n    enemies[0].speed = 6.5;\n    label[0] = 65;\n    let negative: i32 = 0 - 1;\n    ints[negative] = 99;\n    ints[8] = 88;\n    let result: i32 = count + ints[0] + bytes[2] + enemies[0].hp + label[0] + label.max_length;\n    if (ints[negative] != 0) { return 1; }\n    if (ints[8] != 0) { return 2; }\n    if (ratio < 1.4) { return 3; }\n    if (precise < 2.4) { return 4; }\n    if (floats[1] < 3.4) { return 5; }\n    if (doubles[0] < 4.4) { return 6; }\n    if (enemies[0].speed < 6.4) { return 7; }\n    return result;\n}\n",
+            "struct Enemy { hp: i32; speed: f32; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal ints: i32[2];\nglobal floats: f32[2];\nglobal doubles: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction main(): i32 {\n    count = 7;\n    ratio = 1.5;\n    precise = 2.5;\n    ints[0] = 11;\n    floats[1] = 3.5;\n    doubles[0] = 4.5;\n    bytes[2] = 250;\n    enemies[0].hp = 13;\n    enemies[0].speed = 6.5;\n    label[0] = 65;\n    let result: i32 = count + ints[0] + bytes[2] + enemies[0].hp + label[0] + label.max_length;\n    if (ratio < 1.4) { return 3; }\n    if (precise < 2.4) { return 4; }\n    if (floats[1] < 3.4) { return 5; }\n    if (doubles[0] < 4.4) { return 6; }\n    if (enemies[0].speed < 6.4) { return 7; }\n    return result;\n}\n",
         );
         process.compile().expect("compile direct storage fixture");
         assert_eq!(
@@ -5523,6 +6476,152 @@ mod tests {
         assert!(
             !has_call_instruction,
             "core global storage emitted a runtime call:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_elides_static_array_checks_for_canonical_max_length_loop() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "global values: i32[4];\nfunction main(): i32 {\n    let total: i32 = 0;\n    let i: i32 = 0;\n    for (i = 0; i < values.max_length; i = i + 1) {\n        total += values[i];\n    }\n    return total;\n}\n",
+        );
+        process.compile().expect("compile proven bounds fixture");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(clif.contains("load.i32"), "expected direct load:\n{clif}");
+        assert!(
+            !clif.contains("trapz"),
+            "proven loop retained array bounds trap:\n{clif}"
+        );
+        let loop_bound_loads = clif
+            .lines()
+            .filter(|line| line.trim_start().contains("load.i32"))
+            .count();
+        assert_eq!(
+            loop_bound_loads, 1,
+            "fixed max_length should be an immediate, leaving only the element load:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_keeps_view_max_length_dynamic() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "view_capacity.stasis",
+            "global storage: i32[4];\nfunction capacity(values: i32[]): i32 { return values.max_length; }\nfunction main(): i32 { return capacity(storage); }\n",
+        );
+        process.compile().expect("compile view capacity fixture");
+        let clif = process
+            .clif_for_function_name("capacity")
+            .expect("capacity CLIF");
+        assert!(
+            clif.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("call ") || line.contains(" = call ")
+            }),
+            "view max_length incorrectly became a static constant:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_elides_static_array_store_checks_for_canonical_max_length_loop() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "global values: i32[4];\nfunction main(): i32 {\n    let i: i32 = 0;\n    for (i = 0; i < values.max_length; i = i + 1) {\n        values[i] = i;\n    }\n    return 0;\n}\n",
+        );
+        process
+            .compile()
+            .expect("compile proven store bounds fixture");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(clif.contains("store"), "expected direct store:\n{clif}");
+        assert!(
+            !clif.contains("trapz"),
+            "proven loop retained array store bounds trap:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_preserves_proven_bounds_through_struct_element_alias() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "struct Enemy { hp: i32; }\nglobal enemies: Enemy[4];\nfunction main(): i32 {\n    let total: i32 = 0;\n    let i: i32 = 0;\n    for (i = 0; i < enemies.max_length; i = i + 1) {\n        let enemy: Enemy = enemies[i];\n        total += enemy.hp;\n    }\n    return total;\n}\n",
+        );
+        process.compile().expect("compile alias bounds fixture");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(
+            clif.contains("load.i32"),
+            "expected direct alias load:\n{clif}"
+        );
+        assert!(
+            !clif.contains("trapz"),
+            "proven struct alias retained array bounds trap:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_retains_fatal_check_for_unproven_static_array_index() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "global values: i32[4];\nfunction read(index: i32): i32 { return values[index]; }\nfunction main(): i32 { return read(0); }\n",
+        );
+        process.compile().expect("compile checked bounds fixture");
+        let clif = process.clif_for_function_name("read").expect("read CLIF");
+        assert!(
+            clif.contains("trapz"),
+            "unproven static array index omitted fatal check:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_retains_fatal_check_for_unproven_static_array_store() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "global values: i32[4];\nfunction write(index: i32): i32 { values[index] = 7; return 0; }\nfunction main(): i32 { return write(0); }\n",
+        );
+        process
+            .compile()
+            .expect("compile checked store bounds fixture");
+        let clif = process.clif_for_function_name("write").expect("write CLIF");
+        assert!(
+            clif.contains("trapz"),
+            "unproven static array store omitted fatal check:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_checks_unproven_static_struct_view_once() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "struct Draw { x: f32; y: f32; opacity: i32; }\nglobal draws: Draw[4];\nfunction write(index: i32): i32 {\n    let draw: Draw = draws[index];\n    draw.x = 1.0;\n    draw.y = 2.0;\n    draw.opacity = 255;\n    return draw.opacity;\n}\nfunction main(): i32 { return write(0); }\n",
+        );
+        process
+            .compile()
+            .expect("compile checked struct view fixture");
+        let clif = process.clif_for_function_name("write").expect("write CLIF");
+        assert_eq!(
+            clif.matches("trapz").count(),
+            1,
+            "static struct view did not consolidate bounds checks at alias creation:\n{clif}"
+        );
+        assert!(
+            clif.contains("store"),
+            "expected direct field stores:\n{clif}"
+        );
+        assert!(
+            clif.contains("load.i32"),
+            "expected direct field load:\n{clif}"
         );
     }
 
@@ -5567,28 +6666,105 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_direct_array_bounds_follow_between_tick_rebinding() {
+    fn jit_elides_static_array_checks_for_in_bounds_literal_indexes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "literal_bounds.stasis",
+            "global values: i32[4];\nfunction main(): i32 { values[0] = 3; values[1 + 2] = 4; return values[0] + values[6 / 2]; }\n",
+        );
+        process.compile().expect("compile literal bounds fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute literal bounds fixture"),
+            7
+        );
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(clif.contains("load.i32"), "expected direct loads:\n{clif}");
+        assert!(clif.contains("store"), "expected direct stores:\n{clif}");
+        assert!(
+            !clif.contains("trapz"),
+            "in-bounds literal indexes retained array bounds traps:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_retains_fatal_check_for_out_of_bounds_literal_index() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "literal_bounds.stasis",
+            "global values: i32[4];\nfunction read(): i32 { return values[4]; }\nfunction main(): i32 { if (values[0] < 0) { return read(); } return 0; }\n",
+        );
+        process
+            .compile()
+            .expect("compile invalid literal bounds fixture");
+        let clif = process.clif_for_function_name("read").expect("read CLIF");
+        assert!(
+            clif.contains("trapz"),
+            "out-of-bounds literal index omitted fatal check:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_does_not_prove_unevaluable_constant_array_index() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "constant_bounds.stasis",
+            "global values: i32[4];\nfunction divide_by_zero(): i32 { return values[1 / 0]; }\nfunction main(): i32 { if (values[0] < 0) { return divide_by_zero(); } return 0; }\n",
+        );
+        process
+            .compile()
+            .expect("compile invalid constant bounds fixture");
+        let clif = process
+            .clif_for_function_name("divide_by_zero")
+            .expect("unevaluable constant function CLIF");
+        assert!(
+            clif.contains("trap"),
+            "unevaluable constant index was incorrectly proven safe:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_rejects_negative_constant_array_index() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "constant_bounds.stasis",
+            "global values: i32[4];\nfunction main(): i32 { return values[0 - 1]; }\n",
+        );
+        let error = process
+            .compile()
+            .expect_err("reject negative constant index");
+        match error {
+            crate::compiler::CompileError::Backend(message) => assert!(
+                message.contains("negative collection indices"),
+                "unexpected negative-index diagnostic: {message}"
+            ),
+            other => panic!("unexpected negative-index error: {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_rejects_backing_shorter_than_compiled_fixed_array() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "resize.stasis",
             "global values: i32[2];\nfunction main(): i32 { return values[3]; }\n",
         );
         process.compile().expect("compile resize fixture");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("initial run"),
-            0
-        );
-
         let hash = hash_global_path("values");
         let expanded = Box::leak(Box::new([1, 2, 3, 44]));
         stasis_dynload::register_global_i32_array(hash, 0, expanded.as_mut_ptr(), expanded.len());
         assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("expanded run"),
-            44
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash,
+                0,
+            ),
+            Some(expanded.len())
         );
 
         let contracted = Box::leak(Box::new([9]));
@@ -5599,10 +6775,13 @@ mod tests {
             contracted.len(),
         );
         assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("contracted run"),
-            0
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash,
+                0,
+            ),
+            Some(expanded.len()),
+            "short host backing replaced compiled fixed-array storage"
         );
     }
 
@@ -5774,7 +6953,7 @@ mod tests {
                     "return mid() + 12;",
                     "return shared() + 22;",
                     3,
-                    "function renamed(): i32 { return 5; }\nfunction unreachable(): i32 { return missing(); }",
+                    "function renamed(): i32 { return 5; }\nfunction unreachable(): i32 { return 6; }",
                 ),
                 47,
                 0,
@@ -5834,18 +7013,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn jit_process_skips_unreachable_invalid_function_body() {
+    fn jit_process_rejects_unreachable_unresolved_call() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "sample.stasis",
             "function bad(): i32 { return missing(); }\nfunction tick(): i32 { return 1; }\n",
         );
-        let report = process.compile().expect("compile");
-        assert_eq!(report.emit.emitted_functions, 1);
-        let value = process
-            .execute_i32_noarg_by_name("tick")
-            .expect("execute tick");
-        assert_eq!(value, 1);
+        let error = process
+            .compile()
+            .expect_err("whole-program validation must reject unreachable unresolved calls");
+        assert!(format!("{error:?}").contains("cannot resolve call 'missing'"));
+        assert!(process.artifacts().is_empty());
     }
 
     #[test]
@@ -5856,6 +7034,42 @@ mod tests {
         assert_eq!(report.index.parsed_functions, 1);
         assert_eq!(report.emit.emitted_functions, 1);
         assert!(process.artifacts()[0].code_ptr != 0);
+    }
+
+    #[test]
+    fn selectively_profiled_jit_reports_only_named_functions() {
+        let mut process = JitProcess::new();
+        process
+            .set_profile_functions(vec!["helper".to_string()])
+            .expect("configure profiler");
+        process.upsert_file(
+            "src/main.stasis",
+            "function helper(value: i32): i32 { return value * 2; }\nfunction main(): i32 { return helper(3) + helper(4); }\n",
+        );
+        process.compile().expect("profiled compile");
+        let helper_id = process
+            .program_snapshot()
+            .expect("program snapshot")
+            .functions()
+            .iter()
+            .find(|function| function.name == "helper")
+            .map(|function| function.id)
+            .expect("helper id");
+
+        stasis_dynload::enable_jit_profiler();
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute profiled main"),
+            14
+        );
+        stasis_dynload::disable_jit_profiler();
+        let samples = stasis_dynload::jit_profile_snapshot();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].function_id, helper_id);
+        assert_eq!(samples[0].calls, 2);
+        assert!(samples[0].inclusive_ns >= samples[0].exclusive_ns);
+        stasis_dynload::reset_jit_profile();
     }
 
     #[test]
@@ -6168,13 +7382,13 @@ mod tests {
             .compile()
             .expect_err("expected condition type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6187,13 +7401,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected return type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("return expression expected bool but found i32"),
+                    message.contains("return expression expected bool expression but found i32"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6208,13 +7422,13 @@ mod tests {
             .compile()
             .expect_err("expected assignment type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("let binding 'ready' expected bool expression but found i32"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6229,13 +7443,13 @@ mod tests {
             .compile()
             .expect_err("expected condition type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6250,13 +7464,13 @@ mod tests {
             .compile()
             .expect_err("expected condition type error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("condition expression must be bool"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6269,13 +7483,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("let binding 'value' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6288,13 +7502,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("let binding 'i' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6308,13 +7522,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("foreach item binding 'value' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6328,13 +7542,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected shadowing error");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
                     message.contains("foreach index binding 'v' shadows existing variable"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
     }
 
@@ -6819,6 +8033,65 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_compound_assignment_to_receiver_array_fields() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "receiver_array_compound.stasis",
+            RECEIVER_ARRAY_COMPOUND_TEST_SOURCE,
+        );
+        process
+            .compile()
+            .expect("compile receiver array compound assignment");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute receiver array compound assignment"),
+            29
+        );
+        let update_clif = process
+            .clif_for_function_name("update")
+            .expect("receiver array update CLIF");
+        assert_eq!(
+            update_clif.matches("trapz").count(),
+            2,
+            "each unproven receiver array index must retain a bounds trap:\n{update_clif}"
+        );
+        let read_clif = process
+            .clif_for_function_name("read")
+            .expect("receiver array read CLIF");
+        assert_eq!(
+            read_clif.matches("trapz").count(),
+            1,
+            "unproven receiver array reads must retain a bounds trap:\n{read_clif}"
+        );
+    }
+
+    #[test]
+    fn jit_process_rejects_mod_assignment_to_f32_receiver_array_fields() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "receiver_array_mod.stasis",
+            r#"
+const CAP: i32 = 4;
+struct Batch { values: f32[CAP]; }
+global batch: Batch;
+function update(self: Batch, index: i32): void { self.values[index] %= 0.5; }
+function main(): i32 { batch.update(0); return 0; }
+"#,
+        );
+        let error = process
+            .compile()
+            .expect_err("reject f32 receiver array remainder assignment");
+        assert!(
+            format!("{error:?}").contains(
+                "'%=' is unsupported for f32 indexed receiver assignment 'self.values[...]'"
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_resolves_same_method_name_by_receiver_type() {
         let mut process = JitProcess::new();
         process.upsert_file(
@@ -6961,6 +8234,70 @@ mod tests {
         assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 2);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn effect_contract_rejects_staged_candidate_and_preserves_active_code() {
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function leaf(): void { return; } function @effects() render(): i32 { leaf(); return 7; } function main(): i32 { return render(); }",
+        );
+        active.compile().expect("compile compliant generation");
+        let revision = active
+            .generation_metadata()
+            .expect("active metadata")
+            .source_revision;
+        assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 7);
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function leaf(): void { state.value += 1; } function @effects() render(): i32 { leaf(); return 9; } function main(): i32 { return render(); }",
+        );
+        let error = candidate
+            .compile()
+            .expect_err("candidate violates pure render boundary");
+        assert!(format!("{error:?}").contains("render -> leaf"));
+        assert_eq!(active.execute_i32_noarg_by_name("main").unwrap(), 7);
+        assert_eq!(
+            active.generation_metadata().unwrap().source_revision,
+            revision
+        );
+    }
+
+    #[test]
+    fn effect_contract_only_edit_reuses_emitted_machine_code() {
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects(state) tick(): i32 { state.value += 1; return 0; }",
+        );
+        active.compile().expect("compile broad contract");
+        let pointer = active
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "tick")
+            .expect("tick artifact")
+            .code_ptr;
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects(state.value) tick(): i32 { state.value += 1; return 0; }",
+        );
+        let report = candidate.compile().expect("validate narrower contract");
+        assert_eq!(report.emit.emitted_functions, 0);
+        assert_eq!(
+            candidate
+                .artifacts()
+                .iter()
+                .find(|artifact| artifact.function_key.name == "tick")
+                .unwrap()
+                .code_ptr,
+            pointer
+        );
+    }
+
     #[test]
     fn staged_candidate_applies_custom_roots_before_indexing_source_edits() {
         let mut active = JitProcess::new();
@@ -7063,13 +8400,13 @@ mod tests {
         );
         let error = process.compile().expect_err("expected compile failure");
         match error {
-            crate::compiler::CompileError::Backend(message) => {
+            crate::compiler::CompileError::Frontend(message) => {
                 assert!(
-                    message.contains("unknown call target 'missing'"),
+                    message.contains("cannot resolve call 'missing'"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected backend error, got {other:?}"),
+            other => panic!("expected frontend semantic error, got {other:?}"),
         }
 
         let second_main_ptr = process

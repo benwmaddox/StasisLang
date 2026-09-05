@@ -1,0 +1,46 @@
+import ".stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+const SCREEN_W: f32 = 360.0;
+const SCREEN_H: f32 = 640.0;
+
+global color_index: i32;
+global color_switch_host_frame: HostFrame;
+
+function next_color(index: i32): i32 {
+    if (index >= 2) {
+        return 0;
+    }
+    return index + 1;
+}
+
+function main(): i32 {
+    init_window(360, 640, "Stasis Color Switch");
+    color_index = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    color_switch_host_frame.refresh();
+    if (color_switch_host_frame.quit_requested) {
+        return 1;
+    }
+    if (color_switch_host_frame.pointer_count > 0 && color_switch_host_frame.pointers[0].went_down) {
+        color_index = next_color(color_index);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    if (color_index == 0) {
+        clear(0.12, 0.32, 0.88, 1.0);
+    } else if (color_index == 1) {
+        clear(0.10, 0.72, 0.48, 1.0);
+    } else {
+        clear(0.92, 0.28, 0.22, 1.0);
+    }
+    fill_rect(64.0, 176.0, SCREEN_W - 128.0, SCREEN_H - 352.0, 0.04, 0.05, 0.08, 0.86);
+    fill_rect(116.0, 228.0, SCREEN_W - 232.0, SCREEN_H - 456.0, 0.98, 0.98, 0.92, 1.0);
+    end_frame();
+    return 0;
+}

@@ -51,6 +51,7 @@ Stasis receiver-form functions are the primary API. They mutate an existing glob
 ```stasis
 function load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
+function release(self: Sprite): void;
 
 function load_text_from(self: TextRun, font: i32, text: string): bool;
 function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void;
@@ -98,11 +99,39 @@ Receiver-scoped resolution distinguishes the two `draw` functions by parameter 0
 
 Replacing an already valid sprite releases the old handle only after its replacement loads successfully. Failed replacement preserves the old valid resource. Prepared text remains owned by the host cache, which currently has no individual run-release operation; this API does not invent a second ownership policy.
 
+`Sprite.release()` is idempotent. It calls the native release bridge only when the
+receiver has a nonzero handle, then clears `handle`, `width`, and `height` even
+when the handle is stale or already released. A copied `Sprite` value is not an
+extra host acquisition: manually copying its integer fields and releasing both
+copies is invalid ownership. Code that needs two owners must load the resource
+twice (the host may return the same native handle and balances both references).
+
+Native desktop and mobile-AOT handles contain a slot generation. Release makes
+the old generation invalid, and a later slot reuse receives a different
+generation; stale handles are omitted from renderer restoration. The JIT and
+mobile AOT replacement paths publish the newly acquired receiver state before
+releasing the previous ownership, including when both acquisitions return the
+same handle.
+
+Android Workshop uses stable manifest handles as content identities, not GPU
+allocation IDs. Typed loads maintain a bounded per-project reference table. A
+zero-reference release is queued for the GL thread and is canceled if the same
+stable handle is acquired before the queue is drained. Workshop may map several
+manifest handles to one decoded texture by content hash; the GLES texture is
+deleted only after its last mapping is removed. The queue and table retain
+bounded deterministic limits, and overflow is surfaced as a resource error.
+Raw/direct manifest handles that were never acquired through typed loading are
+not owned by this release table. Surface restoration rebuilds only live entries;
+released entries and pending canceled releases cannot reappear.
+
 ## Drawing invariants
 
 `Sprite.draw` reads width and height from the receiver and emits the existing sprite command at exactly those logical dimensions. It rejects or ignores an invalid receiver according to the existing graphics-command failure policy; it never substitutes caller-provided dimensions.
 
 `TextRun.draw` reads the cached text handle from its receiver. Font ownership is explicit because the existing prepared-text command requires both font and run handles; it must not recover the font through a detector, global side table keyed only by source position, or fake fallback.
+
+Frequently changing labels use the bounded caller-owned replacement contract in
+[dynamic_text_runs.md](dynamic_text_runs.md); immutable `load_text_from` behavior remains unchanged.
 
 Physical density remains transparent to Stasis code:
 
@@ -125,6 +154,7 @@ The first implementation slice must cover:
 - receiver-form mutation of a global `Sprite` and `TextRun`;
 - successful load metadata assignment;
 - atomic clearing on invalid dimensions or native load failure;
+- idempotent `Sprite.release()` clearing all receiver metadata;
 - canonical sprite command width and height sourced from the receiver;
 - cached-text drawing through the receiver;
 - JIT and AOT lowering for the representative program where applicable;
@@ -175,4 +205,26 @@ The receiver is a mutable view into global-backed state, matching Stasis's exist
 
 Future work may add explicit downscale, fit, or intentionally upscaled operations. Those APIs must remain distinct from canonical `draw` and must validate against the resource's logical painted envelope. Asset-manifest IDs may eventually supply the logical size so paths and dimensions also have one declaration.
 
+TextRun and font ownership intentionally remain unchanged in this slice. The
+existing host text cache retains font bytes and prepared runs through surface
+restore; a future text/font release extension must define cache ownership
+separately rather than reusing sprite release semantics.
+`SpriteSheet` ownership is likewise unchanged; adding its explicit release
+operation remains a separate API extension from this `Sprite.release()` slice.
+
 Theory gained: a drawable's logical painted envelope belongs to the loaded resource, not to each draw command. The existing graphics path proves that physical raster density is already a host concern while Stasis draw commands still duplicate logical size. This predicts that receiver-owned logical dimensions can remove silent enlargement from ordinary drawing without changing the renderer or command-buffer architecture.
+
+## Sprite sheets and deterministic clips
+
+`Sprite.draw` remains a full-texture draw. `SpriteSheet.load_sprite_sheet_from(path, columns, rows, cell_width, cell_height)` loads one asset transactionally and records a validated uniform grid; `draw_frame` selects a row-major cell while preserving its logical painted dimensions. `draw_frame_scaled` selects the same validated cell while accepting caller-selected width and height, keeping geometry customization in the stdlib without exposing UV command-buffer patching to game code. A manifest sprite may additionally declare `format.layout` with the same `columns` and `rows`; Stasis validates that the declared image dimensions divide evenly into those cells and preserves the metadata through preparation. Prepared PNG atlases resize whole cells before rebuilding the image, so `SpriteSheet.load_sprite_sheet_from` can continue to use exact cell dimensions. The sheet abstraction owns normalized source-region details, so ordinary game code cannot accidentally issue malformed UV commands.
+
+`AnimationClip` is a pure helper for authored frame mappings. Its `first_frame`, `frame_count`, `ticks_per_frame`, and integer playback mode are data-driven; the standard constants are `ANIMATION_PLAYBACK_ONCE`, `ANIMATION_PLAYBACK_LOOP`, and `ANIMATION_PLAYBACK_PING_PONG`. `frame_at(elapsed_ticks)` clamps negative time and wraps or reflects deterministically, while `finished(elapsed_ticks)` reports completion for once-only clips. Games should bind frame mapping and timing from JSON; StasisLang owns UV sampling and playback mechanics.
+The executable reference is `samples/sprite_sheet_animation`. It loads one 2x2 PNG, draws all four row-major cells, and packages the single source image for both JIT and AOT builds. The fixture verifier and language tests are:
+
+```powershell
+python tools/verify_sprite_sheet_fixture.py
+stasis --workspace samples/sprite_sheet_animation check
+stasis --workspace samples/sprite_sheet_animation build
+```
+
+Good: one texture and one sprite command represent every cell, so animation frames do not duplicate GPU resources or asset-manifest records. Bad: nested resource structs and arbitrary annotated wrapper calls are not yet supported by the current JIT call boundary. Adjustment: `SpriteSheet` uses a flat resource layout and one compiler-recognized loader while keeping clip timing independent and data-driven. Theory gained: a generic renderer needs only validated source regions plus deterministic frame selection; game-specific states, pacing, and clip mappings remain configuration data rather than engine policy.

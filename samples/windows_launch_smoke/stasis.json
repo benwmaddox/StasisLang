@@ -3,5 +3,6 @@
   "name": "windows_launch_smoke",
   "entry": "main.stasis",
   "tests": "tests",
-  "output": "build"
+  "output": "build",
+  "stdlib": "toolchain"
 }

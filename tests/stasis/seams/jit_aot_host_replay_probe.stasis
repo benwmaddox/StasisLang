@@ -1,0 +1,263 @@
+import "../../../src/stdlib/graphics.stasis";
+
+function @extern("stasis_jit_render_trace") native_render_trace(
+    cmd_i32: i32[],
+    cmd_i32_len: i32,
+    cmd_f32: f32[],
+    cmd_f32_len: i32,
+    cmd_u8: u8[],
+    cmd_u8_len: i32
+): i32;
+
+global score: i32;
+global pointer_marks: i32;
+global resize_marks: i32;
+global main_calls: i32;
+global tick_calls: i32;
+global render_calls: i32;
+global last_tick_result: i32;
+global last_render_result: i32;
+global last_trace: i32;
+global replay_host_frame: HostFrame;
+
+function main(): i32 {
+    score = 5;
+    pointer_marks = 0;
+    resize_marks = 0;
+    main_calls = 1;
+    tick_calls = 0;
+    render_calls = 0;
+    last_tick_result = 0;
+    last_render_result = 0;
+    last_trace = 0;
+    host_i32[HOST_I_KEY_BASE + 44] = 0;
+    return 0;
+}
+
+function apply_snapshot(index: i32): void {
+    host_i32[HOST_I_TICK_INDEX] = index + 1;
+    host_i32[HOST_I_RESIZED] = 0;
+    host_i32[HOST_I_SCREEN_W_PX] = 320;
+    host_i32[HOST_I_SCREEN_H_PX] = 180;
+    host_i32[HOST_I_VERSION] = 4;
+    host_i32[HOST_I_TICK_HZ] = 60;
+    host_i32[HOST_I_WINDOW_FOCUSED] = 1;
+    host_i32[HOST_I_WINDOW_MINIMIZED] = 0;
+    host_i32[HOST_I_NATIVE_W_PX] = 320;
+    host_i32[HOST_I_NATIVE_H_PX] = 180;
+    host_i32[HOST_I_DRAWABLE_W_PX] = 320;
+    host_i32[HOST_I_DRAWABLE_H_PX] = 180;
+    host_i32[HOST_I_DISPLAY_GENERATION] = 1;
+    host_i32[HOST_I_DENSITY_GENERATION] = 1;
+    host_i32[HOST_I_DROPPED_POINTERS] = 0;
+    host_i32[HOST_I_POINTER_COUNT] = 1;
+    host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 0] = 77;
+    host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 1] = 1;
+    host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 2] = 0;
+    host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 3] = 0;
+    host_f32[HOST_F_CONTENT_SCALE] = 1.0;
+    host_f32[HOST_F_RASTER_SCALE] = 1.0;
+    host_f32[HOST_F_LOGICAL_W] = 320.0;
+    host_f32[HOST_F_LOGICAL_H] = 180.0;
+    host_f32[HOST_F_SAFE_X] = 0.0;
+    host_f32[HOST_F_SAFE_Y] = 0.0;
+    host_f32[HOST_F_SAFE_W] = 320.0;
+    host_f32[HOST_F_SAFE_H] = 180.0;
+    host_f32[HOST_F_AVAILABLE_W] = 1280.0;
+    host_f32[HOST_F_AVAILABLE_H] = 720.0;
+
+    if (index == 0) {
+        host_i32[HOST_I_KEY_BASE + 44] = 1;
+        host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 2] = 1;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 0] = 10.5;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 1] = 20.0;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 4] = 0.0328125;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 5] = 0.11111111;
+    } else if (index == 1) {
+        host_i32[HOST_I_KEY_BASE + 44] = 0;
+        host_i32[HOST_I_RESIZED] = 1;
+        host_i32[HOST_I_SCREEN_W_PX] = 641;
+        host_i32[HOST_I_SCREEN_H_PX] = 359;
+        host_i32[HOST_I_NATIVE_W_PX] = 1282;
+        host_i32[HOST_I_NATIVE_H_PX] = 718;
+        host_i32[HOST_I_DRAWABLE_W_PX] = 1282;
+        host_i32[HOST_I_DRAWABLE_H_PX] = 718;
+        host_i32[HOST_I_DISPLAY_GENERATION] = 2;
+        host_i32[HOST_I_DENSITY_GENERATION] = 2;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 0] = 18.25;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 1] = 28.5;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 2] = 7.75;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 3] = 8.5;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 4] = 0.02847114;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 5] = 0.07938719;
+        host_f32[HOST_F_RASTER_SCALE] = 2.0;
+        host_f32[HOST_F_LOGICAL_W] = 641.0;
+        host_f32[HOST_F_LOGICAL_H] = 359.0;
+        host_f32[HOST_F_SAFE_W] = 641.0;
+        host_f32[HOST_F_SAFE_H] = 359.0;
+    } else {
+        host_i32[HOST_I_KEY_BASE + 44] = 1;
+        host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 1] = 0;
+        host_i32[HOST_I_POINTER_BASE + 0 * HOST_I_POINTER_STRIDE + 3] = 1;
+        host_i32[HOST_I_SCREEN_W_PX] = 641;
+        host_i32[HOST_I_SCREEN_H_PX] = 359;
+        host_i32[HOST_I_NATIVE_W_PX] = 1282;
+        host_i32[HOST_I_NATIVE_H_PX] = 718;
+        host_i32[HOST_I_DRAWABLE_W_PX] = 1282;
+        host_i32[HOST_I_DRAWABLE_H_PX] = 718;
+        host_i32[HOST_I_DISPLAY_GENERATION] = 2;
+        host_i32[HOST_I_DENSITY_GENERATION] = 2;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 0] = 21.0;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 1] = 31.0;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 2] = 2.75;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 3] = 2.5;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 4] = 0.03276131;
+        host_f32[HOST_F_POINTER_BASE + 0 * HOST_F_POINTER_STRIDE + 5] = 0.08635098;
+        host_f32[HOST_F_RASTER_SCALE] = 2.0;
+        host_f32[HOST_F_LOGICAL_W] = 641.0;
+        host_f32[HOST_F_LOGICAL_H] = 359.0;
+        host_f32[HOST_F_SAFE_W] = 641.0;
+        host_f32[HOST_F_SAFE_H] = 359.0;
+    }
+}
+
+function tick(): i32 {
+    replay_host_frame.refresh();
+    tick_calls += 1;
+    if (replay_host_frame.keys[44] != 0) {
+        score += 7;
+    } else {
+        score -= 2;
+    }
+    if (replay_host_frame.pointer_count > 0) {
+        if (replay_host_frame.pointers[0].x_logical > 15.0) {
+            pointer_marks += 3;
+        } else {
+            pointer_marks += 1;
+        }
+        if (replay_host_frame.pointers[0].went_down) {
+            pointer_marks += 10;
+        }
+        if (replay_host_frame.pointers[0].went_up) {
+            pointer_marks += 20;
+        }
+    }
+    if (replay_host_frame.display.resized) {
+        resize_marks += replay_host_frame.display.screen_width_px + replay_host_frame.display.screen_height_px;
+    }
+    return score + pointer_marks + resize_marks + tick_calls;
+}
+
+function render(): i32 {
+    replay_host_frame.refresh();
+    render_calls += 1;
+    gfx_cmd_begin();
+    gfx_cmd_clear(0.05, 0.10, 0.15, 1.0);
+    gfx_cmd_rect(4.0, 5.0, 20.0, 12.0, 0.2, 0.4, 0.6, 1.0);
+    if (replay_host_frame.pointers[0].is_down) {
+        gfx_cmd_rect(30.0, 8.0, 9.0, 7.0, 0.8, 0.3, 0.1, 1.0);
+    }
+    last_trace = native_render_trace(gfx_cmd_i32, 67888, gfx_cmd_f32, 146564, gfx_cmd_u8, 65536);
+    return render_calls * 10 + gfx_cmd_i32[24];
+}
+
+function replay(ticks: i32): void {
+    main();
+    for (let index: i32 = 0; index < ticks; index += 1) {
+        apply_snapshot(index);
+        last_tick_result = tick();
+        last_render_result = render();
+    }
+}
+
+function replay_metric(ticks: i32, metric: i32): i32 {
+    replay(ticks);
+    if (metric == 0) {
+        return last_tick_result * 100 + last_render_result;
+    }
+    if (metric == 1) {
+        return score * 100000 + pointer_marks * 1000 + resize_marks + tick_calls;
+    }
+    if (metric == 2) {
+        return main_calls * 10000 + tick_calls * 100 + render_calls;
+    }
+    if (metric == 3) {
+        return gfx_cmd_i32[3] * 1000000 + gfx_cmd_i32[24] * 1000 + gfx_cmd_i32[22];
+    }
+    if (metric == 4) {
+        return last_trace;
+    }
+    return pointer_marks;
+}
+
+function it011_t1_entry(): i32 {
+    return replay_metric(1, 0);
+}
+
+function it011_t1_state(): i32 {
+    return replay_metric(1, 1);
+}
+
+function it011_t1_lifecycle(): i32 {
+    return replay_metric(1, 2);
+}
+
+function it011_t1_counts(): i32 {
+    return replay_metric(1, 3);
+}
+
+function it011_t1_trace(): i32 {
+    return replay_metric(1, 4);
+}
+
+function it011_t1_pointer_marks(): i32 {
+    return replay_metric(1, 5);
+}
+
+function it011_t2_entry(): i32 {
+    return replay_metric(2, 0);
+}
+
+function it011_t2_state(): i32 {
+    return replay_metric(2, 1);
+}
+
+function it011_t2_lifecycle(): i32 {
+    return replay_metric(2, 2);
+}
+
+function it011_t2_counts(): i32 {
+    return replay_metric(2, 3);
+}
+
+function it011_t2_trace(): i32 {
+    return replay_metric(2, 4);
+}
+
+function it011_t2_pointer_marks(): i32 {
+    return replay_metric(2, 5);
+}
+
+function it011_t3_entry(): i32 {
+    return replay_metric(3, 0);
+}
+
+function it011_t3_state(): i32 {
+    return replay_metric(3, 1);
+}
+
+function it011_t3_lifecycle(): i32 {
+    return replay_metric(3, 2);
+}
+
+function it011_t3_counts(): i32 {
+    return replay_metric(3, 3);
+}
+
+function it011_t3_trace(): i32 {
+    return replay_metric(3, 4);
+}
+
+function it011_t3_pointer_marks(): i32 {
+    return replay_metric(3, 5);
+}

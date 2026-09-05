@@ -1,0 +1,15 @@
+// SDL scancodes used by samples.
+// Values match SDL_SCANCODE_* (keyboard scancodes, not keycodes).
+
+enum Scancode {
+    A = 4,
+    D = 7,
+    W = 26,
+    Return = 40,
+    Escape = 41,
+    Space = 44,
+    Right = 79,
+    Left = 80,
+    Down = 81,
+    Up = 82,
+}

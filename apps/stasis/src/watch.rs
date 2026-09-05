@@ -78,6 +78,17 @@ fn is_watchable_path(path: &Path) -> bool {
         ext.eq_ignore_ascii_case("stasis")
             || ext.eq_ignore_ascii_case("json")
             || ext.eq_ignore_ascii_case("csv")
+            || ext.eq_ignore_ascii_case("svg")
+            || ext.eq_ignore_ascii_case("png")
+            || ext.eq_ignore_ascii_case("jpg")
+            || ext.eq_ignore_ascii_case("jpeg")
+            || ext.eq_ignore_ascii_case("webp")
+            || ext.eq_ignore_ascii_case("ttf")
+            || ext.eq_ignore_ascii_case("otf")
+            || ext.eq_ignore_ascii_case("wav")
+            || ext.eq_ignore_ascii_case("ogg")
+            || ext.eq_ignore_ascii_case("mp3")
+            || ext.eq_ignore_ascii_case("m4a")
     })
 }
 
@@ -97,6 +108,7 @@ mod tests {
                 PathBuf::from("a.stasis"),
                 PathBuf::from("data.json"),
                 PathBuf::from("data.csv"),
+                PathBuf::from("assets/piece.svg"),
                 PathBuf::from("note.txt"),
             ],
             attrs: Default::default(),
@@ -116,17 +128,18 @@ mod tests {
         let modify_events = map_notify_event(modify, &mut revision);
         let remove_events = map_notify_event(remove, &mut revision);
 
-        assert_eq!(create_events.len(), 3);
+        assert_eq!(create_events.len(), 4);
         assert_eq!(create_events[0].change_kind, FileChangeKind::Created);
         assert_eq!(create_events[0].revision, 10);
+        assert_eq!(create_events[3].path, PathBuf::from("assets/piece.svg"));
 
         assert_eq!(modify_events.len(), 1);
         assert_eq!(modify_events[0].change_kind, FileChangeKind::Modified);
-        assert_eq!(modify_events[0].revision, 13);
+        assert_eq!(modify_events[0].revision, 14);
 
         assert_eq!(remove_events.len(), 1);
         assert_eq!(remove_events[0].change_kind, FileChangeKind::Deleted);
-        assert_eq!(remove_events[0].revision, 14);
+        assert_eq!(remove_events[0].revision, 15);
     }
 
     #[test]

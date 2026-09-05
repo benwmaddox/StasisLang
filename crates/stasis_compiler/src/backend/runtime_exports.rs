@@ -27,8 +27,14 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_audio_set_music_volume",
     "stasis_jit_audio_play_effect",
     "stasis_jit_audio_shutdown",
+    "stasis_jit_asset_request_sprite",
+    "stasis_jit_asset_request_audio",
+    "stasis_jit_asset_task_poll",
+    "stasis_jit_asset_task_take_handle",
+    "stasis_jit_asset_task_cancel",
     "stasis_jit_collection_i32_load",
     "stasis_jit_collection_i32_store",
+    "stasis_jit_clear_string_literal_table",
     "stasis_jit_cos_fast",
     "stasis_jit_gfx_cache_text",
     "stasis_jit_gfx_dump_bmp",
@@ -39,6 +45,8 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_gfx_measure_text_cached_height",
     "stasis_jit_sprite_load_from",
     "stasis_jit_text_run_load_from",
+    "stasis_jit_text_run_replace_from",
+    "stasis_jit_upsert_string_literal",
     "stasis_jit_gfx_poll_reload",
     "stasis_jit_global_f32_array_load",
     "stasis_jit_global_f32_array_ptr",
@@ -76,6 +84,18 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_sys_memmove_f32",
     "stasis_jit_sys_memmove_i32",
     "stasis_jit_sys_memmove_u8",
+    "stasis_jit_network_supported",
+    "stasis_jit_network_host_random_seed",
+    "stasis_jit_network_host_start",
+    "stasis_jit_network_host_start_text",
+    "stasis_jit_network_host_start_bind",
+    "stasis_jit_network_host_start_bind_text",
+    "stasis_jit_network_host_poll",
+    "stasis_jit_network_host_send",
+    "stasis_jit_network_host_status",
+    "stasis_jit_network_host_overflow_count",
+    "stasis_jit_network_host_port",
+    "stasis_jit_network_host_stop",
 ];
 
 pub(crate) fn is_aot_runtime_export_symbol(symbol: &str) -> bool {
@@ -97,6 +117,9 @@ mod tests {
             "stasis_jit_gfx_release_sprite"
         ));
         assert!(is_aot_runtime_export_symbol("stasis_jit_audio_load_music"));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_network_host_random_seed"
+        ));
         assert!(is_aot_runtime_export_symbol(
             "stasis_jit_audio_set_music_volume"
         ));

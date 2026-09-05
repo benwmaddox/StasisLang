@@ -11,7 +11,7 @@ if (unlocked < 4) {
 }
 ```
 
-The graphical desktop host stores values under SDL's app-private preference directory. Android configures the same scoped storage contract under the application's private files directory. Headless Linux and macOS JIT hosts use the platform user-data directory; `STASIS_STORAGE_DIR` can override that root for controlled environments.
+The graphical desktop host stores values under SDL's app-private preference directory. Android stores each validated scope in its own child directory under the application's private files directory because SDL's Android preference root does not encode the organization or application arguments. Legacy unscoped Android files are not read: assigning one such file to a scope would let a different scope with the same key alias it. Headless Linux and macOS JIT hosts use the platform user-data directory; `STASIS_STORAGE_DIR` can override that root for controlled environments.
 
 Every host uses the explicit game scope. Scope and key are restricted to 1-63 ASCII letters, digits, underscores, or hyphens; invalid names fail closed. A missing, invalid, or corrupt value returns the supplied fallback. Save returns `true` only after the complete integer value has been written and atomically published.
 

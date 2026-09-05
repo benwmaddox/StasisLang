@@ -177,3 +177,59 @@ will improve SVG and text sharpness without changing game layout or input code.
 - Adjustment: Windows display work should verify the executable awareness
   context and captured framebuffer dimensions, not only renderer flags and
   logical metrics.
+
+## 2026-08-31 critical incident: stale fitted output
+
+Released nightly 270 ran on a per-monitor-v2 150% host, yet a
+portrait-to-landscape logical change reported drawable `493 x 986` and loaded
+fonts at scale `1.00` while the captured landscape content was `1920 x 960`.
+The cue was that the reported drawable exactly resembled the previous portrait
+fit instead of any plausible complete renderer backing.
+
+The runtime queried `SDL_GetCurrentRenderOutputSize` before applying the new
+logical presentation. SDL defines that query in terms of current logical
+presentation, so the prior fitted viewport remained observable at the
+transition boundary. `SDL_GetRenderOutputSize` instead reports the renderer's
+complete backing independently of logical presentation. Stasis now uses that
+full-backing query for display metrics and continues to derive its fitted
+content viewport separately.
+
+The tempting alternative was to reorder the current-output query after
+`SDL_SetRenderLogicalPresentation`. That would make this transition less stale
+but would still assign a logical-presentation result to a field whose contract
+is the complete physical target. The ownership correction is the durable fix.
+A counterfactual full-backing receipt equal to the screenshot dimensions would
+have redirected investigation to resource invalidation rather than SDL output
+selection.
+
+Theory gained: renderer backing and fitted logical output can have identical
+dimensions in ordinary windowed cases but remain different kinds of state.
+The released transition exposed that distinction; it predicts a future
+orientation change can alter fitted content and raster scale without changing
+the underlying drawable dimensions.
+
+## 2026-08-31 first-revision receipts
+
+Visual evidence: a matched-fingerprint source CLI/runtime pair on the physical
+150% host reported logical `720 x 360`, native/full drawable `1920 x 986`, and
+density generation 3. Its fitted-content capture was `1920 x 960`, with a
+13-pixel top offset in the full backing. Thirty-six current live resource
+receipts all named generation 3; their computed RGBA texture total was
+53,944,264 bytes and full framebuffer receipt was 7,572,480 bytes. This is a
+local first-revision diagnostic, not successor-nightly approval.
+
+Theory gained: the full backing, fitted capture, and resource preparation tier
+need three separate receipts joined by one density generation. The run also
+showed that applying `ceil` to a rounded float ratio can over-prepare an exact
+integer result: logical size 18 at `1920 / 720` became 49 instead of 48. Runtime
+resource extents now use integer-rational ceiling from logical/full-backing
+dimensions.
+
+- Good: opt-in replacement receipts exposed both the current live tier and the
+  exact memory total after the final transition.
+- Bad: an earlier harness accepted a zero texture total because PowerShell did
+  not project ordered-dictionary values through `Measure-Object`, and the first
+  source debug CLI overflowed its stack before physical acceptance.
+- Adjustment: acceptance now sums receipt dictionaries explicitly, rejects an
+  executable whose sibling runtime differs from the supplied DLL, and uses the
+  matched release-profile source pair for first-revision capture.

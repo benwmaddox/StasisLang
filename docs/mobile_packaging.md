@@ -9,8 +9,9 @@ stasis --workspace path/to/game package-mobile --target ios-arm64
 ```
 
 Official release archives verify their compiler and runtime sources against
-`stasis_release_provenance.json` before packaging. A source checkout must add
-`--development-build`; that output is explicitly labeled non-release. See
+`stasis_release_provenance.json` before packaging. When that manifest is absent,
+a source-built toolchain automatically emits content-addressed local-release provenance and keeps
+optimized release behavior. `--development-build` explicitly selects development output. See
 `release_provenance.md` for the manifest and repinning contract.
 
 `stasis.json` supplies the entry source. Its optional Android object supplies
@@ -31,6 +32,10 @@ not publish a partial app project.
 }
 ```
 
+`orientation` accepts `unspecified`, `sensorLandscape`, `sensorPortrait`, or
+Android's `fullSensor`. Use `fullSensor` when the app owns responsive logical
+canvases for all four physical device rotations.
+
 Each output contains the same pieces:
 
 - `aot/`: target-native game objects, generated entry bindings, ABI metadata
@@ -40,13 +45,16 @@ Each output contains the same pieces:
 - `stasis_provenance.json`: verified release identity and content hashes
 - `android/` or `ios/`: a thin platform-native app project
 
-Mobile packaging follows the selected entry module's import graph. It includes only
-manifest assets referenced by static string literals in reachable production source,
-plus their transitive manifest dependencies, and emits a manifest containing that same
-subset. Relative literals use the selected entry file's directory as their base, even
-when they appear in imported modules. Keep dynamically chosen release asset paths out of
-string construction; declare the literal paths in reachable source instead. Android and
-iOS use the identical rule.
+Mobile packaging follows the selected entry module's import graph and the same
+compiler-owned `@asset_path` validation used by `stasis check` and desktop builds. It includes
+only validated manifest assets from reachable production calls plus transitive dependencies.
+Relative literals use the declaring module directory. Both canonical `assets/...` and rooted
+`/assets/...` project paths are accepted; the latter is a virtual root spelling and is staged as
+`assets/...` beneath `stasis_game` on every target. Casing is checked identically on Windows and Unix.
+URI, drive, UNC, embedded-backslash, and other host-rooted spellings fail compilation before
+publishing a package. Bounded dynamic loaders must use
+the manifest's `dynamic_assets` declaration; otherwise packaging fails before publishing output.
+Android and iOS use the identical result.
 
 The packaged runtime is the same canonical SDL command interpreter used by the
 desktop distribution. The versioned guest buffer and deterministic trace
@@ -56,7 +64,8 @@ Potential Android release-shell additions are tracked in
 `android_release_shell_backlog.md`; they must remain generic or opt-in adapters.
 
 The runtime asset root is always the packaged `stasis_game` project root.
-Canonical game paths therefore start with `assets/`. For compatibility with
+Canonical game paths therefore start with `assets/`; source-rooted `/assets/...` paths are
+normalized to that same canonical form before runtime lookup. For compatibility with
 older source-relative literals such as `../assets/foo.svg`, an explicit
 packaged asset root normalizes `.` and leading parent segments without allowing
 the resolved path to escape `stasis_game`.
@@ -98,10 +107,24 @@ desktop, Workshop JIT preview, and the generated release shell. On Android, a
 three-finger tap toggles a rolling tick/render timing overlay in both Workshop
 and the generated release app.
 
+The generated Android release shell reads the packaged asset manifest on every
+Activity creation but reuses a matching app-private extraction when its
+versioned package/release marker and file inventory still agree. Cold
+extraction verifies every declared asset and publishes the staged tree with
+rollback protection; reuse relies on the verified inventory's bounded file
+metadata rather than rehashing all asset bytes. Missing, changed, truncated,
+extra, or partial output is rebuilt or rejected safely. The marker seals the
+fully verified tree within the app-private trust boundary; this inventory is
+not a cryptographic defense against a same-privilege attacker who rewrites
+bytes and restores all recorded metadata. The shell logs elapsed time and
+deterministic packaged/cache byte counters for cold and reuse paths.
+
 ## iOS arm64
 
 On macOS install Xcode and obtain device-capable `SDL3.xcframework` and
-`SDL3_image.xcframework` bundles in one directory. From generated `ios/` run:
+`SDL3_image.xcframework` bundles in one directory. The supported inputs are
+the official SDL3 3.4.10 and SDL3_image 3.4.4 release DMGs, matching the
+runtime's pinned source versions. From generated `ios/` run:
 
 ```text
 xcodebuild -project StasisMobile.xcodeproj -scheme StasisMobile \
@@ -113,4 +136,45 @@ xcodebuild -project StasisMobile.xcodeproj -scheme StasisMobile \
 The checked-in Xcode shell compiles the same runtime, links the iOS AOT objects,
 and copies `StasisMobile/stasis_game` into the app resources. Device arm64 is
 the v1 target; simulator and multi-architecture packaging are intentionally out
-of scope.
+of scope. Pull requests run `tools/ci/build_ios_package.sh` on macOS with code
+signing disabled; the driver builds `samples/mobile_storage_link` and verifies
+the arm64 executable, embedded SDL frameworks, packaged assets and provenance,
+and absence of Stasis source. A signed device install still requires the
+developer's `DEVELOPMENT_TEAM` and provisioning profile.
+
+iOS uses the immutable app-bundle asset tree directly and has no Android-style
+extraction cache. The Android cache is therefore not part of the shared iOS
+runtime contract.
+
+When the project declares the optional `network` capability, packaging also
+requires a macOS host with Xcode and the `aarch64-apple-ios` Rust target. The
+toolchain builds `stasis_network` as a release static library, stages it under
+`ios/network/`, links it through the generated `StasisMobile.xcconfig`, and
+places the signed/static `network_guest.bundle` in the iOS asset root. The
+generated package metadata uses iOS paths and defines `STASIS_NETWORK_ENABLED=1`;
+non-network packages contain none of those references.
+
+Official toolchain archives resolve network libraries relative to the installed
+executable from `mobile/network/<target>/libstasis_network.a` and the shared
+`mobile/network/include/stasis_network.h`; they do not depend on the source
+checkout used to build the compiler. Source-tree Cargo builds retain a
+development fallback. Release assembly must therefore publish the prebuilt
+Android arm64/x86_64 libraries and, on macOS archives, the iOS arm64 library
+under that layout before advertising network mobile packaging.
+
+Nightly archives now receive these support files from a fail-closed, pinned
+mobile-network build job (Android NDK 27.0.12077973/API 26 and the macOS
+iphoneos SDK) before archive provenance is generated. Downstream network
+packaging therefore does not need the Stasis source checkout or Cargo to build
+the network library.
+
+The network shell requests `NSLocalNetworkUsageDescription` with a clear nearby
+friends explanation. v1 uses direct TCP/unicast and does not request Bonjour,
+multicast, or discovery entitlements. After host startup, the native UIKit shell
+offers a Copy URL / Dismiss alert. The pairing URL is copied through bounded
+native memory only and is never placed in Stasis state, snapshots, logs, or
+guest data. See Apple's [Local Network
+Privacy](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+and [`NSLocalNetworkUsageDescription`](https://developer.apple.com/documentation/BundleResources/Information-Property-List/NSLocalNetworkUsageDescription)
+guidance. Physical iOS signing, installation, and device pairing remain release
+gates.

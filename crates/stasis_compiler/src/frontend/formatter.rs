@@ -1113,6 +1113,15 @@ mod tests {
     }
 
     #[test]
+    fn preserves_canonical_effect_attribute_placement_and_regions() {
+        let source = "function @effects(state.enemies,state.projectiles)tick():void{return;}";
+        let expected =
+            "function @effects(state.enemies, state.projectiles) tick(): void {\n    return;\n}\n";
+        assert_eq!(format_source(source).expect("format effects"), expected);
+        assert_eq!(format_source(expected).expect("reformat effects"), expected);
+    }
+
+    #[test]
     fn keeps_commented_imports_in_one_group() {
         let source = "import\"a.stasis\";// first\nimport \"b.stasis\";/* second */\nfunction main():i32{return 0;}";
         let expected = "import \"a.stasis\"; // first\nimport \"b.stasis\"; /* second */\n\nfunction main(): i32 {\n    return 0;\n}\n";

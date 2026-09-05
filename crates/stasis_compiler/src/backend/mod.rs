@@ -1,5 +1,9 @@
 pub mod aot;
+pub mod assets;
+pub(crate) mod compile_analysis;
+pub mod development_swap;
 pub(crate) mod emit;
+pub mod hot_render;
 pub mod jit;
 pub mod patch_plan;
 pub mod program_snapshot;
@@ -8,6 +12,7 @@ mod runtime_exports;
 pub mod state_layout;
 pub mod state_migration;
 mod state_query;
+pub mod wasm;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineEntrypoints {

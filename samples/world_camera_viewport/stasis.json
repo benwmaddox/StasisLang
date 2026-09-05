@@ -1,0 +1,8 @@
+{
+  "manifest_version": 1,
+  "name": "world_camera_viewport",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain"
+}

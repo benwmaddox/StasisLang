@@ -1,19 +1,32 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use flate2::{Compression, GzBuilder};
+use oxc_allocator::Allocator;
+use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
+use oxc_minifier::{CompressOptions, Minifier, MinifierOptions};
+use oxc_parser::Parser as JavaScriptParser;
+use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
-    run_jit_tests_in_directory_with_project_root_and_session, run_live_in_process,
-    run_live_in_process_with_data, run_play_in_process_with_window_title,
-    run_self_host_aot_cli_with_options, LiveRunConfig, StasisTestRunSession,
+    load_and_apply_play_data_bindings_for_test, provision_local_certificate,
+    resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
+    run_play_in_process_with_replay, run_play_in_process_with_window_title,
+    run_self_host_aot_cli_with_options, sign_artifacts, signing_status, verify_artifacts,
+    LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
-    load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
+    load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
+    AssetLimits, AudioEncoding, FontEncoding, SpriteEncoding, ASSET_PACKAGE_IDENTITY_PATH,
+    DEFAULT_ASSET_MANIFEST_PATH,
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
+use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::frontend::formatter::format_source;
+use stasis_compiler::frontend::types::{TYPE_ID_F32, TYPE_ID_I32};
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
@@ -38,31 +51,41 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod dap;
+mod desktop_editor;
 mod gauntlet;
+mod headless;
 mod live_tui;
+mod record;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
+const GFX_CMD_NAME: &str = "gfx_cmd";
+const GFX_CMD_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const MOBILE_RUNTIME_FILES: &[&str] = &[
     "CMakeLists.txt",
     "MINIMP3-LICENSE.txt",
     "minimp3.h",
     "minimp3_ex.h",
-    "nanosvg.h",
-    "nanosvgrast.h",
+    "stasis_svg.cpp",
+    "stasis_svg.h",
     "stasis_display_scale.h",
     "stasis_asset_path.h",
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",
+    "stasis_performance_metrics.h",
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
     "stasis_graphics.c",
+    "stasis_mixed_quad_planner.h",
+    "stasis_sprite_atlas_policy.h",
+    "stasis_image_writer.c",
+    "stasis_image_writer.h",
     "stasis_runner.manifest",
     "stasis_runner_macos.plist.in",
     "stasis_mobile_aot_runtime.c",
@@ -75,25 +98,72 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_platform_services.h",
     "stb_truetype.h",
 ];
+const MOBILE_RUNTIME_DIRS: &[&str] = &["third_party/thorvg"];
 const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md");
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
+const PROJECT_GIT_ATTRIBUTES: &str = "*.[sS][vV][gG] text eol=lf\n";
+const PROJECT_GIT_IGNORE: &str = "/vendor/stasis/docs/\n";
+const KNOWLEDGE_FILES: &[&str] = &[
+    "README.md",
+    "a-little-stasis/01-three-entry-points.md",
+    "a-little-stasis/02-state-has-owners.md",
+    "a-little-stasis/03-a-tick-is-an-ordered-recipe.md",
+    "a-little-stasis/04-input-crosses-a-boundary.md",
+    "a-little-stasis/05-bounded-storage-is-policy.md",
+    "a-little-stasis/06-query-materialize-commit.md",
+    "a-little-stasis/07-test-systems-not-balance-numbers.md",
+    "a-little-stasis/08-projection-is-not-authority.md",
+    "practical-examples/breakout-remove-one-brick-per-collision.md",
+    "practical-examples/platformer-land-in-the-crossing-tick.md",
+    "practical-examples/pong-score-after-the-ball-crosses-the-goal.md",
+    "practical-examples/snake-reject-a-reverse-turn.md",
+    "examples/src/breakout_brick.stasis",
+    "examples/src/game_patterns.stasis",
+    "examples/src/platformer_landing.stasis",
+    "examples/src/pong_goal.stasis",
+    "examples/src/snake_turn.stasis",
+    "examples/stasis.json",
+    "examples/tests/breakout_brick.test.stasis",
+    "examples/tests/game_patterns.test.stasis",
+    "examples/tests/platformer_landing.test.stasis",
+    "examples/tests/pong_goal.test.stasis",
+    "examples/tests/snake_turn.test.stasis",
+    "geometry-and-collision.md",
+    "semantic-edit-and-validation.md",
+];
 const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";
-import "/vendor/stasis/stdlib/audio.stasis";
-import "/vendor/stasis/stdlib/collision.stasis";
-import "/vendor/stasis/stdlib/flex_layout.stasis";
-import "/vendor/stasis/stdlib/frame_timer.stasis";
-import "/vendor/stasis/stdlib/hud_table.stasis";
-import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
-import "/vendor/stasis/stdlib/storage.stasis";
-import "/vendor/stasis/stdlib/ui_axis_layout.stasis";
-import "/vendor/stasis/stdlib/ui_layout_audit.stasis";
-import "/vendor/stasis/stdlib/ui_button_9slice.stasis";
+import "/vendor/stasis/stdlib/ui_single_pass.stasis";
+
+struct GameState {
+    ticks: i32;
+}
+
+global state: GameState;
 
 function main(): i32 {
+    state.ticks = 0;
     return 0;
+}
+
+function @effects(state) tick(): i32 {
+    state.ticks += 1;
+    return 0;
+}
+
+function @effects(graphics) render(): i32 {
+    begin_frame();
+    clear(0.05, 0.07, 0.10, 1.0);
+    end_frame();
+    return 0;
+}
+"#;
+const DEFAULT_ASSET_MANIFEST: &str = r#"{
+  "schema": "stasis-assets",
+  "version": 1,
+  "assets": []
 }
 "#;
 const PROJECT_VSCODE_SETTINGS: &str = r#"{
@@ -133,6 +203,26 @@ if ! git diff --quiet -- ':(glob)**/*.stasis'; then
     exit 1
 fi
 "#;
+const TARGET_BUILD_HELP: &str = r#"Build targets:
+  Windows, Linux, or macOS (current host)
+    stasis build --mode release
+    stasis package --target desktop
+
+  Web (WebAssembly browser bundle)
+    stasis package --target web
+
+  Android devices (64-bit ARM app project)
+    stasis package-mobile --target android-arm64
+
+  Android emulator (x86-64 test app project)
+    stasis package-mobile --target android-x86_64 --development-build
+
+  iPhone and iPad (64-bit ARM app project)
+    stasis package-mobile --target ios-arm64
+
+Desktop builds target the operating system running stasis. Web output is a static bundle to
+serve over HTTP. Mobile commands create Gradle or Xcode projects for final SDK builds; source
+toolchains create local release packages when official provenance is absent."#;
 const COMMANDS: &[&str] = &[
     "new",
     "init",
@@ -144,12 +234,16 @@ const COMMANDS: &[&str] = &[
     "gauntlet",
     "validate",
     "run",
+    "record",
     "lsp",
     "dap",
     "tui",
+    "editor",
     "build",
     "package",
     "package-mobile",
+    "prepare",
+    "signing",
     "inspect",
     "replay",
     "verify",
@@ -167,7 +261,8 @@ const COMMANDS: &[&str] = &[
     name = "stasis",
     version,
     about = "The batteries-included Stasis toolchain",
-    long_about = "Create, format, check, test, run, live-edit, build, inspect, and package Stasis projects without invoking Cargo."
+    long_about = "Create, format, check, test, run, live-edit, build, inspect, and package Stasis projects without invoking Cargo.",
+    after_help = TARGET_BUILD_HELP
 )]
 struct ToolchainCli {
     #[arg(
@@ -267,6 +362,17 @@ enum ToolchainCommand {
         /// Explicitly select the headless runtime (currently the default).
         #[arg(long)]
         headless: bool,
+        /// Execute exactly this many simulation ticks after main().
+        #[arg(long, default_value_t = 0, value_name = "COUNT")]
+        ticks: u64,
+        /// Run bounded ticks without wall-clock pacing (headless only).
+        #[arg(long)]
+        fast_forward: bool,
+    },
+    /// Render a deterministic PNG sequence, MP4, or audio-only MP3 recording.
+    Record {
+        #[command(flatten)]
+        args: record::RecordArgs,
     },
     /// Run the persistent Stasis language server.
     Lsp {
@@ -305,12 +411,23 @@ enum ToolchainCommand {
         #[arg(long)]
         ticks: Option<u64>,
     },
+    /// Open the keyboard-first graphical AI editor beside the live game.
+    Editor {
+        /// Override the entry declared in stasis.json.
+        #[arg(value_name = "ENTRY")]
+        entry: Option<PathBuf>,
+        #[arg(long, default_value_t = 16_000)]
+        tick_sleep_us: u64,
+    },
     /// Build the project for development or as a release executable.
     Build {
         #[arg(long, value_enum, default_value_t = BuildMode::Release)]
         mode: BuildMode,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+        /// Select optional, required, or automatic Windows signing behavior.
+        #[arg(long, value_enum, default_value_t = SigningSelection::Auto)]
+        signing: SigningSelection,
     },
     /// Assemble a distributable desktop or mobile directory.
     Package {
@@ -318,9 +435,12 @@ enum ToolchainCommand {
         target: PackageTarget,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Permit a visibly labeled package from a local/source toolchain.
+        /// Force a visibly labeled development package.
         #[arg(long)]
         development_build: bool,
+        /// Select optional, required, or automatic Windows signing behavior.
+        #[arg(long, value_enum, default_value_t = SigningSelection::Auto)]
+        signing: SigningSelection,
     },
     /// Assemble a release-only Android or iOS app project around one AOT game.
     PackageMobile {
@@ -330,9 +450,21 @@ enum ToolchainCommand {
         entry: Option<PathBuf>,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Permit a visibly labeled package from a local/source toolchain.
+        /// Force a visibly labeled development package.
         #[arg(long)]
         development_build: bool,
+        /// Select named Stasis functions for bounded mobile AOT profiling.
+        #[arg(long, value_delimiter = ',', value_name = "NAME[,NAME...]")]
+        profile_functions: Vec<String>,
+        #[arg(long, default_value_t = 120)]
+        profile_warmup_frames: u32,
+        #[arg(long, default_value_t = 300)]
+        profile_sample_frames: u32,
+    },
+    /// Inspect and operate the repository-owned Windows signing policy.
+    Signing {
+        #[command(subcommand)]
+        command: SigningCommand,
     },
     /// Report compiler-owned state memory, layout, and mobile budget information.
     Inspect {
@@ -343,8 +475,16 @@ enum ToolchainCommand {
         #[arg(long, default_value_t = MAX_STATE_SNAPSHOT_BYTES as u64)]
         mobile_budget_bytes: u64,
     },
-    /// Replay support is reserved until the replay runtime lands.
-    Replay,
+    /// Replay one recorded HostFrame-diff session through tick and render.
+    Replay {
+        #[arg(value_name = "RECORDING")]
+        recording: PathBuf,
+        /// Override the manifest entry with a project-relative .stasis file.
+        #[arg(long, value_name = "ENTRY")]
+        entry: Option<PathBuf>,
+        #[arg(long, default_value_t = 16_000)]
+        tick_sleep_us: u64,
+    },
     /// Replay verification is reserved until the replay runtime lands.
     Verify,
     /// Print the installed toolchain version.
@@ -358,6 +498,8 @@ enum ToolchainCommand {
         #[command(subcommand)]
         command: VendorCommand,
     },
+    /// Materialize the selected toolchain standard library cache.
+    Prepare,
     /// Find and transactionally edit compiler-owned semantic symbols.
     Symbol {
         #[command(subcommand)]
@@ -371,6 +513,34 @@ enum VendorCommand {
     Status,
     /// Atomically replace the checked-in snapshot with this executable's sources.
     Update,
+}
+
+#[derive(Debug, Subcommand)]
+enum SigningCommand {
+    /// Report deterministic signer discovery and credential configuration status.
+    Status,
+    /// Explicitly provision a non-exportable CurrentUser development certificate.
+    Provision,
+    /// Sign explicit executable or toolchain artifact paths.
+    Sign {
+        #[arg(value_name = "ARTIFACT", required = true)]
+        artifacts: Vec<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        tool: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        certificate: Option<PathBuf>,
+        #[arg(long, value_name = "THUMBPRINT")]
+        thumbprint: Option<String>,
+        #[arg(long, value_name = "URL")]
+        timestamp_url: Option<String>,
+    },
+    /// Verify Authenticode signatures on explicit artifact paths.
+    Verify {
+        #[arg(value_name = "ARTIFACT", required = true)]
+        artifacts: Vec<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        tool: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -461,6 +631,15 @@ enum SymbolCommand {
     },
 }
 
+impl SymbolCommand {
+    fn is_read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::List { .. } | Self::Find(_) | Self::Read(_) | Self::References { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Args)]
 struct SymbolSelectorArgs {
     name: String,
@@ -525,15 +704,37 @@ enum BuildMode {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum SigningSelection {
+    Auto,
+    Optional,
+    Required,
+}
+
+impl SigningSelection {
+    fn env_value(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Optional => Some("optional"),
+            Self::Required => Some("required"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum PackageTarget {
     Desktop,
+    Web,
     AndroidArm64,
+    #[value(name = "android-x86_64")]
+    AndroidX86_64,
     IosArm64,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MobilePackageTarget {
     AndroidArm64,
+    #[value(name = "android-x86_64")]
+    AndroidX86_64,
     IosArm64,
 }
 
@@ -541,6 +742,7 @@ impl MobilePackageTarget {
     fn package_target(self) -> PackageTarget {
         match self {
             Self::AndroidArm64 => PackageTarget::AndroidArm64,
+            Self::AndroidX86_64 => PackageTarget::AndroidX86_64,
             Self::IosArm64 => PackageTarget::IosArm64,
         }
     }
@@ -550,8 +752,29 @@ impl PackageTarget {
     fn as_str(self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
+            Self::Web => "web",
             Self::AndroidArm64 => "android-arm64",
+            Self::AndroidX86_64 => "android-x86_64",
             Self::IosArm64 => "ios-arm64",
+        }
+    }
+
+    fn is_android(self) -> bool {
+        matches!(self, Self::AndroidArm64 | Self::AndroidX86_64)
+    }
+
+    fn is_mobile(self) -> bool {
+        matches!(
+            self,
+            Self::AndroidArm64 | Self::AndroidX86_64 | Self::IosArm64
+        )
+    }
+
+    fn android_abi(self) -> Option<&'static str> {
+        match self {
+            Self::AndroidArm64 => Some("arm64-v8a"),
+            Self::AndroidX86_64 => Some("x86_64"),
+            Self::Desktop | Self::Web | Self::IosArm64 => None,
         }
     }
 }
@@ -569,7 +792,39 @@ struct ProjectManifest {
     vendor: Option<VendorManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     android: Option<AndroidProjectManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<ProjectCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web: Option<WebProjectManifest>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct ProjectCapabilities {
+    #[serde(default)]
+    network: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WebProjectManifest {
+    #[serde(default)]
+    entry: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loading_font: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    viewport: Option<WebViewportManifest>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+struct WebViewportManifest {
+    width: u32,
+    height: u32,
+}
+
+const DEFAULT_WEB_VIEWPORT: WebViewportManifest = WebViewportManifest {
+    width: 640,
+    height: 360,
+};
+const WEB_VIEWPORT_MAX_DIMENSION: u32 = 8192;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct VendorManifest {
@@ -602,6 +857,8 @@ impl ProjectManifest {
             stdlib: None,
             vendor: None,
             android: None,
+            capabilities: None,
+            web: None,
         }
     }
 
@@ -619,6 +876,11 @@ impl ProjectManifest {
             ("output", self.output.as_str()),
         ] {
             validate_relative_path(field, Path::new(value))?;
+        }
+        if let Some(web) = &self.web {
+            if !web.entry.is_empty() {
+                validate_relative_path("web.entry", Path::new(&web.entry))?;
+            }
         }
         if self
             .stdlib
@@ -658,10 +920,10 @@ impl ProjectManifest {
             }
             if !matches!(
                 android.orientation.as_str(),
-                "unspecified" | "sensorLandscape" | "sensorPortrait"
+                "unspecified" | "sensorLandscape" | "sensorPortrait" | "fullSensor"
             ) {
                 return Err(
-                    "android orientation must be unspecified, sensorLandscape, or sensorPortrait"
+                    "android orientation must be unspecified, sensorLandscape, sensorPortrait, or fullSensor"
                         .to_string(),
                 );
             }
@@ -674,6 +936,23 @@ impl ProjectManifest {
                 })
             {
                 return Err("android version_name is invalid".to_string());
+            }
+        }
+        if let Some(web) = &self.web {
+            if let Some(path) = web.loading_font.as_deref() {
+                normalize_web_loading_font_path(path)?;
+            }
+            if let Some(viewport) = web.viewport {
+                for (field, value) in [
+                    ("web.viewport.width", viewport.width),
+                    ("web.viewport.height", viewport.height),
+                ] {
+                    if !(1..=WEB_VIEWPORT_MAX_DIMENSION).contains(&value) {
+                        return Err(format!(
+                            "{field} must be between 1 and {WEB_VIEWPORT_MAX_DIMENSION}"
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -719,6 +998,43 @@ impl CommandResult {
     }
 }
 
+pub(super) fn is_read_only_symbol_invocation() -> bool {
+    let args: Vec<OsString> = env::args_os().collect();
+    is_read_only_symbol_args(&args)
+}
+
+fn is_read_only_symbol_args(args: &[OsString]) -> bool {
+    matches!(parse_toolchain_command(args), Some(ToolchainCommand::Symbol { command }) if command.is_read_only())
+}
+
+pub(super) fn should_skip_stale_stasis_cache_cleanup() -> bool {
+    if is_read_only_symbol_invocation() {
+        return true;
+    }
+    let args: Vec<OsString> = env::args_os().collect();
+    matches!(
+        parse_toolchain_command(&args),
+        Some(ToolchainCommand::Prepare)
+    )
+}
+
+#[cfg(test)]
+fn should_skip_stale_stasis_cache_cleanup_args(args: &[OsString]) -> bool {
+    match parse_toolchain_command(args) {
+        Some(ToolchainCommand::Prepare) => true,
+        Some(ToolchainCommand::Symbol { command }) => command.is_read_only(),
+        _ => false,
+    }
+}
+
+fn parse_toolchain_command(args: &[OsString]) -> Option<ToolchainCommand> {
+    if !is_toolchain_invocation(args) {
+        return None;
+    }
+    ToolchainCli::try_parse_from(args.to_vec())
+        .ok()
+        .map(|parsed| parsed.command)
+}
 pub(super) fn try_run() -> Option<i32> {
     let args: Vec<OsString> = env::args_os().collect();
     if !is_toolchain_invocation(&args) {
@@ -762,8 +1078,19 @@ pub(super) fn try_run() -> Option<i32> {
     };
     let command_name = command_name(&parsed.command);
     let raw_output = matches!(&parsed.command, ToolchainCommand::Fmt { stdin: true, .. });
+    let started_at = (!parsed.json
+        && matches!(
+            &parsed.command,
+            ToolchainCommand::Build { .. }
+                | ToolchainCommand::Package { .. }
+                | ToolchainCommand::PackageMobile { .. }
+        ))
+    .then(Instant::now);
     match execute(parsed.command, parsed.workspace, parsed.json) {
-        Ok(result) => {
+        Ok(mut result) => {
+            if let Some(started_at) = started_at {
+                append_elapsed_confirmation(&mut result.human, started_at.elapsed());
+            }
             if parsed.json {
                 println!(
                     "{}",
@@ -783,20 +1110,42 @@ pub(super) fn try_run() -> Option<i32> {
         }
         Err(message) => {
             if parsed.json {
-                eprintln!(
-                    "{}",
-                    json!({
-                        "ok": false,
-                        "command": command_name,
-                        "code": "command_failed",
-                        "message": message,
-                    })
-                );
+                let mut error = json!({
+                    "ok": false,
+                    "command": command_name,
+                    "code": "command_failed",
+                    "message": &message,
+                });
+                if let Some(payload) = message
+                    .strip_prefix(crate::release_assets::ASSET_DIAGNOSTIC_PREFIX)
+                    .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
+                {
+                    error["code"] = json!("asset_validation_failed");
+                    error["message"] = json!("asset validation failed");
+                    error["diagnostics"] = payload;
+                }
+                eprintln!("{error}");
             } else {
                 eprintln!("stasis {command_name}: {message}");
             }
             Some(1)
         }
+    }
+}
+
+fn append_elapsed_confirmation(output: &mut String, elapsed: Duration) {
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str("Completed in ");
+    if elapsed.as_secs() >= 60 {
+        let minutes = elapsed.as_secs() / 60;
+        let seconds = elapsed.as_secs_f64() - minutes as f64 * 60.0;
+        output.push_str(&format!("{minutes}m {seconds:.1}s."));
+    } else if elapsed.as_secs() >= 1 {
+        output.push_str(&format!("{:.2}s.", elapsed.as_secs_f64()));
+    } else {
+        output.push_str(&format!("{}ms.", elapsed.as_millis()));
     }
 }
 
@@ -825,20 +1174,98 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Validate { .. } => "validate",
         ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
+        ToolchainCommand::Record { .. } => "record",
         ToolchainCommand::Lsp { .. } => "lsp",
         ToolchainCommand::Dap { .. } => "dap",
         ToolchainCommand::Tui { .. } => "tui",
+        ToolchainCommand::Editor { .. } => "editor",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
         ToolchainCommand::PackageMobile { .. } => "package-mobile",
+        ToolchainCommand::Prepare => "prepare",
         ToolchainCommand::Inspect { .. } => "inspect",
-        ToolchainCommand::Replay => "replay",
+        ToolchainCommand::Replay { .. } => "replay",
         ToolchainCommand::Verify => "verify",
         ToolchainCommand::Version => "version",
         ToolchainCommand::EditorInfo => "editor-info",
         ToolchainCommand::Env => "env",
         ToolchainCommand::Vendor { .. } => "vendor",
         ToolchainCommand::Symbol { .. } => "symbol",
+        ToolchainCommand::Signing { .. } => "signing",
+    }
+}
+
+fn with_signing_selection<T>(selection: SigningSelection, operation: impl FnOnce() -> T) -> T {
+    let Some(value) = selection.env_value() else {
+        return operation();
+    };
+    let previous = env::var_os("STASIS_SIGNING_MODE");
+    env::set_var("STASIS_SIGNING_MODE", value);
+    let result = operation();
+    match previous {
+        Some(value) => env::set_var("STASIS_SIGNING_MODE", value),
+        None => env::remove_var("STASIS_SIGNING_MODE"),
+    }
+    result
+}
+
+fn signing_command(command: SigningCommand) -> Result<CommandResult, String> {
+    match command {
+        SigningCommand::Status => {
+            let status = signing_status();
+            let human = if status.diagnostics.is_empty() {
+                format!(
+                    "Windows signing ready: signer={} certificate_configured={}",
+                    status.signer.as_deref().unwrap_or("none"),
+                    status.certificate_configured
+                )
+            } else {
+                format!("Windows signing status: {}", status.diagnostics.join("; "))
+            };
+            Ok(CommandResult::success(
+                human,
+                serde_json::to_value(status)
+                    .map_err(|error| format!("failed to serialize signing status: {error}"))?,
+            ))
+        }
+        SigningCommand::Provision => {
+            let result = provision_local_certificate()?;
+            Ok(CommandResult::success(
+                format!(
+                    "provisioned CurrentUser development certificate {}",
+                    result.thumbprint
+                ),
+                serde_json::to_value(result).map_err(|error| {
+                    format!("failed to serialize signing provisioning result: {error}")
+                })?,
+            ))
+        }
+        SigningCommand::Sign {
+            artifacts,
+            tool,
+            certificate,
+            thumbprint,
+            timestamp_url,
+        } => {
+            let options = SigningOptions {
+                tool,
+                certificate,
+                thumbprint,
+                timestamp_url,
+            };
+            sign_artifacts(&artifacts, &options)?;
+            Ok(CommandResult::success(
+                format!("signed {} artifact(s)", artifacts.len()),
+                json!({"artifacts": artifacts.iter().map(|path| display_path(path)).collect::<Vec<_>>(), "digest": "SHA256", "page_hashes": true}),
+            ))
+        }
+        SigningCommand::Verify { artifacts, tool } => {
+            verify_artifacts(&artifacts, tool.as_deref())?;
+            Ok(CommandResult::success(
+                format!("verified {} artifact(s)", artifacts.len()),
+                json!({"artifacts": artifacts.iter().map(|path| display_path(path)).collect::<Vec<_>>(), "verified": true}),
+            ))
+        }
     }
 }
 
@@ -847,8 +1274,13 @@ fn execute(
     workspace_arg: Option<PathBuf>,
     json_output: bool,
 ) -> Result<CommandResult, String> {
+    if command_requires_runtime(&command) {
+        verify_installed_toolchain_identity()?;
+    }
     match command {
-        ToolchainCommand::New { name, dir } => create_new_project(dir.unwrap_or_else(|| PathBuf::from(&name)), name),
+        ToolchainCommand::New { name, dir } => {
+            create_new_project(dir.unwrap_or_else(|| PathBuf::from(&name)), name)
+        }
         ToolchainCommand::Init { dir, name } => {
             let root = absolute_path(&dir)?;
             let inferred = root
@@ -864,10 +1296,7 @@ fn execute(
         ToolchainCommand::Version => Ok(version_result()),
         ToolchainCommand::EditorInfo => editor_info_result(),
         ToolchainCommand::Env => env_result(workspace_arg.as_deref()),
-        ToolchainCommand::Replay => Err(
-            "replay is unavailable in toolchain 0.1; no replay runtime contract is implemented"
-                .to_string(),
-        ),
+        ToolchainCommand::Signing { command } => signing_command(command),
         ToolchainCommand::Verify => Err(
             "verify is unavailable in toolchain 0.1; no replay verification contract is implemented"
                 .to_string(),
@@ -905,11 +1334,15 @@ fn execute(
         }
         other => {
             let workspace_path = workspace_arg.as_deref().or(match &other {
-                ToolchainCommand::Tui { entry, .. } => entry.as_deref(),
+                ToolchainCommand::Tui { entry, .. } | ToolchainCommand::Editor { entry, .. } => entry.as_deref(),
                 _ => None,
             });
             let vendor_gate = match &other {
                 ToolchainCommand::Vendor { .. } => VendorGate::Inspect,
+                ToolchainCommand::Prepare => VendorGate::Inspect,
+                ToolchainCommand::Symbol { command } if command.is_read_only() => {
+                    VendorGate::ReadOnly
+                }
                 _ => VendorGate::Sync,
             };
             let workspace = load_workspace_with_vendor_gate(workspace_path, vendor_gate)?;
@@ -949,17 +1382,39 @@ fn execute(
                     &tick,
                     &render,
                 ),
-                ToolchainCommand::Run { watch, headless } => {
+                ToolchainCommand::Run {
+                    watch,
+                    headless,
+                    ticks,
+                    fast_forward,
+                } => {
                     if watch && json_output {
                         Err("--json cannot be combined with --watch; watch mode is an unbounded event stream".to_string())
                     } else if watch && headless {
                         Err("--headless cannot be combined with --watch; watch mode uses the graphical hot-swap runner".to_string())
+                    } else if watch && ticks != 0 {
+                        Err("--ticks cannot be combined with --watch; use play --ticks for a bounded graphical run".to_string())
+                    } else if watch && fast_forward {
+                        Err("--fast-forward cannot be combined with --watch".to_string())
+                    } else if fast_forward && ticks == 0 {
+                        Err("--fast-forward requires --ticks greater than zero".to_string())
                     } else if watch {
                         run_workspace_watch(&workspace)
                     } else {
-                        run_workspace(&workspace, headless)
+                        run_workspace(&workspace, headless, ticks, fast_forward)
                     }
                 }
+                ToolchainCommand::Record { args } => record::execute(&workspace, args),
+                ToolchainCommand::Replay {
+                    recording,
+                    entry,
+                    tick_sleep_us,
+                } => replay_workspace(
+                    &workspace,
+                    &recording,
+                    entry.as_deref(),
+                    tick_sleep_us,
+                ),
                 ToolchainCommand::Lsp { stdio } => {
                     if json_output {
                         Err("--json cannot be combined with lsp; LSP owns stdout".to_string())
@@ -1007,23 +1462,42 @@ fn execute(
                         )
                     }
                 }
-                ToolchainCommand::Build { mode, out } => {
+                ToolchainCommand::Editor {
+                    entry,
+                    tick_sleep_us,
+                } => {
+                    if json_output {
+                        Err("--json cannot be combined with editor; the editor owns a desktop window".to_string())
+                    } else {
+                        let entry = entry.as_deref().unwrap_or_else(|| Path::new(&workspace.manifest.entry));
+                        run_workspace_editor(&workspace, entry, tick_sleep_us)
+                    }
+                }
+                ToolchainCommand::Build { mode, out, signing } => {
                     validate_optional_workspace_path(&workspace, "build output", out.as_deref())?;
-                    build_workspace(&workspace, mode, out.as_deref())
+                    with_signing_selection(signing, || {
+                        build_workspace(&workspace, mode, out.as_deref())
+                    })
                 }
                 ToolchainCommand::Package {
                     target,
                     out,
                     development_build,
+                    signing,
                 } => {
                     validate_optional_workspace_path(&workspace, "package output", out.as_deref())?;
-                    package_workspace(&workspace, target, out.as_deref(), development_build)
+                    with_signing_selection(signing, || {
+                        package_workspace(&workspace, target, out.as_deref(), development_build)
+                    })
                 }
                 ToolchainCommand::PackageMobile {
                     target,
                     entry,
                     out,
                     development_build,
+                    profile_functions,
+                    profile_warmup_frames,
+                    profile_sample_frames,
                 } => {
                     validate_optional_workspace_path(
                         &workspace,
@@ -1041,6 +1515,9 @@ fn execute(
                         entry.as_deref(),
                         out.as_deref(),
                         development_build,
+                        &profile_functions,
+                        profile_warmup_frames,
+                        profile_sample_frames,
                     )
                 }
                 ToolchainCommand::Inspect {
@@ -1048,6 +1525,7 @@ fn execute(
                     mobile_budget_bytes,
                 } => inspect_workspace(&workspace, &capacities, mobile_budget_bytes),
                 ToolchainCommand::Vendor { command } => vendor_command(&workspace, command),
+                ToolchainCommand::Prepare => prepare_workspace(&workspace),
                 ToolchainCommand::Symbol { command } => symbol_workspace(&workspace, command),
                 _ => Err("unsupported command routing".to_string()),
             }
@@ -1055,31 +1533,63 @@ fn execute(
     }
 }
 
+fn command_requires_runtime(command: &ToolchainCommand) -> bool {
+    match command {
+        ToolchainCommand::Ai { .. }
+        | ToolchainCommand::Gauntlet { .. }
+        | ToolchainCommand::Validate { .. }
+        | ToolchainCommand::ValidateRuntime { .. }
+        | ToolchainCommand::Record { .. }
+        | ToolchainCommand::Replay { .. }
+        | ToolchainCommand::Lsp { .. }
+        | ToolchainCommand::Dap { .. }
+        | ToolchainCommand::Tui { .. }
+        | ToolchainCommand::Editor { .. }
+        | ToolchainCommand::Build { .. }
+        | ToolchainCommand::Package { .. }
+        | ToolchainCommand::PackageMobile { .. } => true,
+        ToolchainCommand::Run { .. } => true,
+        ToolchainCommand::New { .. }
+        | ToolchainCommand::Init { .. }
+        | ToolchainCommand::Version
+        | ToolchainCommand::EditorInfo
+        | ToolchainCommand::Env
+        | ToolchainCommand::Signing { .. }
+        | ToolchainCommand::Verify
+        | ToolchainCommand::Fmt { .. }
+        | ToolchainCommand::Check
+        | ToolchainCommand::Test { .. }
+        | ToolchainCommand::Inspect { .. }
+        | ToolchainCommand::Vendor { .. }
+        | ToolchainCommand::Prepare
+        | ToolchainCommand::Symbol { .. } => false,
+    }
+}
+
 fn create_new_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
-    create_project_with_options(path, name, true)
+    create_project_with_options(path, name, true, true)
+}
+
+fn create_internal_git_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
+    create_project_with_options(path, name, true, false)
 }
 
 fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
-    create_project_with_options(path, name, false)
+    create_project_with_options(path, name, false, false)
 }
 
 fn create_project_with_options(
     path: PathBuf,
     name: String,
     initialize_git: bool,
+    github_actions: bool,
 ) -> Result<CommandResult, String> {
     validate_project_name(&name)?;
     if initialize_git {
         require_git()?;
     }
     let root = absolute_path(&path)?;
-    let bundled_stdlib = bundled_stdlib_dir()?;
-    let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
-        format!(
-            "bundled stdlib has no src parent: {}",
-            bundled_stdlib.display()
-        )
-    })?;
+    let vendor_manifest = current_vendor_manifest()?;
     let manifest_path = root.join(MANIFEST_NAME);
     let mut reserved_paths = vec![
         manifest_path.clone(),
@@ -1088,58 +1598,101 @@ fn create_project_with_options(
         root.join(PROJECT_ARCHITECTURE_NAME),
         root.join("src/main.stasis"),
         root.join("tests/main.test.stasis"),
+        root.join("assets/manifest.json"),
         root.join("vendor/stasis"),
         root.join(".vscode/settings.json"),
         root.join(".vscode/extensions.json"),
     ];
     if initialize_git {
+        reserved_paths.push(root.join(".gitattributes"));
+        reserved_paths.push(root.join(".gitignore"));
         reserved_paths.push(root.join(".githooks/pre-commit"));
     }
+    if github_actions {
+        reserved_paths.extend([
+            root.join(".github/workflows/stasis-pr.yml"),
+            root.join(".github/workflows/stasis-weekly.yml"),
+            root.join("tools/restore-stasis-release.ps1"),
+            root.join("tools/resolve-stasis-nightly.ps1"),
+        ]);
+        for directory in [
+            root.join(".github"),
+            root.join(".github/workflows"),
+            root.join("tools"),
+        ] {
+            validate_safe_project_directory(
+                &directory,
+                "refusing to generate GitHub Actions through",
+            )?;
+        }
+    }
     let vscode_directory = root.join(".vscode");
-    if vscode_directory.exists() {
-        let metadata = fs::symlink_metadata(&vscode_directory).map_err(|error| {
-            format!("failed to inspect {}: {error}", vscode_directory.display())
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!(
-                "refusing to write editor settings through {}",
-                vscode_directory.display()
-            ));
-        }
-    }
+    validate_safe_project_directory(
+        &vscode_directory,
+        "refusing to write editor settings through",
+    )?;
     let vendor_directory = root.join("vendor");
-    if vendor_directory.exists() {
-        let metadata = fs::symlink_metadata(&vendor_directory).map_err(|error| {
-            format!("failed to inspect {}: {error}", vendor_directory.display())
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!(
-                "refusing to write vendored packages through {}",
-                vendor_directory.display()
-            ));
-        }
-    }
+    validate_safe_project_directory(
+        &vendor_directory,
+        "refusing to write vendored packages through",
+    )?;
+    let assets_directory = root.join("assets");
+    validate_safe_project_directory(
+        &assets_directory,
+        "refusing to write asset manifest through",
+    )?;
     for reserved in &reserved_paths {
-        if reserved.exists() {
-            return Err(format!("refusing to overwrite {}", reserved.display()));
+        match fs::symlink_metadata(reserved) {
+            Ok(_) => return Err(format!("refusing to overwrite {}", reserved.display())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to inspect {}: {error}", reserved.display())),
         }
     }
     fs::create_dir_all(root.join("src"))
         .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
     fs::create_dir_all(root.join("tests"))
         .map_err(|error| format!("failed to create tests directory: {error}"))?;
+    fs::create_dir_all(&assets_directory)
+        .map_err(|error| format!("failed to create assets directory: {error}"))?;
     let mut manifest = ProjectManifest::new(name.clone());
-    manifest.vendor = Some(current_vendor_manifest(bundled_source)?);
+    manifest.vendor = Some(vendor_manifest);
     write_manifest(&manifest_path, &manifest)?;
     let vendor_package = root.join("vendor/stasis");
-    copy_dir_if_exists(&bundled_stdlib, &vendor_package.join("stdlib"))?;
+    copy_bundled_vendor_package(&vendor_package)?;
     write_new_file(&root.join("AGENTS.md"), PROJECT_AGENT_GUIDE)?;
     write_new_file(&root.join("CLAUDE.md"), PROJECT_CLAUDE_GUIDE)?;
     write_new_file(
         &root.join(PROJECT_ARCHITECTURE_NAME),
         PROJECT_ARCHITECTURE_GUIDE,
     )?;
+    if initialize_git {
+        write_new_file(&root.join(".gitattributes"), PROJECT_GIT_ATTRIBUTES)?;
+        write_new_file(&root.join(".gitignore"), PROJECT_GIT_IGNORE)?;
+    }
+    if github_actions {
+        fs::create_dir_all(root.join(".github/workflows"))
+            .map_err(|error| format!("failed to create GitHub workflows directory: {error}"))?;
+        fs::create_dir_all(root.join("tools"))
+            .map_err(|error| format!("failed to create tools directory: {error}"))?;
+        write_new_file(
+            &root.join(".github/workflows/stasis-pr.yml"),
+            include_str!("../templates/github-actions/stasis-pr.yml"),
+        )?;
+        write_new_file(
+            &root.join(".github/workflows/stasis-weekly.yml"),
+            include_str!("../templates/github-actions/stasis-weekly.yml"),
+        )?;
+        write_new_file(
+            &root.join("tools/restore-stasis-release.ps1"),
+            include_str!("../templates/github-actions/restore-stasis-release.ps1"),
+        )?;
+        write_new_file(
+            &root.join("tools/resolve-stasis-nightly.ps1"),
+            include_str!("../templates/github-actions/resolve-stasis-nightly.ps1"),
+        )?;
+    }
     write_new_file(&root.join("src/main.stasis"), DEFAULT_PROJECT_SOURCE)?;
+    write_new_file(&root.join("assets/manifest.json"), DEFAULT_ASSET_MANIFEST)?;
     write_new_file(
         &root.join("tests/main.test.stasis"),
         "test `new project is ready`(): bool {\r\n    return 1 == 1;\r\n}\r\n",
@@ -1166,8 +1719,29 @@ fn create_project_with_options(
             "root": display_path(&root),
             "manifest": MANIFEST_NAME,
             "format_hook": initialize_git,
+            "github_actions": github_actions,
         }),
     ))
+}
+
+fn validate_safe_project_directory(path: &Path, refusal: &str) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            #[cfg(windows)]
+            let reparse_point = {
+                use std::os::windows::fs::MetadataExt;
+                metadata.file_attributes() & 0x400 != 0
+            };
+            #[cfg(not(windows))]
+            let reparse_point = false;
+            if metadata.file_type().is_symlink() || reparse_point || !metadata.is_dir() {
+                return Err(format!("{refusal} {}", path.display()));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("failed to inspect {}: {error}", path.display())),
+    }
 }
 
 fn require_git() -> Result<(), String> {
@@ -1246,6 +1820,7 @@ fn write_manifest(path: &Path, manifest: &ProjectManifest) -> Result<(), String>
 enum VendorGate {
     Sync,
     Inspect,
+    ReadOnly,
 }
 
 fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
@@ -1285,21 +1860,52 @@ fn load_workspace_with_vendor_gate(
     let mut manifest: ProjectManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
     manifest.validate()?;
-    if manifest.stdlib.as_deref() == Some("toolchain") {
+    if let Some(web) = manifest.web.as_ref() {
+        if let Some(path) = web.loading_font.as_deref() {
+            let normalized = normalize_web_loading_font_path(path)?;
+            let font = root.join(&normalized);
+            let assets_root = root.join("assets").canonicalize().ok();
+            let resolved_font = font.canonicalize().ok();
+            if !font.is_file()
+                || !assets_root.as_deref().is_some_and(|assets| {
+                    resolved_font
+                        .as_deref()
+                        .is_some_and(|resolved| resolved.starts_with(assets))
+                })
+            {
+                return Err(format!(
+                    "web.loading_font must name an existing file under assets: {}",
+                    font.display()
+                ));
+            }
+        }
+    }
+    if manifest.stdlib.as_deref() == Some("toolchain") && vendor_gate == VendorGate::Sync {
         sync_toolchain_stdlib(&root)?;
     }
-    if vendor_gate != VendorGate::Inspect {
-        reconcile_project_vendor(&root, &mut manifest)?;
+    match vendor_gate {
+        VendorGate::Sync => reconcile_project_vendor(&root, &mut manifest)?,
+        VendorGate::Inspect => {}
+        VendorGate::ReadOnly => {
+            validate_read_only_vendor(&root, &manifest)?;
+            if manifest.stdlib.as_deref() == Some("toolchain") {
+                validate_read_only_toolchain_stdlib(&root)?;
+            }
+        }
     }
     Ok(Workspace { root, manifest })
 }
 
-fn sync_toolchain_stdlib(workspace_root: &Path) -> Result<(), String> {
+fn bundled_stdlib_source_tree() -> Result<PathBuf, String> {
     let stdlib = bundled_stdlib_dir()?;
-    let source = stdlib
+    stdlib
         .parent()
-        .ok_or_else(|| format!("bundled stdlib has no src parent: {}", stdlib.display()))?
-        .to_path_buf();
+        .ok_or_else(|| format!("bundled stdlib has no src parent: {}", stdlib.display()))
+        .map(Path::to_path_buf)
+}
+
+fn sync_toolchain_stdlib(workspace_root: &Path) -> Result<(), String> {
+    let source = bundled_stdlib_source_tree()?;
     let fingerprint = directory_sha256(&source)?;
     let cache_root = workspace_root.join(".stasis_cache/toolchain");
     let target = cache_root.join("src");
@@ -1361,54 +1967,82 @@ fn sync_toolchain_stdlib(workspace_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn directory_sha256(root: &Path) -> Result<String, String> {
-    fn collect(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
-        let mut entries = fs::read_dir(directory)
-            .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to enumerate {}: {error}", directory.display()))?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let kind = entry.file_type().map_err(|error| {
-                format!("failed to inspect {}: {error}", entry.path().display())
-            })?;
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                collect(root, &entry.path(), files)?;
-            } else if kind.is_file() {
-                files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
-            }
+fn collect_mapped_files(
+    root: &Path,
+    directory: &Path,
+    prefix: &Path,
+    files: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<(), String> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to enumerate {}: {error}", directory.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect {}: {error}", entry.path().display()))?;
+        if kind.is_symlink() {
+            continue;
         }
-        Ok(())
+        if kind.is_dir() {
+            collect_mapped_files(root, &entry.path(), prefix, files)?;
+        } else if kind.is_file() {
+            let physical = entry.path();
+            let relative = physical
+                .strip_prefix(root)
+                .map_err(|_| format!("file escaped mapped directory {}", root.display()))?;
+            files.push((prefix.join(relative), physical));
+        }
     }
+    Ok(())
+}
 
-    let mut files = Vec::new();
-    collect(root, root, &mut files)?;
+fn mapped_files_sha256(mut files: Vec<(PathBuf, PathBuf)>) -> Result<String, String> {
+    files.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest = Sha256::new();
-    for relative in files {
+    for (relative, physical) in files {
         digest.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
         digest.update([0]);
-        let bytes = fs::read(root.join(&relative))
-            .map_err(|error| format!("failed to read {}: {error}", relative.display()))?;
+        let bytes = fs::read(&physical)
+            .map_err(|error| format!("failed to read {}: {error}", physical.display()))?;
         digest.update(bytes);
         digest.update([0]);
     }
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn directory_sha256(root: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    collect_mapped_files(root, root, Path::new(""), &mut files)?;
+    mapped_files_sha256(files)
+}
+
+fn bundled_vendor_sha256() -> Result<String, String> {
+    let stdlib = bundled_stdlib_dir()?;
+    let docs = bundled_knowledge_docs_dir()?;
+    let mut files = Vec::new();
+    collect_mapped_files(&stdlib, &stdlib, Path::new("stdlib"), &mut files)?;
+    collect_mapped_files(&docs, &docs, Path::new("docs"), &mut files)?;
+    mapped_files_sha256(files)
+}
+
 fn current_release_id() -> &'static str {
     option_env!("STASIS_RELEASE_ID").unwrap_or("development")
 }
 
-fn current_vendor_manifest(source: &Path) -> Result<VendorManifest, String> {
+fn current_vendor_manifest() -> Result<VendorManifest, String> {
     Ok(VendorManifest {
         stasis: StasisVendorManifest {
             release_id: current_release_id().to_string(),
-            sha256: directory_sha256(source)?,
+            sha256: bundled_vendor_sha256()?,
         },
     })
+}
+
+fn copy_bundled_vendor_package(destination: &Path) -> Result<(), String> {
+    copy_dir_if_exists(&bundled_stdlib_dir()?, &destination.join("stdlib"))?;
+    copy_dir_if_exists(&bundled_knowledge_docs_dir()?, &destination.join("docs"))
 }
 
 fn validate_vendor_sources(source_root: &Path) -> Result<(), String> {
@@ -1469,14 +2103,7 @@ fn inspect_project_vendor(
     workspace_root: &Path,
     manifest: &ProjectManifest,
 ) -> Result<VendorStatus, String> {
-    let bundled_stdlib = bundled_stdlib_dir()?;
-    let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
-        format!(
-            "bundled stdlib has no src parent: {}",
-            bundled_stdlib.display()
-        )
-    })?;
-    let installed = current_vendor_manifest(bundled_source)?.stasis;
+    let installed = current_vendor_manifest()?.stasis;
     let recorded = manifest.vendor.as_ref().map(|vendor| vendor.stasis.clone());
     let vendor_package = workspace_root.join("vendor/stasis");
     let actual_sha256 = if vendor_package.exists() {
@@ -1505,6 +2132,38 @@ fn inspect_project_vendor(
         local_changes,
         update_available,
     })
+}
+
+fn validate_read_only_vendor(
+    workspace_root: &Path,
+    manifest: &ProjectManifest,
+) -> Result<(), String> {
+    if manifest.vendor.is_none() {
+        return Ok(());
+    }
+    let status = inspect_project_vendor(workspace_root, manifest)?;
+    let Some(actual_sha256) = status.actual_sha256.as_deref() else {
+        return Err("read-only symbol query did not update files: checked-in vendor snapshot is missing; run 'stasis vendor status' then 'stasis vendor update'".to_string());
+    };
+    let recorded_sha256 = status
+        .recorded
+        .as_ref()
+        .map(|recorded| recorded.sha256.as_str())
+        .unwrap_or_default();
+    if actual_sha256 == recorded_sha256 && actual_sha256 == status.installed.sha256 {
+        return Ok(());
+    }
+
+    let reason = if actual_sha256 != status.installed.sha256 && actual_sha256 == recorded_sha256 {
+        "is stale for the selected toolchain"
+    } else if actual_sha256 == status.installed.sha256 {
+        "has an inconsistent manifest fingerprint"
+    } else {
+        "has local changes"
+    };
+    Err(format!(
+        "read-only symbol query did not update files: checked-in vendor snapshot {reason}; run 'stasis vendor status' then 'stasis vendor update'"
+    ))
 }
 
 fn reconcile_project_vendor(
@@ -1548,13 +2207,6 @@ fn update_vendor_snapshot(
     {
         return Ok(false);
     }
-    let bundled_stdlib = bundled_stdlib_dir()?;
-    let bundled_source = bundled_stdlib.parent().ok_or_else(|| {
-        format!(
-            "bundled stdlib has no src parent: {}",
-            bundled_stdlib.display()
-        )
-    })?;
     let vendor_root = workspace_root.join("vendor");
     fs::create_dir_all(&vendor_root)
         .map_err(|error| format!("failed to create {}: {error}", vendor_root.display()))?;
@@ -1575,7 +2227,7 @@ fn update_vendor_snapshot(
     let manifest_staging = workspace_root.join(format!("{MANIFEST_NAME}.vendor-sync-{suffix}"));
     let manifest_backup = workspace_root.join(format!("{MANIFEST_NAME}.vendor-previous-{suffix}"));
 
-    if let Err(error) = copy_dir_if_exists(bundled_source, &staging) {
+    if let Err(error) = copy_bundled_vendor_package(&staging) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -1678,6 +2330,25 @@ fn vendor_command(workspace: &Workspace, command: VendorCommand) -> Result<Comma
             ))
         }
     }
+}
+
+fn prepare_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
+    if workspace.manifest.stdlib.as_deref() != Some("toolchain") {
+        return Ok(CommandResult::success(
+            "toolchain stdlib preparation is not needed for this workspace",
+            json!({"prepared": false, "stdlib": workspace.manifest.stdlib}),
+        ));
+    }
+
+    sync_toolchain_stdlib(&workspace.root)?;
+    Ok(CommandResult::success(
+        "prepared the selected toolchain stdlib in .stasis_cache/toolchain/src",
+        json!({
+            "prepared": true,
+            "stdlib": "toolchain",
+            "path": ".stasis_cache/toolchain/src",
+        }),
+    ))
 }
 
 fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
@@ -1823,6 +2494,7 @@ fn format_files(
 
 fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
     let jit = compile_workspace_jit(workspace)?;
+    validate_compiled_workspace_assets(workspace, &jit)?;
     Ok(CommandResult::success(
         format!("checked {}", workspace.manifest.name),
         json!({
@@ -1831,6 +2503,32 @@ fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
             "functions_emitted": jit.artifacts().len(),
         }),
     ))
+}
+
+fn validate_compiled_workspace_assets(
+    workspace: &Workspace,
+    jit: &JitProcess,
+) -> Result<Option<stasis_assets::ResolvedAssetManifest>, String> {
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "asset validation compile produced no ProgramSnapshot".to_string())?;
+    validate_program_snapshot_assets(workspace, snapshot)
+}
+
+fn validate_program_snapshot_assets(
+    workspace: &Workspace,
+    snapshot: &ProgramSnapshot,
+) -> Result<Option<stasis_assets::ResolvedAssetManifest>, String> {
+    let manifest = if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        Some(
+            load_project_asset_manifest(&workspace.root, AssetLimits::default())
+                .map_err(|error| format!("failed to resolve project assets: {error}"))?,
+        )
+    } else {
+        None
+    };
+    crate::release_assets::validate_snapshot_assets(&workspace.root, snapshot, manifest.as_ref())?;
+    Ok(manifest)
 }
 
 fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
@@ -2060,12 +2758,38 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         .map(|value| workspace.root.join(value))
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
     validate_workspace_destination(workspace, "test directory", &directory)?;
+    let manifest = if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        Some(
+            load_project_asset_manifest(&workspace.root, AssetLimits::default())
+                .map_err(|error| format!("failed to resolve test assets: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let data_binding_paths = resolve_play_data_binding_paths(
+        &workspace.root.join(&workspace.manifest.entry),
+        &workspace.root,
+        None,
+        None,
+    )?;
     let mut session = StasisTestRunSession::new();
-    let summary = run_jit_tests_in_directory_with_project_root_and_session(
+    let summary = stasis::run_jit_tests_in_directory_with_project_root_session_and_validator(
         &directory,
         &workspace.root,
         &mut session,
+        |jit| {
+            let snapshot = jit
+                .program_snapshot()
+                .ok_or_else(|| "test compilation did not publish a program snapshot".to_string())?;
+            crate::release_assets::validate_snapshot_assets(
+                &workspace.root,
+                snapshot,
+                manifest.as_ref(),
+            )?;
+            load_and_apply_play_data_bindings_for_test(&data_binding_paths, jit)
+        },
     )?;
+    let scenarios = headless::run_scenarios(workspace, &directory)?;
     let data = json!({
         "files_discovered": summary.files_discovered,
         "files_with_tests": summary.files_with_tests,
@@ -2075,24 +2799,42 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         "tests_failed": summary.tests_failed,
         "passed_tests": summary.passed_tests,
         "failures": summary.failures,
+        "scenarios_discovered": scenarios.scenarios_discovered,
+        "scenario_cases_run": scenarios.cases_run,
+        "scenario_cases_passed": scenarios.cases_passed,
+        "scenario_cases_failed": scenarios.cases_failed,
+        "scenario_failures": scenarios.failures,
+        "scenario_failure_receipts": scenarios.failure_receipts,
     });
-    if summary.tests_failed > 0 {
+    if summary.tests_failed > 0 || scenarios.cases_failed > 0 {
         return Err(format!(
-            "{} test(s) failed: {}",
+            "{} test(s) and {} scenario case(s) failed: {}",
             summary.tests_failed,
-            summary.failures.join(" | ")
+            scenarios.cases_failed,
+            summary
+                .failures
+                .iter()
+                .chain(scenarios.failures.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ")
         ));
     }
     Ok(CommandResult::success(
         format!(
-            "{} test(s) passed in {} file(s)",
-            summary.tests_passed, summary.files_with_tests
+            "{} test(s) passed in {} file(s); {} scenario case(s) passed",
+            summary.tests_passed, summary.files_with_tests, scenarios.cases_passed
         ),
         data,
     ))
 }
 
-fn run_workspace(workspace: &Workspace, _headless: bool) -> Result<CommandResult, String> {
+fn run_workspace(
+    workspace: &Workspace,
+    _headless: bool,
+    ticks: u64,
+    fast_forward: bool,
+) -> Result<CommandResult, String> {
     let jit = compile_workspace_jit(workspace)?;
     let guest_exit = match jit.execute_i32_noarg_by_name("main") {
         Ok(value) => value,
@@ -2102,10 +2844,21 @@ fn run_workspace(workspace: &Workspace, _headless: bool) -> Result<CommandResult
         }
         Err(error) => return Err(error),
     };
+    let run = headless::run_ticks(&jit, ticks)?;
     Ok(CommandResult {
         code: guest_exit,
-        human: format!("program exited with code {guest_exit}"),
-        data: json!({"exit_code": guest_exit, "backend": "jit", "headless": true}),
+        human: format!(
+            "program exited with code {guest_exit} after {} headless tick(s)",
+            run.ticks_executed
+        ),
+        data: json!({
+            "exit_code": guest_exit,
+            "backend": "jit",
+            "headless": true,
+            "ticks_executed": run.ticks_executed,
+            "fast_forward": fast_forward,
+            "state_hash": run.state_hash,
+        }),
     })
 }
 
@@ -2123,6 +2876,40 @@ fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
     Ok(CommandResult::success(
         "graphical watch session ended",
         json!({"backend": "jit", "headless": false, "watch": true}),
+    ))
+}
+
+fn replay_workspace(
+    workspace: &Workspace,
+    recording: &Path,
+    entry: Option<&Path>,
+    tick_sleep_us: u64,
+) -> Result<CommandResult, String> {
+    let entry = entry.unwrap_or_else(|| Path::new(&workspace.manifest.entry));
+    validate_relative_path("replay entry", entry)?;
+    let entry = workspace.root.join(entry);
+    validate_workspace_destination(workspace, "replay entry", &entry)?;
+    let recording = absolute_path(recording)?;
+    run_play_in_process_with_replay(
+        &entry,
+        Some(&workspace.root),
+        None,
+        None,
+        None,
+        tick_sleep_us,
+        None,
+        Some(&workspace.manifest.name),
+        None,
+        None,
+        PlayReplayConfig::Replay(recording.clone()),
+    )?;
+    Ok(CommandResult::success(
+        format!("replayed {}", recording.display()),
+        json!({
+            "backend": "jit",
+            "recording": recording,
+            "verified": true,
+        }),
     ))
 }
 
@@ -2171,6 +2958,67 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
             "trace": trace,
             "usage_trace": usage_trace,
         }),
+    ))
+}
+
+fn run_workspace_editor(
+    workspace: &Workspace,
+    entry: &Path,
+    tick_sleep_micros: u64,
+) -> Result<CommandResult, String> {
+    let (entry_path, entry_relative) = resolve_tui_entry(workspace, entry)?;
+    let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
+    let editor_root = workspace.root.clone();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let config = LiveRunConfig::new(
+        workspace.root.clone(),
+        entry_relative,
+        PathBuf::from(&workspace.manifest.output),
+    )
+    .with_window_title(&workspace.manifest.name);
+    let runtime_shutdown = Arc::clone(&shutdown);
+    let runtime = thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_live_in_process_with_data(
+                &entry_path,
+                None,
+                None,
+                None,
+                tick_sleep_micros,
+                None,
+                server,
+                config,
+            )
+        }))
+        .map_err(|_| "live runtime thread panicked".to_string())
+        .and_then(|result| result);
+        runtime_shutdown.store(true, Ordering::Release);
+        result
+    });
+    let quit_client = client.clone();
+    let editor_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        desktop_editor::run(client, editor_root, Arc::clone(&shutdown))
+    }))
+    .map_err(|_| "desktop editor panicked".to_string())
+    .and_then(|result| result);
+    shutdown.store(true, Ordering::Release);
+    let _ = quit_client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
+    drop(quit_client);
+    let runtime_result = runtime
+        .join()
+        .map_err(|_| "live runtime thread panicked".to_string())
+        .and_then(|result| result);
+    match (runtime_result, editor_result) {
+        (Err(runtime), Err(editor)) => {
+            return Err(format!("{runtime}; editor shutdown also failed: {editor}"));
+        }
+        (Err(runtime), Ok(())) => return Err(runtime),
+        (Ok(()), Err(editor)) => return Err(editor),
+        (Ok(()), Ok(())) => {}
+    }
+    Ok(CommandResult::success(
+        "desktop editor session ended",
+        json!({"backend": "jit", "headless": false, "editor": "desktop", "task_scoped": true}),
     ))
 }
 
@@ -3190,6 +4038,7 @@ fn build_workspace(
     match mode {
         BuildMode::Dev => {
             let jit = compile_workspace_jit(workspace)?;
+            let manifest = validate_compiled_workspace_assets(workspace, &jit)?;
             let receipt = output
                 .map(|path| workspace.root.join(path))
                 .unwrap_or_else(|| {
@@ -3211,8 +4060,6 @@ fn build_workspace(
             let mut contents = serde_json::to_string_pretty(&data)
                 .map_err(|error| format!("failed to serialize dev build receipt: {error}"))?;
             contents.push('\n');
-            fs::write(&receipt, contents)
-                .map_err(|error| format!("failed to write {}: {error}", receipt.display()))?;
             stage_workspace_assets(
                 workspace,
                 receipt.parent().ok_or_else(|| {
@@ -3221,15 +4068,19 @@ fn build_workspace(
                         receipt.display()
                     )
                 })?,
-                Path::new("."),
-                None,
+                manifest.as_ref(),
             )?;
+            fs::write(&receipt, contents)
+                .map_err(|error| format!("failed to write {}: {error}", receipt.display()))?;
             Ok(CommandResult::success(
                 format!("built JIT development image: {}", receipt.display()),
                 json!({"backend": "jit", "receipt": display_path(&receipt)}),
             ))
         }
         BuildMode::Release => {
+            let validation_jit = compile_workspace_jit(workspace)?;
+            let manifest = validate_compiled_workspace_assets(workspace, &validation_jit)?;
+            preflight_release_asset_preparation(workspace, &validation_jit, manifest.as_ref())?;
             let output = output
                 .map(|path| workspace.root.join(path))
                 .unwrap_or_else(|| default_release_output(workspace));
@@ -3244,10 +4095,28 @@ fn build_workspace(
                 None,
                 Some(Path::new(&workspace.manifest.entry)),
             )?;
-            let sources = crate::release_assets::load_entry_sources(
-                &workspace.root,
-                Path::new(&workspace.manifest.entry),
-            )?;
+            let build_snapshot = summary.program_snapshot.as_ref().ok_or_else(|| {
+                "release build did not publish its authoritative ProgramSnapshot".to_string()
+            })?;
+            let validation_snapshot = validation_jit.program_snapshot().ok_or_else(|| {
+                "release asset preflight did not publish a ProgramSnapshot".to_string()
+            })?;
+            if build_snapshot.asset_references() != validation_snapshot.asset_references() {
+                return Err(
+                    "release build asset roots changed after successful preflight validation"
+                        .to_string(),
+                );
+            }
+            let retained = manifest
+                .as_ref()
+                .map(|resolved| {
+                    crate::release_assets::retain_snapshot_assets(
+                        &workspace.root,
+                        build_snapshot,
+                        resolved,
+                    )
+                })
+                .transpose()?;
             stage_workspace_assets(
                 workspace,
                 summary.linked_image_path.parent().ok_or_else(|| {
@@ -3256,10 +4125,7 @@ fn build_workspace(
                         summary.linked_image_path.display()
                     )
                 })?,
-                Path::new(&workspace.manifest.entry)
-                    .parent()
-                    .unwrap_or_else(|| Path::new(".")),
-                Some(&sources),
+                retained.as_ref(),
             )?;
             Ok(CommandResult::success(
                 format!(
@@ -3275,6 +4141,47 @@ fn build_workspace(
             ))
         }
     }
+}
+
+fn preflight_release_asset_preparation(
+    workspace: &Workspace,
+    jit: &JitProcess,
+    resolved: Option<&stasis_assets::ResolvedAssetManifest>,
+) -> Result<(), String> {
+    let Some(resolved) = resolved else {
+        return Ok(());
+    };
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "release asset preflight produced no ProgramSnapshot".to_string())?;
+    let retained =
+        crate::release_assets::retain_snapshot_assets(&workspace.root, snapshot, resolved)?;
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let destination = workspace
+        .root
+        .join(".stasis_cache")
+        .join(format!("asset-preflight-{}-{stamp}", std::process::id()));
+    let prepared = prepare_asset_bundle(
+        &retained,
+        &destination,
+        workspace.root.join(".stasis_cache/assets"),
+    )
+    .map_err(|error| format!("release asset preparation failed: {error}"));
+    let cleanup = if destination.exists() {
+        fs::remove_dir_all(&destination).map_err(|error| {
+            format!(
+                "failed to remove asset preflight {}: {error}",
+                destination.display()
+            )
+        })
+    } else {
+        Ok(())
+    };
+    prepared?;
+    cleanup
 }
 
 fn package_workspace(
@@ -3293,11 +4200,14 @@ fn package_workspace(
             ))
         });
     validate_workspace_destination(workspace, "package output", &package_root)?;
-    if package_root.exists() {
+    if package_root.exists() && !matches!(target, PackageTarget::Web) {
         return Err(format!(
             "package output already exists: {}",
             package_root.display()
         ));
+    }
+    if matches!(target, PackageTarget::Web) {
+        return package_web_workspace(workspace, &package_root, development_build);
     }
     if !matches!(target, PackageTarget::Desktop) {
         return package_mobile_workspace(
@@ -3306,6 +4216,9 @@ fn package_workspace(
             Path::new(&workspace.manifest.entry),
             &package_root,
             development_build,
+            &[],
+            0,
+            0,
         );
     }
     let staging_name = format!(
@@ -3352,11 +4265,13 @@ fn package_workspace(
             &workspace.root.join(MANIFEST_NAME),
             &payload_root.join(MANIFEST_NAME),
         )?;
-        if let Some(runtime) = installed_runtime_library() {
-            copy_file(
-                &runtime,
-                &payload_root.join(runtime.file_name().unwrap_or_default()),
-            )?;
+        if !cfg!(windows) {
+            if let Some(runtime) = installed_runtime_library() {
+                copy_file(
+                    &runtime,
+                    &payload_root.join(runtime.file_name().unwrap_or_default()),
+                )?;
+            }
         }
         write_json_file(&payload_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
         Ok(())
@@ -3385,6 +4300,681 @@ fn package_workspace(
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
+const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
+
+struct WebWasmArtifact {
+    bytes: Vec<u8>,
+    optimized: bool,
+    input_bytes: usize,
+}
+
+fn prepare_web_wasm(
+    module_bytes: &[u8],
+    staging_root: &Path,
+    development_build: bool,
+) -> Result<WebWasmArtifact, String> {
+    if development_build {
+        return Ok(WebWasmArtifact {
+            bytes: module_bytes.to_vec(),
+            optimized: false,
+            input_bytes: module_bytes.len(),
+        });
+    }
+
+    let configured = env::var_os("STASIS_WASM_OPT");
+    let executables = configured.clone().map_or_else(
+        || vec![OsString::from("wasm-opt"), OsString::from("wasmopt")],
+        |executable| vec![executable],
+    );
+    let input_path = staging_root.join(".game.unoptimized.wasm");
+    let output_path = staging_root.join(".game.optimized.wasm");
+    fs::write(&input_path, module_bytes)
+        .map_err(|error| format!("failed to stage {}: {error}", input_path.display()))?;
+    let mut result = None;
+    for executable in &executables {
+        match Command::new(executable)
+            .arg("-Oz")
+            .arg(&input_path)
+            .arg("-o")
+            .arg(&output_path)
+            .output()
+        {
+            Ok(output) => {
+                result = Some((executable, output));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound && configured.is_none() => {}
+            Err(error) => {
+                let _ = fs::remove_file(&input_path);
+                return Err(format!(
+                    "failed to run wasm-opt at {}: {error}",
+                    Path::new(executable).display()
+                ));
+            }
+        }
+    }
+    let _ = fs::remove_file(&input_path);
+
+    let Some((_, output)) = result else {
+        return Ok(WebWasmArtifact {
+            bytes: module_bytes.to_vec(),
+            optimized: false,
+            input_bytes: module_bytes.len(),
+        });
+    };
+    if !output.status.success() {
+        let _ = fs::remove_file(&output_path);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "wasm-opt failed with status {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    let bytes = fs::read(&output_path)
+        .map_err(|error| format!("failed to read {}: {error}", output_path.display()))?;
+    let _ = fs::remove_file(&output_path);
+    if !bytes.starts_with(b"\0asm\x01\0\0\0") {
+        return Err("wasm-opt produced an invalid WebAssembly module header".to_string());
+    }
+    Ok(WebWasmArtifact {
+        bytes,
+        optimized: true,
+        input_bytes: module_bytes.len(),
+    })
+}
+
+fn package_web_workspace(
+    workspace: &Workspace,
+    package_root: &Path,
+    development_build: bool,
+) -> Result<CommandResult, String> {
+    let staging_name = format!(
+        ".{}.staging",
+        package_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("stasis-web-package")
+    );
+    let staging_root = package_root.with_file_name(staging_name);
+    if staging_root.exists() {
+        return Err(format!(
+            "package staging output already exists: {}",
+            staging_root.display()
+        ));
+    }
+    let mut provenance = resolve_package_provenance(development_build)?;
+    let development_build = provenance["development_build"].as_bool() == Some(true);
+    fs::create_dir_all(&staging_root)
+        .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
+
+    let assembled = (|| -> Result<(bool, usize, usize, Value), String> {
+        let web_entry = workspace
+            .manifest
+            .web
+            .as_ref()
+            .and_then(|web| (!web.entry.is_empty()).then_some(web.entry.as_str()))
+            .unwrap_or(workspace.manifest.entry.as_str());
+        let files = load_workshop_edit_workspace(&workspace.root, Path::new(web_entry))?;
+        let files = workshop_reachable_files(&files, Path::new(web_entry))?;
+        let mut process = WasmProcess::new();
+        process.set_debug_symbols(development_build);
+        process.set_project_root(display_path(&workspace.root))?;
+        process.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+        ]);
+        let mut sources = BTreeMap::new();
+        for file in files {
+            let path = workspace.root.join(&file.path);
+            let path = path.canonicalize().unwrap_or(path);
+            let compiler_path = path.to_string_lossy().to_string();
+            sources.insert(compiler_path.clone(), file.source.clone());
+            process.upsert_file(compiler_path, file.source);
+        }
+        process.compile().map_err(|error| {
+            if let Some(diagnostic) = process.last_source_diagnostic() {
+                let source = sources
+                    .get(&diagnostic.path)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let (line, column) = line_column(source, diagnostic.start);
+                format!(
+                    "{}:{}:{}: {}",
+                    diagnostic.path, line, column, diagnostic.message
+                )
+            } else {
+                format!("{error:?}")
+            }
+        })?;
+        let wasm = prepare_web_wasm(process.module_bytes(), &staging_root, development_build)?;
+
+        let snapshot = process
+            .program_snapshot()
+            .ok_or_else(|| "web compile produced no ProgramSnapshot".to_string())?;
+        let resolved = validate_program_snapshot_assets(workspace, snapshot)?;
+        let retained = resolved
+            .as_ref()
+            .map(|manifest| {
+                crate::release_assets::retain_snapshot_assets(&workspace.root, snapshot, manifest)
+            })
+            .transpose()?;
+        stage_workspace_assets(workspace, &staging_root, retained.as_ref())?;
+        stage_web_loading_font(workspace, &staging_root)?;
+        let loading_font = workspace
+            .manifest
+            .web
+            .as_ref()
+            .and_then(|web| web.loading_font.as_deref())
+            .map(normalize_web_loading_font_path)
+            .transpose()?;
+        let audit_asset_metadata = staged_web_asset_metadata(&staging_root)?;
+        let runtime_asset_metadata = if development_build {
+            audit_asset_metadata.clone()
+        } else {
+            release_web_asset_metadata(&audit_asset_metadata)
+        };
+        let mut runtime_config = web_runtime_config(workspace, &process, development_build);
+        runtime_config["asset_metadata"] = runtime_asset_metadata.clone();
+        let asset_identity_path = staging_root.join(ASSET_PACKAGE_IDENTITY_PATH);
+        if development_build && asset_identity_path.is_file() {
+            runtime_config["asset_package"] =
+                serde_json::from_slice(&fs::read(&asset_identity_path).map_err(|error| {
+                    format!(
+                        "failed to read Web asset package identity {}: {error}",
+                        asset_identity_path.display()
+                    )
+                })?)
+                .map_err(|error| format!("failed to decode Web asset package identity: {error}"))?;
+        }
+        let runtime_json = serde_json::to_string(&runtime_config)
+            .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
+            .replace("</", "<\\/");
+        let audio_enabled = process.imported_symbols().iter().any(|symbol| {
+            symbol.starts_with("audio_") || symbol.contains("_audio_") || symbol == "web_play_tone"
+        });
+        let network_enabled = process
+            .imported_symbols()
+            .iter()
+            .any(|symbol| symbol.starts_with("stasis_web_network_"));
+        let linked_runtime = link_web_runtime(&process, audio_enabled, network_enabled)?;
+        let linked_bundle = format!("window.STASIS_GAME = {runtime_json};\n{linked_runtime}");
+        let runtime_bundle = if development_build {
+            linked_bundle.clone()
+        } else {
+            format!(
+                "window.STASIS_GAME = {runtime_json};\n{}",
+                minify_web_runtime(&linked_runtime)?
+            )
+        };
+        let size_metrics = web_package_size_metrics(
+            &linked_bundle,
+            &runtime_bundle,
+            &audit_asset_metadata,
+            &runtime_asset_metadata,
+            !development_build,
+        )?;
+        provenance["web_package"] = json!({
+            "asset_metadata_audit": audit_asset_metadata,
+            "size_metrics": size_metrics.clone(),
+        });
+        let wasm_path = staging_root.join("game.wasm");
+        fs::write(&wasm_path, &wasm.bytes)
+            .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
+        fs::write(staging_root.join("game.js"), &runtime_bundle)
+            .map_err(|error| format!("failed to write web runtime: {error}"))?;
+        fs::write(
+            staging_root.join("index.html"),
+            web_index_html(
+                &workspace.manifest.name,
+                development_build,
+                loading_font.as_deref(),
+                workspace.manifest.web.as_ref().and_then(|web| web.viewport),
+            ),
+        )
+        .map_err(|error| format!("failed to write web index: {error}"))?;
+
+        if workspace
+            .manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        {
+            let mut bundle_files = vec![
+                stasis_network::BundleFile {
+                    path: "index.html".to_string(),
+                    mime: "text/html; charset=utf-8".to_string(),
+                    bytes: fs::read(staging_root.join("index.html"))
+                        .map_err(|error| format!("failed to read staged web index: {error}"))?,
+                },
+                stasis_network::BundleFile {
+                    path: "game.js".to_string(),
+                    mime: "text/javascript".to_string(),
+                    bytes: runtime_bundle.as_bytes().to_vec(),
+                },
+                stasis_network::BundleFile {
+                    path: "game.wasm".to_string(),
+                    mime: "application/wasm".to_string(),
+                    bytes: wasm.bytes.clone(),
+                },
+            ];
+            if let Some(retained) = retained.as_ref() {
+                let mut assets = retained.assets.iter().collect::<Vec<_>>();
+                assets.sort_by(|left, right| left.entry.path.cmp(&right.entry.path));
+                for asset in assets {
+                    let staged_path = staging_root.join(&asset.entry.path);
+                    let bytes = fs::read(&staged_path).map_err(|error| {
+                        format!(
+                            "failed to read staged network guest asset {}: {error}",
+                            staged_path.display()
+                        )
+                    })?;
+                    bundle_files.push(stasis_network::BundleFile {
+                        path: asset.entry.path.clone(),
+                        mime: network_guest_asset_mime(&asset.entry.format).to_string(),
+                        bytes,
+                    });
+                }
+            }
+            let bundle = stasis_network::StaticBundle::new(bundle_files)
+                .map_err(|error| format!("failed to create network guest bundle: {error}"))?;
+            let encoded = bundle
+                .encode()
+                .map_err(|error| format!("failed to encode network guest bundle: {error}"))?;
+            fs::write(staging_root.join("network_guest.bundle"), &encoded)
+                .map_err(|error| format!("failed to write network guest bundle: {error}"))?;
+            write_json_file(
+                &staging_root.join("network_guest.bundle.json"),
+                &json!({
+                    "format": "stasis.static_bundle.v1",
+                    "path": "network_guest.bundle",
+                    "length": encoded.len(),
+                    "sha256": format!("{:x}", Sha256::digest(&encoded)),
+                }),
+            )?;
+        }
+
+        write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
+        Ok((
+            wasm.optimized,
+            wasm.input_bytes,
+            wasm.bytes.len(),
+            size_metrics,
+        ))
+    })();
+    let (wasm_optimized, wasm_input_bytes, wasm_output_bytes, web_size_metrics) = match assembled {
+        Ok(package) => package,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(error);
+        }
+    };
+    publish_package_output(&staging_root, package_root)?;
+    let optimization = if wasm_optimized {
+        "wasm-opt -Oz"
+    } else if development_build {
+        "development Wasm"
+    } else {
+        "unoptimized Wasm; wasm-opt not found"
+    };
+    Ok(CommandResult::success(
+        format!(
+            "packaged web at {} ({optimization})",
+            package_root.display()
+        ),
+        json!({
+            "target": "web",
+            "output": display_path(package_root),
+            "play": "index.html",
+            "wasm": "game.wasm",
+            "wasm_optimized": wasm_optimized,
+            "wasm_input_bytes": wasm_input_bytes,
+            "wasm_output_bytes": wasm_output_bytes,
+            "web_size_metrics": web_size_metrics,
+            "provenance": PACKAGE_PROVENANCE_NAME,
+            "development_build": provenance["development_build"],
+            "web_entry": workspace
+                .manifest
+                .web
+                .as_ref()
+                .and_then(|web| (!web.entry.is_empty()).then_some(web.entry.as_str()))
+                .unwrap_or(workspace.manifest.entry.as_str()),
+            "network_guest_bundle": workspace
+                .manifest
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.network)
+                .then_some("network_guest.bundle"),
+        }),
+    ))
+}
+
+fn publish_package_output(staging_root: &Path, package_root: &Path) -> Result<(), String> {
+    let previous_root = package_root.with_file_name(format!(
+        ".{}.previous",
+        package_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("stasis-package")
+    ));
+    let replacing = package_root.exists();
+    if replacing {
+        if previous_root.exists() {
+            let _ = fs::remove_dir_all(staging_root);
+            return Err(format!(
+                "package replacement backup already exists: {}",
+                previous_root.display()
+            ));
+        }
+        fs::rename(package_root, &previous_root).map_err(|error| {
+            let _ = fs::remove_dir_all(staging_root);
+            format!(
+                "failed to prepare package replacement {}: {error}",
+                package_root.display()
+            )
+        })?;
+    }
+    if let Err(error) = fs::rename(staging_root, package_root) {
+        let rollback = if replacing {
+            fs::rename(&previous_root, package_root)
+                .map_err(|rollback_error| format!("; rollback failed: {rollback_error}"))
+        } else {
+            Ok(())
+        };
+        let _ = fs::remove_dir_all(staging_root);
+        return Err(format!(
+            "failed to publish package {}: {error}{}",
+            package_root.display(),
+            rollback.err().unwrap_or_default()
+        ));
+    }
+    if replacing {
+        fs::remove_dir_all(&previous_root).map_err(|error| {
+            format!(
+                "published package but failed to remove previous output {}: {error}",
+                previous_root.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn web_index_html(
+    title: &str,
+    development_build: bool,
+    loading_font: Option<&str>,
+    viewport: Option<WebViewportManifest>,
+) -> String {
+    let viewport = viewport.unwrap_or(DEFAULT_WEB_VIEWPORT);
+    let (hud_style, hud) = if development_build {
+        (
+            "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }",
+            r#"<div id="stasis-hud" role="status">Starting Wasm...</div>"#,
+        )
+    } else {
+        ("", "")
+    };
+    let (loading_font_face, loading_font_family) = loading_font
+        .map(|path| {
+            let (mime, format) = match Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("ttf") => ("ttf", "truetype"),
+                Some("otf") => ("otf", "opentype"),
+                Some("woff") => ("woff", "woff"),
+                Some("woff2") => ("woff2", "woff2"),
+                _ => ("font", "font"),
+            };
+            (
+                format!(
+                    "<link rel=\"preload\" href=\"{path}\" as=\"font\" type=\"font/{mime}\" crossorigin>\n  <style>@font-face {{ font-family: \"StasisLoadingFont\"; src: url(\"{path}\") format(\"{format}\"); font-display: block; }}</style>"
+                ),
+                "\"StasisLoadingFont\", ".to_string(),
+            )
+        })
+        .unwrap_or_else(|| (String::new(), String::new()));
+    WEB_INDEX_HTML
+        .replace("__STASIS_GAME_TITLE__", title)
+        .replace("__STASIS_PERFORMANCE_HUD_STYLE__", hud_style)
+        .replace("__STASIS_PERFORMANCE_HUD__", hud)
+        .replace("__STASIS_LOADING_FONT_FACE__", &loading_font_face)
+        .replace("__STASIS_LOADING_FONT_FAMILY__", &loading_font_family)
+        .replace("__STASIS_LOGICAL_WIDTH__", &viewport.width.to_string())
+        .replace("__STASIS_LOGICAL_HEIGHT__", &viewport.height.to_string())
+}
+
+fn link_web_runtime(
+    process: &WasmProcess,
+    audio_enabled: bool,
+    network_enabled: bool,
+) -> Result<String, String> {
+    let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", audio_enabled);
+    let runtime = strip_web_runtime_feature(&runtime, "network", network_enabled);
+    strip_web_runtime_imports(&runtime, process.imported_symbols())
+}
+
+fn strip_web_runtime_imports(
+    source: &str,
+    imported_symbols: &BTreeSet<String>,
+) -> Result<String, String> {
+    const PREFIX: &str = "// @stasis-import ";
+    let mut active: Option<(String, bool)> = None;
+    let mut output = Vec::new();
+
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(marker) = trimmed.strip_prefix(PREFIX) {
+            if let Some(symbol) = marker.strip_suffix(" begin") {
+                if symbol.is_empty() || symbol.split_whitespace().count() != 1 {
+                    return Err(format!(
+                        "invalid Web runtime import marker on line {}: {trimmed}",
+                        index + 1
+                    ));
+                }
+                if let Some((active_symbol, _)) = active.as_ref() {
+                    return Err(format!(
+                        "nested Web runtime import marker for {symbol} inside {active_symbol} on line {}",
+                        index + 1
+                    ));
+                }
+                active = Some((symbol.to_string(), imported_symbols.contains(symbol)));
+                continue;
+            }
+            if let Some(symbol) = marker.strip_suffix(" end") {
+                match active.take() {
+                    Some((active_symbol, _)) if active_symbol == symbol => continue,
+                    Some((active_symbol, _)) => {
+                        return Err(format!(
+                            "mismatched Web runtime import marker for {symbol}; expected {active_symbol} on line {}",
+                            index + 1
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "unmatched Web runtime import end marker for {symbol} on line {}",
+                            index + 1
+                        ));
+                    }
+                }
+            }
+            return Err(format!(
+                "invalid Web runtime import marker on line {}: {trimmed}",
+                index + 1
+            ));
+        }
+
+        if active.as_ref().is_none_or(|(_, retain)| *retain) {
+            output.push(line);
+        }
+    }
+
+    if let Some((symbol, _)) = active {
+        return Err(format!(
+            "unterminated Web runtime import marker for {symbol}"
+        ));
+    }
+    Ok(output.join("\n"))
+}
+
+fn strip_web_runtime_feature(source: &str, feature: &str, enabled: bool) -> String {
+    let begin = format!("// @stasis-feature {feature} begin");
+    let end = format!("// @stasis-feature {feature} end");
+    let mut inside = false;
+    source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed == begin {
+                inside = true;
+                return None;
+            }
+            if trimmed == end {
+                inside = false;
+                return None;
+            }
+            (enabled || !inside).then_some(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// Keep these aligned with the metadata reads in runtime/web/game.js. Development
+// packages retain the complete reflection tables for inspection and tooling.
+const WEB_RESOURCE_BINDING_FIELDS: [&str; 5] = ["sprite_ref", "handle", "width", "height", "font"];
+const WEB_RUNTIME_BUFFERS: [&str; 5] = [
+    "gfx_cmd_i32",
+    "gfx_cmd_f32",
+    "gfx_cmd_u8",
+    "host_i32",
+    "host_f32",
+];
+const WEB_HOST_GLOBALS: [&str; 4] = [
+    "host_req_seq",
+    "host_req_flags",
+    "host_req_window_w_px",
+    "host_req_window_h_px",
+];
+
+fn web_runtime_config(
+    workspace: &Workspace,
+    process: &WasmProcess,
+    development_build: bool,
+) -> Value {
+    let strings = process
+        .string_literals()
+        .iter()
+        .map(|(id, value)| (id.to_string(), Value::String(value.clone())))
+        .collect::<serde_json::Map<_, _>>();
+    let memory = process
+        .memory_layout()
+        .iter()
+        .map(|(path, layout)| {
+            (
+                path.clone(),
+                json!({
+                    "hash": stasis_compiler::backend::wasm::wasm_global_hash(path),
+                    "offset": layout.offset,
+                    "type_id": layout.type_id,
+                    "length": layout.length,
+                    "stride": layout.stride,
+                    "byte_backed": layout.byte_backed,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let views = process
+        .struct_views()
+        .iter()
+        .map(|(base, fields)| (base.to_string(), json!(fields)))
+        .collect::<serde_json::Map<_, _>>();
+    let globals = process
+        .global_types()
+        .iter()
+        .map(|(path, type_id)| {
+            (
+                path.clone(),
+                json!({"hash": stasis_compiler::backend::wasm::wasm_global_hash(path), "type_id": type_id}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let mut config = json!({
+        "name": workspace.manifest.name,
+        "strings": strings,
+        "memory": memory,
+        "views": views,
+        "globals": globals,
+        "assets": {},
+    });
+    if !development_build {
+        prune_release_web_runtime_config(&mut config, process.imported_symbols());
+    }
+    config
+}
+
+fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTreeSet<String>) {
+    let views = config["views"].as_object_mut().expect("generated views");
+    views.retain(|_, fields| {
+        let fields = fields.as_object_mut().expect("generated view fields");
+        fields.retain(|field, _| WEB_RESOURCE_BINDING_FIELDS.contains(&field.as_str()));
+        !fields.is_empty()
+    });
+    let retained_paths = views
+        .values()
+        .flat_map(|fields| {
+            fields
+                .as_object()
+                .expect("generated view fields")
+                .values()
+                .filter_map(Value::as_str)
+        })
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let dynamic_text_paths = if imported_symbols.contains("stasis_jit_text_run_replace_from") {
+        config["memory"]
+            .as_object()
+            .expect("generated memory layouts")
+            .iter()
+            .filter(|(_, layout)| layout["byte_backed"].as_bool() == Some(true))
+            .map(|(path, _)| path.clone())
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+    config["memory"]
+        .as_object_mut()
+        .expect("generated memory layouts")
+        .retain(|path, layout| {
+            retained_paths.contains(path.as_str())
+                || WEB_RUNTIME_BUFFERS.contains(&path.as_str())
+                || dynamic_text_paths.contains(path)
+                || (imported_symbols.contains("sys_memcpy_u8")
+                    && layout["byte_backed"].as_bool() == Some(true))
+                || (imported_symbols.contains("sys_memcpy_i32")
+                    && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_I32)))
+                || (imported_symbols.contains("sys_memcpy_f32")
+                    && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_F32)))
+        });
+    config["globals"]
+        .as_object_mut()
+        .expect("generated globals")
+        .retain(|path, _| {
+            retained_paths.contains(path.as_str())
+                || WEB_HOST_GLOBALS.contains(&path.as_str())
+                || path
+                    .strip_suffix(".length")
+                    .is_some_and(|collection| dynamic_text_paths.contains(collection))
+        });
 }
 
 #[cfg(windows)]
@@ -3417,26 +5007,13 @@ fn nest_windows_desktop_payload(staging_root: &Path, executable: &Path) -> Resul
 fn stage_workspace_assets(
     workspace: &Workspace,
     destination_root: &Path,
-    source_base_dir: &Path,
-    sources: Option<&[(String, String)]>,
+    resolved: Option<&stasis_assets::ResolvedAssetManifest>,
 ) -> Result<(), String> {
     let assets = workspace.root.join("assets");
     validate_workspace_destination(workspace, "assets directory", &assets)?;
-    if workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
-        let resolved = load_project_asset_manifest(&workspace.root, AssetLimits::default())
-            .map_err(|error| format!("failed to resolve desktop build assets: {error}"))?;
-        let resolved = if let Some(sources) = sources {
-            crate::release_assets::retain_source_referenced_assets(
-                &workspace.root,
-                source_base_dir,
-                sources,
-                &resolved,
-            )?
-        } else {
-            resolved
-        };
+    if let Some(resolved) = resolved {
         prepare_asset_bundle(
-            &resolved,
+            resolved,
             destination_root,
             workspace.root.join(".stasis_cache/assets"),
         )
@@ -3444,7 +5021,225 @@ fn stage_workspace_assets(
     } else {
         copy_dir_if_exists(&assets, &destination_root.join("assets"))?;
     }
+    if destination_root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        write_asset_package_identity(destination_root)?;
+    }
     Ok(())
+}
+
+fn staged_web_asset_metadata(destination_root: &Path) -> Result<Value, String> {
+    let manifest_path = destination_root.join(DEFAULT_ASSET_MANIFEST_PATH);
+    if !manifest_path.is_file() {
+        return Ok(json!({}));
+    }
+    let bytes = fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "failed to read staged Web asset manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "failed to decode staged Web asset manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let mut metadata = serde_json::Map::new();
+    for entry in manifest
+        .get("assets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(path) = entry.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let format = entry.get("format").cloned().unwrap_or_else(|| json!({}));
+        let mut item = serde_json::Map::new();
+        item.insert("path".to_string(), Value::String(path.to_string()));
+        if let Some(encoding) = format.get("encoding").and_then(Value::as_str) {
+            item.insert("encoding".to_string(), Value::String(encoding.to_string()));
+        }
+        for (source, target) in [("width", "prepared_width"), ("height", "prepared_height")] {
+            if let Some(value) = format.get(source).and_then(Value::as_u64) {
+                item.insert(target.to_string(), Value::Number(value.into()));
+            }
+        }
+        let prepared_path = destination_root.join(path);
+        if let Ok(length) = fs::metadata(&prepared_path).map(|metadata| metadata.len()) {
+            item.insert("prepared_bytes".to_string(), Value::Number(length.into()));
+            if entry.get("prepared_from_sha256").is_none() && entry.get("source_bytes").is_none() {
+                // Copied masters retain their source byte length in the
+                // staged package; transformed assets intentionally expose
+                // only the prepared length unless the manifest carries a
+                // retained source length.
+                item.insert("source_bytes".to_string(), Value::Number(length.into()));
+            }
+        }
+        if let Some(value) = entry.get("source_bytes").and_then(Value::as_u64) {
+            item.insert("source_bytes".to_string(), Value::Number(value.into()));
+        }
+        if let Some(prepare) = entry.get("prepare") {
+            for (source, target) in [
+                ("max_logical_width", "logical_width"),
+                ("max_logical_height", "logical_height"),
+            ] {
+                if let Some(value) = prepare.get(source).and_then(Value::as_u64) {
+                    item.insert(target.to_string(), Value::Number(value.into()));
+                }
+            }
+        } else {
+            for (source, target) in [("width", "logical_width"), ("height", "logical_height")] {
+                if let Some(value) = format.get(source).and_then(Value::as_u64) {
+                    item.entry(target.to_string())
+                        .or_insert_with(|| Value::Number(value.into()));
+                }
+            }
+        }
+        if let Some(value) = entry
+            .get("prepared_from_sha256")
+            .and_then(Value::as_str)
+            .or_else(|| entry.get("content_sha256").and_then(Value::as_str))
+        {
+            item.insert(
+                "source_sha256".to_string(),
+                Value::String(value.to_string()),
+            );
+        }
+        if let Some(value) = entry.get("content_sha256").and_then(Value::as_str) {
+            item.insert(
+                "prepared_sha256".to_string(),
+                Value::String(value.to_string()),
+            );
+        }
+        metadata.insert(path.to_string(), Value::Object(item));
+    }
+    Ok(Value::Object(metadata))
+}
+
+const WEB_RELEASE_ASSET_METADATA_FIELDS: [&str; 5] = [
+    "encoding",
+    "prepared_width",
+    "prepared_height",
+    "logical_width",
+    "logical_height",
+];
+
+fn release_web_asset_metadata(audit: &Value) -> Value {
+    let metadata = audit
+        .as_object()
+        .into_iter()
+        .flat_map(|metadata| metadata.iter())
+        .map(|(path, item)| {
+            let projected = item
+                .as_object()
+                .into_iter()
+                .flat_map(|item| item.iter())
+                .filter(|(field, _)| WEB_RELEASE_ASSET_METADATA_FIELDS.contains(&field.as_str()))
+                .map(|(field, value)| (field.clone(), value.clone()))
+                .collect();
+            (path.clone(), Value::Object(projected))
+        })
+        .collect();
+    Value::Object(metadata)
+}
+
+fn minify_web_runtime(source: &str) -> Result<String, String> {
+    let allocator = Allocator::default();
+    let parsed = JavaScriptParser::new(&allocator, source, SourceType::cjs()).parse();
+    if !parsed.errors.is_empty() {
+        return Err(format!(
+            "failed to parse linked Web runtime for minification: {}",
+            parsed
+                .errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let mut program = parsed.program;
+    let minified = Minifier::new(MinifierOptions {
+        compress: Some(CompressOptions::smallest()),
+        mangle: None,
+        ..MinifierOptions::default()
+    })
+    .minify(&allocator, &mut program);
+    Ok(Codegen::new()
+        .with_options(CodegenOptions {
+            minify: true,
+            comments: CommentOptions::disabled(),
+            ..CodegenOptions::default()
+        })
+        .with_scoping(minified.scoping)
+        .build(&program)
+        .code)
+}
+
+fn deterministic_gzip_size(bytes: &[u8]) -> Result<usize, String> {
+    let mut encoder = GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::best());
+    encoder
+        .write_all(bytes)
+        .map_err(|error| format!("failed to measure Web package gzip size: {error}"))?;
+    encoder
+        .finish()
+        .map(|gzip| gzip.len())
+        .map_err(|error| format!("failed to finish Web package gzip measurement: {error}"))
+}
+
+fn byte_size_metrics(bytes: &[u8]) -> Result<Value, String> {
+    Ok(json!({
+        "raw_bytes": bytes.len(),
+        "gzip_bytes": deterministic_gzip_size(bytes)?,
+    }))
+}
+
+fn web_package_size_metrics(
+    javascript_before: &str,
+    javascript_after: &str,
+    metadata_before: &Value,
+    metadata_after: &Value,
+    javascript_minified: bool,
+) -> Result<Value, String> {
+    let metadata_before = serde_json::to_vec(metadata_before)
+        .map_err(|error| format!("failed to encode Web asset audit metadata: {error}"))?;
+    let metadata_after = serde_json::to_vec(metadata_after)
+        .map_err(|error| format!("failed to encode Web runtime asset metadata: {error}"))?;
+    Ok(json!({
+        "definition": "raw is the exact UTF-8 byte length; gzip is RFC 1952 at level 9 with mtime 0",
+        "javascript_minified": javascript_minified,
+        "javascript": {
+            "before": byte_size_metrics(javascript_before.as_bytes())?,
+            "after": byte_size_metrics(javascript_after.as_bytes())?,
+        },
+        "asset_metadata": {
+            "before": byte_size_metrics(&metadata_before)?,
+            "after": byte_size_metrics(&metadata_after)?,
+        },
+    }))
+}
+
+fn network_guest_asset_mime(format: &AssetFormat) -> &'static str {
+    match format {
+        AssetFormat::Sprite { encoding, .. } => match encoding {
+            SpriteEncoding::Png => "image/png",
+            SpriteEncoding::Svg => "image/svg+xml",
+            SpriteEncoding::Jpeg => "image/jpeg",
+            SpriteEncoding::Webp => "image/webp",
+        },
+        AssetFormat::Audio { encoding, .. } => match encoding {
+            AudioEncoding::Wav => "audio/wav",
+            AudioEncoding::Ogg => "audio/ogg",
+            AudioEncoding::Mp3 => "audio/mpeg",
+            AudioEncoding::M4a => "audio/mp4",
+        },
+        AssetFormat::Font { encoding } => match encoding {
+            FontEncoding::Ttf => "font/ttf",
+            FontEncoding::Otf => "font/otf",
+        },
+    }
 }
 
 fn package_mobile_command(
@@ -3453,6 +5248,9 @@ fn package_mobile_command(
     entry: Option<&Path>,
     output: Option<&Path>,
     development_build: bool,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
 ) -> Result<CommandResult, String> {
     let target = target.package_target();
     let entry = entry.unwrap_or_else(|| Path::new(&workspace.manifest.entry));
@@ -3466,7 +5264,38 @@ fn package_mobile_command(
             ))
         });
     validate_workspace_destination(workspace, "package output", &package_root)?;
-    package_mobile_workspace(workspace, target, entry, &package_root, development_build)
+    package_mobile_workspace(
+        workspace,
+        target,
+        entry,
+        &package_root,
+        development_build,
+        profile_functions,
+        profile_warmup_frames,
+        profile_sample_frames,
+    )
+}
+
+fn validate_mobile_network_guest_contract(
+    manifest: &ProjectManifest,
+    target: PackageTarget,
+) -> Result<(), String> {
+    if target.is_mobile()
+        && manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        && manifest
+            .web
+            .as_ref()
+            .map_or(true, |web| web.entry.is_empty())
+    {
+        return Err(
+            "network-enabled mobile projects must declare web.entry for the guest bundle"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn package_mobile_workspace(
@@ -3475,7 +5304,43 @@ fn package_mobile_workspace(
     entry: &Path,
     package_root: &Path,
     development_build: bool,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
 ) -> Result<CommandResult, String> {
+    validate_mobile_network_guest_contract(&workspace.manifest, target)?;
+    if matches!(target, PackageTarget::IosArm64)
+        && workspace
+            .manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        && !cfg!(target_os = "macos")
+    {
+        return Err(
+            "network-enabled iOS packaging requires a macOS host with Xcode and the iOS Rust toolchain"
+                .to_string(),
+        );
+    }
+    if matches!(target, PackageTarget::AndroidX86_64) && !development_build {
+        return Err(
+            "android-x86_64 is a test-only emulator target; pass --development-build".to_string(),
+        );
+    }
+    if !profile_functions.is_empty() && !development_build {
+        return Err("mobile function profiling requires --development-build".to_string());
+    }
+    if profile_functions.len() > 64 {
+        return Err("mobile function profiling supports at most 64 functions".to_string());
+    }
+    if !profile_functions.is_empty() && profile_sample_frames == 0 {
+        return Err("mobile function profiling requires at least one sample frame".to_string());
+    }
+    let unique_profile_functions: BTreeSet<&str> =
+        profile_functions.iter().map(String::as_str).collect();
+    if unique_profile_functions.len() != profile_functions.len() {
+        return Err("mobile function profiling function names must be unique".to_string());
+    }
     if package_root.exists() {
         return Err(format!(
             "package output already exists: {}",
@@ -3502,7 +5367,8 @@ fn package_mobile_workspace(
         let aot_root = staging_root.join("aot");
         let executable = env::current_exe()
             .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
-        let child = Command::new(executable)
+        let mut child_command = Command::new(executable);
+        child_command
             .arg("mobile-aot-bundle")
             .arg("--target")
             .arg(target.as_str())
@@ -3511,7 +5377,17 @@ fn package_mobile_workspace(
             .arg("--entry-file")
             .arg(entry)
             .arg("--out-dir")
-            .arg(&aot_root)
+            .arg(&aot_root);
+        if !profile_functions.is_empty() {
+            child_command
+                .arg("--profile-functions")
+                .arg(profile_functions.join(","))
+                .arg("--profile-warmup-frames")
+                .arg(profile_warmup_frames.to_string())
+                .arg("--profile-sample-frames")
+                .arg(profile_sample_frames.to_string());
+        }
+        let child = child_command
             .output()
             .map_err(|error| format!("failed to launch mobile AOT packaging: {error}"))?;
         if !child.status.success() {
@@ -3522,7 +5398,34 @@ fn package_mobile_workspace(
                 String::from_utf8_lossy(&child.stderr).trim()
             ));
         }
-        assemble_mobile_shell(workspace, target, &aot_root, &staging_root, &provenance)?;
+        let web_guest_bundle = if workspace
+            .manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        {
+            let web_guest_root = staging_root.join("web-guest");
+            package_web_workspace(workspace, &web_guest_root, development_build)?;
+            Some(web_guest_root.join("network_guest.bundle"))
+        } else {
+            None
+        };
+        if workspace
+            .manifest
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network)
+        {
+            stage_mobile_network_library(&staging_root, target)?;
+        }
+        assemble_mobile_shell(
+            workspace,
+            target,
+            &aot_root,
+            &staging_root,
+            &provenance,
+            web_guest_bundle.as_deref(),
+        )?;
         Ok(())
     })();
     if let Err(error) = child_result {
@@ -3543,14 +5446,276 @@ fn package_mobile_workspace(
             "output": display_path(package_root),
             "entry": display_path(entry),
             "project": match target {
-                PackageTarget::AndroidArm64 => "android",
+                PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
                 PackageTarget::IosArm64 => "ios/StasisMobile.xcodeproj",
-                PackageTarget::Desktop => unreachable!(),
+                PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+fn stage_mobile_network_library(staging_root: &Path, target: PackageTarget) -> Result<(), String> {
+    match target {
+        PackageTarget::IosArm64 => stage_ios_network_library(staging_root),
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+            stage_android_network_library(staging_root, target)
+        }
+        PackageTarget::Desktop | PackageTarget::Web => {
+            Err("network static library requires a mobile target".to_string())
+        }
+    }
+}
+
+fn network_support_target(target: PackageTarget) -> Option<&'static str> {
+    match target {
+        PackageTarget::AndroidArm64 => Some("android-arm64"),
+        PackageTarget::AndroidX86_64 => Some("android-x86_64"),
+        PackageTarget::IosArm64 => Some("ios-arm64"),
+        PackageTarget::Desktop | PackageTarget::Web => None,
+    }
+}
+
+fn bundled_network_artifacts_for_executable(
+    executable: &Path,
+    target: PackageTarget,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let target_name = network_support_target(target)
+        .ok_or_else(|| "network static library requires a mobile target".to_string())?;
+    let executable_dir = executable.parent().unwrap_or(Path::new("."));
+    for support_root in [
+        executable_dir.join("mobile/network"),
+        executable_dir.join("../mobile/network"),
+    ] {
+        let library = support_root.join(target_name).join("libstasis_network.a");
+        let header = support_root.join("include/stasis_network.h");
+        if library.is_file() && header.is_file() {
+            return Ok(Some((library, header)));
+        }
+    }
+    Ok(None)
+}
+
+fn stage_network_artifacts(
+    staging_root: &Path,
+    target: PackageTarget,
+    library: &Path,
+    header: &Path,
+) -> Result<(), String> {
+    let destination = match target {
+        PackageTarget::IosArm64 => staging_root.join("ios/network"),
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+            staging_root.join("android/app/src/main/cpp/network")
+        }
+        PackageTarget::Desktop | PackageTarget::Web => {
+            return Err("network static library requires a mobile target".to_string())
+        }
+    };
+    fs::create_dir_all(destination.join("include"))
+        .map_err(|error| format!("failed to create network staging: {error}"))?;
+    copy_file(library, &destination.join("libstasis_network.a"))?;
+    copy_file(header, &destination.join("include/stasis_network.h"))?;
+    Ok(())
+}
+
+fn source_network_workspace() -> Option<PathBuf> {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)?
+        .to_path_buf();
+    (source_root.join("Cargo.toml").is_file()
+        && source_root
+            .join("crates/stasis_network/Cargo.toml")
+            .is_file())
+    .then_some(source_root)
+}
+
+fn stage_android_network_library(staging_root: &Path, target: PackageTarget) -> Result<(), String> {
+    if let Some((library, header)) = bundled_network_artifacts_for_executable(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+        target,
+    )? {
+        return stage_network_artifacts(staging_root, target, &library, &header);
+    }
+    let source_root = source_network_workspace().ok_or_else(|| {
+        "installed toolchain is missing prebuilt mobile/network network libraries; reinstall the complete release archive"
+            .to_string()
+    })?;
+    let (rust_target, api_level) = match target {
+        PackageTarget::AndroidArm64 => ("aarch64-linux-android", "aarch64-linux-android26"),
+        PackageTarget::AndroidX86_64 => ("x86_64-linux-android", "x86_64-linux-android26"),
+        _ => return Err("network static library requires an Android target".to_string()),
+    };
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut command = Command::new(cargo);
+    command.current_dir(&source_root).args([
+        "build",
+        "-p",
+        "stasis_network",
+        "--target",
+        rust_target,
+        "--release",
+    ]);
+    let Some(clang) = android_ndk_clang("clang") else {
+        return Err(
+            "network-enabled Android packaging requires an installed Android NDK clang".to_string(),
+        );
+    };
+    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str(&format!("-C link-arg=--target={api_level}"));
+    let linker_key = format!(
+        "CARGO_TARGET_{}_LINKER",
+        rust_target.replace('-', "_").to_ascii_uppercase()
+    );
+    command
+        .env(linker_key, &clang)
+        .env(format!("CC_{rust_target}"), &clang)
+        .env(format!("CXX_{rust_target}"), &clang)
+        .env(
+            format!("CFLAGS_{rust_target}"),
+            format!("--target={api_level}"),
+        )
+        .env("RUSTFLAGS", rustflags);
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to build stasis_network for Android: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Android stasis_network build failed with exit code {}: stdout={} stderr={}",
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let library = source_root.join(format!("target/{rust_target}/release/libstasis_network.a"));
+    if !library.is_file() {
+        return Err(format!(
+            "Android stasis_network build did not produce {}",
+            library.display()
+        ));
+    }
+    stage_network_artifacts(
+        staging_root,
+        target,
+        &library,
+        &source_root.join("crates/stasis_network/include/stasis_network.h"),
+    )
+}
+
+fn stage_ios_network_library(staging_root: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err(
+            "network-enabled iOS packaging requires a macOS host with Xcode and the iOS Rust toolchain"
+                .to_string(),
+        );
+    }
+    if let Some((library, header)) = bundled_network_artifacts_for_executable(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+        PackageTarget::IosArm64,
+    )? {
+        return stage_network_artifacts(staging_root, PackageTarget::IosArm64, &library, &header);
+    }
+    let source_root = source_network_workspace().ok_or_else(|| {
+        "installed toolchain is missing prebuilt mobile/network network libraries; reinstall the complete release archive"
+            .to_string()
+    })?;
+    let rust_target = "aarch64-apple-ios";
+    let xcrun = Command::new("xcrun")
+        .args(["--sdk", "iphoneos", "--find", "clang"])
+        .output()
+        .map_err(|error| {
+            format!(
+                "network-enabled iOS packaging requires Xcode's iphoneos clang (run xcrun --sdk iphoneos --find clang): {error}"
+            )
+        })?;
+    if !xcrun.status.success() {
+        return Err(format!(
+            "network-enabled iOS packaging requires Xcode's iphoneos clang (xcrun failed): {}",
+            String::from_utf8_lossy(&xcrun.stderr).trim()
+        ));
+    }
+    let clang = String::from_utf8_lossy(&xcrun.stdout).trim().to_string();
+    if clang.is_empty() {
+        return Err(
+            "network-enabled iOS packaging requires Xcode's iphoneos clang (xcrun returned no path)"
+                .to_string(),
+        );
+    }
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(&source_root)
+        .args([
+            "build",
+            "-p",
+            "stasis_network",
+            "--target",
+            rust_target,
+            "--release",
+        ])
+        .env("CARGO_TARGET_AARCH64_APPLE_IOS_LINKER", &clang)
+        .env("CC_aarch64_apple_ios", &clang)
+        .env("CXX_aarch64_apple_ios", &clang);
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to build stasis_network for iOS: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "iOS stasis_network build failed with exit code {}: stdout={} stderr={}",
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let library = source_root.join(format!("target/{rust_target}/release/libstasis_network.a"));
+    if !library.is_file() {
+        return Err(format!(
+            "iOS stasis_network build did not produce {}",
+            library.display()
+        ));
+    }
+    stage_network_artifacts(
+        staging_root,
+        PackageTarget::IosArm64,
+        &library,
+        &source_root.join("crates/stasis_network/include/stasis_network.h"),
+    )
+}
+
+fn android_ndk_clang(executable: &str) -> Option<PathBuf> {
+    let sdk = env::var_os("ANDROID_NDK_HOME")
+        .or_else(|| env::var_os("ANDROID_NDK_ROOT"))
+        .map(PathBuf::from)
+        .or_else(|| {
+            let sdk = env::var_os("ANDROID_SDK_ROOT")
+                .or_else(|| env::var_os("ANDROID_HOME"))
+                .map(PathBuf::from)?;
+            let mut versions = fs::read_dir(sdk.join("ndk"))
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            versions.sort();
+            versions.pop()
+        })?;
+    let directory = sdk.join("toolchains/llvm/prebuilt/windows-x86_64/bin");
+    let exe_path = directory.join(format!("{executable}.exe"));
+    if exe_path.is_file() {
+        return Some(exe_path);
+    }
+    let path = directory.join(executable);
+    if path.is_file() {
+        return Some(path);
+    }
+    let cmd_path = directory.join(format!("{executable}.cmd"));
+    cmd_path.is_file().then_some(cmd_path)
 }
 
 fn assemble_mobile_shell(
@@ -3559,13 +5724,16 @@ fn assemble_mobile_shell(
     aot_root: &Path,
     staging_root: &Path,
     provenance: &Value,
+    web_guest_bundle: Option<&Path>,
 ) -> Result<(), String> {
     let mobile_assets = bundled_mobile_assets_dir()?;
     let runtime = bundled_mobile_runtime_dir()?;
     let platform = match target {
-        PackageTarget::AndroidArm64 => "android",
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
         PackageTarget::IosArm64 => "ios",
-        PackageTarget::Desktop => return Err("desktop is not a mobile package target".to_string()),
+        PackageTarget::Desktop | PackageTarget::Web => {
+            return Err("selected target is not a mobile package target".to_string())
+        }
     };
     let common_destination = staging_root.join("common");
     let platform_destination = staging_root.join(platform);
@@ -3576,16 +5744,20 @@ fn assemble_mobile_shell(
     write_mobile_provenance_header(&common_destination, provenance)?;
 
     let asset_source = match target {
-        PackageTarget::AndroidArm64 => aot_root.join("apk_assets/stasis_game"),
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+            aot_root.join("apk_assets/stasis_game")
+        }
         PackageTarget::IosArm64 => aot_root.join("ios_assets/stasis_game"),
-        PackageTarget::Desktop => unreachable!(),
+        PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
     };
     let asset_destination = match target {
-        PackageTarget::AndroidArm64 => staging_root.join("android/app/src/main/assets/stasis_game"),
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+            staging_root.join("android/app/src/main/assets/stasis_game")
+        }
         PackageTarget::IosArm64 => staging_root.join("ios/StasisMobile/stasis_game"),
-        PackageTarget::Desktop => unreachable!(),
+        PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
     };
-    let android_manifest = if matches!(target, PackageTarget::AndroidArm64) {
+    let android_manifest = if target.is_android() {
         workspace.manifest.android.as_ref()
     } else {
         None
@@ -3607,6 +5779,19 @@ fn assemble_mobile_shell(
         .map(|manifest| manifest.version_name.as_str())
         .unwrap_or("1.0");
     let jni_package = package_id.replace('.', "_");
+    let network_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network);
+    let local_network_usage = if network_enabled && matches!(target, PackageTarget::IosArm64) {
+        format!(
+            "    <key>NSLocalNetworkUsageDescription</key><string>{} uses your local network so nearby friends can join games hosted on this device.</string>\n",
+            app_name
+        )
+    } else {
+        String::new()
+    };
     let replacements = [
         ("@STASIS_APP_NAME@", app_name),
         ("@STASIS_PACKAGE_ID@", package_id.as_str()),
@@ -3618,10 +5803,34 @@ fn assemble_mobile_shell(
             android_version_code.as_str(),
         ),
         ("@STASIS_ANDROID_VERSION_NAME@", android_version_name),
+        ("@STASIS_ANDROID_ABI@", target.android_abi().unwrap_or("")),
+        (
+            "@STASIS_NETWORK_ENABLED@",
+            if network_enabled { "1" } else { "0" },
+        ),
+        (
+            "@STASIS_NETWORK_PERMISSION@",
+            if network_enabled {
+                "    <uses-permission android:name=\"android.permission.INTERNET\" />\n"
+            } else {
+                ""
+            },
+        ),
+        ("@STASIS_LOCAL_NETWORK_USAGE@", local_network_usage.as_str()),
     ];
     replace_shell_tokens(&common_destination, &replacements)?;
     replace_shell_tokens(&platform_destination, &replacements)?;
     copy_required_dir(&asset_source, &asset_destination)?;
+    if let Some(bundle) = web_guest_bundle {
+        copy_file(bundle, &asset_destination.join("network_guest.bundle"))?;
+        let metadata = bundle.with_extension("bundle.json");
+        if metadata.is_file() {
+            copy_file(
+                &metadata,
+                &asset_destination.join("network_guest.bundle.json"),
+            )?;
+        }
+    }
     write_json_file(&asset_destination.join(PACKAGE_PROVENANCE_NAME), provenance)?;
     fs::write(
         asset_destination.join("stasis_asset_base.marker"),
@@ -3635,8 +5844,45 @@ fn assemble_mobile_shell(
         ));
     }
     if matches!(target, PackageTarget::IosArm64) {
-        write_ios_object_config(aot_root, &staging_root.join("ios/StasisMobile.xcconfig"))?;
+        write_ios_object_config(
+            aot_root,
+            &staging_root.join("ios/StasisMobile.xcconfig"),
+            network_enabled,
+        )?;
     }
+    let network_library = if network_enabled {
+        Some(match target {
+            PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+                "android/app/src/main/cpp/network/libstasis_network.a"
+            }
+            PackageTarget::IosArm64 => "ios/network/libstasis_network.a",
+            PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
+        })
+    } else {
+        None
+    };
+    let network_header = if network_enabled {
+        Some(match target {
+            PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+                "android/app/src/main/cpp/network/include/stasis_network.h"
+            }
+            PackageTarget::IosArm64 => "ios/network/include/stasis_network.h",
+            PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
+        })
+    } else {
+        None
+    };
+    let network_guest_bundle = if network_enabled {
+        Some(match target {
+            PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+                "android/app/src/main/assets/stasis_game/network_guest.bundle"
+            }
+            PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game/network_guest.bundle",
+            PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
+        })
+    } else {
+        None
+    };
     fs::write(
         staging_root.join("stasis_mobile_package.json"),
         serde_json::to_string_pretty(&json!({
@@ -3652,10 +5898,16 @@ fn assemble_mobile_shell(
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
             "assets": match target {
-                PackageTarget::AndroidArm64 => "android/app/src/main/assets/stasis_game",
+                PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+                    "android/app/src/main/assets/stasis_game"
+                }
                 PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game",
-                PackageTarget::Desktop => unreachable!(),
+                PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
+            "network": network_enabled,
+            "network_library": network_library,
+            "network_header": network_header,
+            "network_guest_bundle": network_guest_bundle,
         }))
         .map_err(|error| format!("failed to encode mobile package manifest: {error}"))?
             + "\n",
@@ -3691,6 +5943,9 @@ fn copy_mobile_runtime(source: &Path, destination: &Path) -> Result<(), String> 
         .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
     for name in MOBILE_RUNTIME_FILES {
         copy_file(&source.join(name), &destination.join(name))?;
+    }
+    for name in MOBILE_RUNTIME_DIRS {
+        copy_required_dir(&source.join(name), &destination.join(name))?;
     }
     Ok(())
 }
@@ -3776,21 +6031,16 @@ fn content_hashes(root: &Path, prefix: &str) -> Result<serde_json::Map<String, V
     Ok(output)
 }
 
-fn release_provenance_path() -> Result<PathBuf, String> {
+fn release_provenance_path() -> Result<Option<PathBuf>, String> {
     let executable = env::current_exe()
         .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
     let directory = executable.parent().unwrap_or(Path::new("."));
-    for candidate in [
+    Ok([
         directory.join(RELEASE_PROVENANCE_NAME),
         directory.join("..").join(RELEASE_PROVENANCE_NAME),
-    ] {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "installed toolchain is missing {RELEASE_PROVENANCE_NAME}; reinstall an official release or pass --development-build for a visibly labeled local package"
-    ))
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file()))
 }
 
 fn provenance_string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> {
@@ -3813,12 +6063,18 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
             path.display()
         )
     })?;
+    let command_buffer = &value["command_buffer"];
+    let command_buffer_version = command_buffer["version"].as_i64();
+    let current_command_buffer = command_buffer_version == Some(GFX_CMD_VERSION);
     if value["schema"] != "stasis.release_provenance.v1"
         || value["development_build"] != false
         || value["dirty_state"] != false
-        || value["command_buffer"]["version"] != 3
+        || command_buffer["name"] != GFX_CMD_NAME
+        || !current_command_buffer
     {
-        return Err("release provenance is not a clean official gfx_cmd v3 build".to_string());
+        return Err(
+            "release provenance is not a clean official gfx_cmd schema 7 build".to_string(),
+        );
     }
     let release_tag = provenance_string_field(&value, "release_tag")?;
     let source_commit = provenance_string_field(&value, "source_commit")?;
@@ -3882,6 +6138,20 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
             ));
         }
     }
+    for name in MOBILE_RUNTIME_DIRS {
+        let prefix = format!("runtime/{name}");
+        let actual = content_hashes(&root.join("runtime").join(name), &prefix)?;
+        let expected = sources
+            .iter()
+            .filter(|(key, _)| key.starts_with(&format!("{prefix}/")))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<serde_json::Map<String, Value>>();
+        if actual != expected {
+            return Err(format!(
+                "release runtime directory hash mismatch for {prefix}"
+            ));
+        }
+    }
     let expected_shells = value["mobile_shell_sources"]
         .as_object()
         .ok_or_else(|| "release provenance is missing mobile_shell_sources".to_string())?;
@@ -3909,7 +6179,7 @@ fn git_text(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn development_provenance() -> Result<Value, String> {
+fn local_provenance(development_build: bool) -> Result<Value, String> {
     let executable = env::current_exe()
         .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
     let runtime = bundled_mobile_runtime_dir()?;
@@ -3921,24 +6191,39 @@ fn development_provenance() -> Result<Value, String> {
             Value::String(sha256_file(&runtime.join(name))?),
         );
     }
+    for name in MOBILE_RUNTIME_DIRS {
+        sources.extend(content_hashes(
+            &runtime.join(name),
+            &format!("runtime/{name}"),
+        )?);
+    }
+    let dirty_state = development_build
+        || git_text(&["status", "--porcelain", "--untracked-files=no"])
+            .map_or(true, |status| !status.is_empty());
+    let build_class = if development_build {
+        "development"
+    } else {
+        "local_release"
+    };
     Ok(json!({
         "schema": "stasis.release_provenance.v1",
+        "build_class": build_class,
         "release_tag": Value::Null,
         "source_commit": git_text(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string()),
-        "dirty_state": true,
-        "development_build": true,
+        "dirty_state": dirty_state,
+        "development_build": development_build,
         "compiler": {
             "path": executable.file_name().unwrap_or_default().to_string_lossy(),
             "sha256": sha256_file(&executable)?,
         },
         "runtime_sources": sources,
         "mobile_shell_sources": content_hashes(&mobile_shells, "mobile/shells")?,
-        "command_buffer": {"name": "gfx_cmd", "version": 3},
+        "command_buffer": {"name": GFX_CMD_NAME, "version": GFX_CMD_VERSION},
         "backends": ["sdl3"],
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
         "dependencies": {
             "stasis": env!("CARGO_PKG_VERSION"),
-            "toolchain": "development",
+            "toolchain": build_class,
             "sdl3": "3.4.10-static",
             "sdl3_image": "3.4.4-static",
         },
@@ -3947,9 +6232,11 @@ fn development_provenance() -> Result<Value, String> {
 
 fn resolve_package_provenance(development_build: bool) -> Result<Value, String> {
     if development_build {
-        development_provenance()
+        local_provenance(true)
+    } else if let Some(path) = release_provenance_path()? {
+        verify_release_provenance(&path)
     } else {
-        verify_release_provenance(&release_provenance_path()?)
+        local_provenance(false)
     }
 }
 
@@ -3963,6 +6250,8 @@ fn write_mobile_provenance_header(destination: &Path, provenance: &Value) -> Res
     let commit = provenance["source_commit"].as_str().unwrap_or("unknown");
     let label = if provenance["development_build"].as_bool() == Some(true) {
         "non-release development build"
+    } else if provenance["build_class"] == "local_release" {
+        "local release"
     } else {
         "official release"
     };
@@ -4002,7 +6291,11 @@ fn replace_shell_tokens(root: &Path, replacements: &[(&str, &str)]) -> Result<()
     Ok(())
 }
 
-fn write_ios_object_config(aot_root: &Path, output: &Path) -> Result<(), String> {
+fn write_ios_object_config(
+    aot_root: &Path,
+    output: &Path,
+    network_enabled: bool,
+) -> Result<(), String> {
     let mut objects = Vec::new();
     for entry in fs::read_dir(aot_root)
         .map_err(|error| format!("failed to read {}: {error}", aot_root.display()))?
@@ -4028,10 +6321,29 @@ fn write_ios_object_config(aot_root: &Path, output: &Path) -> Result<(), String>
         })
         .collect::<Vec<_>>()
         .join(" ");
+    let network_flags = if network_enabled {
+        " STASIS_NETWORK_ENABLED=1"
+    } else {
+        ""
+    };
+    let network_headers = if network_enabled {
+        " $(PROJECT_DIR)/network/include"
+    } else {
+        ""
+    };
+    let network_library = if network_enabled {
+        " $(PROJECT_DIR)/network/libstasis_network.a"
+    } else {
+        ""
+    };
     fs::write(
         output,
         format!(
-            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited) STASIS_GRAPHICS_SDL_ONLY=1\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image {object_flags}\n"
+            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited){network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
+            network_flags = network_flags,
+            network_headers = network_headers,
+            network_library = network_library,
+            object_flags = object_flags,
         ),
     )
     .map_err(|error| format!("failed to write {}: {error}", output.display()))
@@ -4074,6 +6386,7 @@ fn symbol_workspace(
         .filter(|file| is_editable_workshop_path(&file.path))
         .cloned()
         .collect::<Vec<_>>();
+    let query_files = &files;
     match command {
         SymbolCommand::List {
             query,
@@ -4084,7 +6397,7 @@ fn symbol_workspace(
             limit,
         } => {
             let limit = limit.clamp(1, 200);
-            let mut items = workshop_source_items(&editable_files)?;
+            let mut items = workshop_source_items(query_files)?;
             if requested_files.len() > 16 {
                 return Err("symbol list accepts at most 16 --file values".to_string());
             }
@@ -4123,7 +6436,8 @@ fn symbol_workspace(
                 })
                 .collect::<Result<BTreeMap<_, _>, String>>()?;
             items.retain(|item| {
-                item.kind != WorkshopSourceItemKind::Imports
+                item.exposure.is_public()
+                    && item.kind != WorkshopSourceItemKind::Imports
                     && !(item.kind == WorkshopSourceItemKind::Globals
                         && item.source.trim().is_empty())
                     && query.as_deref().is_none_or(|query| {
@@ -4177,7 +6491,7 @@ fn symbol_workspace(
             ))
         }
         SymbolCommand::Find(args) => {
-            let items = find_workshop_symbols(&editable_files, &args.selector())?;
+            let items = find_workshop_symbols(query_files, &args.selector())?;
             let metadata = items
                 .iter()
                 .map(|item| {
@@ -4198,7 +6512,7 @@ fn symbol_workspace(
         }
         SymbolCommand::Read(args) => {
             let selector = args.selector();
-            let mut items = find_workshop_symbols(&editable_files, &selector)?;
+            let mut items = find_workshop_symbols(query_files, &selector)?;
             if items.len() != 1 {
                 return Err(format!(
                     "symbol read requires exactly one match; found {}",
@@ -4212,7 +6526,7 @@ fn symbol_workspace(
             ))
         }
         SymbolCommand::References { symbol, limit } => {
-            let references = find_workshop_references(&editable_files, &symbol, limit)?;
+            let references = find_workshop_references(query_files, &symbol, limit)?;
             let human = references
                 .iter()
                 .map(|reference| {
@@ -4247,7 +6561,7 @@ fn symbol_workspace(
                     expected_source_hash: None,
                 }],
             };
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Update {
             target,
@@ -4266,7 +6580,7 @@ fn symbol_workspace(
                     expected_source_hash,
                 }],
             };
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Delete {
             target,
@@ -4282,13 +6596,13 @@ fn symbol_workspace(
                     expected_source_hash,
                 }],
             };
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Apply { request, options } => {
             let source = read_workspace_input(workspace, "semantic edit request", &request)?;
             let batch = serde_json::from_str::<WorkshopSemanticEditBatch>(&source)
                 .map_err(|error| format!("invalid semantic edit request: {error}"))?;
-            apply_symbol_batch(workspace, &files, batch, options)
+            apply_symbol_batch(workspace, &editable_files, query_files, batch, options)
         }
         SymbolCommand::Revert {
             receipt,
@@ -4317,13 +6631,16 @@ fn read_symbol_source(
 
 fn apply_symbol_batch(
     workspace: &Workspace,
-    files: &[WorkshopSourceFile],
+    editable_files: &[WorkshopSourceFile],
+    query_files: &[WorkshopSourceFile],
     mut batch: WorkshopSemanticEditBatch,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
-    normalize_cli_semantic_batch(files, &mut batch)?;
-    let (after, plan) = plan_workshop_semantic_edits(files, &batch)?;
-    validate_semantic_files(workspace, &after)?;
+    normalize_cli_semantic_batch(editable_files, &mut batch)?;
+    let (after, plan) = plan_workshop_semantic_edits(editable_files, &batch)?;
+    ensure_editable_semantic_plan(&plan)?;
+    let validation_files = overlay_workshop_files(query_files, &after);
+    validate_semantic_files(workspace, &validation_files)?;
     if options.dry_run {
         return Ok(CommandResult::success(
             format!(
@@ -4395,6 +6712,20 @@ fn apply_symbol_batch(
             "receipt": relative_display(&workspace.root, &receipt),
         }),
     ))
+}
+
+fn overlay_workshop_files(
+    query_files: &[WorkshopSourceFile],
+    edited_files: &[WorkshopSourceFile],
+) -> Vec<WorkshopSourceFile> {
+    let mut files = query_files
+        .iter()
+        .map(|file| (file.path.clone(), file.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for file in edited_files {
+        files.insert(file.path.clone(), file.clone());
+    }
+    files.into_values().collect()
 }
 
 fn normalize_cli_semantic_batch(
@@ -4499,6 +6830,12 @@ fn revert_symbol_plan(
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let mut restored = current.clone();
     for change in &plan.changed_files {
+        if !is_editable_workshop_path(&change.file) {
+            return Err(format!(
+                "semantic edits are limited to project src/ and tests/ files: {}",
+                change.file
+            ));
+        }
         let file = restored
             .iter_mut()
             .find(|file| file.path == change.file)
@@ -4550,6 +6887,55 @@ fn read_workspace_input(workspace: &Workspace, field: &str, path: &Path) -> Resu
         .map_err(|error| format!("failed to read {}: {error}", absolute.display()))
 }
 
+fn ensure_editable_semantic_plan(plan: &WorkshopSemanticEditPlan) -> Result<(), String> {
+    if let Some(change) = plan
+        .changed_files
+        .iter()
+        .find(|change| !is_editable_workshop_path(&change.file))
+    {
+        return Err(format!(
+            "semantic edits are limited to project src/ and tests/ files: {}",
+            change.file
+        ));
+    }
+    Ok(())
+}
+
+fn validate_read_only_toolchain_stdlib(workspace_root: &Path) -> Result<(), String> {
+    let source = bundled_stdlib_source_tree()?;
+    let expected_fingerprint = directory_sha256(&source)?;
+    let target = workspace_root.join(".stasis_cache/toolchain/src");
+    let marker = target.join(".toolchain-sha256");
+    let missing_message = "read-only symbol query did not update files: toolchain stdlib cache is missing or unprepared; run 'stasis prepare'";
+    let stale_message = "read-only symbol query did not update files: toolchain stdlib cache is stale for the selected toolchain; run 'stasis prepare'";
+
+    let target_metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(missing_message.to_string());
+        }
+        Err(_) => return Err(missing_message.to_string()),
+    };
+    if target_metadata.file_type().is_symlink() || !target_metadata.is_dir() {
+        return Err(stale_message.to_string());
+    }
+
+    let marker_metadata = match fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(missing_message.to_string());
+        }
+        Err(_) => return Err(stale_message.to_string()),
+    };
+    if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+        return Err(stale_message.to_string());
+    }
+    let actual_fingerprint = fs::read_to_string(&marker).map_err(|_| stale_message.to_string())?;
+    if actual_fingerprint.trim() != expected_fingerprint {
+        return Err(stale_message.to_string());
+    }
+    Ok(())
+}
 fn is_editable_workshop_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     normalized.starts_with("src/") || normalized.starts_with("tests/")
@@ -4762,27 +7148,33 @@ fn editor_info_result() -> Result<CommandResult, String> {
         .map_err(|error| format!("failed to locate stasis executable: {error}"))?
         .canonicalize()
         .map_err(|error| format!("failed to resolve stasis executable: {error}"))?;
-    let runtime = installed_runtime_library().ok_or_else(|| {
-        format!(
-            "the Stasis graphics runtime is not installed beside {}",
-            executable.display()
-        )
-    })?;
+    let runtime = require_installed_runtime(&executable, installed_runtime_library())?;
     let runtime = runtime
         .canonicalize()
         .map_err(|error| format!("failed to resolve graphics runtime: {error}"))?;
-    stasis_dynload::StasisGraphicsApi::load(&runtime)
-        .map_err(|error| format!("the sibling graphics runtime is incompatible: {error}"))?;
 
     let version = env!("CARGO_PKG_VERSION");
     let release_id = option_env!("STASIS_RELEASE_ID").unwrap_or("development");
-    let runtime_release_id = stasis_dynload::graphics_runtime_release_id(&runtime)?;
+    let build_fingerprint = option_env!("STASIS_BUILD_FINGERPRINT").ok_or_else(|| {
+        "stasis CLI has no verified build fingerprint; refusing installed runtime startup"
+            .to_string()
+    })?;
+    if !stasis_dynload::is_verified_build_fingerprint(build_fingerprint) {
+        return Err(format!(
+            "stasis CLI has invalid build fingerprint '{build_fingerprint}'; refusing installed runtime startup"
+        ));
+    }
+    let (runtime_release_id, runtime_build_fingerprint) =
+        stasis_dynload::graphics_runtime_identity(&runtime)?;
     if runtime_release_id != release_id {
         return Err(format!(
             "toolchain release mismatch: stasis is '{release_id}' but {} is '{runtime_release_id}'",
             runtime.display()
         ));
     }
+    ensure_matching_build_fingerprints(build_fingerprint, &runtime_build_fingerprint, &runtime)?;
+    stasis_dynload::StasisGraphicsApi::load(&runtime)
+        .map_err(|error| format!("the sibling graphics runtime is incompatible: {error}"))?;
     let source_commit = option_env!("STASIS_SOURCE_COMMIT").unwrap_or("development");
     let target = option_env!("STASIS_BUILD_TARGET")
         .map(str::to_string)
@@ -4790,6 +7182,7 @@ fn editor_info_result() -> Result<CommandResult, String> {
     let data = json!({
         "schema": 1,
         "release_id": release_id,
+        "build_fingerprint": build_fingerprint,
         "version": version,
         "source_commit": source_commit,
         "target": target,
@@ -4806,6 +7199,7 @@ fn editor_info_result() -> Result<CommandResult, String> {
         "graphics_runtime": {
             "path": runtime,
             "release_id": runtime_release_id,
+            "build_fingerprint": runtime_build_fingerprint,
             "sha256": sha256_file(&runtime)?,
         },
     });
@@ -4813,6 +7207,91 @@ fn editor_info_result() -> Result<CommandResult, String> {
         format!("stasis editor toolchain {release_id} ({target})"),
         data,
     ))
+}
+
+fn ensure_matching_build_fingerprints(
+    expected: &str,
+    actual: &str,
+    runtime: &Path,
+) -> Result<(), String> {
+    if !stasis_dynload::is_verified_build_fingerprint(expected) {
+        return Err(format!(
+            "stasis CLI has invalid build fingerprint '{expected}'; refusing installed runtime startup"
+        ));
+    }
+    if !stasis_dynload::is_verified_build_fingerprint(actual) {
+        return Err(format!(
+            "incompatible stasis graphics runtime {}: invalid build fingerprint '{actual}'",
+            runtime.display()
+        ));
+    }
+    if expected != actual {
+        return Err(format!(
+            "toolchain build fingerprint mismatch: stasis is '{expected}' but {} is '{actual}'",
+            runtime.display()
+        ));
+    }
+    Ok(())
+}
+
+fn require_installed_runtime(
+    executable: &Path,
+    runtime: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    runtime.ok_or_else(|| {
+        format!(
+            "the Stasis graphics runtime is not installed beside {}",
+            executable.display()
+        )
+    })
+}
+
+/// Check the installed executable/runtime pair before a graphical service is
+/// started. This is intentionally independent of project loading so a stale
+/// DLL cannot execute guest startup code.
+pub(crate) fn verify_installed_toolchain_identity() -> Result<(), String> {
+    let expected = option_env!("STASIS_BUILD_FINGERPRINT");
+    let runtime = installed_runtime_library();
+    let release_id = option_env!("STASIS_RELEASE_ID").unwrap_or("development");
+    if runtime.is_none() && expected.is_none() && release_id == "development" {
+        return Ok(());
+    }
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    verify_installed_toolchain_identity_for(&executable, runtime, expected, release_id)
+}
+
+fn verify_installed_toolchain_identity_for(
+    executable: &Path,
+    runtime: Option<PathBuf>,
+    expected: Option<&str>,
+    release_id: &str,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        if runtime.is_none() && release_id == "development" {
+            return Ok(());
+        }
+        return Err(
+            "stasis CLI has no verified build fingerprint; refusing installed runtime startup"
+                .to_string(),
+        );
+    };
+    if !stasis_dynload::is_verified_build_fingerprint(expected) {
+        return Err(format!(
+            "stasis CLI has invalid build fingerprint '{expected}'; refusing installed runtime startup"
+        ));
+    }
+    let runtime = require_installed_runtime(executable, runtime)?
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve graphics runtime: {error}"))?;
+    let (runtime_release_id, actual) = stasis_dynload::graphics_runtime_identity(&runtime)?;
+    if runtime_release_id != release_id {
+        return Err(format!(
+            "toolchain release mismatch: stasis is '{release_id}' but {} is '{runtime_release_id}'",
+            runtime.display()
+        ));
+    }
+    ensure_matching_build_fingerprints(expected, &actual, &runtime)
 }
 
 fn wait_for_live_terminal_shutdown(
@@ -4870,13 +7349,31 @@ fn bundled_stdlib_dir() -> Result<PathBuf, String> {
         source_tree,
     ] {
         if candidate.join("stdlib.stasis").is_file()
-            && candidate.join("internal/host_frame.stasis").is_file()
+            && candidate.join("internal/host_frame_raw.stasis").is_file()
             && candidate.join("internal/gfx_cmd.stasis").is_file()
         {
             return Ok(candidate);
         }
     }
     Err("installed toolchain is missing the complete src/stdlib hierarchy; reinstall the complete release archive".to_string())
+}
+
+fn bundled_knowledge_docs_dir() -> Result<PathBuf, String> {
+    let directory = bundled_toolchain_directory("docs/knowledge", "Stasis knowledge library")?;
+    let missing: Vec<_> = KNOWLEDGE_FILES
+        .iter()
+        .filter(|document| !directory.join(document).is_file())
+        .copied()
+        .collect();
+    if missing.is_empty() {
+        Ok(directory)
+    } else {
+        Err(format!(
+            "installed toolchain has an incomplete Stasis knowledge library at {} (missing {}); reinstall the complete release archive",
+            directory.display(),
+            missing.join(", ")
+        ))
+    }
 }
 
 fn bundled_mobile_assets_dir() -> Result<PathBuf, String> {
@@ -4998,6 +7495,52 @@ fn validate_relative_path(field: &str, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn stage_web_loading_font(workspace: &Workspace, destination_root: &Path) -> Result<(), String> {
+    let Some(path) = workspace
+        .manifest
+        .web
+        .as_ref()
+        .and_then(|web| web.loading_font.as_deref())
+    else {
+        return Ok(());
+    };
+    let path = normalize_web_loading_font_path(path)?;
+    let source = workspace.root.join(&path);
+    let destination = destination_root.join(&path);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    copy_file(&source, &destination)
+}
+
+fn normalize_web_loading_font_path(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let value = value.strip_prefix('/').unwrap_or(value);
+    if value.is_empty() || value.contains('\\') {
+        return Err(
+            "web.loading_font must be an assets-relative path such as /assets/ui.ttf".to_string(),
+        );
+    }
+    let path = Path::new(value);
+    validate_relative_path("web.loading_font", path)?;
+    let normalized = value.replace('\\', "/");
+    if !normalized.starts_with("assets/") || normalized.len() == "assets/".len() {
+        return Err("web.loading_font must point to a file under assets/".to_string());
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "web.loading_font must have a web font extension".to_string())?;
+    if !matches!(extension.as_str(), "ttf" | "otf" | "woff" | "woff2") {
+        return Err(
+            "web.loading_font must use a .ttf, .otf, .woff, or .woff2 extension".to_string(),
+        );
+    }
+    Ok(normalized)
+}
+
 fn validate_optional_workspace_path(
     workspace: &Workspace,
     field: &str,
@@ -5069,8 +7612,406 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_graphical_project_has_effect_boundaries_and_checks() {
+        let root = temp_dir("effect_template");
+        create_project(root.clone(), "effect_template".to_string()).expect("create project");
+        let source = fs::read_to_string(root.join("src/main.stasis")).expect("read source");
+        assert_eq!(
+            source
+                .matches("function @effects(state) tick(): i32")
+                .count(),
+            1
+        );
+        assert_eq!(
+            source
+                .matches("function @effects(graphics) render(): i32")
+                .count(),
+            1
+        );
+        assert!(!source.contains("function @effects(state, graphics)"));
+        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+        check_workspace(&workspace).expect("generated project checks");
+        remove_temp(&root);
+    }
     use stasis_ai::live_tool_specs;
+    use stasis_compiler::frontend::types::TYPE_ID_U8;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn release_web_index_omits_performance_hud() {
+        let release = web_index_html("release-game", false, None, None);
+        assert!(!release.contains("stasis-hud"));
+        assert!(!release.contains("__STASIS_"));
+        assert!(release.contains(r#"<h1 id="stasis-loading-title">release-game</h1>"#));
+        assert!(release.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
+        assert!(release.contains(r#"id="stasis-loading" role="status" aria-live="polite""#));
+        assert!(release.contains(
+            r#"width="640" height="360" data-logical-width="640" data-logical-height="360""#
+        ));
+
+        let development = web_index_html("development-game", true, None, None);
+        assert!(development.contains(r#"id="stasis-hud""#));
+        assert!(development.contains(r#"<h1 id="stasis-loading-title">development-game</h1>"#));
+        for html in [&release, &development] {
+            assert!(!html.contains("__STASIS_"));
+            assert!(html.contains("#stasis-error { position: absolute;"));
+            assert!(html.contains("inset: 0; margin: 0;"));
+            assert!(html.contains("white-space: pre-wrap;"));
+            assert!(html.contains("#stasis-error:empty { display: none; }"));
+        }
+    }
+
+    #[test]
+    fn sheep_herder_web_index_starts_with_authored_viewport() {
+        let html = web_index_html(
+            "sheep-herder",
+            false,
+            None,
+            Some(WebViewportManifest {
+                width: 1600,
+                height: 900,
+            }),
+        );
+        assert!(html.contains(
+            r#"width="640" height="360" data-logical-width="1600" data-logical-height="900""#
+        ));
+        assert!(!html.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn web_package_propagates_sheep_herder_viewport_to_startup_html() {
+        let root = temp_dir("sheep_herder_web_viewport");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        fs::write(
+            root.join("src/main.stasis"),
+            concat!(
+                "function main(): i32 { return 0; }\n",
+                "function tick(): i32 { return 0; }\n",
+                "function render(): i32 { return 0; }\n"
+            ),
+        )
+        .expect("entry source");
+        let mut manifest = ProjectManifest::new("sheep_herder".to_string());
+        manifest.web = Some(WebProjectManifest {
+            entry: String::new(),
+            loading_font: None,
+            viewport: Some(WebViewportManifest {
+                width: 1600,
+                height: 900,
+            }),
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+        };
+        let output = root.join("dist/sheep-herder-web");
+
+        package_web_workspace(&workspace, &output, true).expect("package web workspace");
+
+        let html = fs::read_to_string(output.join("index.html")).expect("packaged web index");
+        assert!(html.contains(
+            r#"width="640" height="360" data-logical-width="1600" data-logical-height="900""#
+        ));
+        assert!(!html.contains("__STASIS_"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn configured_web_loading_font_is_preloaded_and_used_by_shell() {
+        let html = web_index_html("font-game", false, Some("assets/fonts/ui.ttf"), None);
+        assert!(html.contains(
+            r#"<link rel="preload" href="assets/fonts/ui.ttf" as="font" type="font/ttf" crossorigin>"#
+        ));
+        assert!(html.contains(
+            r#"@font-face { font-family: "StasisLoadingFont"; src: url("assets/fonts/ui.ttf") format("truetype");"#
+        ));
+        assert!(
+            html.contains(r#"font-family: "StasisLoadingFont", Georgia, "Times New Roman", serif"#)
+        );
+        assert!(!html.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn web_loading_font_paths_accept_rooted_assets_and_reject_escape() {
+        assert_eq!(
+            normalize_web_loading_font_path("/assets/fonts/ui.ttf").unwrap(),
+            "assets/fonts/ui.ttf"
+        );
+        assert_eq!(
+            normalize_web_loading_font_path("assets/fonts/ui.woff2").unwrap(),
+            "assets/fonts/ui.woff2"
+        );
+        for path in [
+            "../assets/fonts/ui.ttf",
+            "assets/../outside.ttf",
+            "assets/fonts/ui.txt",
+            "fonts/ui.ttf",
+            "assets/fonts\\ui.ttf",
+        ] {
+            assert!(
+                normalize_web_loading_font_path(path).is_err(),
+                "accepted invalid web loading font path {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn sprite_asset_tasks_survive_audio_feature_stripping() {
+        let runtime = strip_web_runtime_feature(WEB_RUNTIME_JS, "audio", false);
+        assert!(runtime.contains("const assetTasks = new Map()"));
+        assert!(runtime.contains("const requestSprite = (pathId, width, height) =>"));
+        assert!(runtime.contains("const releaseSprite = handle =>"));
+        assert!(runtime.contains("stasis_jit_asset_request_sprite"));
+        assert!(runtime.contains("stasis_jit_asset_task_poll"));
+        assert!(runtime.contains("stasis_jit_gfx_release_sprite"));
+        assert!(!runtime.contains("const requestAudio = pathId =>"));
+        assert!(!runtime.contains("stasis_jit_asset_request_audio"));
+        assert!(!runtime.contains("let audioContext"));
+        assert!(!runtime.contains("@stasis-feature audio"));
+    }
+
+    #[test]
+    fn release_web_runtime_keeps_only_required_host_interop() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let entry = Path::new("tests/stasis/seams/asset_extern_abi_probe.stasis");
+        let files =
+            load_workshop_edit_workspace(&source_root, entry).expect("load asset ABI sample files");
+        let files = workshop_reachable_files(&files, entry).expect("prune asset ABI sample files");
+        let mut process = WasmProcess::new();
+        process
+            .set_project_root(display_path(&source_root))
+            .expect("set web sample root");
+        process.set_required_emit_roots(&["main".to_string()]);
+        for file in files {
+            process.upsert_file(source_root.join(file.path).to_string_lossy(), file.source);
+        }
+        process.compile().expect("compile web sample");
+
+        let release = web_runtime_config(&workspace, &process, false);
+        let release_views = release["views"].as_object().expect("release views");
+        assert!(!release_views.is_empty());
+        assert!(release_views.values().all(|fields| fields
+            .as_object()
+            .expect("release view fields")
+            .keys()
+            .all(|field| WEB_RESOURCE_BINDING_FIELDS.contains(&field.as_str()))));
+        assert!(release_views.values().any(|fields| fields
+            .as_object()
+            .expect("release view fields")
+            .contains_key("handle")));
+        assert!(release_views.values().any(|fields| fields
+            .as_object()
+            .expect("release view fields")
+            .contains_key("sprite_ref")));
+        let retained_view_paths = release_views
+            .values()
+            .flat_map(|fields| fields.as_object().expect("release view fields").values())
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        let release_memory = release["memory"].as_object().expect("release memory");
+        assert!(release_memory
+            .iter()
+            .all(|(path, layout)| retained_view_paths.contains(path.as_str())
+                || WEB_RUNTIME_BUFFERS.contains(&path.as_str())
+                || (process
+                    .imported_symbols()
+                    .contains("stasis_jit_text_run_replace_from")
+                    && layout["byte_backed"].as_bool() == Some(true))));
+        let retained_dynamic_text_paths = release_memory
+            .iter()
+            .filter(|(_, layout)| layout["byte_backed"].as_bool() == Some(true))
+            .map(|(path, _)| path.as_str())
+            .collect::<BTreeSet<_>>();
+        let release_globals = release["globals"].as_object().expect("release globals");
+        assert!(release_globals.keys().all(|path| {
+            WEB_HOST_GLOBALS.contains(&path.as_str())
+                || retained_view_paths.contains(path.as_str())
+                || path
+                    .strip_suffix(".length")
+                    .is_some_and(|collection| retained_dynamic_text_paths.contains(collection))
+        }));
+        for path in retained_view_paths {
+            assert!(release_memory.contains_key(path) || release_globals.contains_key(path));
+        }
+
+        let development = web_runtime_config(&workspace, &process, true);
+        assert!(development.get("views").is_some());
+        assert!(development.get("globals").is_some());
+        assert!(development.get("memory").is_some());
+        assert!(
+            development["views"]
+                .as_object()
+                .expect("development views")
+                .len()
+                >= release_views.len()
+        );
+        assert!(
+            serde_json::to_vec(&release)
+                .expect("encode release runtime")
+                .len()
+                < serde_json::to_vec(&development)
+                    .expect("encode development runtime")
+                    .len()
+        );
+    }
+
+    #[test]
+    fn release_web_runtime_retains_hashed_u8_layouts_for_memcpy() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+        ]);
+        process.upsert_file(
+            "memcpy.stasis",
+            "extern function sys_memcpy_u8(dst: u8[], dst_index: i32, src: u8[], src_index: i32, count: i32): void; global source: u8[4]; global destination: u8[4]; global source_utf8: utf8[4]; global destination_ascii: ascii[4]; global scratch: u8[2]; global unrelated: i32[4]; function main(): i32 { source[0] = 65; source_utf8[0] = 66; sys_memcpy_u8(destination, 0, source, 0, 4); sys_memcpy_u8(destination_ascii, 0, source_utf8, 0, 1); return destination[0]; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile web memcpy fixture");
+        assert!(process.imported_symbols().contains("sys_memcpy_u8"));
+
+        let release = web_runtime_config(&workspace, &process, false);
+        let memory = release["memory"].as_object().expect("release memory");
+        for path in ["source", "destination", "scratch"] {
+            let layout = memory
+                .get(path)
+                .unwrap_or_else(|| panic!("release omitted u8 layout {path}"));
+            assert_eq!(layout["type_id"], json!(TYPE_ID_U8));
+            assert_eq!(
+                layout["hash"],
+                json!(stasis_compiler::backend::wasm::wasm_global_hash(path))
+            );
+        }
+        for path in ["source_utf8", "destination_ascii"] {
+            let layout = memory
+                .get(path)
+                .unwrap_or_else(|| panic!("release omitted byte-backed layout {path}"));
+            assert_eq!(layout["byte_backed"], json!(true));
+            assert_eq!(
+                layout["hash"],
+                json!(stasis_compiler::backend::wasm::wasm_global_hash(path))
+            );
+        }
+        assert!(!memory.contains_key("unrelated"));
+
+        let runtime = link_web_runtime(&process, false, false).expect("link Web runtime");
+        assert!(runtime.contains("const sysMemcpyU8 ="));
+        assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
+    }
+
+    #[test]
+    fn release_web_runtime_retains_dynamic_text_length_metadata() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let mut process = WasmProcess::new();
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        process
+            .set_project_root(display_path(&source_root))
+            .expect("set compiler-owned graphics project root");
+        process.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+        ]);
+        process.upsert_file(
+            "tests/stasis/compiler/dynamic_text_release.stasis",
+            "import \"../../../src/stdlib/graphics.stasis\"; global run: TextRun; global text: utf8[8]; function main(): i32 { text[0] = 65; text.length = 1; if (run.replace_text_from(1, text)) { return 1; } return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile Web dynamic text fixture");
+        assert!(process
+            .imported_symbols()
+            .contains("stasis_jit_text_run_replace_from"));
+
+        let release = web_runtime_config(&workspace, &process, false);
+        assert_eq!(release["memory"]["text"]["byte_backed"], json!(true));
+        assert!(release["globals"].get("text.length").is_some());
+    }
+
+    #[test]
+    fn web_runtime_import_markers_follow_imports_and_reject_malformed_layout() {
+        let source = "before\n// @stasis-import web_input_axis begin\naxis\n// @stasis-import web_input_axis end\nmiddle\n// @stasis-import web_input_fire begin\nfire\n// @stasis-import web_input_fire end\nafter";
+        let imports = BTreeSet::from(["web_input_fire".to_string()]);
+        let stripped = strip_web_runtime_imports(source, &imports).expect("strip imports");
+        assert_eq!(stripped, "before\nmiddle\nfire\nafter");
+
+        let runtime = strip_web_runtime_imports(WEB_RUNTIME_JS, &imports)
+            .expect("strip optional imports from runtime");
+        assert!(runtime.contains("web_input_fire: () =>"));
+        assert!(!runtime.contains("web_input_axis: () =>"));
+        assert!(!runtime.contains("@stasis-import"));
+
+        for malformed in [
+            "// @stasis-import a begin\n// @stasis-import b begin\nvalue",
+            "// @stasis-import a begin\nvalue\n// @stasis-import b end",
+            "// @stasis-import a end",
+            "// @stasis-import a begin\nvalue",
+        ] {
+            assert!(
+                strip_web_runtime_imports(malformed, &BTreeSet::new()).is_err(),
+                "accepted malformed marker layout: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_web_runtime_retains_typed_layouts_for_memcpy() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_memcpy.stasis",
+            "extern function sys_memcpy_i32(dst: i32[], dst_index: i32, src: i32[], src_index: i32, count: i32): void; extern function sys_memcpy_f32(dst: f32[], dst_index: i32, src: f32[], src_index: i32, count: i32): void; global i32_source: i32[4]; global i32_destination: i32[4]; global i32_scratch: i32[2]; global f32_source: f32[4]; global f32_destination: f32[4]; global f32_scratch: f32[2]; global unrelated: u8[4]; function main(): i32 { i32_source[0] = 41; f32_source[0] = 1.0; sys_memcpy_i32(i32_destination, 0, i32_source, 0, 4); sys_memcpy_f32(f32_destination, 0, f32_source, 0, 4); return i32_destination[0]; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process.compile().expect("compile typed web memcpy fixture");
+        assert!(process.imported_symbols().contains("sys_memcpy_i32"));
+        assert!(process.imported_symbols().contains("sys_memcpy_f32"));
+
+        let release = web_runtime_config(&workspace, &process, false);
+        let memory = release["memory"].as_object().expect("release memory");
+        for (paths, type_id) in [
+            (
+                ["i32_source", "i32_destination", "i32_scratch"],
+                TYPE_ID_I32,
+            ),
+            (
+                ["f32_source", "f32_destination", "f32_scratch"],
+                TYPE_ID_F32,
+            ),
+        ] {
+            for path in paths {
+                let layout = memory
+                    .get(path)
+                    .unwrap_or_else(|| panic!("release omitted typed layout {path}"));
+                assert_eq!(layout["type_id"], json!(type_id));
+                assert_eq!(
+                    layout["hash"],
+                    json!(stasis_compiler::backend::wasm::wasm_global_hash(path))
+                );
+                assert_eq!(
+                    layout["offset"],
+                    json!(
+                        process
+                            .memory_layout()
+                            .get(path)
+                            .expect("typed layout")
+                            .offset
+                    )
+                );
+            }
+        }
+        assert!(!memory.contains_key("unrelated"));
+    }
 
     #[test]
     fn successful_live_runner_allows_terminal_acknowledgement_to_finish() {
@@ -5083,6 +8024,16 @@ mod tests {
             .join()
             .expect("join terminal")
             .expect("terminal result");
+    }
+
+    #[test]
+    fn web_network_runtime_is_feature_stripped_for_normal_games() {
+        let stripped = strip_web_runtime_feature(WEB_RUNTIME_JS, "network", false);
+        assert!(!stripped.contains("stasis_web_network_connect"));
+        assert!(!stripped.contains("stasis_web_network_checkpoint"));
+        let linked = strip_web_runtime_feature(WEB_RUNTIME_JS, "network", true);
+        assert!(linked.contains("stasis_web_network_connect"));
+        assert!(linked.contains("stasis_web_network_checkpoint"));
     }
 
     #[test]
@@ -5306,12 +8257,23 @@ mod tests {
     fn every_live_ai_tool_has_a_human_command_surface() {
         let mappings = BTreeMap::from([
             ("list_symbols", "stasis symbol list / :symbols"),
+            (
+                "get_stdlib_api",
+                "stasis symbol list --file / :symbols --file",
+            ),
             ("find_references", "stasis symbol references / :references"),
             ("read_symbol", "stasis symbol read / :read"),
+            ("read_imports", "stasis symbol read imports / :read imports"),
             ("write_symbol", "stasis symbol update / :update"),
+            (
+                "write_imports",
+                "stasis symbol update imports / :update imports",
+            ),
             ("delete_symbol", "stasis symbol delete / :delete"),
+            ("get_capability", "stasis ai / :inspect / controlled assets"),
             ("inspect_runtime_state", ":inspect"),
             ("run_frame", ":step / stasis validate --frames"),
+            ("run_tests", "stasis test"),
         ]);
 
         for tool in live_tool_specs() {
@@ -5444,6 +8406,22 @@ mod tests {
     }
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn elapsed_confirmation_uses_readable_units() {
+        for (elapsed, expected) in [
+            (Duration::from_millis(482), "built\nCompleted in 482ms."),
+            (Duration::from_millis(1_250), "built\nCompleted in 1.25s."),
+            (
+                Duration::from_millis(301_500),
+                "built\nCompleted in 5m 1.5s.",
+            ),
+        ] {
+            let mut output = "built".to_string();
+            append_elapsed_confirmation(&mut output, elapsed);
+            assert_eq!(output, expected);
+        }
+    }
+
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -5456,6 +8434,34 @@ mod tests {
 
     fn remove_temp(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn development_web_wasm_keeps_diagnostic_module_unchanged() {
+        let root = temp_dir("development_web_wasm");
+        fs::create_dir_all(&root).expect("create optimizer fixture");
+        let module = b"\0asm\x01\0\0\0diagnostic-names";
+        let artifact = prepare_web_wasm(module, &root, true).expect("prepare development Wasm");
+        assert!(!artifact.optimized);
+        assert_eq!(artifact.input_bytes, module.len());
+        assert_eq!(artifact.bytes, module);
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn configured_wasm_opt_produces_a_valid_release_module() {
+        if env::var_os("STASIS_WASM_OPT").is_none() {
+            return;
+        }
+        let root = temp_dir("release_web_wasm");
+        fs::create_dir_all(&root).expect("create optimizer fixture");
+        let module = b"\0asm\x01\0\0\0";
+        let artifact = prepare_web_wasm(module, &root, false).expect("optimize release Wasm");
+        assert!(artifact.optimized);
+        assert!(artifact.bytes.starts_with(b"\0asm\x01\0\0\0"));
+        assert!(!root.join(".game.unoptimized.wasm").exists());
+        assert!(!root.join(".game.optimized.wasm").exists());
+        remove_temp(&root);
     }
 
     #[test]
@@ -5552,33 +8558,153 @@ mod tests {
         let root = temp_dir("smoke");
         create_project(root.clone(), "smoke".to_string()).expect("create project");
         let source = fs::read_to_string(root.join("src/main.stasis")).expect("read main source");
-        for module in [
-            "stdlib",
-            "graphics",
-            "audio",
-            "collision",
-            "flex_layout",
-            "frame_timer",
-            "hud_table",
-            "sdl_scancodes",
-            "storage",
-            "ui_axis_layout",
-            "ui_layout_audit",
-            "ui_button_9slice",
-        ] {
+        for module in ["stdlib", "graphics", "ui_single_pass"] {
             assert!(
                 source.contains(&format!("/vendor/stasis/stdlib/{module}.stasis")),
                 "missing default {module} import"
             );
         }
+        assert_eq!(source.matches("import \"").count(), 3);
         let workspace = load_workspace(Some(&root)).expect("load workspace");
         check_workspace(&workspace).expect("check project");
         test_workspace(&workspace, None).expect("test project");
-        let run = run_workspace(&workspace, true).expect("run project");
+        let run = run_workspace(&workspace, true, 0, false).expect("run project");
         assert_eq!(run.code, 0);
         remove_temp(&root);
     }
 
+    fn write_data_binding_test_project(root: &Path, data: Option<&str>, metadata: Option<&str>) {
+        create_project(root.to_path_buf(), "data_binding_test".to_string())
+            .expect("create project");
+        fs::write(
+            root.join("src/main.stasis"),
+            "struct Config { loaded: bool; scalar: i32; values: i32[2]; }\nstruct State { config: Config; }\nglobal state: State;\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "import \"../src/main.stasis\";\ntest `bound data reaches globals`(): bool { return state.config.loaded && state.config.scalar == 17 && state.config.values[0] == 4 && state.config.values[1] == 9; }\n",
+        )
+        .expect("write test");
+        if let Some(data) = data {
+            fs::create_dir_all(root.join("data")).expect("data directory");
+            fs::write(root.join("data/gameplay.json"), data).expect("write data");
+        }
+        if let Some(metadata) = metadata {
+            fs::create_dir_all(root.join("data")).expect("data directory");
+            fs::write(root.join("data/gameplay.struct-meta.json"), metadata)
+                .expect("write metadata");
+        }
+    }
+
+    const DATA_BINDING_META: &str = r#"{
+  "version": 1,
+  "globalName": "state",
+  "totalSize": 0,
+  "fields": [
+    {"name":"state__config__loaded","jsonPath":"config.loaded","offset":0,"size":1,"type":"bool","arrayCount":1},
+    {"name":"state__config__scalar","jsonPath":"config.scalar","offset":4,"size":4,"type":"i32","arrayCount":1},
+    {"name":"state__config__values","jsonPath":"config.values","offset":8,"size":8,"type":"i32","arrayCount":2}
+  ]
+}"#;
+
+    #[test]
+    fn workspace_tests_apply_project_json_scalar_and_array_bindings() {
+        let root = temp_dir("test_data_binding");
+        write_data_binding_test_project(
+            &root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
+            Some(DATA_BINDING_META),
+        );
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        test_workspace(&workspace, None).expect("bound test project");
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn workspace_tests_skip_project_bindings_outside_the_test_import_graph() {
+        let root = temp_dir("test_data_binding_scoped_imports");
+        write_data_binding_test_project(
+            &root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
+            Some(DATA_BINDING_META),
+        );
+        fs::write(
+            root.join("tests/independent.test.stasis"),
+            "global independent_value: i32;\ntest `independent test omits project globals`(): bool { return independent_value == 0; }\n",
+        )
+        .expect("write independent test");
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let result = test_workspace(&workspace, None).expect("scoped binding test project");
+        assert_eq!(result.data["tests_run"], 2);
+        assert_eq!(result.data["tests_passed"], 2);
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn workspace_tests_reject_invalid_project_json_binding_deterministically() {
+        let root = temp_dir("test_data_binding_invalid");
+        write_data_binding_test_project(
+            &root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9],"extra":1}}"#),
+            Some(DATA_BINDING_META),
+        );
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let error = test_workspace(&workspace, None).expect_err("extra data property rejected");
+        assert!(
+            error.contains("binding source property config.extra"),
+            "{error}"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn workspace_tests_reject_malformed_and_missing_project_metadata() {
+        let malformed_root = temp_dir("test_data_binding_malformed");
+        write_data_binding_test_project(
+            &malformed_root,
+            Some("{not-json"),
+            Some(DATA_BINDING_META),
+        );
+        let malformed_workspace = load_workspace(Some(&malformed_root)).expect("workspace");
+        let malformed =
+            test_workspace(&malformed_workspace, None).expect_err("malformed data rejected");
+        assert!(
+            malformed.contains("failed to parse data JSON"),
+            "{malformed}"
+        );
+        remove_temp(&malformed_root);
+
+        let missing_root = temp_dir("test_data_binding_missing_meta");
+        write_data_binding_test_project(
+            &missing_root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
+            None,
+        );
+        let missing_workspace = load_workspace(Some(&missing_root)).expect("workspace");
+        let missing =
+            test_workspace(&missing_workspace, None).expect_err("missing metadata rejected");
+        assert!(missing.contains("requires matching metadata"), "{missing}");
+        remove_temp(&missing_root);
+    }
+    #[test]
+    fn workspace_tests_without_project_data_keep_zero_initialized_globals() {
+        let root = temp_dir("test_data_binding_none");
+        create_project(root.clone(), "data_binding_none".to_string()).expect("create project");
+        fs::write(
+            root.join("src/main.stasis"),
+            "global value: i32;\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("write source");
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "import \"../src/main.stasis\";\ntest `no data leaves defaults`(): bool { return value == 0; }\n",
+        )
+        .expect("write test");
+        let workspace = load_workspace(Some(&root)).expect("workspace");
+        test_workspace(&workspace, None).expect("no-data test project");
+        remove_temp(&root);
+    }
     #[test]
     fn vendor_upgrade_only_rewrites_the_release_when_content_changes() {
         let root = temp_dir("vendor_upgrade");
@@ -5638,6 +8764,7 @@ mod tests {
         load_workspace(Some(&root)).expect("upgrade legacy vendor layout");
 
         assert!(vendor_root.join("stdlib/stdlib.stasis").is_file());
+        assert!(vendor_root.join("docs/README.md").is_file());
         assert!(!vendor_root.join("src").exists());
         remove_temp(&root);
     }
@@ -5648,12 +8775,16 @@ mod tests {
         create_project(root.clone(), "vendor_local_edits".to_string()).expect("create project");
         let edited = root.join("vendor/stasis/stdlib/audio.stasis");
         fs::write(&edited, "// local vendor edit\n").expect("edit vendor source");
+        let removed_doc =
+            root.join("vendor/stasis/docs/a-little-stasis/03-a-tick-is-an-ordered-recipe.md");
+        fs::remove_file(&removed_doc).expect("remove vendor knowledge document");
 
         let current = load_workspace(Some(&root)).expect("automatic vendor replacement");
         assert_ne!(
             fs::read_to_string(&edited).expect("read restored vendor"),
             "// local vendor edit\n"
         );
+        assert!(removed_doc.is_file());
         assert_eq!(
             current
                 .manifest
@@ -5674,6 +8805,39 @@ mod tests {
         ] {
             ToolchainCli::try_parse_from(args).expect("parse vendor command");
         }
+        let parsed =
+            ToolchainCli::try_parse_from(["stasis", "prepare"]).expect("parse prepare command");
+        assert!(matches!(parsed.command, ToolchainCommand::Prepare));
+        assert!(!command_requires_runtime(&ToolchainCommand::Prepare));
+        let prepare_args = ["stasis", "prepare"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(should_skip_stale_stasis_cache_cleanup_args(&prepare_args));
+    }
+
+    #[test]
+    fn symbol_queries_are_the_only_symbol_commands_that_skip_cache_cleanup() {
+        for args in [
+            vec!["stasis", "--json", "symbol", "list"],
+            vec!["stasis", "symbol", "find", "main"],
+            vec!["stasis", "symbol", "read", "main"],
+            vec!["stasis", "symbol", "references", "state"],
+        ] {
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            assert!(is_read_only_symbol_args(&args));
+            assert!(should_skip_stale_stasis_cache_cleanup_args(&args));
+        }
+        for args in [
+            vec!["stasis", "symbol", "add"],
+            vec!["stasis", "symbol", "update", "main"],
+            vec!["stasis", "symbol", "delete", "main"],
+            vec!["stasis", "check"],
+        ] {
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            assert!(!is_read_only_symbol_args(&args));
+            assert!(!should_skip_stale_stasis_cache_cleanup_args(&args));
+        }
     }
 
     #[test]
@@ -5685,6 +8849,9 @@ mod tests {
             "run",
             "--headless",
             "--watch",
+            "--ticks",
+            "3",
+            "--fast-forward",
         ])
         .expect("parse run flags");
         assert!(matches!(
@@ -5692,8 +8859,93 @@ mod tests {
             ToolchainCommand::Run {
                 watch: true,
                 headless: true,
+                ticks: 3,
+                fast_forward: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn record_accepts_exact_sixty_fps_and_frame_count() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "demo",
+            "record",
+            "src/main.stasis",
+            "--output",
+            "artifacts/frames",
+            "--width",
+            "640",
+            "--height",
+            "360",
+            "--fps",
+            "60",
+            "--frames",
+            "12",
+        ])
+        .expect("parse recording command");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::Record { args }
+                if args.entry == Some(PathBuf::from("src/main.stasis"))
+                    && args.width == 640
+                    && args.height == 360
+                    && args.fps == 60
+                    && args.frames == Some(12)
+                    && args.duration.is_none()
+        ));
+    }
+
+    #[test]
+    fn record_requires_one_duration_or_frame_count() {
+        assert!(ToolchainCli::try_parse_from([
+            "stasis", "record", "--output", "frames", "--width", "1", "--height", "1", "--fps",
+            "60"
+        ])
+        .is_err());
+        assert!(ToolchainCli::try_parse_from([
+            "stasis",
+            "record",
+            "--output",
+            "frames",
+            "--width",
+            "1",
+            "--height",
+            "1",
+            "--fps",
+            "60",
+            "--frames",
+            "1",
+            "--duration",
+            "1"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn replay_accepts_a_recording_and_optional_entry() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "demo",
+            "replay",
+            "runs/game.replay.json",
+            "--entry",
+            "src/alternate.stasis",
+            "--tick-sleep-us",
+            "0",
+        ])
+        .expect("parse replay command");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::Replay {
+                recording,
+                entry: Some(entry),
+                tick_sleep_us: 0,
+            } if recording == PathBuf::from("runs/game.replay.json")
+                && entry == PathBuf::from("src/alternate.stasis")
         ));
     }
 
@@ -5719,6 +8971,28 @@ mod tests {
                 ..
             } if entry == Path::new("samples/state_inspection/src/main.stasis")
         ));
+    }
+
+    #[test]
+    fn editor_entry_is_optional_and_accepts_runtime_pacing() {
+        let default = ToolchainCli::try_parse_from(["stasis", "editor"])
+            .expect("parse manifest editor entry");
+        assert!(matches!(
+            default.command,
+            ToolchainCommand::Editor { entry: None, .. }
+        ));
+
+        let explicit = ToolchainCli::try_parse_from([
+            "stasis",
+            "editor",
+            "src/game.stasis",
+            "--tick-sleep-us",
+            "0",
+        ])
+        .expect("parse explicit editor entry");
+        assert!(matches!(explicit.command, ToolchainCommand::Editor {
+            entry: Some(entry), tick_sleep_us: 0
+        } if entry == PathBuf::from("src/game.stasis")));
     }
 
     #[test]
@@ -5798,8 +9072,36 @@ mod tests {
                 entry: Some(ref entry),
                 out: Some(ref out),
                 development_build: false,
+                ..
             } if entry == Path::new("src/mobile.stasis") && out == Path::new("dist/ios")
         ));
+    }
+
+    #[test]
+    fn local_release_provenance_keeps_release_behavior_without_claiming_official_status() {
+        let provenance = local_provenance(false).expect("local release provenance");
+        assert_eq!(provenance["build_class"], "local_release");
+        assert_eq!(provenance["development_build"], false);
+        assert_eq!(provenance["command_buffer"]["name"], GFX_CMD_NAME);
+        assert_eq!(provenance["command_buffer"]["version"], GFX_CMD_VERSION);
+        assert!(provenance["release_tag"].is_null());
+        assert!(provenance["compiler"]["sha256"].as_str().is_some());
+
+        let root = temp_dir("local_release_provenance");
+        fs::create_dir_all(&root).expect("local release header directory");
+        write_mobile_provenance_header(&root, &provenance).expect("local release header");
+        assert!(fs::read_to_string(root.join("stasis_package_provenance.h"))
+            .expect("read local release header")
+            .contains("local release"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn development_provenance_is_always_marked_dirty() {
+        let provenance = local_provenance(true).expect("development provenance");
+        assert_eq!(provenance["build_class"], "development");
+        assert_eq!(provenance["development_build"], true);
+        assert_eq!(provenance["dirty_state"], true);
     }
 
     #[test]
@@ -5822,6 +9124,14 @@ mod tests {
                 Value::String(sha256_file(&path).expect("hash runtime fixture")),
             );
         }
+        let thorvg = runtime.join("third_party/thorvg");
+        fs::create_dir_all(&thorvg).expect("create ThorVG fixture");
+        let thorvg_license = thorvg.join("LICENSE");
+        fs::write(&thorvg_license, b"fixture MIT license\n").expect("write ThorVG fixture");
+        runtime_sources.insert(
+            "runtime/third_party/thorvg/LICENSE".to_string(),
+            Value::String(sha256_file(&thorvg_license).expect("hash ThorVG fixture")),
+        );
         let shells = root.join("mobile/shells/common");
         fs::create_dir_all(&shells).expect("create shell fixture");
         fs::write(shells.join("stasis_mobile_main.c"), b"official shell\n")
@@ -5840,7 +9150,7 @@ mod tests {
             },
             "runtime_sources": runtime_sources,
             "mobile_shell_sources": mobile_shell_sources,
-            "command_buffer": {"name": "gfx_cmd", "version": 3},
+            "command_buffer": {"name": "gfx_cmd", "version": GFX_CMD_VERSION},
             "backends": ["sdl3"],
             "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
             "dependencies": {
@@ -5853,6 +9163,26 @@ mod tests {
         let manifest_path = root.join(RELEASE_PROVENANCE_NAME);
         write_json_file(&manifest_path, &manifest).expect("write provenance fixture");
         verify_release_provenance(&manifest_path).expect("accept matching release");
+
+        let mut legacy_manifest = manifest.clone();
+        legacy_manifest["command_buffer"]["version"] = json!(4);
+        write_json_file(&manifest_path, &legacy_manifest).expect("write legacy provenance fixture");
+        let error =
+            verify_release_provenance(&manifest_path).expect_err("reject legacy render provenance");
+        assert!(error.contains("schema 7 build"));
+
+        let mut current_manifest = manifest.clone();
+        current_manifest["command_buffer"]["version"] = json!(GFX_CMD_VERSION);
+        write_json_file(&manifest_path, &current_manifest)
+            .expect("write current provenance fixture");
+        verify_release_provenance(&manifest_path).expect("accept current release");
+
+        let mut wrong_family = current_manifest.clone();
+        wrong_family["command_buffer"]["name"] = json!("other_cmd");
+        write_json_file(&manifest_path, &wrong_family).expect("write wrong-family fixture");
+        let error = verify_release_provenance(&manifest_path).expect_err("reject wrong family");
+        assert!(error.contains("clean official gfx_cmd schema 7 build"));
+        write_json_file(&manifest_path, &current_manifest).expect("restore current provenance");
 
         fs::write(
             runtime.join("stasis_graphics.c"),
@@ -5942,7 +9272,7 @@ mod tests {
                 android: Some(AndroidProjectManifest {
                     application_id: "com.example.mobile".to_string(),
                     label: "Mobile Smoke".to_string(),
-                    orientation: "sensorPortrait".to_string(),
+                    orientation: "fullSensor".to_string(),
                     version_code: 7,
                     version_name: "2.1.0".to_string(),
                 }),
@@ -5952,20 +9282,30 @@ mod tests {
 
         let android = root.join("android-package");
         fs::create_dir_all(&android).expect("create Android staging");
-        let provenance = development_provenance().expect("development provenance");
+        let provenance = local_provenance(true).expect("development provenance");
         assemble_mobile_shell(
             &workspace,
             PackageTarget::AndroidArm64,
             &aot,
             &android,
             &provenance,
+            None,
         )
         .expect("assemble Android shell");
         let android_cmake =
             fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
                 .expect("read Android CMake");
         assert!(android_cmake.contains("stasis_mobile_runtime"));
-        assert!(android_cmake.contains("STASIS_AOT_OBJECTS"));
+        assert!(android_cmake.contains("project(stasis_mobile_android C CXX)"));
+        assert!(android_cmake.contains("published_aot_objects.cmake"));
+        assert!(android_cmake.contains("STASIS_PUBLISHED_AOT_OBJECTS"));
+        assert!(!android_cmake.contains("file(GLOB STASIS_AOT_OBJECTS"));
+        assert!(android_cmake.contains("libmain.map"));
+        assert!(android_cmake.contains("SDL3::SDL3-static"));
+        assert!(android_cmake.contains("SDL3_image::SDL3_image-static"));
+        assert!(android_cmake.contains("set_property(TARGET main PROPERTY LINKER_LANGUAGE CXX)"));
+        assert!(android_cmake.contains("-Wl,--gc-sections"));
+        assert!(android_cmake.contains("-flto"));
         assert!(!android_cmake.contains("stasis_dynload"));
         let android_gradle = fs::read_to_string(android.join("android/app/build.gradle"))
             .expect("read Android Gradle");
@@ -5975,14 +9315,113 @@ mod tests {
         let android_manifest =
             fs::read_to_string(android.join("android/app/src/main/AndroidManifest.xml"))
                 .expect("read Android manifest");
+        assert!(android_manifest.contains("android:appCategory=\"game\""));
+        assert!(android_manifest.contains(
+            "android:name=\"android.window.PROPERTY_COMPAT_ALLOW_ORIENTATION_OVERRIDE\""
+        ));
+        assert!(android_manifest.contains(
+            "android:name=\"android.window.PROPERTY_COMPAT_ALLOW_USER_ASPECT_RATIO_OVERRIDE\""
+        ));
+        assert!(android_manifest.matches("android:value=\"false\"").count() >= 2);
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
-        assert!(android_manifest.contains("android:screenOrientation=\"sensorPortrait\""));
+        assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
         let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
-            .expect("read shared mobile main");
+            .expect("read shared mobile main")
+            .replace("\r\n", "\n");
         assert!(mobile_main.contains("stasis_mobile_runtime_last_entry_result"));
+        assert!(mobile_main.contains("stasis_mobile_runtime_last_entry"));
+        assert!(mobile_main.contains("entry_failure"));
+        assert!(mobile_main.contains("Stasis seam:"));
+        assert!(mobile_main.contains("seam_state_checksum"));
+        assert!(mobile_main.contains("resource_state"));
+        assert!(mobile_main.contains("renderer_generation"));
+        assert!(mobile_main.contains("restore_failures"));
+        assert!(mobile_main.contains("frame == 1"));
+        assert!(mobile_main.contains("frame % 30 == 0"));
+        assert!(mobile_main.contains(
+            "} else {\n#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)"
+        ));
+        assert!(mobile_main.contains("stasis_mobile_network_present_join_url();"));
+        assert!(mobile_main.contains("if (seam_test_id != NULL && seam_test_id[0] != '\\0')"));
+        assert!(mobile_main.contains("STASIS_ASSET_MANIFEST_SHA256"));
+        assert!(mobile_main.contains("audio_queued_before"));
+        assert!(mobile_main.contains("audio_nonzero_after_prefix"));
+        assert!(mobile_main.contains("audio_replay_matches"));
+        assert!(mobile_main.contains("stasis_set_recording_audio_config(1)"));
+        assert!(!mobile_main.contains("}\n#if defined(STASIS_ENABLE_SEAM_TESTS)\n    else if"));
+        let android_activity = fs::read_to_string(
+            android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
+        )
+        .expect("read Android activity");
+        assert_eq!(android_activity.matches("System.loadLibrary").count(), 1);
+        assert!(android_activity.contains("System.loadLibrary(\"main\")"));
+        assert!(android_activity.contains("stasis.seam_test_id"));
+        assert!(android_activity.contains("BuildConfig.STASIS_SEAM_TESTS"));
+        assert!(android_activity.contains("nativeSetSeamTestId"));
+        assert!(android_activity.contains("nativeSetAssetManifestSha256"));
+        assert!(android_activity.contains("getManifestSha256"));
+        assert!(android_activity
+            .contains("private static final String STASIS_ANDROID_ORIENTATION = \"fullSensor\";"));
+        assert!(!android_activity.contains("@STASIS_ANDROID_ORIENTATION@"));
+        assert!(android_activity.contains("public void setOrientationBis"));
+        assert!(android_activity.contains("ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE"));
+        assert!(android_activity.contains("ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT"));
+        assert!(android_activity.contains("ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR"));
+        assert!(
+            android_activity.contains("super.setOrientationBis(width, height, resizable, hint);")
+        );
+
+        let mut landscape_workspace = workspace.clone();
+        landscape_workspace
+            .manifest
+            .android
+            .as_mut()
+            .expect("Android manifest")
+            .orientation = "sensorLandscape".to_string();
+        let android_landscape = root.join("android-landscape-package");
+        fs::create_dir_all(&android_landscape).expect("create landscape Android staging");
+        assemble_mobile_shell(
+            &landscape_workspace,
+            PackageTarget::AndroidArm64,
+            &aot,
+            &android_landscape,
+            &provenance,
+            None,
+        )
+        .expect("assemble landscape Android shell");
+        let landscape_activity = fs::read_to_string(
+            android_landscape
+                .join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
+        )
+        .expect("read landscape Android activity");
+        assert!(landscape_activity.contains(
+            "private static final String STASIS_ANDROID_ORIENTATION = \"sensorLandscape\";"
+        ));
+        assert!(!landscape_activity.contains("@STASIS_ANDROID_ORIENTATION@"));
+        let landscape_manifest =
+            fs::read_to_string(android_landscape.join("android/app/src/main/AndroidManifest.xml"))
+                .expect("read landscape Android manifest");
+        assert!(landscape_manifest.contains("android:screenOrientation=\"sensorLandscape\""));
+
+        let android_jni =
+            fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
+                .expect("read Android JNI bridge");
+        assert!(android_jni.contains("STASIS_ENABLE_TEST_INPUT"));
+        let android_gradle = fs::read_to_string(android.join("android/app/build.gradle"))
+            .expect("read Android Gradle build");
+        assert!(android_gradle.contains("stasisSeamTests"));
+        let android_cmake =
+            fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
+                .expect("read Android CMake project");
+        assert!(android_cmake.contains("STASIS_ENABLE_SEAM_TESTS"));
+        assert!(android_jni.contains("STASIS_SEAM_TEST_ID"));
+        assert!(android_jni.contains("nativeSetAssetManifestSha256"));
+        assert!(android_jni.contains("STASIS_ASSET_MANIFEST_SHA256"));
         let runtime_header = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.h"))
             .expect("read shared mobile runtime header");
         assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
+        assert!(runtime_header.contains("STASIS_MOBILE_RUNTIME_ABI_VERSION 2"));
+        assert!(runtime_header.contains("stasis_mobile_runtime_last_entry(void)"));
         assert!(android.join("runtime/stasis_display_scale.h").is_file());
         assert!(android.join("runtime/stasis_asset_path.h").is_file());
         assert!(android.join("runtime/stasis_platform_storage.c").is_file());
@@ -5992,6 +9431,9 @@ mod tests {
         assert!(android.join("runtime/stasis_render_contract.h").is_file());
         assert!(android
             .join("runtime/stasis_renderer_lifecycle.h")
+            .is_file());
+        assert!(android
+            .join("runtime/stasis_performance_metrics.h")
             .is_file());
         assert!(android
             .join("android/app/src/main/assets/stasis_game/assets/manifest.json")
@@ -6010,22 +9452,46 @@ mod tests {
             android.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
         )
         .expect("read Android activity");
-        assert!(java.contains(".stasis_game.staging"));
-        assert!(java.contains("new File(root, \".\")"));
+        let asset_cache = fs::read_to_string(
+            android.join("android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java"),
+        )
+        .expect("read Android asset cache");
+        assert!(asset_cache.contains("CACHE_SCHEMA = \"stasis.android.asset-cache\""));
+        assert!(asset_cache.contains("MAX_MARKER_BYTES"));
+        assert!(asset_cache.contains("publicationInterceptor.beforeInstall"));
+        assert!(asset_cache.contains("inventoryMatches"));
+        assert!(asset_cache.contains("rename(backup, root)"));
+        assert!(asset_cache.contains("BACKUP_ALT_NAME"));
+        assert!(asset_cache.contains("MAX_COPIED_TREE_BYTES"));
+        assert!(asset_cache.contains("child.equals(\".\")"));
+        assert!(java.contains("StasisAssetCache.Result"));
+        assert!(java.contains("packageInfo.lastUpdateTime"));
+        assert!(java.contains("INVALID_ASSET_ROOT"));
+        assert!(java.contains("Asset cache mode="));
+        assert!(java.contains("packaged_read_bytes="));
         assert!(java.contains("event.getPointerCount() >= 3"));
         assert!(java.contains("nativeReadPerformanceMetrics"));
+        assert!(java.contains("nativeSetPerformanceMetricsEnabled(show)"));
         assert!(java.contains("nativeReadRuntimeError"));
-        assert!(java.contains("tick avg="));
-        assert!(java.contains("verifyAssetManifest(staging)"));
-        assert!(java.contains("manifestVersion != 1 && manifestVersion != 2"));
-        assert!(java.contains("Asset verification failed before runtime startup"));
+        assert!(java.contains("guest render"));
+        assert!(java.contains("host replay"));
+        assert!(java.contains("frame work"));
+        assert!(java.contains("appendWorkload"));
+        assert!(!java.contains("percentile("));
+        assert!(java.contains("performanceHud.setSingleLine(false)"));
+        assert!(java.contains("new AndroidAssetSource(getAssets())"));
+        assert!(java.contains("Asset cache preparation failed before runtime startup"));
         assert!(java.contains("setOnApplyWindowInsetsListener"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
                 .expect("read Android asset bridge");
         assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeSetAssetRoot"));
         assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeReadPerformanceMetrics"));
+        assert!(
+            jni.contains("Java_com_example_mobile_MainActivity_nativeSetPerformanceMetricsEnabled")
+        );
         assert!(jni.contains("Java_com_example_mobile_MainActivity_nativeReadRuntimeError"));
+        assert!(jni.contains("stasis_host_get_latest_performance_metrics_v1"));
         assert!(!jni.contains("@STASIS_"));
         let runtime_source = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.c"))
             .expect("read shared mobile runtime source");
@@ -6033,21 +9499,36 @@ mod tests {
 
         let ios = root.join("ios-package");
         fs::create_dir_all(&ios).expect("create iOS staging");
-        assemble_mobile_shell(&workspace, PackageTarget::IosArm64, &aot, &ios, &provenance)
-            .expect("assemble iOS shell");
+        assemble_mobile_shell(
+            &workspace,
+            PackageTarget::IosArm64,
+            &aot,
+            &ios,
+            &provenance,
+            None,
+        )
+        .expect("assemble iOS shell");
         let project = fs::read_to_string(ios.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
             .expect("read Xcode project");
         let config =
             fs::read_to_string(ios.join("ios/StasisMobile.xcconfig")).expect("read Xcode config");
+        assert!(project
+            .contains("HEADER_SEARCH_PATHS = (\"$(inherited)\", \"$(PROJECT_DIR)/../runtime\""));
+        assert_eq!(
+            project
+                .matches("HEADER_SEARCH_PATHS = (\"$(inherited)\", ")
+                .count(),
+            2
+        );
         assert!(project.contains("stasis_mobile_runtime.c in Sources"));
         assert!(project.contains("stasis_platform_services.c in Sources"));
         assert!(!project.contains("stasis_platform_storage.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
-        assert!(config.contains("STASIS_GRAPHICS_SDL_ONLY=1"));
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
         assert!(ios.join("runtime/stasis_asset_path.h").is_file());
         assert!(ios.join("runtime/stasis_render_contract.h").is_file());
         assert!(ios.join("runtime/stasis_renderer_lifecycle.h").is_file());
+        assert!(ios.join("runtime/stasis_performance_metrics.h").is_file());
         assert!(ios.join("runtime/stasis_platform_storage.c").is_file());
         assert!(ios.join("runtime/stasis_platform_storage.h").is_file());
         assert!(ios.join("runtime/stasis_platform_services.c").is_file());
@@ -6060,8 +9541,199 @@ mod tests {
         assert!(ios
             .join("ios/StasisMobile/stasis_game/stasis_asset_base.marker")
             .is_file());
+        let ios_info = fs::read_to_string(ios.join("ios/StasisMobile/Info.plist"))
+            .expect("read non-network iOS Info.plist");
+        assert!(!ios_info.contains("NSLocalNetworkUsageDescription"));
+        assert!(!config.contains("STASIS_NETWORK_ENABLED"));
+        assert!(!config.contains("network/libstasis_network.a"));
         assert!(!project.contains("@STASIS_"));
 
+        let mut network_workspace = workspace.clone();
+        network_workspace.manifest.capabilities = Some(ProjectCapabilities { network: true });
+        network_workspace.manifest.web = Some(WebProjectManifest {
+            entry: "src/main.stasis".to_string(),
+            loading_font: None,
+            viewport: None,
+        });
+        let ios_network = root.join("ios-network-package");
+        fs::create_dir_all(ios_network.join("ios/network/include"))
+            .expect("create iOS network staging fixture");
+        fs::write(
+            ios_network.join("ios/network/libstasis_network.a"),
+            b"fixture static library",
+        )
+        .expect("write iOS network library fixture");
+        fs::write(
+            ios_network.join("ios/network/include/stasis_network.h"),
+            b"/* fixture network header */\n",
+        )
+        .expect("write iOS network header fixture");
+        let guest_bundle = root.join("network_guest.bundle");
+        fs::write(&guest_bundle, b"fixture guest bundle")
+            .expect("write network guest bundle fixture");
+        fs::write(
+            guest_bundle.with_extension("bundle.json"),
+            b"{\"schema\":\"stasis.network_guest_bundle.v1\"}\n",
+        )
+        .expect("write network guest metadata fixture");
+        assemble_mobile_shell(
+            &network_workspace,
+            PackageTarget::IosArm64,
+            &aot,
+            &ios_network,
+            &provenance,
+            Some(&guest_bundle),
+        )
+        .expect("assemble network-enabled iOS shell");
+        let network_config = fs::read_to_string(ios_network.join("ios/StasisMobile.xcconfig"))
+            .expect("read network iOS config");
+        assert!(network_config.contains("STASIS_NETWORK_ENABLED=1"));
+        assert!(network_config.contains("$(PROJECT_DIR)/network/include"));
+        assert!(network_config.contains("$(PROJECT_DIR)/network/libstasis_network.a"));
+        let network_info = fs::read_to_string(ios_network.join("ios/StasisMobile/Info.plist"))
+            .expect("read network iOS Info.plist");
+        assert!(network_info.contains("NSLocalNetworkUsageDescription"));
+        assert!(network_info.contains("mobile_smoke uses your local network"));
+        let network_receipt: Value = serde_json::from_str(
+            &fs::read_to_string(ios_network.join("stasis_mobile_package.json"))
+                .expect("read network iOS package receipt"),
+        )
+        .expect("parse network iOS package receipt");
+        assert_eq!(network_receipt["network"], true);
+        assert_eq!(
+            network_receipt["network_library"],
+            "ios/network/libstasis_network.a"
+        );
+        assert_eq!(
+            network_receipt["network_header"],
+            "ios/network/include/stasis_network.h"
+        );
+        assert_eq!(
+            network_receipt["network_guest_bundle"],
+            "ios/StasisMobile/stasis_game/network_guest.bundle"
+        );
+        let network_asset_root = ios_network.join("ios/StasisMobile/stasis_game");
+        assert!(network_asset_root.join("network_guest.bundle").is_file());
+        assert!(network_asset_root
+            .join("network_guest.bundle.json")
+            .is_file());
+        assert!(network_asset_root.join("assets/manifest.json").is_file());
+        assert!(ios_network
+            .join("ios/network/libstasis_network.a")
+            .is_file());
+        assert!(ios_network
+            .join("ios/network/include/stasis_network.h")
+            .is_file());
+        let network_main = fs::read_to_string(ios_network.join("ios/StasisMobile/main.m"))
+            .expect("read network iOS SDL3 main wrapper");
+        assert_eq!(network_main.trim(), "#include <SDL3/SDL_main.h>");
+        let network_presenter =
+            fs::read_to_string(ios_network.join("ios/StasisMobile/stasis_ios_network.m"))
+                .expect("read network iOS native presenter");
+        assert!(network_presenter.contains("stasis_mobile_network_present_join_url"));
+        assert!(network_presenter.contains("stasis_mobile_network_copy_join_url"));
+        assert!(network_presenter.contains("alertControllerWithTitle:@\"mobile_smoke\""));
+        assert!(network_presenter.contains("message:joinURL"));
+        assert!(!network_presenter.contains("@STASIS_"));
+        assert!(!network_presenter.contains("Join Maddox"));
+        assert!(!network_presenter.contains("NSLog"));
+        assert!(!network_presenter.contains("printf"));
+        assert!(
+            fs::read_to_string(ios_network.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
+                .expect("read network iOS Xcode project")
+                .contains("stasis_ios_network.m in Sources")
+        );
+
+        let android_network = root.join("android-network-package");
+        fs::create_dir_all(android_network.join("android/app/src/main/cpp/network/include"))
+            .expect("create Android network staging fixture");
+        fs::write(
+            android_network.join("android/app/src/main/cpp/network/libstasis_network.a"),
+            b"fixture Android static library",
+        )
+        .expect("write Android network library fixture");
+        fs::write(
+            android_network.join("android/app/src/main/cpp/network/include/stasis_network.h"),
+            b"/* fixture Android network header */\n",
+        )
+        .expect("write Android network header fixture");
+        assemble_mobile_shell(
+            &network_workspace,
+            PackageTarget::AndroidArm64,
+            &aot,
+            &android_network,
+            &provenance,
+            Some(&guest_bundle),
+        )
+        .expect("assemble network-enabled Android shell");
+        let android_network_cmake =
+            fs::read_to_string(android_network.join("android/app/src/main/cpp/CMakeLists.txt"))
+                .expect("read network Android CMake");
+        assert!(android_network_cmake.contains("STASIS_NETWORK_ENABLED 1"));
+        let android_network_manifest =
+            fs::read_to_string(android_network.join("android/app/src/main/AndroidManifest.xml"))
+                .expect("read network Android manifest");
+        assert!(android_network_manifest.contains("android.permission.INTERNET"));
+        let android_network_receipt: Value = serde_json::from_str(
+            &fs::read_to_string(android_network.join("stasis_mobile_package.json"))
+                .expect("read network Android package receipt"),
+        )
+        .expect("parse network Android package receipt");
+        assert_eq!(
+            android_network_receipt["network_library"],
+            "android/app/src/main/cpp/network/libstasis_network.a"
+        );
+        assert_eq!(
+            android_network_receipt["network_header"],
+            "android/app/src/main/cpp/network/include/stasis_network.h"
+        );
+        assert_eq!(
+            android_network_receipt["network_guest_bundle"],
+            "android/app/src/main/assets/stasis_game/network_guest.bundle"
+        );
+        assert!(android_network
+            .join("android/app/src/main/assets/stasis_game/network_guest.bundle")
+            .is_file());
+
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn bundled_network_artifacts_resolve_from_a_relocated_toolchain_root() {
+        let root = temp_dir("relocated_network_support");
+        let executable = root.join("bin/stasis");
+        let support = root.join("mobile/network");
+        fs::create_dir_all(support.join("ios-arm64"))
+            .expect("create relocated iOS support directory");
+        fs::create_dir_all(support.join("include"))
+            .expect("create relocated network include directory");
+        fs::create_dir_all(executable.parent().expect("executable parent"))
+            .expect("create relocated executable directory");
+        fs::write(&executable, b"relocated stasis executable").expect("write executable fixture");
+        fs::write(
+            support.join("ios-arm64/libstasis_network.a"),
+            b"relocated iOS network library",
+        )
+        .expect("write relocated network library");
+        fs::write(
+            support.join("include/stasis_network.h"),
+            b"/* relocated network header */\n",
+        )
+        .expect("write relocated network header");
+        let (library, header) =
+            bundled_network_artifacts_for_executable(&executable, PackageTarget::IosArm64)
+                .expect("resolve relocated network support")
+                .expect("relocated support artifacts");
+        assert_eq!(
+            fs::canonicalize(library).expect("canonicalize relocated library"),
+            fs::canonicalize(support.join("ios-arm64/libstasis_network.a"))
+                .expect("canonicalize expected library")
+        );
+        assert_eq!(
+            fs::canonicalize(header).expect("canonicalize relocated header"),
+            fs::canonicalize(support.join("include/stasis_network.h"))
+                .expect("canonicalize expected header")
+        );
         remove_temp(&root);
     }
 
@@ -6072,6 +9744,37 @@ mod tests {
             ..ProjectManifest::new("demo".to_string())
         };
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_validates_web_viewport_dimensions() {
+        let mut manifest = ProjectManifest::new("sheep_herder".to_string());
+        manifest.web = Some(WebProjectManifest {
+            entry: String::new(),
+            loading_font: None,
+            viewport: Some(WebViewportManifest {
+                width: 1600,
+                height: 900,
+            }),
+        });
+        assert!(manifest.validate().is_ok());
+
+        for (width, height, expected) in [
+            (0, 900, "web.viewport.width must be between 1 and 8192"),
+            (1600, 0, "web.viewport.height must be between 1 and 8192"),
+            (8193, 900, "web.viewport.width must be between 1 and 8192"),
+            (1600, 8193, "web.viewport.height must be between 1 and 8192"),
+        ] {
+            manifest.web.as_mut().unwrap().viewport = Some(WebViewportManifest { width, height });
+            assert_eq!(manifest.validate().unwrap_err(), expected);
+        }
+
+        let missing_height = serde_json::from_str::<ProjectManifest>(
+            r#"{"manifest_version":1,"name":"sheep_herder","entry":"src/main.stasis","tests":"tests","output":"build","web":{"viewport":{"width":1600}}}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing_height.contains("missing field `height`"));
     }
 
     #[test]
@@ -6131,6 +9834,20 @@ mod tests {
     }
 
     #[test]
+    fn prepare_is_a_noop_without_toolchain_stdlib() {
+        let root = temp_dir("prepare_noop");
+        create_project(root.clone(), "demo".to_string()).expect("create project");
+        let workspace = load_workspace(Some(&root)).expect("load workspace");
+
+        let result = prepare_workspace(&workspace).expect("prepare workspace");
+        assert_eq!(result.data["prepared"], false);
+        assert_eq!(result.data["stdlib"], Value::Null);
+        assert!(!root.join(".stasis_cache/toolchain").exists());
+
+        remove_temp(&root);
+    }
+
+    #[test]
     fn manifest_validates_android_release_identity() {
         let valid = ProjectManifest {
             android: Some(AndroidProjectManifest {
@@ -6143,6 +9860,21 @@ mod tests {
             ..ProjectManifest::new("example_game".to_string())
         };
         assert!(valid.validate().is_ok());
+
+        for orientation in [
+            "unspecified",
+            "sensorLandscape",
+            "sensorPortrait",
+            "fullSensor",
+        ] {
+            let mut oriented = valid.clone();
+            oriented.android.as_mut().unwrap().orientation = orientation.to_string();
+            assert!(oriented.validate().is_ok(), "rejected {orientation}");
+        }
+
+        let mut invalid_orientation = valid.clone();
+        invalid_orientation.android.as_mut().unwrap().orientation = "sensor".to_string();
+        assert!(invalid_orientation.validate().is_err());
 
         for application_id in ["game", "com.example.bad-name", "com.1game"] {
             let mut invalid = valid.clone();
@@ -6160,6 +9892,31 @@ mod tests {
     }
 
     #[test]
+    fn manifest_validates_network_guest_entry_contract() {
+        let mut manifest = ProjectManifest::new("network_game".to_string());
+        manifest.capabilities = Some(ProjectCapabilities { network: true });
+        assert!(manifest.validate().is_ok());
+        assert!(
+            validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_err()
+        );
+        assert!(
+            validate_mobile_network_guest_contract(&manifest, PackageTarget::IosArm64).is_err()
+        );
+        assert!(validate_mobile_network_guest_contract(&manifest, PackageTarget::Web).is_ok());
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/guest_main.stasis".to_string(),
+            loading_font: None,
+            viewport: None,
+        });
+        assert!(manifest.validate().is_ok());
+        assert!(
+            validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_ok()
+        );
+        manifest.web.as_mut().unwrap().entry = "../guest.stasis".to_string();
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
     fn init_preflights_reserved_paths_without_partial_writes() {
         let root = temp_dir("preflight");
         fs::create_dir_all(root.join("src")).expect("create source directory");
@@ -6173,6 +9930,239 @@ mod tests {
             "user source\n"
         );
         remove_temp(&root);
+    }
+
+    #[test]
+    fn github_actions_templates_are_offline_and_match_the_ci_contract() {
+        let root = temp_dir("github_actions_templates");
+        let result = create_project_with_options(root.clone(), "demo".to_string(), false, true)
+            .expect("generate GitHub Actions scaffold");
+        assert_eq!(result.data["github_actions"], true);
+
+        let pr = fs::read_to_string(root.join(".github/workflows/stasis-pr.yml"))
+            .expect("read PR workflow");
+        assert!(pr.contains("pull_request:"));
+        assert!(!pr.contains("paths:"));
+        assert_eq!(pr.matches("./tools/resolve-stasis-nightly.ps1").count(), 1);
+        assert!(!pr.contains("stasis.json"));
+        assert!(!pr.contains("vendor.stasis.release_id"));
+        assert!(!pr.contains("pinnedReleaseId"));
+        assert!(pr.contains("Using newest complete published Stasis nightly"));
+        assert!(pr.contains("GITHUB_STEP_SUMMARY"));
+        for expected in [
+            "stasis --json vendor status --workspace .",
+            "$LASTEXITCODE -ne 0",
+            "ConvertFrom-Json -ErrorAction Stop",
+            "$status.ok -ne $true",
+            "$status.result.current -ne $true",
+        ] {
+            assert!(pr.contains(expected), "PR workflow missing {expected}");
+        }
+        assert!(pr.contains("cancel-in-progress: true"));
+        assert!(pr.contains("run: stasis check"));
+        for forbidden in [
+            "stasis fmt",
+            "stasis test",
+            "stasis build",
+            "stasis package",
+        ] {
+            assert!(!pr.contains(forbidden), "PR workflow contains {forbidden}");
+        }
+
+        let weekly = fs::read_to_string(root.join(".github/workflows/stasis-weekly.yml"))
+            .expect("read weekly workflow");
+        for expected in [
+            "cron: \"0 9 * * 5\"",
+            "workflow_dispatch:",
+            "ubuntu-latest",
+            "windows-latest",
+            "macos-15",
+            "stasis vendor update",
+            "stasis fmt --check",
+            "run: stasis check",
+            "run: stasis test",
+            "stasis package --target desktop",
+            "actions/upload-artifact@v4",
+        ] {
+            assert!(
+                weekly.contains(expected),
+                "weekly workflow missing {expected}"
+            );
+        }
+        for forbidden in [
+            "release create",
+            "package-mobile",
+            "--target web",
+            "signing",
+        ] {
+            assert!(
+                !weekly.contains(forbidden),
+                "weekly workflow contains {forbidden}"
+            );
+        }
+
+        let restore = fs::read_to_string(root.join("tools/restore-stasis-release.ps1"))
+            .expect("read restore helper");
+        for expected in [
+            "GetRelativePath",
+            "ReparsePoint",
+            "sha256:",
+            "Get-FileHash",
+            ".stasis-restore-",
+            "exactly one Stasis executable",
+            "$LASTEXITCODE -ne 0",
+            "finally",
+            "editor-info",
+        ] {
+            assert!(
+                restore.contains(expected),
+                "restore helper missing {expected}"
+            );
+        }
+        let resolver = fs::read_to_string(root.join("tools/resolve-stasis-nightly.ps1"))
+            .expect("read resolver helper");
+        assert!(restore.contains("'benwmaddox/StasisLang'"));
+        assert!(resolver.contains("'benwmaddox/StasisLang'"));
+        assert!(resolver.contains("-notmatch '^nightly-[0-9]{8}-[0-9]+$'"));
+        assert!(resolver.contains("$release.draft"));
+        assert!(resolver.contains("$matches.Count -ne 1"));
+        assert!(resolver.contains("$LASTEXITCODE -ne 0"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn github_actions_restore_accepts_only_supported_archive_layouts() {
+        let restore = include_str!("../templates/github-actions/restore-stasis-release.ps1");
+        for expected in [
+            "@('stasis.exe', 'bin/stasis.exe')",
+            "@('stasis', 'bin/stasis')",
+            "$candidates.Count -eq 0",
+            "$topLevel.Count -eq 1 -and $topLevel[0].PSIsContainer",
+            "$candidates.Count -ne 1 -or $allExecutables.Count -ne 1",
+            "[IO.Path]::GetRelativePath($wrapper, $candidates[0])",
+            "Get-ChildItem -LiteralPath $wrapper -Force",
+            "Move-Item -LiteralPath $_.FullName -Destination $staging",
+            "Remove-Item -LiteralPath $wrapper -Force",
+        ] {
+            assert!(
+                restore.contains(expected),
+                "restore helper layout contract missing {expected}"
+            );
+        }
+
+        let root_candidates = restore
+            .find("$candidates = @($candidateNames")
+            .expect("root candidate lookup");
+        let wrapper_gate = restore
+            .find("if ($candidates.Count -eq 0)")
+            .expect("wrapper fallback gate");
+        let exact_executable_gate = restore
+            .find("if ($candidates.Count -ne 1 -or $allExecutables.Count -ne 1)")
+            .expect("exact executable gate");
+        let strip_wrapper = restore.find("if ($wrapper)").expect("wrapper strip gate");
+        assert!(root_candidates < wrapper_gate);
+        assert!(wrapper_gate < exact_executable_gate);
+        assert!(exact_executable_gate < strip_wrapper);
+        assert!(!restore.contains("Get-ChildItem -LiteralPath $staging -Recurse -Directory"));
+    }
+
+    #[test]
+    fn github_actions_pr_rejects_vendor_drift_from_json_before_checking() {
+        let pr = include_str!("../templates/github-actions/stasis-pr.yml");
+        let status_command = pr
+            .find("stasis --json vendor status --workspace .")
+            .expect("JSON vendor status command");
+        let command_gate = pr
+            .find("if ($LASTEXITCODE -ne 0)")
+            .expect("vendor status command gate");
+        let json_gate = pr
+            .find("if ($status.ok -ne $true)")
+            .expect("vendor status JSON success gate");
+        let current_gate = pr
+            .find("if ($status.result.current -ne $true)")
+            .expect("vendor current gate");
+        let check = pr.find("run: stasis check").expect("Stasis check step");
+        assert!(status_command < command_gate);
+        assert!(command_gate < json_gate);
+        assert!(json_gate < current_gate);
+        assert!(current_gate < check);
+        assert!(!pr.contains("run: stasis vendor status --workspace ."));
+    }
+
+    #[test]
+    fn github_actions_restore_uses_platform_path_comparison() {
+        let restore = include_str!("../templates/github-actions/restore-stasis-release.ps1");
+        for expected in [
+            "[Runtime.InteropServices.RuntimeInformation]::IsOSPlatform",
+            "[Runtime.InteropServices.OSPlatform]::Windows",
+            "[StringComparison]::OrdinalIgnoreCase",
+            "else { [StringComparison]::Ordinal }",
+            "StartsWith($prefix, $pathComparison)",
+        ] {
+            assert!(
+                restore.contains(expected),
+                "restore helper path comparison contract missing {expected}"
+            );
+        }
+        assert!(!restore.contains("StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)"));
+    }
+
+    #[test]
+    fn github_actions_preflights_conflicts_without_partial_writes() {
+        let root = temp_dir("github_actions_conflict");
+        fs::create_dir_all(root.join(".github/workflows")).expect("create workflow directory");
+        fs::write(
+            root.join(".github/workflows/stasis-weekly.yml"),
+            "user workflow\n",
+        )
+        .expect("write workflow conflict");
+        let error = create_new_project(root.clone(), "demo".to_string())
+            .expect_err("reject workflow conflict");
+        assert!(error.contains("stasis-weekly.yml"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read_to_string(root.join(".github/workflows/stasis-weekly.yml"))
+                .expect("read preserved workflow"),
+            "user workflow\n"
+        );
+        remove_temp(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_actions_rejects_broken_directory_symlinks_without_partial_writes() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("github_actions_broken_symlink");
+        fs::create_dir_all(&root).expect("create root");
+        symlink(root.join("missing"), root.join(".github")).expect("create broken symlink");
+        let error = create_new_project(root.clone(), "demo".to_string())
+            .expect_err("reject broken symlink");
+        assert!(error.contains("refusing to generate GitHub Actions"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        remove_temp(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn github_actions_rejects_directory_reparse_points_without_partial_writes() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = temp_dir("github_actions_reparse");
+        let outside = temp_dir("github_actions_reparse_outside");
+        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(&outside).expect("create outside directory");
+        if symlink_dir(&outside, root.join(".github")).is_err() {
+            remove_temp(&root);
+            remove_temp(&outside);
+            return;
+        }
+        let error =
+            create_new_project(root.clone(), "demo".to_string()).expect_err("reject reparse point");
+        assert!(error.contains("refusing to generate GitHub Actions"));
+        assert!(!root.join(MANIFEST_NAME).exists());
+        remove_temp(&root);
+        remove_temp(&outside);
     }
 
     #[test]
@@ -6373,5 +10363,90 @@ mod tests {
             .contains("outside the workspace"));
         remove_temp(&root);
         remove_temp(&outside);
+    }
+
+    #[test]
+    fn matching_toolchain_fingerprints_are_accepted() {
+        let fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        ensure_matching_build_fingerprints(
+            fingerprint,
+            fingerprint,
+            Path::new("stasis_graphics.dll"),
+        )
+        .expect("matching CLI/runtime identity");
+    }
+
+    #[test]
+    fn mismatched_toolchain_fingerprints_are_rejected_before_runtime_startup() {
+        let expected = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let actual = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        let error =
+            ensure_matching_build_fingerprints(expected, actual, Path::new("stasis_graphics.dll"))
+                .expect_err("mismatched CLI/runtime identity");
+        assert!(
+            error.contains("toolchain build fingerprint mismatch"),
+            "{error}"
+        );
+        assert!(error.contains(expected), "{error}");
+        assert!(error.contains(actual), "{error}");
+    }
+
+    #[test]
+    fn unverified_toolchain_fingerprints_are_rejected() {
+        let error = ensure_matching_build_fingerprints(
+            "development",
+            "development",
+            Path::new("stasis_graphics.dll"),
+        )
+        .expect_err("development is not an installed identity");
+        assert!(error.contains("invalid build fingerprint"), "{error}");
+    }
+
+    #[test]
+    fn missing_installed_runtime_is_an_editor_info_error() {
+        let error = require_installed_runtime(Path::new("stasis.exe"), None)
+            .expect_err("editor-info must reject a missing installed runtime");
+        assert!(
+            error.contains("graphics runtime is not installed beside"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn stamped_toolchain_rejects_missing_sibling_runtime() {
+        let fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let error = verify_installed_toolchain_identity_for(
+            Path::new("stasis.exe"),
+            None,
+            Some(fingerprint),
+            "development",
+        )
+        .expect_err("stamped toolchain must require its sibling runtime");
+        assert_eq!(
+            error,
+            "the Stasis graphics runtime is not installed beside stasis.exe"
+        );
+    }
+
+    #[test]
+    fn unstamped_source_development_allows_missing_sibling_runtime() {
+        verify_installed_toolchain_identity_for(Path::new("stasis.exe"), None, None, "development")
+            .expect("unstamped source development may run without a sibling runtime");
+    }
+
+    #[test]
+    fn every_run_mode_checks_installed_toolchain_identity() {
+        assert!(command_requires_runtime(&ToolchainCommand::Run {
+            watch: false,
+            headless: true,
+            ticks: 1,
+            fast_forward: true,
+        }));
+        assert!(command_requires_runtime(&ToolchainCommand::Run {
+            watch: true,
+            headless: false,
+            ticks: 0,
+            fast_forward: false,
+        }));
     }
 }

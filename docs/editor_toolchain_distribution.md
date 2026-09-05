@@ -7,13 +7,15 @@ must not be selected or upgraded independently.
 
 Every editor operation uses the executable in the immutable toolchain directory bundled inside the
 platform VSIX. The graphics runtime is loaded from beside that executable. Both binaries expose the
-same `release_id`, and activation fails before starting any editor service when their identities,
-protocols, or packaged hashes differ.
+same `release_id` and exact 64-character `build_fingerprint`, and activation fails before starting
+any editor service when either identity, protocol, or packaged hash differs. Empty, malformed, or
+`development` fingerprints are never accepted as an installed-toolchain identity.
 
 The release pipeline stamps one identity into Rust with `STASIS_RELEASE_ID` and into the native
-runtime with the `STASIS_RELEASE_ID` CMake setting. `stasis --json editor-info` validates the sibling
-runtime ABI and identity and reports hashes for both files. VSIX packaging records that response and
-the hashes in `dist/toolchain-manifest.json`.
+runtime with the `STASIS_RELEASE_ID` CMake setting. It stamps the same
+`STASIS_BUILD_FINGERPRINT` into both builds. `stasis --json editor-info` validates the sibling
+runtime ABI, release identity, and exact fingerprint and reports hashes for both files. VSIX
+packaging records that response and the hashes in `dist/toolchain-manifest.json`.
 
 At activation the extension:
 
@@ -31,8 +33,8 @@ therefore installs or rolls back the complete editor toolchain.
 
 Source-tree development can set `stasis.developer.executablePath` to an absolute executable path.
 The override remains subject to the same `editor-info` handshake, including a compatible sibling
-graphics runtime. Local Rust and CMake builds use the release identity `development` unless an
-explicit identity is supplied. Reload VS Code after changing the override.
+graphics runtime. Source-tree builds without `STASIS_BUILD_FINGERPRINT` remain development-only and
+cannot pass the installed-toolchain handshake. Reload VS Code after changing the override.
 
 ## Release construction
 
@@ -65,3 +67,15 @@ editor workflow. `scripts/install_vscode_stasis.ps1` consumes that directory ins
 separate extension/toolchain pair. Environments governed by Windows App Control can either pass
 `-SigningCertificate` and `-SigningPassword` or configure the repository's existing
 `STASIS_AOT_SIGN_TOOL`; signing occurs before hashes and the VSIX are produced.
+
+For a complete local install into the repository `bin` directory, use the single supported command:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_local_toolchain.ps1
+```
+
+The command requires a clean Git revision, derives one fingerprint from that revision and release
+identity, builds the CLI and dynamic graphics DLL with the same values through the repository Cargo
+cache wrapper, stages a fresh complete directory, validates `editor-info`, and runs one bounded
+`windows_launch_smoke` record frame. Only after all checks pass does it promote the staged directory
+to `bin`. A failed promotion restores the prior `bin` directory.

@@ -1,0 +1,37 @@
+import "../../../src/stdlib/world_camera.stasis";
+
+global probe_camera: WorldCamera;
+global probe_history: WorldCameraHistory;
+global probe_tiles: WorldTileRange;
+
+function world_camera_viewport_probe(): i32 {
+    probe_camera.world_camera_configure(-100.0, -50.0, 1900.0, 950.0, 8.0, 12.0, 640.0, 360.0, 2.0);
+    probe_camera.world_camera_follow(333.0, 444.0);
+    probe_history.world_camera_history_reset(300.0, 400.0);
+    probe_history.world_camera_history_advance(320.0, 440.0);
+    probe_tiles.world_camera_tile_range_calculate(probe_camera, 64.0, 1);
+    gfx_cmd_begin();
+    probe_camera.world_camera_clip_begin();
+    probe_camera.world_camera_clip_end();
+    if (probe_camera.origin_x != 173.0 || probe_camera.origin_y != 354.0) {
+        return 1;
+    }
+    if (probe_camera.world_to_view_x(333.0) != 328.0 || probe_camera.world_to_view_y(444.0) != 192.0) {
+        return 2;
+    }
+    if (probe_history.interpolated_x(0.5) != 310.0 || probe_history.interpolated_y(0.5) != 420.0) {
+        return 3;
+    }
+    if (
+        probe_tiles.status != 0
+        || probe_tiles.effective_tile_world_size != 64.0
+        || probe_tiles.count <= 0
+        || probe_tiles.count > WORLD_CAMERA_MAX_RESIDENT_TILES
+    ) {
+        return 4;
+    }
+    if (gfx_cmd_clip_count() != 1 || gfx_cmd_order_count() != 2) {
+        return 5;
+    }
+    return 0;
+}

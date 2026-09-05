@@ -140,15 +140,20 @@ Rules:
 
 ## Runtime Contract
 
-Mobile shells link one shared SDL-only Stasis runtime core.
+Mobile shells link one SDL-only Stasis runtime core. Android production folds
+that core, SDL3, SDL3_image's PNG-only decoder, and the generated AOT objects
+into one `arm64-v8a/libmain.so`. Release delivery is an AAB; generated release
+APKs are useful for direct size and device acceptance checks. The x86-64 target
+remains available only with `--development-build` for emulator workflows.
 
 Rules:
 
-- `STASIS_GRAPHICS_SDL_ONLY` is the mobile runtime direction.
+- The canonical SDL renderer is the mobile runtime direction.
 - Android and iOS shells should share the same C runtime ABI wherever platform
   SDK differences do not force a thin adapter.
 - The runtime drives the app lifecycle and calls `main` once, then `tick` and
-  `render` on the fixed tick/frame loop.
+  `render` on the shell-paced 60 Hz tick/frame loop. Display refresh may block
+  presentation, but it must not redefine deterministic game speed.
 - Platform pause, resume, focus, and shutdown events are runtime-owned and must
   not require dynamic game code replacement.
 - Audio and graphics device unavailability must leave gameplay state coherent

@@ -3,12 +3,13 @@ use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess, JitScalarValue
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
+use stasis_compiler::frontend::module_graph::parse_imports;
 use stasis_compiler::frontend::workshop::{
-    find_workshop_symbols, load_workshop_edit_workspace, load_workshop_source_workspace,
-    plan_workshop_semantic_edits, workshop_completion_items, workshop_direct_import_files,
-    workshop_reachable_files, workshop_source_hash, workshop_source_items,
-    write_workshop_semantic_plan, write_workshop_semantic_receipt, ExpectedReload,
-    WorkshopCompletionItem, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
+    find_workshop_symbols, load_workshop_edit_workspace, load_workshop_project,
+    load_workshop_source_workspace, plan_workshop_semantic_edits, workshop_completion_items,
+    workshop_direct_import_files, workshop_reachable_files, workshop_source_hash,
+    workshop_source_items, write_workshop_semantic_plan, write_workshop_semantic_receipt,
+    ExpectedReload, WorkshopCompletionItem, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
     WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
     WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
@@ -43,6 +44,8 @@ const MAX_LIVE_EDIT_BATCH: usize = 64;
 const MAX_LIVE_TRANSACTION_ASSIGNMENTS: usize = 64;
 const MAX_STAGED_TEST_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_STAGED_TEST_DIAGNOSTIC_BYTES: usize = 4096;
+const MAX_STAGED_TEST_FAILURE_CHARS: usize = 1024;
+const MAX_PRIVATE_SYMBOL_HINT_FILES: usize = 64;
 const MAX_WATCH_PREDICATE_SCAN_PER_TICK: usize = 4096;
 const MAX_INSPECT_VALUES: usize = 4096;
 #[derive(Debug, Clone)]
@@ -1453,28 +1456,41 @@ impl LiveWorkspace {
         page: u32,
         limit: usize,
     ) -> Result<(&'static str, Value), String> {
-        let query = query.unwrap_or("").to_ascii_lowercase();
+        let query_arg = query.filter(|query| !query.is_empty());
+        let query = query_arg.unwrap_or("").to_ascii_lowercase();
         let kind = kind.map(parse_kind).transpose()?;
         if files.len() > 16 {
             return Err("symbol search accepts at most 16 starting files".to_string());
         }
-        let loaded_files = &self.source_files;
         let default_scope = files.is_empty();
-        let mut scope_files = if default_scope {
+        let test_default_scope = default_scope && kind == Some(WorkshopSourceItemKind::Test);
+        let mut scope_files = if test_default_scope {
+            self.source_items
+                .iter()
+                .filter(|item| item.kind == WorkshopSourceItemKind::Test)
+                .map(|item| normalize_file(&item.file))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        } else if default_scope {
             vec![normalize_file(&self.config.entry.to_string_lossy())]
         } else {
             files.iter().map(|file| normalize_file(file)).collect()
         };
-        if default_scope {
-            scope_files.extend(workshop_direct_import_files(
-                loaded_files,
-                &self.config.entry,
-            )?);
+        if default_scope && !test_default_scope {
+            let direct_imports =
+                workshop_direct_import_files(&self.source_files, &self.config.entry)
+                    .unwrap_or_else(|_| {
+                        self.best_effort_loaded_direct_imports(&normalize_file(
+                            &self.config.entry.to_string_lossy(),
+                        ))
+                    });
+            scope_files.extend(direct_imports);
         }
         let available_files = self
-            .source_items
+            .source_files
             .iter()
-            .map(|item| normalize_file(&item.file))
+            .map(|file| normalize_file(&file.path))
             .collect::<BTreeSet<_>>();
         for file in &scope_files {
             if !available_files.contains(file) {
@@ -1482,17 +1498,9 @@ impl LiveWorkspace {
             }
         }
         let scope_files = scope_files.into_iter().collect::<BTreeSet<_>>();
-        let imports = scope_files
-            .iter()
-            .map(|file| {
-                Ok((
-                    file.clone(),
-                    workshop_direct_import_files(loaded_files, Path::new(file))?,
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
         let matches = |item: &WorkshopSourceItem| {
-            item.kind != WorkshopSourceItemKind::Imports
+            item.exposure.is_public()
+                && item.kind != WorkshopSourceItemKind::Imports
                 && !(item.kind == WorkshopSourceItemKind::Globals && item.source.trim().is_empty())
                 && (query.is_empty()
                     || item.name.to_ascii_lowercase().contains(&query)
@@ -1529,10 +1537,72 @@ impl LiveWorkspace {
                 value
             })
             .collect::<Vec<_>>();
-        Ok((
-            "symbols",
-            json!({"schema_version": 1, "files": scope_files, "imports": imports, "page": page, "limit": limit, "total": total, "items": items}),
-        ))
+        let returned = items.len();
+        let mut result = json!({"items": items});
+        if default_scope && !test_default_scope {
+            let hint_files = scope_files
+                .iter()
+                .cloned()
+                .chain(
+                    scope_files
+                        .iter()
+                        .flat_map(|file| self.best_effort_loaded_direct_imports(file)),
+                )
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .take(MAX_PRIVATE_SYMBOL_HINT_FILES)
+                .collect::<Vec<_>>();
+            result["_hint_files"] = json!(hint_files);
+        }
+        if offset.saturating_add(returned) < total {
+            let mut args = serde_json::Map::new();
+            if !files.is_empty() {
+                args.insert("files".into(), json!(files));
+            }
+            if let Some(query) = query_arg {
+                args.insert("query".into(), json!(query));
+            }
+            if let Some(kind) = kind {
+                args.insert("kind".into(), json!(kind));
+            }
+            if let Some(owner) = owner {
+                args.insert("owner".into(), json!(owner));
+            }
+            args.insert("page".into(), json!(page.saturating_add(1)));
+            args.insert("limit".into(), json!(limit));
+            result["next"] = json!({"tool": "list_symbols", "args": args});
+        }
+        Ok(("symbols", result))
+    }
+
+    fn best_effort_loaded_direct_imports(&self, file_path: &str) -> Vec<String> {
+        let file_path = normalize_file(file_path);
+        let available = self
+            .source_files
+            .iter()
+            .map(|file| normalize_file(&file.path))
+            .collect::<BTreeSet<_>>();
+        let Some(source) = self
+            .source_files
+            .iter()
+            .find(|file| normalize_file(&file.path) == file_path)
+            .map(|file| file.source.as_str())
+        else {
+            return Vec::new();
+        };
+        workshop_direct_import_files(&self.source_files, Path::new(&file_path)).unwrap_or_else(
+            |_| {
+                parse_imports(&file_path, source)
+                    .map(|imports| {
+                        imports
+                            .into_iter()
+                            .map(|import| normalize_file(&import.target))
+                            .filter(|target| available.contains(target))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            },
+        )
     }
 
     fn read_symbol(&self, target: LiveSymbolTarget) -> Result<(&'static str, Value), String> {
@@ -1966,7 +2036,7 @@ impl LiveWorkspace {
         items.extend(
             self.completion_items
                 .iter()
-                .filter(|item| !is_static_type_field(item))
+                .filter(|item| item.exposure.is_public() && !is_static_type_field(item))
                 .map(live_completion_item),
         );
         items.extend(
@@ -2542,7 +2612,8 @@ fn run_staged_tests(
             fs::copy(&manifest, root.join("stasis.json"))
                 .map_err(|error| format!("failed staging stasis.json: {error}"))?;
         }
-        for file in files {
+        let staged_files = staged_test_source_closure(config, files, canceled)?;
+        for file in staged_files {
             check_preparation_canceled(canceled)?;
             let destination = root.join(&file.path);
             if !destination.starts_with(&root) {
@@ -2567,6 +2638,54 @@ fn run_staged_tests(
         (Ok(()), Err(error)) => Err(format!("failed cleaning live test overlay: {error}")),
         (Ok(()), Ok(())) => Ok(()),
     }
+}
+
+pub fn run_project_tests_bounded(project_root: &Path, canceled: &AtomicBool) -> Result<(), String> {
+    let executable = locate_stasis_executable()?.ok_or_else(|| {
+        "baseline tests require a stasis executable beside the running binary".to_string()
+    })?;
+    run_staged_test_process(&executable, project_root, canceled)
+}
+
+fn staged_test_source_closure(
+    config: &LiveRunConfig,
+    candidate_files: &[WorkshopSourceFile],
+    canceled: &AtomicBool,
+) -> Result<Vec<WorkshopSourceFile>, String> {
+    let test_files = workshop_source_items(candidate_files)?
+        .into_iter()
+        .filter(|item| item.kind == WorkshopSourceItemKind::Test)
+        .map(|item| normalize_file(&item.file))
+        .collect::<BTreeSet<_>>();
+    let mut staged = BTreeMap::new();
+    for test_file in test_files {
+        check_preparation_canceled(canceled)?;
+        for imported in load_workshop_project(&config.project_root, Path::new(&test_file))? {
+            check_preparation_canceled(canceled)?;
+            let path = normalize_file(&imported.path);
+            let source_path = Path::new(&path);
+            if source_path.extension().and_then(|value| value.to_str()) != Some("stasis") {
+                continue;
+            }
+            if source_path
+                .components()
+                .next()
+                .is_some_and(|component| component.as_os_str() == "build")
+            {
+                return Err(format!(
+                    "staged test import may not read build output: {path}"
+                ));
+            }
+            staged.entry(path.clone()).or_insert(WorkshopSourceFile {
+                path,
+                source: imported.source,
+            });
+        }
+    }
+    for candidate in candidate_files {
+        staged.insert(normalize_file(&candidate.path), candidate.clone());
+    }
+    Ok(staged.into_values().collect())
 }
 
 fn stage_live_test_assets(
@@ -2725,13 +2844,9 @@ fn run_staged_test_process(
     if status.success() {
         return Ok(());
     }
-    let diagnostics = format!("{stdout}{stderr}");
     Err(format!(
         "staged live tests failed: {}",
-        diagnostics
-            .chars()
-            .take(MAX_STAGED_TEST_DIAGNOSTIC_BYTES)
-            .collect::<String>()
+        format_staged_test_failure(&stdout, &stderr)
     ))
 }
 
@@ -2753,10 +2868,66 @@ fn drain_bounded_test_output(
         if previous.saturating_add(count) > MAX_STAGED_TEST_OUTPUT_BYTES {
             overflow.store(true, Ordering::Release);
         }
-        let remaining = MAX_STAGED_TEST_DIAGNOSTIC_BYTES.saturating_sub(captured.len());
-        captured.extend_from_slice(&buffer[..count.min(remaining)]);
+        if count >= MAX_STAGED_TEST_DIAGNOSTIC_BYTES {
+            captured.clear();
+            captured.extend_from_slice(&buffer[count - MAX_STAGED_TEST_DIAGNOSTIC_BYTES..count]);
+        } else {
+            let overflow = captured
+                .len()
+                .saturating_add(count)
+                .saturating_sub(MAX_STAGED_TEST_DIAGNOSTIC_BYTES);
+            if overflow > 0 {
+                captured.drain(..overflow);
+            }
+            captured.extend_from_slice(&buffer[..count]);
+        }
     }
     Ok(String::from_utf8_lossy(&captured).into_owned())
+}
+
+fn format_staged_test_failure(stdout: &str, stderr: &str) -> String {
+    let combined = format!("{stdout}\n{stderr}");
+    let mut structured_fallback = None;
+    for line in combined.lines().rev() {
+        let line = line.trim();
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(message) = record
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+        {
+            if record.get("code").and_then(Value::as_str) == Some("command_failed") {
+                return bounded_test_failure_text(message);
+            }
+            structured_fallback.get_or_insert_with(|| message.to_string());
+        }
+    }
+    if let Some(message) = structured_fallback {
+        return bounded_test_failure_text(&message);
+    }
+    let fallback = combined.trim();
+    if fallback.is_empty() {
+        "test process exited without diagnostics".to_string()
+    } else {
+        bounded_test_failure_text(fallback)
+    }
+}
+
+fn bounded_test_failure_text(text: &str) -> String {
+    let length = text.chars().count();
+    if length <= MAX_STAGED_TEST_FAILURE_CHARS {
+        return text.to_string();
+    }
+    const MARKER: &str = "[truncated] ";
+    let keep = MAX_STAGED_TEST_FAILURE_CHARS.saturating_sub(MARKER.chars().count());
+    let tail = text
+        .chars()
+        .skip(length.saturating_sub(keep))
+        .collect::<String>();
+    format!("{MARKER}{tail}")
 }
 
 fn check_preparation_canceled(canceled: &AtomicBool) -> Result<(), String> {
@@ -3455,6 +3626,42 @@ mod tests {
     }
 
     #[test]
+    fn test_symbol_default_scope_uses_all_known_test_files() {
+        let (root, config) = project();
+        fs::write(
+            root.join("tests/secondary.test.stasis"),
+            "test `secondary behavior`(): bool { return 2 == 2; }\n",
+        )
+        .expect("secondary test");
+        let (jit, _) = compile(&config);
+        let (_, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+
+        let (_, result) = workspace
+            .symbols(None, Some("test"), &[], None, 0, 32)
+            .expect("test symbols");
+
+        assert_eq!(result.as_object().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["kind"], "test");
+        assert_eq!(result["items"][1]["kind"], "test");
+
+        let (_, filtered) = workspace
+            .symbols(Some("secondary"), Some("test"), &[], None, 0, 1)
+            .expect("filtered test symbols");
+        assert_eq!(filtered["items"][0]["name"], "secondary behavior");
+
+        workspace
+            .source_items
+            .retain(|item| item.kind != WorkshopSourceItemKind::Test);
+        let (_, empty) = workspace
+            .symbols(None, Some("test"), &[], None, 0, 32)
+            .expect("empty test symbols");
+        assert_eq!(empty["items"], json!([]));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn live_edit_batch_plans_all_symbols_as_one_transaction() {
         let (root, config) = project();
         let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
@@ -3708,13 +3915,108 @@ mod tests {
     }
 
     #[test]
-    fn staged_test_output_drain_caps_diagnostics_and_flags_overflow() {
-        let bytes = vec![b'x'; MAX_STAGED_TEST_OUTPUT_BYTES + 1];
+    fn staged_test_failure_prefers_final_structured_command_message() {
+        let stdout = format!(
+            "{}\n{}\n",
+            "balance dump\n".repeat(1_000),
+            json!({
+                "code": "command_failed",
+                "message": "2 test(s) failed: enemy balance remains bounded"
+            })
+        );
+        let total = AtomicUsize::new(0);
+        let overflow = AtomicBool::new(false);
+        let stdout =
+            drain_bounded_test_output(std::io::Cursor::new(stdout.as_bytes()), &total, &overflow)
+                .expect("tail capture");
+        assert!(!overflow.load(Ordering::Acquire));
+
+        assert_eq!(
+            format_staged_test_failure(&stdout, "runner detail"),
+            "2 test(s) failed: enemy balance remains bounded"
+        );
+    }
+
+    #[test]
+    fn staged_tests_include_recursive_project_local_test_imports() {
+        let (root, config) = project();
+        fs::write(
+            root.join("stasis.json"),
+            r#"{"manifest_version":1,"name":"staged_imports","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+        )
+        .expect("manifest");
+        fs::create_dir_all(root.join("tools")).expect("tools directory");
+        fs::write(
+            root.join("tools/nested.stasis"),
+            "function helper_base(): bool { return true; }\n",
+        )
+        .expect("nested helper");
+        fs::write(
+            root.join("tools/helper.stasis"),
+            concat!(
+                "import \"nested.stasis\";\n",
+                "function helper(): bool { return helper_base(); }\n",
+            ),
+        )
+        .expect("test helper");
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            concat!(
+                "import \"../tools/helper.stasis\";\n",
+                "test `project helper import is available`(): bool { return false; }\n",
+            ),
+        )
+        .expect("disk test");
+        let mut candidate_files =
+            load_workshop_edit_workspace(&root, &config.entry).expect("candidate files");
+        let candidate_test = candidate_files
+            .iter_mut()
+            .find(|file| file.path == "tests/main.test.stasis")
+            .expect("candidate test");
+        candidate_test.source = concat!(
+            "import \"../tools/helper.stasis\";\n",
+            "test `project helper import is available`(): bool { return helper(); }\n",
+        )
+        .to_string();
+
+        let closure =
+            staged_test_source_closure(&config, &candidate_files, &AtomicBool::new(false))
+                .expect("staged source closure");
+        assert!(closure
+            .iter()
+            .any(|file| file.path == "tools/helper.stasis"));
+        assert!(closure
+            .iter()
+            .any(|file| file.path == "tools/nested.stasis"));
+        assert!(closure
+            .iter()
+            .find(|file| file.path == "tests/main.test.stasis")
+            .is_some_and(|file| file.source.contains("return helper()")));
+
+        run_staged_tests(&config, &candidate_files, 424_242, &AtomicBool::new(false))
+            .expect("staged tests with project-local helper");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn staged_test_failure_fallback_is_bounded_and_marked() {
+        let failure = format_staged_test_failure(&"x".repeat(2_000), "");
+        assert_eq!(failure.chars().count(), MAX_STAGED_TEST_FAILURE_CHARS);
+        assert!(failure.starts_with("[truncated] "));
+        assert!(failure.ends_with(&"x".repeat(128)));
+    }
+
+    #[test]
+    fn staged_test_output_drain_retains_tail_and_flags_overflow() {
+        let marker = b"FINAL_TAIL";
+        let mut bytes = vec![b'x'; MAX_STAGED_TEST_OUTPUT_BYTES + 1 - marker.len()];
+        bytes.extend_from_slice(marker);
         let total = AtomicUsize::new(0);
         let overflow = AtomicBool::new(false);
         let captured = drain_bounded_test_output(std::io::Cursor::new(bytes), &total, &overflow)
             .expect("drain output");
         assert_eq!(captured.len(), MAX_STAGED_TEST_DIAGNOSTIC_BYTES);
+        assert!(captured.ends_with("FINAL_TAIL"));
         assert_eq!(
             total.load(Ordering::Acquire),
             MAX_STAGED_TEST_OUTPUT_BYTES + 1
@@ -4055,7 +4357,7 @@ mod tests {
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
-            "import \"helper.stasis\";\nglobal score: i32;\nfunction main(): i32 { score = 1; return 0; }\nfunction tick(): i32 { score += 1; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
+            "import \"helper.stasis\";\nimport \"game/game.stasis\";\nglobal score: i32;\nfunction main(): i32 { score = 1; return 0; }\nfunction tick(): i32 { score += 1; return 0; }\nfunction render(): i32 { return 0; }\nfunction on_code_swap(): void { return; }\n",
         )
         .expect("source with import");
         fs::write(
@@ -4063,9 +4365,20 @@ mod tests {
             "function direct_import_value(): i32 { return 1; }\n",
         )
         .expect("helper source");
+        fs::create_dir_all(root.join("src/game/systems")).expect("systems source directory");
+        fs::write(
+            root.join("src/game/game.stasis"),
+            "import \"systems/enemies.stasis\";\nfunction game_value(): i32 { return 1; }\n",
+        )
+        .expect("game module source");
+        fs::write(
+            root.join("src/game/systems/enemies.stasis"),
+            "function update_enemy_movement(): void { return; }\n",
+        )
+        .expect("enemy system source");
         let (jit, _package) = compile(&config);
         let (_client, server) = stasis_runner::live::live_session(8);
-        let workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
 
         let (_, all) = workspace
             .symbols(None, None, &[], None, 0, 32)
@@ -4077,17 +4390,69 @@ mod tests {
         assert!(items
             .iter()
             .all(|item| { matches!(item.as_object().map(|object| object.len()), Some(4 | 5)) }));
-        assert_eq!(
-            all["files"],
-            json!(["src/helper.stasis", "src/main.stasis"])
-        );
-        assert_eq!(
-            all["imports"],
-            json!({"src/helper.stasis": [], "src/main.stasis": ["src/helper.stasis"]})
-        );
+        assert!(all.get("files").is_none());
+        assert!(all.get("imports").is_none());
         assert!(items
             .iter()
             .any(|item| item["name"] == "direct_import_value"));
+        assert_eq!(
+            all["_hint_files"],
+            json!([
+                "src/game/game.stasis",
+                "src/game/systems/enemies.stasis",
+                "src/helper.stasis",
+                "src/main.stasis"
+            ])
+        );
+
+        let game = workspace
+            .source_files
+            .iter_mut()
+            .find(|file| file.path == "src/game/game.stasis")
+            .expect("game source");
+        game.source = format!("import \"../vendor/unloaded.stasis\";\n{}", game.source);
+        let (_, tolerant) = workspace
+            .symbols(None, None, &[], None, 0, 32)
+            .expect("missing import edges do not block discovery");
+        assert!(tolerant["_hint_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file == "src/helper.stasis"));
+        assert!(tolerant["_hint_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file == "src/game/systems/enemies.stasis"));
+
+        let (_, paged) = workspace
+            .symbols(
+                None,
+                Some("function"),
+                &["src/main.stasis".to_string()],
+                None,
+                0,
+                1,
+            )
+            .expect("paged symbols");
+        assert_eq!(
+            paged["next"],
+            json!({
+                "tool":"list_symbols",
+                "args":{
+                    "files":["src/main.stasis"],
+                    "kind":"function",
+                    "page":1,
+                    "limit":1
+                }
+            })
+        );
+        assert!(paged.get("total").is_none());
+        assert!(paged.get("page").is_none());
+        assert!(paged.get("limit").is_none());
+        let paged_bytes = serde_json::to_vec(&paged).unwrap().len();
+        eprintln!("representative compact list_symbols page bytes: {paged_bytes}");
+        assert!(paged_bytes < 1024);
 
         let (_, filtered) = workspace
             .symbols(
@@ -4099,7 +4464,6 @@ mod tests {
                 1,
             )
             .expect("filtered symbols");
-        assert_eq!(filtered["total"], 1);
         assert_eq!(filtered["items"][0]["name"], "tick");
         assert!(filtered["items"][0].get("owner").is_none());
 
@@ -4113,8 +4477,18 @@ mod tests {
                 32,
             )
             .expect("test symbols");
-        assert_eq!(tests["total"], 1);
-        assert_eq!(tests["files"], json!(["tests/main.test.stasis"]));
+        assert_eq!(tests["items"].as_array().unwrap().len(), 1);
+
+        let test_file = workspace
+            .source_files
+            .iter_mut()
+            .find(|file| file.path == "tests/main.test.stasis")
+            .expect("test source");
+        test_file.source = "import \"../vendor/unloaded.stasis\";\n".to_string();
+        let (_, unaffected) = workspace
+            .symbols(None, Some("test"), &[], None, 0, 32)
+            .expect("test discovery does not resolve unsolicited imports");
+        assert_eq!(unaffected["items"].as_array().unwrap().len(), 1);
         fs::remove_dir_all(root).ok();
     }
 

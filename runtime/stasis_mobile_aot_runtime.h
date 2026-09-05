@@ -24,6 +24,12 @@ void stasis_jit_register_global_u16_array(
 void stasis_jit_register_code_ptr(int32_t fn_id, int64_t code_ptr);
 void stasis_jit_clear_string_literal_table(void);
 void stasis_jit_upsert_string_literal(int32_t id, const char *value);
+void stasis_jit_profile_register_function(int32_t function_id, const char *name);
+void stasis_jit_profile_configure(int32_t warmup_frames, int32_t sample_frames);
+void stasis_jit_profile_frame_begin(void);
+void stasis_jit_profile_frame_end(void);
+void stasis_jit_profile_frame_enter(int32_t function_id);
+void stasis_jit_profile_frame_leave(int32_t function_id);
 int64_t stasis_jit_lookup_code_ptr(int32_t fn_id);
 int32_t stasis_jit_global_i32_load(int32_t hash);
 void stasis_jit_global_i32_store(int32_t hash, int32_t value);
@@ -100,6 +106,11 @@ void stasis_jit_audio_pause_music(int32_t asset_handle, int32_t paused);
 void stasis_jit_audio_set_music_volume(int32_t asset_handle, float volume);
 int stasis_jit_audio_play_effect(int32_t asset_handle, float volume);
 int stasis_jit_gfx_load_sprite(int32_t path, int32_t max_w, int32_t max_h);
+int stasis_jit_asset_request_sprite(int32_t path, int32_t max_w, int32_t max_h);
+int stasis_jit_asset_request_audio(int32_t path);
+int stasis_jit_asset_task_poll(int32_t task);
+int stasis_jit_asset_task_take_handle(int32_t task);
+void stasis_jit_asset_task_cancel(int32_t task);
 void stasis_jit_gfx_release_sprite(int32_t handle);
 int stasis_jit_gfx_dump_bmp(int32_t path);
 int stasis_jit_gfx_dump_png(int32_t path);
@@ -122,6 +133,7 @@ float stasis_jit_gfx_measure_text_cached(int32_t handle);
 float stasis_jit_gfx_measure_text_cached_height(int32_t handle);
 int stasis_jit_sprite_load_from(int32_t base, int32_t index, int32_t len, int32_t path, int32_t width, int32_t height);
 int stasis_jit_text_run_load_from(int32_t base, int32_t index, int32_t len, int32_t font, int32_t text);
+int stasis_jit_text_run_replace_from(int32_t base, int32_t index, int32_t len, int32_t font, int32_t text);
 int stasis_jit_load_font(int32_t path, int32_t size);
 float stasis_jit_measure_text(int32_t font, int32_t text);
 void stasis_jit_sleep_ms(int32_t ms);
@@ -131,6 +143,27 @@ int stasis_jit_storage_load_ascii(int32_t scope, int32_t key, int32_t out, int32
 int stasis_jit_storage_load_i32(int32_t scope, int32_t key, int32_t fallback);
 int stasis_jit_storage_save_ascii(int32_t scope, int32_t key, int32_t value, int32_t length);
 int stasis_jit_storage_save_i32(int32_t scope, int32_t key, int32_t value);
+int32_t stasis_jit_network_supported(void);
+int32_t stasis_jit_network_host_random_seed(void);
+int32_t stasis_jit_network_host_start(int32_t content_id, int32_t content_length);
+int32_t stasis_jit_network_host_start_text(int32_t content_id);
+int32_t stasis_jit_network_host_start_bind(int32_t content_id, int32_t content_length, int32_t bind_ipv4);
+int32_t stasis_jit_network_host_start_bind_text(int32_t content_id, int32_t bind_ipv4);
+int32_t stasis_jit_network_host_status(void);
+int32_t stasis_jit_network_host_overflow_count(void);
+int32_t stasis_jit_network_host_port(void);
+int32_t stasis_jit_network_host_poll(int32_t fields_id, int32_t field_capacity, int32_t payload_id, int32_t payload_capacity);
+int32_t stasis_jit_network_host_send(int32_t connection, int32_t payload_id, int32_t payload_length);
+void stasis_jit_network_host_stop(void);
+int32_t stasis_mobile_network_copy_i32_payload(
+    int32_t payload_id,
+    int32_t payload_length,
+    uint8_t *out,
+    int32_t out_capacity
+);
+int32_t stasis_mobile_network_start_from_asset_root(void);
+int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity);
+void stasis_mobile_network_stop(void);
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity);
 void stasis_mobile_aot_reset(void);
 

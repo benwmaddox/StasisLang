@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "frames": [
+    {
+      "frame": 1,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 198, "y": 105}
+      ]
+    },
+    {
+      "frame": 2,
+      "pointers": [
+        {"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 198, "y": 105}
+      ]
+    },
+    {
+      "frame": 4,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 320, "y": 105}
+      ]
+    },
+    {
+      "frame": 5,
+      "pointers": [
+        {"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 320, "y": 105}
+      ]
+    },
+    {
+      "frame": 7,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 76, "y": 230}
+      ]
+    },
+    {
+      "frame": 8,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": false, "wentUp": false, "x": 76, "y": 80}
+      ]
+    },
+    {
+      "frame": 9,
+      "pointers": [
+        {"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 76, "y": 80}
+      ]
+    },
+    {
+      "frame": 12,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 440, "y": 105}
+      ]
+    },
+    {
+      "frame": 13,
+      "pointers": [
+        {"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 440, "y": 105}
+      ]
+    },
+    {
+      "frame": 16,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 500, "y": 320}
+      ]
+    },
+    {
+      "frame": 17,
+      "pointers": [
+        {"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 500, "y": 320}
+      ]
+    },
+    {
+      "frame": 18,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 600, "y": 105}
+      ]
+    },
+    {
+      "frame": 19,
+      "pointers": [
+        {"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 600, "y": 105}
+      ]
+    },
+    {
+      "frame": 20,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 900, "y": 345}
+      ]
+    },
+    {
+      "frame": 21,
+      "pointers": [
+        {"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 900, "y": 345}
+      ]
+    },
+    {
+      "frame": 22,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 100, "y": 400}
+      ]
+    },
+    {
+      "frame": 23,
+      "pointers": [
+        {"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 100, "y": 400}
+      ]
+    },
+    {
+      "frame": 24,
+      "pointers": [
+        {"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 680, "y": 490}
+      ]
+    },
+    {
+      "frame": 25,
+      "pointers": [
+        {"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 680, "y": 490}
+      ]
+    }
+  ]
+}

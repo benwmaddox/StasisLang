@@ -53,6 +53,28 @@ static int store_samples(
     return store->assets[slot].handle;
 }
 
+void stasis_audio_decoded_free(StasisDecodedAudio* decoded) {
+    if (!decoded) return;
+    free(decoded->samples);
+    memset(decoded, 0, sizeof(*decoded));
+}
+
+int stasis_audio_assets_store_decoded(
+    StasisAudioAssetStore* store,
+    StasisDecodedAudio* decoded
+) {
+    if (!decoded) return 0;
+    int handle = store_samples(
+        store,
+        decoded->samples,
+        decoded->sample_rate,
+        decoded->channels,
+        decoded->frame_count
+    );
+    if (handle > 0) memset(decoded, 0, sizeof(*decoded));
+    return handle;
+}
+
 static float clamp_unit(float value) {
     if (value < -1.0f) return -1.0f;
     if (value > 1.0f) return 1.0f;
@@ -190,6 +212,47 @@ done:
     free(bytes);
     free(samples);
     return result;
+}
+
+int stasis_audio_decode(const char* path, StasisDecodedAudio* decoded) {
+    FILE* file = NULL;
+    uint8_t signature[12];
+    size_t read = 0;
+    if (!decoded) return 0;
+    memset(decoded, 0, sizeof(*decoded));
+    if (!path || !*path) return 0;
+
+    file = fopen(path, "rb");
+    if (!file) return 0;
+    read = fread(signature, 1, sizeof(signature), file);
+    fclose(file);
+
+    StasisAudioAssetStore temporary;
+    memset(&temporary, 0, sizeof(temporary));
+    stasis_audio_assets_reset(&temporary);
+    int handle = 0;
+    if (read >= sizeof(signature) && memcmp(signature, "RIFF", 4) == 0 &&
+        memcmp(signature + 8, "WAVE", 4) == 0) {
+        handle = stasis_audio_assets_load_wav(&temporary, path);
+    } else {
+        handle = stasis_audio_assets_load_mp3(&temporary, path);
+    }
+    if (handle <= 0) {
+        stasis_audio_assets_reset(&temporary);
+        return 0;
+    }
+    for (int i = 0; i < STASIS_AUDIO_MAX_ASSETS; i++) {
+        if (temporary.assets[i].handle != handle || !temporary.assets[i].samples) continue;
+        decoded->sample_rate = temporary.assets[i].sample_rate;
+        decoded->channels = temporary.assets[i].channels;
+        decoded->frame_count = temporary.assets[i].frame_count;
+        decoded->samples = temporary.assets[i].samples;
+        temporary.assets[i].samples = NULL;
+        stasis_audio_assets_reset(&temporary);
+        return 1;
+    }
+    stasis_audio_assets_reset(&temporary);
+    return 0;
 }
 
 int stasis_audio_assets_load(StasisAudioAssetStore* store, const char* path) {

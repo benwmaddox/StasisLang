@@ -1,0 +1,5 @@
+import "../src/main.stasis";
+
+test `audio fixture keeps bounded sink handles and event contracts`(): bool {
+    return AUDIO_FRAMES_PER_PUSH == 256 && AUDIO_EVENT_NONE == 0 && AUDIO_EVENT_MUSIC == 1 && AUDIO_EVENT_EFFECT == 2;
+}

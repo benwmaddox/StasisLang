@@ -1,6 +1,25 @@
 use std::ops::Range;
 
-use crate::frontend::lexer::{lex, Token, TokenKind};
+use crate::frontend::lexer::{lex, lex_with_diagnostic, Token, TokenKind};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParserDiagnostic {
+    pub message: String,
+    pub start: usize,
+    pub end: usize,
+    pub symbol: String,
+}
+
+impl From<String> for ParserDiagnostic {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            start: 0,
+            end: 0,
+            symbol: String::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedParam {
@@ -59,8 +78,10 @@ pub enum ParsedFunctionAnnotationArgumentKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedExternFunctionDeclaration {
     pub name: String,
+    pub name_range: Range<usize>,
     pub symbol_name: String,
     pub explicit_symbol: bool,
+    pub annotations: Vec<ParsedFunctionAnnotation>,
     pub params: Vec<ParsedParam>,
     pub return_type_name: String,
 }
@@ -543,7 +564,20 @@ pub fn rewrite_top_level_test_declarations(
 }
 
 pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSignature>, String> {
-    let tokens = lex(source)?;
+    parse_top_level_functions_with_diagnostic(source).map_err(|error| error.message)
+}
+
+pub fn parse_top_level_functions_with_diagnostic(
+    source: &str,
+) -> Result<Vec<ParsedFunctionSignature>, ParserDiagnostic> {
+    parse_top_level_functions_impl(source)
+}
+
+fn parse_top_level_functions_impl(
+    source: &str,
+) -> Result<Vec<ParsedFunctionSignature>, ParserDiagnostic> {
+    let tokens = lex_with_diagnostic(source)
+        .map_err(|error| lexer_error_context(source, error.message, error.offset))?;
     let mut out = Vec::new();
     let mut cursor = 0usize;
     while cursor < tokens.len() {
@@ -551,25 +585,89 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
             cursor += 1;
             continue;
         }
+        let function_token_index = cursor;
         let signature_start = tokens[cursor].start;
         cursor += 1;
-        let (next_cursor, _, annotations) = parse_function_annotations(source, &tokens, cursor)?;
+        let (next_cursor, _, annotations) = parse_function_annotations(source, &tokens, cursor)
+            .map_err(|message| {
+                contextual_parser_error(
+                    source,
+                    &tokens,
+                    function_token_index,
+                    cursor,
+                    None,
+                    message,
+                )
+            })?;
         cursor = next_cursor;
-        let name = token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
+        let name = token_text(
+            source,
+            expect(&tokens, cursor, TokenKind::Identifier).map_err(|message| {
+                contextual_parser_error(
+                    source,
+                    &tokens,
+                    function_token_index,
+                    cursor,
+                    None,
+                    message,
+                )
+            })?,
+        )
+        .to_string();
         cursor += 1;
-        expect(&tokens, cursor, TokenKind::LParen)?;
+        expect(&tokens, cursor, TokenKind::LParen).map_err(|message| {
+            contextual_parser_error(
+                source,
+                &tokens,
+                function_token_index,
+                cursor,
+                Some(&name),
+                message,
+            )
+        })?;
         cursor += 1;
         let mut params = Vec::new();
         while tokens
             .get(cursor)
             .is_some_and(|token| token.kind != TokenKind::RParen)
         {
-            let param_name =
-                token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
+            let param_name = token_text(
+                source,
+                expect(&tokens, cursor, TokenKind::Identifier).map_err(|message| {
+                    contextual_parser_error(
+                        source,
+                        &tokens,
+                        function_token_index,
+                        cursor,
+                        Some(&name),
+                        message,
+                    )
+                })?,
+            )
+            .to_string();
             cursor += 1;
-            expect(&tokens, cursor, TokenKind::Colon)?;
+            expect(&tokens, cursor, TokenKind::Colon).map_err(|message| {
+                contextual_parser_error(
+                    source,
+                    &tokens,
+                    function_token_index,
+                    cursor,
+                    Some(&name),
+                    message,
+                )
+            })?;
             cursor += 1;
-            let (type_name, next_cursor) = parse_type_name(source, &tokens, cursor)?;
+            let (type_name, next_cursor) =
+                parse_type_name(source, &tokens, cursor).map_err(|message| {
+                    contextual_parser_error(
+                        source,
+                        &tokens,
+                        function_token_index,
+                        cursor,
+                        Some(&name),
+                        message,
+                    )
+                })?;
             cursor = next_cursor;
             params.push(ParsedParam {
                 name: param_name,
@@ -582,7 +680,16 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
                 cursor += 1;
             }
         }
-        expect(&tokens, cursor, TokenKind::RParen)?;
+        expect(&tokens, cursor, TokenKind::RParen).map_err(|message| {
+            contextual_parser_error(
+                source,
+                &tokens,
+                function_token_index,
+                cursor,
+                Some(&name),
+                message,
+            )
+        })?;
         cursor += 1;
 
         let mut return_type_name = "void".to_string();
@@ -591,7 +698,17 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
             .is_some_and(|token| token.kind == TokenKind::Colon)
         {
             cursor += 1;
-            let (parsed_return_type, next_cursor) = parse_type_name(source, &tokens, cursor)?;
+            let (parsed_return_type, next_cursor) = parse_type_name(source, &tokens, cursor)
+                .map_err(|message| {
+                    contextual_parser_error(
+                        source,
+                        &tokens,
+                        function_token_index,
+                        cursor,
+                        Some(&name),
+                        message,
+                    )
+                })?;
             return_type_name = parsed_return_type;
             cursor = next_cursor;
         }
@@ -608,9 +725,24 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
             .get(cursor)
             .map_or(source.len(), |token| token.start)
             .min(source.len());
-        let body_start_token = expect(&tokens, cursor, TokenKind::LBrace)?;
+        let body_start_token = expect(&tokens, cursor, TokenKind::LBrace).map_err(|message| {
+            contextual_parser_error(
+                source,
+                &tokens,
+                function_token_index,
+                cursor,
+                Some(&name),
+                message,
+            )
+        })?;
         cursor += 1;
-        let body_end_token_index = find_matching_rbrace(&tokens, cursor, 1)?;
+        let body_end_token_index =
+            find_matching_rbrace(&tokens, cursor, 1).map_err(|message| ParserDiagnostic {
+                message,
+                start: signature_start,
+                end: source.len(),
+                symbol: name.clone(),
+            })?;
         let body_end_token = tokens[body_end_token_index];
         let body_range = body_start_token.start..body_end_token.end;
         out.push(ParsedFunctionSignature {
@@ -624,6 +756,201 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
         cursor = body_end_token_index + 1;
     }
     Ok(out)
+}
+
+fn contextual_parser_error(
+    source: &str,
+    tokens: &[Token],
+    function_token_index: usize,
+    cursor: usize,
+    symbol: Option<&str>,
+    message: String,
+) -> ParserDiagnostic {
+    let token = tokens
+        .get(cursor)
+        .or_else(|| tokens.get(function_token_index))
+        .copied()
+        .unwrap_or(Token {
+            kind: TokenKind::Eof,
+            start: source.len(),
+            end: source.len(),
+        });
+    ParserDiagnostic {
+        message,
+        start: token.start,
+        end: token.end.max(token.start + 1).min(source.len()),
+        symbol: symbol
+            .map(str::to_string)
+            .unwrap_or_else(|| function_name_hint(source, tokens, function_token_index)),
+    }
+}
+
+fn function_name_hint(source: &str, tokens: &[Token], function_token_index: usize) -> String {
+    let mut after_at = false;
+    for (index, token) in tokens.iter().enumerate().skip(function_token_index + 1) {
+        if token.kind == TokenKind::FunctionKw || token.kind == TokenKind::LBrace {
+            break;
+        }
+        if token_is_other_char(source, *token, b'@') {
+            after_at = true;
+            continue;
+        }
+        if token.kind == TokenKind::Identifier {
+            if after_at {
+                after_at = false;
+                continue;
+            }
+            if tokens
+                .get(index + 1)
+                .is_some_and(|next| next.kind == TokenKind::LParen)
+            {
+                return token_text(source, *token).to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+pub(crate) fn lexer_error_context(
+    source: &str,
+    message: String,
+    offset: usize,
+) -> ParserDiagnostic {
+    let mut symbol = String::new();
+    let limit = offset.min(source.len());
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index < limit {
+        if bytes[index] == b'/' && index + 1 < limit && bytes[index + 1] == b'/' {
+            index += 2;
+            while index < limit && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index] == b'/' && index + 1 < limit && bytes[index + 1] == b'*' {
+            index += 2;
+            while index < limit {
+                if bytes[index] == b'*' && index + 1 < limit && bytes[index + 1] == b'/' {
+                    index += 2;
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index] == b'"' {
+            index += 1;
+            while index < limit {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(limit);
+                } else if bytes[index] == b'"' {
+                    index += 1;
+                    break;
+                } else {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if is_identifier_char(bytes[index]) && !bytes[index].is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while index < limit && is_identifier_char(bytes[index]) {
+                index += 1;
+            }
+            if &source[start..index] == "function" {
+                // A declaration may carry annotations before its name. Clear the
+                // previous declaration first; an incomplete annotation must not
+                // make a lexer failure appear to belong to that prior function.
+                symbol.clear();
+                let mut name_index = index;
+                while name_index < limit && bytes[name_index].is_ascii_whitespace() {
+                    name_index += 1;
+                }
+                let mut annotations_complete = true;
+                while name_index < limit && bytes[name_index] == b'@' {
+                    name_index += 1;
+                    while name_index < limit && bytes[name_index].is_ascii_whitespace() {
+                        name_index += 1;
+                    }
+                    if name_index >= limit
+                        || !is_identifier_char(bytes[name_index])
+                        || bytes[name_index].is_ascii_digit()
+                    {
+                        annotations_complete = false;
+                        break;
+                    }
+                    while name_index < limit && is_identifier_char(bytes[name_index]) {
+                        name_index += 1;
+                    }
+                    while name_index < limit && bytes[name_index].is_ascii_whitespace() {
+                        name_index += 1;
+                    }
+                    if name_index < limit && bytes[name_index] == b'(' {
+                        let mut depth = 0usize;
+                        while name_index < limit {
+                            match bytes[name_index] {
+                                b'"' => {
+                                    name_index += 1;
+                                    while name_index < limit {
+                                        if bytes[name_index] == b'\\' {
+                                            name_index = (name_index + 2).min(limit);
+                                        } else if bytes[name_index] == b'"' {
+                                            name_index += 1;
+                                            break;
+                                        } else {
+                                            name_index += 1;
+                                        }
+                                    }
+                                }
+                                b'(' => {
+                                    depth += 1;
+                                    name_index += 1;
+                                }
+                                b')' if depth > 0 => {
+                                    depth -= 1;
+                                    name_index += 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => name_index += 1,
+                            }
+                        }
+                        if depth != 0 {
+                            annotations_complete = false;
+                            break;
+                        }
+                    }
+                    while name_index < limit && bytes[name_index].is_ascii_whitespace() {
+                        name_index += 1;
+                    }
+                }
+                if annotations_complete
+                    && name_index < limit
+                    && is_identifier_char(bytes[name_index])
+                    && !bytes[name_index].is_ascii_digit()
+                {
+                    let name_start = name_index;
+                    name_index += 1;
+                    while name_index < limit && is_identifier_char(bytes[name_index]) {
+                        name_index += 1;
+                    }
+                    symbol = source[name_start..name_index].to_string();
+                }
+            }
+            continue;
+        }
+        index += 1;
+    }
+    let start = offset.min(source.len());
+    ParserDiagnostic {
+        message,
+        start,
+        end: source.len().max(start + 1),
+        symbol,
+    }
 }
 
 pub fn parse_top_level_struct_definitions(
@@ -689,10 +1016,12 @@ pub fn parse_top_level_extern_functions(
         }
 
         cursor += 1;
-        let (after_annotations, annotation_symbol, _) =
+        let (after_annotations, annotation_symbol, annotations) =
             parse_function_annotations(source, &tokens, cursor)?;
         cursor = after_annotations;
-        let name = token_text(source, expect(&tokens, cursor, TokenKind::Identifier)?).to_string();
+        let name_token = expect(&tokens, cursor, TokenKind::Identifier)?;
+        let name = token_text(source, name_token).to_string();
+        let name_range = name_token.start..name_token.end;
         cursor += 1;
         expect(&tokens, cursor, TokenKind::LParen)?;
         cursor += 1;
@@ -742,8 +1071,10 @@ pub fn parse_top_level_extern_functions(
                 let symbol_name = annotation_symbol.unwrap_or_else(|| name.clone());
                 out.push(ParsedExternFunctionDeclaration {
                     name,
+                    name_range,
                     symbol_name,
                     explicit_symbol,
+                    annotations,
                     params,
                     return_type_name,
                 });
@@ -1112,6 +1443,19 @@ fn parse_function_annotations(
                 }
             }
             let next_cursor = skip_parenthesized_tokens(tokens, cursor)?;
+            if annotation_name == "effects" {
+                arguments = parse_effect_annotation_arguments(
+                    source,
+                    &tokens[cursor + 1..next_cursor - 1],
+                )?;
+                cursor = next_cursor;
+                annotations.push(ParsedFunctionAnnotation {
+                    name: annotation_name.to_string(),
+                    has_parentheses,
+                    arguments,
+                });
+                continue;
+            }
             let mut expects_argument = true;
             for token in &tokens[cursor + 1..next_cursor - 1] {
                 if token.kind == TokenKind::Comma {
@@ -1153,6 +1497,37 @@ fn parse_function_annotations(
         });
     }
     Ok((cursor, extern_symbol, annotations))
+}
+
+fn parse_effect_annotation_arguments(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Vec<ParsedFunctionAnnotationArgument>, String> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut arguments = Vec::new();
+    let mut start = 0usize;
+    for end in 0..=tokens.len() {
+        if end < tokens.len() && tokens[end].kind != TokenKind::Comma {
+            continue;
+        }
+        if start == end {
+            return Err("annotation '@effects' has an empty argument".to_string());
+        }
+        let first = tokens[start];
+        let last = tokens[end - 1];
+        arguments.push(ParsedFunctionAnnotationArgument {
+            kind: if start + 1 == end && first.kind == TokenKind::Identifier {
+                ParsedFunctionAnnotationArgumentKind::Identifier
+            } else {
+                ParsedFunctionAnnotationArgumentKind::Other
+            },
+            text: source[first.start..last.end].to_string(),
+        });
+        start = end + 1;
+    }
+    Ok(arguments)
 }
 
 fn parse_extern_symbol_annotation(
@@ -1205,8 +1580,11 @@ pub(crate) fn parse_string_literal_text(literal_text: &str) -> Result<String, St
             index += 2;
             continue;
         }
-        out.push(byte as char);
-        index += 1;
+        let Some(next_char) = literal_text[index..].chars().next() else {
+            return Err("invalid UTF-8 boundary in string literal".to_string());
+        };
+        out.push(next_char);
+        index += next_char.len_utf8();
     }
     Ok(out)
 }
@@ -1751,6 +2129,7 @@ function tick(): i32 {
         assert_eq!(parsed[0].symbol_name, "host_cli_arg_count");
         assert!(!parsed[0].explicit_symbol);
         assert_eq!(parsed[0].return_type_name, "i32");
+        assert_eq!(&source[parsed[0].name_range.clone()], "host_cli_arg_count");
     }
 
     #[test]
@@ -1763,6 +2142,124 @@ function tick(): i32 {
         assert!(parsed[0].explicit_symbol);
         assert_eq!(parsed[0].params.len(), 2);
         assert_eq!(parsed[0].params[1].type_name, "string");
+        assert_eq!(&source[parsed[0].name_range.clone()], "gfx_cache_text");
+    }
+
+    #[test]
+    fn preserves_name_spans_for_multiple_extern_declarations() {
+        let source = "extern function first(): void;\n".to_string()
+            + "function @extern(\"second_symbol\") second(value: i32): void;\n";
+        let parsed = parse_top_level_extern_functions(&source).expect("parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(&source[parsed[0].name_range.clone()], "first");
+        assert_eq!(&source[parsed[1].name_range.clone()], "second");
+        assert!(parsed[0].name_range.end < parsed[1].name_range.start);
+    }
+
+    #[test]
+    fn missing_final_function_brace_owns_parser_span_and_symbol() {
+        let source = "function first(): void { return; }\n\nfunction final_hook(): void {\n";
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("missing final brace must fail");
+        assert_eq!(error.message, "missing closing '}' for function body");
+        assert_eq!(error.symbol, "final_hook");
+        assert_eq!(
+            &source[error.start..source.find("function final_hook").unwrap() + 8],
+            "function"
+        );
+        assert_eq!(error.end, source.len());
+    }
+
+    #[test]
+    fn malformed_later_function_owns_parser_span_and_symbol() {
+        let source = "function first(): void {}\nfunction second(: i32): void {}\n";
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("later malformed function must fail");
+        assert_eq!(error.symbol, "second");
+        assert_eq!(&source[error.start..error.end], ":");
+        assert_eq!(source[..error.start].matches('\n').count() + 1, 2);
+    }
+
+    #[test]
+    fn later_function_missing_parameter_colon_keeps_active_context() {
+        let source = "function first(): void {}\nfunction second(value i32): void {}\n";
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("missing parameter colon must fail");
+        assert_eq!(error.symbol, "second");
+        assert_eq!(&source[error.start..error.end], "i32");
+    }
+
+    #[test]
+    fn malformed_later_annotation_keeps_active_context() {
+        let source = "function first(): void {}\nfunction @effects(state,) second(): void {}\n";
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("malformed annotation must fail");
+        assert_eq!(error.symbol, "second");
+        assert!(error.start > source.find("function second").unwrap_or(0));
+        assert!(error.end > error.start);
+    }
+
+    #[test]
+    fn lexer_failure_in_later_function_keeps_best_parser_context() {
+        let source = "function first(): void {}\nfunction second(): void { \"unterminated\n";
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("unterminated later string must fail");
+        assert_eq!(error.symbol, "second");
+        assert_eq!(error.start, source.find("\"unterminated").unwrap());
+        assert_eq!(error.end, source.len());
+    }
+
+    #[test]
+    fn lexer_failure_uses_preceding_function_not_later_text() {
+        let source = "function first(): void { \"unterminated\nfunction later(): void {}\n";
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("unterminated earlier string must fail");
+        assert_eq!(error.symbol, "first");
+        assert_eq!(error.start, source.find("\"unterminated").unwrap());
+    }
+
+    #[test]
+    fn lexer_failure_ignores_function_text_inside_string() {
+        let source = "function first(): void {}\n\"unterminated function fake(): void {}\n";
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("unterminated string must fail");
+        assert_eq!(error.symbol, "first");
+        assert!(!error.symbol.contains("fake"));
+    }
+
+    #[test]
+    fn lexer_failure_ignores_function_text_inside_block_comment() {
+        let source = concat!(
+            "function first(): void {}\n",
+            "/* function fake(): void {} */\n",
+            "function actual(): void { \"unterminated\n",
+        );
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("unterminated string after block comment must fail");
+        assert_eq!(error.symbol, "actual");
+        assert_eq!(error.start, source.find("\"unterminated").unwrap());
+        assert_eq!(error.end, source.len());
+    }
+
+    #[test]
+    fn lexer_failure_in_annotated_function_does_not_retain_prior_symbol() {
+        let source = "function first(): void {}\nfunction @extern(\"unterminated\n";
+        let error = parse_top_level_functions_with_diagnostic(source)
+            .expect_err("unterminated annotated string must fail");
+        assert!(
+            error.symbol.is_empty(),
+            "unexpected symbol: {}",
+            error.symbol
+        );
+        assert_eq!(error.start, source.find("\"unterminated").unwrap());
+    }
+
+    #[test]
+    fn preserves_utf8_in_string_literals() {
+        assert_eq!(
+            parse_string_literal_text("\"héllo 世界 ✓\"").expect("parse UTF-8 literal"),
+            "héllo 世界 ✓"
+        );
     }
 
     #[test]
@@ -1797,5 +2294,25 @@ function tick(): i32 {
             "function demo(): i32 { /* test `inner`(): bool { return false; } */ return 0; }\n";
         let parsed = parse_top_level_test_declarations(source).expect("parse");
         assert_eq!(parsed.len(), 0);
+    }
+
+    #[test]
+    fn parses_internal_annotations_on_functions_and_externs() {
+        let source = concat!(
+            "function @internal helper(): i32 { return 1; }\n",
+            "function @internal @extern(\"host_raw\") host_raw(): i32;\n",
+            "extern function @internal legacy_host_raw(): i32;\n",
+        );
+        let functions = parse_top_level_functions(source).expect("functions");
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].annotations[0].name, "internal");
+        let externs = parse_top_level_extern_functions(source).expect("externs");
+        assert_eq!(externs.len(), 2);
+        assert!(externs.iter().all(|external| external
+            .annotations
+            .iter()
+            .any(|annotation| annotation.name == "internal")));
+        assert_eq!(externs[0].symbol_name, "host_raw");
+        assert_eq!(externs[1].symbol_name, "legacy_host_raw");
     }
 }

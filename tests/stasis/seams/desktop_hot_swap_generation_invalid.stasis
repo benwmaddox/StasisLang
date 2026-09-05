@@ -1,0 +1,27 @@
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+global tick_generation: i32;
+
+function main(): i32 {
+    return missing_generation;
+}
+
+function tick(): i32 {
+    tick_generation = 404;
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    if (tick_generation == 404) {
+        clear(0.44, 0.84, 0.24, 1.0);
+    } else {
+        clear(0.94, 0.04, 0.24, 1.0);
+    }
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

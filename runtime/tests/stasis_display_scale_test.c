@@ -71,6 +71,118 @@ static void test_fractional_and_downscale_metrics_are_distinct(void) {
     CHECK(stasis_display_scaled_extent(96, downscale.raster_scale) == 96);
 }
 
+static void test_desktop_density_tiers_preserve_logical_geometry(void) {
+    const int scales[] = {100, 125, 150, 200};
+    const int drawable_widths[] = {800, 1000, 1200, 1600};
+    const int drawable_heights[] = {600, 750, 900, 1200};
+    for (int index = 0; index < 4; index++) {
+        StasisDisplayMetrics metrics = metrics_for(
+            800, 600, 800, 600,
+            drawable_widths[index], drawable_heights[index]);
+        const float expected_scale = (float)scales[index] / 100.0f;
+        CHECK(metrics.logical_w == 800);
+        CHECK(metrics.logical_h == 600);
+        CHECK(close_enough(metrics.content_scale, expected_scale));
+        CHECK(close_enough(metrics.raster_scale, expected_scale));
+        CHECK(stasis_display_scaled_extent(33, metrics.raster_scale) ==
+            (int)ceilf(33.0f * expected_scale));
+
+        float native_x = 0.0f;
+        float native_y = 0.0f;
+        float logical_x = 0.0f;
+        float logical_y = 0.0f;
+        stasis_display_logical_to_native_xy(
+            &metrics, 613.25f, 411.75f, &native_x, &native_y);
+        stasis_display_native_to_logical_xy(
+            &metrics, native_x, native_y, &logical_x, &logical_y);
+        CHECK(close_enough(logical_x, 613.25f));
+        CHECK(close_enough(logical_y, 411.75f));
+    }
+    CHECK(stasis_display_scaled_extent_for_backing(18, 720, 360, 1920, 986) == 48);
+    CHECK(stasis_display_scaled_extent_for_backing(13, 720, 360, 1920, 986) == 35);
+    CHECK(stasis_display_scaled_extent_for_backing(18, 720, 360, 1921, 986) == 49);
+}
+
+static void test_preparation_scale_is_exact_and_bounded(void) {
+    const StasisDisplayPreparationScale unity =
+        stasis_display_preparation_scale(2000, 1000, 2000, 1000);
+    const StasisDisplayPreparationScale fractional =
+        stasis_display_preparation_scale(2000, 1000, 2001, 1001);
+    CHECK(unity.numerator == 1);
+    CHECK(unity.denominator == 1);
+    CHECK(fractional.numerator == 2001);
+    CHECK(fractional.denominator == 2000);
+    CHECK(stasis_display_preparation_scale_changed(unity, fractional));
+    CHECK(stasis_display_scaled_extent_for_backing(2000, 2000, 1000, 2001, 1001) == 2001);
+
+    const StasisDisplayPreparationScale over_eight =
+        stasis_display_preparation_scale(100, 50, 901, 451);
+    const StasisDisplayPreparationScale farther_over_eight =
+        stasis_display_preparation_scale(100, 50, 1200, 600);
+    CHECK(over_eight.numerator == STASIS_DISPLAY_RASTER_SCALE_MAX);
+    CHECK(over_eight.denominator == 1);
+    CHECK(!stasis_display_preparation_scale_changed(over_eight, farther_over_eight));
+    CHECK(stasis_display_scaled_extent_for_backing(100, 100, 50, 901, 451) == 800);
+    CHECK(stasis_display_scaled_extent_for_backing(9000, 100, 50, 901, 451) == 65536);
+}
+
+static void test_x11_content_scale_selects_window_backing(void) {
+    CHECK(stasis_display_scaled_window_extent(720, 1.0f) == 720);
+    CHECK(stasis_display_scaled_window_extent(360, 1.0f) == 360);
+    CHECK(stasis_display_scaled_window_extent(720, 1.25f) == 900);
+    CHECK(stasis_display_scaled_window_extent(360, 1.25f) == 450);
+    CHECK(stasis_display_scaled_window_extent(720, 1.5f) == 1080);
+    CHECK(stasis_display_scaled_window_extent(360, 1.5f) == 540);
+    CHECK(stasis_display_scaled_window_extent(720, 2.0f) == 1440);
+    CHECK(stasis_display_scaled_window_extent(360, 2.0f) == 720);
+    CHECK(stasis_display_scaled_window_extent(720, 0.5f) == 720);
+    CHECK(stasis_display_scaled_window_extent(10000, 20.0f) == 65536);
+}
+
+static void test_x11_scale_control_requires_an_explicit_valid_factor(void) {
+    CHECK(stasis_display_scale_control_is_valid("1.0"));
+    CHECK(stasis_display_scale_control_is_valid("1.25"));
+    CHECK(stasis_display_scale_control_is_valid("1.5"));
+    CHECK(stasis_display_scale_control_is_valid("2.0"));
+    CHECK(!stasis_display_scale_control_is_valid(NULL));
+    CHECK(!stasis_display_scale_control_is_valid(""));
+    CHECK(!stasis_display_scale_control_is_valid("0"));
+    CHECK(!stasis_display_scale_control_is_valid("-1"));
+    CHECK(!stasis_display_scale_control_is_valid("not-a-scale"));
+    CHECK(!stasis_display_scale_control_is_valid("1.25x"));
+}
+
+static void test_explicit_window_extent_survives_stale_maximized_state(void) {
+    CHECK(stasis_display_should_apply_windowed_extent(1, 0, 1, 0));
+    CHECK(stasis_display_should_apply_windowed_extent(1, 0, 0, 1));
+    CHECK(!stasis_display_should_apply_windowed_extent(1, 1, 0, 0));
+    CHECK(!stasis_display_should_apply_windowed_extent(0, 0, 1, 0));
+    CHECK(!stasis_display_should_apply_windowed_extent(0, 0, 0, 1));
+    CHECK(stasis_display_should_apply_windowed_extent(0, 0, 0, 0));
+}
+
+static void test_full_backing_and_fitted_content_remain_distinct(void) {
+    StasisDisplayMetrics portrait = metrics_for(
+        360, 720, 1920, 960, 1920, 960);
+    CHECK(portrait.drawable_w == 1920);
+    CHECK(portrait.drawable_h == 960);
+    CHECK(close_enough(portrait.drawable_viewport.x, 720.0f));
+    CHECK(close_enough(portrait.drawable_viewport.y, 0.0f));
+    CHECK(close_enough(portrait.drawable_viewport.w, 480.0f));
+    CHECK(close_enough(portrait.drawable_viewport.h, 960.0f));
+    CHECK(close_enough(portrait.raster_scale, 4.0f / 3.0f));
+
+    StasisDisplayMetrics landscape = metrics_for(
+        720, 360, 1920, 960, 1920, 960);
+    CHECK(landscape.drawable_w == 1920);
+    CHECK(landscape.drawable_h == 960);
+    CHECK(close_enough(landscape.drawable_viewport.x, 0.0f));
+    CHECK(close_enough(landscape.drawable_viewport.y, 0.0f));
+    CHECK(close_enough(landscape.drawable_viewport.w, 1920.0f));
+    CHECK(close_enough(landscape.drawable_viewport.h, 960.0f));
+    CHECK(close_enough(landscape.raster_scale, 8.0f / 3.0f));
+}
+
 static void test_orientation_change_keeps_logical_dimensions(void) {
     StasisDisplayMetrics portrait = metrics_for(360, 720, 1080, 2400, 1080, 2400);
     StasisDisplayMetrics landscape = metrics_for(360, 720, 2400, 1080, 2400, 1080);
@@ -148,14 +260,31 @@ static void test_extreme_density_and_extent_are_bounded(void) {
     CHECK(stasis_display_font_atlas_extent(metrics.raster_scale) == 2048);
 }
 
+static void test_font_atlas_growth_is_bounded_and_deterministic(void) {
+    CHECK(stasis_display_font_atlas_next_extent(512) == 1024);
+    CHECK(stasis_display_font_atlas_next_extent(1024) == 2048);
+    CHECK(stasis_display_font_atlas_next_extent(2048) == 4096);
+    CHECK(stasis_display_font_atlas_next_extent(4096) == 0);
+    CHECK(stasis_display_font_atlas_next_extent(8192) == 0);
+    CHECK(stasis_display_font_atlas_next_extent(0) == 512);
+    CHECK(stasis_display_font_atlas_next_extent(513) == 1024);
+}
+
 int main(void) {
     test_phone_scale_preserves_logical_canvas();
     test_pointer_mapping_round_trips_through_letterbox();
     test_fractional_and_downscale_metrics_are_distinct();
+    test_desktop_density_tiers_preserve_logical_geometry();
+    test_preparation_scale_is_exact_and_bounded();
+    test_x11_content_scale_selects_window_backing();
+    test_x11_scale_control_requires_an_explicit_valid_factor();
+    test_explicit_window_extent_survives_stale_maximized_state();
+    test_full_backing_and_fitted_content_remain_distinct();
     test_orientation_change_keeps_logical_dimensions();
     test_odd_fractional_viewport_uses_renderer_rounding();
     test_safe_native_area_maps_to_logical_viewport();
     test_maximized_portrait_pointer_mapping();
     test_extreme_density_and_extent_are_bounded();
+    test_font_atlas_growth_is_bounded_and_deterministic();
     return 0;
 }

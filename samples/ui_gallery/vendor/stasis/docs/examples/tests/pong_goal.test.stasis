@@ -1,0 +1,18 @@
+import "../src/pong_goal.stasis";
+
+test `crossing the right goal scores once and resets play`(): bool {
+    reset_pong();
+    pong.left_score = 4;
+    pong.right_score = 7;
+    pong.ball_x = COURT_RIGHT;
+    pong.ball_dx = 1;
+
+    tick();
+    if (pong.left_score != 5 || pong.right_score != 7 || pong.ball_x != COURT_CENTER || pong.ball_dx != -1) {
+        return false;
+    }
+
+    tick();
+
+    return pong.left_score == 5 && pong.right_score == 7 && pong.ball_x == COURT_CENTER - 1 && pong.ball_dx == -1;
+}

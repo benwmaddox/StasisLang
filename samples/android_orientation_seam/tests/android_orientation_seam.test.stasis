@@ -1,0 +1,71 @@
+import "../.stasis_cache/toolchain/src/stdlib/testing/input_testkit.stasis";
+import "../main.stasis";
+
+function reset_orientation_seam(): void {
+    input_testkit_reset();
+    seam_state_checksum = 4000;
+    seam_probe_sequence = 0;
+    seam_probe_kind = 0;
+    seam_probe_tick = 0;
+    seam_pointer_id = 0;
+    seam_pointer_count = 0;
+    seam_pointer_is_down = 0;
+    seam_pointer_went_down = 0;
+    seam_pointer_went_up = 0;
+    seam_pointer_x = 0.0;
+    seam_pointer_y = 0.0;
+    seam_pointer_x_n = 0.0;
+    seam_pointer_y_n = 0.0;
+    seam_safe_x = 0.0;
+    seam_safe_y = 0.0;
+    seam_safe_w = 0.0;
+    seam_safe_h = 0.0;
+    seam_logical_w = 0.0;
+    seam_logical_h = 0.0;
+    seam_native_w = 0;
+    seam_native_h = 0;
+    seam_drawable_w = 0;
+    seam_drawable_h = 0;
+    seam_display_generation = 0;
+    seam_density_generation = 0;
+    seam_content_scale = 0.0;
+    seam_raster_scale = 0.0;
+    seam_pending_generation = 0;
+    seam_last_generation = 0;
+}
+
+function set_stage(width_px: i32, height_px: i32, generation: i32, is_down: bool, went_down: bool, went_up: bool): void {
+    input_testkit_set_display_snapshot_with_logical(width_px, height_px, 360, 720, generation);
+    input_testkit_set_pointer_count(2);
+    input_testkit_set_pointer(0, 0, false, false, false, 0.0, 0.0);
+    input_testkit_set_pointer(1, 77, is_down, went_down, went_up, 270.0, 540.0);
+    tick();
+}
+
+test `android orientation seam portrait to landscape release is actionable`(): bool {
+    reset_orientation_seam();
+    set_stage(360, 720, 1, true, true, false);
+    let portrait_down: bool = seam_probe_sequence == 0 && seam_state_checksum == 4000;
+    set_stage(360, 720, 1, false, false, true);
+    let portrait_up: bool = seam_probe_sequence == 1 && seam_probe_kind == 1 && seam_display_generation == 1 && seam_pointer_id == 77 && seam_pointer_went_up == 1 && seam_pointer_x == 270.0 && seam_pointer_y == 540.0;
+    set_stage(720, 360, 2, true, true, false);
+    let landscape_down: bool = seam_probe_sequence == 1 && seam_state_checksum == 4111;
+    set_stage(720, 360, 2, false, false, true);
+    let landscape_up: bool = seam_probe_sequence == 2 && seam_probe_kind == 2 && seam_display_generation == 2 && seam_pointer_id == 77 && seam_pointer_went_up == 1 && seam_pointer_x_n == 0.75 && seam_pointer_y_n == 0.75;
+    return portrait_down && portrait_up && landscape_down && landscape_up;
+}
+
+test `android orientation seam landscape to portrait release is actionable`(): bool {
+    reset_orientation_seam();
+    set_stage(720, 360, 1, true, true, false);
+    let landscape_down: bool = seam_probe_sequence == 0 && seam_state_checksum == 4000;
+    set_stage(720, 360, 1, false, false, true);
+    let landscape_up: bool = seam_probe_sequence == 1 && seam_probe_kind == 2 && seam_display_generation == 1 && seam_logical_w == 360.0 && seam_logical_h == 720.0 && seam_native_w == 720 && seam_native_h == 360 && seam_pointer_id == 77 && seam_pointer_went_up == 1;
+    set_stage(360, 720, 2, true, true, false);
+    let portrait_down: bool = seam_probe_sequence == 1 && seam_state_checksum == 4121;
+    set_stage(360, 720, 2, false, false, true);
+    let portrait_up: bool = seam_probe_sequence == 2 && seam_probe_kind == 1 && seam_display_generation == 2 && seam_logical_w == 360.0 && seam_logical_h == 720.0 && seam_native_w == 360 && seam_native_h == 720 && seam_pointer_id == 77 && seam_pointer_went_up == 1 && seam_pointer_x_n == 0.75 && seam_pointer_y_n == 0.75;
+    set_stage(360, 720, 2, false, false, false);
+    let quiet: bool = seam_probe_sequence == 2 && seam_state_checksum == 4212 && seam_pointer_went_up == 1;
+    return landscape_down && landscape_up && portrait_down && portrait_up && quiet;
+}

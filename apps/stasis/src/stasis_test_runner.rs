@@ -70,6 +70,20 @@ pub fn run_jit_tests_in_directory_with_project_root_and_session(
     project_root: &Path,
     session: &mut StasisTestRunSession,
 ) -> Result<StasisTestRunSummary, String> {
+    run_jit_tests_in_directory_with_project_root_session_and_validator(
+        root,
+        project_root,
+        session,
+        |_| Ok(()),
+    )
+}
+
+pub fn run_jit_tests_in_directory_with_project_root_session_and_validator(
+    root: &Path,
+    project_root: &Path,
+    session: &mut StasisTestRunSession,
+    mut validate: impl FnMut(&JitProcess) -> Result<(), String>,
+) -> Result<StasisTestRunSummary, String> {
     let current_dir = std::env::current_dir()
         .map_err(|error| format!("failed to read current directory: {error}"))?;
     let root = canonical_test_path("test directory", root, &current_dir)?;
@@ -195,6 +209,7 @@ pub fn run_jit_tests_in_directory_with_project_root_and_session(
             session.last_active_path = Some(file_path.clone());
         }
 
+        validate(&entry.process)?;
         entry.process.activate_runtime_state();
         let execute_started = Instant::now();
         run_discovered_tests(&entry.process, &tests, &file_path, &mut summary);
@@ -347,7 +362,7 @@ fn looks_like_test_declaration_source(source: &str) -> bool {
     source.contains("test") && source.contains('`')
 }
 
-fn natural_path_cmp(left: &str, right: &str) -> Ordering {
+pub fn natural_path_cmp(left: &str, right: &str) -> Ordering {
     let left_bytes = left.as_bytes();
     let right_bytes = right.as_bytes();
     let mut i = 0usize;

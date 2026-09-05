@@ -16,8 +16,8 @@ Configure the supported build with:
 
 ```text
 cmake -S runtime -B runtime/build \
-  -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
-  -DSTASIS_GRAPHICS_SDL_ONLY=ON
+  -DSTASIS_GRAPHICS_BUNDLE_SDL=ON
+
 cmake --build runtime/build --config Release
 ```
 

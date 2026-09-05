@@ -1,0 +1,55 @@
+@link("stasis_graphics");
+
+import "../../../src/stdlib/internal/gfx_cmd.stasis";
+
+extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+extern function load_font(path: string, size: i32): i32;
+extern function measure_text(font: i32, text: string): f32;
+
+function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
+function @extern("stasis_jit_gfx_measure_text_cached") gfx_measure_text_cached(handle: i32): f32;
+
+global seam_sprite_handle: i32;
+global seam_font_handle: i32;
+global seam_cached_handle: i32;
+global seam_direct_width: f32;
+global seam_cached_width: f32;
+
+function main(): i32 {
+    seam_sprite_handle = gfx_load_sprite("assets/smoke.png", 64, 64);
+    if (seam_sprite_handle == 0) {
+        return 21;
+    }
+    seam_font_handle = load_font("assets/smoke.ttf", 24);
+    if (seam_font_handle == 0) {
+        return 22;
+    }
+    seam_cached_handle = gfx_cache_text(seam_font_handle, "CACHED");
+    if (seam_cached_handle == 0) {
+        return 23;
+    }
+    seam_direct_width = measure_text(seam_font_handle, "DIRECT");
+    seam_cached_width = gfx_measure_text_cached(seam_cached_handle);
+    if (seam_direct_width <= 0.0 || seam_cached_width <= 0.0) {
+        return 24;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    gfx_cmd_begin();
+    gfx_cmd_clear(0.04, 0.07, 0.12, 1.0);
+    gfx_cmd_sprite(seam_sprite_handle, 52.0, 28.0, 64.0, 64.0, 0, 255);
+    gfx_cmd_text(seam_font_handle, "DIRECT", 30.0, 112.0, 1.0, 0.8, 0.1, 1.0);
+    gfx_cmd_text_cached(seam_font_handle, seam_cached_handle, 175.0, 112.0, 0.1, 0.9, 1.0, 1.0);
+    gfx_cmd_submit();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

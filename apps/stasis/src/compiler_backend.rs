@@ -5,8 +5,6 @@ use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_layout::StateLayout;
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
-#[cfg(test)]
-use stasis_compiler::{SimpleI32Condition, SimpleI32ReturnExpr};
 use stasis_jit::{
     link_objects_to_dynamic_library, link_objects_to_executable, AotCompileConfig, AotLinkConfig,
 };
@@ -18,6 +16,8 @@ use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 
 pub(crate) struct PreparedJitSwap {
@@ -66,7 +66,7 @@ fn stable_absolute_path(path: &Path) -> PathBuf {
     absolute
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelfHostedAotCliSummary {
     pub source_file_count: usize,
     pub linked_image_path: PathBuf,
@@ -74,15 +74,8 @@ pub struct SelfHostedAotCliSummary {
     pub ir_bundle_path: PathBuf,
     pub object_bundle_path: PathBuf,
     pub object_file_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AotFallbackStubDetail {
-    symbol: String,
-    id_hash: i32,
-    sig_hash: i32,
-    body_hash: i32,
-    ordinal: u32,
+    #[serde(skip)]
+    pub program_snapshot: Option<ProgramSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,8 +85,6 @@ struct AotPatchManifest {
     linked_image_path: Option<String>,
     linked_image_size_bytes: Option<u64>,
     linked_image_sha256: Option<String>,
-    fallback_stub_symbols: Vec<String>,
-    fallback_stub_details: Vec<AotFallbackStubDetail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +122,28 @@ struct EngineBundleManifestCollectionMaxLengthRow {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct EngineBundleManifestHotRenderImageRow {
+    logical_path: String,
+    logical_width: u32,
+    logical_height: u32,
+    max_renders_per_render: Option<u64>,
+    atlas_eligible: bool,
+    grouping_key: String,
+    #[serde(default)]
+    estimated_distinct_transitions: u64,
+    #[serde(default)]
+    group_member_count: u32,
+    #[serde(default)]
+    group_logical_pixel_area: u64,
+    #[serde(default)]
+    group_max_logical_width: u32,
+    #[serde(default)]
+    group_max_logical_height: u32,
+    #[serde(default)]
+    backend_constraints: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifest {
     #[serde(default)]
     optimization_profile: Option<String>,
@@ -139,6 +152,103 @@ struct EngineBundleManifest {
     string_literals: Option<Vec<EngineBundleManifestStringLiteralRow>>,
     #[serde(default)]
     collection_max_lengths: Option<Vec<EngineBundleManifestCollectionMaxLengthRow>>,
+    #[serde(default)]
+    hot_render_metadata_version: Option<u32>,
+    #[serde(default)]
+    hot_render_images: Option<Vec<EngineBundleManifestHotRenderImageRow>>,
+}
+
+fn read_engine_bundle_manifest(path: &Path) -> Result<EngineBundleManifest, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read AOT engine bundle manifest {}: {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "failed to parse AOT engine bundle manifest {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HotRenderRuntimePolicy {
+    version: u32,
+    images: Vec<stasis_dynload::HotRenderRuntimeImage>,
+}
+
+impl HotRenderRuntimePolicy {
+    #[cfg(test)]
+    pub(crate) fn for_test(images: Vec<stasis_dynload::HotRenderRuntimeImage>) -> Self {
+        Self {
+            version: stasis_dynload::HOT_RENDER_METADATA_VERSION,
+            images,
+        }
+    }
+
+    pub(crate) fn publish(&self) {
+        stasis_dynload::replace_hot_render_metadata(self.version, &self.images);
+    }
+}
+
+pub(crate) fn snapshot_hot_render_policy(snapshot: &ProgramSnapshot) -> HotRenderRuntimePolicy {
+    let images = snapshot
+        .hot_render_images()
+        .iter()
+        .map(|image| stasis_dynload::HotRenderRuntimeImage {
+            logical_path: image.logical_path.clone(),
+            logical_width: image.logical_width,
+            logical_height: image.logical_height,
+            max_renders_per_render: image.max_renders_per_render,
+            atlas_eligible: image.atlas_eligible,
+            grouping_key: image.grouping_key.clone(),
+            estimated_distinct_transitions: image.estimated_distinct_transitions,
+            group_member_count: image.group_member_count,
+            group_logical_pixel_area: image.group_logical_pixel_area,
+            group_max_logical_width: image.group_max_logical_width,
+            group_max_logical_height: image.group_max_logical_height,
+            backend_constraints: image.backend_constraints.clone(),
+        })
+        .collect::<Vec<_>>();
+    HotRenderRuntimePolicy {
+        version: stasis_compiler::backend::hot_render::HOT_RENDER_METADATA_VERSION,
+        images,
+    }
+}
+
+fn manifest_hot_render_policy(manifest: &EngineBundleManifest) -> HotRenderRuntimePolicy {
+    let images = manifest
+        .hot_render_images
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|image| stasis_dynload::HotRenderRuntimeImage {
+            logical_path: image.logical_path.clone(),
+            logical_width: image.logical_width,
+            logical_height: image.logical_height,
+            max_renders_per_render: image.max_renders_per_render,
+            atlas_eligible: image.atlas_eligible && image.backend_constraints.is_some(),
+            grouping_key: image.grouping_key.clone(),
+            estimated_distinct_transitions: image.estimated_distinct_transitions,
+            group_member_count: image.group_member_count,
+            group_logical_pixel_area: image.group_logical_pixel_area,
+            group_max_logical_width: image.group_max_logical_width,
+            group_max_logical_height: image.group_max_logical_height,
+            backend_constraints: image.backend_constraints.clone().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    HotRenderRuntimePolicy {
+        version: manifest.hot_render_metadata_version.unwrap_or_default(),
+        images,
+    }
+}
+
+pub(crate) fn load_manifest_hot_render_policy(
+    path: &Path,
+) -> Result<HotRenderRuntimePolicy, String> {
+    read_engine_bundle_manifest(path).map(|manifest| manifest_hot_render_policy(&manifest))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -410,6 +520,7 @@ impl CompilerBackend for IncrementalCompilerBackend {
                     request_id,
                     vec![Diagnostic {
                         severity: DiagnosticSeverity::Error,
+                        code: None,
                         message,
                         path: None,
                         line: None,
@@ -461,6 +572,7 @@ impl IncrementalCompilerBackend {
                 request.request_id,
                 vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
+                    code: None,
                     message,
                     path: request.changed_files.first().cloned(),
                     line: None,
@@ -475,6 +587,7 @@ impl IncrementalCompilerBackend {
                     request.request_id,
                     vec![Diagnostic {
                         severity: DiagnosticSeverity::Error,
+                        code: None,
                         message,
                         path: request.changed_files.first().cloned(),
                         line: None,
@@ -526,6 +639,7 @@ impl IncrementalCompilerBackend {
                     request.request_id,
                     vec![Diagnostic {
                         severity: DiagnosticSeverity::Error,
+                        code: None,
                         message,
                         path: request.changed_files.first().cloned(),
                         line: None,
@@ -574,6 +688,7 @@ impl IncrementalCompilerBackend {
                 request.request_id,
                 vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
+                    code: None,
                     message,
                     path: request.changed_files.first().cloned(),
                     line: None,
@@ -594,6 +709,7 @@ impl IncrementalCompilerBackend {
         let Some(source) = source else {
             return Diagnostic {
                 severity: DiagnosticSeverity::Error,
+                code: None,
                 message: fallback,
                 path: fallback_path,
                 line: None,
@@ -615,6 +731,7 @@ impl IncrementalCompilerBackend {
             start.saturating_sub(text[..start].rfind('\n').map_or(0, |index| index + 1)) as u32 + 1;
         Diagnostic {
             severity: DiagnosticSeverity::Error,
+            code: Some(source.code.as_str().to_string()),
             message: source.message.clone(),
             path: Some(
                 source_entry
@@ -652,6 +769,7 @@ impl IncrementalCompilerBackend {
                                 request.request_id,
                                 vec![Diagnostic {
                                     severity: DiagnosticSeverity::Error,
+                                    code: None,
                                     message,
                                     path: request.changed_files.first().cloned(),
                                     line: None,
@@ -670,6 +788,7 @@ impl IncrementalCompilerBackend {
                             request.request_id,
                             vec![Diagnostic {
                                 severity: DiagnosticSeverity::Error,
+                                code: None,
                                 message,
                                 path: request.changed_files.first().cloned(),
                                 line: None,
@@ -696,6 +815,7 @@ impl IncrementalCompilerBackend {
                     if let Err(error) = std::fs::remove_dir_all(&bundle_output_dir) {
                         return CompileResult::failed(request.request_id, vec![Diagnostic {
                             severity: DiagnosticSeverity::Error,
+                            code: None,
                             message: format!("failed to clear existing AOT engine bundle directory {}: {error}", bundle_output_dir.display()),
                             path: request.changed_files.first().cloned(), line: None, column: None,
                         }]);
@@ -711,6 +831,7 @@ impl IncrementalCompilerBackend {
                             request.request_id,
                             vec![Diagnostic {
                                 severity: DiagnosticSeverity::Error,
+                                code: None,
                                 message,
                                 path: request.changed_files.first().cloned(),
                                 line: None,
@@ -727,6 +848,7 @@ impl IncrementalCompilerBackend {
                         request.request_id,
                         vec![Diagnostic {
                             severity: DiagnosticSeverity::Error,
+                            code: None,
                             message: format!(
                                 "failed to stat AOT engine bundle manifest {}: {error}",
                                 bundle.manifest_path.display()
@@ -746,6 +868,7 @@ impl IncrementalCompilerBackend {
                         request.request_id,
                         vec![Diagnostic {
                             severity: DiagnosticSeverity::Error,
+                            code: None,
                             message: format!(
                                 "failed to hash AOT engine bundle manifest {}: {error}",
                                 bundle.manifest_path.display()
@@ -767,6 +890,7 @@ impl IncrementalCompilerBackend {
                             request.request_id,
                             vec![Diagnostic {
                                 severity: DiagnosticSeverity::Error,
+                                code: None,
                                 message,
                                 path: request.changed_files.first().cloned(),
                                 line: None,
@@ -823,8 +947,9 @@ impl IncrementalCompilerBackend {
                         return CompileResult::failed(
                         request.request_id,
                         vec![Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            message: format!(
+                    severity: DiagnosticSeverity::Error,
+                    code: None,
+                    message: format!(
                                 "host ABI alias '{}' is ambiguous across canonical function identities",
                                 entry.name
                             ),
@@ -846,6 +971,7 @@ impl IncrementalCompilerBackend {
                 request.request_id,
                 vec![Diagnostic {
                     severity: DiagnosticSeverity::Error,
+                    code: None,
                     message:
                         "engine contract compile produced no emitted function mapping for patch set"
                             .to_string(),
@@ -872,6 +998,7 @@ impl IncrementalCompilerBackend {
                         request.request_id,
                         vec![Diagnostic {
                             severity: DiagnosticSeverity::Error,
+                            code: None,
                             message: format!(
                                 "AOT manifest FnId collision: '{}' vs '{}'",
                                 manifest_symbol_id, entry.symbol_id
@@ -898,6 +1025,7 @@ impl IncrementalCompilerBackend {
                     request.request_id,
                     vec![Diagnostic {
                         severity: DiagnosticSeverity::Error,
+                        code: None,
                         message: "missing JIT engine package after successful JIT compile"
                             .to_string(),
                         path: request.changed_files.first().cloned(),
@@ -1139,18 +1267,7 @@ impl IncrementalCompilerBackend {
     }
 
     fn read_engine_bundle_manifest(&self, path: &Path) -> Result<EngineBundleManifest, String> {
-        let text = std::fs::read_to_string(path).map_err(|error| {
-            format!(
-                "failed to read AOT engine bundle manifest {}: {error}",
-                path.display()
-            )
-        })?;
-        serde_json::from_str(&text).map_err(|error| {
-            format!(
-                "failed to parse AOT engine bundle manifest {}: {error}",
-                path.display()
-            )
-        })
+        read_engine_bundle_manifest(path)
     }
 
     fn layout_hash_from_snapshot(&self) -> LayoutHash {
@@ -1257,8 +1374,6 @@ impl IncrementalCompilerBackend {
                 .map(|path| path.display().to_string()),
             linked_image_size_bytes,
             linked_image_sha256.clone(),
-            &[],
-            &[],
         )?;
 
         Ok(DirectAotArtifactBundle {
@@ -1318,8 +1433,6 @@ impl IncrementalCompilerBackend {
         linked_image_path: Option<String>,
         linked_image_size_bytes: Option<u64>,
         linked_image_sha256: Option<String>,
-        fallback_stub_symbols: &[String],
-        fallback_stub_details: &[AotFallbackStubDetail],
     ) -> Result<(), String> {
         let manifest_path = self.aot_artifact_root.join("last_patch_manifest.json");
         let manifest = AotPatchManifest {
@@ -1328,8 +1441,6 @@ impl IncrementalCompilerBackend {
             linked_image_path,
             linked_image_size_bytes,
             linked_image_sha256,
-            fallback_stub_symbols: fallback_stub_symbols.to_vec(),
-            fallback_stub_details: fallback_stub_details.to_vec(),
         };
         let payload = serde_json::to_string_pretty(&manifest)
             .map_err(|error| format!("failed to serialize AOT manifest: {error}"))?;
@@ -1358,794 +1469,6 @@ fn expand_layout_hash(layout_hash: i32) -> LayoutHash {
     LayoutHash(out)
 }
 
-#[cfg(test)]
-fn hash_identifier(name: &str) -> i32 {
-    let mut hash: i32 = 216613626;
-    for byte in name.bytes() {
-        hash = hash
-            .wrapping_mul(16777619)
-            .wrapping_add(i32::from(byte) + 1);
-    }
-    hash
-}
-
-#[cfg(test)]
-fn build_aot_stub_clif(
-    function_name: &str,
-    return_type: &str,
-    simple_expr: Option<&SimpleI32ReturnExpr>,
-    fallback_return_value: i32,
-    simple_call_target_symbol: Option<&str>,
-    simple_i32_return_call_add_delta: Option<i32>,
-    simple_call_one_arg_target_symbol: Option<&str>,
-    simple_call_one_arg_i32_literal: Option<i32>,
-    simple_call_one_arg_arg_call_target_symbol: Option<&str>,
-    simple_two_call_left_target_symbol: Option<&str>,
-    simple_two_call_right_target_symbol: Option<&str>,
-    simple_i32_return_two_call_op_code: Option<i32>,
-    simple_void_print_i32_literal: Option<i32>,
-    simple_void_print_i32_call_target_symbol: Option<&str>,
-    simple_void_print_i32_call_one_arg_arg_call_target_symbol: Option<&str>,
-    simple_void_print_i32_call_add_delta: Option<i32>,
-) -> String {
-    build_aot_stub_clif_for_metric(
-        function_name,
-        return_type,
-        simple_expr,
-        fallback_return_value,
-        simple_call_target_symbol,
-        simple_i32_return_call_add_delta,
-        simple_call_one_arg_target_symbol,
-        simple_call_one_arg_i32_literal,
-        simple_call_one_arg_arg_call_target_symbol,
-        None,
-        None,
-        None,
-        None,
-        0,
-        0,
-        false,
-        false,
-        false,
-        false,
-        false,
-        simple_two_call_left_target_symbol,
-        simple_two_call_right_target_symbol,
-        simple_i32_return_two_call_op_code,
-        simple_void_print_i32_literal,
-        simple_void_print_i32_call_target_symbol,
-        simple_void_print_i32_call_one_arg_arg_call_target_symbol,
-        simple_void_print_i32_call_add_delta,
-    )
-}
-
-#[cfg(test)]
-fn clif_type_for_stasis_param_code(type_code: i32) -> &'static str {
-    if type_code == 1 {
-        "i32"
-    } else {
-        "i64"
-    }
-}
-
-#[cfg(test)]
-fn build_aot_stub_clif_for_metric(
-    function_name: &str,
-    return_type: &str,
-    simple_expr: Option<&SimpleI32ReturnExpr>,
-    fallback_return_value: i32,
-    simple_call_target_symbol: Option<&str>,
-    simple_i32_return_call_add_delta: Option<i32>,
-    simple_call_one_arg_target_symbol: Option<&str>,
-    simple_call_one_arg_i32_literal: Option<i32>,
-    simple_call_one_arg_arg_call_target_symbol: Option<&str>,
-    simple_call_two_arg_target_symbol: Option<&str>,
-    simple_call_three_arg_target_symbol: Option<&str>,
-    simple_call_four_arg_target_symbol: Option<&str>,
-    simple_call_two_arg_literal_first_second_param_target_symbol: Option<&str>,
-    function_param_count: i32,
-    function_first_param_type_code: i32,
-    simple_call_one_arg_uses_first_param_passthrough: bool,
-    simple_call_two_arg_uses_first_second_param_passthrough: bool,
-    simple_call_three_arg_uses_first_second_third_param_passthrough: bool,
-    simple_call_four_arg_uses_first_second_third_fourth_param_passthrough: bool,
-    simple_call_two_arg_uses_literal_first_second_param_passthrough: bool,
-    simple_two_call_left_target_symbol: Option<&str>,
-    simple_two_call_right_target_symbol: Option<&str>,
-    simple_i32_return_two_call_op_code: Option<i32>,
-    simple_void_print_i32_literal: Option<i32>,
-    simple_void_print_i32_call_target_symbol: Option<&str>,
-    simple_void_print_i32_call_one_arg_arg_call_target_symbol: Option<&str>,
-    simple_void_print_i32_call_add_delta: Option<i32>,
-) -> String {
-    if return_type == "void" {
-        if let (Some(left_target_symbol), Some(right_target_symbol), Some(op_code)) = (
-            simple_two_call_left_target_symbol,
-            simple_two_call_right_target_symbol,
-            simple_i32_return_two_call_op_code,
-        ) {
-            let op = if op_code == 2 { "isub" } else { "iadd" };
-            return format!(
-                "external print_i32(i32) {}\nexternal {left_target_symbol}() -> i32 {}\nexternal {right_target_symbol}() -> i32 {}\nfunction %{function_name}() {} {{\nblock0:\nv0 = call %{left_target_symbol}()\nv1 = call %{right_target_symbol}()\nv2 = {op} v0, v1\ncall %print_i32(v2)\nreturn\n}}\n",
-                aot_call_conv(),
-                aot_call_conv(),
-                aot_call_conv(),
-                aot_call_conv()
-            );
-        }
-        if let Some(call_target_symbol) = simple_void_print_i32_call_target_symbol {
-            if let (Some(arg_literal), Some(delta)) = (
-                simple_void_print_i32_literal,
-                simple_void_print_i32_call_add_delta,
-            ) {
-                let abs_delta = delta.abs();
-                let op = if delta < 0 { "isub" } else { "iadd" };
-                return format!(
-                    "external print_i32(i32) {}\nexternal {call_target_symbol}(i32) -> i32 {}\nfunction %{function_name}() {} {{\nblock0:\nv0 = iconst.i32 {arg_literal}\nv1 = call %{call_target_symbol}(v0)\nv2 = iconst.i32 {abs_delta}\nv3 = {op} v1, v2\ncall %print_i32(v3)\nreturn\n}}\n",
-                    aot_call_conv(),
-                    aot_call_conv(),
-                    aot_call_conv()
-                );
-            }
-            if let Some(arg_call_target_symbol) =
-                simple_void_print_i32_call_one_arg_arg_call_target_symbol
-            {
-                if let Some(delta) = simple_void_print_i32_call_add_delta {
-                    let abs_delta = delta.abs();
-                    let op = if delta < 0 { "isub" } else { "iadd" };
-                    return format!(
-                        "external print_i32(i32) {}\nexternal {arg_call_target_symbol}() -> i32 {}\nexternal {call_target_symbol}(i32) -> i32 {}\nfunction %{function_name}() {} {{\nblock0:\nv0 = call %{arg_call_target_symbol}()\nv1 = call %{call_target_symbol}(v0)\nv2 = iconst.i32 {abs_delta}\nv3 = {op} v1, v2\ncall %print_i32(v3)\nreturn\n}}\n",
-                        aot_call_conv(),
-                        aot_call_conv(),
-                        aot_call_conv(),
-                        aot_call_conv()
-                    );
-                }
-                return format!(
-                    "external print_i32(i32) {}\nexternal {arg_call_target_symbol}() -> i32 {}\nexternal {call_target_symbol}(i32) -> i32 {}\nfunction %{function_name}() {} {{\nblock0:\nv0 = call %{arg_call_target_symbol}()\nv1 = call %{call_target_symbol}(v0)\ncall %print_i32(v1)\nreturn\n}}\n",
-                    aot_call_conv(),
-                    aot_call_conv(),
-                    aot_call_conv(),
-                    aot_call_conv()
-                );
-            }
-            if let Some(arg_literal) = simple_void_print_i32_literal {
-                return format!(
-                    "external print_i32(i32) {}\nexternal {call_target_symbol}(i32) -> i32 {}\nfunction %{function_name}() {} {{\nblock0:\nv0 = iconst.i32 {arg_literal}\nv1 = call %{call_target_symbol}(v0)\ncall %print_i32(v1)\nreturn\n}}\n",
-                    aot_call_conv(),
-                    aot_call_conv(),
-                    aot_call_conv()
-                );
-            }
-            if let Some(delta) = simple_void_print_i32_call_add_delta {
-                let abs_delta = delta.abs();
-                let op = if delta < 0 { "isub" } else { "iadd" };
-                return format!(
-                    "external print_i32(i32) {}\nexternal {call_target_symbol}() -> i32 {}\nfunction %{function_name}() {} {{\nblock0:\nv0 = call %{call_target_symbol}()\nv1 = iconst.i32 {abs_delta}\nv2 = {op} v0, v1\ncall %print_i32(v2)\nreturn\n}}\n",
-                    aot_call_conv(),
-                    aot_call_conv(),
-                    aot_call_conv()
-                );
-            }
-            return format!(
-                "external print_i32(i32) {}\nexternal {call_target_symbol}() -> i32 {}\nfunction %{function_name}() {} {{\nblock0:\nv0 = call %{call_target_symbol}()\ncall %print_i32(v0)\nreturn\n}}\n",
-                aot_call_conv(),
-                aot_call_conv(),
-                aot_call_conv()
-            );
-        }
-        if let Some(print_literal) = simple_void_print_i32_literal {
-            return format!(
-                "external print_i32(i32) {}\nfunction %{function_name}() {} {{\nblock0:\nv0 = iconst.i32 {print_literal}\ncall %print_i32(v0)\nreturn\n}}\n",
-                aot_call_conv(),
-                aot_call_conv()
-            );
-        }
-        return format!(
-            "function %{function_name}() {} {{\nblock0:\nreturn\n}}\n",
-            aot_call_conv()
-        );
-    }
-    if let Some(call_target_symbol) = simple_call_target_symbol {
-        if let Some(delta) = simple_i32_return_call_add_delta {
-            let abs_delta = delta.abs();
-            let op = if delta < 0 { "isub" } else { "iadd" };
-            return format!(
-                "external {call_target_symbol}() -> i32 {}\nfunction %{function_name}() -> i32 {} {{\nblock0:\nv0 = call %{call_target_symbol}()\nv1 = iconst.i32 {abs_delta}\nv2 = {op} v0, v1\nreturn v2\n}}\n",
-                aot_call_conv(),
-                aot_call_conv()
-            );
-        }
-        return format!(
-            "external {call_target_symbol}() -> i32 {}\nfunction %{function_name}() -> i32 {} {{\nblock0:\nv0 = call %{call_target_symbol}()\nreturn v0\n}}\n",
-            aot_call_conv(),
-            aot_call_conv()
-        );
-    }
-    if simple_call_four_arg_uses_first_second_third_fourth_param_passthrough {
-        if let Some(call_target_symbol) = simple_call_four_arg_target_symbol {
-            if function_param_count == 4 {
-                let first_arg_type =
-                    clif_type_for_stasis_param_code(function_first_param_type_code);
-                let second_arg_type = "i32";
-                let third_arg_type = "i64";
-                let fourth_arg_type = "i64";
-                if let Some(delta) = simple_i32_return_call_add_delta {
-                    let abs_delta = delta.abs();
-                    let op = if delta < 0 { "isub" } else { "iadd" };
-                    return format!(
-                        "external {call_target_symbol}({first_arg_type}, {second_arg_type}, {third_arg_type}, {fourth_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}, {third_arg_type}, {fourth_arg_type}) -> i32 {} {{\nblock0:\nv4 = call %{call_target_symbol}(v0, v1, v2, v3)\nv5 = iconst.i32 {abs_delta}\nv6 = {op} v4, v5\nreturn v6\n}}\n",
-                        aot_call_conv(),
-                        aot_call_conv()
-                    );
-                }
-                return format!(
-                    "external {call_target_symbol}({first_arg_type}, {second_arg_type}, {third_arg_type}, {fourth_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}, {third_arg_type}, {fourth_arg_type}) -> i32 {} {{\nblock0:\nv4 = call %{call_target_symbol}(v0, v1, v2, v3)\nreturn v4\n}}\n",
-                    aot_call_conv(),
-                    aot_call_conv()
-                );
-            }
-        }
-    }
-    if simple_call_three_arg_uses_first_second_third_param_passthrough {
-        if let Some(call_target_symbol) = simple_call_three_arg_target_symbol {
-            if function_param_count == 3 {
-                let first_arg_type =
-                    clif_type_for_stasis_param_code(function_first_param_type_code);
-                let second_arg_type = "i64";
-                let third_arg_type = "i64";
-                if let Some(delta) = simple_i32_return_call_add_delta {
-                    let abs_delta = delta.abs();
-                    let op = if delta < 0 { "isub" } else { "iadd" };
-                    return format!(
-                        "external {call_target_symbol}({first_arg_type}, {second_arg_type}, {third_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}, {third_arg_type}) -> i32 {} {{\nblock0:\nv3 = call %{call_target_symbol}(v0, v1, v2)\nv4 = iconst.i32 {abs_delta}\nv5 = {op} v3, v4\nreturn v5\n}}\n",
-                        aot_call_conv(),
-                        aot_call_conv()
-                    );
-                }
-                return format!(
-                    "external {call_target_symbol}({first_arg_type}, {second_arg_type}, {third_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}, {third_arg_type}) -> i32 {} {{\nblock0:\nv3 = call %{call_target_symbol}(v0, v1, v2)\nreturn v3\n}}\n",
-                    aot_call_conv(),
-                    aot_call_conv()
-                );
-            }
-        }
-    }
-    if simple_call_two_arg_uses_first_second_param_passthrough {
-        if let Some(call_target_symbol) = simple_call_two_arg_target_symbol {
-            if function_param_count == 2 {
-                let first_arg_type =
-                    clif_type_for_stasis_param_code(function_first_param_type_code);
-                let second_arg_type = "i64";
-                if let Some(delta) = simple_i32_return_call_add_delta {
-                    let abs_delta = delta.abs();
-                    let op = if delta < 0 { "isub" } else { "iadd" };
-                    return format!(
-                        "external {call_target_symbol}({first_arg_type}, {second_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}) -> i32 {} {{\nblock0:\nv2 = call %{call_target_symbol}(v0, v1)\nv3 = iconst.i32 {abs_delta}\nv4 = {op} v2, v3\nreturn v4\n}}\n",
-                        aot_call_conv(),
-                        aot_call_conv()
-                    );
-                }
-                return format!(
-                    "external {call_target_symbol}({first_arg_type}, {second_arg_type}) -> i32 {}\nfunction %{function_name}({first_arg_type}, {second_arg_type}) -> i32 {} {{\nblock0:\nv2 = call %{call_target_symbol}(v0, v1)\nreturn v2\n}}\n",
-                    aot_call_conv(),
-                    aot_call_conv()
-                );
-            }
-        }
-    }
-    if simple_call_two_arg_uses_literal_first_second_param_passthrough {
-        if let (Some(call_target_symbol), Some(arg_literal)) = (
-            simple_call_two_arg_literal_first_second_param_target_symbol,
-            simple_call_one_arg_i32_literal,
-        ) {
-            if function_param_count == 1 {
-                let second_arg_type =
-                    clif_type_for_stasis_param_code(function_first_param_type_code);
-                if let Some(delta) = simple_i32_return_call_add_delta {
-                    let abs_delta = delta.abs();
-                    let op = if delta < 0 { "isub" } else { "iadd" };
-                    return format!(
-                        "external {call_target_symbol}(i32, {second_arg_type}) -> i32 {}\nfunction %{function_name}({second_arg_type}) -> i32 {} {{\nblock0:\nv1 = iconst.i32 {arg_literal}\nv2 = call %{call_target_symbol}(v1, v0)\nv3 = iconst.i32 {abs_delta}\nv4 = {op} v2, v3\nreturn v4\n}}\n",
-                        aot_call_conv(),
-                        aot_call_conv()
-                    );
-                }
-                return format!(
-                    "external {call_target_symbol}(i32, {second_arg_type}) -> i32 {}\nfunction %{function_name}({second_arg_type}) -> i32 {} {{\nblock0:\nv1 = iconst.i32 {arg_literal}\nv2 = call %{call_target_symbol}(v1, v0)\nreturn v2\n}}\n",
-                    aot_call_conv(),
-                    aot_call_conv()
-                );
-            }
-        }
-    }
-    if simple_call_one_arg_uses_first_param_passthrough {
-        if let Some(call_target_symbol) = simple_call_one_arg_target_symbol {
-            if function_param_count == 1 {
-                let arg_type = clif_type_for_stasis_param_code(function_first_param_type_code);
-                if let Some(delta) = simple_i32_return_call_add_delta {
-                    let abs_delta = delta.abs();
-                    let op = if delta < 0 { "isub" } else { "iadd" };
-                    return format!(
-                        "external {call_target_symbol}({arg_type}) -> i32 {}\nfunction %{function_name}({arg_type}) -> i32 {} {{\nblock0:\nv1 = call %{call_target_symbol}(v0)\nv2 = iconst.i32 {abs_delta}\nv3 = {op} v1, v2\nreturn v3\n}}\n",
-                        aot_call_conv(),
-                        aot_call_conv()
-                    );
-                }
-                return format!(
-                    "external {call_target_symbol}({arg_type}) -> i32 {}\nfunction %{function_name}({arg_type}) -> i32 {} {{\nblock0:\nv1 = call %{call_target_symbol}(v0)\nreturn v1\n}}\n",
-                    aot_call_conv(),
-                    aot_call_conv()
-                );
-            }
-        }
-    }
-    if let (Some(call_target_symbol), Some(arg_literal)) = (
-        simple_call_one_arg_target_symbol,
-        simple_call_one_arg_i32_literal,
-    ) {
-        if let Some(delta) = simple_i32_return_call_add_delta {
-            let abs_delta = delta.abs();
-            let op = if delta < 0 { "isub" } else { "iadd" };
-            return format!(
-                "external {call_target_symbol}(i32) -> i32 {}\nfunction %{function_name}() -> i32 {} {{\nblock0:\nv0 = iconst.i32 {arg_literal}\nv1 = call %{call_target_symbol}(v0)\nv2 = iconst.i32 {abs_delta}\nv3 = {op} v1, v2\nreturn v3\n}}\n",
-                aot_call_conv(),
-                aot_call_conv()
-            );
-        }
-        return format!(
-            "external {call_target_symbol}(i32) -> i32 {}\nfunction %{function_name}() -> i32 {} {{\nblock0:\nv0 = iconst.i32 {arg_literal}\nv1 = call %{call_target_symbol}(v0)\nreturn v1\n}}\n",
-            aot_call_conv(),
-            aot_call_conv()
-        );
-    }
-    if let (Some(call_target_symbol), Some(arg_call_target_symbol)) = (
-        simple_call_one_arg_target_symbol,
-        simple_call_one_arg_arg_call_target_symbol,
-    ) {
-        if let Some(delta) = simple_i32_return_call_add_delta {
-            let abs_delta = delta.abs();
-            let op = if delta < 0 { "isub" } else { "iadd" };
-            return format!(
-                "external {arg_call_target_symbol}() -> i32 {}\nexternal {call_target_symbol}(i32) -> i32 {}\nfunction %{function_name}() -> i32 {} {{\nblock0:\nv0 = call %{arg_call_target_symbol}()\nv1 = call %{call_target_symbol}(v0)\nv2 = iconst.i32 {abs_delta}\nv3 = {op} v1, v2\nreturn v3\n}}\n",
-                aot_call_conv(),
-                aot_call_conv(),
-                aot_call_conv()
-            );
-        }
-        return format!(
-            "external {arg_call_target_symbol}() -> i32 {}\nexternal {call_target_symbol}(i32) -> i32 {}\nfunction %{function_name}() -> i32 {} {{\nblock0:\nv0 = call %{arg_call_target_symbol}()\nv1 = call %{call_target_symbol}(v0)\nreturn v1\n}}\n",
-            aot_call_conv(),
-            aot_call_conv(),
-            aot_call_conv()
-        );
-    }
-    if let (Some(left_target_symbol), Some(right_target_symbol), Some(op_code)) = (
-        simple_two_call_left_target_symbol,
-        simple_two_call_right_target_symbol,
-        simple_i32_return_two_call_op_code,
-    ) {
-        let op = if op_code == 2 { "isub" } else { "iadd" };
-        return format!(
-            "external {left_target_symbol}() -> i32 {}\nexternal {right_target_symbol}() -> i32 {}\nfunction %{function_name}() -> i32 {} {{\nblock0:\nv0 = call %{left_target_symbol}()\nv1 = call %{right_target_symbol}()\nv2 = {op} v0, v1\nreturn v2\n}}\n",
-            aot_call_conv(),
-            aot_call_conv(),
-            aot_call_conv()
-        );
-    }
-    let fallback_expr = SimpleI32ReturnExpr::Literal(fallback_return_value);
-    let expression = simple_expr.unwrap_or(&fallback_expr);
-    let mut temp_counter: u32 = 0;
-    let body = if let SimpleI32ReturnExpr::Select(condition, then_expr, else_expr) = expression {
-        let mut next_block_id: u32 = 3;
-        let mut branch_blocks = emit_clif_condition_branch_blocks(
-            condition,
-            "block0",
-            "block1",
-            "block2",
-            &mut temp_counter,
-            &mut next_block_id,
-        );
-
-        let mut then_lines = Vec::new();
-        let then_value = emit_clif_for_simple_expr(then_expr, &mut temp_counter, &mut then_lines);
-        then_lines.push(format!("return {then_value}"));
-
-        let mut else_lines = Vec::new();
-        let else_value = emit_clif_for_simple_expr(else_expr, &mut temp_counter, &mut else_lines);
-        else_lines.push(format!("return {else_value}"));
-
-        branch_blocks.push(("block1".to_string(), then_lines));
-        branch_blocks.push(("block2".to_string(), else_lines));
-        branch_blocks
-            .into_iter()
-            .map(|(label, lines)| format!("{label}:\n{}", lines.join("\n")))
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        let mut lines = Vec::new();
-        let result = emit_clif_for_simple_expr(expression, &mut temp_counter, &mut lines);
-        lines.push(format!("return {result}"));
-        format!("block0:\n{}", lines.join("\n"))
-    };
-    format!(
-        "function %{function_name}() -> i32 {} {{\n{body}\n}}\n",
-        aot_call_conv()
-    )
-}
-
-#[cfg(test)]
-fn resolve_unique_i32_call_target_symbol_by_hash(
-    maybe_target_id_hash: Option<i32>,
-    metrics: &[stasis_compiler::FunctionMetric],
-) -> Option<String> {
-    let target_id_hash = maybe_target_id_hash?;
-    let mut matches = metrics.iter().filter(|candidate| {
-        candidate.id_hash == target_id_hash
-            && candidate.return_type_code == stasis_compiler::RETURN_TYPE_CODE_I32
-            && candidate.param_count == 0
-    });
-    if let Some(first) = matches.next() {
-        if matches.next().is_some() {
-            return None;
-        }
-        return Some(aot_symbol_name(first));
-    }
-    resolve_known_host_noarg_i32_extern_symbol_by_hash(target_id_hash).map(str::to_string)
-}
-
-#[cfg(test)]
-fn resolve_unique_i32_single_arg_call_target_symbol_by_hash(
-    maybe_target_id_hash: Option<i32>,
-    metrics: &[stasis_compiler::FunctionMetric],
-    first_param_type_code: i32,
-) -> Option<String> {
-    let target_id_hash = maybe_target_id_hash?;
-    let mut matches = metrics.iter().filter(|candidate| {
-        candidate.id_hash == target_id_hash
-            && candidate.return_type_code == stasis_compiler::RETURN_TYPE_CODE_I32
-            && candidate.param_count == 1
-            && candidate.first_param_type_code == first_param_type_code
-    });
-    if let Some(first) = matches.next() {
-        if matches.next().is_some() {
-            return None;
-        }
-        return Some(aot_symbol_name(first));
-    }
-    resolve_known_host_single_arg_i32_extern_symbol_by_hash(target_id_hash, first_param_type_code)
-        .map(str::to_string)
-}
-
-#[cfg(test)]
-fn resolve_known_host_noarg_i32_extern_symbol_by_hash(target_id_hash: i32) -> Option<&'static str> {
-    if target_id_hash == hash_identifier("host_cli_arg_count") {
-        return Some("host_cli_arg_count");
-    }
-    if target_id_hash == hash_identifier("host_run_self_host_aot_cli_from_env") {
-        return Some("host_run_self_host_aot_cli_from_env");
-    }
-    None
-}
-
-#[cfg(test)]
-fn resolve_known_host_single_arg_i32_extern_symbol_by_hash(
-    target_id_hash: i32,
-    first_param_type_code: i32,
-) -> Option<&'static str> {
-    if first_param_type_code != 0 {
-        return None;
-    }
-    if target_id_hash == hash_identifier("host_source_file_count") {
-        return Some("host_source_file_count");
-    }
-    if target_id_hash == hash_identifier("host_set_summary_file") {
-        return Some("host_set_summary_file");
-    }
-    None
-}
-
-#[cfg(test)]
-fn resolve_known_host_two_arg_i32_extern_symbol_by_hash(
-    maybe_target_id_hash: Option<i32>,
-    first_param_type_code: i32,
-) -> Option<&'static str> {
-    let target_id_hash = maybe_target_id_hash?;
-    if target_id_hash == hash_identifier("host_cli_arg_value") && first_param_type_code == 1 {
-        return Some("host_cli_arg_value");
-    }
-    None
-}
-
-#[cfg(test)]
-fn resolve_known_host_three_arg_i32_extern_symbol_by_hash(
-    maybe_target_id_hash: Option<i32>,
-    first_param_type_code: i32,
-) -> Option<&'static str> {
-    let target_id_hash = maybe_target_id_hash?;
-    if target_id_hash == hash_identifier("host_write_aot_cli_summary") && first_param_type_code == 0
-    {
-        return Some("host_write_aot_cli_summary");
-    }
-    None
-}
-
-#[cfg(test)]
-fn resolve_known_host_four_arg_i32_extern_symbol_by_hash(
-    maybe_target_id_hash: Option<i32>,
-    first_param_type_code: i32,
-) -> Option<&'static str> {
-    let target_id_hash = maybe_target_id_hash?;
-    if target_id_hash == hash_identifier("host_load_source_file") && first_param_type_code == 0 {
-        return Some("host_load_source_file");
-    }
-    None
-}
-
-#[cfg(test)]
-fn resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
-    maybe_target_id_hash: Option<i32>,
-    first_param_type_code: i32,
-) -> Option<&'static str> {
-    let target_id_hash = maybe_target_id_hash?;
-    if target_id_hash == hash_identifier("host_cli_arg_value") && first_param_type_code == 0 {
-        return Some("host_cli_arg_value");
-    }
-    None
-}
-
-#[cfg(test)]
-fn emit_clif_for_simple_expr(
-    expr: &SimpleI32ReturnExpr,
-    temp_counter: &mut u32,
-    lines: &mut Vec<String>,
-) -> String {
-    match expr {
-        SimpleI32ReturnExpr::Literal(value) => {
-            let name = format!("v{temp_counter}");
-            lines.push(format!("{name} = iconst.i32 {value}"));
-            *temp_counter += 1;
-            name
-        }
-        SimpleI32ReturnExpr::Add(left, right) => {
-            emit_clif_binary_expr("iadd", left, right, temp_counter, lines)
-        }
-        SimpleI32ReturnExpr::Sub(left, right) => {
-            emit_clif_binary_expr("isub", left, right, temp_counter, lines)
-        }
-        SimpleI32ReturnExpr::Mul(left, right) => {
-            emit_clif_binary_expr("imul", left, right, temp_counter, lines)
-        }
-        SimpleI32ReturnExpr::Div(left, right) => {
-            emit_clif_binary_expr("sdiv", left, right, temp_counter, lines)
-        }
-        SimpleI32ReturnExpr::Mod(left, right) => {
-            emit_clif_binary_expr("srem", left, right, temp_counter, lines)
-        }
-        SimpleI32ReturnExpr::Select(condition, then_expr, else_expr) => {
-            let cond_name = emit_clif_condition(condition, temp_counter, lines);
-            let then_name = emit_clif_for_simple_expr(then_expr, temp_counter, lines);
-            let else_name = emit_clif_for_simple_expr(else_expr, temp_counter, lines);
-            let out = format!("v{temp_counter}");
-            lines.push(format!(
-                "{out} = select {cond_name}, {then_name}, {else_name}"
-            ));
-            *temp_counter += 1;
-            out
-        }
-    }
-}
-
-#[cfg(test)]
-fn emit_clif_condition(
-    condition: &SimpleI32Condition,
-    temp_counter: &mut u32,
-    lines: &mut Vec<String>,
-) -> String {
-    let (opcode, left, right) = match condition {
-        SimpleI32Condition::Eq(left, right) => ("eq", left, right),
-        SimpleI32Condition::Ne(left, right) => ("ne", left, right),
-        SimpleI32Condition::Le(left, right) => ("sle", left, right),
-        SimpleI32Condition::Ge(left, right) => ("sge", left, right),
-        SimpleI32Condition::Lt(left, right) => ("slt", left, right),
-        SimpleI32Condition::Gt(left, right) => ("sgt", left, right),
-        SimpleI32Condition::And(left, right) => {
-            let left_name = emit_clif_condition(left, temp_counter, lines);
-            let right_name = emit_clif_condition(right, temp_counter, lines);
-            let out = format!("v{temp_counter}");
-            lines.push(format!("{out} = band {left_name}, {right_name}"));
-            *temp_counter += 1;
-            return out;
-        }
-        SimpleI32Condition::Or(left, right) => {
-            let left_name = emit_clif_condition(left, temp_counter, lines);
-            let right_name = emit_clif_condition(right, temp_counter, lines);
-            let out = format!("v{temp_counter}");
-            lines.push(format!("{out} = bor {left_name}, {right_name}"));
-            *temp_counter += 1;
-            return out;
-        }
-        SimpleI32Condition::Not(inner) => {
-            let input = emit_clif_condition(inner, temp_counter, lines);
-            let out = format!("v{temp_counter}");
-            lines.push(format!("{out} = bnot {input}"));
-            *temp_counter += 1;
-            return out;
-        }
-    };
-    let left_name = emit_clif_for_simple_expr(left, temp_counter, lines);
-    let right_name = emit_clif_for_simple_expr(right, temp_counter, lines);
-    let out = format!("v{temp_counter}");
-    lines.push(format!("{out} = icmp {opcode} {left_name}, {right_name}"));
-    *temp_counter += 1;
-    out
-}
-
-#[cfg(test)]
-fn emit_clif_condition_branch_blocks(
-    condition: &SimpleI32Condition,
-    current_label: &str,
-    true_label: &str,
-    false_label: &str,
-    temp_counter: &mut u32,
-    next_block_id: &mut u32,
-) -> Vec<(String, Vec<String>)> {
-    match condition {
-        SimpleI32Condition::Eq(left, right) => vec![emit_clif_comparison_branch_block(
-            "eq",
-            left,
-            right,
-            current_label,
-            true_label,
-            false_label,
-            temp_counter,
-        )],
-        SimpleI32Condition::Ne(left, right) => vec![emit_clif_comparison_branch_block(
-            "ne",
-            left,
-            right,
-            current_label,
-            true_label,
-            false_label,
-            temp_counter,
-        )],
-        SimpleI32Condition::Le(left, right) => vec![emit_clif_comparison_branch_block(
-            "sle",
-            left,
-            right,
-            current_label,
-            true_label,
-            false_label,
-            temp_counter,
-        )],
-        SimpleI32Condition::Ge(left, right) => vec![emit_clif_comparison_branch_block(
-            "sge",
-            left,
-            right,
-            current_label,
-            true_label,
-            false_label,
-            temp_counter,
-        )],
-        SimpleI32Condition::Lt(left, right) => vec![emit_clif_comparison_branch_block(
-            "slt",
-            left,
-            right,
-            current_label,
-            true_label,
-            false_label,
-            temp_counter,
-        )],
-        SimpleI32Condition::Gt(left, right) => vec![emit_clif_comparison_branch_block(
-            "sgt",
-            left,
-            right,
-            current_label,
-            true_label,
-            false_label,
-            temp_counter,
-        )],
-        SimpleI32Condition::And(left, right) => {
-            let rhs_label = format!("block{next_block_id}");
-            *next_block_id += 1;
-            let mut blocks = emit_clif_condition_branch_blocks(
-                left,
-                current_label,
-                &rhs_label,
-                false_label,
-                temp_counter,
-                next_block_id,
-            );
-            blocks.extend(emit_clif_condition_branch_blocks(
-                right,
-                &rhs_label,
-                true_label,
-                false_label,
-                temp_counter,
-                next_block_id,
-            ));
-            blocks
-        }
-        SimpleI32Condition::Or(left, right) => {
-            let rhs_label = format!("block{next_block_id}");
-            *next_block_id += 1;
-            let mut blocks = emit_clif_condition_branch_blocks(
-                left,
-                current_label,
-                true_label,
-                &rhs_label,
-                temp_counter,
-                next_block_id,
-            );
-            blocks.extend(emit_clif_condition_branch_blocks(
-                right,
-                &rhs_label,
-                true_label,
-                false_label,
-                temp_counter,
-                next_block_id,
-            ));
-            blocks
-        }
-        SimpleI32Condition::Not(inner) => emit_clif_condition_branch_blocks(
-            inner,
-            current_label,
-            false_label,
-            true_label,
-            temp_counter,
-            next_block_id,
-        ),
-    }
-}
-
-#[cfg(test)]
-fn emit_clif_comparison_branch_block(
-    predicate: &str,
-    left: &SimpleI32ReturnExpr,
-    right: &SimpleI32ReturnExpr,
-    current_label: &str,
-    true_label: &str,
-    false_label: &str,
-    temp_counter: &mut u32,
-) -> (String, Vec<String>) {
-    let mut lines = Vec::new();
-    let left_name = emit_clif_for_simple_expr(left, temp_counter, &mut lines);
-    let right_name = emit_clif_for_simple_expr(right, temp_counter, &mut lines);
-    let cond_name = format!("v{temp_counter}");
-    lines.push(format!(
-        "{cond_name} = icmp {predicate} {left_name}, {right_name}"
-    ));
-    *temp_counter += 1;
-    lines.push(format!("brif {cond_name}, {true_label}, {false_label}"));
-    (current_label.to_string(), lines)
-}
-
-#[cfg(test)]
-fn emit_clif_binary_expr(
-    opcode: &str,
-    left: &SimpleI32ReturnExpr,
-    right: &SimpleI32ReturnExpr,
-    temp_counter: &mut u32,
-    lines: &mut Vec<String>,
-) -> String {
-    let left_name = emit_clif_for_simple_expr(left, temp_counter, lines);
-    let right_name = emit_clif_for_simple_expr(right, temp_counter, lines);
-    let out = format!("v{temp_counter}");
-    lines.push(format!("{out} = {opcode} {left_name}, {right_name}"));
-    *temp_counter += 1;
-    out
-}
-
-#[cfg(test)]
-fn aot_symbol_name(metric: &stasis_compiler::FunctionMetric) -> String {
-    format!(
-        "fn_{}_{}_{}",
-        metric.id_hash.unsigned_abs(),
-        metric.sig_hash.unsigned_abs(),
-        metric.ordinal
-    )
-}
-
 fn compute_file_sha256_hex(path: &Path) -> Result<String, String> {
     let file = std::fs::File::open(path)
         .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
@@ -2164,8 +1487,55 @@ fn compute_file_sha256_hex(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn self_host_repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+const SELF_HOST_RUNTIME_CMAKE: &str = "runtime/CMakeLists.txt";
+const SELF_HOST_MOBILE_MAIN: &str = "mobile/shells/common/stasis_mobile_main.c";
+
+fn self_host_inputs_are_complete(root: &Path) -> bool {
+    root.join(SELF_HOST_RUNTIME_CMAKE).is_file() && root.join(SELF_HOST_MOBILE_MAIN).is_file()
+}
+
+fn resolve_self_host_repo_root(
+    executable_path: Option<&Path>,
+    compile_time_root: &Path,
+) -> Result<PathBuf, String> {
+    let mut candidate_roots = Vec::with_capacity(3);
+    if let Some(executable_directory) = executable_path.and_then(Path::parent) {
+        candidate_roots.push(executable_directory.to_path_buf());
+        if executable_directory.file_name() == Some(std::ffi::OsStr::new("bin")) {
+            if let Some(bundle_root) = executable_directory.parent() {
+                candidate_roots.push(bundle_root.to_path_buf());
+            }
+        }
+    }
+    if !candidate_roots
+        .iter()
+        .any(|candidate| candidate == compile_time_root)
+    {
+        candidate_roots.push(compile_time_root.to_path_buf());
+    }
+
+    for candidate in &candidate_roots {
+        if self_host_inputs_are_complete(candidate) {
+            return Ok(candidate.to_path_buf());
+        }
+    }
+
+    let checked_roots = candidate_roots
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "unable to locate Stasis self-host repository inputs; checked root locations: {}. Expected regular files {} and {}",
+        checked_roots,
+        SELF_HOST_RUNTIME_CMAKE,
+        SELF_HOST_MOBILE_MAIN,
+    ))
+}
+
+fn self_host_repo_root() -> Result<PathBuf, String> {
+    let compile_time_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    resolve_self_host_repo_root(std::env::current_exe().ok().as_deref(), &compile_time_root)
 }
 
 fn resolve_self_host_aot_entry_file(
@@ -2215,7 +1585,7 @@ fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
     }
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| self_host_repo_root().join("target"));
+        .or_else(|| self_host_repo_root().ok().map(|root| root.join("target")))?;
     let mut candidates: Vec<PathBuf> = Vec::new();
     let link_lib_names: &[&str] = if cfg!(windows) {
         &["stasis_dynload.dll.lib"]
@@ -2346,7 +1716,7 @@ fn ensure_stasis_dynload_link_library() -> Result<PathBuf, String> {
     if let Some(existing) = resolve_stasis_dynload_lib() {
         return Ok(existing);
     }
-    let repo_root = self_host_repo_root();
+    let repo_root = self_host_repo_root()?;
     let mut command = std::process::Command::new("cargo");
     if cfg!(windows) {
         command.arg("build").arg("-p").arg("stasis_dynload");
@@ -2544,7 +1914,7 @@ fn ensure_rust_lld_link_wrapper(artifact_root: &Path) -> Option<PathBuf> {
 }
 
 fn ensure_runtime_release_artifacts() -> Result<(PathBuf, PathBuf), String> {
-    let repo_root = self_host_repo_root();
+    let repo_root = self_host_repo_root()?;
     let runner = resolve_runtime_runner_path(&repo_root);
     let graphics = resolve_runtime_graphics_path(&repo_root);
     if let (Some(runner), Some(graphics)) = (runner, graphics) {
@@ -3771,8 +3141,8 @@ void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n",
     source.push_str(
         "STASIS_EXPORT int32_t host_i32[768] = {0};\n\
 STASIS_EXPORT float host_f32[64] = {0};\n\
-STASIS_EXPORT int32_t gfx_cmd_i32[34608] = {0};\n\
-STASIS_EXPORT float gfx_cmd_f32[108676] = {0};\n\
+STASIS_EXPORT int32_t gfx_cmd_i32[67888] = {0};\n\
+STASIS_EXPORT float gfx_cmd_f32[146564] = {0};\n\
 STASIS_EXPORT uint8_t gfx_cmd_u8[65536] = {0};\n\
 STASIS_EXPORT int32_t host_req_seq = 0;\n\
 STASIS_EXPORT int32_t host_req_flags = 0;\n\
@@ -3788,10 +3158,10 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
             "stasis_jit_register_global_f32_array({host_f32_hash}, 0, host_f32, 64);"
         ),
         format!(
-            "stasis_jit_register_global_i32_array({gfx_cmd_i32_hash}, 0, gfx_cmd_i32, 34608);"
+            "stasis_jit_register_global_i32_array({gfx_cmd_i32_hash}, 0, gfx_cmd_i32, 67888);"
         ),
         format!(
-            "stasis_jit_register_global_f32_array({gfx_cmd_f32_hash}, 0, gfx_cmd_f32, 108676);"
+            "stasis_jit_register_global_f32_array({gfx_cmd_f32_hash}, 0, gfx_cmd_f32, 146564);"
         ),
         format!(
             "stasis_jit_register_global_u8_array({gfx_cmd_u8_hash}, 0, gfx_cmd_u8, 65536);"
@@ -3843,7 +3213,7 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
             "STASIS_EXPORT void stasis_init(int width, int height) {\n\
     host_i32[12] = width;\n\
     host_i32[13] = height;\n\
-    host_i32[14] = 3;\n\
+    host_i32[14] = 4;\n\
     host_i32[22] = width;\n\
     host_i32[23] = height;\n\
     host_i32[24] = width;\n\
@@ -3858,6 +3228,8 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
     host_f32[53] = 0.0f;\n\
     host_f32[54] = (float)width;\n\
     host_f32[55] = (float)height;\n\
+    host_f32[56] = (float)width;\n\
+    host_f32[57] = (float)height;\n\
     host_req_window_w_px = width;\n\
     host_req_window_h_px = height;\n\
     main();\n\
@@ -3991,6 +3363,320 @@ fn resolve_engine_bundle_symbol(
         .find(|row| row.name == name)
         .map(|row| row.symbol.clone())
         .ok_or_else(|| format!("engine bundle manifest is missing required symbol {name}"))
+}
+
+#[cfg(windows)]
+fn cmake_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(windows)]
+static MONOLITH_CMAKE_INSTANCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+struct MonolithCmakeBuildDir {
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl Drop for MonolithCmakeBuildDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(windows)]
+fn create_monolith_cmake_build_dir(
+    aot_root: &Path,
+    output_exe: &Path,
+) -> Result<MonolithCmakeBuildDir, String> {
+    let identity = format!(
+        "{}|{}",
+        stable_absolute_path(aot_root).display(),
+        stable_absolute_path(output_exe).display()
+    );
+    let identity_hash = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    let parent = std::env::temp_dir().join("stasis-monolith-cmake");
+    std::fs::create_dir_all(&parent).map_err(|error| {
+        format!(
+            "failed to create monolith CMake temp directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    for _ in 0..32 {
+        let instance = MONOLITH_CMAKE_INSTANCE.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(
+            "{}-{:016x}-{}",
+            std::process::id(),
+            instance,
+            &identity_hash[..12]
+        ));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(MonolithCmakeBuildDir { path }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to create isolated monolith CMake build directory {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Err("could not allocate a unique isolated monolith CMake build directory".to_string())
+}
+
+#[cfg(windows)]
+fn resolve_vcvars64() -> Result<PathBuf, String> {
+    let mut installation_roots = Vec::new();
+    let mut vswhere_paths = vec![
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+    ];
+    if let Ok(output) = std::process::Command::new("vswhere.exe")
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            installation_roots.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(PathBuf::from),
+            );
+        }
+    }
+    for path in vswhere_paths.drain(..) {
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(output) = std::process::Command::new(&path)
+            .args([
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property",
+                "installationPath",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                installation_roots.extend(
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .map(PathBuf::from),
+                );
+            }
+        }
+    }
+    for root in [
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools",
+        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Professional",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise",
+    ] {
+        installation_roots.push(PathBuf::from(root));
+    }
+    for root in installation_roots {
+        let candidate = root.join(r"VC\Auxiliary\Build\vcvars64.bat");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err("Visual Studio vcvars64.bat was not found. Install the C++ desktop workload (including MSVC x64/x86 build tools) or add vswhere.exe to PATH".to_string())
+}
+
+#[cfg(windows)]
+fn run_cmake_in_msvc_environment(arguments: &[String]) -> Result<std::process::Output, String> {
+    let vcvars = resolve_vcvars64()?;
+    let quoted_arguments = arguments
+        .iter()
+        .map(|argument| format!("\"{}\"", argument.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock failed while staging CMake: {error}"))?
+        .as_nanos();
+    let script_path = std::env::temp_dir().join(format!(
+        "stasis_monolith_cmake_{}_{}.cmd",
+        std::process::id(),
+        stamp
+    ));
+    let script = format!(
+        "@echo off\r\ncall \"{}\" >nul\r\nif errorlevel 1 exit /b %errorlevel%\r\ncmake {quoted_arguments}\r\n",
+        vcvars.display()
+    );
+    std::fs::write(&script_path, script)
+        .map_err(|error| format!("failed to stage {}: {error}", script_path.display()))?;
+    let output = std::process::Command::new("cmd.exe")
+        .arg("/d")
+        .arg("/c")
+        .arg(&script_path)
+        .output()
+        .map_err(|error| format!("failed to launch CMake in the MSVC environment: {error}"));
+    let _ = std::fs::remove_file(&script_path);
+    output
+}
+
+#[cfg(windows)]
+fn package_engine_bundle_monolithic_windows(
+    backend: &IncrementalCompilerBackend,
+    bundle: &AotEngineBundle,
+    output_exe: &Path,
+    project_dir: &Path,
+) -> Result<SelfHostedAotCliSummary, String> {
+    let repo_root = self_host_repo_root()?;
+    let aot_root = backend.aot_artifact_root.join("windows_monolith");
+    std::fs::create_dir_all(&aot_root).map_err(|error| {
+        format!(
+            "failed to create Windows monolith directory {}: {error}",
+            aot_root.display()
+        )
+    })?;
+    let manifest_text = std::fs::read_to_string(&bundle.manifest_path).map_err(|error| {
+        format!(
+            "failed to read AOT engine manifest {}: {error}",
+            bundle.manifest_path.display()
+        )
+    })?;
+    let manifest_json: serde_json::Value = serde_json::from_str(&manifest_text)
+        .map_err(|error| format!("failed to parse AOT engine manifest: {error}"))?;
+    let state_layout = backend
+        .last_program_snapshot
+        .as_ref()
+        .map(ProgramSnapshot::state_layout)
+        .ok_or_else(|| "AOT program snapshot missing during monolithic packaging".to_string())?;
+    let bindings_source = aot_root.join("published_aot_bindings.c");
+    crate::write_mobile_aot_bindings_source(
+        &manifest_json,
+        state_layout,
+        project_dir,
+        &bindings_source,
+    )?;
+    let symbols_header = aot_root.join("published_aot_symbols.h");
+    std::fs::write(
+        &symbols_header,
+        "#ifndef STASIS_PUBLISHED_AOT_SYMBOLS_H\n#define STASIS_PUBLISHED_AOT_SYMBOLS_H\n"
+            .to_string()
+            + "#include <stdint.h>\n"
+            + "int32_t stasis_mobile_main_entry(void);\n"
+            + "int32_t stasis_mobile_tick_entry(void);\n"
+            + "int32_t stasis_mobile_render_entry(void);\n"
+            + "void stasis_aot_bind_runtime_globals(void);\n"
+            + "#define STASIS_AOT_MAIN stasis_mobile_main_entry\n"
+            + "#define STASIS_AOT_TICK stasis_mobile_tick_entry\n"
+            + "#define STASIS_AOT_RENDER stasis_mobile_render_entry\n"
+            + "#define STASIS_AOT_BIND_RUNTIME_GLOBALS stasis_aot_bind_runtime_globals\n"
+            + "#endif\n",
+    )
+    .map_err(|error| format!("failed to write {}: {error}", symbols_header.display()))?;
+
+    let mut object_list = String::from("set(STASIS_PUBLISHED_AOT_OBJECTS\n");
+    for path in bundle.object_paths() {
+        object_list.push_str(&format!("  \"{}\"\n", cmake_path(path)));
+    }
+    object_list.push_str(")\n");
+    let object_list_path = aot_root.join("published_aot_objects.cmake");
+    std::fs::write(&object_list_path, object_list)
+        .map_err(|error| format!("failed to write {}: {error}", object_list_path.display()))?;
+
+    let shell_template =
+        std::fs::read_to_string(repo_root.join("mobile/shells/common/stasis_mobile_main.c"))
+            .map_err(|error| format!("failed to read production host template: {error}"))?;
+    let app_name = output_exe
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Stasis");
+    let shell_source = shell_template
+        .replace(
+            "@STASIS_APP_NAME@",
+            &crate::escape_mobile_c_string_literal(app_name),
+        )
+        .replace("@STASIS_ASSET_BASE@", ".");
+    let shell_source_path = aot_root.join("stasis_windows_main.c");
+    std::fs::write(&shell_source_path, shell_source)
+        .map_err(|error| format!("failed to write {}: {error}", shell_source_path.display()))?;
+
+    let output_dir = output_exe.parent().unwrap_or_else(|| Path::new("."));
+    let output_name = output_exe
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("invalid monolith output name {}", output_exe.display()))?;
+    let build_dir = create_monolith_cmake_build_dir(&aot_root, output_exe)?;
+    let configure_arguments = vec![
+        "-S".to_string(),
+        cmake_path(&repo_root.join("runtime")),
+        "-B".to_string(),
+        cmake_path(&build_dir.path),
+        "-DSTASIS_BUILD_MONOLITH=ON".to_string(),
+        format!("-DSTASIS_MONOLITH_AOT_DIR={}", cmake_path(&aot_root)),
+        format!(
+            "-DSTASIS_MONOLITH_MAIN_SOURCE={}",
+            cmake_path(&shell_source_path)
+        ),
+        format!("-DSTASIS_MONOLITH_OUTPUT_DIR={}", cmake_path(output_dir)),
+        format!("-DSTASIS_MONOLITH_OUTPUT_NAME={output_name}"),
+    ];
+    let configure = run_cmake_in_msvc_environment(&configure_arguments)?;
+    if !configure.status.success() {
+        return Err(format!(
+            "Windows monolith configure failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&configure.stdout),
+            String::from_utf8_lossy(&configure.stderr)
+        ));
+    }
+    let build = run_cmake_in_msvc_environment(&[
+        "--build".to_string(),
+        cmake_path(&build_dir.path),
+        "--config".to_string(),
+        "Release".to_string(),
+        "--target".to_string(),
+        "stasis_monolith".to_string(),
+    ])?;
+    if !build.status.success() {
+        return Err(format!(
+            "Windows monolith build failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        ));
+    }
+    if !output_exe.is_file() {
+        return Err(format!(
+            "Windows monolith build did not produce {}",
+            output_exe.display()
+        ));
+    }
+    sign_output_artifact_if_configured(output_exe)?;
+    Ok(SelfHostedAotCliSummary {
+        source_file_count: bundle.object_paths().count() + 1,
+        linked_image_path: output_exe.to_path_buf(),
+        entry_symbol: "main".to_string(),
+        ir_bundle_path: PathBuf::new(),
+        object_bundle_path: bundle.manifest_path.clone(),
+        object_file_names: bundle
+            .object_paths()
+            .filter_map(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect(),
+        program_snapshot: None,
+    })
 }
 
 fn packaged_launch_sidecar_path(output_exe: &Path) -> Result<PathBuf, String> {
@@ -4151,6 +3837,18 @@ fn package_engine_bundle_release(
         .map(ProgramSnapshot::state_layout)
         .ok_or_else(|| "AOT program snapshot missing during packaging".to_string())?;
     let runtime_fields = merge_runtime_fields(state_layout, &support.runtime_fields)?;
+    #[cfg(windows)]
+    if matches!(
+        backend.aot_compile_config.target,
+        stasis_jit::AotTarget::Native
+    ) {
+        return package_engine_bundle_monolithic_windows(
+            backend,
+            bundle,
+            packaged_output_exe,
+            project_dir,
+        );
+    }
     let mut function_aliases = vec![PackagedFunctionAlias {
         alias: "main",
         target_symbol: entry_symbol.clone(),
@@ -4361,11 +4059,11 @@ fn package_engine_bundle_release(
             })?;
         write_macos_runner_info_plist(info_plist, executable_name)?;
     }
-    maybe_sign_output_artifact(packaged_output_exe)?;
-    maybe_sign_output_artifact(&linked_library_path)?;
-    maybe_sign_output_artifact(&graphics_dst)?;
+    sign_output_artifact_if_configured(packaged_output_exe)?;
+    sign_output_artifact_if_configured(&linked_library_path)?;
+    sign_output_artifact_if_configured(&graphics_dst)?;
     if let Some(app_bundle) = runner_layout.app_bundle.as_deref() {
-        maybe_sign_output_artifact(app_bundle)?;
+        sign_output_artifact_if_configured(app_bundle)?;
     }
 
     let object_file_names = object_paths
@@ -4383,21 +4081,30 @@ fn package_engine_bundle_release(
         ir_bundle_path: PathBuf::new(),
         object_bundle_path: bundle.manifest_path.clone(),
         object_file_names,
+        program_snapshot: None,
     })
-}
-
-#[cfg(test)]
-fn aot_call_conv() -> &'static str {
-    if cfg!(windows) {
-        "windows_fastcall"
-    } else {
-        "system_v"
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_manifest_accepts_versioned_hot_render_metadata() {
+        assert_eq!(
+            stasis_compiler::backend::hot_render::HOT_RENDER_METADATA_VERSION,
+            stasis_dynload::HOT_RENDER_METADATA_VERSION
+        );
+        let manifest: EngineBundleManifest = serde_json::from_str(
+            r#"{"functions":[],"hot_render_metadata_version":3,"hot_render_images":[{"logical_path":"assets/hero.png","logical_width":32,"logical_height":24,"max_renders_per_render":3,"atlas_eligible":true,"grouping_key":"batch-v3:test","estimated_distinct_transitions":4,"group_member_count":2,"group_logical_pixel_area":1536,"group_max_logical_width":32,"group_max_logical_height":24,"backend_constraints":"desktop-gl"}]}"#,
+        )
+        .expect("parse hot-render manifest");
+        assert_eq!(manifest.hot_render_metadata_version, Some(3));
+        let image = &manifest.hot_render_images.expect("image rows")[0];
+        assert_eq!(image.max_renders_per_render, Some(3));
+        assert!(image.atlas_eligible);
+        assert_eq!(image.backend_constraints.as_deref(), Some("desktop-gl"));
+    }
 
     #[test]
     fn macos_packaged_runner_keeps_executable_and_retina_plist_in_app_bundle() {
@@ -4477,6 +4184,7 @@ mod tests {
         assert_eq!(diagnostic.path, Some(PathBuf::from("dep.stasis")));
         assert_eq!(diagnostic.line, Some(2));
         assert_eq!(diagnostic.column, Some(1));
+        assert_eq!(diagnostic.code.as_deref(), Some("stasis.generic"));
     }
 
     fn assert_second_file_diagnostic(target_mode: TargetMode) {
@@ -4904,9 +4612,34 @@ mod tests {
         &PROCESS_ENV_LOCK
     }
 
-    #[test]
-    fn identifier_hash_matches_incremental_function() {
-        assert_eq!(hash_identifier("on_code_swap"), -663_287_521);
+    struct RemovedEnvironmentVariable {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl RemovedEnvironmentVariable {
+        fn new(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for RemovedEnvironmentVariable {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
+    fn disable_ambient_signing() -> (RemovedEnvironmentVariable, RemovedEnvironmentVariable) {
+        (
+            RemovedEnvironmentVariable::new("STASIS_AOT_SIGN_TOOL"),
+            RemovedEnvironmentVariable::new("STASIS_REQUIRE_SIGNED_EXECUTION"),
+        )
     }
 
     #[test]
@@ -5129,7 +4862,9 @@ mod tests {
 
         assert!(!source.contains("StasisDirectStorageSlot"));
         assert!(source.contains("STASIS_EXPORT void stasis_init(int width, int height)"));
-        assert!(source.contains("host_i32[14] = 3;"));
+        assert!(source.contains("host_i32[14] = 4;"));
+        assert!(source.contains("host_f32[56] = (float)width;"));
+        assert!(source.contains("host_f32[57] = (float)height;"));
         assert!(source.contains("host_f32[50] = (float)width;"));
         assert!(source.contains("STASIS_EXPORT void stasis_tick(float dt)"));
         assert!(source.contains("host_i32[10] = host_i32[10] + 1;"));
@@ -5208,1074 +4943,6 @@ mod tests {
             default_runtime_bridge_compiler(&stasis_jit::AotTarget::android_arm64_default()),
             PathBuf::from("clang")
         );
-    }
-
-    #[test]
-    fn aot_stub_uses_platform_calling_convention() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            Some(&SimpleI32ReturnExpr::Literal(7)),
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("function %main() -> i32"));
-        assert!(clif.contains("iconst.i32 7"));
-        assert!(clif.contains(aot_call_conv()));
-    }
-
-    #[test]
-    fn aot_stub_uses_arithmetic_when_simple_expression_is_available() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            Some(&SimpleI32ReturnExpr::Add(
-                Box::new(SimpleI32ReturnExpr::Literal(2)),
-                Box::new(SimpleI32ReturnExpr::Literal(3)),
-            )),
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("iconst.i32 2"));
-        assert!(clif.contains("iconst.i32 3"));
-        assert!(clif.contains("iadd"));
-    }
-
-    #[test]
-    fn aot_stub_uses_div_and_mod_when_simple_expression_is_available() {
-        let div = build_aot_stub_clif(
-            "main",
-            "i32",
-            Some(&SimpleI32ReturnExpr::Div(
-                Box::new(SimpleI32ReturnExpr::Literal(8)),
-                Box::new(SimpleI32ReturnExpr::Literal(2)),
-            )),
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(div.contains("sdiv"));
-        let rem = build_aot_stub_clif(
-            "main",
-            "i32",
-            Some(&SimpleI32ReturnExpr::Mod(
-                Box::new(SimpleI32ReturnExpr::Literal(9)),
-                Box::new(SimpleI32ReturnExpr::Literal(4)),
-            )),
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(rem.contains("srem"));
-    }
-
-    #[test]
-    fn aot_stub_uses_branch_blocks_for_top_level_conditional_expression() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            Some(&SimpleI32ReturnExpr::Select(
-                SimpleI32Condition::Gt(
-                    Box::new(SimpleI32ReturnExpr::Literal(8)),
-                    Box::new(SimpleI32ReturnExpr::Literal(3)),
-                ),
-                Box::new(SimpleI32ReturnExpr::Literal(11)),
-                Box::new(SimpleI32ReturnExpr::Literal(22)),
-            )),
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("icmp sgt"));
-        assert!(clif.contains("brif"));
-        assert!(clif.contains("block1:"));
-        assert!(clif.contains("block2:"));
-        assert!(!clif.contains("select "));
-    }
-
-    #[test]
-    fn aot_stub_uses_void_signature_for_void_return_type() {
-        let clif = build_aot_stub_clif(
-            "on_code_swap",
-            "void",
-            None,
-            123,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("function %on_code_swap()"));
-        assert!(!clif.contains("-> i32"));
-        assert!(clif.contains("\nreturn\n"));
-        assert!(!clif.contains("iconst.i32"));
-    }
-
-    #[test]
-    fn aot_stub_uses_print_i32_call_for_simple_void_print_metadata() {
-        let clif = build_aot_stub_clif(
-            "on_code_swap",
-            "void",
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(33),
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external print_i32(i32)"));
-        assert!(clif.contains("iconst.i32 33"));
-        assert!(clif.contains("call %print_i32(v0)"));
-        assert!(clif.contains("\nreturn\n"));
-    }
-
-    #[test]
-    fn aot_stub_uses_print_i32_call_with_direct_call_target_for_simple_void_metadata() {
-        let clif = build_aot_stub_clif(
-            "on_code_swap",
-            "void",
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("callee_symbol"),
-            None,
-            None,
-        );
-        assert!(clif.contains("external print_i32(i32)"));
-        assert!(clif.contains("external callee_symbol() -> i32"));
-        assert!(clif.contains("v0 = call %callee_symbol()"));
-        assert!(clif.contains("call %print_i32(v0)"));
-        assert!(clif.contains("\nreturn\n"));
-    }
-
-    #[test]
-    fn aot_stub_uses_print_i32_call_with_direct_call_target_and_add_delta_when_metadata_is_resolved(
-    ) {
-        let clif = build_aot_stub_clif(
-            "on_code_swap",
-            "void",
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("callee_symbol"),
-            None,
-            Some(-4),
-        );
-        assert!(clif.contains("external print_i32(i32)"));
-        assert!(clif.contains("external callee_symbol() -> i32"));
-        assert!(clif.contains("v0 = call %callee_symbol()"));
-        assert!(clif.contains("iconst.i32 4"));
-        assert!(clif.contains("isub v0, v1"));
-        assert!(clif.contains("call %print_i32(v2)"));
-        assert!(clif.contains("\nreturn\n"));
-    }
-
-    #[test]
-    fn aot_stub_uses_print_i32_call_with_two_call_targets_for_simple_void_metadata() {
-        let clif = build_aot_stub_clif(
-            "on_code_swap",
-            "void",
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("lhs_symbol"),
-            Some("rhs_symbol"),
-            Some(2),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external print_i32(i32)"));
-        assert!(clif.contains("external lhs_symbol() -> i32"));
-        assert!(clif.contains("external rhs_symbol() -> i32"));
-        assert!(clif.contains("v0 = call %lhs_symbol()"));
-        assert!(clif.contains("v1 = call %rhs_symbol()"));
-        assert!(clif.contains("isub v0, v1"));
-        assert!(clif.contains("call %print_i32(v2)"));
-        assert!(clif.contains("\nreturn\n"));
-    }
-
-    #[test]
-    fn aot_stub_uses_print_i32_call_with_direct_one_i32_arg_call_target_for_simple_void_metadata() {
-        let clif = build_aot_stub_clif(
-            "on_code_swap",
-            "void",
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(13),
-            Some("callee_symbol"),
-            None,
-            None,
-        );
-        assert!(clif.contains("external print_i32(i32)"));
-        assert!(clif.contains("external callee_symbol(i32) -> i32"));
-        assert!(clif.contains("iconst.i32 13"));
-        assert!(clif.contains("call %callee_symbol(v0)"));
-        assert!(clif.contains("call %print_i32(v1)"));
-        assert!(clif.contains("\nreturn\n"));
-    }
-
-    #[test]
-    fn aot_stub_uses_print_i32_call_with_direct_one_call_arg_call_target_for_simple_void_metadata()
-    {
-        let clif = build_aot_stub_clif(
-            "on_code_swap",
-            "void",
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("callee_symbol"),
-            Some("arg_fn_symbol"),
-            None,
-        );
-        assert!(clif.contains("external print_i32(i32)"));
-        assert!(clif.contains("external arg_fn_symbol() -> i32"));
-        assert!(clif.contains("external callee_symbol(i32) -> i32"));
-        assert!(clif.contains("v0 = call %arg_fn_symbol()"));
-        assert!(clif.contains("v1 = call %callee_symbol(v0)"));
-        assert!(clif.contains("call %print_i32(v1)"));
-        assert!(clif.contains("\nreturn\n"));
-    }
-
-    #[test]
-    fn aot_stub_uses_print_i32_call_with_direct_one_i32_arg_call_target_and_add_delta_for_simple_void_metadata(
-    ) {
-        let clif = build_aot_stub_clif(
-            "on_code_swap",
-            "void",
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(13),
-            Some("callee_symbol"),
-            None,
-            Some(2),
-        );
-        assert!(clif.contains("external print_i32(i32)"));
-        assert!(clif.contains("external callee_symbol(i32) -> i32"));
-        assert!(clif.contains("iconst.i32 13"));
-        assert!(clif.contains("call %callee_symbol(v0)"));
-        assert!(clif.contains("iconst.i32 2"));
-        assert!(clif.contains("iadd v1, v2"));
-        assert!(clif.contains("call %print_i32(v3)"));
-        assert!(clif.contains("\nreturn\n"));
-    }
-
-    #[test]
-    fn aot_stub_uses_print_i32_call_with_direct_one_call_arg_call_target_and_add_delta_for_simple_void_metadata(
-    ) {
-        let clif = build_aot_stub_clif(
-            "on_code_swap",
-            "void",
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("callee_symbol"),
-            Some("arg_fn_symbol"),
-            Some(-4),
-        );
-        assert!(clif.contains("external print_i32(i32)"));
-        assert!(clif.contains("external arg_fn_symbol() -> i32"));
-        assert!(clif.contains("external callee_symbol(i32) -> i32"));
-        assert!(clif.contains("v0 = call %arg_fn_symbol()"));
-        assert!(clif.contains("v1 = call %callee_symbol(v0)"));
-        assert!(clif.contains("iconst.i32 4"));
-        assert!(clif.contains("isub v1, v2"));
-        assert!(clif.contains("call %print_i32(v3)"));
-        assert!(clif.contains("\nreturn\n"));
-    }
-
-    #[test]
-    fn aot_stub_uses_logical_condition_ops_for_select_conditions() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            Some(&SimpleI32ReturnExpr::Select(
-                SimpleI32Condition::Or(
-                    Box::new(SimpleI32Condition::Gt(
-                        Box::new(SimpleI32ReturnExpr::Literal(5)),
-                        Box::new(SimpleI32ReturnExpr::Literal(2)),
-                    )),
-                    Box::new(SimpleI32Condition::Not(Box::new(SimpleI32Condition::Eq(
-                        Box::new(SimpleI32ReturnExpr::Literal(1)),
-                        Box::new(SimpleI32ReturnExpr::Literal(1)),
-                    )))),
-                ),
-                Box::new(SimpleI32ReturnExpr::Literal(9)),
-                Box::new(SimpleI32ReturnExpr::Literal(4)),
-            )),
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("block3:"));
-        assert!(clif.matches("brif ").count() >= 2);
-        assert!(clif.contains("brif"));
-        assert!(!clif.contains("bor "));
-        assert!(!clif.contains("bnot "));
-    }
-
-    #[test]
-    fn aot_stub_uses_short_circuit_branching_for_and_conditions() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            Some(&SimpleI32ReturnExpr::Select(
-                SimpleI32Condition::And(
-                    Box::new(SimpleI32Condition::Eq(
-                        Box::new(SimpleI32ReturnExpr::Literal(1)),
-                        Box::new(SimpleI32ReturnExpr::Literal(1)),
-                    )),
-                    Box::new(SimpleI32Condition::Gt(
-                        Box::new(SimpleI32ReturnExpr::Literal(3)),
-                        Box::new(SimpleI32ReturnExpr::Literal(2)),
-                    )),
-                ),
-                Box::new(SimpleI32ReturnExpr::Literal(9)),
-                Box::new(SimpleI32ReturnExpr::Literal(4)),
-            )),
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("block3:"));
-        assert!(clif.matches("brif ").count() >= 2);
-        assert!(!clif.contains("band "));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_when_simple_return_call_target_is_resolved() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            None,
-            123,
-            Some("callee_symbol"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external callee_symbol() -> i32"));
-        assert!(clif.contains("v0 = call %callee_symbol()"));
-        assert!(clif.contains("return v0"));
-        assert!(!clif.contains("iconst.i32 123"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_add_delta_when_metadata_is_resolved() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            None,
-            123,
-            Some("callee_symbol"),
-            Some(5),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external callee_symbol() -> i32"));
-        assert!(clif.contains("v0 = call %callee_symbol()"));
-        assert!(clif.contains("iconst.i32 5"));
-        assert!(clif.contains("iadd v0, v1"));
-        assert!(clif.contains("return v2"));
-        assert!(!clif.contains("iconst.i32 123"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_one_i32_arg_when_metadata_is_resolved() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            None,
-            123,
-            None,
-            None,
-            Some("callee_symbol"),
-            Some(9),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external callee_symbol(i32) -> i32"));
-        assert!(clif.contains("iconst.i32 9"));
-        assert!(clif.contains("call %callee_symbol(v0)"));
-        assert!(clif.contains("return v1"));
-        assert!(!clif.contains("iconst.i32 123"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_first_param_passthrough_when_metadata_is_resolved() {
-        let clif = build_aot_stub_clif_for_metric(
-            "forward",
-            "i32",
-            None,
-            123,
-            None,
-            None,
-            Some("host_set_summary_file"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            1,
-            0,
-            true,
-            false,
-            false,
-            false,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external host_set_summary_file(i64) -> i32"));
-        assert!(clif.contains("function %forward(i64) -> i32"));
-        assert!(clif.contains("v1 = call %host_set_summary_file(v0)"));
-        assert!(clif.contains("return v1"));
-        assert!(!clif.contains("iconst.i32 123"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_first_second_param_passthrough_when_metadata_is_resolved() {
-        let clif = build_aot_stub_clif_for_metric(
-            "forward2",
-            "i32",
-            None,
-            123,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("host_cli_arg_value"),
-            None,
-            None,
-            None,
-            2,
-            1,
-            false,
-            true,
-            false,
-            false,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external host_cli_arg_value(i32, i64) -> i32"));
-        assert!(clif.contains("function %forward2(i32, i64) -> i32"));
-        assert!(clif.contains("v2 = call %host_cli_arg_value(v0, v1)"));
-        assert!(clif.contains("return v2"));
-        assert!(!clif.contains("iconst.i32 123"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_first_second_third_param_passthrough_when_metadata_is_resolved(
-    ) {
-        let clif = build_aot_stub_clif_for_metric(
-            "forward3",
-            "i32",
-            None,
-            123,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("host_write_aot_cli_summary"),
-            None,
-            None,
-            3,
-            0,
-            false,
-            false,
-            true,
-            false,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external host_write_aot_cli_summary(i64, i64, i64) -> i32"));
-        assert!(clif.contains("function %forward3(i64, i64, i64) -> i32"));
-        assert!(clif.contains("v3 = call %host_write_aot_cli_summary(v0, v1, v2)"));
-        assert!(clif.contains("return v3"));
-        assert!(!clif.contains("iconst.i32 123"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_first_second_third_fourth_param_passthrough_when_metadata_is_resolved(
-    ) {
-        let clif = build_aot_stub_clif_for_metric(
-            "forward4",
-            "i32",
-            None,
-            123,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("host_load_source_file"),
-            None,
-            4,
-            0,
-            false,
-            false,
-            false,
-            true,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external host_load_source_file(i64, i32, i64, i64) -> i32"));
-        assert!(clif.contains("function %forward4(i64, i32, i64, i64) -> i32"));
-        assert!(clif.contains("v4 = call %host_load_source_file(v0, v1, v2, v3)"));
-        assert!(clif.contains("return v4"));
-        assert!(!clif.contains("iconst.i32 123"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_first_second_third_fourth_param_passthrough_add_delta_when_metadata_is_resolved(
-    ) {
-        let clif = build_aot_stub_clif_for_metric(
-            "forward4_add",
-            "i32",
-            None,
-            123,
-            None,
-            Some(-2),
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("host_load_source_file"),
-            None,
-            4,
-            0,
-            false,
-            false,
-            false,
-            true,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external host_load_source_file(i64, i32, i64, i64) -> i32"));
-        assert!(clif.contains("function %forward4_add(i64, i32, i64, i64) -> i32"));
-        assert!(clif.contains("v4 = call %host_load_source_file(v0, v1, v2, v3)"));
-        assert!(clif.contains("iconst.i32 2"));
-        assert!(clif.contains("isub v4, v5"));
-        assert!(clif.contains("return v6"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_literal_first_second_param_passthrough_when_metadata_is_resolved(
-    ) {
-        let clif = build_aot_stub_clif_for_metric(
-            "forward_lit",
-            "i32",
-            None,
-            123,
-            None,
-            None,
-            None,
-            Some(1),
-            None,
-            None,
-            None,
-            None,
-            Some("host_cli_arg_value"),
-            1,
-            0,
-            false,
-            false,
-            false,
-            false,
-            true,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external host_cli_arg_value(i32, i64) -> i32"));
-        assert!(clif.contains("function %forward_lit(i64) -> i32"));
-        assert!(clif.contains("v1 = iconst.i32 1"));
-        assert!(clif.contains("v2 = call %host_cli_arg_value(v1, v0)"));
-        assert!(clif.contains("return v2"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_one_i32_arg_and_add_delta_when_metadata_is_resolved() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            None,
-            123,
-            None,
-            Some(2),
-            Some("callee_symbol"),
-            Some(9),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external callee_symbol(i32) -> i32"));
-        assert!(clif.contains("iconst.i32 9"));
-        assert!(clif.contains("call %callee_symbol(v0)"));
-        assert!(clif.contains("iconst.i32 2"));
-        assert!(clif.contains("iadd v1, v2"));
-        assert!(clif.contains("return v3"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_one_call_arg_when_metadata_is_resolved() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            None,
-            123,
-            None,
-            None,
-            Some("callee_symbol"),
-            None,
-            Some("arg_fn_symbol"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external arg_fn_symbol() -> i32"));
-        assert!(clif.contains("external callee_symbol(i32) -> i32"));
-        assert!(clif.contains("v0 = call %arg_fn_symbol()"));
-        assert!(clif.contains("call %callee_symbol(v0)"));
-        assert!(clif.contains("return v1"));
-    }
-
-    #[test]
-    fn aot_stub_uses_direct_call_with_one_call_arg_and_add_delta_when_metadata_is_resolved() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            None,
-            123,
-            None,
-            Some(-4),
-            Some("callee_symbol"),
-            None,
-            Some("arg_fn_symbol"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external arg_fn_symbol() -> i32"));
-        assert!(clif.contains("external callee_symbol(i32) -> i32"));
-        assert!(clif.contains("v0 = call %arg_fn_symbol()"));
-        assert!(clif.contains("v1 = call %callee_symbol(v0)"));
-        assert!(clif.contains("iconst.i32 4"));
-        assert!(clif.contains("isub v1, v2"));
-        assert!(clif.contains("return v3"));
-    }
-
-    #[test]
-    fn aot_stub_uses_two_call_add_when_metadata_is_resolved() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            None,
-            123,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("lhs_symbol"),
-            Some("rhs_symbol"),
-            Some(1),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("external lhs_symbol() -> i32"));
-        assert!(clif.contains("external rhs_symbol() -> i32"));
-        assert!(clif.contains("v0 = call %lhs_symbol()"));
-        assert!(clif.contains("v1 = call %rhs_symbol()"));
-        assert!(clif.contains("iadd v0, v1"));
-        assert!(clif.contains("return v2"));
-        assert!(!clif.contains("iconst.i32 123"));
-    }
-
-    #[test]
-    fn aot_stub_uses_two_call_sub_when_metadata_is_resolved() {
-        let clif = build_aot_stub_clif(
-            "main",
-            "i32",
-            None,
-            123,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("lhs_symbol"),
-            Some("rhs_symbol"),
-            Some(2),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(clif.contains("isub v0, v1"));
-    }
-
-    #[test]
-    fn resolve_simple_i32_return_call_target_symbol_returns_unique_match() {
-        let target_id_hash = hash_identifier("callee");
-        let caller = stasis_compiler::FunctionMetric {
-            file_index: 0,
-            ordinal: 0,
-            id_hash: hash_identifier("main"),
-            sig_hash: 11,
-            body_hash: 12,
-            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
-            param_count: 0,
-            first_param_type_code: 0,
-            clif_text: String::new(),
-        };
-        let callee = stasis_compiler::FunctionMetric {
-            file_index: 0,
-            ordinal: 1,
-            id_hash: hash_identifier("callee"),
-            sig_hash: 21,
-            body_hash: 22,
-            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
-            param_count: 0,
-            first_param_type_code: 0,
-            clif_text: String::new(),
-        };
-        let metrics = vec![caller.clone(), callee.clone()];
-        let resolved =
-            resolve_unique_i32_call_target_symbol_by_hash(Some(target_id_hash), &metrics)
-                .expect("resolved");
-        assert_eq!(resolved, aot_symbol_name(&callee));
-    }
-
-    #[test]
-    fn resolve_simple_i32_return_call_target_symbol_rejects_one_arg_candidate_for_noarg_call() {
-        let target_id_hash = hash_identifier("callee");
-        let caller = stasis_compiler::FunctionMetric {
-            file_index: 0,
-            ordinal: 0,
-            id_hash: hash_identifier("main"),
-            sig_hash: 11,
-            body_hash: 12,
-            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
-            param_count: 0,
-            first_param_type_code: 0,
-            clif_text: String::new(),
-        };
-        let callee = stasis_compiler::FunctionMetric {
-            file_index: 0,
-            ordinal: 1,
-            id_hash: hash_identifier("callee"),
-            sig_hash: 21,
-            body_hash: 22,
-            return_type_code: stasis_compiler::RETURN_TYPE_CODE_I32,
-            param_count: 1,
-            first_param_type_code: 1,
-            clif_text: String::new(),
-        };
-        let metrics = vec![caller.clone(), callee];
-        let resolved =
-            resolve_unique_i32_call_target_symbol_by_hash(Some(target_id_hash), &metrics);
-        assert!(
-            resolved.is_none(),
-            "no-arg call resolution should reject one-arg candidate signature"
-        );
-    }
-
-    #[test]
-    fn resolve_simple_i32_return_call_target_symbol_supports_known_host_noarg_extern() {
-        let resolved = resolve_unique_i32_call_target_symbol_by_hash(
-            Some(hash_identifier("host_cli_arg_count")),
-            &[],
-        )
-        .expect("known host extern should resolve");
-        assert_eq!(resolved, "host_cli_arg_count");
-        let resolved_runtime_entry = resolve_unique_i32_call_target_symbol_by_hash(
-            Some(hash_identifier("host_run_self_host_aot_cli_from_env")),
-            &[],
-        )
-        .expect("known host runtime entry extern should resolve");
-        assert_eq!(
-            resolved_runtime_entry,
-            "host_run_self_host_aot_cli_from_env"
-        );
-    }
-
-    #[test]
-    fn resolve_simple_i32_return_one_arg_target_symbol_supports_known_host_single_arg_extern() {
-        let summary = resolve_unique_i32_single_arg_call_target_symbol_by_hash(
-            Some(hash_identifier("host_set_summary_file")),
-            &[],
-            0,
-        )
-        .expect("known host summary extern should resolve");
-        assert_eq!(summary, "host_set_summary_file");
-        let source_count = resolve_unique_i32_single_arg_call_target_symbol_by_hash(
-            Some(hash_identifier("host_source_file_count")),
-            &[],
-            0,
-        )
-        .expect("known host source-count extern should resolve");
-        assert_eq!(source_count, "host_source_file_count");
-    }
-
-    #[test]
-    fn resolve_simple_i32_return_two_arg_passthrough_target_symbol_supports_known_host_extern() {
-        let resolved = resolve_known_host_two_arg_i32_extern_symbol_by_hash(
-            Some(hash_identifier("host_cli_arg_value")),
-            1,
-        )
-        .expect("known host cli arg-value extern should resolve");
-        assert_eq!(resolved, "host_cli_arg_value");
-    }
-
-    #[test]
-    fn resolve_simple_i32_return_three_arg_passthrough_target_symbol_supports_known_host_extern() {
-        let resolved = resolve_known_host_three_arg_i32_extern_symbol_by_hash(
-            Some(hash_identifier("host_write_aot_cli_summary")),
-            0,
-        )
-        .expect("known host aot summary extern should resolve");
-        assert_eq!(resolved, "host_write_aot_cli_summary");
-    }
-
-    #[test]
-    fn resolve_simple_i32_return_four_arg_passthrough_target_symbol_supports_known_host_extern() {
-        let resolved = resolve_known_host_four_arg_i32_extern_symbol_by_hash(
-            Some(hash_identifier("host_load_source_file")),
-            0,
-        )
-        .expect("known host source-loader extern should resolve");
-        assert_eq!(resolved, "host_load_source_file");
-    }
-
-    #[test]
-    fn resolve_simple_i32_return_two_arg_literal_first_second_param_passthrough_target_symbol_supports_known_host_extern(
-    ) {
-        let resolved =
-            resolve_known_host_two_arg_literal_first_second_param_i32_extern_symbol_by_hash(
-                Some(hash_identifier("host_cli_arg_value")),
-                0,
-            )
-            .expect("known host cli arg-value literal+param extern should resolve");
-        assert_eq!(resolved, "host_cli_arg_value");
     }
 
     #[test]
@@ -6448,13 +5115,6 @@ mod tests {
 
     #[test]
     fn aot_brickout_revenge_v1_compiles_full_engine_bundle() {
-        if !std::env::var("STASIS_AOT_QUALITY_GATE")
-            .ok()
-            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        {
-            return;
-        }
-
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -6543,153 +5203,33 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn aot_brickout_revenge_v1_engine_bundle_executes_two_ticks() {
-        fn find_lld_link() -> Option<PathBuf> {
-            let candidates = [
-                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
-                r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\lld-link.exe",
-                r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\lld-link.exe",
-                r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\lld-link.exe",
-            ];
-            for candidate in candidates {
-                let path = PathBuf::from(candidate);
-                if path.exists() {
-                    return Some(path);
-                }
-            }
-            if std::process::Command::new("lld-link.exe")
-                .arg("/NOLOGO")
-                .output()
-                .is_ok()
-            {
-                return Some(PathBuf::from("lld-link.exe"));
-            }
-            None
-        }
-
         fn hash_global_path(path: &str) -> i32 {
-            // Must match `crates/stasis_compiler/src/backend/jit.rs::hash_global_path`.
-            let mut hash: u32 = 2166136261;
+            let mut hash: u32 = 2_166_136_261;
             for byte in path.bytes() {
                 hash ^= u32::from(byte);
-                hash = hash.wrapping_mul(16777619);
+                hash = hash.wrapping_mul(16_777_619);
             }
             hash as i32
         }
 
-        fn resolve_stasis_dynload_lib() -> Option<PathBuf> {
-            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("..")
-                        .join("..")
-                        .join("target")
-                });
-            let mut candidates: Vec<PathBuf> = Vec::new();
-
-            for profile in ["debug", "release"] {
-                let base = target_dir.join(profile);
-                let direct = base.join("stasis_dynload.lib");
-                if direct.exists() {
-                    candidates.push(direct);
-                }
-
-                let deps = base.join("deps");
-                let Ok(entries) = fs::read_dir(&deps) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                        continue;
-                    };
-                    if !name.starts_with("stasis_dynload-") || !name.ends_with(".lib") {
-                        continue;
-                    }
-                    candidates.push(path);
-                }
-            }
-
-            candidates.into_iter().max_by_key(|path| {
-                fs::metadata(path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                    .unwrap_or_default()
-            })
-        }
-
-        if !std::env::var("STASIS_AOT_QUALITY_GATE")
-            .ok()
-            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        {
-            return;
-        }
-
-        // Compile/link steps can consult/modify process-wide env; serialize with other tests.
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
-
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-
-        // Ensure the `stasis_dynload` staticlib exists and is up-to-date before linking.
-        let mut dynload_build_command = Command::new("cargo");
-        dynload_build_command
-            .arg("rustc")
-            .arg("-p")
-            .arg("stasis_dynload");
-        if !cfg!(debug_assertions) {
-            dynload_build_command.arg("--release");
-        }
-        dynload_build_command
-            .arg("--")
-            .arg("--crate-type")
-            .arg("staticlib")
-            .current_dir(&repo_root);
-        if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-            dynload_build_command.env("CARGO_TARGET_DIR", target_dir);
-        }
-        let dynload_build = dynload_build_command
-            .output()
-            .expect("spawn cargo rustc -p stasis_dynload --crate-type staticlib");
-        assert!(
-            dynload_build.status.success(),
-            "failed to build stasis_dynload staticlib\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&dynload_build.stdout),
-            String::from_utf8_lossy(&dynload_build.stderr)
-        );
-
-        let linker_path = find_lld_link().expect("lld-link.exe required for AOT quality gate");
-        let stasis_dynload_lib = resolve_stasis_dynload_lib()
-            .expect("stasis_dynload staticlib required for AOT quality gate");
-
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("samples")
             .join("brickout_revenge")
             .join("brickout_revenge_v1.stasis");
-        assert!(
-            source.exists(),
-            "expected Brickout sample at {}",
-            source.display()
-        );
-
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
         let temp_root = std::env::temp_dir().join(format!("stasis_aot_brickout_exec_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create temp root");
-        let artifact_root = temp_root.join("aot_artifacts");
 
-        let compile_config = AotCompileConfig::default();
-        assert_eq!(
-            compile_config.opt_level.as_str(),
-            "speed_and_size",
-            "AOT compile config default opt_level should be speed_and_size for release-like engine bundles"
+        let mut backend = IncrementalCompilerBackend::with_aot_config(
+            AotCompileConfig::default(),
+            temp_root.join("aot_artifacts"),
         );
-        let mut backend =
-            IncrementalCompilerBackend::with_aot_config(compile_config, artifact_root);
         let result = backend.compile(CompileRequest::new(
             RequestId(9_202),
             vec![source],
@@ -6698,129 +5238,138 @@ mod tests {
         assert_eq!(
             result.status,
             CompileStatus::Success,
-            "expected Brickout AOT compile success, got diagnostics: {:?}",
+            "Brickout AOT diagnostics: {:?}",
             result.diagnostics
         );
+
         let bundle = backend
             .last_aot_engine_bundle()
-            .expect("AOT engine bundle should be present after successful compile");
+            .expect("compiled Brickout engine bundle");
         let manifest = backend
             .read_engine_bundle_manifest(&bundle.manifest_path)
-            .expect("read engine bundle manifest");
-        assert_eq!(
-            manifest.optimization_profile.as_deref(),
-            Some("speed_and_size"),
-            "engine bundle manifest should report speed_and_size optimization by default"
-        );
-
-        let main_symbol = manifest
+            .expect("read Brickout bundle manifest");
+        let symbol = |name: &str| {
+            manifest
+                .functions
+                .iter()
+                .find(|row| row.name == name)
+                .map(|row| row.symbol.clone())
+                .unwrap_or_else(|| panic!("manifest should include {name}"))
+        };
+        let main_symbol = symbol("main");
+        let tick_symbol = symbol("tick");
+        let state_layout = backend
+            .last_program_snapshot
+            .as_ref()
+            .map(ProgramSnapshot::state_layout)
+            .expect("Brickout AOT snapshot");
+        let runtime_fields =
+            merge_runtime_fields(state_layout, &[]).expect("Brickout runtime fields");
+        let function_symbols = manifest
             .functions
             .iter()
-            .find(|row| row.name == "main")
             .map(|row| row.symbol.clone())
-            .expect("manifest should include main");
-        let tick_symbol = manifest
-            .functions
-            .iter()
-            .find(|row| row.name == "tick")
-            .map(|row| row.symbol.clone())
-            .expect("manifest should include tick");
+            .collect::<Vec<_>>();
+        let function_aliases = vec![
+            PackagedFunctionAlias {
+                alias: "main",
+                target_symbol: main_symbol.clone(),
+                returns_i32: true,
+            },
+            PackagedFunctionAlias {
+                alias: "tick",
+                target_symbol: tick_symbol.clone(),
+                returns_i32: true,
+            },
+        ];
+        let bridge_object = emit_engine_bundle_runtime_bridge_object(
+            &backend,
+            &runtime_fields,
+            &function_symbols,
+            &function_aliases,
+            manifest.string_literals.as_deref().unwrap_or_default(),
+        )
+        .expect("compile Brickout runtime bridge");
 
-        let object_paths: Vec<PathBuf> = bundle.object_paths().cloned().collect();
-        assert!(
-            !object_paths.is_empty(),
-            "expected engine bundle to include object files"
-        );
-
-        let linked_output = temp_root.join("brickout_aot_bundle.dll");
+        let mut link_config = AotLinkConfig::default();
+        link_config
+            .runtime_lib_paths
+            .push(ensure_stasis_dynload_link_library().expect("stasis_dynload link library"));
+        if let Some(wrapper) = ensure_rust_lld_link_wrapper(&temp_root) {
+            link_config.linker_path = Some(wrapper);
+        }
+        let linked = temp_root.join("brickout_aot_bundle.dll");
         let export_symbols = vec![
             main_symbol.clone(),
             tick_symbol.clone(),
-            // Seed host frame values in the same runtime instance as the linked AOT code.
             "stasis_jit_global_i32_array_store".to_string(),
+            "stasis_jit_global_f32_array_store".to_string(),
         ];
-        let link_config = stasis_jit::AotLinkConfig {
-            linker_path: Some(linker_path),
-            runtime_lib_paths: vec![stasis_dynload_lib],
-            target: stasis_jit::AotTarget::default(),
-        };
+        let mut object_paths = bundle.object_paths().cloned().collect::<Vec<_>>();
+        object_paths.push(bridge_object);
+        link_objects_to_dynamic_library(&object_paths, &linked, &export_symbols, &link_config)
+            .expect("link Brickout engine bundle");
+        sign_output_artifact_if_configured(&linked).expect("sign Brickout engine bundle");
 
-        stasis_jit::link_objects_to_dynamic_library(
-            &object_paths,
-            &linked_output,
-            &export_symbols,
-            &link_config,
-        )
-        .expect("link engine bundle into dll");
-
-        let library = stasis_dynload::Library::load(&linked_output).expect("load linked image");
+        let library = stasis_dynload::Library::load(&linked).expect("load Brickout engine bundle");
         let main_ptr = library
             .symbol_address(&main_symbol)
-            .expect("resolve main export");
+            .expect("resolve Brickout main");
         let tick_ptr = library
             .symbol_address(&tick_symbol)
-            .expect("resolve tick export");
-
-        let store_ptr = library
+            .expect("resolve Brickout tick");
+        let store_i32 = library
             .symbol_address("stasis_jit_global_i32_array_store")
-            .expect("resolve host_i32 store");
-        let store_f32_ptr = library
+            .expect("resolve host i32 store");
+        let store_f32 = library
             .symbol_address("stasis_jit_global_f32_array_store")
-            .expect("resolve host_f32 store");
-
+            .expect("resolve host f32 store");
+        let bind_runtime = library
+            .symbol_address("stasis_aot_bind_runtime_globals")
+            .expect("resolve runtime-global binding entrypoint");
+        stasis_dynload::invoke_noarg_void(bind_runtime).expect("bind Brickout runtime globals");
         let host_i32 = hash_global_path("host_i32");
         let host_f32 = hash_global_path("host_f32");
-        let field = 0;
         let store = |index: i32, value: i32| {
-            stasis_dynload::invoke_i32_i32_i32_i32_to_void(
-                store_ptr, host_i32, field, index, value,
-            )
-            .expect("invoke host_i32 store");
+            stasis_dynload::invoke_i32_i32_i32_i32_to_void(store_i32, host_i32, 0, index, value)
+                .expect("store Brickout host i32");
         };
-        let store_f32 = |index: i32, value: f32| {
-            stasis_dynload::invoke_i32_i32_i32_f32_to_void(
-                store_f32_ptr,
-                host_f32,
-                field,
-                index,
-                value,
-            )
-            .expect("invoke host_f32 store");
+        let store_float = |index: i32, value: f32| {
+            stasis_dynload::invoke_i32_i32_i32_f32_to_void(store_f32, host_f32, 0, index, value)
+                .expect("store Brickout host f32");
         };
 
-        // Seed enough HostFrame state for Brickout to initialize and tick headlessly.
-        // Indices from src/stdlib/internal/host_frame.stasis.
-        let t0_ms: i32 = 12345;
-        store(0, t0_ms); // HOST_I_TIME_MS
-        store_f32(50, 360.0); // HOST_F_LOGICAL_W
-        store_f32(51, 720.0); // HOST_F_LOGICAL_H
-        store_f32(52, 0.0); // HOST_F_SAFE_X
-        store_f32(53, 0.0); // HOST_F_SAFE_Y
-        store_f32(54, 360.0); // HOST_F_SAFE_W
-        store_f32(55, 720.0); // HOST_F_SAFE_H
-        store(7, 0); // HOST_I_POINTER_COUNT
-        store(8, 0); // HOST_I_DROPPED_POINTERS
-        store(9, 0); // HOST_I_QUIT_REQUESTED
-        store(10, 0); // HOST_I_TICK_INDEX
-        store(11, 1); // HOST_I_RESIZED
-        store(12, 360); // HOST_I_SCREEN_W_PX
-        store(13, 720); // HOST_I_SCREEN_H_PX
-        store(19, t0_ms * 1000); // HOST_I_TIME_US (coarse is fine)
+        let start_ms = 12_345;
+        store(0, start_ms);
+        store_float(50, 360.0);
+        store_float(51, 720.0);
+        store_float(52, 0.0);
+        store_float(53, 0.0);
+        store_float(54, 360.0);
+        store_float(55, 720.0);
+        store(7, 0);
+        store(8, 0);
+        store(9, 0);
+        store(10, 0);
+        store(11, 1);
+        store(12, 360);
+        store(13, 720);
+        store(19, start_ms * 1_000);
 
-        let main_rc = stasis_dynload::invoke_noarg_i32(main_ptr).expect("invoke main");
-        assert_eq!(main_rc, 0, "expected Brickout main() to succeed");
-
-        // Clear resize flag for subsequent ticks.
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(main_ptr).expect("execute Brickout main"),
+            0
+        );
         store(11, 0);
-
         for tick_index in 0..2 {
-            let time_ms = t0_ms + (tick_index + 1) * 16;
+            let time_ms = start_ms + (tick_index + 1) * 16;
             store(0, time_ms);
             store(10, tick_index);
-            store(19, time_ms * 1000);
-
-            let rc = stasis_dynload::invoke_noarg_i32(tick_ptr).expect("invoke tick");
-            assert_eq!(rc, 0, "expected tick() to return 0 (keep running)");
+            store(19, time_ms * 1_000);
+            assert_eq!(
+                stasis_dynload::invoke_noarg_i32(tick_ptr).expect("execute Brickout tick"),
+                0
+            );
         }
 
         drop(library);
@@ -7239,9 +5788,10 @@ mod tests {
         assert_eq!(result.status, CompileStatus::Failed);
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
-                diagnostic.message.contains("call target") && diagnostic.message.contains("callee")
+                diagnostic.message.contains("cannot resolve call")
+                    && diagnostic.message.contains("callee")
             }),
-            "expected unresolved direct call target diagnostic, got: {:?}",
+            "expected unresolved call diagnostic, got: {:?}",
             result.diagnostics
         );
         fs::remove_dir_all(&temp_root).ok();
@@ -7276,9 +5826,8 @@ mod tests {
 
         let manifest_path = artifact_root.join("last_patch_manifest.json");
         let manifest_text = fs::read_to_string(&manifest_path).expect("read manifest");
-        let manifest: AotPatchManifest =
+        let _: AotPatchManifest =
             serde_json::from_str(&manifest_text).expect("parse manifest json");
-        assert!(manifest.fallback_stub_symbols.is_empty());
 
         fs::remove_dir_all(&temp_root).ok();
     }
@@ -7642,8 +6191,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let temp_root =
-            std::env::temp_dir().join(format!("stasis_bounded_performance_aot_{stamp}"));
+        let temp_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.stasis_cache/tmp")
+            .join(format!("stasis_bounded_performance_aot_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create stable AOT test root");
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../samples/bounded_performance/src/main.stasis");
         let mut backend = IncrementalCompilerBackend::with_aot_config(
@@ -7719,6 +6270,7 @@ mod tests {
         )
         .expect("link bounded-performance AOT bundle");
         stage_stasis_dynload_runtime(&dynload, &linked).expect("stage runtime");
+        sign_output_artifact_if_configured(&linked).expect("sign bounded-performance AOT bundle");
 
         let library = DynamicLibrary::load(&linked).expect("load AOT bundle");
         let bind = library
@@ -7837,6 +6389,8 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_links_runnable_executable_with_main_entry_symbol() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -7880,6 +6434,8 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_links_standalone_storage_for_non_engine_globals() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -7971,7 +6527,61 @@ echo "signed" > "$1.signed"
     }
 
     #[test]
+    fn missing_optional_signer_does_not_block_unsigned_local_artifacts() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
+        let old_signer = std::env::var_os("STASIS_AOT_SIGN_TOOL");
+        let old_required = std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION");
+        let missing_signer = std::env::temp_dir().join("stasis-missing-sign-tool");
+        std::env::set_var("STASIS_AOT_SIGN_TOOL", &missing_signer);
+        std::env::remove_var("STASIS_REQUIRE_SIGNED_EXECUTION");
+
+        let result = sign_output_artifact_if_configured(Path::new("local-artifact.exe"));
+
+        if let Some(value) = old_signer {
+            std::env::set_var("STASIS_AOT_SIGN_TOOL", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_SIGN_TOOL");
+        }
+        if let Some(value) = old_required {
+            std::env::set_var("STASIS_REQUIRE_SIGNED_EXECUTION", value);
+        } else {
+            std::env::remove_var("STASIS_REQUIRE_SIGNED_EXECUTION");
+        }
+        result.expect("an unavailable optional signer should permit unsigned local output");
+    }
+
+    #[test]
+    fn missing_required_signer_fails_before_artifact_execution() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
+        let old_signer = std::env::var_os("STASIS_AOT_SIGN_TOOL");
+        let old_required = std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION");
+        let missing_signer = std::env::temp_dir().join("stasis-missing-required-sign-tool");
+        std::env::set_var("STASIS_AOT_SIGN_TOOL", &missing_signer);
+        std::env::set_var("STASIS_REQUIRE_SIGNED_EXECUTION", "1");
+
+        let result = sign_output_artifact_if_configured(Path::new("local-artifact.exe"));
+
+        if let Some(value) = old_signer {
+            std::env::set_var("STASIS_AOT_SIGN_TOOL", value);
+        } else {
+            std::env::remove_var("STASIS_AOT_SIGN_TOOL");
+        }
+        if let Some(value) = old_required {
+            std::env::set_var("STASIS_REQUIRE_SIGNED_EXECUTION", value);
+        } else {
+            std::env::remove_var("STASIS_REQUIRE_SIGNED_EXECUTION");
+        }
+        assert!(result
+            .expect_err("required signing must reject an unavailable signer")
+            .contains("does not exist"));
+    }
+
+    #[test]
     fn self_host_aot_cli_writes_default_summary_sidecar() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -8012,6 +6622,8 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_writes_summary_to_configured_path() {
+        let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
+        let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -8054,8 +6666,7 @@ echo "signed" > "$1.signed"
     #[test]
     fn self_host_aot_cli_is_deterministic_across_repeated_runs_with_same_source() {
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
-        let old_signer = std::env::var("STASIS_AOT_SIGN_TOOL").ok();
-        std::env::remove_var("STASIS_AOT_SIGN_TOOL");
+        let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -8106,11 +6717,6 @@ echo "signed" > "$1.signed"
         assert!(first.object_bundle_path.exists());
 
         fs::remove_dir_all(&temp_root).ok();
-        if let Some(value) = old_signer {
-            std::env::set_var("STASIS_AOT_SIGN_TOOL", value);
-        } else {
-            std::env::remove_var("STASIS_AOT_SIGN_TOOL");
-        }
     }
 }
 
@@ -8372,6 +6978,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
             ir_bundle_path: PathBuf::new(),
             object_bundle_path,
             object_file_names,
+            program_snapshot: None,
         }
     };
 
@@ -8405,7 +7012,14 @@ pub fn run_self_host_aot_cli_with_options(
         summary_file_path.map(PathBuf::from),
         entry_file.map(PathBuf::from),
     );
-    run_self_host_aot_cli_with_backend_and_options(&mut backend, project_dir, output_exe, &options)
+    let mut summary = run_self_host_aot_cli_with_backend_and_options(
+        &mut backend,
+        project_dir,
+        output_exe,
+        &options,
+    )?;
+    summary.program_snapshot = backend.last_program_snapshot.clone();
+    Ok(summary)
 }
 
 pub fn run_self_host_aot_cli(
@@ -8415,33 +7029,12 @@ pub fn run_self_host_aot_cli(
     run_self_host_aot_cli_with_options(project_dir, output_exe, None, None)
 }
 
-fn maybe_sign_output_artifact(artifact_path: &Path) -> Result<(), String> {
-    let Some(sign_tool) = std::env::var_os("STASIS_AOT_SIGN_TOOL") else {
-        return Ok(());
-    };
-    let status = std::process::Command::new(&sign_tool)
-        .arg(artifact_path)
-        .status()
-        .map_err(|error| {
-            format!(
-                "failed to launch signer tool {:?} for {}: {error}",
-                sign_tool,
-                artifact_path.display()
-            )
-        })?;
-    if !status.success() {
-        return Err(format!(
-            "signer tool {:?} failed for {} with status {:?}",
-            sign_tool,
-            artifact_path.display(),
-            status.code()
-        ));
-    }
-    Ok(())
+pub fn sign_output_artifact_if_configured(artifact_path: &Path) -> Result<(), String> {
+    crate::windows_signing::sign_output_artifact_if_configured(artifact_path)
 }
 
 fn maybe_sign_output_executable(output_exe: &Path) -> Result<(), String> {
-    maybe_sign_output_artifact(output_exe)
+    sign_output_artifact_if_configured(output_exe)
 }
 
 fn resolve_aot_cli_summary_sidecar_path(
@@ -8494,7 +7087,149 @@ fn write_default_aot_cli_summary_sidecar(
 mod self_host_file_selection_tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempTestRoot(PathBuf);
+
+    impl TempTestRoot {
+        fn new(label: &str) -> Self {
+            let id = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "stasis_self_host_{label}_{}_{}",
+                std::process::id(),
+                id
+            ));
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTestRoot {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn write_self_host_inputs(root: &Path) {
+        fs::create_dir_all(root.join("runtime")).expect("create runtime directory");
+        fs::create_dir_all(root.join("mobile/shells/common"))
+            .expect("create mobile shell directory");
+        fs::write(root.join(SELF_HOST_RUNTIME_CMAKE), "installed runtime\n")
+            .expect("write runtime input");
+        fs::write(root.join(SELF_HOST_MOBILE_MAIN), "installed mobile shell\n")
+            .expect("write mobile input");
+    }
+
+    #[test]
+    fn self_host_repo_root_prefers_installed_executable_root() {
+        let root = TempTestRoot::new("root_prefer");
+        let compile_root = root.path().join("compile");
+        let installed_root = root.path().join("installed");
+        write_self_host_inputs(&compile_root);
+        write_self_host_inputs(&installed_root);
+
+        let executable = installed_root.join("stasis.exe");
+        let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect("installed root should resolve");
+        assert_eq!(resolved, installed_root);
+    }
+
+    #[test]
+    fn self_host_repo_root_resolves_published_bin_bundle_root() {
+        let root = TempTestRoot::new("bin_bundle");
+        let compile_root = root.path().join("compile");
+        let bundle_root = root.path().join("installed");
+        write_self_host_inputs(&compile_root);
+        write_self_host_inputs(&bundle_root);
+        fs::create_dir_all(bundle_root.join("bin")).expect("create bin directory");
+
+        let executable = bundle_root.join("bin/stasis");
+        let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect("bundle root should resolve");
+        assert_eq!(resolved, bundle_root);
+    }
+
+    #[test]
+    fn self_host_repo_root_falls_back_when_installed_root_is_incomplete() {
+        let root = TempTestRoot::new("direct_fallback");
+        let compile_root = root.path().join("compile");
+        let installed_root = root.path().join("installed");
+        write_self_host_inputs(&compile_root);
+        fs::create_dir_all(installed_root.join("runtime")).expect("create partial runtime");
+        fs::write(
+            installed_root.join(SELF_HOST_RUNTIME_CMAKE),
+            "partial runtime\n",
+        )
+        .expect("write partial input");
+
+        let executable = installed_root.join("stasis.exe");
+        let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect("compile root should resolve");
+        assert_eq!(resolved, compile_root);
+    }
+
+    #[test]
+    fn self_host_repo_root_falls_back_when_installed_bin_layout_is_incomplete() {
+        let root = TempTestRoot::new("bin_fallback");
+        let compile_root = root.path().join("compile");
+        let bundle_root = root.path().join("installed");
+        let executable_directory = bundle_root.join("bin");
+        write_self_host_inputs(&compile_root);
+        fs::create_dir_all(executable_directory.join("runtime"))
+            .expect("create partial bin runtime");
+        fs::write(
+            executable_directory.join(SELF_HOST_RUNTIME_CMAKE),
+            "partial bin runtime\n",
+        )
+        .expect("write partial bin input");
+        fs::create_dir_all(bundle_root.join("mobile/shells/common"))
+            .expect("create partial bundle mobile shell");
+        fs::write(
+            bundle_root.join(SELF_HOST_MOBILE_MAIN),
+            "partial bundle mobile shell\n",
+        )
+        .expect("write partial bundle input");
+
+        let executable = executable_directory.join("stasis");
+        let resolved = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect("compile root should resolve");
+        assert_eq!(resolved, compile_root);
+    }
+
+    #[test]
+    fn self_host_repo_root_falls_back_when_executable_is_unavailable() {
+        let root = TempTestRoot::new("unavailable_fallback");
+        let compile_root = root.path().join("compile");
+        write_self_host_inputs(&compile_root);
+
+        let resolved = resolve_self_host_repo_root(None, &compile_root)
+            .expect("compile root should resolve without an executable");
+        assert_eq!(resolved, compile_root);
+    }
+
+    #[test]
+    fn self_host_repo_root_reports_all_checked_roots_and_markers() {
+        let root = TempTestRoot::new("missing");
+        let compile_root = root.path().join("compile");
+        let bundle_root = root.path().join("installed");
+        let executable_directory = bundle_root.join("bin");
+        let executable = executable_directory.join("stasis");
+
+        let error = resolve_self_host_repo_root(Some(&executable), &compile_root)
+            .expect_err("missing roots should report an actionable error");
+        assert!(error.contains("checked root locations"));
+        assert!(error.contains(&executable_directory.display().to_string()));
+        assert!(error.contains(&bundle_root.display().to_string()));
+        assert!(error.contains(&compile_root.display().to_string()));
+        assert!(error.contains("runtime/CMakeLists.txt"));
+        assert!(error.contains("mobile/shells/common/stasis_mobile_main.c"));
+    }
 
     #[test]
     fn self_host_project_entry_selects_project_local_import_closure() {

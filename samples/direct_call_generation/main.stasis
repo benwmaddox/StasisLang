@@ -17,5 +17,5 @@ function main(): i32 {
 }
 
 function unreachable(): i32 {
-    return missing();
+    return 0;
 }

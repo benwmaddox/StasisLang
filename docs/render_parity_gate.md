@@ -1,9 +1,12 @@
 # Render parity gate
 
-`samples/render_parity` is the framework-owned gfx_cmd v3 conformance scene. It
+`samples/render_parity` is the framework-owned current gfx_cmd conformance scene. It
 does not depend on a game. One frame contains a clear, two overlapping lines,
-the procedural fallback sprite, opaque and translucent SVGs, a full-canvas SVG,
-a rotated/scaled sprite, direct UTF-8 text, cached text, and present.
+one translucent filled rectangle, five resolved atlas-backed sprite instances
+(a full-canvas SVG, the same SVG repeated smaller, opaque and translucent SVGs,
+and a rotated/scaled opaque SVG), direct UTF-8 text, cached text, and present.
+Missing resources use the renderer's same-path placeholder region, but are tested
+separately instead of being part of this normal resource fixture.
 
 The checked-in test font is intentionally synthetic. Regenerate it with
 `python tools/ci/generate_render_parity_font.py`; it contains only deterministic
@@ -25,8 +28,8 @@ cargo test -p stasis_compiler parity_corpus_covers_shared_lowering_shapes -- --n
 ```
 
 The `renderer_command_trace` case compiles
-`samples/render_parity/trace.stasis`. It asserts the exact gfx_cmd v3 trace
-`3298812902` as an unsigned trace (`-996154394` as the Stasis `i32` result) in JIT, links and executes the AOT object where the host linker is
+`samples/render_parity/trace.stasis`. It intentionally asserts the exact
+current gfx_cmd trace recorded in `capture_manifest.json` as the unsigned and Stasis `i32` trace result, links and executes the AOT object where the host linker is
 available, and requires both results to match. Display and density metadata are
 present in the fixture but intentionally excluded from the backend-independent
 trace.
@@ -65,7 +68,7 @@ font asset, drawable size, and dependency versions are fixed. The checked-in
 `windows_sdl_d3d11` profile records the exact proof capture from that fixed
 configuration. The checked-in `portable` profile instead uses named pixel
 regions with documented tolerances.
-This prevents driver rounding from hiding a missing SVG, fallback sprite, or
+This prevents driver rounding from hiding a missing SVG, the atlas-backed canvas sprite, or
 text layer while still producing a specific stage/region failure.
 
 For Android, package the same project and use the existing device lifecycle
@@ -97,6 +100,6 @@ current backend and generations in the same bounded operation. It never accepts
 an existing image to relabel after the fact.
 All app processes must be force-stopped after device testing.
 
-The optional legacy desktop GL build uses the same fixture and `portable`
+The optional desktop GL build uses the same fixture and `portable`
 profile. Any expected backend difference belongs in a separately named capture
 profile with an explicit reason; command traces must remain exact.

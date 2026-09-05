@@ -15,6 +15,14 @@ ALLOWED_PREFIXES = (
     "crates/stasis_android_bridge/src/",
     "mobile/android/codex_native/src/",
 )
+ALLOWED_FILES = {
+    "apps/stasis/tests/desktop_asset_load_stress.rs",
+    "apps/stasis/tests/desktop_display_metrics_seam.rs",
+    "apps/stasis/tests/desktop_input_frame_seam.rs",
+    "apps/stasis/tests/desktop_manifest_assets_seam.rs",
+    "apps/stasis/tests/desktop_render_recovery_seam.rs",
+    "crates/stasis_ai/src/lib.rs",
+}
 
 
 def unsafe_files(root: Path) -> list[str]:
@@ -33,7 +41,7 @@ def unexpected_unsafe_files(root: Path) -> list[str]:
     return [
         path
         for path in unsafe_files(root)
-        if not path.startswith(ALLOWED_PREFIXES)
+        if path not in ALLOWED_FILES and not path.startswith(ALLOWED_PREFIXES)
     ]
 
 

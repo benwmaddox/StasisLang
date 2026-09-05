@@ -2,19 +2,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::backend::emit::{
-    parse_simple_statements_with_debug, ParsedSimpleStatements, SimpleCondition, SimpleExpr,
-    SimpleStmt,
-};
 use crate::data_flow::{
-    build_function_data_flow_summaries, compiler_local_types, CompilerLocalType,
-    FunctionDataFlowSummary,
+    build_function_data_flow_summaries, compiler_local_types, validate_effect_contracts,
+    validate_program_semantics, CompilerLocalType, FunctionDataFlowSummary,
 };
-use crate::frontend::indexer::{hash_text, index_file, IndexedCallDependency};
+use crate::frontend::body_parser::parse_simple_statements_with_debug;
+use crate::frontend::indexer::{hash_text, index_file_with_diagnostic, IndexedCallDependency};
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::identity::{overload_discriminator, FnId, SymbolId};
-use crate::ir::hir::{Block, DebugStatement, FunctionHIR};
+use crate::ir::hir::{
+    DebugStatement, FunctionHIR, ParsedSimpleStatements, SimpleCondition, SimpleExpr, SimpleStmt,
+};
 
 pub type FunctionId = FnId;
 pub type FunctionStorageIndex = u32;
@@ -44,6 +43,10 @@ pub struct FunctionMeta {
     pub param_names: Vec<String>,
     pub params: Vec<TypeId>,
     pub return_type: TypeId,
+    /// Requests body substitution at eligible call sites. The real function is still emitted.
+    pub inline: bool,
+    /// Optional compile-time assertion over the function's reachable effects.
+    pub effect_contract: Option<Vec<String>>,
     pub dependencies: Vec<FunctionId>,
     pub dependents: Vec<FunctionId>,
     pub call_sites: Vec<FunctionCallSite>,
@@ -296,9 +299,6 @@ impl SymbolTable {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct DependencyGraph;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
     Frontend(String),
@@ -331,7 +331,6 @@ pub struct Compiler {
     files: Vec<SourceFile>,
     functions: Vec<FunctionMeta>,
     function_index_by_id: HashMap<FunctionId, usize>,
-    deps: DependencyGraph,
     types: TypeTable,
     parsed_statements: Vec<Vec<SimpleStmt>>,
     parsed_debug_statements: Vec<Vec<DebugStatement>>,
@@ -437,23 +436,38 @@ impl Compiler {
             .collect();
         let project_root = self.project_root.clone();
         let mut confined_root = None;
-        let result = ModuleGraph::load(self.entry_roots.iter().cloned(), |path| {
-            if let Some(source) = available.get(path) {
-                return Ok(source.clone());
-            }
-            let root = project_root.as_deref().ok_or_else(|| {
-                format!("missing imported module '{path}': compiler project root is not set")
-            })?;
-            if confined_root.is_none() {
-                confined_root = Some(
-                    crate::frontend::module_graph::ConfinedProjectRoot::new(std::path::Path::new(
-                        root,
-                    ))
-                    .map_err(|message| format!("missing imported module '{path}': {message}"))?,
-                );
-            }
-            confined_root.as_ref().unwrap().read_source(path)
-        });
+        let allow_graphics_test_seams = cfg!(test)
+            || project_root.as_deref().is_some_and(|root| {
+                let repository_root =
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+                std::fs::canonicalize(root)
+                    .ok()
+                    .zip(std::fs::canonicalize(repository_root).ok())
+                    .is_some_and(|(root, repository_root)| root == repository_root)
+            });
+        let result = ModuleGraph::load_with_graphics_test_seams(
+            self.entry_roots.iter().cloned(),
+            |path| {
+                if let Some(source) = available.get(path) {
+                    return Ok(source.clone());
+                }
+                let root = project_root.as_deref().ok_or_else(|| {
+                    format!("missing imported module '{path}': compiler project root is not set")
+                })?;
+                if confined_root.is_none() {
+                    confined_root = Some(
+                        crate::frontend::module_graph::ConfinedProjectRoot::new(
+                            std::path::Path::new(root),
+                        )
+                        .map_err(|message| {
+                            format!("missing imported module '{path}': {message}")
+                        })?,
+                    );
+                }
+                confined_root.as_ref().unwrap().read_source(path)
+            },
+            allow_graphics_test_seams,
+        );
         let (mut graph, loaded_sources) = match result {
             Ok(result) => result,
             Err(diagnostic) => {
@@ -487,17 +501,17 @@ impl Compiler {
     where
         F: FnMut(&FunctionMeta, &FunctionHIR, &TypeTable) -> Result<(), String>,
     {
-        let index = self.index_pass()?;
+        let index = self.check()?;
         let emit = self.emit_pass_with(&mut emit_function)?;
         Ok(CompileReport { index, emit })
     }
 
     pub fn index_pass(&mut self) -> CompileResult<IndexPassResult> {
-        self.index_pass_with_scope(false)
+        self.check()
     }
 
     pub fn check(&mut self) -> CompileResult<IndexPassResult> {
-        let index = self.index_pass_with_scope(true)?;
+        let index = self.analyze_program()?;
         let functions = self.functions.clone();
         for function in functions {
             if let Err(error) = self.lower_function_to_hir(&function) {
@@ -508,7 +522,7 @@ impl Compiler {
         Ok(index)
     }
 
-    fn index_pass_with_scope(&mut self, analyze_all: bool) -> CompileResult<IndexPassResult> {
+    fn analyze_program(&mut self) -> CompileResult<IndexPassResult> {
         self.last_source_diagnostic = None;
         if let Some(error) = self.pending_path_error.take() {
             return Err(CompileError::Frontend(error));
@@ -593,26 +607,28 @@ impl Compiler {
         self.parsed_statements.clear();
         self.parsed_debug_statements.clear();
         self.parsed_statement_ids.clear();
-        self.deps = DependencyGraph;
-
         let mut dependencies_by_function: Vec<Vec<IndexedCallDependency>> = Vec::new();
         let mut signature_changed_ids: Vec<FunctionId> = Vec::new();
 
         for file_id in 0..self.files.len() {
-            let indexed = match index_file(&self.files[file_id].content, &mut self.types) {
-                Ok(indexed) => indexed,
-                Err(message) => {
-                    let file = &self.files[file_id];
-                    self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
-                        file.path.clone(),
-                        0,
-                        file.content.len(),
-                        "",
-                        message.clone(),
-                    ));
-                    return Err(CompileError::Frontend(message));
-                }
-            };
+            let indexed =
+                match index_file_with_diagnostic(&self.files[file_id].content, &mut self.types) {
+                    Ok(indexed) => indexed,
+                    Err(diagnostic) => {
+                        let file = &self.files[file_id];
+                        self.last_source_diagnostic = Some(
+                            crate::SourceDiagnostic::new(
+                                file.path.clone(),
+                                diagnostic.start,
+                                diagnostic.end,
+                                diagnostic.symbol,
+                                diagnostic.message.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::Parse),
+                        );
+                        return Err(CompileError::Frontend(diagnostic.message));
+                    }
+                };
             self.files[file_id].functions.clear();
             for indexed_function in indexed {
                 let storage_index = self.functions.len() as FunctionStorageIndex;
@@ -669,6 +685,8 @@ impl Compiler {
                     param_names: indexed_function.param_names,
                     params: indexed_function.params,
                     return_type: indexed_function.return_type,
+                    inline: indexed_function.inline,
+                    effect_contract: indexed_function.effect_contract,
                     dependencies: Vec::new(),
                     dependents: Vec::new(),
                     call_sites: Vec::new(),
@@ -752,17 +770,13 @@ impl Compiler {
 
         self.parsed_statements = vec![Vec::new(); self.functions.len()];
         self.parsed_debug_statements = vec![Vec::new(); self.functions.len()];
-        let reachable = if analyze_all {
-            self.functions.iter().map(|function| function.id).collect()
-        } else {
-            crate::backend::reachability::compute_reachable_function_ids(
-                &self.functions,
-                &self.analysis_required_roots,
-            )
-        };
-        self.prepare_statement_artifacts(&reachable.iter().copied().collect::<Vec<_>>())?;
-
+        let all_functions = self
+            .functions
+            .iter()
+            .map(|function| function.id)
+            .collect::<Vec<_>>();
         self.propagate_dirty_from_signature_changes(&signature_changed_ids);
+        self.prepare_statement_artifacts(&all_functions)?;
         let dirty_functions = self
             .functions
             .iter()
@@ -832,13 +846,16 @@ impl Compiler {
                 let artifacts = match parse_simple_statements_with_debug(body, &mut self.types) {
                     Ok(artifacts) => artifacts,
                     Err(message) => {
-                        self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
-                            file.path.clone(),
-                            function.source_range.start as usize,
-                            function.source_range.end as usize,
-                            function.name.clone(),
-                            message.clone(),
-                        ));
+                        self.last_source_diagnostic = Some(
+                            crate::SourceDiagnostic::new(
+                                file.path.clone(),
+                                function.source_range.start as usize,
+                                function.source_range.end as usize,
+                                function.name.clone(),
+                                message.clone(),
+                            )
+                            .with_code(crate::SourceDiagnosticCode::Parse),
+                        );
                         return Err(CompileError::Backend(message));
                     }
                 };
@@ -850,6 +867,7 @@ impl Compiler {
                     &self.files,
                     &self.functions,
                     &self.module_resolution,
+                    true,
                 ) {
                     return Err(CompileError::Frontend(message));
                 }
@@ -862,10 +880,28 @@ impl Compiler {
             self.parsed_statement_ids.insert(*function_id);
         }
         self.statement_cache = next_statement_cache;
+        let mut analysis_statements = self.parsed_statements.clone();
+        for function in self
+            .functions
+            .iter()
+            .filter(|function| self.parsed_statement_ids.contains(&function.id))
+        {
+            let file = &self.files[function.file_id as usize];
+            qualify_module_calls(
+                &mut analysis_statements[function.storage_index as usize],
+                &file.path,
+                &self.module_graph,
+                &self.files,
+                &self.functions,
+                &self.module_resolution,
+                false,
+            )
+            .map_err(CompileError::Frontend)?;
+        }
         let (summaries, context_fingerprint) = build_function_data_flow_summaries(
             &self.files,
             &self.functions,
-            &self.parsed_statements,
+            &analysis_statements,
             &self.parsed_statement_ids,
             &changed_function_ids,
             &self.types,
@@ -877,6 +913,97 @@ impl Compiler {
             self.data_flow_summaries = summaries.into();
         }
         self.data_flow_context_fingerprint = context_fingerprint;
+        self.refresh_resolved_dependency_graph()?;
+        if let Err(violation) =
+            validate_effect_contracts(&self.files, &self.functions, &self.data_flow_summaries)
+        {
+            self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                violation.file,
+                violation.source_start as usize,
+                violation.source_end as usize,
+                violation.function,
+                violation.message.clone(),
+            ));
+            return Err(CompileError::Frontend(violation.message));
+        }
+        if let Err((storage_index, message)) = validate_program_semantics(
+            &self.files,
+            &self.functions,
+            &analysis_statements,
+            &self.types,
+        ) {
+            if let Some(function) = self.functions.get(storage_index as usize).cloned() {
+                self.record_function_diagnostic(&function, &message);
+            }
+            return Err(CompileError::Frontend(message));
+        }
+        Ok(())
+    }
+
+    fn refresh_resolved_dependency_graph(&mut self) -> CompileResult<()> {
+        let mut resolved_calls = BTreeSet::new();
+        for function in &self.functions {
+            let mut lexical_targets_by_span = BTreeMap::<(u32, u32), BTreeSet<FunctionId>>::new();
+            for site in &function.call_sites {
+                lexical_targets_by_span
+                    .entry((site.source_range.start, site.source_range.end))
+                    .or_default()
+                    .insert(site.callee);
+            }
+            for targets in lexical_targets_by_span.values() {
+                if let Some(callee) = targets
+                    .iter()
+                    .copied()
+                    .next()
+                    .filter(|_| targets.len() == 1)
+                {
+                    resolved_calls.insert((function.id, callee));
+                }
+            }
+        }
+        for summary in self.data_flow_summaries.iter() {
+            let caller = self
+                .functions
+                .get(summary.internal_function_id as usize)
+                .ok_or_else(|| {
+                    CompileError::Invariant(
+                        "data-flow summary references missing caller".to_string(),
+                    )
+                })?
+                .id;
+            for callee_index in summary.resolved_callee_storage_indices() {
+                let callee = self
+                    .functions
+                    .get(callee_index as usize)
+                    .ok_or_else(|| {
+                        CompileError::Invariant(
+                            "data-flow summary references missing callee".to_string(),
+                        )
+                    })?
+                    .id;
+                resolved_calls.insert((caller, callee));
+            }
+        }
+
+        for function in &mut self.functions {
+            function.dependencies.clear();
+            function.dependents.clear();
+        }
+        for function in &mut self.functions {
+            let caller = function.id;
+            function
+                .call_sites
+                .retain(|site| resolved_calls.contains(&(caller, site.callee)));
+        }
+        for (caller, callee) in resolved_calls
+            .into_iter()
+            .filter(|(caller, callee)| caller != callee)
+        {
+            let caller_index = self.function_index(caller)?;
+            let callee_index = self.function_index(callee)?;
+            self.functions[caller_index].dependencies.push(callee);
+            self.functions[callee_index].dependents.push(caller);
+        }
         Ok(())
     }
 
@@ -987,6 +1114,10 @@ impl Compiler {
         self.last_source_diagnostic.as_ref()
     }
 
+    pub(crate) fn set_external_source_diagnostic(&mut self, diagnostic: crate::SourceDiagnostic) {
+        self.last_source_diagnostic = Some(diagnostic);
+    }
+
     fn record_function_diagnostic(&mut self, function: &FunctionMeta, message: &str) {
         let Some(file) = self.files.get(function.file_id as usize) else {
             return;
@@ -1041,13 +1172,6 @@ impl Compiler {
         let file = self.files.get(function.file_id as usize).ok_or_else(|| {
             CompileError::Invariant("function references missing file".to_string())
         })?;
-        let body = file
-            .content
-            .get(function.source_range.start as usize..function.source_range.end as usize)
-            .ok_or_else(|| {
-                CompileError::Invariant("function body range out of bounds".to_string())
-            })?
-            .to_string();
         let mut statements = self
             .parsed_statements
             .get(function.storage_index as usize)
@@ -1065,10 +1189,56 @@ impl Compiler {
             &self.files,
             &self.functions,
             &self.module_resolution,
+            true,
         )
         .map_err(CompileError::Frontend)?;
+        let mut inline_candidates = Vec::new();
+        for candidate in self.functions.iter().filter(|candidate| candidate.inline) {
+            let Some(candidate_statements) =
+                self.parsed_statements.get(candidate.storage_index as usize)
+            else {
+                continue;
+            };
+            let [SimpleStmt::Return(expression)] = candidate_statements.as_slice() else {
+                continue;
+            };
+            let candidate_file = self.files.get(candidate.file_id as usize).ok_or_else(|| {
+                CompileError::Invariant(format!(
+                    "inline function '{}' references missing file",
+                    candidate.name
+                ))
+            })?;
+            let mut qualified_body = vec![SimpleStmt::Return(expression.clone())];
+            qualify_module_calls(
+                &mut qualified_body,
+                &candidate_file.path,
+                &self.module_graph,
+                &self.files,
+                &self.functions,
+                &self.module_resolution,
+                true,
+            )
+            .map_err(CompileError::Frontend)?;
+            let SimpleStmt::Return(expression) = qualified_body.remove(0) else {
+                unreachable!("inline candidate shape was already checked")
+            };
+            let qualified_name = format!("{}.{}", candidate.module_alias, candidate.name);
+            let has_same_arity_overload = self.functions.iter().any(|other| {
+                other.id != candidate.id
+                    && other.module_alias == candidate.module_alias
+                    && other.name == candidate.name
+                    && other.params.len() == candidate.params.len()
+            });
+            inline_candidates.push(InlineExpressionCandidate {
+                id: candidate.id,
+                qualified_name,
+                param_names: candidate.param_names.clone(),
+                expression,
+                has_same_arity_overload,
+            });
+        }
+        inline_expression_calls(&mut statements, &inline_candidates, function.id);
         Ok(FunctionHIR {
-            blocks: vec![Block { source: body }],
             statements,
             debug_statements: self
                 .parsed_debug_statements
@@ -1081,6 +1251,27 @@ impl Compiler {
                     ))
                 })?,
         })
+    }
+
+    /// Returns the accepted shared HIR keyed by stable function identity for
+    /// target-independent whole-program analyses.
+    pub(crate) fn analysis_hirs(
+        &mut self,
+        required_emit_roots: &[String],
+    ) -> CompileResult<BTreeMap<FunctionId, FunctionHIR>> {
+        let functions = self.functions.clone();
+        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+            &functions,
+            required_emit_roots,
+        );
+        functions
+            .iter()
+            .filter(|function| reachable.contains(&function.id))
+            .map(|function| {
+                self.lower_function_to_hir(function)
+                    .map(|hir| (function.id, hir))
+            })
+            .collect()
     }
 
     fn function_index(&self, id: FunctionId) -> CompileResult<usize> {
@@ -1184,6 +1375,7 @@ fn qualify_module_calls(
     files: &[SourceFile],
     functions: &[FunctionMeta],
     resolution: &ModuleResolutionIndex,
+    qualify_bare_calls: bool,
 ) -> Result<(), String> {
     fn expression(
         value: &mut SimpleExpr,
@@ -1192,17 +1384,38 @@ fn qualify_module_calls(
         files: &[SourceFile],
         functions: &[FunctionMeta],
         resolution: &ModuleResolutionIndex,
+        qualify_bare_calls: bool,
     ) -> Result<(), String> {
         match value {
-            SimpleExpr::Condition(condition) => {
-                condition_value(condition, caller_path, graph, files, functions, resolution)
-            }
-            SimpleExpr::IndexedPath { index, .. } => {
-                expression(index, caller_path, graph, files, functions, resolution)
-            }
+            SimpleExpr::Condition(condition) => condition_value(
+                condition,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
+            SimpleExpr::IndexedPath { index, .. } => expression(
+                index,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
             SimpleExpr::Call { target, args } => {
                 for argument in args.iter_mut() {
-                    expression(argument, caller_path, graph, files, functions, resolution)?;
+                    expression(
+                        argument,
+                        caller_path,
+                        graph,
+                        files,
+                        functions,
+                        resolution,
+                        qualify_bare_calls,
+                    )?;
                 }
                 let qualifier = args.first().and_then(|argument| match argument {
                     SimpleExpr::Identifier(alias) => Some(alias.as_str()),
@@ -1218,7 +1431,10 @@ fn qualify_module_calls(
                     resolution,
                 ) {
                     Ok(resolution) => {
-                        if let Some(alias) = resolution.module_alias {
+                        if let Some(alias) = resolution
+                            .module_alias
+                            .filter(|_| qualify_bare_calls || resolution.consume_qualifier)
+                        {
                             *target = format!("{alias}.{target}");
                         }
                         if resolution.consume_qualifier {
@@ -1230,10 +1446,27 @@ fn qualify_module_calls(
                 }
             }
             SimpleExpr::Binary { lhs, rhs, .. } => {
-                expression(lhs, caller_path, graph, files, functions, resolution)?;
-                expression(rhs, caller_path, graph, files, functions, resolution)
+                expression(
+                    lhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                expression(
+                    rhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )
             }
-            SimpleExpr::Int(_)
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
@@ -1248,22 +1481,67 @@ fn qualify_module_calls(
         files: &[SourceFile],
         functions: &[FunctionMeta],
         resolution: &ModuleResolutionIndex,
+        qualify_bare_calls: bool,
     ) -> Result<(), String> {
         match condition {
             SimpleCondition::Comparison { lhs, rhs, .. } => {
-                expression(lhs, caller_path, graph, files, functions, resolution)?;
-                expression(rhs, caller_path, graph, files, functions, resolution)
+                expression(
+                    lhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                expression(
+                    rhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )
             }
-            SimpleCondition::Expr(value) => {
-                expression(value, caller_path, graph, files, functions, resolution)
-            }
+            SimpleCondition::Expr(value) => expression(
+                value,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
             SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-                condition_value(lhs, caller_path, graph, files, functions, resolution)?;
-                condition_value(rhs, caller_path, graph, files, functions, resolution)
+                condition_value(
+                    lhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                condition_value(
+                    rhs,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )
             }
-            SimpleCondition::Not(inner) => {
-                condition_value(inner, caller_path, graph, files, functions, resolution)
-            }
+            SimpleCondition::Not(inner) => condition_value(
+                inner,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
         }
     }
 
@@ -1274,6 +1552,7 @@ fn qualify_module_calls(
         files: &[SourceFile],
         functions: &[FunctionMeta],
         resolution: &ModuleResolutionIndex,
+        qualify_bare_calls: bool,
     ) -> Result<(), String> {
         match value {
             SimpleStmt::Let {
@@ -1283,20 +1562,48 @@ fn qualify_module_calls(
                 expression: value, ..
             }
             | SimpleStmt::Expr(value)
-            | SimpleStmt::Return(value) => {
-                expression(value, caller_path, graph, files, functions, resolution)
-            }
-            SimpleStmt::Convert { source, .. } => {
-                expression(source, caller_path, graph, files, functions, resolution)
-            }
+            | SimpleStmt::Return(value) => expression(
+                value,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
+            SimpleStmt::Convert { source, .. } => expression(
+                source,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
             SimpleStmt::If {
                 condition,
                 then_statements,
                 else_statements,
             } => {
-                condition_value(condition, caller_path, graph, files, functions, resolution)?;
+                condition_value(
+                    condition,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
                 for nested in then_statements {
-                    statement(nested, caller_path, graph, files, functions, resolution)?;
+                    statement(
+                        nested,
+                        caller_path,
+                        graph,
+                        files,
+                        functions,
+                        resolution,
+                        qualify_bare_calls,
+                    )?;
                 }
                 if let Some(nested) = else_statements {
                     for statement_value in nested {
@@ -1307,6 +1614,7 @@ fn qualify_module_calls(
                             files,
                             functions,
                             resolution,
+                            qualify_bare_calls,
                         )?;
                     }
                 }
@@ -1318,11 +1626,43 @@ fn qualify_module_calls(
                 step,
                 body_statements,
             } => {
-                statement(init, caller_path, graph, files, functions, resolution)?;
-                condition_value(condition, caller_path, graph, files, functions, resolution)?;
-                statement(step, caller_path, graph, files, functions, resolution)?;
+                statement(
+                    init,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                condition_value(
+                    condition,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                statement(
+                    step,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
                 for nested in body_statements {
-                    statement(nested, caller_path, graph, files, functions, resolution)?;
+                    statement(
+                        nested,
+                        caller_path,
+                        graph,
+                        files,
+                        functions,
+                        resolution,
+                        qualify_bare_calls,
+                    )?;
                 }
                 Ok(())
             }
@@ -1330,7 +1670,15 @@ fn qualify_module_calls(
                 body_statements, ..
             } => {
                 for nested in body_statements {
-                    statement(nested, caller_path, graph, files, functions, resolution)?;
+                    statement(
+                        nested,
+                        caller_path,
+                        graph,
+                        files,
+                        functions,
+                        resolution,
+                        qualify_bare_calls,
+                    )?;
                 }
                 Ok(())
             }
@@ -1346,6 +1694,7 @@ fn qualify_module_calls(
             files,
             functions,
             resolution,
+            qualify_bare_calls,
         )?;
     }
     Ok(())
@@ -1363,6 +1712,245 @@ fn compile_error_message(error: &CompileError) -> &str {
 struct PreviousFunctionHashes {
     signature_hash: u64,
     body_hash: u64,
+}
+
+#[derive(Clone)]
+struct InlineExpressionCandidate {
+    id: FunctionId,
+    qualified_name: String,
+    param_names: Vec<String>,
+    expression: SimpleExpr,
+    has_same_arity_overload: bool,
+}
+
+fn inline_expression_calls(
+    statements: &mut [SimpleStmt],
+    candidates: &[InlineExpressionCandidate],
+    caller_id: FunctionId,
+) {
+    fn substitute_identifier(path: &str, arguments: &BTreeMap<String, SimpleExpr>) -> SimpleExpr {
+        if let Some(argument) = arguments.get(path) {
+            return argument.clone();
+        }
+        if let Some((root, suffix)) = path.split_once('.') {
+            match arguments.get(root) {
+                Some(SimpleExpr::Identifier(argument_root)) => {
+                    return SimpleExpr::Identifier(format!("{argument_root}.{suffix}"));
+                }
+                Some(SimpleExpr::IndexedPath {
+                    collection_path,
+                    index,
+                    suffix: argument_suffix,
+                }) => {
+                    let combined_suffix = if argument_suffix.is_empty() {
+                        suffix.to_string()
+                    } else {
+                        format!("{argument_suffix}.{suffix}")
+                    };
+                    return SimpleExpr::IndexedPath {
+                        collection_path: collection_path.clone(),
+                        index: index.clone(),
+                        suffix: combined_suffix,
+                    };
+                }
+                _ => {}
+            }
+        }
+        SimpleExpr::Identifier(path.to_string())
+    }
+
+    fn is_safe_argument(expression: &SimpleExpr) -> bool {
+        match expression {
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
+            | SimpleExpr::Float(_)
+            | SimpleExpr::Bool(_)
+            | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::Identifier(_) => true,
+            SimpleExpr::IndexedPath { index, .. } => is_safe_argument(index),
+            SimpleExpr::Binary { lhs, rhs, .. } => is_safe_argument(lhs) && is_safe_argument(rhs),
+            SimpleExpr::Condition(condition) => is_safe_condition(condition),
+            SimpleExpr::Call { .. } => false,
+        }
+    }
+
+    fn is_safe_condition(condition: &SimpleCondition) -> bool {
+        match condition {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                is_safe_argument(lhs) && is_safe_argument(rhs)
+            }
+            SimpleCondition::Expr(expression) => is_safe_argument(expression),
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                is_safe_condition(lhs) && is_safe_condition(rhs)
+            }
+            SimpleCondition::Not(inner) => is_safe_condition(inner),
+        }
+    }
+
+    fn condition(
+        value: &mut SimpleCondition,
+        candidates: &[InlineExpressionCandidate],
+        caller_id: FunctionId,
+        arguments: Option<&BTreeMap<String, SimpleExpr>>,
+        stack: &mut Vec<FunctionId>,
+    ) {
+        match value {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                expression(lhs, candidates, caller_id, arguments, stack);
+                expression(rhs, candidates, caller_id, arguments, stack);
+            }
+            SimpleCondition::Expr(value) => {
+                expression(value, candidates, caller_id, arguments, stack)
+            }
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                condition(lhs, candidates, caller_id, arguments, stack);
+                condition(rhs, candidates, caller_id, arguments, stack);
+            }
+            SimpleCondition::Not(inner) => {
+                condition(inner, candidates, caller_id, arguments, stack)
+            }
+        }
+    }
+
+    fn expression(
+        value: &mut SimpleExpr,
+        candidates: &[InlineExpressionCandidate],
+        caller_id: FunctionId,
+        arguments: Option<&BTreeMap<String, SimpleExpr>>,
+        stack: &mut Vec<FunctionId>,
+    ) {
+        match value {
+            SimpleExpr::Identifier(path) => {
+                if let Some(arguments) = arguments {
+                    *value = substitute_identifier(path, arguments);
+                }
+            }
+            SimpleExpr::IndexedPath {
+                collection_path,
+                index,
+                ..
+            } => {
+                if let Some(arguments) = arguments {
+                    if let Some(SimpleExpr::Identifier(argument_path)) =
+                        arguments.get(collection_path)
+                    {
+                        *collection_path = argument_path.clone();
+                    }
+                }
+                expression(index, candidates, caller_id, arguments, stack);
+            }
+            SimpleExpr::Call { target, args } => {
+                for argument in args.iter_mut() {
+                    expression(argument, candidates, caller_id, arguments, stack);
+                }
+                let matches = candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.qualified_name == *target
+                            && candidate.param_names.len() == args.len()
+                            && !candidate.has_same_arity_overload
+                            && candidate.id != caller_id
+                            && !stack.contains(&candidate.id)
+                    })
+                    .collect::<Vec<_>>();
+                if matches.len() != 1 || !args.iter().all(is_safe_argument) {
+                    return;
+                }
+                let candidate = matches[0];
+                let replacements = candidate
+                    .param_names
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().cloned())
+                    .collect::<BTreeMap<_, _>>();
+                let mut inlined = candidate.expression.clone();
+                stack.push(candidate.id);
+                expression(
+                    &mut inlined,
+                    candidates,
+                    caller_id,
+                    Some(&replacements),
+                    stack,
+                );
+                stack.pop();
+                *value = inlined;
+            }
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                expression(lhs, candidates, caller_id, arguments, stack);
+                expression(rhs, candidates, caller_id, arguments, stack);
+            }
+            SimpleExpr::Condition(value) => {
+                condition(value, candidates, caller_id, arguments, stack)
+            }
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
+            | SimpleExpr::Float(_)
+            | SimpleExpr::Bool(_)
+            | SimpleExpr::StringLiteral(_) => {}
+        }
+    }
+
+    fn statement(
+        value: &mut SimpleStmt,
+        candidates: &[InlineExpressionCandidate],
+        caller_id: FunctionId,
+        stack: &mut Vec<FunctionId>,
+    ) {
+        match value {
+            SimpleStmt::Let {
+                expression: value, ..
+            }
+            | SimpleStmt::Assign {
+                expression: value, ..
+            }
+            | SimpleStmt::Expr(value)
+            | SimpleStmt::Return(value) => expression(value, candidates, caller_id, None, stack),
+            SimpleStmt::Convert { source, .. } => {
+                expression(source, candidates, caller_id, None, stack)
+            }
+            SimpleStmt::If {
+                condition: condition_value,
+                then_statements,
+                else_statements,
+            } => {
+                condition(condition_value, candidates, caller_id, None, stack);
+                for nested in then_statements {
+                    statement(nested, candidates, caller_id, stack);
+                }
+                if let Some(nested) = else_statements {
+                    for statement_value in nested {
+                        statement(statement_value, candidates, caller_id, stack);
+                    }
+                }
+            }
+            SimpleStmt::For {
+                init,
+                condition: condition_value,
+                step,
+                body_statements,
+            } => {
+                statement(init, candidates, caller_id, stack);
+                condition(condition_value, candidates, caller_id, None, stack);
+                statement(step, candidates, caller_id, stack);
+                for nested in body_statements {
+                    statement(nested, candidates, caller_id, stack);
+                }
+            }
+            SimpleStmt::Foreach {
+                body_statements, ..
+            } => {
+                for nested in body_statements {
+                    statement(nested, candidates, caller_id, stack);
+                }
+            }
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+        }
+    }
+
+    let mut stack = Vec::new();
+    for statement_value in statements {
+        statement(statement_value, candidates, caller_id, &mut stack);
+    }
 }
 
 #[cfg(test)]
@@ -1394,7 +1982,9 @@ mod tests {
         let hir = compiler
             .lower_function_to_hir(&function)
             .expect("lower function");
-        let body = &hir.blocks[0].source;
+        let file = &compiler.files()[function.file_id as usize];
+        let body =
+            &file.content[function.source_range.start as usize..function.source_range.end as usize];
         let mut offsets = Vec::new();
         flatten_debug_offsets(&hir.debug_statements, &mut offsets);
         let starts = offsets
@@ -1402,6 +1992,48 @@ mod tests {
             .map(|offset| body[offset..].split_whitespace().next().unwrap_or_default())
             .collect::<Vec<_>>();
         assert_eq!(starts, vec!["let", "if", "value", "return"]);
+    }
+
+    #[test]
+    fn inline_keeps_same_arity_overload_calls_for_typed_backend_resolution() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nstruct Player { score: i32; }\nglobal player: Player;\nfunction @inline value(item: Enemy): i32 { return item.hp + 100; }\nfunction value(item: Player): i32 { return item.score; }\nfunction main(): i32 { return value(player); }\n",
+        );
+        compiler.index_pass().expect("index overload fixture");
+        let function = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&function)
+            .expect("lower overload caller");
+        assert!(matches!(
+            &hir.statements[0],
+            SimpleStmt::Return(SimpleExpr::Call { target, .. }) if target.ends_with(".value")
+        ));
+    }
+
+    #[test]
+    fn inline_composes_indexed_argument_with_callee_field_suffix() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "struct Enemy { hp: i32; }\nglobal enemies: Enemy[2];\nfunction @inline hp(enemy: Enemy): i32 { return enemy.hp; }\nfunction main(): i32 { return hp(enemies[0]); }\n",
+        );
+        compiler.index_pass().expect("index indexed-view fixture");
+        let function = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&function)
+            .expect("lower indexed-view caller");
+        assert!(matches!(
+            &hir.statements[0],
+            SimpleStmt::Return(SimpleExpr::IndexedPath {
+                collection_path,
+                index,
+                suffix,
+            }) if collection_path == "enemies"
+                && matches!(index.as_ref(), SimpleExpr::Int(0))
+                && suffix == "hp"
+        ));
     }
 
     #[test]
@@ -1857,6 +2489,13 @@ function tick(): i32 {
         );
         assert_eq!(tick.direct.host_calls, vec!["host_emit"]);
         assert_eq!(
+            tick.direct.host_effects,
+            vec![crate::data_flow::FunctionHostEffect {
+                function: "host_emit".to_string(),
+                capability: "unknown".to_string(),
+            }]
+        );
+        assert_eq!(
             tick.direct.reads,
             vec!["state.enemies[*].hp", "state.score"]
         );
@@ -1944,7 +2583,7 @@ global state: State;
 function touch(enemy: Enemy): void { enemy.hp += 1; }
 function touch(player: Player): void { player.score += 1; }
 
-function tick(): i32 {
+function @effects(state) tick(): i32 {
     touch(state.enemy);
     touch(state.player);
     return 0;
@@ -1965,27 +2604,302 @@ function tick(): i32 {
     }
 
     #[test]
-    fn data_flow_skips_unreachable_unsupported_bodies() {
+    fn effect_contracts_follow_imported_calls() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
-            "dead.stasis",
+            "helper.stasis",
+            "function update(value: State): void { value.score += 1; }",
+        );
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"helper.stasis\"; struct State { score: i32; } global state: State; function @effects(state) tick(): i32 { update(state); return state.score; }",
+        );
+        compiler.check().expect("imported alias write is contained");
+    }
+
+    #[test]
+    fn effect_contracts_enforce_transitive_alias_aware_global_regions() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
             r#"
-function main(): i32 { return 0; }
-function unreachable(): i32 { while (true) { return 1; } }
+struct Enemy { hp: i32; }
+struct State { enemies: Enemy[2]; player: Enemy; score: i32; }
+global state: State;
+function damage(enemy: Enemy): void { enemy.hp -= 1; }
+function damage_enemies(): void { state.enemies.length = 2; state.enemies[0].damage(); }
+function @effects(state.enemies) tick(): void { damage_enemies(); }
 "#,
         );
+        compiler.check().expect("contained alias write is allowed");
 
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+struct Enemy { hp: i32; }
+struct State { enemies: Enemy[2]; player: Enemy; score: i32; }
+global state: State;
+function damage(enemy: Enemy): void { enemy.hp -= 1; }
+function damage_enemies(): void { state.player.damage(); }
+function @effects(state.enemies) tick(): void { damage_enemies(); }
+"#,
+        );
+        let error = compiler.check().expect_err("neighboring region must fail");
+        let message = compile_error_message(&error);
+        assert!(message.contains("state.player.hp"), "{message}");
+        assert!(
+            message.contains("tick -> damage_enemies -> damage"),
+            "{message}"
+        );
+        let diagnostic = compiler.last_source_diagnostic().unwrap();
+        assert_eq!(diagnostic.symbol, "tick");
+        assert!(diagnostic.message.contains("originating operation"));
+    }
+
+    #[test]
+    fn effect_contracts_compose_regions_and_host_capabilities() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+struct State { enemies: i32[2]; projectiles: i32[2]; score: i32; }
+global state: State;
+extern function @effects(graphics) draw(value: i32): void;
+extern function @effects(audio) play(): void;
+function render_helpers(): void { draw(state.score); }
+function @effects(state.enemies, state.projectiles, graphics) simulate(): void {
+    state.enemies[0] += 1;
+    state.projectiles[1] += 1;
+    render_helpers();
+}
+"#,
+        );
+        compiler
+            .check()
+            .expect("declared regions and graphics pass");
+
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+struct State { score: i32; }
+global state: State;
+extern function @effects(graphics) draw(value: i32): void;
+extern function @effects(audio) play(): void;
+function helper(): void { play(); }
+function @effects(graphics) render(): void { draw(state.score); helper(); }
+"#,
+        );
+        let error = compiler.check().expect_err("audio is not graphics");
+        let message = compile_error_message(&error);
+        assert!(message.contains("host effect 'audio'"), "{message}");
+        assert!(message.contains("render -> helper"), "{message}");
+    }
+
+    #[test]
+    fn effect_contract_diagnostic_follows_the_rejected_effect_branch() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+global allowed: i32;
+global first: i32;
+global second: i32;
+function write_second(): void { second += 1; }
+function write_first(): void { first += 1; }
+function @effects(allowed) tick(): void { write_second(); write_first(); }
+"#,
+        );
+        let error = compiler.check().expect_err("first is the sorted violation");
+        let message = compile_error_message(&error);
+        assert!(message.contains("rejects write 'first'"), "{message}");
+        assert!(message.contains("tick -> write_first"), "{message}");
+        assert!(!message.contains("write_second"), "{message}");
+    }
+
+    #[test]
+    fn effect_contracts_propagate_generic_view_helper_writes() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            r#"
+global allowed: ascii[8];
+global forbidden: ascii[8];
+function clear(value: ascii[]): void { value[0] = 0; }
+function @effects(allowed) tick(): void { clear(forbidden); }
+"#,
+        );
+        let error = compiler
+            .check()
+            .expect_err("generic view helper write must reach the boundary");
+        let message = compile_error_message(&error);
+        assert!(message.contains("forbidden[*]"), "{message}");
+        assert!(message.contains("tick -> clear"), "{message}");
+    }
+
+    #[test]
+    fn effect_contracts_reject_unknown_externs_and_unknown_global_regions() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "extern function mystery(): void; function @effects(graphics) render(): void { mystery(); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("unknown extern is conservative");
+        assert!(compile_error_message(&error).contains("host effect 'unknown'"));
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "extern function @effects(graphics) host(value: i32): void; extern function @effects(audio) host(value: f32): void; function @effects(graphics) render(): void { host(1); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("same-name extern overload effects must not overwrite");
+        assert!(
+            compile_error_message(&error).contains("must declare identical @effects metadata"),
+            "{}",
+            compile_error_message(&error)
+        );
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; extern function @effects(audio) collide(value: f32): void; function collide(value: i32): void { state.value += value; } function @effects(state) tick(): void { collide(missing()); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("ambiguous same-name host effects must remain conservative");
+        let message = compile_error_message(&error);
+        assert!(message.contains("host effect 'audio'"), "{message}");
+        assert!(message.contains("from 'collide'"), "{message}");
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "function @effects() render(): void { missing(); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("unresolved calls cannot pass a restricted boundary");
+        let message = compile_error_message(&error);
+        assert!(message.contains("host effect 'unknown'"), "{message}");
+        assert!(message.contains("from 'missing'"), "{message}");
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "function @effects(state) tick(): void { return; }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("literal state global must exist");
+        assert!(compile_error_message(&error).contains("unknown global region 'state'"));
+
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { score: i32; } global state: State; function @effects(state.missing) tick(): void { return; }",
+        );
+        let error = compiler.check().expect_err("named region field must exist");
+        assert!(compile_error_message(&error).contains("state.missing"));
+
+        compiler.upsert_file(
+            "effects.stasis",
+            "global gfx_cmd_i32: i32[2]; function @effects(graphics) render(): void { gfx_cmd_i32[0] = 1; }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("application globals cannot impersonate command buffers");
+        assert!(compile_error_message(&error).contains("graphics internal identifier"));
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "vendor/stasis/stdlib/internal/host_window_request.stasis",
+            "global host_req_flags: i32; function request_window(): void { host_req_flags = 1; }",
+        );
+        compiler.upsert_file(
+            "effects.stasis",
+            "import \"vendor/stasis/stdlib/internal/host_window_request.stasis\"; function @effects(platform) tick(): void { request_window(); }",
+        );
+        compiler
+            .check()
+            .expect("platform owns the stdlib window-request mailbox");
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "global host_req_flags: i32; function @effects(platform) tick(): void { host_req_flags = 1; }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("application globals cannot impersonate platform mailboxes");
+        assert!(compile_error_message(&error).contains("host_req_flags"));
+
+        compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects(state) mutate(value: State): void { value.value += 1; }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("unbound parameter provenance is conservative");
+        assert!(compile_error_message(&error).contains("not proven"));
+    }
+
+    #[test]
+    fn effect_contract_rechecks_when_only_a_deep_callee_changes() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function leaf(): void { return; } function middle(): void { leaf(); } function @effects() render(): void { middle(); }",
+        );
+        compiler.check().expect("initial pure tree");
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function leaf(): void { state.value += 1; } function middle(): void { leaf(); } function @effects() render(): void { middle(); }",
+        );
+        let error = compiler
+            .check()
+            .expect_err("deep effect invalidates aggregate");
+        let message = compile_error_message(&error);
+        assert!(message.contains("state.value"), "{message}");
+        assert!(message.contains("render -> middle -> leaf"), "{message}");
+    }
+
+    #[test]
+    fn effect_contract_only_edit_reuses_statements_and_runtime_identity() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects(state) tick(): void { state.value += 1; }",
+        );
+        compiler.index_pass().expect("initial allowed contract");
+        let signature = function_by_name(&compiler, "tick").signature_hash;
+        let parses = compiler.statement_parse_count;
+
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { value: i32; } global state: State; function @effects() tick(): void { state.value += 1; }",
+        );
         compiler
             .index_pass()
-            .expect("unreachable body stays deferred");
+            .expect_err("narrowed contract revalidates cached body");
+        assert_eq!(compiler.statement_parse_count, parses);
         assert_eq!(
-            compiler
-                .function_data_flow_summaries()
-                .iter()
-                .map(|summary| summary.function.as_str())
-                .collect::<Vec<_>>(),
-            vec!["main"]
+            function_by_name(&compiler, "tick").signature_hash,
+            signature
         );
+        assert!(!function_by_name(&compiler, "tick").dirty);
+    }
+
+    #[test]
+    fn on_code_swap_contract_names_state_and_rejection_capability() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "effects.stasis",
+            "struct State { swaps: i32; } global state: State; extern function @effects(code_swap) reject_code_swap(): void; function @effects(state, code_swap) on_code_swap(): void { state.swaps += 1; reject_code_swap(); }",
+        );
+        compiler.check().expect("explicit swap effects are allowed");
     }
 
     #[test]
@@ -2008,6 +2922,97 @@ function unreachable(): i32 { while (true) { return 1; } }
         assert_eq!(diagnostic.path, "dead.stasis");
         assert_eq!(diagnostic.symbol, "unreachable");
         assert!(diagnostic.message.contains("while"));
+    }
+
+    #[test]
+    fn check_type_checks_functions_unreachable_from_runtime_roots() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "dead.stasis",
+            r#"
+function main(): i32 { return 0; }
+function unfinished(): i32 { let value: i32 = true; return value; }
+"#,
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("unreachable body must be type checked");
+        assert!(format!("{error:?}").contains("expected i32 expression but found bool"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured unreachable-function diagnostic");
+        assert_eq!(diagnostic.symbol, "unfinished");
+    }
+
+    #[test]
+    fn check_validates_control_flow_in_functions_unreachable_from_runtime_roots() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "dead.stasis",
+            r#"
+function main(): i32 { return 0; }
+function unfinished(): void { continue; }
+"#,
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("unreachable body must validate loop control");
+        assert!(format!("{error:?}").contains("only valid inside loops"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured unreachable-function diagnostic");
+        assert_eq!(diagnostic.symbol, "unfinished");
+    }
+
+    #[test]
+    fn body_parse_failure_is_typed_parse_diagnostic_with_function_context() {
+        let mut compiler = Compiler::new();
+        let source = "function main(): void { let broken = ; }\n";
+        compiler.upsert_file("body_parse.stasis", source);
+
+        compiler
+            .check()
+            .expect_err("malformed body statement must fail parsing");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("body parse diagnostic");
+        assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Parse);
+        assert_eq!(diagnostic.path, "body_parse.stasis");
+        assert_eq!(diagnostic.symbol, "main");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "{ let broken = ; }"
+        );
+        assert!(diagnostic.message.contains("expression"));
+    }
+
+    #[test]
+    fn check_distinguishes_typed_defaults_from_explicit_initializers() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "defaults.stasis",
+            r#"
+struct Enemy { hp: i32; }
+function main(): i32 { return 0; }
+function create_enemy(): Enemy { let enemy: Enemy; return enemy; }
+"#,
+        );
+        compiler.check().expect("typed default should be valid");
+
+        compiler.upsert_file(
+            "defaults.stasis",
+            r#"
+struct Enemy { hp: i32; }
+function main(): i32 { return 0; }
+function create_enemy(): Enemy { let enemy: Enemy = 0.0; return enemy; }
+"#,
+        );
+        let error = compiler
+            .check()
+            .expect_err("explicit float initializer should remain invalid");
+        assert!(format!("{error:?}").contains("expected Enemy expression but found f32"));
     }
 
     #[test]
@@ -2043,7 +3048,7 @@ struct State { left: i32; right: i32; }
 global state: State;
 function left(view: State): void { view.left += 1; right(view); }
 function right(view: State): void { view.right += 1; left(view); }
-function tick(): i32 { left(state); return 0; }
+function @effects(state) tick(): i32 { left(state); return 0; }
 "#,
         );
 
@@ -2065,6 +3070,41 @@ function tick(): i32 { left(state); return 0; }
             .find(|summary| summary.function == "tick")
             .expect("tick summary");
         assert_eq!(tick.aggregate.writes, vec!["state.left", "state.right"]);
+    }
+
+    #[test]
+    fn local_and_parameter_types_shadow_same_named_globals_in_data_flow_validation() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "shadowing.stasis",
+            r#"
+global value: i32[2];
+global float_values: f32[2];
+
+function parameter_value(value: f32[2]): f32 {
+    value[0] = 1.0;
+    return value[0] + 1.0;
+}
+
+function local_value(): f32 {
+    let value: f32[2];
+    value[0] = 1.0;
+    return value[0];
+}
+
+function global_value(): i32 {
+    return value[0];
+}
+
+function main(): i32 {
+    return global_value() + f32_to_i32(parameter_value(float_values) + local_value());
+}
+"#,
+        );
+
+        compiler
+            .check()
+            .expect("locals and parameters must shadow same-named globals");
     }
 
     #[test]
@@ -2237,7 +3277,7 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
 
         compiler.upsert_file(
             "api.stasis",
-            "function value(input: i32): f32 { return to_f32(input); }",
+            "function value(input: i32): f32 { return i32_to_f32(input); }",
         );
         compiler.index_pass().expect("return edit index");
         let return_edit = compiler.functions()[0].clone();
@@ -2356,6 +3396,33 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
             .expect("unrelated module value");
         assert_eq!(main.dependencies, vec![local_value.id]);
         assert_ne!(main.dependencies, vec![unrelated_value]);
+    }
+
+    #[test]
+    fn indexed_receiver_call_keeps_imported_method_reachable() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"assets.stasis\"; struct State { assets: Asset[2]; } global state: State; function main(): i32 { return state.assets[1].poll(); }",
+        );
+        compiler.upsert_file(
+            "assets.stasis",
+            "struct Asset { state: i32; } function poll(self: Asset): i32 { return self.state; }",
+        );
+        compiler
+            .index_pass()
+            .expect("indexed receiver dependency resolution");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        let poll = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "poll")
+            .expect("poll method");
+        assert_eq!(main.dependencies, vec![poll.id]);
     }
 
     #[test]
@@ -2503,6 +3570,62 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
     }
 
     #[test]
+    fn resolved_overload_identity_drives_reachability() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "function value(input: i32): i32 { return input; } function value(input: f32): i32 { return 2; } function main(): i32 { return value(1); }",
+        );
+        compiler.check().expect("resolve overload graph");
+
+        let main = function_by_name(&compiler, "main");
+        let selected = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "value"
+                    && function.params[0] == crate::frontend::types::TYPE_ID_I32
+            })
+            .expect("selected i32 overload");
+        let rejected = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "value"
+                    && function.params[0] == crate::frontend::types::TYPE_ID_F32
+            })
+            .expect("unselected f32 overload");
+
+        assert_eq!(main.dependencies, vec![selected.id]);
+        let reachable =
+            crate::backend::reachability::compute_reachable_function_ids(compiler.functions(), &[]);
+        assert!(reachable.contains(&selected.id));
+        assert!(!reachable.contains(&rejected.id));
+    }
+
+    #[test]
+    fn analysis_hirs_only_lowers_reachable_and_required_functions() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "function helper(): i32 { return 1; } function required_preview(): i32 { return 2; } function unused(): i32 { return 3; } function render(): i32 { return helper(); } function main(): i32 { return 0; }",
+        );
+        compiler.check().expect("accept program");
+
+        let required = vec!["required_preview".to_string()];
+        let hirs = compiler
+            .analysis_hirs(&required)
+            .expect("lower analysis HIRs");
+        let id = |name: &str| function_by_name(&compiler, name).id;
+
+        assert!(hirs.contains_key(&id("main")));
+        assert!(hirs.contains_key(&id("render")));
+        assert!(hirs.contains_key(&id("helper")));
+        assert!(hirs.contains_key(&id("required_preview")));
+        assert!(!hirs.contains_key(&id("unused")));
+    }
+
+    #[test]
     fn graph_refresh_removes_modules_that_leave_the_entry_closure() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
@@ -2609,7 +3732,7 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
         compiler.index_pass().expect("initial index");
         assert_eq!(compiler.statement_parse_count, 2);
 
-        compiler.upsert_file("helper.stasis", "function helper(): f32 { return 1.0; }");
+        compiler.upsert_file("helper.stasis", "function helper(): u32 { return 1; }");
         compiler.index_pass().expect("signature edit index");
         assert_eq!(compiler.statement_parse_count, 4);
     }

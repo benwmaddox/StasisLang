@@ -93,6 +93,196 @@ fn json_stderr(output: &Output) -> Value {
     serde_json::from_slice(&output.stderr).expect("single JSON stderr object")
 }
 
+#[test]
+fn help_explains_how_to_build_each_supported_target() {
+    let output = stasis(&["help"], Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help output");
+
+    for expected in [
+        "Build targets:",
+        "Windows, Linux, or macOS (current host)",
+        "stasis build --mode release",
+        "stasis package --target desktop",
+        "stasis package --target web",
+        "stasis package-mobile --target android-arm64",
+        "stasis package-mobile --target android-x86_64 --development-build",
+        "stasis package-mobile --target ios-arm64",
+        "prepare",
+        "Mobile commands create Gradle or Xcode projects",
+    ] {
+        assert!(help.contains(expected), "missing help text: {expected}");
+    }
+}
+
+#[test]
+fn build_confirmation_reports_elapsed_time() {
+    let project = temp_dir("build_elapsed");
+    fs::create_dir_all(project.join("src")).expect("source directory");
+    fs::write(
+        project.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"build_elapsed","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("workspace manifest");
+    fs::write(
+        project.join("src/main.stasis"),
+        "function main(): i32 { return 0; }\n",
+    )
+    .expect("entry source");
+
+    let output = stasis(&["build", "--mode", "dev"], &project);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 build output");
+    let confirmation = stdout.lines().last().expect("elapsed confirmation");
+    assert!(confirmation.starts_with("Completed in "), "{stdout}");
+    assert!(confirmation.ends_with('.'), "{stdout}");
+
+    let json_output = stasis(&["--json", "build", "--mode", "dev"], &project);
+    let json = json_stdout(&json_output);
+    assert_eq!(json["command"], "build");
+    assert!(json["result"].get("elapsed_ms").is_none());
+
+    fs::remove_dir_all(project).ok();
+}
+
+#[test]
+fn check_reports_structured_asset_diagnostics_and_build_is_atomic() {
+    let project = temp_dir("asset_validation");
+    fs::create_dir_all(project.join("src")).expect("source directory");
+    fs::create_dir_all(project.join("assets/fonts")).expect("asset directory");
+    fs::write(
+        project.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"asset_validation","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("workspace manifest");
+    fs::write(project.join("assets/fonts/ui.ttf"), b"font").expect("font asset");
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
+            "function main(): i32 { return request_font(\"../assets/fonts/UI.ttf\", 16); }\n"
+        ),
+    )
+    .expect("entry source");
+
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(checked.status.code(), Some(1));
+    let error = json_stderr(&checked);
+    assert_eq!(error["code"], "asset_validation_failed");
+    assert_eq!(error["diagnostics"][0]["code"], "asset_path_case_mismatch");
+    assert_eq!(error["diagnostics"][0]["api"], "request_font");
+    assert_eq!(
+        error["diagnostics"][0]["logical_path"],
+        "../assets/fonts/UI.ttf"
+    );
+    assert!(error["diagnostics"][0]["start"].as_u64().is_some());
+    assert!(error["diagnostics"][0]["attempted_paths"]
+        .as_array()
+        .is_some_and(|paths| paths.len() == 2));
+
+    let built = stasis(&["--json", "build", "--mode", "dev"], &project);
+    assert_eq!(built.status.code(), Some(1));
+    assert!(!project.join("build/dev-build.json").exists());
+
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
+            "function main(): i32 { return request_font(\"../assets/fonts/ui.ttf\", 16); }\n"
+        ),
+    )
+    .expect("corrected entry source");
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(checked.status.code(), Some(0));
+    assert_eq!(json_stdout(&checked)["result"]["name"], "asset_validation");
+
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
+            "const FONT_PATH: string = \"../assets/fonts/ui.ttf\";\n",
+            "function choose_font(FONT_PATH: string): i32 { return request_font(FONT_PATH, 16); }\n",
+            "function main(): i32 { return choose_font(\"../assets/fonts/ui.ttf\"); }\n"
+        ),
+    )
+    .expect("shadowed asset source");
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(checked.status.code(), Some(1));
+    let error = json_stderr(&checked);
+    assert_eq!(error["code"], "asset_validation_failed");
+    assert_eq!(
+        error["diagnostics"][0]["code"],
+        "asset_dynamic_path_undeclared"
+    );
+    assert_eq!(error["diagnostics"][0]["logical_path"], Value::Null);
+
+    fs::create_dir_all(project.join("tests")).expect("test directory");
+    fs::write(
+        project.join("tests/assets.test.stasis"),
+        concat!(
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
+            "test `invalid asset is never executed`(): bool {\n",
+            "    return request_font(\"../assets/fonts/missing.ttf\", 16) > 0;\n",
+            "}\n"
+        ),
+    )
+    .expect("asset test source");
+    let tested = stasis(&["--json", "test"], &project);
+    assert_eq!(tested.status.code(), Some(1));
+    assert_eq!(json_stderr(&tested)["code"], "asset_validation_failed");
+
+    fs::remove_dir_all(project).ok();
+}
+
+#[test]
+fn check_resolves_nested_asset_calls_from_the_entry_source_boundary() {
+    let project = temp_dir("nested_entry_asset_boundary");
+    fs::create_dir_all(project.join("src/game/view")).expect("nested source directory");
+    fs::create_dir_all(project.join("assets/fonts")).expect("asset directory");
+    fs::write(
+        project.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"nested_entry_asset_boundary","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("workspace manifest");
+    fs::write(project.join("assets/fonts/ui.ttf"), b"font").expect("font asset");
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "import \"game/view/assets.stasis\";\n",
+            "function main(): i32 { return load_ui_font(); }\n",
+        ),
+    )
+    .expect("entry source");
+    fs::write(
+        project.join("src/game/view/assets.stasis"),
+        concat!(
+            "function @asset_path(path) request_font(path: string, size: i32): i32 { return 1; }\n",
+            "function load_ui_font(): i32 { return request_font(\"../assets/fonts/ui.ttf\", 16); }\n",
+        ),
+    )
+    .expect("nested asset source");
+
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert_eq!(
+        json_stdout(&checked)["result"]["name"],
+        "nested_entry_asset_boundary"
+    );
+
+    fs::remove_dir_all(project).ok();
+}
+
 fn lsp_frame(message: Value) -> String {
     let body = message.to_string();
     format!("Content-Length: {}\r\n\r\n{body}", body.len())
@@ -343,10 +533,29 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     let created_json = json_stdout(&created);
     assert_eq!(created_json["ok"], true);
     assert_eq!(created_json["command"], "new");
+    assert_eq!(created_json["result"]["github_actions"], true);
     let manifest: Value = serde_json::from_slice(
         &fs::read(project.join("stasis.json")).expect("read generated manifest"),
     )
     .expect("parse generated manifest");
+    assert_eq!(
+        fs::read_to_string(project.join("assets/manifest.json"))
+            .expect("read generated asset manifest"),
+        "{\n  \"schema\": \"stasis-assets\",\n  \"version\": 1,\n  \"assets\": []\n}\n"
+    );
+    let asset_manifest: Value = serde_json::from_str(
+        &fs::read_to_string(project.join("assets/manifest.json"))
+            .expect("read generated asset manifest"),
+    )
+    .expect("parse generated asset manifest");
+    assert_eq!(
+        asset_manifest,
+        json!({
+            "schema": "stasis-assets",
+            "version": 1,
+            "assets": [],
+        })
+    );
     assert!(manifest["vendor"]["stasis"].get("update_policy").is_none());
     assert_eq!(
         manifest["vendor"]["stasis"]["sha256"]
@@ -385,7 +594,50 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     let pre_commit = fs::read_to_string(project.join(".githooks/pre-commit"))
         .expect("read generated pre-commit hook");
     assert!(pre_commit.contains("stasis format --check"));
-    assert!(!project.join(".gitattributes").exists());
+    assert_eq!(
+        fs::read(project.join(".gitattributes")).expect("read generated Git attributes"),
+        b"*.[sS][vV][gG] text eol=lf\n"
+    );
+    assert_eq!(
+        fs::read(project.join(".gitignore")).expect("read generated Git ignore"),
+        b"/vendor/stasis/docs/\n"
+    );
+    assert!(git(
+        &[
+            "check-ignore",
+            "--quiet",
+            "--no-index",
+            "--",
+            "vendor/stasis/docs/README.md",
+        ],
+        &project
+    )
+    .status
+    .success());
+    assert!(!git(
+        &[
+            "check-ignore",
+            "--quiet",
+            "--no-index",
+            "--",
+            "vendor/stasis/stdlib/internal/host_frame_raw.stasis",
+        ],
+        &project
+    )
+    .status
+    .success());
+    for path in [
+        "assets/example.svg",
+        "assets/example.SVG",
+        "assets/example.SvG",
+    ] {
+        let svg_eol = git(&["check-attr", "eol", "--", path], &project);
+        assert!(svg_eol.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&svg_eol.stdout),
+            format!("{path}: eol: lf\n")
+        );
+    }
     assert_eq!(
         fs::read_to_string(project.join(".vscode/settings.json"))
             .expect("read generated VS Code settings"),
@@ -397,11 +649,110 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         "{\n  \"recommendations\": [\n    \"stasislang.stasis\"\n  ]\n}\n"
     );
     assert!(project
-        .join("vendor/stasis/stdlib/internal/host_frame.stasis")
+        .join("vendor/stasis/stdlib/internal/host_frame_raw.stasis")
         .is_file());
     assert!(project
         .join("vendor/stasis/stdlib/internal/gfx_cmd.stasis")
         .is_file());
+    let knowledge_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/knowledge");
+    let knowledge_documents = [
+        "README.md",
+        "a-little-stasis/01-three-entry-points.md",
+        "a-little-stasis/02-state-has-owners.md",
+        "a-little-stasis/03-a-tick-is-an-ordered-recipe.md",
+        "a-little-stasis/04-input-crosses-a-boundary.md",
+        "a-little-stasis/05-bounded-storage-is-policy.md",
+        "a-little-stasis/06-query-materialize-commit.md",
+        "a-little-stasis/07-test-systems-not-balance-numbers.md",
+        "a-little-stasis/08-projection-is-not-authority.md",
+        "practical-examples/breakout-remove-one-brick-per-collision.md",
+        "practical-examples/platformer-land-in-the-crossing-tick.md",
+        "practical-examples/pong-score-after-the-ball-crosses-the-goal.md",
+        "practical-examples/snake-reject-a-reverse-turn.md",
+        "geometry-and-collision.md",
+        "semantic-edit-and-validation.md",
+    ];
+    for document in knowledge_documents.iter().copied() {
+        assert_eq!(
+            fs::read(project.join("vendor/stasis/docs").join(document))
+                .expect("read generated knowledge document"),
+            fs::read(knowledge_source.join(document)).expect("read source knowledge document"),
+            "generated knowledge document differs: {document}"
+        );
+    }
+    let knowledge_examples = [
+        "examples/src/breakout_brick.stasis",
+        "examples/src/game_patterns.stasis",
+        "examples/src/platformer_landing.stasis",
+        "examples/src/pong_goal.stasis",
+        "examples/src/snake_turn.stasis",
+        "examples/stasis.json",
+        "examples/tests/breakout_brick.test.stasis",
+        "examples/tests/game_patterns.test.stasis",
+        "examples/tests/platformer_landing.test.stasis",
+        "examples/tests/pong_goal.test.stasis",
+        "examples/tests/snake_turn.test.stasis",
+    ];
+    for example in knowledge_examples.iter().copied() {
+        assert_eq!(
+            fs::read(project.join("vendor/stasis/docs").join(example))
+                .expect("read generated knowledge example"),
+            fs::read(knowledge_source.join(example)).expect("read source knowledge example"),
+            "generated knowledge example differs: {example}"
+        );
+    }
+
+    let compiled_examples = knowledge_examples
+        .iter()
+        .filter(|path| path.ends_with(".stasis"))
+        .map(|path| {
+            fs::read_to_string(knowledge_source.join(path))
+                .expect("read knowledge example Stasis source")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("\r\n", "\n");
+    let mut checked_stasis_blocks = 0;
+    for document in knowledge_documents.iter().copied() {
+        let path = knowledge_source.join(document);
+        let markdown = fs::read_to_string(&path)
+            .expect("read knowledge Markdown")
+            .replace("\r\n", "\n");
+        let mut remaining = markdown.as_str();
+        while let Some(start) = remaining.find("```stasis\n") {
+            let block_start = start + "```stasis\n".len();
+            let after_start = &remaining[block_start..];
+            let end = after_start
+                .find("\n```")
+                .expect("close Stasis Markdown fence");
+            let block = &after_start[..end];
+            assert!(
+                compiled_examples.contains(block),
+                "Stasis block in {} is not an exact compiler-checked excerpt:\n{block}",
+                path.display()
+            );
+            checked_stasis_blocks += 1;
+            remaining = &after_start[end + "\n```".len()..];
+        }
+    }
+    assert!(
+        checked_stasis_blocks > 0,
+        "no Stasis Markdown blocks checked"
+    );
+
+    let generated_examples = project.join("vendor/stasis/docs/examples");
+    let examples_checked = stasis(&["--json", "check"], &generated_examples);
+    assert_eq!(examples_checked.status.code(), Some(0));
+    let examples_tested = stasis(&["--json", "test"], &generated_examples);
+    assert_eq!(examples_tested.status.code(), Some(0));
+    let examples_test_result = json_stdout(&examples_tested);
+    assert!(
+        examples_test_result["result"]["tests_passed"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "generated knowledge examples discovered no tests"
+    );
+    assert_eq!(examples_test_result["result"]["tests_failed"], 0);
     assert!(!project.join("vendor/stasis/src").exists());
     assert!(!project.join("vendor/stasis/runtime").exists());
     assert!(!project.join("vendor/stasis/stdlib/gfx_cmd.stasis").exists());
@@ -449,6 +800,130 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         .as_str()
         .unwrap_or_default()
         .contains("does not exist"));
+
+    let build_ready = stasis(&["build", "--mode", "dev"], &project);
+    assert_eq!(
+        build_ready.status.code(),
+        Some(0),
+        "generated project build should have its canonical asset manifest: stdout={} stderr={}",
+        String::from_utf8_lossy(&build_ready.stdout),
+        String::from_utf8_lossy(&build_ready.stderr)
+    );
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn new_always_generates_github_actions() {
+    let parent = temp_dir("github_actions_development");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+
+    let output = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(json_stdout(&output)["result"]["github_actions"], true);
+    for path in [
+        ".github/workflows/stasis-pr.yml",
+        ".github/workflows/stasis-weekly.yml",
+        "tools/restore-stasis-release.ps1",
+        "tools/resolve-stasis-nightly.ps1",
+    ] {
+        assert!(project.join(path).is_file(), "missing generated {path}");
+    }
+    let pr = fs::read_to_string(project.join(".github/workflows/stasis-pr.yml"))
+        .expect("read generated PR workflow");
+    assert!(pr.contains("stasis --json vendor status --workspace ."));
+    assert!(pr.contains("$status.result.current -ne $true"));
+    let restore = fs::read_to_string(project.join("tools/restore-stasis-release.ps1"))
+        .expect("read generated restore helper");
+    assert!(restore.contains("StartsWith($prefix, $pathComparison)"));
+    assert!(!restore.contains("StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)"));
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(project.join("stasis.json")).expect("read manifest"))
+            .expect("parse manifest");
+    assert_eq!(
+        manifest["vendor"]["stasis"]["release_id"],
+        option_env!("STASIS_RELEASE_ID").unwrap_or("development")
+    );
+
+    let initialized = parent.join("initialized");
+    fs::create_dir_all(&initialized).expect("create init directory");
+    let init = stasis(&["--json", "init", "--name", "initialized"], &initialized);
+    assert_eq!(init.status.code(), Some(0));
+    assert_eq!(json_stdout(&init)["result"]["github_actions"], false);
+    assert!(!initialized.join(".github").exists());
+    assert!(!initialized.join("tools").exists());
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
+fn init_preserves_existing_svg_line_ending_policy() {
+    let parent = temp_dir("init_existing_gitattributes");
+    let project = parent.join("demo");
+    fs::create_dir_all(&project).expect("create project directory");
+    fs::write(project.join(".gitattributes"), "*.png binary\n").expect("write existing policy");
+
+    let initialized = stasis(&["--json", "init", "--name", "demo", "."], &project);
+    assert_eq!(initialized.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitattributes")).expect("read existing Git attributes"),
+        "*.png binary\n"
+    );
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn init_preserves_existing_git_ignore_policy() {
+    let parent = temp_dir("init_existing_gitignore");
+    let project = parent.join("demo");
+    fs::create_dir_all(&project).expect("create project directory");
+    fs::write(project.join(".gitignore"), "custom-cache/\n")
+        .expect("write existing Git ignore policy");
+
+    let initialized = stasis(&["--json", "init", "--name", "demo", "."], &project);
+    assert_eq!(initialized.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitignore")).expect("read existing Git ignore policy"),
+        "custom-cache/\n"
+    );
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn new_refuses_to_overwrite_existing_svg_line_ending_policy() {
+    let parent = temp_dir("new_existing_gitattributes");
+    let project = parent.join("demo");
+    fs::create_dir_all(&project).expect("create project directory");
+    fs::write(project.join(".gitattributes"), "*.png binary\n").expect("write existing policy");
+
+    let created = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_ne!(created.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitattributes")).expect("read existing Git attributes"),
+        "*.png binary\n"
+    );
+    assert!(!project.join("stasis.json").exists());
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn new_refuses_to_overwrite_existing_git_ignore_policy() {
+    let parent = temp_dir("new_existing_gitignore");
+    let project = parent.join("demo");
+    fs::create_dir_all(&project).expect("create project directory");
+    fs::write(project.join(".gitignore"), "custom-cache/\n")
+        .expect("write existing Git ignore policy");
+
+    let created = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_ne!(created.status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(project.join(".gitignore")).expect("read existing Git ignore policy"),
+        "custom-cache/\n"
+    );
+    assert!(!project.join("stasis.json").exists());
 
     fs::remove_dir_all(&parent).ok();
 }
@@ -665,15 +1140,17 @@ fn inspect_reports_compiler_state_memory_and_capacity_projection() {
     );
     fs::write(
         project.join("src/main.stasis"),
-        "import \"state.stasis\";\nfunction main(): i32 { return state.score; }\n",
+        "import \"../tests/stasis/seams/state.stasis\";\nfunction main(): i32 { return state.score; }\n",
     )
     .expect("write memory entry fixture");
+    fs::create_dir_all(project.join("tests/stasis/seams"))
+        .expect("create explicit graphics seam directory");
     fs::write(
-        project.join("src/state.stasis"),
+        project.join("tests/stasis/seams/state.stasis"),
         "struct Enemy { hp: i32; speed: f64; }\n\
          struct GameState { score: i32; enemies: Enemy[4]; }\n\
          global state: GameState;\n\
-         global gfx_cmd_i32: i32[8];\n",
+         global render_cmd_i32: i32[8];\n",
     )
     .expect("write imported memory fixture");
 
@@ -705,7 +1182,7 @@ fn inspect_reports_compiler_state_memory_and_capacity_projection() {
         .is_some_and(|items| items.iter().any(|item| item["path"] == "state")));
     assert!(memory["command_buffers"]
         .as_array()
-        .is_some_and(|items| items.iter().any(|item| item["path"] == "gfx_cmd_i32")));
+        .is_some_and(|items| items.iter().any(|item| item["path"] == "render_cmd_i32")));
     assert!(memory["warnings"]
         .as_array()
         .is_some_and(|items| items.iter().any(|item| item
@@ -932,6 +1409,183 @@ fn usage_compile_test_and_guest_exit_codes_are_stable() {
     assert_eq!(run.status.code(), Some(7));
     let run_json = json_stdout(&run);
     assert_eq!(run_json["result"]["exit_code"], 7);
+
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn headless_ticks_and_seeded_scenarios_are_deterministic_and_reproducible() {
+    let parent = temp_dir("headless_scenarios");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    assert_eq!(
+        stasis(&["new", "demo", "--dir", "demo"], &parent)
+            .status
+            .code(),
+        Some(0)
+    );
+    fs::write(
+        project.join("src/main.stasis"),
+        "global ticks: i32;\nglobal render_calls: i32;\nglobal seed: i32;\nglobal base: i32;\nglobal bad: i32;\nglobal checksum: i32;\nglobal values: i32[2];\nfunction main(): i32 { ticks = 0; render_calls = 0; seed = 0; base = 0; bad = 0; checksum = 0; values[0] = 0; values[1] = 0; return 0; }\nfunction tick(): i32 { ticks += 1; seed += 1; values[1] += 1; checksum = base * 10000 + seed * 100 + ticks + values[0]; if (ticks > 3) { bad = 1; } return 0; }\nfunction render(): i32 { render_calls += 1; return 0; }\n",
+    )
+    .expect("write headless game");
+
+    let first = stasis(
+        &[
+            "--json",
+            "run",
+            "--headless",
+            "--ticks",
+            "3",
+            "--fast-forward",
+        ],
+        &project,
+    );
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json = json_stdout(&first);
+    assert_eq!(first_json["result"]["ticks_executed"], 3);
+    assert_eq!(first_json["result"]["fast_forward"], true);
+    let first_hash = first_json["result"]["state_hash"]
+        .as_str()
+        .expect("state hash")
+        .to_string();
+    assert_eq!(first_hash.len(), 64);
+
+    let second = stasis(
+        &[
+            "--json",
+            "run",
+            "--headless",
+            "--ticks",
+            "3",
+            "--fast-forward",
+        ],
+        &project,
+    );
+    assert_eq!(second.status.code(), Some(0));
+    assert_eq!(json_stdout(&second)["result"]["state_hash"], first_hash);
+
+    fs::write(
+        project.join("tests/baseline.state.json"),
+        "{\"base\":7,\"values[0]\":11}\n",
+    )
+    .expect("write saved state");
+    let scenario_path = project.join("tests/determinism with spaces.scenario.json");
+    fs::write(
+        &scenario_path,
+        r#"{
+  "schema_version": 1,
+  "name": "seeded isolation",
+  "ticks": 3,
+  "state_file": "baseline.state.json",
+  "invariants": [
+    {"path": "base", "op": "eq", "value": 7},
+    {"path": "bad", "op": "eq", "value": 0},
+    {"path": "values[0]", "op": "eq", "value": 11},
+    {"path": "values[1]", "op": "lte", "value": 3},
+    {"path": "render_calls", "op": "eq", "value": 0}
+  ],
+  "property": {"seed_path": "seed", "seeds": [2, 5]}
+}
+"#,
+    )
+    .expect("write passing scenario");
+    let scenarios = stasis(&["--json", "test"], &project);
+    assert_eq!(
+        scenarios.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&scenarios.stdout),
+        String::from_utf8_lossy(&scenarios.stderr)
+    );
+    let scenarios_json = json_stdout(&scenarios);
+    assert_eq!(scenarios_json["result"]["scenarios_discovered"], 1);
+    assert_eq!(scenarios_json["result"]["scenario_cases_run"], 2);
+    assert_eq!(scenarios_json["result"]["scenario_cases_passed"], 2);
+
+    fs::write(
+        &scenario_path,
+        r#"{
+  "schema_version": 1,
+  "name": "seeded isolation",
+  "ticks": 3,
+  "state_file": "baseline.state.json",
+  "invariants": [{"path": "ticks", "op": "lt", "value": 2}],
+  "property": {"seed_path": "seed", "seeds": [2, 5]}
+}
+"#,
+    )
+    .expect("write failing scenario");
+    let failed = stasis(&["--json", "test"], &project);
+    assert_eq!(failed.status.code(), Some(1));
+    let receipt_dir = project.join("build/headless-replays");
+    let receipts = fs::read_dir(&receipt_dir)
+        .expect("read receipt directory")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect receipts");
+    assert_eq!(receipts.len(), 1);
+    let receipt = receipts[0].path();
+    let receipt_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&receipt).expect("read deterministic failure receipt"),
+    )
+    .expect("parse deterministic failure receipt");
+    assert_eq!(receipt_json["seed"], 2);
+    assert_eq!(receipt_json["failed_tick"], 2);
+    assert_eq!(receipt_json["observed_hashes_truncated"], false);
+    assert_eq!(
+        receipt_json["observed_hashes"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        receipt_json["scenario"],
+        "tests/determinism with spaces.scenario.json"
+    );
+    assert_eq!(
+        receipt_json["rerun"],
+        "stasis test \"tests/determinism with spaces.scenario.json\""
+    );
+    assert_eq!(
+        receipt_json["rerun_argv"],
+        serde_json::json!(["test", "tests/determinism with spaces.scenario.json"])
+    );
+
+    fs::write(
+        &scenario_path,
+        r#"{
+  "schema_version": 1,
+  "name": "seeded isolation",
+  "ticks": 3,
+  "state_file": "baseline.state.json",
+  "invariants": [{"path": "values[0]", "op": "eq", "value": 11}],
+  "expected_hashes": [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000"
+  ],
+  "property": {"seed_path": "seed", "seeds": [2]}
+}
+"#,
+    )
+    .expect("write hash mismatch scenario");
+    let hash_failed = stasis(&["--json", "test"], &project);
+    assert_eq!(hash_failed.status.code(), Some(1));
+    let hash_receipt: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&receipt).expect("read hash mismatch receipt"))
+            .expect("parse hash mismatch receipt");
+    assert_eq!(hash_receipt["failed_tick"], 1);
+    assert!(hash_receipt["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("state hash mismatch")));
+    assert_eq!(
+        hash_receipt["observed_hashes"].as_array().map(Vec::len),
+        Some(1)
+    );
 
     fs::remove_dir_all(&parent).ok();
 }
@@ -1270,6 +1924,521 @@ fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
 }
 
 #[test]
+fn semantic_symbol_queries_are_read_only_in_a_linked_vendor_worktree() {
+    let parent = temp_dir("semantic_symbols_vendor_readonly");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("consumer");
+    let created = stasis(&["new", "consumer", "--dir", "consumer"], &parent);
+    assert_eq!(
+        created.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr)
+    );
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "import \"/vendor/stasis/stdlib/graphics.stasis\";\n",
+            "import \"/vendor/stasis/stdlib/network_client.stasis\";\n",
+            "function main(): i32 { return network_client_supported(); }\n",
+        ),
+    )
+    .expect("write vendor consumer entry");
+    assert!(git(&["config", "user.name", "Stasis Test"], &project)
+        .status
+        .success());
+    assert!(git(
+        &["config", "user.email", "stasis@example.invalid"],
+        &project,
+    )
+    .status
+    .success());
+    assert!(git(&["add", "-A"], &project).status.success());
+    let committed = git(&["commit", "--no-verify", "-m", "initial"], &project);
+    assert!(
+        committed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&committed.stdout),
+        String::from_utf8_lossy(&committed.stderr)
+    );
+
+    let linked = parent.join("consumer-linked");
+    let linked_arg = linked.to_string_lossy().to_string();
+    let worktree = git(
+        &["worktree", "add", "--detach", &linked_arg, "HEAD"],
+        &project,
+    );
+    assert!(
+        worktree.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&worktree.stdout),
+        String::from_utf8_lossy(&worktree.stderr)
+    );
+    let vendor_updated = stasis(&["--json", "vendor", "update"], &linked);
+    assert_eq!(
+        vendor_updated.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&vendor_updated.stdout),
+        String::from_utf8_lossy(&vendor_updated.stderr)
+    );
+    let stale_cache = linked.join(".stasis_cache/toolchain/stale.bin");
+    fs::create_dir_all(stale_cache.parent().expect("stale cache parent"))
+        .expect("create stale cache fixture");
+    fs::write(&stale_cache, "stale").expect("write stale cache fixture");
+    let stale_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    fs::File::options()
+        .write(true)
+        .open(&stale_cache)
+        .expect("open stale cache fixture")
+        .set_times(
+            fs::FileTimes::new()
+                .set_accessed(stale_time)
+                .set_modified(stale_time),
+        )
+        .expect("age stale cache fixture");
+
+    let before_noop_prepare = snapshot_project_bytes(&linked);
+    let noop_prepare = stasis(&["--json", "prepare"], &linked);
+    assert_eq!(noop_prepare.status.code(), Some(0));
+    assert_eq!(json_stdout(&noop_prepare)["result"]["prepared"], false);
+    assert_eq!(snapshot_project_bytes(&linked), before_noop_prepare);
+
+    let run_query = |args: &[&str]| {
+        let before = snapshot_project_bytes(&linked);
+        let output = stasis(args, &linked);
+        assert_eq!(
+            snapshot_project_bytes(&linked),
+            before,
+            "query changed project bytes for {:?}",
+            args
+        );
+        output
+    };
+
+    let listed = run_query(&["--json", "symbol", "list", "--limit", "200"]);
+    assert_eq!(
+        listed.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&listed.stdout),
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed_json = json_stdout(&listed);
+    let listed_files = listed_json["result"]["files"]
+        .as_array()
+        .expect("default query files");
+    assert!(listed_files
+        .iter()
+        .any(|file| file == "vendor/stasis/stdlib/graphics.stasis"));
+    assert!(listed_files
+        .iter()
+        .any(|file| file == "vendor/stasis/stdlib/network_client.stasis"));
+    let listed_items = listed_json["result"]["items"]
+        .as_array()
+        .expect("default query items");
+    assert!(listed_items
+        .iter()
+        .any(|item| item["name"] == "network_client_supported"));
+
+    for (file, name) in [
+        ("vendor/stasis/stdlib/host_frame.stasis", "refresh"),
+        (
+            "vendor/stasis/stdlib/network_client.stasis",
+            "network_client_supported",
+        ),
+    ] {
+        let scoped = run_query(&[
+            "--json", "symbol", "list", "--file", file, "--kind", "function",
+        ]);
+        assert_eq!(scoped.status.code(), Some(0));
+        let scoped_json = json_stdout(&scoped);
+        let scoped_items = scoped_json["result"]["items"]
+            .as_array()
+            .expect("scoped query items");
+        assert!(scoped_items.iter().any(|item| item["name"] == name));
+    }
+
+    let found = run_query(&[
+        "--json",
+        "symbol",
+        "find",
+        "network_client_supported",
+        "--kind",
+        "function",
+        "--file",
+        "vendor/stasis/stdlib/network_client.stasis",
+    ]);
+    assert_eq!(found.status.code(), Some(0));
+    assert_eq!(
+        json_stdout(&found)["result"]["matches"]
+            .as_array()
+            .expect("vendor symbol matches")
+            .len(),
+        1
+    );
+
+    let read = run_query(&[
+        "--json",
+        "symbol",
+        "read",
+        "refresh",
+        "--kind",
+        "function",
+        "--file",
+        "vendor/stasis/stdlib/host_frame.stasis",
+    ]);
+    assert_eq!(read.status.code(), Some(0));
+    assert!(json_stdout(&read)["result"]["item"]["source"]
+        .as_str()
+        .is_some_and(|source| source.contains("function refresh")));
+
+    let references = run_query(&["--json", "symbol", "references", "network_client_supported"]);
+    assert_eq!(references.status.code(), Some(0));
+    assert!(json_stdout(&references)["result"]["references"]
+        .as_array()
+        .is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["file"] == "vendor/stasis/stdlib/network_client.stasis")
+        }));
+
+    let manifest_path = linked.join("stasis.json");
+    let mut byte_current_manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("current manifest"))
+            .expect("parse current manifest");
+    byte_current_manifest["vendor"]["stasis"]["release_id"] =
+        Value::String("older-toolchain".to_string());
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&byte_current_manifest).expect("serialize byte-current manifest"),
+    )
+    .expect("write byte-current manifest");
+    assert_eq!(
+        run_query(&["--json", "symbol", "list"]).status.code(),
+        Some(0)
+    );
+
+    let mut inconsistent_manifest: Value = serde_json::from_slice(
+        &fs::read(&manifest_path).expect("manifest after release-only edit"),
+    )
+    .expect("parse inconsistent manifest");
+    inconsistent_manifest["vendor"]["stasis"]["sha256"] = Value::String("0".repeat(64));
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&inconsistent_manifest).expect("serialize inconsistent manifest"),
+    )
+    .expect("write inconsistent manifest");
+    let before_inconsistent = snapshot_project_bytes(&linked);
+    let inconsistent = stasis(&["--json", "symbol", "list"], &linked);
+    assert_eq!(inconsistent.status.code(), Some(1));
+    assert_eq!(
+        json_stderr(&inconsistent)["message"],
+        "read-only symbol query did not update files: checked-in vendor snapshot has an inconsistent manifest fingerprint; run 'stasis vendor status' then 'stasis vendor update'"
+    );
+    assert_eq!(snapshot_project_bytes(&linked), before_inconsistent);
+    assert_eq!(
+        stasis(&["--json", "vendor", "update"], &linked)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_query(&["--json", "symbol", "list"]).status.code(),
+        Some(0)
+    );
+
+    fs::remove_dir_all(linked.join("vendor/stasis")).expect("remove vendor snapshot");
+    let before_missing = snapshot_project_bytes(&linked);
+    let missing = stasis(&["--json", "symbol", "list"], &linked);
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        json_stderr(&missing)["message"],
+        "read-only symbol query did not update files: checked-in vendor snapshot is missing; run 'stasis vendor status' then 'stasis vendor update'"
+    );
+    assert_eq!(snapshot_project_bytes(&linked), before_missing);
+    let repaired = stasis(&["--json", "vendor", "update"], &linked);
+    assert_eq!(
+        repaired.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&repaired.stdout),
+        String::from_utf8_lossy(&repaired.stderr)
+    );
+    assert_eq!(
+        run_query(&["--json", "symbol", "list"]).status.code(),
+        Some(0)
+    );
+
+    let edited_vendor = linked.join("vendor/stasis/stdlib/graphics.stasis");
+    let mut edited_source = fs::read_to_string(&edited_vendor).expect("read vendor source");
+    edited_source.push_str("// local vendor edit\n");
+    fs::write(&edited_vendor, edited_source).expect("edit vendor source");
+    let before_local_change = snapshot_project_bytes(&linked);
+    let local_change = stasis(&["--json", "symbol", "list"], &linked);
+    assert_eq!(local_change.status.code(), Some(1));
+    assert_eq!(
+        json_stderr(&local_change)["message"],
+        "read-only symbol query did not update files: checked-in vendor snapshot has local changes; run 'stasis vendor status' then 'stasis vendor update'"
+    );
+    assert_eq!(snapshot_project_bytes(&linked), before_local_change);
+    assert_eq!(
+        stasis(&["--json", "vendor", "update"], &linked)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_query(&["--json", "symbol", "list"]).status.code(),
+        Some(0)
+    );
+
+    let mut stale_source = fs::read_to_string(&edited_vendor).expect("read repaired vendor");
+    stale_source.push_str("// stale toolchain fixture\n");
+    fs::write(&edited_vendor, stale_source).expect("write stale vendor fixture");
+    let status = stasis(&["--json", "vendor", "status"], &linked);
+    assert_eq!(status.status.code(), Some(0));
+    let actual_sha256 = json_stdout(&status)["result"]["actual_sha256"]
+        .as_str()
+        .expect("stale fixture hash")
+        .to_string();
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).expect("manifest"))
+        .expect("parse manifest");
+    manifest["vendor"]["stasis"]["sha256"] = Value::String(actual_sha256);
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize stale manifest"),
+    )
+    .expect("write stale manifest");
+    let before_stale = snapshot_project_bytes(&linked);
+    let stale = stasis(&["--json", "symbol", "list"], &linked);
+    assert_eq!(stale.status.code(), Some(1));
+    assert_eq!(
+        json_stderr(&stale)["message"],
+        "read-only symbol query did not update files: checked-in vendor snapshot is stale for the selected toolchain; run 'stasis vendor status' then 'stasis vendor update'"
+    );
+    assert_eq!(snapshot_project_bytes(&linked), before_stale);
+    assert_eq!(
+        stasis(&["--json", "vendor", "update"], &linked)
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        run_query(&["--json", "symbol", "list"]).status.code(),
+        Some(0)
+    );
+
+    let removed = git(&["worktree", "remove", "--force", &linked_arg], &project);
+    assert!(
+        removed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
+fn toolchain_stdlib_queries_require_explicit_prepare_in_a_linked_worktree() {
+    let parent = temp_dir("semantic_symbols_toolchain_readonly");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("consumer");
+    let created = stasis(&["new", "consumer", "--dir", "consumer"], &parent);
+    assert_eq!(
+        created.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let manifest_path = project.join("stasis.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read generated manifest"))
+            .expect("parse generated manifest");
+    manifest["stdlib"] = Value::String("toolchain".to_string());
+    manifest
+        .as_object_mut()
+        .expect("manifest object")
+        .remove("vendor");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize toolchain manifest"),
+    )
+    .expect("write toolchain manifest");
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "import \"/.stasis_cache/toolchain/src/stdlib/graphics.stasis\";\n",
+            "import \"/.stasis_cache/toolchain/src/stdlib/network_client.stasis\";\n",
+            "function main(): i32 { return network_client_supported(); }\n",
+        ),
+    )
+    .expect("write toolchain consumer entry");
+    fs::remove_dir_all(project.join("vendor")).expect("remove unused vendor snapshot");
+    if project.join(".stasis_cache").exists() {
+        fs::remove_dir_all(project.join(".stasis_cache")).expect("remove initial toolchain cache");
+    }
+    assert!(git(&["config", "user.name", "Stasis Test"], &project)
+        .status
+        .success());
+    assert!(git(
+        &["config", "user.email", "stasis@example.invalid"],
+        &project,
+    )
+    .status
+    .success());
+    assert!(git(&["add", "-A"], &project).status.success());
+    let committed = git(&["commit", "--no-verify", "-m", "initial"], &project);
+    assert!(
+        committed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&committed.stdout),
+        String::from_utf8_lossy(&committed.stderr)
+    );
+
+    let linked = parent.join("consumer-linked");
+    let linked_arg = linked.to_string_lossy().to_string();
+    let worktree = git(
+        &["worktree", "add", "--detach", &linked_arg, "HEAD"],
+        &project,
+    );
+    assert!(
+        worktree.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&worktree.stdout),
+        String::from_utf8_lossy(&worktree.stderr)
+    );
+
+    let run_query = |args: &[&str]| {
+        let before = snapshot_project_bytes(&linked);
+        let output = stasis(args, &linked);
+        assert_eq!(
+            snapshot_project_bytes(&linked),
+            before,
+            "query changed project bytes for {:?}",
+            args
+        );
+        output
+    };
+
+    let missing = run_query(&["--json", "symbol", "list"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        json_stderr(&missing)["message"],
+        "read-only symbol query did not update files: toolchain stdlib cache is missing or unprepared; run 'stasis prepare'"
+    );
+
+    let prepared = stasis(&["--json", "prepare"], &linked);
+    assert_eq!(
+        prepared.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&prepared.stdout),
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    assert_eq!(json_stdout(&prepared)["result"]["prepared"], true);
+    assert!(linked
+        .join(".stasis_cache/toolchain/src/.toolchain-sha256")
+        .is_file());
+
+    let listed = run_query(&["--json", "symbol", "list", "--limit", "200"]);
+    assert_eq!(listed.status.code(), Some(0));
+    let listed_json = json_stdout(&listed);
+    let listed_files = listed_json["result"]["files"]
+        .as_array()
+        .expect("toolchain query files");
+    assert!(listed_files
+        .iter()
+        .any(|file| file == ".stasis_cache/toolchain/src/stdlib/graphics.stasis"));
+    assert!(listed_files
+        .iter()
+        .any(|file| file == ".stasis_cache/toolchain/src/stdlib/network_client.stasis"));
+    let listed_items = listed_json["result"]["items"]
+        .as_array()
+        .expect("toolchain query items");
+    assert!(listed_items
+        .iter()
+        .any(|item| item["name"] == "network_client_supported"));
+
+    for (file, name) in [
+        (
+            ".stasis_cache/toolchain/src/stdlib/host_frame.stasis",
+            "refresh",
+        ),
+        (
+            ".stasis_cache/toolchain/src/stdlib/network_client.stasis",
+            "network_client_supported",
+        ),
+    ] {
+        let scoped = run_query(&[
+            "--json", "symbol", "list", "--file", file, "--kind", "function",
+        ]);
+        assert_eq!(scoped.status.code(), Some(0));
+        assert!(json_stdout(&scoped)["result"]["items"]
+            .as_array()
+            .expect("scoped toolchain items")
+            .iter()
+            .any(|item| item["name"] == name));
+    }
+
+    let read = run_query(&[
+        "--json",
+        "symbol",
+        "read",
+        "refresh",
+        "--kind",
+        "function",
+        "--file",
+        ".stasis_cache/toolchain/src/stdlib/host_frame.stasis",
+    ]);
+    assert_eq!(read.status.code(), Some(0));
+    assert!(json_stdout(&read)["result"]["item"]["source"]
+        .as_str()
+        .is_some_and(|source| source.contains("function refresh")));
+
+    let references = run_query(&["--json", "symbol", "references", "network_client_supported"]);
+    assert_eq!(references.status.code(), Some(0));
+    assert!(json_stdout(&references)["result"]["references"]
+        .as_array()
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item["file"] == ".stasis_cache/toolchain/src/stdlib/network_client.stasis"
+            })
+        }));
+
+    let marker = linked.join(".stasis_cache/toolchain/src/.toolchain-sha256");
+    fs::write(&marker, "stale-toolchain\n").expect("write stale toolchain marker");
+    let before_stale = snapshot_project_bytes(&linked);
+    let stale = stasis(&["--json", "symbol", "list"], &linked);
+    assert_eq!(stale.status.code(), Some(1));
+    assert_eq!(
+        json_stderr(&stale)["message"],
+        "read-only symbol query did not update files: toolchain stdlib cache is stale for the selected toolchain; run 'stasis prepare'"
+    );
+    assert_eq!(snapshot_project_bytes(&linked), before_stale);
+
+    let repaired = stasis(&["--json", "prepare"], &linked);
+    assert_eq!(repaired.status.code(), Some(0));
+    assert_eq!(json_stdout(&repaired)["result"]["prepared"], true);
+    assert_eq!(
+        run_query(&["--json", "symbol", "list"]).status.code(),
+        Some(0)
+    );
+
+    let removed = git(&["worktree", "remove", "--force", &linked_arg], &project);
+    assert!(
+        removed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
 fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     let parent = temp_dir("mobile_package");
     fs::create_dir_all(&parent).expect("create temp parent");
@@ -1278,17 +2447,22 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     assert_eq!(created.status.code(), Some(0));
     fs::write(
         project.join("src/main.stasis"),
-        "import \"/vendor/stasis/stdlib/graphics.stasis\";\nfunction main(): i32 { return 0; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
+        "import \"/vendor/stasis/stdlib/graphics.stasis\";\nfunction main(): i32 { return load_font(\"/assets/fonts/ui.ttf\", 16); }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
     )
     .expect("write mobile entry");
-    fs::create_dir_all(project.join("assets")).expect("create assets");
+    fs::create_dir_all(project.join("assets/fonts")).expect("create assets");
+    fs::write(project.join("assets/fonts/ui.ttf"), b"font").expect("write font asset");
     fs::write(
         project.join("assets/manifest.json"),
-        "{\n  \"schema\": \"stasis-assets\",\n  \"version\": 1,\n  \"assets\": []\n}\n",
+        "{\n  \"schema\": \"stasis-assets\",\n  \"version\": 1,\n  \"assets\": [\n    {\"id\":\"ui_font\",\"path\":\"assets/fonts/ui.ttf\",\"content_sha256\":\"795ea3efa43d0872b63bf0067be97553b46983e4f075097669391e9d15388ecc\",\"format\":{\"kind\":\"font\",\"encoding\":\"ttf\"},\"dependencies\":[]}\n  ]\n}\n",
     )
     .expect("write asset manifest");
 
-    for (target, output) in [("android-arm64", "android"), ("ios-arm64", "ios")] {
+    for (target, output) in [
+        ("android-arm64", "android"),
+        ("android-x86_64", "android_x86"),
+        ("ios-arm64", "ios"),
+    ] {
         let packaged = stasis(
             &[
                 "package-mobile",
@@ -1308,6 +2482,11 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
             "stdout={} stderr={}",
             String::from_utf8_lossy(&packaged.stdout),
             String::from_utf8_lossy(&packaged.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&packaged.stdout).contains("\nCompleted in "),
+            "stdout={}",
+            String::from_utf8_lossy(&packaged.stdout)
         );
         assert!(project
             .join(output)
@@ -1393,7 +2572,7 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
         )
         .expect("read engine manifest");
         assert!(
-            engine_manifest.contains("\"path\":\"gfx_cmd_f32\",\"max_length\":108676"),
+            engine_manifest.contains("\"path\":\"gfx_cmd_f32\",\"max_length\":146564"),
             "mobile render ABI must publish the full f32 command buffer"
         );
         assert!(aot_manifest["objects"]
@@ -1415,6 +2594,17 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
         .join("android/android/app/src/main/assets/stasis_game/assets/manifest.json")
         .is_file());
     assert!(project
+        .join("android/android/app/src/main/assets/stasis_game/assets/fonts/ui.ttf")
+        .is_file());
+    let arm64_gradle = fs::read_to_string(project.join("android/android/app/build.gradle"))
+        .expect("read arm64 Gradle");
+    assert!(arm64_gradle.contains("abiFilters 'arm64-v8a'"));
+    assert!(!arm64_gradle.contains("abiFilters 'x86_64'"));
+    let x86_gradle = fs::read_to_string(project.join("android_x86/android/app/build.gradle"))
+        .expect("read x86_64 Gradle");
+    assert!(x86_gradle.contains("abiFilters 'x86_64'"));
+    assert!(!x86_gradle.contains("abiFilters 'arm64-v8a'"));
+    assert!(project
         .join("ios/ios/StasisMobile.xcodeproj/project.pbxproj")
         .is_file());
     assert!(project
@@ -1432,6 +2622,52 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
     )
     .expect("read desktop graphics runtime");
     assert!(graphics_source.contains("Stasis package provenance: path=%s manifest=%s"));
+
+    let refused = stasis(
+        &[
+            "package-mobile",
+            "--target",
+            "android-x86_64",
+            "--out",
+            "x86_release",
+        ],
+        &project,
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr)
+        .contains("android-x86_64 is a test-only emulator target; pass --development-build"));
+    assert!(!project.join("x86_release").exists());
+
+    if !cfg!(target_os = "macos") {
+        let manifest_path = project.join("stasis.json");
+        let mut network_manifest: Value = serde_json::from_slice(
+            &fs::read(&manifest_path).expect("read mobile manifest for network fixture"),
+        )
+        .expect("parse mobile manifest for network fixture");
+        network_manifest["capabilities"] = json!({"network": true});
+        network_manifest["web"] = json!({"entry": "src/main.stasis"});
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&network_manifest).expect("encode network fixture manifest"),
+        )
+        .expect("write network fixture manifest");
+        let network_ios = stasis(
+            &[
+                "package-mobile",
+                "--target",
+                "ios-arm64",
+                "--out",
+                "network_ios",
+                "--development-build",
+            ],
+            &project,
+        );
+        assert_eq!(network_ios.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&network_ios.stderr)
+            .contains("requires a macOS host with Xcode"));
+        assert!(!project.join("network_ios").exists());
+        assert!(!project.join(".network_ios.staging").exists());
+    }
 
     fs::write(project.join("src/main.stasis"), "function main(: i32 {\n")
         .expect("write invalid mobile entry");
@@ -2210,10 +3446,10 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     fs::create_dir_all(project.join("assets")).expect("create asset directory");
 
     let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/render_parity");
-    let main_source = fs::read_to_string(sample.join("main.stasis"))
-        .expect("read render parity entry")
-        .replace("\"assets/", "\"../assets/");
-    fs::write(project.join("src/main.stasis"), main_source).expect("write nested entry");
+    let main_source =
+        fs::read_to_string(sample.join("main.stasis")).expect("read render parity entry");
+    let rooted_source = main_source.replace("\"assets/", "\"/assets/");
+    fs::write(project.join("src/main.stasis"), rooted_source).expect("write rooted entry");
     fs::copy(
         sample.join("frame.stasis"),
         project.join("src/frame.stasis"),
@@ -2238,6 +3474,28 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     .expect("write manifest");
     fs::write(project.join("live.commands"), ":quit\n").expect("write live script");
 
+    let rooted_output = stasis(
+        &[
+            "tui",
+            "demo/src/main.stasis",
+            "--live-script",
+            "live.commands",
+            "--live-json",
+        ],
+        &parent,
+    );
+    assert_eq!(
+        rooted_output.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&rooted_output.stdout),
+        String::from_utf8_lossy(&rooted_output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&rooted_output.stdout).contains("\"kind\":\"quitting\""));
+    assert!(!String::from_utf8_lossy(&rooted_output.stderr).contains("failed to open"));
+
+    let legacy_source = main_source.replace("\"assets/", "\"../assets/");
+    fs::write(project.join("src/main.stasis"), legacy_source).expect("write legacy entry");
     let output = stasis(
         &[
             "tui",
@@ -2329,6 +3587,41 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
             if path.is_dir() {
                 pending.push(path);
             } else {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+fn snapshot_project_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = walk_files_without_git(root)
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(root)
+                .expect("snapshot path under root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            (relative, fs::read(path).expect("read snapshot file"))
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
+}
+
+fn walk_files_without_git(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).expect("read snapshot directory") {
+            let path = entry.expect("read snapshot entry").path();
+            if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
+                continue;
+            }
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.is_file() {
                 files.push(path);
             }
         }

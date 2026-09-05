@@ -1,4 +1,4 @@
-use super::emit::{CollectionInfoMap, GlobalPathTypeMap};
+use super::compile_analysis::{CollectionInfoMap, GlobalPathTypeMap};
 use crate::frontend::types::{
     TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
     TYPE_ID_U32, TYPE_ID_U8,
@@ -406,7 +406,7 @@ fn checked_memory_bytes(count: u64, element_bytes: u64) -> Result<u64, String> {
         .ok_or_else(|| "state memory report byte count overflow".to_string())
 }
 
-fn is_command_buffer_path(path: &str) -> bool {
+pub fn is_command_buffer_path(path: &str) -> bool {
     path.starts_with("gfx_cmd_")
         || path.starts_with("render_cmd_")
         || path.starts_with("audio_cmd_")
@@ -488,7 +488,14 @@ pub(crate) fn build_state_layout(
             .iter_mut()
             .find(|collection| collection.path == *path)
         {
-            if !collection.fields.iter().any(|field| field.field.is_empty()) {
+            if let Some(field) = collection
+                .fields
+                .iter_mut()
+                .find(|field| field.field.is_empty())
+            {
+                field.type_name = "u8".to_string();
+                field.storage_type_name = "u8".to_string();
+            } else {
                 collection.fields.push(StateCollectionFieldLayout {
                     field: String::new(),
                     type_name: "u8".to_string(),
@@ -647,10 +654,13 @@ mod tests {
         let layout = jit.state_layout();
         assert_eq!(layout, aot.state_layout());
         assert!(layout.scalars.iter().any(|field| field.path == "score"));
-        assert!(layout
+        let title = layout
             .collections
             .iter()
-            .any(|collection| collection.path == "title" && collection.capacity == 8));
+            .find(|collection| collection.path == "title")
+            .expect("fixed UTF-8 collection layout");
+        assert_eq!(title.capacity, 8);
+        assert_eq!(title.fields[0].storage_type_name(), "u8");
         assert!(layout
             .collections
             .iter()
@@ -684,7 +694,7 @@ mod tests {
                       global gfx_cmd_i32: i32[8];\n\
                       function main(): i32 { return state.score; }\n";
         let mut jit = JitProcess::new();
-        jit.upsert_file("main.stasis", source);
+        jit.upsert_file("tests/stasis/seams/state_layout.stasis", source);
         jit.compile_staged().expect("compile report fixture");
 
         let active_counts = BTreeMap::from([("state.enemies".to_string(), 2)]);

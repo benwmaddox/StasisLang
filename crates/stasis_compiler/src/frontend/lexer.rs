@@ -22,7 +22,17 @@ pub struct Token {
     pub end: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LexerDiagnostic {
+    pub message: String,
+    pub offset: usize,
+}
+
 pub fn lex(source: &str) -> Result<Vec<Token>, String> {
+    lex_with_diagnostic(source).map_err(|error| error.message)
+}
+
+pub fn lex_with_diagnostic(source: &str) -> Result<Vec<Token>, LexerDiagnostic> {
     let bytes = source.as_bytes();
     let mut tokens = Vec::new();
     let mut i = 0usize;
@@ -56,7 +66,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             if !closed {
-                return Err("unterminated string literal".to_string());
+                return Err(LexerDiagnostic {
+                    message: "unterminated string literal".to_string(),
+                    offset: start,
+                });
             }
             tokens.push(Token {
                 kind: TokenKind::StringLiteral,
@@ -120,6 +133,37 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
         end: bytes.len(),
     });
     Ok(tokens)
+}
+
+pub(crate) fn is_inside_backtick_literal(source: &str, offset: usize) -> bool {
+    let bytes = &source.as_bytes()[..offset.min(source.len())];
+    let mut cursor = 0usize;
+    let mut in_string = false;
+    let mut in_comment = false;
+    let mut in_backtick = false;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if in_comment {
+            if byte == b'\n' {
+                in_comment = false;
+            }
+        } else if in_string {
+            if byte == b'\\' {
+                cursor = cursor.saturating_add(1);
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if !in_backtick && byte == b'/' && bytes.get(cursor + 1) == Some(&b'/') {
+            in_comment = true;
+            cursor = cursor.saturating_add(1);
+        } else if !in_backtick && byte == b'"' {
+            in_string = true;
+        } else if byte == b'`' {
+            in_backtick = !in_backtick;
+        }
+        cursor = cursor.saturating_add(1);
+    }
+    in_backtick
 }
 
 fn is_identifier_start(byte: u8) -> bool {

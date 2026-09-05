@@ -9,6 +9,14 @@ import json
 import pathlib
 
 
+COMMAND_BUFFER_NAME = "gfx_cmd"
+CURRENT_COMMAND_BUFFER_VERSION = 7
+ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
+ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
+ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"
+ASSET_PACKAGE_IDENTITY_VERSION = 1
+
+
 def sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -25,6 +33,60 @@ def mobile_package_id(name: str) -> str:
         else:
             component += f"x{byte:02x}"
     return f"com.stasislang.{component}"
+
+
+def verify_asset_package_identities(
+    parser: argparse.ArgumentParser, package_root: pathlib.Path
+) -> None:
+    packaged_manifests = sorted(package_root.rglob("assets/manifest.json"))
+    for manifest_path in packaged_manifests:
+        identity_path = manifest_path.parent.parent / ASSET_PACKAGE_IDENTITY_NAME
+        if not identity_path.is_file():
+            parser.error(
+                f"asset package identity is missing for packaged manifest: {manifest_path}"
+            )
+
+    for identity_path in sorted(package_root.rglob(ASSET_PACKAGE_IDENTITY_NAME)):
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        if set(identity) != {"schema", "version", "manifest_path", "manifest_sha256"}:
+            parser.error(f"malformed asset package identity: {identity_path}")
+        if identity["schema"] != ASSET_PACKAGE_IDENTITY_SCHEMA:
+            parser.error(f"unsupported asset package identity schema: {identity_path}")
+        if identity["version"] != ASSET_PACKAGE_IDENTITY_VERSION:
+            parser.error(f"unsupported asset package identity version: {identity_path}")
+        relative = pathlib.PurePosixPath(identity["manifest_path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            parser.error(f"unsafe asset manifest identity path: {identity_path}")
+        if relative != ASSET_MANIFEST_RELATIVE_PATH:
+            parser.error(f"unsupported asset manifest identity path: {identity_path}")
+        manifest_path = identity_path.parent / pathlib.Path(*relative.parts)
+        if not manifest_path.is_file():
+            parser.error(f"asset package identity manifest is missing: {manifest_path}")
+        actual = sha256(manifest_path)
+        if actual != identity["manifest_sha256"]:
+            parser.error(
+                f"asset package manifest hash mismatch: expected "
+                f"{identity['manifest_sha256']}, found {actual}"
+            )
+
+
+def validate_command_buffer(parser: argparse.ArgumentParser, manifest: dict) -> None:
+    command_buffer = manifest.get("command_buffer")
+    if not isinstance(command_buffer, dict):
+        parser.error("provenance is missing command_buffer contract")
+    if command_buffer.get("name") != COMMAND_BUFFER_NAME:
+        parser.error(
+            "provenance command_buffer family must be gfx_cmd: "
+            f"{command_buffer.get('name')!r}"
+        )
+    version = command_buffer.get("version")
+    if type(version) is int and version == CURRENT_COMMAND_BUFFER_VERSION:
+        return
+    parser.error(
+        "unsupported gfx_cmd command_buffer schema: "
+        f"expected current {CURRENT_COMMAND_BUFFER_VERSION}"
+        + f", found {version!r}"
+    )
 
 
 def verify_mobile_shells(
@@ -49,6 +111,7 @@ def verify_mobile_shells(
         parser.error(f"unsupported mobile package target: {target!r}")
     platform = target.split("-", 1)[0]
     package_id = receipt.get("package_id") or mobile_package_id(receipt["name"])
+    network_enabled = receipt.get("network") is True
     replacements = {
         "@STASIS_APP_NAME@": receipt.get("app_name") or receipt["name"],
         "@STASIS_PACKAGE_ID@": package_id,
@@ -60,6 +123,18 @@ def verify_mobile_shells(
             receipt.get("android_version_code") or "1"
         ),
         "@STASIS_ANDROID_VERSION_NAME@": receipt.get("android_version_name") or "1.0",
+        "@STASIS_ANDROID_ABI@": "arm64-v8a" if target == "android-arm64" else "",
+        "@STASIS_NETWORK_ENABLED@": "1" if network_enabled else "0",
+        "@STASIS_NETWORK_PERMISSION@": (
+            '    <uses-permission android:name="android.permission.INTERNET" />\n'
+            if network_enabled and platform == "android"
+            else ""
+        ),
+        "@STASIS_LOCAL_NETWORK_USAGE@": (
+            f"    <key>NSLocalNetworkUsageDescription</key><string>{receipt.get('app_name') or receipt['name']} uses your local network so nearby friends can join games hosted on this device.</string>\n"
+            if network_enabled and target == "ios-arm64"
+            else ""
+        ),
     }
     expected_paths = set()
     for source_group in ("common", platform):
@@ -85,6 +160,21 @@ def verify_mobile_shells(
     expected_paths.add(("common", "stasis_package_provenance.h"))
     if target == "ios-arm64":
         expected_paths.add(("ios", "StasisMobile.xcconfig"))
+    if network_enabled:
+        if target == "ios-arm64":
+            expected_paths.update(
+                {
+                    ("ios", "network/libstasis_network.a"),
+                    ("ios", "network/include/stasis_network.h"),
+                }
+            )
+        else:
+            expected_paths.update(
+                {
+                    ("android", "app/src/main/cpp/network/libstasis_network.a"),
+                    ("android", "app/src/main/cpp/network/include/stasis_network.h"),
+                }
+            )
     asset_prefix = (
         "app/src/main/assets/stasis_game/"
         if target == "android-arm64"
@@ -143,8 +233,11 @@ def main() -> int:
     packaged = json.loads(
         (args.package_root / "stasis_provenance.json").read_text(encoding="utf-8")
     )
+    validate_command_buffer(parser, release)
+    validate_command_buffer(parser, packaged)
     if release != packaged:
         parser.error("packaged provenance does not exactly match the release manifest")
+    verify_asset_package_identities(parser, args.package_root)
     runtime_sources = release["runtime_sources"] if args.expect_runtime_sources else {}
     for relative, expected in runtime_sources.items():
         relative_path = pathlib.PurePosixPath(relative)

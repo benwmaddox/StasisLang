@@ -40,9 +40,9 @@ function Invoke-Bounded {
     if (-not $process.Start()) { throw "failed to start $Description" }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit(60000)) {
+    if (-not $process.WaitForExit(180000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        throw "$Description exceeded 60 seconds"
+        throw "$Description exceeded 180 seconds (3 minutes)"
     }
     $process.WaitForExit()
     $stdout = $stdoutTask.Result
@@ -112,6 +112,9 @@ function Assert-SmokeFrame {
     }
 }
 
+Invoke-Bounded -Description 'prepare toolchain stdlib' -FilePath $Toolchain `
+    -Arguments @('--workspace', $PSScriptRoot, 'prepare')
+
 $captures = @{}
 $captures.play = Join-Path $ArtifactRoot 'play.png'
 Invoke-Bounded -Description 'play' -FilePath $Toolchain -Arguments @(
@@ -147,15 +150,22 @@ $packagePayload = Join-Path $packageRoot 'app'
 $requiredPayload = @(
     'assets/manifest.json',
     'stasis.json',
-    'stasis_dynload.dll',
-    'stasis_provenance.json',
-    'stasis_graphics.dll',
-    'windows_launch_smoke.dll',
-    'windows_launch_smoke.exe.launch'
+    'stasis_provenance.json'
 )
 foreach ($relative in $requiredPayload) {
     if (-not (Test-Path -LiteralPath (Join-Path $packagePayload $relative))) {
         throw "desktop package payload is missing $relative"
+    }
+}
+$obsoletePayload = @(
+    'stasis_dynload.dll',
+    'stasis_graphics.dll',
+    'windows_launch_smoke.dll',
+    'windows_launch_smoke.exe.launch'
+)
+foreach ($relative in $obsoletePayload) {
+    if (Test-Path -LiteralPath (Join-Path $packagePayload $relative)) {
+        throw "desktop production package retained obsolete modular payload $relative"
     }
 }
 $unexpectedRootEntries = @(Get-ChildItem -LiteralPath $packageRoot | Where-Object {

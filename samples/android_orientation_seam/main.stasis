@@ -1,0 +1,127 @@
+import ".stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+global seam_state_checksum: i32;
+global seam_probe_sequence: i32;
+global seam_probe_kind: i32;
+global seam_probe_tick: i32;
+global seam_pointer_id: i32;
+global seam_pointer_count: i32;
+global seam_pointer_is_down: i32;
+global seam_pointer_went_down: i32;
+global seam_pointer_went_up: i32;
+global seam_pointer_x: f32;
+global seam_pointer_y: f32;
+global seam_pointer_x_n: f32;
+global seam_pointer_y_n: f32;
+global seam_safe_x: f32;
+global seam_safe_y: f32;
+global seam_safe_w: f32;
+global seam_safe_h: f32;
+global seam_logical_w: f32;
+global seam_logical_h: f32;
+global seam_native_w: i32;
+global seam_native_h: i32;
+global seam_drawable_w: i32;
+global seam_drawable_h: i32;
+global seam_display_generation: i32;
+global seam_density_generation: i32;
+global seam_content_scale: f32;
+global seam_raster_scale: f32;
+global seam_pending_generation: i32;
+global seam_last_generation: i32;
+global orientation_host_frame: HostFrame;
+
+// Copy HostFrame display lanes into guest-owned evidence before rendering.
+function snapshot_host_frame_display(): void {
+    seam_logical_w = orientation_host_frame.display.logical_width;
+    seam_logical_h = orientation_host_frame.display.logical_height;
+    seam_native_w = orientation_host_frame.display.native_width_px;
+    seam_native_h = orientation_host_frame.display.native_height_px;
+    seam_drawable_w = orientation_host_frame.display.drawable_width_px;
+    seam_drawable_h = orientation_host_frame.display.drawable_height_px;
+    seam_display_generation = orientation_host_frame.display.generation;
+    seam_density_generation = orientation_host_frame.display.density_generation;
+    seam_content_scale = orientation_host_frame.display.content_scale;
+    seam_raster_scale = orientation_host_frame.display.raster_scale;
+    seam_safe_x = orientation_host_frame.display.safe_x;
+    seam_safe_y = orientation_host_frame.display.safe_y;
+    seam_safe_w = orientation_host_frame.display.safe_width;
+    seam_safe_h = orientation_host_frame.display.safe_height;
+}
+
+function record_probe(pointer: i32): void {
+    snapshot_host_frame_display();
+    seam_probe_sequence += 1;
+    seam_probe_kind = 1;
+    if (seam_native_w > seam_native_h) {
+        seam_probe_kind = 2;
+    }
+    seam_probe_tick = orientation_host_frame.tick_index;
+    seam_pointer_id = orientation_host_frame.pointers[pointer].id;
+    seam_pointer_count = orientation_host_frame.pointer_count;
+    seam_pointer_is_down = 0;
+    if (orientation_host_frame.pointers[pointer].is_down) {
+        seam_pointer_is_down = 1;
+    }
+    seam_pointer_went_down = 0;
+    if (orientation_host_frame.pointers[pointer].went_down) {
+        seam_pointer_went_down = 1;
+    }
+    seam_pointer_went_up = 0;
+    if (orientation_host_frame.pointers[pointer].went_up) {
+        seam_pointer_went_up = 1;
+    }
+    seam_pointer_x = orientation_host_frame.pointers[pointer].x_logical;
+    seam_pointer_y = orientation_host_frame.pointers[pointer].y_logical;
+    seam_pointer_x_n = orientation_host_frame.pointers[pointer].x_normalized;
+    seam_pointer_y_n = orientation_host_frame.pointers[pointer].y_normalized;
+    seam_pending_generation = 0;
+    seam_state_checksum = 4000 + seam_probe_sequence * 100 + seam_probe_kind * 10 + seam_display_generation;
+}
+
+function main(): i32 {
+    init_window(360, 720, "Stasis Android Orientation Seam");
+    seam_state_checksum = 4000;
+    seam_probe_sequence = 0;
+    seam_pending_generation = 0;
+    seam_last_generation = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    orientation_host_frame.refresh();
+    let generation: i32 = orientation_host_frame.display.generation;
+    if (generation > 0 && generation != seam_last_generation) {
+        snapshot_host_frame_display();
+        seam_last_generation = generation;
+        seam_pending_generation = generation;
+    }
+    if (seam_pending_generation > 0 && orientation_host_frame.pointer_count > 1 && orientation_host_frame.pointers[1].went_up) {
+        record_probe(1);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.0, 0.0, 0.0, 1.0);
+    fill_rect(20.0, 20.0, 320.0, 680.0, 0.10, 0.12, 0.16, 1.0);
+    if (seam_probe_sequence == 1) {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.12, 0.84, 0.36, 1.0);
+    } else if (seam_probe_sequence == 2) {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.14, 0.42, 0.92, 1.0);
+    } else if (seam_probe_sequence >= 3) {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.92, 0.36, 0.16, 1.0);
+    } else {
+        fill_rect(60.0, 260.0, 240.0, 200.0, 0.72, 0.16, 0.18, 1.0);
+    }
+    if (seam_probe_sequence > 0) {
+        fill_rect(seam_pointer_x - 18.0, seam_pointer_y - 18.0, 36.0, 36.0, 0.95, 0.20, 0.80, 1.0);
+    }
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

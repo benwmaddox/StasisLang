@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "Headless Scenario",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build"
+}

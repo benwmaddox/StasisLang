@@ -1,0 +1,17 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "IT-022",
+  "asset_rejection": {
+    "variant": "missing",
+    "code": "missing_asset",
+    "path": "assets/asset_sprite.svg"
+  },
+  "variants": [
+    "missing",
+    "tampered",
+    "traversal",
+    "duplicate",
+    "oversized",
+    "malformed-manifest"
+  ]
+}

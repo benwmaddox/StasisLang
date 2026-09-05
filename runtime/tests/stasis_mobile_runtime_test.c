@@ -37,9 +37,14 @@ static int32_t host_request_sequences[8];
 static int gfx_submit_calls;
 static int shutdown_calls;
 static uint64_t performance_counter;
+static int performance_metrics_enabled = 1;
 static int performance_metrics_calls;
 static uint64_t reported_tick_us;
 static uint64_t reported_render_us;
+static int profile_start_logs;
+static int profile_row_logs;
+static int profile_done_logs;
+static char profile_row[256];
 static int32_t game_host_i32[768];
 static float game_host_f32[64];
 static int32_t game_gfx_cmd_i32[STASIS_RENDER_I32_COUNT];
@@ -49,6 +54,7 @@ static int32_t game_host_req_seq;
 static int32_t game_host_req_flags;
 static int32_t game_host_req_window_w_px;
 static int32_t game_host_req_window_h_px;
+static char game_string_literals[640][32];
 
 int stasis_init_window(int width, int height, const char *title) {
     assert(width == 1280);
@@ -101,7 +107,7 @@ void stasis_host_bulk_apply_requests(
 }
 
 void stasis_gfx_submit_u8(
-    const int32_t *cmd_i32,
+    int32_t *cmd_i32,
     const float *cmd_f32,
     const uint8_t *cmd_u8
 ) {
@@ -109,8 +115,8 @@ void stasis_gfx_submit_u8(
     assert(cmd_i32 == game_gfx_cmd_i32);
     assert(cmd_f32 == game_gfx_cmd_f32);
     assert(cmd_u8 == game_gfx_cmd_u8);
-    assert(cmd_i32[STASIS_RENDER_I_MAGIC] == STASIS_RENDER_V2_MAGIC);
-    assert(cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_V2_VERSION);
+    assert(cmd_i32[STASIS_RENDER_I_MAGIC] == STASIS_RENDER_MAGIC);
+    assert(cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_VERSION);
     gfx_submit_calls += 1;
     stasis_begin_frame();
     stasis_end_frame();
@@ -125,6 +131,10 @@ uint64_t stasis_host_performance_counter(void) {
     return performance_counter;
 }
 
+int stasis_host_performance_metrics_enabled(void) {
+    return performance_metrics_enabled;
+}
+
 uint64_t stasis_host_performance_elapsed_us(uint64_t started, uint64_t finished) {
     return finished - started;
 }
@@ -133,6 +143,15 @@ void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us) {
     performance_metrics_calls += 1;
     reported_tick_us = tick_us;
     reported_render_us = render_us;
+}
+
+void stasis_host_log_message(const char *message) {
+    if (strncmp(message, "STASIS_PROFILE_START|", 21) == 0) profile_start_logs += 1;
+    if (strncmp(message, "STASIS_PROFILE|", 15) == 0) {
+        profile_row_logs += 1;
+        snprintf(profile_row, sizeof(profile_row), "%s", message);
+    }
+    if (strncmp(message, "STASIS_PROFILE_DONE|", 20) == 0) profile_done_logs += 1;
 }
 
 int stasis_audio_init(int rate, int channels, int latency) { return rate + channels + latency; }
@@ -168,10 +187,16 @@ int stasis_audio_play_effect(int asset_handle, float volume) {
     return asset_handle + (int)volume;
 }
 int stasis_gfx_load_sprite(const char *path, int max_w, int max_h) { return path && max_w && max_h; }
+int stasis_asset_request_sprite(const char *path, int max_w, int max_h) { return path && max_w && max_h ? 31 : 0; }
+int stasis_asset_request_audio(const char *path) { return path ? 32 : 0; }
+int stasis_asset_task_poll(int task) { return task > 0 ? 3 : 0; }
+int stasis_asset_task_take_handle(int task) { return task > 0 ? 33 : 0; }
+void stasis_asset_task_cancel(int task) { (void)task; }
 void stasis_gfx_release_sprite(int handle) { (void)handle; }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
 int stasis_gfx_dump_png(const char *path) { return path != NULL; }
 int stasis_gfx_cache_text(int font, const char *text) { return font + (text != NULL); }
+int stasis_gfx_replace_text(int handle, int font, const char *text) { return handle > 0 ? handle : font + (text != NULL); }
 int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
 float stasis_gfx_measure_text_cached_height(int handle) { return (float)handle + 1.0f; }
@@ -206,6 +231,7 @@ static int32_t hash_path(const char *path);
 
 static int32_t game_main(void) {
     main_calls += 1;
+    assert(stasis_jit_load_font(1639, 19) == 19);
     game_host_req_seq = 1;
     game_host_req_flags = 1;
     game_host_req_window_w_px = 960;
@@ -214,7 +240,14 @@ static int32_t game_main(void) {
 }
 
 static void bind_runtime(void) {
+    int literal_index;
     bind_runtime_calls += 1;
+    stasis_jit_clear_string_literal_table();
+    for (literal_index = 0; literal_index < 640; literal_index += 1) {
+        snprintf(game_string_literals[literal_index], sizeof(game_string_literals[literal_index]),
+            "asset/path/%d.ttf", literal_index);
+        stasis_jit_upsert_string_literal(1000 + literal_index, game_string_literals[literal_index]);
+    }
     stasis_jit_register_global_i32_array(hash_path("host_i32"), 0, game_host_i32, 768);
     stasis_jit_register_global_f32_array(hash_path("host_f32"), 0, game_host_f32, 64);
     stasis_jit_register_global_i32_array(
@@ -229,6 +262,8 @@ static void bind_runtime(void) {
         hash_path("host_req_window_w_px"), &game_host_req_window_w_px);
     stasis_jit_register_global_i32_ptr(
         hash_path("host_req_window_h_px"), &game_host_req_window_h_px);
+    stasis_jit_profile_register_function(77, "render");
+    stasis_jit_profile_configure(1, 2);
 }
 
 static int32_t game_tick(void) {
@@ -237,9 +272,11 @@ static int32_t game_tick(void) {
 }
 
 static int32_t game_render(void) {
+    stasis_jit_profile_frame_enter(77);
     render_calls += 1;
-    game_gfx_cmd_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_V2_MAGIC;
-    game_gfx_cmd_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_V2_VERSION;
+    game_gfx_cmd_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
+    game_gfx_cmd_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
+    stasis_jit_profile_frame_leave(77);
     return render_result;
 }
 
@@ -285,9 +322,14 @@ static void reset_fakes(void) {
     gfx_submit_calls = 0;
     shutdown_calls = 0;
     performance_counter = 0;
+    performance_metrics_enabled = 1;
     performance_metrics_calls = 0;
     reported_tick_us = 0;
     reported_render_us = 0;
+    profile_start_logs = 0;
+    profile_row_logs = 0;
+    profile_done_logs = 0;
+    profile_row[0] = '\0';
     memset(game_host_i32, 0, sizeof(game_host_i32));
     memset(game_host_f32, 0, sizeof(game_host_f32));
     memset(game_gfx_cmd_i32, 0, sizeof(game_gfx_cmd_i32));
@@ -362,6 +404,20 @@ static void test_runs_mobile_lifecycle(void) {
     assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_NOT_INITIALIZED);
 }
 
+static void test_skips_hidden_performance_hud_measurement(void) {
+    StasisMobileRuntimeConfig valid_config = config();
+    StasisMobileGameEntries valid_entries = entries();
+    performance_metrics_enabled = 0;
+
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(tick_calls == 1);
+    assert(render_calls == 1);
+    assert(performance_counter == 0);
+    assert(performance_metrics_calls == 0);
+    stasis_mobile_runtime_shutdown();
+}
+
 static void test_rejects_duplicate_initialization(void) {
     StasisMobileRuntimeConfig valid_config = config();
     StasisMobileGameEntries valid_entries = entries();
@@ -376,6 +432,21 @@ static void test_rejects_duplicate_initialization(void) {
     assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) == 0);
     assert(stasis_jit_global_i32_array_load(hash_path("host_i32"), 0, 0) == 0);
     assert(main_calls == 2);
+    stasis_mobile_runtime_shutdown();
+}
+
+static void test_reports_bounded_profile_after_warmup(void) {
+    StasisMobileRuntimeConfig valid_config = config();
+    StasisMobileGameEntries valid_entries = entries();
+
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(profile_start_logs == 0 && profile_row_logs == 0 && profile_done_logs == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(profile_start_logs == 1 && profile_row_logs == 0 && profile_done_logs == 0);
+    assert(stasis_mobile_runtime_step() == 0);
+    assert(profile_row_logs == 1 && profile_done_logs == 1);
+    assert(strstr(profile_row, "STASIS_PROFILE|render|2|") == profile_row);
     stasis_mobile_runtime_shutdown();
 }
 
@@ -403,6 +474,7 @@ static void test_stops_on_nonzero_game_entry_results(void) {
     main_result = 7;
     assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
         STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_MAIN);
     assert(stasis_mobile_runtime_last_entry_result() == 7);
     assert(tick_calls == 0 && render_calls == 0);
     stasis_mobile_runtime_shutdown();
@@ -412,6 +484,7 @@ static void test_stops_on_nonzero_game_entry_results(void) {
     assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
         STASIS_MOBILE_RUNTIME_OK);
     assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_TICK);
     assert(stasis_mobile_runtime_last_entry_result() == 8);
     assert(tick_calls == 1 && render_calls == 0);
     assert(begin_frame_calls == 0 && end_frame_calls == 0 && gfx_submit_calls == 0);
@@ -422,6 +495,7 @@ static void test_stops_on_nonzero_game_entry_results(void) {
     assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
         STASIS_MOBILE_RUNTIME_OK);
     assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(stasis_mobile_runtime_last_entry() == STASIS_MOBILE_RUNTIME_ENTRY_RENDER);
     assert(stasis_mobile_runtime_last_entry_result() == 9);
     assert(tick_calls == 1 && render_calls == 1);
     assert(begin_frame_calls == 0 && end_frame_calls == 0 && gfx_submit_calls == 0);
@@ -433,7 +507,11 @@ int main(void) {
     test_rejects_invalid_configuration();
     test_runs_mobile_lifecycle();
     reset_fakes();
+    test_skips_hidden_performance_hud_measurement();
+    reset_fakes();
     test_rejects_duplicate_initialization();
+    reset_fakes();
+    test_reports_bounded_profile_after_warmup();
     reset_fakes();
     test_reports_graphics_initialization_failure();
     reset_fakes();
