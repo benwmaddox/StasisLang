@@ -808,6 +808,16 @@ pub fn live_session(capacity: usize) -> (LiveSessionClient, LiveSessionServer) {
 }
 
 impl LiveSessionClient {
+    /// Select this client for future session-wide events with request ID zero.
+    /// Request replies stay with their submitting client. Cloning does not
+    /// transfer this role; dropping the recipient selects the oldest survivor.
+    pub fn claim_unsolicited_responses(&self) {
+        let mut state = self.routing.lock_state();
+        if state.mailboxes.contains_key(&self.owner_id) {
+            state.primary_owner = Some(self.owner_id);
+        }
+    }
+
     pub fn submit(&self, request: LiveRequest) -> Result<(), String> {
         self.routing.submit(self.owner_id, &self.requests, request)
     }
@@ -1921,6 +1931,63 @@ mod tests {
         );
         assert_eq!(client.try_receive().expect("root mailbox"), None);
         assert_eq!(clone.try_receive().expect("clone mailbox"), None);
+    }
+
+    #[test]
+    fn unsolicited_owner_transfer_preserves_request_routing_and_backpressure() {
+        let (client, server) = live_session(1);
+        let events = client.clone();
+        client
+            .submit(LiveRequest::new(17, LiveCommand::Status))
+            .unwrap();
+        let request = server.drain(1).pop().unwrap();
+        events.claim_unsolicited_responses();
+        let background = client.clone();
+
+        server
+            .respond(LiveResponse::success(
+                0,
+                1,
+                "watch",
+                serde_json::json!({"path": "score", "value": 1}),
+            ))
+            .unwrap();
+        let error = LiveResponse::success(
+            0,
+            2,
+            "watch_error",
+            serde_json::json!({"path": "score", "error": "unavailable"}),
+        );
+        let Err(LiveResponseSendError::Full(retry)) = server.respond(error) else {
+            panic!("the selected event mailbox must remain bounded");
+        };
+        assert_eq!(events.try_receive().unwrap().unwrap().kind, "watch");
+        server.respond(retry).unwrap();
+        assert_eq!(events.try_receive().unwrap().unwrap().kind, "watch_error");
+        assert!(client.try_receive().unwrap().is_none());
+        assert!(background.try_receive().unwrap().is_none());
+
+        server
+            .respond(LiveResponse::success(
+                request.request_id,
+                3,
+                "status",
+                serde_json::json!({}),
+            ))
+            .unwrap();
+        assert!(events.try_receive().unwrap().is_none());
+        assert_eq!(client.try_receive().unwrap().unwrap().request_id, 17);
+        drop(events);
+        server
+            .respond(LiveResponse::success(
+                0,
+                4,
+                "watch",
+                serde_json::json!({"path": "score", "value": 4}),
+            ))
+            .unwrap();
+        assert_eq!(client.try_receive().unwrap().unwrap().kind, "watch");
+        assert!(background.try_receive().unwrap().is_none());
     }
 
     #[test]

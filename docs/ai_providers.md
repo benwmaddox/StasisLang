@@ -93,6 +93,13 @@ can still target a preparing edit.
 Existing request validation, bounded output,
 queue backpressure, and host execution gates still apply.
 
+Unsolicited session events (`request_id == 0`, including watch updates and watch
+errors) have one explicitly selected recipient. The terminal UI claims that role
+when constructed, so its cloned client receives events even while the original
+client stays alive. Creating background clients does not transfer event ownership
+or change request-specific reply routing. Dropping the event recipient selects
+the oldest remaining client.
+
 ## Security
 
 Keep `OPENROUTER_API_KEY` only in the process environment or a secret manager. Never place it in prompts, project files, command transcripts, or bug reports. Stasis uses the key only as the Authorization header and sanitizes transport errors; audit logs omit provider envelopes and credentials. Treat prompts, source, tool observations, and model output as data sent to the selected provider. Review provider retention and privacy terms before enabling a remote transport.
