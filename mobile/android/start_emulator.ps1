@@ -65,7 +65,12 @@ do {
         ""
     }
     if ($booted -eq "1") { break }
-    if ((Get-Date) -ge $deadline) { throw "Android emulator did not finish booting within $BootTimeoutSeconds seconds" }
+    if ((Get-Date) -ge $deadline) {
+        if ($null -ne $emulatorProcess -and -not $emulatorProcess.HasExited) {
+            & taskkill.exe /PID $emulatorProcess.Id /T /F 2>$null | Out-Null
+        }
+        throw "Android emulator did not finish booting within $BootTimeoutSeconds seconds"
+    }
     Start-Sleep -Seconds 2
 } while ($true)
 

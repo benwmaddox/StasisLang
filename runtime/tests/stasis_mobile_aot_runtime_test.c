@@ -31,6 +31,7 @@ static float last_audio_samples[4];
 static int last_audio_frames;
 static int sprite_handle_to_load = 1;
 static int released_sprite_handle;
+static char last_cached_text[64];
 static int released_sprite_count;
 static char saved_scope[64];
 static char saved_key[64];
@@ -114,7 +115,13 @@ void stasis_gfx_release_sprite(int handle) {
 }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
 int stasis_gfx_dump_png(const char *path) { return path != NULL; }
-int stasis_gfx_cache_text(int font, const char *text) { return font + (text != NULL); }
+int stasis_gfx_cache_text(int font, const char *text) {
+    if (text != NULL) {
+        strncpy(last_cached_text, text, sizeof(last_cached_text) - 1);
+        last_cached_text[sizeof(last_cached_text) - 1] = '\0';
+    }
+    return font + (text != NULL);
+}
 int stasis_gfx_replace_text(int handle, int font, const char *text) { return handle > 0 ? handle : font + (text != NULL); }
 int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
@@ -176,6 +183,8 @@ int main(void) {
     uint8_t external_u8[4] = {1, 2, 3, 4};
     uint8_t aot_text_out[16] = {0};
     uint8_t dynamic_path[] = "sprite.bmp";
+    uint8_t dynamic_price[] = {0xe2, 0x82, 0xac, '2', '.', '9', '9'};
+    uint8_t malformed_utf8[] = {0xc3, 0x28};
     uint8_t ascii_value[] = "GG1-test";
     uint8_t ascii_out[32] = {0};
     uint8_t platform_key[] = "power_up";
@@ -287,6 +296,17 @@ int main(void) {
     CHECK(text_width[0] == 8.0f && text_height[0] == 9.0f);
     CHECK(stasis_jit_text_run_replace_from(101, 0, 1, 0, 23) == 0);
     CHECK(text_font[0] == 9 && text_handle[0] == 8);
+
+    stasis_jit_register_global_u8_array(26, 0, dynamic_price, sizeof(dynamic_price));
+    stasis_jit_collection_i32_store(26, 1, sizeof(dynamic_price));
+    CHECK(stasis_jit_text_run_load_from(101, 0, 1, 7, 26) == 1);
+    CHECK(memcmp(last_cached_text, dynamic_price, sizeof(dynamic_price)) == 0);
+    CHECK(last_cached_text[sizeof(dynamic_price)] == '\0');
+
+    stasis_jit_register_global_u8_array(27, 0, malformed_utf8, sizeof(malformed_utf8));
+    stasis_jit_collection_i32_store(27, 1, sizeof(malformed_utf8));
+    CHECK(stasis_jit_text_run_load_from(101, 0, 1, 7, 27) == 0);
+    CHECK(text_font[0] == 7 && text_handle[0] == 8);
 
     stasis_jit_upsert_string_literal(40, "sample_game");
     stasis_jit_upsert_string_literal(41, "unlocked_tier");

@@ -40,6 +40,8 @@ TEST_RUNNER_CASE_MARKER = re.compile(r"Stasis Workshop IT-030 case: (\{[^\r\n]+\
 TEST_RUNNER_MARKER = re.compile(r"Stasis Workshop IT-030: (\{[^\r\n]+\})")
 DIAGNOSTIC_CASE_MARKER = re.compile(r"Stasis Workshop IT-031 case: (\{[^\r\n]+\})")
 DIAGNOSTIC_MARKER = re.compile(r"Stasis Workshop IT-031: (\{[^\r\n]+\})")
+SOAK_MILESTONE_MARKER = re.compile(r"Stasis Workshop IT-032 milestone: (\{[^\r\n]+\})")
+SOAK_MARKER = re.compile(r"Stasis Workshop IT-032: (\{[^\r\n]+\})")
 COMPILE_ERROR_LINE = re.compile(r"^[^\r\n]*CompileError[^\r\n]*\r?$", re.MULTILINE)
 RAW_COMPILE_ERROR_LINE = re.compile(
     r"^(?:(?:\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+"
@@ -543,6 +545,130 @@ def verify_it031(log: str, after_position: int) -> dict | None:
     return marker
 
 
+def verify_it032(log: str, after_position: int) -> dict:
+    summaries = _json_markers(SOAK_MARKER, log, "IT-032 summary", "IT-032")
+    if len(summaries) != 1:
+        raise SeamError(f"expected exactly one IT-032 summary, found {len(summaries)}")
+    summary_match, summary = summaries[0]
+    milestones = _json_markers(
+        SOAK_MILESTONE_MARKER, log, "IT-032 milestone", "IT-032"
+    )
+    # Milestones deliberately omit test_id to stay compact, so parse them directly.
+    if not milestones:
+        milestones = []
+        for match in SOAK_MILESTONE_MARKER.finditer(log):
+            try:
+                milestones.append((match, json.loads(match.group(1))))
+            except json.JSONDecodeError as error:
+                raise SeamError(f"invalid IT-032 milestone JSON: {error}") from error
+    if summary_match.start() <= after_position:
+        raise SeamError("IT-032 summary must follow IT-031")
+    if len(milestones) != 7 or any(
+        match.start() <= after_position or match.start() >= summary_match.start()
+        for match, _ in milestones
+    ):
+        raise SeamError("IT-032 requires exactly 7 ordered milestones after IT-031")
+    expected_frames = [1, 75, 100, 150, 200, 225, 300]
+    expected_revisions = [1, 2, 2, 3, 3, 4, 1]
+    values = [value for _, value in milestones]
+    if [value.get("frame") for value in values] != expected_frames \
+            or [value.get("revision") for value in values] != expected_revisions:
+        raise SeamError("IT-032 milestone schedule or revision sequence changed")
+    tokens = [value.get("frame_token") for value in values]
+    generations = [value.get("generation") for value in values]
+    if any(not isinstance(token, int) or token <= 0 for token in tokens) \
+            or tokens != sorted(set(tokens)):
+        raise SeamError("IT-032 frame tokens are not positive, ordered, and unique")
+    if any(not isinstance(value, int) or value <= 0 for value in generations):
+        raise SeamError("IT-032 runtime generations are invalid")
+    for index in (1, 3, 5, 6):
+        if generations[index] != generations[index - 1] + 1:
+            raise SeamError("IT-032 edit did not publish exactly one runtime generation")
+    if generations[2] != generations[1] or generations[4] != generations[3]:
+        raise SeamError("IT-032 surface recreation changed the runtime generation")
+    expected_sources = [values[index].get("source_fingerprint") for index in (0, 1, 3, 5)]
+    if len(set(expected_sources)) != 4 \
+            or values[2].get("source_fingerprint") != expected_sources[1] \
+            or values[4].get("source_fingerprint") != expected_sources[2] \
+            or values[6].get("source_fingerprint") != expected_sources[0]:
+        raise SeamError("IT-032 source fingerprints are not stable and distinct by revision")
+    renderer_generations = [value.get("renderer_generation") for value in values]
+    surface_generations = [value.get("surface_generation") for value in values]
+    if renderer_generations[2] != renderer_generations[1] + 1 \
+            or renderer_generations[4] != renderer_generations[3] + 1 \
+            or surface_generations[2] != surface_generations[1] + 2 \
+            or surface_generations[4] != surface_generations[3] + 2 \
+            or renderer_generations[1] != renderer_generations[0] \
+            or renderer_generations[3] != renderer_generations[2] \
+            or renderer_generations[5] != renderer_generations[4] \
+            or renderer_generations[6] != renderer_generations[5] \
+            or surface_generations[1] != surface_generations[0] \
+            or surface_generations[3] != surface_generations[2] \
+            or surface_generations[5] != surface_generations[4] \
+            or surface_generations[6] != surface_generations[5]:
+        raise SeamError("IT-032 did not prove both scheduled real surface recreations")
+    if any(value.get("resource_surface_generation") + 1 != value.get("surface_generation")
+           or value.get("resource_renderer_generation") != value.get("renderer_generation")
+           for value in values):
+        raise SeamError("IT-032 resource generation did not match the creation/surface epoch")
+    if values[1].get("command_trace") != values[2].get("command_trace") \
+            or values[3].get("command_trace") != values[4].get("command_trace"):
+        raise SeamError("IT-032 command trace changed without a source publication")
+    if any(not isinstance(value.get("source_fingerprint"), str)
+           or not value["source_fingerprint"] for value in values):
+        raise SeamError("IT-032 source identity is missing")
+    if (summary.get("schema"), summary.get("event"), summary.get("status")) != (
+            "stasis.workshop_soak.v1", "bounded_soak", "passed"
+    ) or summary.get("frame_count") != 300 \
+            or summary.get("gles_presented_count") != 300 \
+            or summary.get("edit_frames") != [75, 150, 225, 300] \
+            or summary.get("surface_frames") != [100, 200] \
+            or summary.get("milestone_count") != 7 \
+            or summary.get("ordered_unique_tokens") is not True \
+            or summary.get("one_generation_per_frame") is not True \
+            or summary.get("java_only") is not False \
+            or summary.get("fallback") != 0 or summary.get("stub") != 0:
+        raise SeamError("IT-032 summary does not prove the exact native 300-frame soak")
+    if summary.get("milestones") != values:
+        raise SeamError("IT-032 summary milestones do not match bounded records")
+    expected_traces = [values[index].get("command_trace") for index in (0, 1, 3, 5)]
+    if summary.get("revision_sources") != expected_sources \
+            or summary.get("revision_traces") != expected_traces \
+            or len(set(expected_traces)) != 4 \
+            or summary.get("final_packaged_source") != expected_sources[0] \
+            or summary.get("final_packaged_source") != values[6].get("source_fingerprint") \
+            or summary.get("final_packaged_trace") != values[6].get("command_trace") \
+            or summary.get("final_packaged_trace") in expected_traces:
+        raise SeamError("IT-032 final packaged state/trace does not match the script")
+    buffers = summary.get("buffer_contract")
+    descriptor = canonical_frame_descriptor()
+    if not isinstance(buffers, dict) or buffers.get("direct") is not True \
+            or buffers.get("stable_identity") is not True \
+            or buffers.get("zero_dropped_frames") != 300 \
+            or buffers.get("i32_capacity") != descriptor["i32"]["bytes"] // 4 \
+            or buffers.get("f32_capacity") != descriptor["f32"]["bytes"] // 4 \
+            or buffers.get("u8_capacity") != descriptor["u8"]["bytes"]:
+        raise SeamError("IT-032 direct-buffer identity/capacity/drop contract is invalid")
+    peaks = summary.get("peaks")
+    limits = {"lines": 10000, "rects": 10000, "sprites": 4096, "text": 2048,
+              "text_bytes": 65536, "order": 16656, "clips": 256,
+              "sprite_runs": 4096, "atlas_pages": 32, "live_regions": 4096,
+              "text_textures": 2048, "font_entries": 2048}
+    if not isinstance(peaks, dict) or any(
+        not isinstance(peaks.get(key), int) or peaks[key] < 0 or peaks[key] > limit
+        for key, limit in limits.items()
+    ):
+        raise SeamError("IT-032 declared buffer/resource peaks are missing or exceeded")
+    cleanup = summary.get("cleanup_receipt")
+    if not isinstance(cleanup, dict) or cleanup.get("status") != "Restored" \
+            or cleanup.get("source") != "packaged" \
+            or cleanup.get("pending_candidate") is not False \
+            or cleanup.get("guest_state") != "restored" \
+            or not isinstance(cleanup.get("runtime_generation"), int):
+        raise SeamError("IT-032 cleanup did not restore packaged source/runtime state")
+    return {"summary": summary, "milestones": values, "_position": summary_match.start()}
+
+
 def verify_it030(log: str, after_position: int) -> dict:
     summaries = _json_markers(TEST_RUNNER_MARKER, log, "IT-030 marker", "IT-030")
     if len(summaries) != 1:
@@ -956,15 +1082,16 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
     diagnostic_seam = verify_it031(log, test_runner["_position"])
     if diagnostic_seam is None:
         raise SeamError("missing mandatory IT-031 diagnostic seam evidence")
-    diagnostic_boundary = next(DIAGNOSTIC_MARKER.finditer(log)).end()
-    idle_window_start = diagnostic_boundary
-    if predecessor_match.start() > diagnostic_boundary:
+    soak = verify_it032(log, next(DIAGNOSTIC_MARKER.finditer(log)).start())
+    soak_boundary = next(SOAK_MARKER.finditer(log)).end()
+    idle_window_start = soak_boundary
+    if predecessor_match.start() > soak_boundary:
         predecessor_native_match, _ = next(
             (
                 (candidate_match, candidate)
                 for candidate_match, candidate in reversed(markers)
                 if candidate.get("frame_token") == predecessor_token
-                and diagnostic_boundary <= candidate_match.start()
+                and soak_boundary <= candidate_match.start()
                 < predecessor_match.start()
             ),
             (None, None),
@@ -1006,6 +1133,8 @@ def verify_log(log: str, manifest: dict, *, minimum_frames: int = 30) -> dict:
         "it030": test_runner["summary"],
         "it030_cases": test_runner["cases"],
         "it031": diagnostic_seam,
+        "it032": soak["summary"],
+        "it032_milestones": soak["milestones"],
     }
 
 

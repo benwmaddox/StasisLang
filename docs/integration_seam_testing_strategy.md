@@ -261,6 +261,7 @@ in Maddox Tasks as Backlog children of the integration-test program.
 | IT-029 | 2 | Switch between two projects with colliding resource handles, then recreate the surface and verify resources remain project- and generation-scoped. | Resource identities, generations, captures | Emulator |
 | IT-030 | 2 | Run a real `.test.stasis` file through Java -> JNI -> Rust test runner after a source edit and verify pass/fail details and rollback behavior. | Structured test result and source checksum | Emulator |
 | IT-031 | 1 | Trigger parse, extern-resolution, runtime, render-schema, and resource errors and verify each crosses Rust/C/JNI/Java without losing its stage and detail. | UI diagnostic equal to structured native cause | Emulator |
+| IT-032 | 1 | Run exactly 300 JNI/JIT/GLES frames while publishing same-shape edits and recreating EGL at fixed boundaries. | Ordered frame/runtime/source/trace generations, direct-buffer and resource peaks, cleanup receipt | Scheduled emulator |
 
 IT-029 runs in the Workshop acceptance build between IT-028 and IT-031. It creates
 two registered render-parity projects whose sprite, font, and text handles collide,
@@ -270,6 +271,21 @@ project A after switching back. `stasis.workshop_resource_scope.v1` binds each P
 hash to the native frame handles, exact resolver identities, renderer generation,
 stale-generation rejection count, restore uploads, and bounded atlas/text caches.
 Numeric GLES texture names are deliberately excluded because drivers may reuse them.
+
+IT-032 runs after IT-031 on the scheduled device lane. It publishes same-layout
+constant revisions before frames 75, 150, 225, and 300, recreates the real EGL
+surface before frames 100 and 200, and restores the packaged revision within frame
+300. Each frame must present its unique JNI token through GLES, observe one coherent
+runtime generation plus matching guest tick/render revision, reuse the same three
+direct buffers, report zero dropped commands, remain within the declared command and
+resource maxima, and leave no pending runtime candidate. The texture provider's
+renderer generation must equal the lifecycle renderer generation; its surface
+generation is the creation-time value exactly one before the lifecycle value added
+by `onSurfaceChanged`. Each recreation advances those epochs by one and two,
+respectively. Logs are bounded to seven
+milestones and one compact `stasis.workshop_soak.v1` summary. The summary carries the
+fixed schedule, source identities, traces, peaks, and a structured cleanup receipt;
+the emulator driver still force-stops the app in `finally` on success or failure.
 
 IT-030 runs immediately after IT-029 and before IT-031 in the Workshop acceptance
 build. The Java runner captures the packaged project with
