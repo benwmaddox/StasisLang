@@ -156,3 +156,29 @@
   unavailable result.
 - Adjustment: every new runtime export family must include one packaged AOT executable that crosses
   the dynamic boundary and asserts real host behavior, not only compiler resolution and C-local tests.
+
+## Task 494: Nightly Release gates (2026-09-05)
+
+- Run 33953032366 failed in the Windows manifest-assets fixture and Android IT-029.
+  The desktop fixture used the removed integer sprite API. IT-029 compared physical
+  raster identities across EGL epochs, stopped the game loop, and consequently
+  produced no render-performance report.
+- Updated the fixture to load a `Sprite` and emit its sealed `SpriteRef`. Android
+  acceptance now compares canonical asset path/content identities while retaining
+  physical raster/epoch keys for cache reuse and duplicate-upload detection.
+- Validation: desktop manifest-assets test passed with a freshly built SDL runtime;
+  seven focused Android JVM tests and 20 render-evidence Python tests passed.
+  The Windows `cargo build -p stasis --release --target x86_64-pc-windows-msvc`
+  command passed through `tools/cargo_cache.py` in 6m 25s using a worktree-local target.
+  JVM tests excluded the native-bridge packaging prerequisite. Full Android device
+  validation remains unverified: the emulator did not boot within 180 seconds and
+  bounded `adb devices` returned no device. The full repository script could not
+  start in the supplied shell
+  because `dirname` and `python3` were unavailable.
+- Visual evidence: `artifacts/task494-ci/desktop-verified.png` inspected; shows the
+  magenta fixture sprite and yellow/cyan synthetic-font output from direct/cached text.
+  No post-fix Android device capture is available.
+- Theory gained: logical asset identity survives GPU recreation, while physical
+  raster identity must change with density and GPU epochs. The failed CI evidence
+  had identical content hashes across recreation but different epoch suffixes;
+  an adjacent density change should likewise preserve the logical identity.

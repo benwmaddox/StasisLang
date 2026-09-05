@@ -255,7 +255,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                         replacement.rasterWidth, replacement.rasterHeight);
                 acceptanceTextureBytes += decodedBytes;
             }
-            recordAcceptanceUpload("sprite", handle, exactIdentity);
+            recordAcceptanceUpload("sprite", handle, canonicalSource + ":" + hash, exactIdentity);
             releaseSpriteIfUnreferenced(cached);
             return replacement.texture;
         } catch (Exception error) {
@@ -601,10 +601,17 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     private void recordAcceptanceUpload(String kind, int handle, String identity) {
+        recordAcceptanceUpload(kind, handle, identity, identity);
+    }
+
+    private void recordAcceptanceUpload(String kind, int handle, String identity,
+            String physicalIdentity) {
         if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
         String exact = acceptanceIdentity(kind, handle, canonicalProjectRoot(), identity);
         acceptanceIdentities.add(exact);
-        String upload = exact + ":" + surfaceGeneration + ":" + rendererGeneration;
+        // Asset identity survives restoration; upload identity includes the raster and epoch.
+        String upload = acceptanceIdentity(kind, handle, canonicalProjectRoot(), physicalIdentity)
+                + ":" + surfaceGeneration + ":" + rendererGeneration;
         if (!acceptanceUploads.add(upload)) acceptanceDuplicateUploads += 1;
         acceptanceRestoreUploads += 1;
         updateAcceptanceMaximums();

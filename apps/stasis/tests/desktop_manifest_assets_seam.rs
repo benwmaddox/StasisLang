@@ -217,7 +217,7 @@ fn manifest_assets_survive_wrong_cwd_and_render_sprite_direct_and_cached_text() 
 
     native.asset_root(&project);
     assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(0));
-    let sprite_handle = scalar_i32("seam_sprite_handle");
+    let sprite_handle = scalar_i32("seam_sprite.sprite_ref");
     let font_handle = scalar_i32("seam_font_handle");
     let cached_handle = scalar_i32("seam_cached_handle");
     let direct_width = scalar_f32("seam_direct_width");
