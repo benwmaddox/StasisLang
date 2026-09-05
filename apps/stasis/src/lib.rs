@@ -5360,6 +5360,12 @@ function render(): void {{ {draws} return; }}
     fn stasis_window_requests_apply_once_after_pre_main_baseline() {
         use std::cell::RefCell;
 
+        let _global_lock = jit_global_table_lock()
+            .lock()
+            .expect("jit global lock should be acquired");
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
+
         let jit = RefCell::new(JitProcess::new());
         compile_window_request_fixture(&mut jit.borrow_mut());
         let host = RefCell::new(RecordingWindowHost::default());
@@ -5412,6 +5418,8 @@ function render(): void {{ {draws} return; }}
         )
         .expect("write window request evidence");
         drop(jit);
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
 
         let mut inverted_jit = JitProcess::new();
         compile_window_request_fixture(&mut inverted_jit);
@@ -5430,6 +5438,9 @@ function render(): void {{ {draws} return; }}
             inversion.contains("actual []"),
             "unexpected inversion: {inversion}"
         );
+        drop(inverted_jit);
+        stasis_dynload::clear_registered_global_memory();
+        stasis_dynload::clear_jit_i32_global_table();
     }
 
     #[test]
