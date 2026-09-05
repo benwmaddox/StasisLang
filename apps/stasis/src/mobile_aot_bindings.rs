@@ -258,6 +258,7 @@ fn mobile_aot_c_return_type(function: &serde_json::Value) -> Result<&'static str
     }
 }
 
+// Escape UTF-8 bytes with fixed-width octal so following digits cannot extend an escape.
 pub fn escape_mobile_c_string_literal(value: &str) -> String {
     let mut escaped = String::new();
     for byte in value.bytes() {

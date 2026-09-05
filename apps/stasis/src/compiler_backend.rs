@@ -3060,22 +3060,6 @@ fn append_runtime_bridge_field_source(
     Ok(())
 }
 
-fn escape_c_string_literal(text: &str) -> String {
-    let mut out = String::new();
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_ascii_graphic() || c == ' ' => out.push(c),
-            c => out.push_str(&format!("\\x{:02X}", c as u32)),
-        }
-    }
-    out
-}
-
 fn build_engine_bundle_runtime_bridge_source(
     target: &stasis_jit::AotTarget,
     runtime_fields: &[PackagedRuntimeField],
@@ -3134,7 +3118,7 @@ void stasis_jit_upsert_string_literal(int32_t id, const char* value);\n",
         source.push_str(&format!(
             "static const char stasis_literal_{}[] = \"{}\";\n",
             literal.id.unsigned_abs(),
-            escape_c_string_literal(&literal.value)
+            crate::escape_mobile_c_string_literal(&literal.value)
         ));
     }
 
@@ -4830,6 +4814,31 @@ mod tests {
     }
 
     #[test]
+    fn engine_bundle_runtime_bridge_literals_are_utf8_byte_exact() {
+        let literal = EngineBundleManifestStringLiteralRow {
+            id: 123,
+            value: "\u{c5}9\u{e9}face/\u{4e16}\u{754c}7/\u{1f680}F\n\r\t\"\\\u{1}7".to_string(),
+        };
+        for target in [
+            stasis_jit::AotTarget::Native,
+            stasis_jit::AotTarget::android_arm64_default(),
+        ] {
+            let source = build_engine_bundle_runtime_bridge_source(
+                &target,
+                &[],
+                &[],
+                &[],
+                std::slice::from_ref(&literal),
+            )
+            .expect("build UTF-8 bridge");
+            assert!(source.contains(
+                r#"static const char stasis_literal_123[] = "\303\2059\303\251face/\344\270\226\347\225\2147/\360\237\232\200F\n\r\t\"\\\0017";"#
+            ));
+            assert!(source.contains("stasis_jit_upsert_string_literal(123, stasis_literal_123);"));
+        }
+    }
+
+    #[test]
     fn engine_bundle_runtime_bridge_source_includes_android_entry_exports() {
         let source = build_engine_bundle_runtime_bridge_source(
             &stasis_jit::AotTarget::android_arm64_default(),
@@ -6088,11 +6097,32 @@ mod tests {
         let project_dir = temp_root.join("project");
         fs::create_dir_all(&project_dir).expect("create project root");
         let source = project_dir.join("main.stasis");
-        fs::write(
-            &source,
+        let mut program = String::from(
             "struct Enemy { hp: i32; speed: f32; precise: f64; }\nglobal count: i32;\nglobal ratio: f32;\nglobal precise: f64;\nglobal values: i32[2];\nglobal float_values: f32[2];\nglobal double_values: f64[2];\nglobal bytes: u8[3];\nglobal enemies: Enemy[1];\nglobal label: ascii[4];\nfunction main(): i32 { count = 7; ratio = 1.5; precise = 2.5; values[1] = 11; float_values[0] = 3.5; double_values[1] = 4.5; bytes[2] = 250; foreach (let byte in bytes) { byte += 1; } enemies[0].hp = 13; enemies[0].speed = 6.5; enemies[0].precise = 7.5; label[0] = 65; if (ratio < 1.4 || precise < 2.4 || float_values[0] < 3.4 || double_values[1] < 4.4 || enemies[0].speed < 6.4 || enemies[0].precise < 7.4) { return -1; } return count + values[1] + bytes[2] + enemies[0].hp + label[0] + label.max_length; }\nfunction tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\n",
-        )
-        .expect("write source");
+        );
+        // Exercise UTF-8 paths and text, including digits after escaped bytes.
+        let literals = [
+            "assets/\u{c5}9\u{e9}face/\u{4e16}\u{754c}7.png",
+            "Text \u{1f680}F \"quoted\" \\ text",
+        ];
+        let mut checks = String::new();
+        for literal in literals {
+            let quoted = serde_json::to_string(literal).expect("quote Stasis literal");
+            for (index, byte) in literal.bytes().enumerate() {
+                checks.push_str(&format!(
+                    "if (literal_byte({quoted}, {index}) != {byte}) {{ return -2; }}\n"
+                ));
+            }
+            checks.push_str(&format!(
+                "if (literal_byte({quoted}, {}) != 0) {{ return -3; }}\n",
+                literal.len()
+            ));
+        }
+        program = program.replace("count = 7;", &format!("{checks}count = 7;"));
+        program.push_str(
+            "function literal_byte(value: utf8[], index: i32): u8 { return value[index]; }\n",
+        );
+        fs::write(&source, program).expect("write source");
 
         let artifact_root = temp_root.join("artifacts");
         let mut backend =
@@ -6143,7 +6173,10 @@ mod tests {
             &runtime_fields,
             &function_symbols,
             &aliases,
-            &[],
+            manifest
+                .string_literals
+                .as_deref()
+                .expect("manifest literals"),
         )
         .expect("compile direct storage bridge");
         let mut objects = bundle.object_paths().cloned().collect::<Vec<_>>();
