@@ -553,6 +553,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int orderCount = 0;
         boolean presented = false;
         synchronized (this) {
+            // Rejection must not clear the prior frame, prepare resources, or consume
+            // its presentation token/capture. The next valid frame can recover normally.
+            if (!isValidFrame(frameI32, frameF32)) {
+                timing.onRendered(System.nanoTime() - started);
+                return;
+            }
             if (restorePlaceholderPending
                     && System.nanoTime() < restorePlaceholderUntilNanos) {
                 drawRestorePlaceholder();
@@ -566,7 +572,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (restoring) {
                 while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
             }
-            boolean hasFrame = shouldPresent(frameI32, frameF32);
+            boolean hasFrame = (frameI32.get(I_FLAGS) & FLAG_PRESENT) != 0;
             if (hasFrame) prepareFrameResources();
             String resourceFailure = textures.consumeFailure();
             int glError = restoring ? GLES20.glGetError() : GLES20.GL_NO_ERROR;
@@ -1491,10 +1497,22 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     static boolean isValidFrame(IntBuffer values, FloatBuffer floats) {
         if (values == null || floats == null
-                || values.capacity() < FRAME_I32_CAPACITY
-                || floats.capacity() < FRAME_F32_CAPACITY
+                || values.limit() < FRAME_I32_CAPACITY
+                || floats.limit() < FRAME_F32_CAPACITY
                 || values.get(I_MAGIC) != RENDER_MAGIC
                 || values.get(I_VERSION) != RENDER_VERSION) return false;
+        // Mirror stasis_render_validate in runtime/stasis_render_contract.h.
+        // Validate the complete frame before resource preparation or any GLES writes.
+        int lineCount = values.get(I_LINE_COUNT);
+        int rectCount = values.get(I_RECT_COUNT);
+        int textCount = values.get(I_TEXT_COUNT);
+        int bytesUsed = values.get(I_TEXT_BYTES_USED);
+        int orderCount = values.get(I_ORDER_COUNT);
+        if (lineCount < 0 || lineCount > MAX_LINES
+                || rectCount < 0 || rectCount > MAX_GEOMETRY - lineCount
+                || textCount < 0 || textCount > MAX_TEXT
+                || bytesUsed < 0 || bytesUsed > TEXT_U8_CAPACITY
+                || orderCount < 0 || orderCount > MAX_ORDER) return false;
         int spriteCount = values.get(I_SPRITE_COUNT);
         int runCount = values.get(I_SPRITE_RUN_COUNT);
         int clipCount = values.get(I_CLIP_COUNT);
@@ -1519,7 +1537,36 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (values.get(baseI32) == 0 || values.get(baseI32 + 2) != 0
                     || !isValidSpriteGeometry(floats, baseF32)) return false;
         }
-        return true;
+        for (int text = 0; text < textCount; text += 1) {
+            int base = I_TEXT_BASE + text * TEXT_I32_STRIDE;
+            int offset = values.get(base + 1);
+            int length = values.get(base + 2);
+            if (offset < 0) {
+                if (offset == Integer.MIN_VALUE || length != 0) return false;
+            } else if (!isValidTextSpan(offset, length, bytesUsed)) return false;
+        }
+        int depth = 0;
+        for (int order = 0; order < orderCount; order += 1) {
+            int entry = values.get(I_ORDER_BASE + order);
+            if (entry < 0) return false;
+            int kind = orderKind(entry);
+            int index = orderIndex(entry);
+            switch (kind) {
+                case ORDER_LINE: if (index >= lineCount) return false; break;
+                case ORDER_RECT: if (index >= rectCount) return false; break;
+                case ORDER_SPRITE: if (index >= runCount) return false; break;
+                case ORDER_TEXT: if (index >= textCount) return false; break;
+                case ORDER_CLIP_PUSH:
+                    if (index >= clipCount || ++depth > MAX_CLIPS) return false;
+                    break;
+                case ORDER_CLIP_POP:
+                    if (index != 0 || depth <= 0) return false;
+                    depth -= 1;
+                    break;
+                default: return false;
+            }
+        }
+        return depth == 0;
     }
 
     static boolean isValidSpriteGeometry(FloatBuffer values, int base) {
