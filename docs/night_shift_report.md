@@ -156,3 +156,13 @@
   unavailable result.
 - Adjustment: every new runtime export family must include one packaged AOT executable that crosses
   the dynamic boundary and asserts real host behavior, not only compiler resolution and C-local tests.
+
+## 2026-09-05 - Task 515: desktop game screenshots
+
+- Replaced scheduled-only capture acknowledgement with bounded, cancelable PNG completion evidence and runtime identity checks. Wired active-task attachment, PNG preview, content hashes, upload/analysis state, and fail-closed provider image routing.
+- Verification: 61 AI library tests, 18 desktop editor tests, five runtime capture tests, and a fresh SDL runtime integration capture; formatting and diff checks passed. Baseline `tools/validate_repo.sh` stops at existing unsafe-boundary findings in `stasis_network`; no unrelated policy files were changed.
+- Visual evidence: `target/task515-evidence/live-game.png` was inspected and shows the expected 320x180 red rectangle on a dark background. `capture.json` records matching PNG dimensions, byte length, SHA-256, and runtime identity with the game paused at tick 0. The native runtime and SDL dependencies were freshly built from pinned sources.
+- Theory gained: presentation continues while deterministic gameplay is paused, so a screenshot can complete without a gameplay step. The observed tick-0 PNG predicts that future paused-state inspection can share this presentation boundary without changing simulation state.
+- Good: task/request snapshots and content hashes prevent late completion from marking newly attached images uploaded.
+- Bad: the initial runtime fixture omitted the required `on_code_swap` entrypoint and failed before capture.
+- Adjustment: live runtime fixtures must include all required lifecycle entrypoints before testing a new host interaction.
