@@ -19,3 +19,32 @@
 - Keep simulation state explicit and render as a projection of current state.
 - Trace feature changes through state definition, initialization/reset, tick/update, render, and tests.
 - Prefer representative `.test.stasis` behavior tests and keep failure paths explicit.
+
+## Stasis vendor update policy
+
+- Treat `stasis.json` fields `vendor.stasis.release_id` and `vendor.stasis.sha256`
+  together with the complete `vendor/stasis` tree as one release snapshot. Intentional
+  release or checksum pin changes must include the matching vendor update in the same
+  change. Select the intended Stasis release executable, inspect `stasis vendor status`,
+  then use `stasis vendor update` to refresh the complete snapshot and manifest together.
+  Do not hand-edit a checksum to bless local vendor edits or copy only selected files.
+- Validate vendored release fidelity with the intended release executable: run
+  `stasis --json vendor status --workspace .` from the project directory and require
+  `ok: true` and `result.current: true`, with `result.local_changes: false` and
+  `result.update_available: false`. Confirm the recorded and installed release IDs and
+  SHA-256 values match the intended release and `result.actual_sha256` matches the
+  manifest checksum. A successful command exit alone does not prove fidelity. Inspect
+  the complete manifest/vendor diff, including additions and deletions, then run
+  `stasis fmt --check`, `stasis check`, and `stasis test`.
+- Require explicit review before accepting backward pins (downgrades), checksum/release
+  mismatches, partial vendor updates, or vendor changes without manifest changes.
+  Report the old and proposed release/checksum, affected paths, reason, and fidelity
+  validation results; do not silently normalize these cases. Release labels alone do
+  not establish ordering or content identity, especially for `development` builds.
+- For each affected project, report its manifest path, matching vendor path, validation
+  outcome, and any reviewed exception. Projects using `"stdlib": "toolchain"` have no
+  checked-in vendor snapshot: use `stasis prepare` and validate against the selected
+  toolchain instead. Unpinned projects without `vendor/stasis` have no snapshot to
+  update; if adopting vendoring, introduce the manifest pin and full tree together.
+  Examples nested inside `vendor/stasis` belong to the enclosing release snapshot;
+  do not update them independently.
