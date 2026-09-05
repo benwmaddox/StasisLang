@@ -293,6 +293,17 @@ impl LiveWorkspace {
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
+        let cancellation_display_ids = cancellation_targets
+            .iter()
+            .map(|canceled| {
+                (
+                    *canceled,
+                    self.server
+                        .caller_request_id(*canceled)
+                        .unwrap_or(*canceled),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut background_canceled_targets = BTreeSet::new();
         for canceled in &cancellation_targets {
             if let Some(preparation) = self
@@ -364,7 +375,13 @@ impl LiveWorkspace {
                     request.request_id,
                     tick,
                     "cancellation_requested",
-                    json!({"request_id": canceled, "background": background_canceled_targets.contains(&canceled)}),
+                    json!({
+                        "request_id": cancellation_display_ids
+                            .get(&canceled)
+                            .copied()
+                            .unwrap_or(canceled),
+                        "background": background_canceled_targets.contains(&canceled),
+                    }),
                 ),
                 LiveCommand::Quit => {
                     self.quit = true;
@@ -700,7 +717,11 @@ impl LiveWorkspace {
                     "watches": self.watches.keys().collect::<Vec<_>>(),
                     "scratch_cells": self.scratch.list(),
                     "dropped_watch_events": self.dropped_watch_events,
-                    "preparing_request_id": self.edit_preparation.as_ref().map(|job| job.request_id),
+                    "preparing_request_id": self.edit_preparation.as_ref().map(|job| {
+                        self.server
+                            .caller_request_id(job.request_id)
+                            .unwrap_or(job.request_id)
+                    }),
                 }),
             )),
             LiveCommand::Pause => {
@@ -1679,9 +1700,13 @@ impl LiveWorkspace {
             receiver,
             worker: Some(worker),
         });
+        let display_request_id = self
+            .server
+            .caller_request_id(request_id)
+            .unwrap_or(request_id);
         Ok((
             "edit_preparing",
-            json!({"request_id": request_id, "background": true}),
+            json!({"request_id": display_request_id, "background": true}),
         ))
     }
 
@@ -1722,9 +1747,13 @@ impl LiveWorkspace {
             receiver,
             worker: Some(worker),
         });
+        let display_request_id = self
+            .server
+            .caller_request_id(request_id)
+            .unwrap_or(request_id);
         Ok((
             "completion_preparing",
-            json!({"request_id": request_id, "background": true}),
+            json!({"request_id": display_request_id, "background": true}),
         ))
     }
 
@@ -3781,7 +3810,23 @@ mod tests {
         .expect("prepare edit")
     }
 
-    fn install_ready_preparation(workspace: &mut LiveWorkspace, prepared: PreparedEdit) {
+    fn install_ready_preparation(
+        client: &stasis_runner::live::LiveSessionClient,
+        workspace: &mut LiveWorkspace,
+        mut prepared: PreparedEdit,
+    ) {
+        let request_id = prepared.request_id;
+        client
+            .submit(LiveRequest::new(request_id, LiveCommand::Status))
+            .expect("register prepared edit request");
+        let request = workspace
+            .server
+            .drain(1)
+            .into_iter()
+            .next()
+            .expect("drain prepared edit request");
+        assert!(matches!(request.command, LiveCommand::Status));
+        prepared.request_id = request.request_id;
         let request_id = prepared.request_id;
         let canceled = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -6679,6 +6724,10 @@ mod tests {
         let preparing = client
             .receive_timeout(std::time::Duration::from_secs(1))
             .expect("preparing");
+        assert_eq!(
+            preparing.data.as_ref().expect("preparing data")["request_id"],
+            30
+        );
         let status = client
             .receive_timeout(std::time::Duration::from_secs(1))
             .expect("status");
@@ -6717,7 +6766,7 @@ mod tests {
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(32);
         let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
-        install_ready_preparation(&mut workspace, prepared);
+        install_ready_preparation(&client, &mut workspace, prepared);
         let mut tick_ptr = package.tick_code_ptr;
         let mut render_ptr = package.render_code_ptr;
         for request_id in 100..109 {
@@ -6740,7 +6789,9 @@ mod tests {
         assert_eq!(canceled.request_id, 50);
         assert!(!canceled.ok);
         assert_eq!(acknowledgement.request_id, 51);
-        assert_eq!(acknowledgement.data.expect("data")["background"], true);
+        let acknowledgement_data = acknowledgement.data.expect("data");
+        assert_eq!(acknowledgement_data["request_id"], 50);
+        assert_eq!(acknowledgement_data["background"], true);
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).expect("after"),
             before
@@ -6803,7 +6854,7 @@ mod tests {
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(4);
         let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
-        install_ready_preparation(&mut workspace, prepared);
+        install_ready_preparation(&client, &mut workspace, prepared);
         let mut tick_ptr = package.tick_code_ptr;
         let mut render_ptr = package.render_code_ptr;
 
