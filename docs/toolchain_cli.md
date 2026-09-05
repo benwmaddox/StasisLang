@@ -423,3 +423,19 @@ Windows graphical launch coverage is defined in
 [Windows game launch integration testing](windows_game_launch_testing.md). It exercises `play`,
 `run --watch`, `tui`, generated release executables, and packaged desktop executables with real
 PNG, SVG, font, tick, and framebuffer assertions.
+
+### Desktop AI editor keyboard commands
+
+Ctrl+K opens the command palette. Type to filter command names (case insensitive),
+use Up/Down to wrap through matching results, Enter to invoke the selected command,
+and Escape to dismiss and restore the previous focus. An empty result list does
+nothing on Enter. Palette input does not invoke global shortcuts or submit the
+objective/reply fields underneath it.
+
+The palette includes new task, next/previous task and individual task selection,
+focus reply, send reply, accept/reject/apply action, focused tests, retry,
+attach screenshot, generate/import image, reconnect, cancel, mark done, and focus
+game. Commands retain their usual task-state prerequisites and report errors when
+unavailable. Objective and reply drafts are kept per task for the current editor
+session and restored by both mouse and keyboard task switching. Creating a task
+consumes its objective and preserves the previous task's unsent reply.
