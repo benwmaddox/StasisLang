@@ -256,10 +256,18 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             ),
             sorted(release_artifacts),
         )
-        self.assertEqual(["android-workshop-it025-it031-seams"], workshop_artifacts)
+        self.assertEqual(["android-workshop-it025-it032-seams"], workshop_artifacts)
         self.assertEqual(9, self.workflow.count("          name: android-"))
         self.assertEqual(9, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
+
+    def test_emulator_boot_timeout_kills_the_launched_process_tree(self):
+        script = (ROOT / "mobile/android/start_emulator.ps1").read_text()
+        self.assertIn("taskkill.exe /PID $emulatorProcess.Id /T /F", script)
+        self.assertLess(
+            script.index("taskkill.exe /PID $emulatorProcess.Id /T /F"),
+            script.index('throw "Android emulator did not finish booting'),
+        )
 
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
         self.assertIn('"adb$executableSuffix"', self.release_script)

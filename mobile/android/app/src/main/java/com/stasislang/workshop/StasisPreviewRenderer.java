@@ -369,6 +369,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int lastHotEditGlesEvidenceToken = -1;
     private int acceptanceTrace = -1;
     private int acceptanceTraceToken = -1;
+    private boolean workshopSoakAcceptanceActive;
+    private final AcceptancePresentationCounter workshopSoakPresentations =
+            new AcceptancePresentationCounter();
     private int frameDrawCalls;
     private int frameTextureBinds;
     private int frameMixedRuns;
@@ -471,6 +474,37 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     synchronized int rectCount() {
         return frameI32.get(I_RECT_COUNT);
+    }
+
+    synchronized JSONObject acceptanceBufferSnapshot() throws Exception {
+        int lines = frameI32.get(I_LINE_COUNT);
+        int sprites = frameI32.get(I_SPRITE_COUNT);
+        int text = frameI32.get(I_TEXT_COUNT);
+        int textBytes = frameI32.get(I_TEXT_BYTES_USED);
+        int order = frameI32.get(I_ORDER_COUNT);
+        int rects = frameI32.get(I_RECT_COUNT);
+        int clips = frameI32.get(I_CLIP_COUNT);
+        int spriteRuns = frameI32.get(I_SPRITE_RUN_COUNT);
+        return new JSONObject()
+                .put("i32_identity", System.identityHashCode(frameI32Bytes))
+                .put("f32_identity", System.identityHashCode(frameF32Bytes))
+                .put("u8_identity", System.identityHashCode(frameU8Bytes))
+                .put("direct", frameI32Bytes.isDirect() && frameF32Bytes.isDirect()
+                        && frameU8Bytes.isDirect())
+                .put("i32_capacity", frameI32.capacity())
+                .put("f32_capacity", frameF32.capacity())
+                .put("u8_capacity", frameU8Bytes.capacity())
+                .put("line_count", lines).put("rect_count", rects)
+                .put("sprite_count", sprites).put("text_count", text)
+                .put("text_bytes_used", textBytes).put("order_count", order)
+                .put("clip_count", clips).put("sprite_run_count", spriteRuns)
+                .put("dropped_lines", frameI32.get(I_DROPPED_LINES))
+                .put("dropped_rects", frameI32.get(I_DROPPED_RECTS))
+                .put("dropped_sprites", frameI32.get(I_DROPPED_SPRITES))
+                .put("dropped_text", frameI32.get(I_DROPPED_TEXT))
+                .put("dropped_order", frameI32.get(I_DROPPED_ORDER))
+                .put("dropped_clips", frameI32.get(I_DROPPED_CLIPS))
+                .put("dropped_sprite_runs", frameI32.get(I_DROPPED_SPRITE_RUNS));
     }
 
     synchronized void copyFrameHeaderInto(int[] destination) {
@@ -621,10 +655,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 presented = true;
                 int frameToken = frameI32.get(I_FRAME_TOKEN);
                 lastPresentedFrameToken = frameToken;
+                if (workshopSoakAcceptanceActive) workshopSoakPresentations.observe(frameToken);
                 notifyAll();
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
                     int markerBase = F_RECT_REVERSE_BASE - GEOMETRY_F32_STRIDE;
-                    if (rectCount >= 2 && isHotEditMarker(markerBase)
+                    if (!workshopSoakAcceptanceActive
+                            && rectCount >= 2 && isHotEditMarker(markerBase)
                             && frameToken != lastHotEditGlesEvidenceToken) {
                         lastHotEditGlesEvidenceToken = frameToken;
                         Log.i(LOG_TAG, "Stasis Workshop IT-028 GLES: {\"schema\":\"stasis.workshop_hot_edit.v1\","
@@ -718,6 +754,42 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     synchronized void setAcceptanceTrace(int token, int trace) {
         acceptanceTraceToken = token;
         acceptanceTrace = trace;
+    }
+
+    synchronized void setWorkshopSoakAcceptanceActive(boolean active) {
+        if (active && !workshopSoakAcceptanceActive) workshopSoakPresentations.reset();
+        workshopSoakAcceptanceActive = active;
+    }
+
+    synchronized JSONObject workshopSoakPresentationSnapshot() throws Exception {
+        return new JSONObject().put("presented_count", workshopSoakPresentations.count())
+                .put("last_frame_token", workshopSoakPresentations.lastToken())
+                .put("tokens_ordered_unique", workshopSoakPresentations.ordered());
+    }
+
+    static final class AcceptancePresentationCounter {
+        private int count;
+        private int lastToken = -1;
+        private boolean ordered = true;
+
+        void reset() {
+            count = 0;
+            lastToken = -1;
+            ordered = true;
+        }
+
+        void observe(int token) {
+            if (token > lastToken) {
+                count += 1;
+                lastToken = token;
+            } else if (token < lastToken) {
+                ordered = false;
+            }
+        }
+
+        int count() { return count; }
+        int lastToken() { return lastToken; }
+        boolean ordered() { return ordered; }
     }
 
     synchronized int acceptanceTrace() {
