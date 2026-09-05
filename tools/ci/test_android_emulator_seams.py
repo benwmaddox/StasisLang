@@ -121,7 +121,8 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
                 self.assertEqual(
                     1,
                     match.group("body").count(
-                        "run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture"
+                        "run: python tools/cargo_cache.py run -- "
+                        "cargo test -p stasis_compiler -- --test-threads=1 --nocapture"
                     ),
                 )
 

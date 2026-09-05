@@ -46,6 +46,8 @@ RUNTIME_FILES = (
     "stasis_mobile_runtime.h",
     "stasis_platform_storage.c",
     "stasis_platform_storage.h",
+    "stasis_platform_services.c",
+    "stasis_platform_services.h",
     "stb_truetype.h",
 )
 RUNTIME_DIRS = ("third_party/thorvg",)
