@@ -9,7 +9,13 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod openrouter;
 pub mod task_session;
+
+pub use openrouter::{
+    ConfiguredProvider, OpenRouterConfig, OpenRouterProvider, PreferredThroughputPolicy,
+    ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+};
 
 pub use task_session::{
     ActionId, ActionKind, ActionRevision, ActionState, ConnectionState, FallbackState,
@@ -66,7 +72,9 @@ impl Default for AgentProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCall {
+    #[serde(rename = "action_id")]
     pub tool: String,
     #[serde(default)]
     pub args: Value,
@@ -102,6 +110,7 @@ impl ToolObservation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub tool: String,
+    pub action_id: String,
     #[serde(rename = "use", alias = "purpose")]
     pub purpose: String,
     #[serde(
@@ -181,6 +190,10 @@ pub trait ModelProvider {
 
     fn take_usage(&mut self) -> Option<Value> {
         None
+    }
+
+    fn requires_action_ids(&self) -> bool {
+        false
     }
 }
 
@@ -292,6 +305,7 @@ where
     .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?;
     let mut transcript = AgentTranscript::new(header);
     let mut completion_rejections = 0_usize;
+    let require_action_ids = provider.requires_action_ids();
     for turn in 1..=profile.max_turns {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
@@ -338,7 +352,7 @@ where
                 emit(AgentEvent::Completed(summary.clone()));
                 return Ok(summary);
             }
-            ModelResponse::ToolCalls { tool_calls, .. } => {
+            ModelResponse::ToolCalls { mut tool_calls, .. } => {
                 if tool_calls.is_empty() {
                     return Err("model returned an empty tool-call batch".to_string());
                 }
@@ -348,26 +362,27 @@ where
                         tool_calls.len()
                     ));
                 }
-                for call in &tool_calls {
-                    if !known_tools.contains(call.tool.as_str()) {
-                        return Err(format!("unsupported AI tool: {}", call.tool));
-                    }
-                }
                 let validation_errors = tool_calls
                     .iter()
                     .filter_map(|call| {
-                        validate_tool_call(call, &validation_tool_specs, &known_tools).err()
+                        validate_tool_call(
+                            call,
+                            &validation_tool_specs,
+                            &known_tools,
+                            require_action_ids,
+                        )
+                        .err()
+                        .map(|error| (call.tool.clone(), error))
                     })
                     .collect::<Vec<_>>();
                 if !validation_errors.is_empty() {
-                    let detail = validation_errors.join("; ");
-                    let observations = tool_calls
-                        .iter()
-                        .map(|call| {
+                    let observations = validation_errors
+                        .into_iter()
+                        .map(|(action_id, error)| {
                             ToolObservation::error(
-                                &call.tool,
+                                action_id,
                                 format!(
-                                    "tool-call batch rejected before execution: {detail}; correct the arguments and retry"
+                                    "action rejected before execution: {error}; replace only this rejected action ID"
                                 ),
                             )
                         })
@@ -376,6 +391,11 @@ where
                     transcript.append(&response_record, &observations)?;
                     compact_transcript(&mut transcript, profile.compaction.as_ref(), &mut emit)?;
                     continue;
+                }
+                for call in &mut tool_calls {
+                    let spec = resolve_tool_spec(call, &validation_tool_specs, require_action_ids)
+                        .expect("validated action has a tool spec");
+                    call.tool.clone_from(&spec.tool);
                 }
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
                 let observations = bound_observations(executor.execute(&tool_calls, canceled));
@@ -554,7 +574,7 @@ fn compact_turn(response: &Value, observations: &[ToolObservation]) -> Value {
                         })
                         .unwrap_or_default();
                     json!({
-                        "tool": call.get("tool").cloned().unwrap_or(Value::Null),
+                        "action_id": call.get("action_id").cloned().unwrap_or(Value::Null),
                         "args": selected_args,
                     })
                 })
@@ -639,30 +659,47 @@ fn validate_working_notes(notes: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn resolve_tool_spec<'a>(
+    call: &ToolCall,
+    specs: &'a [ToolSpec],
+    require_action_id: bool,
+) -> Option<&'a ToolSpec> {
+    specs
+        .iter()
+        .find(|spec| spec.action_id == call.tool || (!require_action_id && spec.tool == call.tool))
+}
+
 fn validate_tool_call(
     call: &ToolCall,
     specs: &[ToolSpec],
     known_tools: &BTreeSet<String>,
+    require_action_id: bool,
 ) -> Result<(), String> {
-    if !known_tools.contains(call.tool.as_str()) {
-        return Err(format!("unsupported AI tool: {}", call.tool));
-    }
+    let spec = resolve_tool_spec(call, specs, require_action_id)
+        .filter(|spec| known_tools.contains(spec.tool.as_str()))
+        .ok_or_else(|| format!("unsupported or invented AI action ID: {}", call.tool))?;
     let args = call
         .args
         .as_object()
-        .ok_or_else(|| format!("AI tool {} requires an object args value", call.tool))?;
-    let spec = specs
-        .iter()
-        .find(|spec| spec.tool == call.tool)
-        .expect("known tool has spec");
+        .ok_or_else(|| format!("AI action {} requires an object args value", call.tool))?;
     for required in &spec.required_args {
         if !args.contains_key(required) {
-            return Err(format!("AI tool {} requires arg: {required}", call.tool));
+            return Err(format!("AI action {} requires arg: {required}", call.tool));
         }
+    }
+    let allowed = spec
+        .required_args
+        .iter()
+        .chain(&spec.optional_args)
+        .collect::<BTreeSet<_>>();
+    if let Some(unknown) = args.keys().find(|name| !allowed.contains(name)) {
+        return Err(format!(
+            "AI action {} does not accept arg: {unknown}",
+            call.tool
+        ));
     }
     Ok(())
 }
-
 fn bound_observations(observations: Vec<ToolObservation>) -> Vec<ToolObservation> {
     if observation_bytes(&observations) <= MAX_OBSERVATION_BYTES {
         return observations;
@@ -698,10 +735,35 @@ pub fn response_contract() -> Value {
     json!({
         "accepted_modes": ["tool_calls", "done"],
         "working_notes": format!("required non-empty string, maximum {MAX_WORKING_NOTES_CHARS} characters"),
-        "tool_calls": {"maximum": MAX_TOOL_CALLS_PER_TURN, "shape": {"tool": "name", "args": "JSON object encoded as a string"}},
+        "tool_calls": {"maximum": MAX_TOOL_CALLS_PER_TURN, "shape": {"action_id": "host-offered opaque action ID", "args": "native JSON object"}},
     })
 }
 
+pub fn model_response_schema_for(tool_specs: &[ToolSpec]) -> Value {
+    let mut schema = model_response_schema();
+    let action_ids = tool_specs
+        .iter()
+        .map(|spec| Value::String(spec.action_id.clone()))
+        .collect::<Vec<_>>();
+    if !action_ids.is_empty() {
+        schema["properties"]["tool_calls"]["items"]["properties"]["action_id"] =
+            json!({"type":"string", "enum":action_ids});
+    }
+    schema
+}
+
+fn model_response_schema_for_request(request: &str) -> Result<Value, String> {
+    let header: Value = serde_json::from_str(request.lines().next().unwrap_or_default())
+        .map_err(|error| format!("AI request header is not valid JSON: {error}"))?;
+    let specs: Vec<ToolSpec> = serde_json::from_value(
+        header
+            .get("tool_specs")
+            .cloned()
+            .ok_or_else(|| "AI request header omitted tool_specs".to_string())?,
+    )
+    .map_err(|error| format!("AI request tool_specs are invalid: {error}"))?;
+    Ok(model_response_schema_for(&specs))
+}
 pub fn model_response_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -716,8 +778,8 @@ pub fn model_response_schema() -> Value {
                 "maxItems": MAX_TOOL_CALLS_PER_TURN,
                 "items": {
                     "type": "object",
-                    "required": ["tool", "args"],
-                    "properties": {"tool": {"type": "string"}, "args": {"type": "string"}},
+                    "required": ["action_id", "args"],
+                    "properties": {"action_id": {"type": "string", "pattern": "^a_[0-9a-f]{16}$"}, "args": {"type": "object"}},
                     "additionalProperties": false
                 }
             }
@@ -775,9 +837,25 @@ pub fn live_tool_specs() -> Vec<ToolSpec> {
     tools
 }
 
+pub fn action_id_for_tool(tool: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in b"stasis-action-v1:".iter().chain(tool.as_bytes()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("a_{hash:016x}")
+}
+pub fn offered_action(tool: &str, purpose: &str, args: Value) -> Value {
+    json!({
+        "action_id": action_id_for_tool(tool),
+        "purpose": purpose,
+        "args": args,
+    })
+}
 fn spec(tool: &str, purpose: &str, required: &[&str], optional: &[&str]) -> ToolSpec {
     ToolSpec {
         tool: tool.to_string(),
+        action_id: action_id_for_tool(tool),
         purpose: purpose.to_string(),
         required_args: required.iter().map(|value| (*value).to_string()).collect(),
         optional_args: optional.iter().map(|value| (*value).to_string()).collect(),
@@ -1128,12 +1206,17 @@ fn default_codex_executable() -> PathBuf {
 
 impl ModelProvider for CodexExecProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String> {
-        let source = self.run_codex(request, &model_response_schema(), canceled)?;
+        let schema = model_response_schema_for_request(request)?;
+        let source = self.run_codex(request, &schema, canceled)?;
         decode_codex_response(&source)
     }
 
     fn take_usage(&mut self) -> Option<Value> {
         self.last_usage.take()
+    }
+
+    fn requires_action_ids(&self) -> bool {
+        true
     }
 }
 
@@ -1151,25 +1234,38 @@ fn read_codex_usage(stdout: impl Read) -> Result<Option<Value>, String> {
     Ok(usage)
 }
 
-fn decode_codex_response(source: &str) -> Result<ModelResponse, String> {
-    let mut value: Value = serde_json::from_str(source)
-        .map_err(|error| format!("Codex returned invalid agent JSON: {error}"))?;
-    if let Some(calls) = value.get_mut("tool_calls").and_then(Value::as_array_mut) {
-        for call in calls {
-            let Some(args) = call.get_mut("args") else {
-                continue;
-            };
-            if let Some(encoded) = args.as_str() {
-                if let Ok(decoded) = serde_json::from_str(encoded) {
-                    *args = decoded;
-                }
-            }
+fn decode_model_response(source: &str, provider: &str) -> Result<ModelResponse, String> {
+    let value: Value = serde_json::from_str(source)
+        .map_err(|error| format!("{provider} returned invalid agent JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{provider} returned a non-object agent response"))?;
+    let allowed = ["mode", "working_notes", "summary", "tool_calls"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(field.as_str()))
+    {
+        return Err(format!(
+            "{provider} returned unknown response field: {field}"
+        ));
+    }
+    let response: ModelResponse = serde_json::from_value(value)
+        .map_err(|error| format!("{provider} returned invalid agent response: {error}"))?;
+    if let ModelResponse::ToolCalls { tool_calls, .. } = &response {
+        if tool_calls.iter().any(|call| !call.args.is_object()) {
+            return Err(format!(
+                "{provider} returned tool args that were not native JSON objects"
+            ));
         }
     }
-    serde_json::from_value(value)
-        .map_err(|error| format!("Codex returned invalid agent response: {error}"))
+    Ok(response)
 }
 
+fn decode_codex_response(source: &str) -> Result<ModelResponse, String> {
+    decode_model_response(source, "Codex")
+}
 struct TemporaryRun {
     root: PathBuf,
     schema: PathBuf,
@@ -1912,28 +2008,134 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_tools_before_execution() {
-        let mut provider = Responses(vec![ModelResponse::ToolCalls {
-            working_notes: "Intent: act. Observed: none. Next: shell. Blocker: none.".to_string(),
-            summary: String::new(),
-            tool_calls: vec![ToolCall {
-                tool: "shell".to_string(),
-                args: json!({}),
-            }],
-        }]);
-        let error = run_agent(
+    fn external_provider_concrete_tool_name_cannot_execute() {
+        struct ExternalResponses(Vec<ModelResponse>);
+        impl ModelProvider for ExternalResponses {
+            fn respond(
+                &mut self,
+                _request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                Ok(self.0.remove(0))
+            }
+
+            fn requires_action_ids(&self) -> bool {
+                true
+            }
+        }
+        let mut provider = ExternalResponses(vec![
+            ModelResponse::ToolCalls {
+                working_notes: "Attempt a concrete tool name.".to_string(),
+                summary: String::new(),
+                tool_calls: vec![ToolCall {
+                    tool: "read_symbol".to_string(),
+                    args: json!({"name":"tick"}),
+                }],
+            },
+            ModelResponse::Done {
+                working_notes: "The concrete name was rejected before execution.".to_string(),
+                summary: "rejected".to_string(),
+            },
+        ]);
+        let mut tools = Tools::default();
+        let mut observations = Vec::new();
+        run_agent(
             &mut provider,
-            &mut Tools::default(),
+            &mut tools,
+            "inspect",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |event| {
+                if let AgentEvent::Observations(values) = event {
+                    observations.extend(values);
+                }
+            },
+        )
+        .expect("provider receives replacement feedback");
+        assert_eq!(tools.0, 0);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].tool, "read_symbol");
+        assert!(observations[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("invented AI action ID"));
+    }
+    #[test]
+    fn rejects_only_invented_action_id_and_retains_accepted_selection() {
+        struct RecordingResponses {
+            responses: Vec<ModelResponse>,
+            requests: Vec<String>,
+        }
+        impl ModelProvider for RecordingResponses {
+            fn respond(
+                &mut self,
+                request: &str,
+                _canceled: &AtomicBool,
+            ) -> Result<ModelResponse, String> {
+                self.requests.push(request.to_string());
+                Ok(self.responses.remove(0))
+            }
+        }
+        let read_id = workshop_tool_specs()
+            .into_iter()
+            .find(|spec| spec.tool == "read_symbol")
+            .expect("read spec")
+            .action_id;
+        let rejected_id = "a_0000000000000000";
+        let mut provider = RecordingResponses {
+            responses: vec![
+                ModelResponse::ToolCalls {
+                    working_notes: "Select one valid read and one invalid action.".to_string(),
+                    summary: String::new(),
+                    tool_calls: vec![
+                        ToolCall {
+                            tool: read_id.clone(),
+                            args: json!({"name":"tick"}),
+                        },
+                        ToolCall {
+                            tool: rejected_id.to_string(),
+                            args: json!({}),
+                        },
+                    ],
+                },
+                ModelResponse::Done {
+                    working_notes: "Retain the valid selection and replace the rejected ID."
+                        .to_string(),
+                    summary: "rejected safely".to_string(),
+                },
+            ],
+            requests: Vec::new(),
+        };
+        let mut tools = Tools::default();
+        let mut rejected = Vec::new();
+        let result = run_agent(
+            &mut provider,
+            &mut tools,
             "change",
             json!({}),
             workshop_tool_specs(),
             &AtomicBool::new(false),
-            |_| {},
+            |event| {
+                if let AgentEvent::Observations(observations) = event {
+                    rejected.extend(observations);
+                }
+            },
         )
-        .expect_err("unknown tool");
-        assert_eq!(error, "unsupported AI tool: shell");
+        .expect("agent receives localized rejection");
+        assert_eq!(result, "rejected safely");
+        assert_eq!(tools.0, 0, "invalid batches remain atomic");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].tool, rejected_id);
+        assert!(rejected[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("replace only this rejected action ID"));
+        assert!(provider.requests[1].contains(&read_id));
+        assert!(provider.requests[1].contains(rejected_id));
     }
-
     #[test]
     fn live_contract_is_compact_and_lazily_exposes_rare_tools() {
         let workshop = workshop_tool_specs();
@@ -2044,7 +2246,7 @@ mod tests {
             AgentProfile::default().instruction.len()
         );
         assert!(
-            live_bytes <= 1_900,
+            live_bytes <= 2_100,
             "live tool specs grew to {live_bytes} bytes"
         );
         assert!(
@@ -2132,59 +2334,79 @@ mod tests {
     }
 
     #[test]
-    fn codex_transport_decodes_json_encoded_tool_args() {
-        let response = decode_codex_response(
-            r#"{"mode":"tool_calls","working_notes":"Inspect next.","summary":"","tool_calls":[{"tool":"read_symbol","args":"{\"name\":\"tick\"}"}]}"#,
+    fn codex_transport_rejects_json_encoded_tool_args() {
+        let error = decode_codex_response(
+            r#"{"mode":"tool_calls","working_notes":"Inspect next.","summary":"","tool_calls":[{"action_id":"a_0000000000000000","args":"{\"name\":\"tick\"}"}]}"#,
         )
-        .expect("response");
-        let ModelResponse::ToolCalls { tool_calls, .. } = response else {
-            panic!("tool calls");
-        };
-        assert_eq!(tool_calls[0].args, json!({"name": "tick"}));
+        .expect_err("string args must be rejected");
+        assert!(error.contains("native JSON objects"));
     }
 
     #[test]
-    fn malformed_json_encoded_tool_args_are_returned_for_correction() {
-        let malformed = decode_codex_response(
-            r#"{"mode":"tool_calls","working_notes":"Correct the malformed call next.","summary":"","tool_calls":[{"tool":"read_symbol","args":"{\"name\":\"tick\"} {\"extra\":true}"}]}"#,
-        )
-        .expect("transport preserves malformed args for the agent loop");
-        let mut provider = Responses(vec![
-            malformed,
-            ModelResponse::Done {
-                working_notes: "The rejected batch was corrected without executing it.".to_string(),
-                summary: "corrected".to_string(),
-            },
-        ]);
-        let mut tools = Tools::default();
-        let mut errors = Vec::new();
-
-        let result = run_agent(
-            &mut provider,
-            &mut tools,
-            "correct malformed tool arguments",
-            json!({}),
-            workshop_tool_specs(),
-            &AtomicBool::new(false),
-            |event| {
-                if let AgentEvent::Observations(observations) = event {
-                    errors.extend(
-                        observations
-                            .into_iter()
-                            .filter_map(|observation| observation.error),
-                    );
-                }
-            },
-        )
-        .expect("agent retries after rejected transport args");
-
-        assert_eq!(result, "corrected");
-        assert_eq!(tools.0, 0);
-        assert!(errors
+    fn host_rejects_unknown_tool_arguments() {
+        let specs = workshop_tool_specs();
+        let known = specs
             .iter()
-            .any(|error| error.contains("batch rejected before execution")));
+            .map(|spec| spec.tool.clone())
+            .collect::<BTreeSet<_>>();
+        let error = validate_tool_call(
+            &ToolCall {
+                tool: "read_symbol".into(),
+                args: json!({"name":"tick", "invented":true}),
+            },
+            &specs,
+            &known,
+            false,
+        )
+        .expect_err("unknown argument");
+        assert!(error.contains("does not accept arg: invented"));
+    }
+    #[test]
+    fn mismatched_action_id_cannot_select_another_tool() {
+        let specs = workshop_tool_specs();
+        let known = specs
+            .iter()
+            .map(|spec| spec.tool.clone())
+            .collect::<BTreeSet<_>>();
+        let write_id = specs
+            .iter()
+            .find(|spec| spec.tool == "write_symbol")
+            .expect("write spec")
+            .action_id
+            .clone();
+        let error = validate_tool_call(
+            &ToolCall {
+                tool: write_id,
+                args: json!({"name":"tick"}),
+            },
+            &specs,
+            &known,
+            true,
+        )
+        .expect_err("write ID cannot invoke read arguments");
+        assert!(error.contains("requires arg: file"));
     }
 
+    #[test]
+    fn provider_decoder_rejects_unknown_response_fields() {
+        let error = decode_codex_response(
+            r#"{"mode":"done","working_notes":"Complete.","summary":"done","invented":true}"#,
+        )
+        .expect_err("unknown response field");
+        assert!(error.contains("unknown response field: invented"));
+        let error = decode_codex_response(
+            r#"{"mode":"tool_calls","working_notes":"Read.","summary":"","tool_calls":[{"action_id":"a_0000000000000000","args":{},"invented":true}]}"#,
+        )
+        .expect_err("unknown call field");
+        assert!(error.contains("unknown field"));
+    }
+    #[test]
+    fn response_schema_requires_native_object_args() {
+        assert_eq!(
+            model_response_schema().pointer("/properties/tool_calls/items/properties/args/type"),
+            Some(&json!("object"))
+        );
+    }
     #[test]
     fn codex_json_stream_keeps_only_the_exact_reported_usage() {
         let stream = concat!(

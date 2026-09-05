@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

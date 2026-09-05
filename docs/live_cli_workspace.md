@@ -493,3 +493,7 @@ Run a repeatable session without Cargo or repository-only tools:
 ```text
 stasis tui src/main.stasis --live-script live.commands --live-json
 ```
+
+## AI provider configuration
+
+Live workspace AI defaults to the installed Codex subscription and can use OpenRouter without changing host editing or safety semantics. See [AI providers](ai_providers.md) for routing, throughput/cost controls, telemetry, security, and the opt-in Cerebras evaluation.
