@@ -341,7 +341,126 @@ for _name, _detail in (("parse", "parse detail"), ("extern_resolution", "extern 
         1)
 
 
+_it032_milestones = [
+    {"frame": 1, "revision": 1, "frame_token": 101, "generation": 20,
+     "source_fingerprint": "a1", "command_trace": 1001,
+     "surface_generation": 2, "renderer_generation": 1,
+     "resource_surface_generation": 1, "resource_renderer_generation": 1},
+    {"frame": 75, "revision": 2, "frame_token": 175, "generation": 21,
+     "source_fingerprint": "a2", "command_trace": 1002,
+     "surface_generation": 2, "renderer_generation": 1,
+     "resource_surface_generation": 1, "resource_renderer_generation": 1},
+    {"frame": 100, "revision": 2, "frame_token": 200, "generation": 21,
+     "source_fingerprint": "a2", "command_trace": 1002,
+     "surface_generation": 4, "renderer_generation": 2,
+     "resource_surface_generation": 3, "resource_renderer_generation": 2},
+    {"frame": 150, "revision": 3, "frame_token": 250, "generation": 22,
+     "source_fingerprint": "a3", "command_trace": 1003,
+     "surface_generation": 4, "renderer_generation": 2,
+     "resource_surface_generation": 3, "resource_renderer_generation": 2},
+    {"frame": 200, "revision": 3, "frame_token": 300, "generation": 22,
+     "source_fingerprint": "a3", "command_trace": 1003,
+     "surface_generation": 6, "renderer_generation": 3,
+     "resource_surface_generation": 5, "resource_renderer_generation": 3},
+    {"frame": 225, "revision": 4, "frame_token": 325, "generation": 23,
+     "source_fingerprint": "a4", "command_trace": 1004,
+     "surface_generation": 6, "renderer_generation": 3,
+     "resource_surface_generation": 5, "resource_renderer_generation": 3},
+    {"frame": 300, "revision": 1, "frame_token": 400, "generation": 24,
+     "source_fingerprint": "a1", "command_trace": 1000,
+     "surface_generation": 6, "renderer_generation": 3,
+     "resource_surface_generation": 5, "resource_renderer_generation": 3},
+]
+_it032_summary = {
+    "schema": "stasis.workshop_soak.v1", "test_id": "IT-032",
+    "event": "bounded_soak", "status": "passed", "frame_count": 300,
+    "gles_presented_count": 300,
+    "edit_frames": [75, 150, 225, 300], "surface_frames": [100, 200],
+    "milestone_count": 7, "milestones": _it032_milestones,
+    "revision_traces": [1001, 1002, 1003, 1004],
+    "revision_sources": ["a1", "a2", "a3", "a4"],
+    "final_packaged_trace": 1000, "final_packaged_source": "a1",
+    "buffer_contract": {"direct": True, "stable_identity": True,
+                        "i32_capacity": 67888, "f32_capacity": 146564,
+                        "u8_capacity": 65536, "zero_dropped_frames": 300},
+    "peaks": {"lines": 8, "rects": 2, "sprites": 3, "text": 2,
+              "text_bytes": 32, "order": 8, "clips": 0, "sprite_runs": 2,
+              "atlas_pages": 1, "live_regions": 3, "text_textures": 2,
+              "font_entries": 1},
+    "cleanup_receipt": {"status": "Restored", "source": "packaged",
+                        "runtime_generation": 24, "pending_candidate": False,
+                        "guest_state": "restored"},
+    "ordered_unique_tokens": True, "one_generation_per_frame": True,
+    "java_only": False, "fallback": 0, "stub": 0,
+}
+_it032_lines = "\n".join(
+    "Stasis Workshop IT-032 milestone: " + json.dumps(item, separators=(",", ":"))
+    for item in _it032_milestones
+) + "\nStasis Workshop IT-032: " + json.dumps(_it032_summary, separators=(",", ":"))
+_it031_summary_line = next(
+    line for line in GOOD.splitlines() if line.startswith("Stasis Workshop IT-031: ")
+)
+GOOD = GOOD.replace(_it031_summary_line,
+                    _it031_summary_line + "\n" + _it032_lines, 1)
+
+
 class WorkshopSeamTests(unittest.TestCase):
+    def test_accepts_exact_it032_schedule(self):
+        result = verify_log(GOOD, MANIFEST)
+        self.assertEqual(300, result["it032"]["frame_count"])
+        self.assertEqual([1, 75, 100, 150, 200, 225, 300],
+                         [item["frame"] for item in result["it032_milestones"]])
+
+    def test_rejects_it032_wrong_frame_count_and_surface_generation(self):
+        with self.assertRaisesRegex(SeamError, "300-frame soak"):
+            verify_log(GOOD.replace('"frame_count":300', '"frame_count":299', 1),
+                       MANIFEST)
+        bad = GOOD.replace(
+            '"surface_generation":4,"renderer_generation":2',
+            '"surface_generation":3,"renderer_generation":2', 1)
+        with self.assertRaisesRegex(SeamError, "surface recreations"):
+            verify_log(bad, MANIFEST)
+
+    def test_rejects_it032_generation_or_source_change_without_edit(self):
+        bad_generation = GOOD.replace(
+            '"frame":100,"revision":2,"frame_token":200,"generation":21',
+            '"frame":100,"revision":2,"frame_token":200,"generation":22', 1)
+        with self.assertRaisesRegex(SeamError, "runtime generation|surface recreation|edit"):
+            verify_log(bad_generation, MANIFEST)
+        bad_source = GOOD.replace(
+            '"frame":100,"revision":2,"frame_token":200,"generation":21,'
+            '"source_fingerprint":"a2"',
+            '"frame":100,"revision":2,"frame_token":200,"generation":21,'
+            '"source_fingerprint":"changed"', 1)
+        with self.assertRaisesRegex(SeamError, "source fingerprints"):
+            verify_log(bad_source, MANIFEST)
+
+    def test_rejects_it032_stale_resource_epoch_or_final_trace(self):
+        stale = GOOD.replace('"resource_surface_generation":3',
+                             '"resource_surface_generation":2', 1)
+        with self.assertRaisesRegex(SeamError, "resource generation"):
+            verify_log(stale, MANIFEST)
+        with self.assertRaisesRegex(SeamError, "final packaged state/trace"):
+            verify_log(GOOD.replace('"final_packaged_trace":1000',
+                                    '"final_packaged_trace":1004', 1), MANIFEST)
+
+    def test_rejects_it032_peak_or_cleanup_failure(self):
+        with self.assertRaisesRegex(SeamError, "peaks"):
+            verify_log(GOOD.replace('"text_bytes":32', '"text_bytes":65537', 1),
+                       MANIFEST)
+        with self.assertRaisesRegex(SeamError, "cleanup"):
+            verify_log(GOOD.replace('"status":"Restored","source":"packaged"',
+                                    '"status":"failed","source":"packaged"', 1),
+                       MANIFEST)
+
+    def test_rejects_it032_unstable_or_wrong_capacity_buffers(self):
+        with self.assertRaisesRegex(SeamError, "direct-buffer"):
+            verify_log(GOOD.replace('"stable_identity":true',
+                                    '"stable_identity":false', 1), MANIFEST)
+        with self.assertRaisesRegex(SeamError, "direct-buffer"):
+            verify_log(GOOD.replace('"i32_capacity":67888',
+                                    '"i32_capacity":67887', 1), MANIFEST)
+
     def test_non_acceptance_text_uploads_do_not_compute_acceptance_hashes(self):
         source = (Path(__file__).resolve().parents[2]
                   / "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java").read_text()
