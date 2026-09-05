@@ -7,7 +7,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WRAPPED = re.compile(r"\bpython3?\s+tools/cargo_cache\.py\s+run\s+--\s+cargo(?:\.exe)?\b")
-CARGO = re.compile(r"(?<![\w/-])cargo(?:\.exe)?(?=[\s\"']|$)")
+CARGO = re.compile(r"(?<![\w-])cargo(?:\.exe)?(?=[\s\"']|$)")
 
 
 def raw_cargo_lines(source):
@@ -42,10 +42,20 @@ class PrCiCargoPolicyTests(unittest.TestCase):
             "cargo test", "cargo +stable build", "cargo.exe check",
             "FOO=1 cargo test", "& cargo test", "echo ready && cargo build",
             "python tools/cargo_cache.py run -- cargo test; cargo build",
+            "/usr/bin/cargo test", "~/.cargo/bin/cargo build", "./cargo check",
+            '"/usr/bin/cargo" test', r'& C:\Rust\bin\cargo.exe check',
         ):
             for scalar in (command, "|\n    " + command, ">-\n    " + command):
                 with self.subTest(command=command, scalar=scalar):
                     self.assertTrue(raw_cargo_lines("  run: " + scalar))
+
+    def test_ignores_unrelated_token_suffixes(self):
+        for token in (
+            "mycargo", "my_cargo", "my-cargo", "/usr/bin/mycargo",
+            "/usr/bin/my-cargo", "cargo-helper", "cargo_cache.py",
+        ):
+            with self.subTest(token=token):
+                self.assertEqual(raw_cargo_lines("  run: " + token + " test"), [])
 
     def test_accepts_wrapper_and_ignores_non_run_metadata(self):
         source = """  - name: cargo test
