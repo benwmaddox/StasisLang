@@ -30,6 +30,7 @@ python3 -m unittest tools.ci.test_deterministic_live_simulation_roadmap
 python3 -m unittest tools.ci.test_runtime_abi_contract
 python3 -m unittest tools.ci.test_host_runtime_contract
 python3 -m unittest tools.ci.test_cargo_cache
+python3 -m unittest tools.ci.test_pr_ci_cargo_policy
 python3 -m unittest tools.ci.test_unsafe_boundaries
 python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance

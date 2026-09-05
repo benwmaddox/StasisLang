@@ -61,6 +61,7 @@ jobs:
           python tools/ci/check_runtime_abi_contract.py
           python tools/ci/check_host_runtime_contract.py
           python -m unittest tools.ci.test_cargo_cache
+          python -m unittest tools.ci.test_pr_ci_cargo_policy
           python -m unittest tools.ci.test_android_emulator_seams
           python -m unittest tools.ci.test_generate_asset_load_fixture
           python -m unittest tools.ci.test_runtime_abi_contract
@@ -117,7 +118,7 @@ jobs:
 
       - name: Run Cargo Test
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
-        run: cargo test --workspace --all-targets -- --test-threads=1
+        run: python tools/cargo_cache.py run -- cargo test --workspace --all-targets -- --test-threads=1
 
   bootstrap-smoke-windows:
     if: ${{ inputs.run_slow_seams }}
@@ -167,13 +168,13 @@ jobs:
           $env:STASIS_RUNTIME_RUNNER_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe")
           $env:STASIS_GFX_LOG_SPRITES = "1"
           $env:STASIS_PARITY_CAPTURE_STAGE = "second_frame"
-          cargo run -p stasis -- --workspace samples/render_parity prepare
+          python tools/cargo_cache.py run -- cargo run -p stasis -- --workspace samples/render_parity prepare
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo run -p stasis -- play samples/render_parity/main.stasis --watch-dir samples/render_parity --ticks 2 --screenshot target/render-parity-ci/frame.png --screenshot-frame 2 --exit-after-screenshot 2>&1 | Tee-Object target/render-parity-ci/runtime.log
+          python tools/cargo_cache.py run -- cargo run -p stasis -- play samples/render_parity/main.stasis --watch-dir samples/render_parity --ticks 2 --screenshot target/render-parity-ci/frame.png --screenshot-frame 2 --exit-after-screenshot 2>&1 | Tee-Object target/render-parity-ci/runtime.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/ci/verify_render_parity.py --capture target/render-parity-ci/frame.png --runtime-log target/render-parity-ci/runtime.log --evidence target/render-parity-ci/evidence.json --write-evidence --require-load-details --profile portable --stage second_frame
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
+          python tools/cargo_cache.py run -- cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
 
       - name: Test Windows desktop SDL seam suite
         shell: pwsh
@@ -189,7 +190,7 @@ jobs:
 
       - name: Bootstrap Compile Smoke (compiler .stasis)
         # Compiler/JIT tests share process-global dispatch and runtime registration state.
-        run: cargo test -p stasis_compiler -- --test-threads=1 --nocapture
+        run: python tools/cargo_cache.py run -- cargo test -p stasis_compiler -- --test-threads=1 --nocapture
 
       - name: Upload Windows platform seam evidence
         if: always()
@@ -288,10 +289,10 @@ jobs:
       - name: Build and probe Stasis runtime loading
         shell: bash
         run: |
-          cargo test -p stasis_dynload -- --test-threads=1
-          cargo build -p stasis
+          python tools/cargo_cache.py run -- cargo test -p stasis_dynload -- --test-threads=1
+          python tools/cargo_cache.py run -- cargo build -p stasis
           mkdir -p target/vscode-e2e-toolchain/bin
-          cp target/debug/stasis target/vscode-e2e-toolchain/bin/
+          cp build/codex-cargo-target/debug/stasis target/vscode-e2e-toolchain/bin/
           cp "$STASIS_RUNTIME_LIBRARY_PATH" target/vscode-e2e-toolchain/bin/
           cp -R src target/vscode-e2e-toolchain/
           "$STASIS_E2E_EXECUTABLE" --json editor-info
@@ -364,7 +365,7 @@ jobs:
           STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
           STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
         run: |
-          cargo run -p stasis -- --workspace samples/mobile_storage_link package-mobile --target android-arm64 --out dist/android --development-build
+          python tools/cargo_cache.py run -- cargo run -p stasis -- --workspace samples/mobile_storage_link package-mobile --target android-arm64 --out dist/android --development-build
           gradle -p samples/mobile_storage_link/dist/android/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain
           test -f samples/mobile_storage_link/dist/android/android/app/build/outputs/apk/debug/app-debug.apk
           native_library=$(find samples/mobile_storage_link/dist/android/android/app/build/intermediates/cxx/Debug -path '*/obj/arm64-v8a/libmain.so' -print -quit)
