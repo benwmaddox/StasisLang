@@ -6,6 +6,19 @@ for normal project work.
 Read `PROJECT_ARCHITECTURE.md` before structuring game code. Use its input, tick, state, and
 rendering boundaries as the default unless the project documents a concrete reason to differ.
 
+## Offline vendor documentation
+
+Generated projects keep the selected toolchain's documentation beside its standard library at
+`vendor/stasis/docs`. Read `vendor/stasis/docs/README.md` for the offline project-local knowledge
+library; its examples and guidance are available without a network connection, and source imports
+continue to use `vendor/stasis/stdlib`.
+
+The documentation and standard library are one vendor snapshot. `stasis vendor update` replaces
+both directories and their manifest release ID and hash in one transaction. Automatic vendor
+synchronization uses that same transaction, so it repairs missing or stale documentation together
+with the standard library. Stasis owns `vendor/stasis`; use the update command to repair it rather
+than editing the snapshot by hand.
+
 ## Theory-building practice
 
 - Treat programming as building and maintaining an explainable theory of how real-world behavior maps through Stasis source, explicit state, deterministic tick systems, rendering, tests, and the packaged user experience. Code, tests, and documentation are evidence and memory cues; they are not substitutes for understanding.

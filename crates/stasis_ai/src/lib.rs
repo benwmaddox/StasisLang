@@ -28,9 +28,10 @@ pub use task_session::{
     ActionId, ActionKind, ActionRevision, ActionState, ConnectionState, FallbackState,
     FocusedTestResult, GeneratedImageArtifact, GeneratedImageId, ImageAttribution,
     ImageHandoffState, ImageReviewState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
-    ScreenshotAttachment, ScreenshotId, ShortcutBinding, ShortcutMapper, Task, TaskAction, TaskId,
-    TaskLifecycle, TaskMetrics, TaskProvenance, TaskSession, TaskSessionCommand, TaskSessionError,
-    ThreadEntry, ThreadEntryKind, UploadState, ValidationStatus, VisionCapability,
+    ScreenshotAnalysisState, ScreenshotAttachment, ScreenshotId, ShortcutBinding, ShortcutMapper,
+    Task, TaskAction, TaskId, TaskLifecycle, TaskMetrics, TaskProvenance, TaskSession,
+    TaskSessionCommand, TaskSessionError, ThreadEntry, ThreadEntryKind, UploadState,
+    ValidationStatus, VisionCapability,
 };
 
 pub const DEFAULT_AGENT_TURNS: usize = 50;
@@ -1390,6 +1391,18 @@ pub fn gauntlet_tool_specs() -> Vec<ToolSpec> {
 }
 
 impl CodexExecProvider {
+    fn ensure_image_input_capability(&self) -> Result<(), String> {
+        if self.images.is_empty()
+            || openrouter::codex_model_supports_image_input(self.model.as_str())
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "Codex model {} does not support image input",
+            self.model
+        ))
+    }
+
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
@@ -1437,6 +1450,7 @@ impl CodexExecProvider {
         canceled: &AtomicBool,
     ) -> Result<String, String> {
         self.last_usage = None;
+        self.ensure_image_input_capability()?;
         self.call_count = self.call_count.saturating_add(1);
         if self.run.is_none() {
             self.run = Some(TemporaryRun::create()?);
@@ -1664,6 +1678,7 @@ fn default_codex_executable() -> PathBuf {
 
 impl ModelProvider for CodexExecProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String> {
+        self.ensure_image_input_capability()?;
         let schema = model_response_schema_for_request(request)?;
         let source = self.run_codex(request, &schema, canceled)?;
         decode_codex_response(&source)

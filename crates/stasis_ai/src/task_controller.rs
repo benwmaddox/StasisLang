@@ -1,6 +1,7 @@
 use crate::{
-    ActionId, ActionKind, ActionState, ConnectionState, ProviderState, TaskId, TaskLifecycle,
-    TaskSession, TaskSessionError, ThreadEntry,
+    ActionId, ActionKind, ActionState, ConnectionState, ProviderState, ScreenshotAnalysisState,
+    ScreenshotAttachment, Task, TaskId, TaskLifecycle, TaskSession, TaskSessionError, ThreadEntry,
+    UploadState, VisionCapability,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -35,6 +36,8 @@ pub struct ProviderRequest {
     pub relevant_tests: Vec<String>,
     pub context: Vec<ThreadEntry>,
     pub actions: Vec<ProviderActionContext>,
+    /// Immutable screenshot set selected when this provider request was admitted.
+    pub screenshots: Vec<ScreenshotAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -382,6 +385,15 @@ impl TaskController {
                         .collect(),
                 })
                 .collect(),
+            screenshots: task
+                .screenshots
+                .values()
+                .filter(|screenshot| {
+                    screenshot.provenance.task_id == task.id
+                        && screenshot.vision == VisionCapability::Available
+                })
+                .cloned()
+                .collect(),
         };
         let canceled = Arc::new(AtomicBool::new(false));
         let admitted = Arc::new(AtomicBool::new(true));
@@ -445,6 +457,11 @@ impl TaskController {
             task.reconnect()?;
         }
         let request_id = self.resubmit(task_id, false)?;
+        update_screenshots(
+            &mut task,
+            &self.requested_screenshots(task_id),
+            ScreenshotOutcome::Pending,
+        );
         task.metrics.record_retry();
         *session
             .task_mut(task_id)
@@ -457,7 +474,8 @@ impl TaskController {
         session: &mut TaskSession,
         task_id: &TaskId,
     ) -> Result<(), TaskControllerError> {
-        session.task_mut(task_id)?.cancel()?;
+        let mut task = session.task(task_id)?.clone();
+        task.cancel()?;
         let mut state = lock(&self.state);
         if let Some(record) = state.requests.get_mut(&(self.client_id, task_id.clone())) {
             record.canceled.store(true, Ordering::Release);
@@ -466,6 +484,11 @@ impl TaskController {
                 u64::try_from(record.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
             record.snapshot.error = None;
             let request_id = record.snapshot.request_id;
+            update_screenshots(
+                &mut task,
+                &record.request.screenshots,
+                ScreenshotOutcome::Canceled,
+            );
             state.events.push_back((
                 self.client_id,
                 TaskControllerEvent::Canceled {
@@ -474,6 +497,10 @@ impl TaskController {
                 },
             ));
         }
+        drop(state);
+        *session
+            .task_mut(task_id)
+            .expect("task was present while cancellation was validated") = task;
         Ok(())
     }
 
@@ -485,6 +512,11 @@ impl TaskController {
         let mut task = session.task(task_id)?.clone();
         task.reconnect()?;
         let request_id = self.resubmit(task_id, true)?;
+        update_screenshots(
+            &mut task,
+            &self.requested_screenshots(task_id),
+            ScreenshotOutcome::Pending,
+        );
         task.metrics.record_retry();
         *session
             .task_mut(task_id)
@@ -558,6 +590,14 @@ impl TaskController {
             return Err(TaskControllerError::CapacityReached);
         }
         Ok(request_id)
+    }
+
+    fn requested_screenshots(&self, task_id: &TaskId) -> Vec<ScreenshotAttachment> {
+        lock(&self.state)
+            .requests
+            .get(&(self.client_id, task_id.clone()))
+            .map(|record| record.request.screenshots.clone())
+            .unwrap_or_default()
     }
 
     pub fn snapshot(&self, task_id: &TaskId) -> Option<TaskRequestSnapshot> {
@@ -676,9 +716,21 @@ impl TaskController {
                                 )?;
                             }
                         }
+                        update_screenshots(
+                            &mut task,
+                            &record.request.screenshots,
+                            ScreenshotOutcome::Completed,
+                        );
                         Ok(task)
                     });
                 let Ok(updated_task) = applied else {
+                    if let Ok(task) = session.task_mut(&completion.task_id) {
+                        update_screenshots(
+                            task,
+                            &record.request.screenshots,
+                            ScreenshotOutcome::Failed(SAFE_SESSION_ERROR),
+                        );
+                    }
                     record.snapshot.state = TaskRequestState::Failed;
                     record.snapshot.error = Some(SAFE_SESSION_ERROR.to_string());
                     return TaskControllerEvent::Failed {
@@ -702,6 +754,11 @@ impl TaskController {
                 record.snapshot.state = TaskRequestState::Failed;
                 record.snapshot.error = Some(SAFE_PROVIDER_ERROR.to_string());
                 if let Ok(task) = session.task_mut(&completion.task_id) {
+                    update_screenshots(
+                        task,
+                        &record.request.screenshots,
+                        ScreenshotOutcome::Failed(SAFE_PROVIDER_ERROR),
+                    );
                     if task.connection == ConnectionState::Connected
                         && task.lifecycle == TaskLifecycle::Active
                     {
@@ -713,6 +770,56 @@ impl TaskController {
                     task_id: completion.task_id,
                     message: SAFE_PROVIDER_ERROR.to_string(),
                 }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScreenshotOutcome<'a> {
+    Pending,
+    Completed,
+    Failed(&'a str),
+    Canceled,
+}
+
+fn update_screenshots(
+    task: &mut Task,
+    requested: &[ScreenshotAttachment],
+    outcome: ScreenshotOutcome<'_>,
+) {
+    for requested_screenshot in requested {
+        if requested_screenshot.provenance.task_id != task.id {
+            continue;
+        }
+        let Some(screenshot) = task.screenshots.get_mut(&requested_screenshot.id) else {
+            continue;
+        };
+        if screenshot.provenance.task_id != task.id
+            || screenshot.source != requested_screenshot.source
+            || screenshot.content_sha256 != requested_screenshot.content_sha256
+        {
+            continue;
+        }
+        match outcome {
+            ScreenshotOutcome::Pending => {
+                screenshot.upload = UploadState::Pending;
+                screenshot.analysis = ScreenshotAnalysisState::Pending;
+            }
+            ScreenshotOutcome::Completed => {
+                screenshot.upload = UploadState::Uploaded;
+                screenshot.analysis = ScreenshotAnalysisState::Completed;
+            }
+            ScreenshotOutcome::Failed(reason) => {
+                screenshot.upload = UploadState::Failed {
+                    reason: reason.to_string(),
+                };
+                screenshot.analysis = ScreenshotAnalysisState::Failed {
+                    reason: reason.to_string(),
+                };
+            }
+            ScreenshotOutcome::Canceled => {
+                screenshot.analysis = ScreenshotAnalysisState::Canceled;
             }
         }
     }
@@ -884,6 +991,16 @@ mod tests {
             Ok(ProviderReply::new("late"))
         });
         let mut session = session(&["one"]);
+        session
+            .task_mut("one")
+            .unwrap()
+            .set_vision_capability(true)
+            .unwrap();
+        session
+            .task_mut("one")
+            .unwrap()
+            .attach_screenshot("shot", "shot.png")
+            .unwrap();
         controller.send(&session, &TaskId::new("one")).unwrap();
         started.wait();
         controller
@@ -908,6 +1025,100 @@ mod tests {
             .iter()
             .any(|event| matches!(event, TaskControllerEvent::Stale { .. })));
         assert_eq!(session.task("one").unwrap().thread.len(), 1);
+        assert_eq!(
+            session.task("one").unwrap().screenshots[&crate::ScreenshotId::new("shot")].analysis,
+            ScreenshotAnalysisState::Canceled
+        );
+    }
+
+    #[test]
+    fn request_snapshots_only_originating_screenshots_and_completion_updates_that_snapshot() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider_seen = Arc::clone(&seen);
+        let controller = TaskController::new(move |request, _| {
+            provider_seen.lock().unwrap().push(request);
+            Ok(ProviderReply::new("analyzed"))
+        });
+        let mut session = session(&["one", "two"]);
+        for id in ["one", "two"] {
+            let task = session.task_mut(id).unwrap();
+            task.set_vision_capability(true).unwrap();
+            task.attach_screenshot(format!("{id}-shot"), format!("{id}.png"))
+                .unwrap();
+        }
+        let foreign =
+            session.task("two").unwrap().screenshots[&crate::ScreenshotId::new("two-shot")].clone();
+        session
+            .task_mut("one")
+            .unwrap()
+            .screenshots
+            .insert(crate::ScreenshotId::new("foreign"), foreign);
+
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        session
+            .task_mut("one")
+            .unwrap()
+            .attach_screenshot("late", "late.png")
+            .unwrap();
+        let events = wait_for(&controller, &mut session);
+        assert!(matches!(events[0], TaskControllerEvent::Completed { .. }));
+
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].screenshots.len(), 1);
+        assert_eq!(requests[0].screenshots[0].id.as_str(), "one-shot");
+        assert_eq!(
+            requests[0].screenshots[0].provenance.task_id.as_str(),
+            "one"
+        );
+        let task = session.task("one").unwrap();
+        assert_eq!(
+            task.screenshots[&crate::ScreenshotId::new("one-shot")].upload,
+            UploadState::Uploaded
+        );
+        assert_eq!(
+            task.screenshots[&crate::ScreenshotId::new("one-shot")].analysis,
+            ScreenshotAnalysisState::Completed
+        );
+        assert_eq!(
+            task.screenshots[&crate::ScreenshotId::new("late")].analysis,
+            ScreenshotAnalysisState::Pending
+        );
+    }
+
+    #[test]
+    fn provider_failure_and_retry_keep_screenshot_lifecycle_truthful() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let controller = TaskController::new(move |_, _| {
+            if provider_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                Err("private provider error".to_string())
+            } else {
+                Ok(ProviderReply::new("analyzed"))
+            }
+        });
+        let mut session = session(&["one"]);
+        let task = session.task_mut("one").unwrap();
+        task.set_vision_capability(true).unwrap();
+        task.attach_screenshot("shot", "shot.png").unwrap();
+
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        wait_for(&controller, &mut session);
+        let shot = &session.task("one").unwrap().screenshots[&crate::ScreenshotId::new("shot")];
+        assert!(matches!(shot.upload, UploadState::Failed { .. }));
+        assert!(matches!(
+            shot.analysis,
+            ScreenshotAnalysisState::Failed { .. }
+        ));
+
+        controller.retry(&mut session, &TaskId::new("one")).unwrap();
+        let shot = &session.task("one").unwrap().screenshots[&crate::ScreenshotId::new("shot")];
+        assert_eq!(shot.upload, UploadState::Pending);
+        assert_eq!(shot.analysis, ScreenshotAnalysisState::Pending);
+        wait_for(&controller, &mut session);
+        let shot = &session.task("one").unwrap().screenshots[&crate::ScreenshotId::new("shot")];
+        assert_eq!(shot.upload, UploadState::Uploaded);
+        assert_eq!(shot.analysis, ScreenshotAnalysisState::Completed);
     }
 
     #[test]

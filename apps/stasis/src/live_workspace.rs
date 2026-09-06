@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess, JitScalarValue, JitStateLayout};
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::EngineEntrypoints;
@@ -31,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use stasis_compiler::backend::state_migration::{
     activate_candidate_transactionally, finalize_runtime_preview, plan_state_migration,
@@ -48,6 +50,10 @@ const MAX_STAGED_TEST_FAILURE_CHARS: usize = 1024;
 const MAX_PRIVATE_SYMBOL_HINT_FILES: usize = 64;
 const MAX_WATCH_PREDICATE_SCAN_PER_TICK: usize = 4096;
 const MAX_INSPECT_VALUES: usize = 4096;
+const LIVE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+const LIVE_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_LIVE_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_LIVE_CAPTURE_PIXELS: u64 = 16 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct LiveRunConfig {
     pub project_root: PathBuf,
@@ -123,6 +129,25 @@ struct CompletionPreparation {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
+struct CapturePreparation {
+    request_id: u64,
+    artifact: String,
+    path: PathBuf,
+    scheduled_tick: u64,
+    runtime_identity: LiveRuntimeIdentity,
+    canceled: Arc<AtomicBool>,
+    receiver: mpsc::Receiver<Result<CaptureEvidence, String>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CaptureEvidence {
+    byte_length: u64,
+    width: u32,
+    height: u32,
+    sha256: String,
+}
+
 #[derive(Clone, Default)]
 struct CompletionSnapshot {
     index: CompletionIndex,
@@ -188,6 +213,7 @@ pub(crate) struct LiveWorkspace {
     self_write_hashes: BTreeMap<PathBuf, String>,
     edit_preparation: Option<EditPreparation>,
     completion_preparation: Option<CompletionPreparation>,
+    capture_preparation: Option<CapturePreparation>,
     dropped_watch_events: u64,
     state_inspection_subscription: Option<(u64, usize, bool)>,
     watch_polling_enabled: bool,
@@ -208,6 +234,12 @@ impl Drop for LiveWorkspace {
             }
         }
         if let Some(mut preparation) = self.completion_preparation.take() {
+            if let Some(worker) = preparation.worker.take() {
+                let _ = worker.join();
+            }
+        }
+        if let Some(mut preparation) = self.capture_preparation.take() {
+            preparation.canceled.store(true, Ordering::Release);
             if let Some(worker) = preparation.worker.take() {
                 let _ = worker.join();
             }
@@ -250,6 +282,7 @@ impl LiveWorkspace {
             self_write_hashes: BTreeMap::new(),
             edit_preparation: None,
             completion_preparation: None,
+            capture_preparation: None,
             dropped_watch_events: 0,
             state_inspection_subscription: None,
             watch_polling_enabled: true,
@@ -314,12 +347,23 @@ impl LiveWorkspace {
                 preparation.canceled.store(true, Ordering::Release);
                 background_canceled_targets.insert(*canceled);
             }
+            if let Some(preparation) = self
+                .capture_preparation
+                .as_ref()
+                .filter(|preparation| preparation.request_id == *canceled)
+            {
+                preparation.canceled.store(true, Ordering::Release);
+                background_canceled_targets.insert(*canceled);
+            }
         }
         let quit_queued = incoming
             .iter()
             .any(|request| matches!(request.command, LiveCommand::Quit));
         if quit_queued {
             if let Some(preparation) = self.edit_preparation.as_ref() {
+                preparation.canceled.store(true, Ordering::Release);
+            }
+            if let Some(preparation) = self.capture_preparation.as_ref() {
                 preparation.canceled.store(true, Ordering::Release);
             }
         }
@@ -364,6 +408,9 @@ impl LiveWorkspace {
         {
             self.enqueue_response(response);
         }
+        if let Some(response) = self.finish_capture_preparation(tick) {
+            self.enqueue_response(response);
+        }
         if let Some(response) = self.finish_completion_preparation(tick) {
             self.enqueue_response(response);
         }
@@ -404,10 +451,19 @@ impl LiveWorkspace {
                 break;
             };
             let request_id = request.request_id;
-            let response = match request.validate() {
-                Ok(()) => self.handle_request(request, tick, jit),
-                Err(error) => LiveResponse::failure(request_id, tick, error),
-            };
+            if let Err(error) = request.validate() {
+                self.enqueue_response(LiveResponse::failure(request_id, tick, error));
+                continue;
+            }
+            if let LiveCommand::CaptureFrame { artifact } = &request.command {
+                if let Err(error) =
+                    self.start_capture_preparation(request_id, artifact.clone(), tick)
+                {
+                    self.enqueue_response(LiveResponse::failure(request_id, tick, error));
+                }
+                continue;
+            }
+            let response = self.handle_request(request, tick, jit);
             self.enqueue_response(response);
             if self.quit {
                 break;
@@ -455,6 +511,124 @@ impl LiveWorkspace {
             identity.complete = false;
         }
         identity
+    }
+
+    fn start_capture_preparation(
+        &mut self,
+        request_id: u64,
+        artifact: String,
+        tick: u64,
+    ) -> Result<(), String> {
+        validate_capture_artifact(&artifact)?;
+        if self.capture_preparation.is_some() {
+            return Err("a live frame capture is already pending".to_string());
+        }
+        let directory = self
+            .config
+            .project_root
+            .join(&self.config.output)
+            .join("gauntlet-captures");
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("failed creating live capture directory: {error}"))?;
+        let path = directory.join(format!("{artifact}.png"));
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("failed replacing prior live capture: {error}"))?;
+        }
+        stasis_dynload::schedule_runtime_screenshot(&path)?;
+
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = Arc::clone(&canceled);
+        let worker_path = path.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .name(format!("stasis-capture-{request_id}"))
+            .spawn(move || {
+                let result = wait_for_capture_png(
+                    &worker_path,
+                    &worker_canceled,
+                    Instant::now() + LIVE_CAPTURE_TIMEOUT,
+                );
+                let _ = sender.send(result);
+            })
+            .map_err(|error| format!("failed starting live capture verification: {error}"))?;
+        self.capture_preparation = Some(CapturePreparation {
+            request_id,
+            artifact,
+            path,
+            scheduled_tick: tick,
+            runtime_identity: self.runtime_identity(),
+            canceled,
+            receiver,
+            worker: Some(worker),
+        });
+        Ok(())
+    }
+
+    fn finish_capture_preparation(&mut self, tick: u64) -> Option<LiveResponse> {
+        let preparation = self.capture_preparation.as_ref()?;
+        let route_connected = self
+            .server
+            .caller_request_id(preparation.request_id)
+            .is_some();
+        if !route_connected {
+            preparation.canceled.store(true, Ordering::Release);
+        }
+        let result = match preparation.receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("live capture verification worker disconnected".to_string())
+            }
+        };
+        let mut preparation = self
+            .capture_preparation
+            .take()
+            .expect("capture preparation exists");
+        if let Some(worker) = preparation.worker.take() {
+            let _ = worker.join();
+        }
+        if !route_connected {
+            return None;
+        }
+        if preparation.canceled.load(Ordering::Acquire) {
+            return Some(LiveResponse::failure(
+                preparation.request_id,
+                tick,
+                "live frame capture canceled",
+            ));
+        }
+        let evidence = match result {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                return Some(LiveResponse::failure(preparation.request_id, tick, error));
+            }
+        };
+        if self.runtime_identity() != preparation.runtime_identity {
+            return Some(LiveResponse::failure(
+                preparation.request_id,
+                tick,
+                "live runtime identity changed before the frame capture was verified",
+            ));
+        }
+        Some(
+            LiveResponse::success(
+                preparation.request_id,
+                tick,
+                "capture_completed",
+                json!({
+                    "artifact": preparation.artifact,
+                    "path": preparation.path,
+                    "scheduled_tick": preparation.scheduled_tick,
+                    "captured_tick": tick,
+                    "byte_length": evidence.byte_length,
+                    "width": evidence.width,
+                    "height": evidence.height,
+                    "sha256": evidence.sha256,
+                }),
+            )
+            .with_runtime_identity(preparation.runtime_identity),
+        )
     }
 
     pub(crate) fn should_run_tick(&self) -> bool {
@@ -722,6 +896,11 @@ impl LiveWorkspace {
                             .caller_request_id(job.request_id)
                             .unwrap_or(job.request_id)
                     }),
+                    "capture_request_id": self.capture_preparation.as_ref().map(|job| {
+                        self.server
+                            .caller_request_id(job.request_id)
+                            .unwrap_or(job.request_id)
+                    }),
                 }),
             )),
             LiveCommand::Pause => {
@@ -745,25 +924,8 @@ impl LiveWorkspace {
                     json!({"ticks": ticks, "after_tick": tick}),
                 ))
             }
-            LiveCommand::CaptureFrame { artifact } => {
-                let artifact = validate_capture_artifact(&artifact)?;
-                let directory = self
-                    .config
-                    .project_root
-                    .join(&self.config.output)
-                    .join("gauntlet-captures");
-                std::fs::create_dir_all(&directory)
-                    .map_err(|error| format!("failed creating live capture directory: {error}"))?;
-                let path = directory.join(format!("{artifact}.png"));
-                if path.exists() {
-                    std::fs::remove_file(&path)
-                        .map_err(|error| format!("failed replacing prior live capture: {error}"))?;
-                }
-                stasis_dynload::schedule_runtime_screenshot(&path)?;
-                Ok((
-                    "capture_scheduled",
-                    json!({"artifact": artifact, "path": path, "next_presented_frame": true}),
-                ))
+            LiveCommand::CaptureFrame { .. } => {
+                unreachable!("frame captures are deferred before dispatch")
             }
             LiveCommand::SetInputState { pointers } => {
                 validate_live_pointers(&pointers)?;
@@ -776,6 +938,9 @@ impl LiveWorkspace {
             LiveCommand::Cancel { .. } => unreachable!("cancellation handled before dispatch"),
             LiveCommand::Quit => {
                 if let Some(preparation) = self.edit_preparation.as_ref() {
+                    preparation.canceled.store(true, Ordering::Release);
+                }
+                if let Some(preparation) = self.capture_preparation.as_ref() {
                     preparation.canceled.store(true, Ordering::Release);
                 }
                 self.quit = true;
@@ -2142,6 +2307,115 @@ fn validate_capture_artifact(value: &str) -> Result<&str, String> {
         );
     }
     Ok(value)
+}
+
+fn wait_for_capture_png(
+    path: &Path,
+    canceled: &AtomicBool,
+    deadline: Instant,
+) -> Result<CaptureEvidence, String> {
+    let mut last_error = None;
+    loop {
+        if canceled.load(Ordering::Acquire) {
+            return Err("live frame capture canceled".to_string());
+        }
+        if Instant::now() >= deadline {
+            return Err(match last_error {
+                Some(error) => format!(
+                    "live frame capture did not produce a valid PNG within {} seconds: {error}",
+                    LIVE_CAPTURE_TIMEOUT.as_secs()
+                ),
+                None => format!(
+                    "live frame capture did not complete within {} seconds at {}",
+                    LIVE_CAPTURE_TIMEOUT.as_secs(),
+                    path.display()
+                ),
+            });
+        }
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.len() > MAX_LIVE_CAPTURE_BYTES => {
+                return Err(format!(
+                    "live frame capture exceeds the {MAX_LIVE_CAPTURE_BYTES}-byte limit"
+                ));
+            }
+            Ok(metadata) if metadata.len() > 0 => {
+                match read_capture_candidate(path, metadata.len()) {
+                    Ok(bytes) if bytes.len() as u64 == metadata.len() => {
+                        match capture_png_evidence(&bytes) {
+                            Ok(evidence) => {
+                                if canceled.load(Ordering::Acquire) {
+                                    return Err("live frame capture canceled".to_string());
+                                }
+                                if Instant::now() >= deadline {
+                                    return Err(format!(
+                                    "live frame capture did not complete within {} seconds at {}",
+                                    LIVE_CAPTURE_TIMEOUT.as_secs(),
+                                    path.display()
+                                ));
+                                }
+                                return Ok(evidence);
+                            }
+                            Err(error) => last_error = Some(error),
+                        }
+                    }
+                    Ok(_) => last_error = Some("capture changed while it was read".to_string()),
+                    Err(error) => last_error = Some(format!("failed reading capture: {error}")),
+                }
+            }
+            Ok(_) => last_error = Some("capture file is empty".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => last_error = Some(format!("failed inspecting capture: {error}")),
+        }
+        std::thread::sleep(LIVE_CAPTURE_POLL_INTERVAL);
+    }
+}
+
+fn read_capture_candidate(path: &Path, expected_len: u64) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(path).map_err(|error| format!("failed opening capture: {error}"))?;
+    let capacity = usize::try_from(expected_len.min(MAX_LIVE_CAPTURE_BYTES)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_LIVE_CAPTURE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed reading capture: {error}"))?;
+    if bytes.len() as u64 > MAX_LIVE_CAPTURE_BYTES {
+        return Err(format!(
+            "live frame capture exceeds the {MAX_LIVE_CAPTURE_BYTES}-byte limit"
+        ));
+    }
+    Ok(bytes)
+}
+
+fn capture_png_evidence(bytes: &[u8]) -> Result<CaptureEvidence, String> {
+    if bytes.len() as u64 > MAX_LIVE_CAPTURE_BYTES {
+        return Err(format!(
+            "live frame capture exceeds the {MAX_LIVE_CAPTURE_BYTES}-byte limit"
+        ));
+    }
+    if bytes.len() < 24
+        || bytes[..8] != [137, 80, 78, 71, 13, 10, 26, 10]
+        || bytes[12..16] != *b"IHDR"
+    {
+        return Err("capture does not have a PNG IHDR header".to_string());
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().expect("four width bytes"));
+    let height = u32::from_be_bytes(bytes[20..24].try_into().expect("four height bytes"));
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if width == 0 || height == 0 || pixels > MAX_LIVE_CAPTURE_PIXELS {
+        return Err(format!(
+            "capture PNG dimensions {width}x{height} exceed the {MAX_LIVE_CAPTURE_PIXELS}-pixel limit"
+        ));
+    }
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("capture is not a complete PNG: {error}"))?;
+    if image.width() != width || image.height() != height {
+        return Err("capture PNG dimensions changed during decode".to_string());
+    }
+    Ok(CaptureEvidence {
+        byte_length: bytes.len() as u64,
+        width: image.width(),
+        height: image.height(),
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+    })
 }
 
 fn validate_live_pointers(
@@ -3512,6 +3786,7 @@ fn apply_scalar_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::ImageEncoder;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3543,18 +3818,55 @@ mod tests {
         );
     }
 
+    fn test_capture_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&[12, 34, 56, 255], 1, 1, image::ColorType::Rgba8.into())
+            .expect("encode test PNG");
+        bytes
+    }
+
+    #[test]
+    fn capture_completion_requires_a_decodable_png() {
+        assert!(capture_png_evidence(b"not a PNG").is_err());
+        let png = test_capture_png();
+        let evidence = capture_png_evidence(&png).expect("PNG evidence");
+        assert_eq!(evidence.byte_length, png.len() as u64);
+        assert_eq!((evidence.width, evidence.height), (1, 1));
+        assert_eq!(evidence.sha256, format!("{:x}", Sha256::digest(&png)));
+    }
+
+    #[test]
+    fn capture_wait_is_bounded_and_cancelable() {
+        let missing = std::env::temp_dir().join(format!(
+            "stasis_missing_capture_{}_{}.png",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let canceled = AtomicBool::new(true);
+        assert_eq!(
+            wait_for_capture_png(&missing, &canceled, Instant::now()).expect_err("canceled"),
+            "live frame capture canceled"
+        );
+        canceled.store(false, Ordering::Release);
+        assert!(wait_for_capture_png(&missing, &canceled, Instant::now())
+            .expect_err("deadline")
+            .contains("did not complete within 5 seconds"));
+        fs::write(&missing, test_capture_png()).expect("expired PNG");
+        assert!(wait_for_capture_png(
+            &missing,
+            &canceled,
+            Instant::now() - Duration::from_millis(1)
+        )
+        .expect_err("expired valid PNG")
+        .contains("did not complete within 5 seconds"));
+        fs::remove_file(missing).ok();
+    }
+
     fn project() -> (PathBuf, LiveRunConfig) {
-        // stasis_compiler is a dependency of this test binary, so its cfg(test) JIT isolation is
-        // not enabled here. Clear process-global runtime storage before each app-level fixture;
-        // otherwise registrations can retain pointers into a previous test's dropped host Vec.
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_f64_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
-        stasis_dynload::clear_jit_f64_array_global_table();
-        stasis_dynload::clear_jit_string_literal_table();
-        stasis_dynload::clear_registered_global_memory();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -3578,6 +3890,145 @@ mod tests {
             PathBuf::from("build"),
         );
         (root, config)
+    }
+
+    fn install_capture_result(
+        workspace: &mut LiveWorkspace,
+        request_id: u64,
+        path: PathBuf,
+        canceled: bool,
+        result: Result<CaptureEvidence, String>,
+    ) -> LiveRuntimeIdentity {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(result).expect("capture result");
+        let runtime_identity = workspace.runtime_identity();
+        workspace.capture_preparation = Some(CapturePreparation {
+            request_id,
+            artifact: "candidate-1".to_string(),
+            path,
+            scheduled_tick: 7,
+            runtime_identity: runtime_identity.clone(),
+            canceled: Arc::new(AtomicBool::new(canceled)),
+            receiver,
+            worker: None,
+        });
+        runtime_identity
+    }
+
+    #[test]
+    fn capture_completion_retains_request_and_runtime_provenance() {
+        let (root, config) = project();
+        let (jit, _) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        client
+            .submit(LiveRequest::new(41, LiveCommand::Status))
+            .expect("reserve routed request");
+        let wire_request = workspace.server.drain(1).pop().expect("wire request");
+        let png = test_capture_png();
+        let evidence = capture_png_evidence(&png).expect("evidence");
+        let expected_identity = install_capture_result(
+            &mut workspace,
+            wire_request.request_id,
+            root.join("build/gauntlet-captures/candidate-1.png"),
+            false,
+            Ok(evidence),
+        );
+        let response = workspace
+            .finish_capture_preparation(8)
+            .expect("capture completion");
+        assert_eq!(response.kind, "capture_completed");
+        assert_eq!(response.data.as_ref().expect("data")["scheduled_tick"], 7);
+        assert_eq!(response.data.as_ref().expect("data")["captured_tick"], 8);
+        assert_eq!(response.data.as_ref().expect("data")["width"], 1);
+        assert_eq!(response.runtime_identity, Some(expected_identity));
+        workspace.enqueue_response(response);
+        assert_eq!(
+            client
+                .receive_timeout(Duration::from_secs(1))
+                .expect("routed completion")
+                .request_id,
+            41
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn capture_completion_rejects_runtime_identity_drift() {
+        let (root, config) = project();
+        let (jit, _) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        client
+            .submit(LiveRequest::new(44, LiveCommand::Status))
+            .expect("reserve routed request");
+        let wire_request = workspace.server.drain(1).pop().expect("wire request");
+        install_capture_result(
+            &mut workspace,
+            wire_request.request_id,
+            root.join("drifted.png"),
+            false,
+            Ok(capture_png_evidence(&test_capture_png()).expect("evidence")),
+        );
+        workspace.host_entry_revision = workspace.host_entry_revision.saturating_add(1);
+
+        let response = workspace
+            .finish_capture_preparation(8)
+            .expect("capture rejection");
+        assert!(!response.ok);
+        assert!(response
+            .error
+            .expect("identity error")
+            .contains("runtime identity changed"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn capture_cancellation_and_disconnect_fail_closed() {
+        let (root, config) = project();
+        let (jit, _) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        client
+            .submit(LiveRequest::new(42, LiveCommand::Status))
+            .expect("reserve canceled request");
+        let canceled_wire = workspace.server.drain(1).pop().expect("wire request");
+        install_capture_result(
+            &mut workspace,
+            canceled_wire.request_id,
+            root.join("canceled.png"),
+            true,
+            Err("worker observed cancellation".to_string()),
+        );
+        let canceled = workspace
+            .finish_capture_preparation(9)
+            .expect("canceled response");
+        assert!(!canceled.ok);
+        assert_eq!(
+            canceled.error.as_deref(),
+            Some("live frame capture canceled")
+        );
+
+        let replacement = client.clone();
+        client
+            .submit(LiveRequest::new(43, LiveCommand::Status))
+            .expect("reserve disconnected request");
+        let disconnected_wire = workspace.server.drain(1).pop().expect("wire request");
+        install_capture_result(
+            &mut workspace,
+            disconnected_wire.request_id,
+            root.join("disconnected.png"),
+            false,
+            Err("worker stopped".to_string()),
+        );
+        drop(client);
+        assert!(workspace.finish_capture_preparation(10).is_none());
+        assert!(workspace.capture_preparation.is_none());
+        assert!(replacement
+            .try_receive()
+            .expect("replacement mailbox")
+            .is_none());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -3656,6 +4107,7 @@ mod tests {
 
     #[test]
     fn test_symbol_default_scope_uses_all_known_test_files() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("tests/secondary.test.stasis"),
@@ -3692,6 +4144,7 @@ mod tests {
 
     #[test]
     fn live_edit_batch_plans_all_symbols_as_one_transaction() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
         let (after, plan) = plan_live_edit_batch(
@@ -3737,6 +4190,7 @@ mod tests {
 
     #[test]
     fn compile_candidate_does_not_reload_imports_under_a_second_path() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -3841,6 +4295,7 @@ mod tests {
 
     #[test]
     fn live_commit_advances_from_external_watch_host_revision() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let initial_revision = stasis_dynload::jit_host_entry_targets()
@@ -3883,6 +4338,7 @@ mod tests {
 
     #[test]
     fn scalar_transactions_preview_and_commit_atomically() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (jit, _) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -3897,6 +4353,7 @@ mod tests {
 
     #[test]
     fn default_state_inspection_is_bounded_and_typed() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (jit, _) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -3911,6 +4368,7 @@ mod tests {
 
     #[test]
     fn state_inspection_includes_bounded_collection_rows() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -3984,6 +4442,7 @@ mod tests {
 
     #[test]
     fn staged_tests_include_recursive_project_local_test_imports() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("stasis.json"),
@@ -4099,6 +4558,7 @@ mod tests {
 
     #[test]
     fn live_runtime_candidate_excludes_test_only_symbols() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -4123,6 +4583,7 @@ mod tests {
 
     #[test]
     fn reference_request_returns_compact_containing_symbols() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -4161,6 +4622,7 @@ mod tests {
 
     #[test]
     fn rename_preview_is_compiler_validated_and_does_not_write_sources() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let source_path = root.join("src/main.stasis");
         let before = fs::read_to_string(&source_path).expect("source before preview");
@@ -4210,6 +4672,7 @@ mod tests {
 
     #[test]
     fn tui_quick_fix_preview_uses_structured_language_service_actions() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let source_path = root.join("src/main.stasis");
         let before = fs::read_to_string(&source_path).expect("source before quick fix");
@@ -4253,6 +4716,7 @@ mod tests {
 
     #[test]
     fn tui_language_queries_share_persistent_service_and_live_hover() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let source_path = root.join("src/main.stasis");
         let source = fs::read_to_string(&source_path)
@@ -4399,6 +4863,7 @@ mod tests {
 
     #[test]
     fn symbol_search_is_filtered_compact_and_hash_free() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -4539,6 +5004,7 @@ mod tests {
 
     #[test]
     fn validation_snapshot_restores_the_same_runtime_baseline() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -4605,6 +5071,7 @@ mod tests {
 
     #[test]
     fn validation_reinitialize_runs_current_main_and_startup_tick_before_snapshot() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -4665,6 +5132,7 @@ mod tests {
 
     #[test]
     fn human_runtime_validation_restores_live_state_after_frames() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -4717,6 +5185,7 @@ mod tests {
 
     #[test]
     fn pause_step_and_expression_watch_events_are_boundary_exact() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -4808,6 +5277,7 @@ mod tests {
 
     #[test]
     fn hidden_live_view_stops_snapshot_and_watch_polling() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -4927,6 +5397,7 @@ mod tests {
 
     #[test]
     fn expression_watch_reports_and_deduplicates_evaluation_errors() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -4987,6 +5458,7 @@ mod tests {
 
     #[test]
     fn predicate_watches_share_one_per_tick_scan_budget() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5024,6 +5496,7 @@ mod tests {
 
     #[test]
     fn code_aware_edit_preview_apply_and_undo_preserve_runtime_and_disk() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5101,6 +5574,7 @@ mod tests {
 
     #[test]
     fn live_batch_can_add_and_call_a_helper_after_hot_swap() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5160,6 +5634,7 @@ mod tests {
 
     #[test]
     fn layout_hot_swap_keeps_validation_restore_and_new_helper_calls_safe() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5329,6 +5804,7 @@ mod tests {
 
     #[test]
     fn layout_edit_previews_then_preserves_state_and_initializes_new_field() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5403,6 +5879,7 @@ mod tests {
 
     #[test]
     fn collection_capacity_shrink_warns_and_copies_only_retained_elements() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let sample = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -5483,6 +5960,7 @@ mod tests {
 
     #[test]
     fn collection_capacity_growth_preserves_prefix_and_initializes_tail() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5560,6 +6038,7 @@ mod tests {
 
     #[test]
     fn collection_growth_preview_rejects_host_owned_storage() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5614,6 +6093,7 @@ mod tests {
 
     #[test]
     fn collection_growth_preview_rejects_unbounded_allocation() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5660,6 +6140,7 @@ mod tests {
 
     #[test]
     fn new_collection_commit_allocates_and_initializes_storage() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5724,6 +6205,7 @@ mod tests {
 
     #[test]
     fn new_collection_preview_rejects_unbounded_allocation() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5770,6 +6252,7 @@ mod tests {
 
     #[test]
     fn text_capacity_shrink_copies_bytes_and_clamps_lengths() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5896,6 +6379,7 @@ mod tests {
 
     #[test]
     fn hook_rejection_rolls_back_hook_mutation_code_and_disk() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5962,6 +6446,7 @@ mod tests {
 
     #[test]
     fn hook_rejection_after_growth_restores_old_collection_registration() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6030,6 +6515,7 @@ mod tests {
 
     #[test]
     fn incompatible_state_type_preview_cannot_commit() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6095,6 +6581,7 @@ mod tests {
 
     #[test]
     fn code_aware_add_delete_refreshes_completion_and_rejects_stale_hash() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -6217,6 +6704,7 @@ mod tests {
 
     #[test]
     fn dirty_unbalanced_definition_overlay_completes_new_typed_local() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (jit, _) = compile(&config);
         let (_, server) = stasis_runner::live::live_session(8);
@@ -6241,6 +6729,7 @@ mod tests {
 
     #[test]
     fn dirty_document_overlay_infers_scope_and_completes_new_local() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (jit, _) = compile(&config);
         let (_, server) = stasis_runner::live::live_session(8);
@@ -6281,6 +6770,7 @@ mod tests {
 
     #[test]
     fn static_type_fields_are_hidden_at_root_and_available_while_editing() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6339,6 +6829,7 @@ mod tests {
 
     #[test]
     fn dirty_overlay_removes_deleted_locals_from_the_accepted_catalog() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let path = root.join("src/main.stasis");
         let source = fs::read_to_string(&path).expect("source").replace(
@@ -6369,6 +6860,7 @@ mod tests {
 
     #[test]
     fn dirty_overlay_keeps_scope_identity_when_a_parameter_is_renamed() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let path = root.join("src/main.stasis");
         let mut source = fs::read_to_string(&path).expect("source");
@@ -6398,6 +6890,7 @@ mod tests {
 
     #[test]
     fn completion_analysis_returns_preparing_before_the_background_result() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -6449,6 +6942,7 @@ mod tests {
 
     #[test]
     fn watch_paths_are_bounded() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -6478,6 +6972,7 @@ mod tests {
 
     #[test]
     fn large_palette_query_stays_bounded_and_completes_in_one_graphics_boundary() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(4);
@@ -6552,6 +7047,7 @@ mod tests {
 
     #[test]
     fn receipt_failure_rolls_back_disk_dispatch_and_state() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, mut config) = project();
         config.output = PathBuf::from("receipt-blocker");
         fs::write(root.join("receipt-blocker"), "not a directory").expect("block receipt");
@@ -6600,6 +7096,7 @@ mod tests {
 
     #[test]
     fn compiler_failure_leaves_disk_dispatch_and_state_unchanged() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -6644,6 +7141,7 @@ mod tests {
 
     #[test]
     fn cached_browse_disambiguates_same_name_overloads_and_completion_keeps_both() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/overloads.stasis"),
@@ -6692,6 +7190,7 @@ mod tests {
 
     #[test]
     fn background_edit_preparation_keeps_status_responsive() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -6760,6 +7259,7 @@ mod tests {
 
     #[test]
     fn queued_cancel_wins_over_a_ready_background_commit() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let before = fs::read_to_string(root.join("src/main.stasis")).expect("before");
         let prepared = prepared_tick_edit(&config, 50);
@@ -6812,6 +7312,7 @@ mod tests {
 
     #[test]
     fn sustained_request_refill_keeps_internal_backlog_bounded() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(MAX_PENDING_LIVE_REQUESTS);
@@ -6843,6 +7344,7 @@ mod tests {
 
     #[test]
     fn unrelated_source_change_rejects_a_ready_background_commit() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let before = fs::read_to_string(root.join("src/main.stasis")).expect("before");
         let prepared = prepared_tick_edit(&config, 60);
@@ -6878,6 +7380,7 @@ mod tests {
 
     #[test]
     fn cancellation_in_same_boundary_prevents_command_execution() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(4);
@@ -6906,6 +7409,7 @@ mod tests {
 
     #[test]
     fn quit_cancels_and_joins_background_preparation() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(4);
@@ -6942,6 +7446,7 @@ mod tests {
 
     #[test]
     fn failing_live_edit_tests_restore_source_dispatch_and_state() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("tests/main.test.stasis"),

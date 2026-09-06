@@ -1,5 +1,5 @@
-// Optional browser guest mailbox. Pairing and resume credentials stay in the
-// web adapter; semantic game frames contain no credential material.
+// Optional browser/native guest mailbox. Pairing and resume credentials stay
+// in the platform adapter; semantic frames contain no credential material.
 const NETWORK_CLIENT_MAX_MESSAGE_BYTES: i32 = 65536;
 
 function @internal @extern("stasis_web_network_supported") network_client_supported_raw(): i32;

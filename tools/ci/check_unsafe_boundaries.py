@@ -16,6 +16,9 @@ ALLOWED_PREFIXES = (
     "mobile/android/codex_native/src/",
 )
 ALLOWED_FILES = {
+    "crates/stasis_network/src/lib.rs",
+    "crates/stasis_network/src/client.rs",
+    "crates/stasis_network/tests/realtime_controls.rs",
     "apps/stasis/tests/desktop_asset_load_stress.rs",
     "apps/stasis/tests/desktop_display_metrics_seam.rs",
     "apps/stasis/tests/desktop_input_frame_seam.rs",

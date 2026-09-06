@@ -38,7 +38,6 @@ const HEARTBEAT_NAME: &str = "heartbeat.json";
 const QUALITY_BAR_NAME: &str = "quality-bar.json";
 const CREATIVE_DIRECTION_NAME: &str = "creative-direction.md";
 const PROJECT_CREATIVE_DIRECTION_NAME: &str = "CREATIVE_DIRECTION.md";
-const MAX_CAPTURE_WAIT: Duration = Duration::from_secs(10);
 const MAX_LIVE_REQUEST_WAIT: Duration = Duration::from_secs(30);
 const FINAL_ACCEPTANCES: u32 = 2;
 const MAX_MEMORY_RECORDS: usize = 48;
@@ -2485,7 +2484,7 @@ fn capture_frame(
         },
         "_",
     );
-    let scheduled = request_live(
+    let completed = request_live(
         client,
         *request_id,
         LiveCommand::CaptureFrame {
@@ -2493,49 +2492,40 @@ fn capture_frame(
         },
     )?;
     *request_id = request_id.saturating_add(1);
-    let runtime_path = scheduled
+    if completed.kind != "capture_completed" {
+        return Err(format!(
+            "expected completed capture, received {}",
+            completed.kind
+        ));
+    }
+    let runtime_path = completed
         .data
         .as_ref()
         .and_then(|data| data.get("path"))
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .ok_or_else(|| "live runtime did not return a screenshot path".to_string())?;
-    request_live(client, *request_id, LiveCommand::Step { ticks: 1 })?;
-    *request_id = request_id.saturating_add(1);
-    let deadline = Instant::now() + MAX_CAPTURE_WAIT;
-    while Instant::now() < deadline {
-        if runtime_path.is_file()
-            && fs::metadata(&runtime_path).is_ok_and(|metadata| metadata.len() > 0)
-        {
-            let destination = artifacts.join("artifacts").join(id).join("frame.png");
-            let parent = destination
-                .parent()
-                .ok_or_else(|| "Gauntlet capture destination has no parent".to_string())?;
-            fs::create_dir_all(parent).map_err(|error| {
-                format!("failed creating candidate artifact directory: {error}")
-            })?;
-            fs::copy(&runtime_path, &destination)
-                .map_err(|error| format!("failed retaining runtime capture: {error}"))?;
-            let bytes = fs::read(&destination)
-                .map_err(|error| format!("failed hashing capture: {error}"))?;
-            emit_event(
-                artifacts,
-                "frame_captured",
-                json!({
-                    "candidate": id,
-                    "path": destination,
-                    "sha256": hex_sha256(&bytes),
-                    "project_root": project_root,
-                }),
-            )?;
-            return Ok(destination);
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    Err(format!(
-        "runtime capture did not appear at {}",
-        runtime_path.display()
-    ))
+    let destination = artifacts.join("artifacts").join(id).join("frame.png");
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Gauntlet capture destination has no parent".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed creating candidate artifact directory: {error}"))?;
+    fs::copy(&runtime_path, &destination)
+        .map_err(|error| format!("failed retaining runtime capture: {error}"))?;
+    let bytes =
+        fs::read(&destination).map_err(|error| format!("failed hashing capture: {error}"))?;
+    emit_event(
+        artifacts,
+        "frame_captured",
+        json!({
+            "candidate": id,
+            "path": destination,
+            "sha256": hex_sha256(&bytes),
+            "project_root": project_root,
+        }),
+    )?;
+    Ok(destination)
 }
 
 fn request_live(
@@ -3786,6 +3776,71 @@ fn visual_critic_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_capture_preserves_the_inspected_simulation_tick() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "gauntlet-capture-{}-{}",
+                std::process::id(),
+                unix_ms()
+            ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("runtime.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([7, 0, 0, 255]))
+            .save(&source)
+            .unwrap();
+        let (client, server) = live_session(8);
+        let runtime = thread::spawn(move || {
+            let mut tick = 7;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                for request in server.drain(8) {
+                    let (kind, data) = match request.command {
+                        LiveCommand::CaptureFrame { .. } => (
+                            "capture_completed",
+                            json!({"path": source, "captured_tick": tick}),
+                        ),
+                        LiveCommand::Step { ticks } => {
+                            tick += u64::from(ticks);
+                            ("step_scheduled", json!({}))
+                        }
+                        LiveCommand::InspectAll { .. } => ("inspection", json!({"tick": tick})),
+                        command => panic!("unexpected capture command: {command:?}"),
+                    };
+                    server
+                        .respond(LiveResponse::success(request.request_id, tick, kind, data))
+                        .unwrap();
+                    if kind == "inspection" {
+                        return;
+                    }
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            panic!("capture did not reach inspection within deadline");
+        });
+        let mut request_id = 41;
+        let retained = capture_frame(&client, &root, &root, "action", &mut request_id).unwrap();
+        let inspection = request_live(
+            &client,
+            request_id,
+            LiveCommand::InspectAll {
+                limit: 64,
+                concise: true,
+                every_ticks: None,
+            },
+        )
+        .unwrap();
+        runtime.join().unwrap();
+        let pixel_tick = u64::from(image::open(retained).unwrap().to_rgba8().get_pixel(0, 0)[0]);
+        fs::remove_dir_all(&root).ok();
+        assert_eq!(
+            inspection.tick, pixel_tick,
+            "capture must not advance simulation before inspection"
+        );
+        assert_eq!(request_id, 42, "capture consumes only its own request ID");
+    }
 
     #[test]
     fn candidate_rollback_resyncs_prepared_manifest_without_deleting_live_cache() {
