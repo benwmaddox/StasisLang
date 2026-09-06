@@ -600,20 +600,23 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     );
     assert_eq!(
         fs::read(project.join(".gitignore")).expect("read generated Git ignore"),
-        b"/vendor/stasis/docs/\n"
+        b"# Track vendor/stasis/stdlib and vendor/stasis/docs together.\n"
     );
-    assert!(git(
-        &[
-            "check-ignore",
-            "--quiet",
-            "--no-index",
-            "--",
-            "vendor/stasis/docs/README.md",
-        ],
-        &project
-    )
-    .status
-    .success());
+    assert_eq!(
+        git(
+            &[
+                "check-ignore",
+                "--quiet",
+                "--no-index",
+                "--",
+                "vendor/stasis/docs/README.md",
+            ],
+            &project
+        )
+        .status
+        .code(),
+        Some(1)
+    );
     assert!(!git(
         &[
             "check-ignore",
