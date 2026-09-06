@@ -475,7 +475,7 @@ impl TaskController {
         if task.connection != ConnectionState::Connected {
             task.reconnect()?;
         }
-        let request_id = self.resubmit(task_id, false)?;
+        let request_id = self.resubmit(task_id, false, None)?;
         update_screenshots(
             &mut task,
             &self.requested_screenshots(task_id),
@@ -530,7 +530,7 @@ impl TaskController {
     ) -> Result<RequestId, TaskControllerError> {
         let mut task = session.task(task_id)?.clone();
         task.reconnect()?;
-        let request_id = self.resubmit(task_id, true)?;
+        let request_id = self.resubmit(task_id, true, task.selected_provider)?;
         update_screenshots(
             &mut task,
             &self.requested_screenshots(task_id),
@@ -547,6 +547,7 @@ impl TaskController {
         &self,
         task_id: &TaskId,
         replace_running: bool,
+        provider: Option<crate::task_session::ProviderSelection>,
     ) -> Result<RequestId, TaskControllerError> {
         let key = (self.client_id, task_id.clone());
         let mut state = lock(&self.state);
@@ -565,6 +566,9 @@ impl TaskController {
         let request_id = RequestId(self.next_request_id.fetch_add(1, Ordering::Relaxed));
         let mut request = prior.request;
         request.request_id = request_id;
+        if let Some(provider) = provider {
+            request.selected_provider = Some(provider);
+        }
         let canceled = Arc::new(AtomicBool::new(false));
         let admitted = Arc::new(AtomicBool::new(true));
         let started_at = Instant::now();
@@ -1004,6 +1008,43 @@ mod tests {
         }
         assert_eq!(snapshots[&TaskId::new("one")], Some(first));
         assert_eq!(snapshots[&TaskId::new("two")], Some(second));
+    }
+
+    #[test]
+    fn reconnect_uses_new_provider_after_failure_without_changing_prior_payload() {
+        use crate::task_session::ProviderSelection;
+        let (sent, received) = mpsc::channel();
+        let controller = TaskController::new(move |request, _| {
+            sent.send(request.clone()).unwrap();
+            Err("provider unavailable".into())
+        });
+        let mut session = session(&["one"]);
+        let id = TaskId::new("one");
+        session
+            .task_mut(&id)
+            .unwrap()
+            .select_provider(ProviderSelection::Codex)
+            .unwrap();
+        controller.send(&session, &id).unwrap();
+        wait_for(&controller, &mut session);
+        let prior = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            session.task(&id).unwrap().connection,
+            ConnectionState::Disconnected
+        );
+        session
+            .task_mut(&id)
+            .unwrap()
+            .select_provider(ProviderSelection::OpenRouter)
+            .unwrap();
+        controller.reconnect(&mut session, &id).unwrap();
+        wait_for(&controller, &mut session);
+        let next = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(next.selected_provider, Some(ProviderSelection::OpenRouter));
+        assert_eq!(prior.selected_provider, Some(ProviderSelection::Codex));
+        assert_ne!(next.request_id, prior.request_id);
+        assert_eq!(next.context, prior.context);
+        assert_eq!(next.task_id, prior.task_id);
     }
 
     #[test]

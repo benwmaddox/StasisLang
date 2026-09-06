@@ -252,10 +252,116 @@ fn provider_request_disables_new_work_only_on_its_own_task() {
     let size = egui::vec2(1100.0, 900.0);
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    assert_eq!(text_rects(&output, "Cancel request").len(), 1);
+    assert_eq!(text_rects(&output, "Cancel task").len(), 1);
     assert!(text_rects(&output, "Send to AI").is_empty());
     editor.state.objective = "Independent task".into();
     editor.state.create_task().unwrap();
     assert!(!editor.ui_busy(editor.state.session.active_task().unwrap()));
     release.send(()).unwrap();
+}
+
+#[test]
+fn cancel_requires_confirmation_and_keeps_originating_task_identity() {
+    let mut editor = editor();
+    let context = egui::Context::default();
+    let size = egui::vec2(1100.0, 900.0);
+    editor.state.handle(TaskSessionCommand::Cancel).unwrap();
+    editor.flush_intents();
+    assert_eq!(
+        editor.state.session.active_task().unwrap().lifecycle,
+        TaskLifecycle::Active
+    );
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+    click(
+        &mut editor,
+        &context,
+        size,
+        text_rects(&output, "Keep task open")[0].center(),
+    );
+    assert!(editor.state.cancel_confirmation.is_none());
+    assert_eq!(
+        editor.state.session.active_task().unwrap().lifecycle,
+        TaskLifecycle::Active
+    );
+    editor.state.handle(TaskSessionCommand::Cancel).unwrap();
+    editor.state.objective = "Another task".into();
+    editor.state.create_task().unwrap();
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+    click(
+        &mut editor,
+        &context,
+        size,
+        text_rects(&output, "Permanently cancel task")[0].center(),
+    );
+    assert_eq!(
+        editor.state.session.task("task-1").unwrap().lifecycle,
+        TaskLifecycle::Canceled
+    );
+    assert_eq!(
+        editor.state.session.active_task().unwrap().lifecycle,
+        TaskLifecycle::Active
+    );
+}
+
+#[test]
+fn unavailable_image_intents_settle_once_without_importing_assets() {
+    let mut editor = editor();
+    editor
+        .state
+        .session
+        .add_generated_image(
+            "image",
+            "missing.png",
+            stasis_ai::task_session::ImageAttribution::new("fixture", None, None).unwrap(),
+        )
+        .unwrap();
+    editor
+        .state
+        .session
+        .approve_generated_image("image")
+        .unwrap();
+    editor
+        .state
+        .intents
+        .push(EditorIntent::GenerateImage("task-1".into()));
+    editor
+        .state
+        .intents
+        .push(EditorIntent::ImportImage("task-1".into(), "image".into()));
+    editor.flush_intents();
+    assert!(editor.state.intents.is_empty());
+    assert!(editor
+        .state
+        .notice
+        .as_deref()
+        .unwrap()
+        .contains("unavailable"));
+    let before = editor.state.session.clone();
+    editor.flush_intents();
+    assert_eq!(editor.state.session, before);
+    assert_eq!(
+        editor.state.session.active_task().unwrap().generated_images["image"].handoff,
+        ImageHandoffState::Pending
+    );
+}
+
+#[test]
+fn disconnected_task_can_open_provider_menu() {
+    let mut editor = editor();
+    editor.state.session.disconnect().unwrap();
+    let context = egui::Context::default();
+    let size = egui::vec2(1100.0, 900.0);
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+    let label = "Provider: Provider pending / model pending  v";
+    click(
+        &mut editor,
+        &context,
+        size,
+        text_rects(&output, label)[0].center(),
+    );
+    let output = frame(&mut editor, &context, size, vec![]);
+    assert_eq!(text_rects(&output, "Codex subscription").len(), 1);
 }

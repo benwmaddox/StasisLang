@@ -870,7 +870,6 @@ impl DesktopEditor {
 
     fn flush_intents(&mut self) {
         let intents = std::mem::take(&mut self.state.intents);
-        let mut pending = Vec::with_capacity(intents.len());
         for intent in intents {
             match intent {
                 EditorIntent::SendReply(task, text) => {
@@ -1049,11 +1048,16 @@ impl DesktopEditor {
                         Err(error) => self.state.notice = Some(error),
                     }
                 }
+                EditorIntent::GenerateImage(task) | EditorIntent::ImportImage(task, _) => {
+                    let message = "Image generation and asset import are unavailable in the desktop editor. No asset was generated or imported.";
+                    if let Ok(task) = self.state.session.task_mut(task.as_str()) {
+                        let _ = task.append_host_result(message);
+                    }
+                    self.state.notice = Some(message.into());
+                }
                 EditorIntent::Screenshot(task) => self.start_capture(TaskId::new(task)),
-                intent => pending.push(intent),
             }
         }
-        self.state.intents = pending;
     }
 
     fn start_capture(&mut self, task_id: TaskId) {
@@ -1761,6 +1765,7 @@ struct EditorState {
     intents: Vec<EditorIntent>,
     notice: Option<String>,
     preview: Option<ScreenshotPreview>,
+    cancel_confirmation: Option<String>,
 }
 
 impl Default for EditorState {
@@ -1781,6 +1786,7 @@ impl Default for EditorState {
             intents: Vec::new(),
             notice: None,
             preview: None,
+            cancel_confirmation: None,
         }
     }
 }
@@ -1820,7 +1826,7 @@ impl EditorState {
         }
         if busy {
             return PrimaryAction {
-                label: "Cancel request",
+                label: "Cancel task",
                 command: TaskSessionCommand::Cancel,
                 enabled: true,
                 disabled_reason: None,
@@ -2120,7 +2126,7 @@ impl EditorState {
             }
             TaskSessionCommand::Cancel => {
                 let task = self.active_id()?;
-                self.intents.push(EditorIntent::Cancel(task));
+                self.cancel_confirmation = Some(task);
                 Ok(())
             }
             TaskSessionCommand::Reconnect => {
@@ -2262,7 +2268,6 @@ impl DesktopEditor {
                     };
                     let model = task.provider.model.as_deref().unwrap_or("model pending");
                     let provider_mutable = task.lifecycle == TaskLifecycle::Active
-                        && task.connection == ConnectionState::Connected
                         && !self.ui_busy(task);
                     ui.add_enabled_ui(provider_mutable, |ui| {
                         ui.menu_button(format!("Provider: {provider_label} / {model}  v"), |ui| {
@@ -2712,7 +2717,12 @@ impl DesktopEditor {
                                     matches!(image.review, ImageReviewState::Approved)
                                         && matches!(image.handoff, ImageHandoffState::Pending)
                                 })
-                                && ui.button("Import asset").clicked()
+                                && ui
+                                    .add_enabled(false, egui::Button::new("Import asset"))
+                                    .on_disabled_hover_text(
+                                        "Asset import is unavailable in the desktop editor.",
+                                    )
+                                    .clicked()
                             {
                                 command = Some(TimelineAction::Import(
                                     task.id.to_string(),
@@ -2888,7 +2898,7 @@ impl DesktopEditor {
                 if ui.add_enabled(interactive, egui::Button::new("Attach frame")).on_hover_text(if interactive { "Capture a verified frame from the running native game" } else { "Attachments are unavailable while this task is closed, disconnected, or busy." }).clicked() {
                     self.state.dispatch(TaskSessionCommand::AttachScreenshot);
                 }
-                if ui.add_enabled(interactive, egui::Button::new("Generate image")).on_hover_text(if interactive { "Generate a task-scoped image for review" } else { "Image generation is unavailable while this task is closed, disconnected, or busy." }).clicked() {
+                if ui.add_enabled(false, egui::Button::new("Generate image")).on_disabled_hover_text("Image generation is unavailable in the desktop editor.").clicked() {
                     self.state.dispatch(TaskSessionCommand::GenerateImage);
                 }
                 ui.label(RichText::new("Ctrl+Enter sends").size(10.0).color(muted_text()));
@@ -3161,7 +3171,33 @@ impl DesktopEditor {
                     });
             }
         }
+        self.cancel_confirmation(context);
         self.flush_intents();
+    }
+
+    fn cancel_confirmation(&mut self, context: &egui::Context) {
+        let Some(task_id) = self.state.cancel_confirmation.clone() else {
+            return;
+        };
+        egui::Window::new("Cancel task?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                let objective = self.state.session.task(task_id.as_str())
+                    .map(|task| task.objective.as_str()).unwrap_or(&task_id);
+                ui.label(format!("Cancel {objective}?"));
+                ui.label("This stops its work and permanently closes the task. You cannot continue it afterward.");
+                ui.horizontal(|ui| {
+                    if ui.button("Keep task open").clicked() {
+                        self.state.cancel_confirmation = None;
+                    }
+                    if ui.button("Permanently cancel task").clicked() {
+                        self.state.intents.push(EditorIntent::Cancel(task_id.clone()));
+                        self.state.cancel_confirmation = None;
+                    }
+                });
+            });
     }
 }
 
@@ -3634,10 +3670,11 @@ mod tests {
         state.objective = "Cancelable task".into();
         state.create_task().unwrap();
         state.handle(TaskSessionCommand::Cancel).unwrap();
-        assert!(matches!(
-            state.intents.last(),
-            Some(EditorIntent::Cancel(task)) if task == "task-2"
-        ));
+        assert_eq!(state.cancel_confirmation.as_deref(), Some("task-2"));
+        assert_eq!(
+            state.session.active_task().unwrap().lifecycle,
+            TaskLifecycle::Active
+        );
     }
 
     #[test]

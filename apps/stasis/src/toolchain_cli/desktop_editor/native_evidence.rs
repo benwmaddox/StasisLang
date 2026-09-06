@@ -107,6 +107,9 @@ fn capture_native_task_timeline() {
         },
     });
     editor.state.focus = FocusArea::Game;
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_CANCEL").is_some() {
+        editor.state.handle(TaskSessionCommand::Cancel).unwrap();
+    }
 
     struct CaptureApp {
         editor: DesktopEditor,

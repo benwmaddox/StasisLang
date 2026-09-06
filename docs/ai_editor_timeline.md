@@ -81,3 +81,34 @@ Theory gained: chronological state belongs to the task, while commands require
 the current task/entity identity and current execution state. Pointer tests that
 accept a proposal whose ID sorts after a later proposal demonstrate this
 distinction; the same rule applies to generated-asset review and future cards.
+
+
+## Review corrections
+
+The busy primary action says `Cancel task` and opens a confirmation identifying
+its original task. `Keep task open` dismisses it without stopping work;
+`Permanently cancel task` uses the existing task cancellation path. Task switching
+does not redirect a pending confirmation.
+
+Image generation and import are explicitly unavailable in this desktop shell.
+Their buttons are disabled with explanatory tooltips, and command-palette intents
+settle once with a task-owned host diagnostic. They never claim generation or
+import, and approved assets retain their pending handoff state.
+
+Active, idle tasks allow provider selection while disconnected. Reconnect keeps
+the previous request payload and task identity but snapshots the newly selected
+provider under a new request ID. Ordinary retry keeps its original provider.
+
+To capture the cancellation prompt, set `STASIS_EDITOR_EVIDENCE_CANCEL=1` with
+the existing native evidence command. The capture uses fixture state.
+
+
+Review validation: 76 AI library tests and 48 desktop tests passed through
+`tools/cargo_cache.py`; formatting and diff checks passed. No test processes
+remained. Optional certificate signing failed, but test executables ran.
+
+Visual evidence: [cancel-confirmation.png](evidence/ai-editor/task519/cancel-confirmation.png)
+was captured from the native renderer and inspected. It shows the task-specific
+warning, both confirmation choices, and disabled generation control without
+clipping. Interaction assertions cover dismissal and confirmation after switching
+tasks. No MP4 of that interaction was captured.
