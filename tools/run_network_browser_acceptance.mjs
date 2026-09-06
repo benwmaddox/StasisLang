@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { encodeVideo } from "./network_browser_video.mjs";
 
 class Cdp {
   constructor(url) {
@@ -113,7 +114,7 @@ try {
   assert.equal(visibleText.includes(SECRET), false, "visible browser content contains pairing secret");
   assert.doesNotMatch(visibleText, /stasis-resume-v1\.[0-9a-f]{32}/i, "visible browser content contains resume credential");
   await writeFile(path.join(evidenceRoot, "browser.png"), screenshotBytes);
-  await encodeVideo();
+  await encodeVideo(evidenceRoot);
   await send(cdp, { kind: "acceptance_complete" });
 
   const hostResult = await waitForExit(host, 10_000);
@@ -242,25 +243,6 @@ async function captureStage(cdp, label) {
   const capture = await cdp.call("Page.captureScreenshot", { format: "png" });
   frame += 1;
   await writeFile(path.join(evidenceRoot, `frame-${String(frame).padStart(2, "0")}.png`), Buffer.from(capture.data, "base64"));
-}
-
-async function encodeVideo() {
-  const ffmpeg = process.env.STASIS_FFMPEG_EXECUTABLE || "ffmpeg";
-  const result = await run(ffmpeg, [
-    "-y", "-framerate", "1", "-i", path.join(evidenceRoot, "frame-%02d.png"),
-    "-c:v", "libx264", "-pix_fmt", "yuv420p", path.join(evidenceRoot, "browser.mp4"),
-  ]);
-  assert.equal(result.code, 0, `ffmpeg failed to encode acceptance evidence: ${result.stderr}`);
-}
-
-function run(executable, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    child.stderr.on("data", chunk => { stderr += chunk; });
-    child.once("error", reject);
-    child.once("exit", code => resolve({ code, stderr }));
-  });
 }
 
 async function terminate(child) {

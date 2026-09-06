@@ -53,6 +53,9 @@ jobs:
             choco install ffmpeg -y --no-progress
           }
           Get-Command ffmpeg -ErrorAction Stop
+      - name: Test browser video encoding dimensions
+        shell: pwsh
+        run: node --test tools/ci/network_browser_video.test.mjs
       - name: Run real browser protocol acceptance
         shell: pwsh
         env:
