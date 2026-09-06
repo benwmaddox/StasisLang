@@ -22,6 +22,7 @@ pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_desktop_network;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use compiler_backend::sign_output_artifact_if_configured;
+pub use compiler_backend::DesktopNetworkMode;
 pub use events::RunnerEvent;
 pub use live_workspace::{run_project_tests_bounded, LiveRunConfig};
 pub use mobile_aot_bindings::{

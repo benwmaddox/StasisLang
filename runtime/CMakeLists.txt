@@ -43,6 +43,7 @@ set(STASIS_MONOLITH_OUTPUT_DIR "" CACHE PATH "Production executable output direc
 set(STASIS_MONOLITH_OUTPUT_NAME "stasis_game" CACHE STRING "Production executable file name")
 set(STASIS_MONOLITH_NETWORK_LIBRARY "" CACHE FILEPATH "stasis_network static library")
 set(STASIS_MONOLITH_NETWORK_INCLUDE_DIR "" CACHE PATH "stasis_network header directory")
+set(STASIS_MONOLITH_NETWORK_MODE "" CACHE STRING "stasis_network mode: host or client")
 option(
     STASIS_BUILD_MOBILE_RUNTIME
     "Build the shared SDL renderer mobile runtime core"
@@ -282,8 +283,15 @@ if(STASIS_BUILD_MONOLITH)
            NOT EXISTS "${STASIS_MONOLITH_NETWORK_INCLUDE_DIR}/stasis_network.h")
             message(FATAL_ERROR "STASIS_MONOLITH_NETWORK_INCLUDE_DIR must contain stasis_network.h")
         endif()
-        target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_ENABLED=1)
-        target_compile_definitions(stasis_monolith PRIVATE STASIS_NETWORK_ENABLED=1)
+        if(STASIS_MONOLITH_NETWORK_MODE STREQUAL "host")
+            target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_ENABLED=1)
+            target_compile_definitions(stasis_monolith PRIVATE STASIS_NETWORK_ENABLED=1)
+        elseif(STASIS_MONOLITH_NETWORK_MODE STREQUAL "client")
+            target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)
+            target_compile_definitions(stasis_monolith PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)
+        else()
+            message(FATAL_ERROR "STASIS_MONOLITH_NETWORK_MODE must be host or client when native networking is linked")
+        endif()
         target_include_directories(stasis_mobile_runtime PRIVATE "${STASIS_MONOLITH_NETWORK_INCLUDE_DIR}")
         target_include_directories(stasis_monolith PRIVATE "${STASIS_MONOLITH_NETWORK_INCLUDE_DIR}")
         target_link_libraries(stasis_monolith PRIVATE "${STASIS_MONOLITH_NETWORK_LIBRARY}")
@@ -445,7 +453,11 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     set_property(TARGET stasis_mobile_runtime_network_test PROPERTY C_STANDARD 11)
     set_property(TARGET stasis_mobile_runtime_network_test PROPERTY C_STANDARD_REQUIRED ON)
     target_compile_definitions(stasis_mobile_runtime_network_test PRIVATE STASIS_NETWORK_ENABLED=1)
-    target_include_directories(stasis_mobile_runtime_network_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_include_directories(
+        stasis_mobile_runtime_network_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../crates/stasis_network/include"
+    )
     if(MSVC)
         target_compile_options(stasis_mobile_runtime_network_test PRIVATE /experimental:c11atomics)
     endif()
@@ -482,6 +494,29 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         target_link_libraries(stasis_mobile_aot_runtime_test PRIVATE m)
     endif()
     add_test(NAME stasis_mobile_aot_runtime_contract COMMAND stasis_mobile_aot_runtime_test)
+    add_executable(
+        stasis_mobile_aot_runtime_client_test
+        tests/stasis_mobile_aot_runtime_test.c
+        stasis_mobile_aot_runtime.c
+        stasis_platform_services.c
+    )
+    set_property(TARGET stasis_mobile_aot_runtime_client_test PROPERTY C_STANDARD 11)
+    set_property(TARGET stasis_mobile_aot_runtime_client_test PROPERTY C_STANDARD_REQUIRED ON)
+    target_compile_definitions(
+        stasis_mobile_aot_runtime_client_test PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)
+    target_include_directories(
+        stasis_mobile_aot_runtime_client_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../crates/stasis_network/include"
+    )
+    if(MSVC)
+        target_compile_options(stasis_mobile_aot_runtime_client_test PRIVATE /experimental:c11atomics)
+    else()
+        target_link_libraries(stasis_mobile_aot_runtime_client_test PRIVATE m)
+    endif()
+    add_test(
+        NAME stasis_mobile_aot_runtime_client_contract
+        COMMAND stasis_mobile_aot_runtime_client_test)
     add_executable(
         stasis_platform_services_test
         tests/stasis_platform_services_test.c

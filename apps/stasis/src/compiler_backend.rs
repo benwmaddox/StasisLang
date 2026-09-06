@@ -326,6 +326,23 @@ pub struct SelfHostedAotCliOptions {
 struct DesktopNetworkLink {
     library: PathBuf,
     include_dir: PathBuf,
+    mode: DesktopNetworkMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopNetworkMode {
+    Host,
+    Client,
+}
+
+#[cfg(windows)]
+impl DesktopNetworkMode {
+    fn cmake_value(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Client => "client",
+        }
+    }
 }
 
 impl SelfHostedAotCliOptions {
@@ -337,10 +354,16 @@ impl SelfHostedAotCliOptions {
         }
     }
 
-    fn with_desktop_network(mut self, library: PathBuf, include_dir: PathBuf) -> Self {
+    fn with_desktop_network(
+        mut self,
+        library: PathBuf,
+        include_dir: PathBuf,
+        mode: DesktopNetworkMode,
+    ) -> Self {
         self.desktop_network = Some(DesktopNetworkLink {
             library,
             include_dir,
+            mode,
         });
         self
     }
@@ -3581,6 +3604,10 @@ fn monolith_configure_arguments(
             "-DSTASIS_MONOLITH_NETWORK_INCLUDE_DIR={}",
             cmake_path(&network.include_dir)
         ));
+        arguments.push(format!(
+            "-DSTASIS_MONOLITH_NETWORK_MODE={}",
+            network.mode.cmake_value()
+        ));
     }
     arguments
 }
@@ -4154,6 +4181,7 @@ mod tests {
         let network = DesktopNetworkLink {
             library: PathBuf::from("network/stasis_network.lib"),
             include_dir: PathBuf::from("network/include"),
+            mode: DesktopNetworkMode::Host,
         };
         let configured = monolith_configure_arguments(
             Path::new("runtime"),
@@ -4170,6 +4198,27 @@ mod tests {
         assert!(configured
             .iter()
             .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_INCLUDE_DIR=network/include"));
+        assert!(configured
+            .iter()
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_MODE=host"));
+
+        let client = DesktopNetworkLink {
+            library: PathBuf::from("network/stasis_network.lib"),
+            include_dir: PathBuf::from("network/include"),
+            mode: DesktopNetworkMode::Client,
+        };
+        let configured = monolith_configure_arguments(
+            Path::new("runtime"),
+            Path::new("build"),
+            Path::new("aot"),
+            Path::new("main.c"),
+            Path::new("dist"),
+            "game",
+            Some(&client),
+        );
+        assert!(configured
+            .iter()
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_MODE=client"));
     }
 
     #[test]
@@ -7161,9 +7210,10 @@ pub fn run_self_host_aot_cli_with_desktop_network(
     entry_file: &Path,
     library: &Path,
     include_dir: &Path,
+    mode: DesktopNetworkMode,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let options = SelfHostedAotCliOptions::new(None, Some(entry_file.to_path_buf()))
-        .with_desktop_network(library.to_path_buf(), include_dir.to_path_buf());
+        .with_desktop_network(library.to_path_buf(), include_dir.to_path_buf(), mode);
     run_self_host_aot_cli_with_cli_options(project_dir, output_exe, options)
 }
 

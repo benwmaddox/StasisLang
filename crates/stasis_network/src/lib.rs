@@ -1,5 +1,6 @@
 #![deny(warnings)]
 
+pub mod client;
 pub mod realtime;
 
 use std::collections::{BTreeMap, HashMap};

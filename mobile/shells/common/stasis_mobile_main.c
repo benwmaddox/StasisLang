@@ -15,6 +15,7 @@
 #endif
 
 #include "published_aot_symbols.h"
+#include "stasis_mobile_aot_runtime.h"
 #if defined(__has_include)
 #if __has_include("stasis_package_provenance.h")
 #include "stasis_package_provenance.h"
@@ -27,7 +28,6 @@
 #include "stasis_package_provenance.h"
 #endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
-#include "stasis_mobile_aot_runtime.h"
 int stasis_set_recording_audio_config(int enabled);
 int stasis_audio_get_queued_frames(void);
 int stasis_recording_audio_pull_f32_interleaved(float *output_stereo, int frame_count);
@@ -309,6 +309,24 @@ static void report_runtime_status(const char *stage, int status) {
     stasis_host_report_runtime_error(message);
 }
 
+static void stasis_network_client_provision_from_shell(void) {
+#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && \
+        defined(STASIS_NETWORK_CLIENT_ENABLED)
+    const char *join_url = SDL_getenv("STASIS_NETWORK_JOIN_URL");
+    if (join_url != NULL && join_url[0] != '\0') {
+        size_t length = strlen(join_url);
+        if (length <= 512) {
+            (void)stasis_mobile_network_client_provision(join_url, length);
+        }
+        SDL_Environment *environment = SDL_GetEnvironment();
+        if (environment != NULL) {
+            (void)SDL_UnsetEnvironmentVariable(environment, "STASIS_NETWORK_JOIN_URL");
+        }
+        (void)SDL_unsetenv_unsafe("STASIS_NETWORK_JOIN_URL");
+    }
+#endif
+}
+
 static void stasis_mobile_wait_for_error_surface_quit(void) {
 #if defined(__ANDROID__)
     SDL_Event event;
@@ -436,9 +454,11 @@ static int configure_asset_root(void) {
 int SDL_main(int argc, char **argv) {
     (void)argc;
     (void)argv;
+    stasis_network_client_provision_from_shell();
     if (configure_asset_root() != 0) {
         stasis_host_report_runtime_error("Stasis could not configure the bundled asset root");
         SDL_Log("Stasis could not configure the bundled asset root");
+        stasis_mobile_network_client_shutdown();
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
     const char *asset_error = SDL_getenv("STASIS_ASSET_VERIFICATION_ERROR");
@@ -453,6 +473,7 @@ int SDL_main(int argc, char **argv) {
             log_asset_rejection_marker(seam_test_id, asset_error);
         }
 #endif
+        stasis_mobile_network_client_shutdown();
         stasis_mobile_wait_for_error_surface_quit();
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
@@ -483,6 +504,11 @@ int SDL_main(int argc, char **argv) {
             SDL_Log("Stasis mobile initialization stopped with status %d", status);
         }
     } else {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+        if (stasis_web_network_supported()) {
+            (void)stasis_mobile_network_client_connect();
+        }
+#endif
 #if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
         stasis_desktop_network_present_join_card();
 #endif
@@ -578,6 +604,7 @@ int SDL_main(int argc, char **argv) {
         }
 #endif
     }
+    stasis_mobile_network_client_shutdown();
     stasis_mobile_runtime_shutdown();
     if (game_result != 0) {
 #if defined(__ANDROID__)

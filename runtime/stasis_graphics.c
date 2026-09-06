@@ -28,6 +28,9 @@
 #include "stasis_performance_metrics.h"
 #include "stasis_image_writer.h"
 #include "stasis_sprite_atlas_policy.h"
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+#include "stasis_mobile_aot_runtime.h"
+#endif
 #include "stasis_mixed_quad_planner.h"
 #if defined(_WIN32)
 #include <sys/types.h>
@@ -1099,10 +1102,16 @@ static void stasis_pump_events(void) {
                     g_resource_lifecycle.renderer_generation);
                 break;
             case SDL_EVENT_WILL_ENTER_BACKGROUND:
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+                (void)stasis_mobile_network_client_set_background(1);
+#endif
                 stasis_renderer_lifecycle_pause(&g_resource_lifecycle);
                 g_resource_frame_ready = false;
                 break;
             case SDL_EVENT_DID_ENTER_FOREGROUND:
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+                (void)stasis_mobile_network_client_set_background(0);
+#endif
                 if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {
                     stasis_renderer_lifecycle_resume(&g_resource_lifecycle);
                 }
