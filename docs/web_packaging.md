@@ -1,5 +1,8 @@
 # Web packaging
 
+For a packaged native application serving this bundle to nearby browsers, see
+[Desktop LAN host packages](desktop_network_packaging.md).
+
 Stasis packages a browser game with the same `package` command used for desktop and mobile:
 
 ```text

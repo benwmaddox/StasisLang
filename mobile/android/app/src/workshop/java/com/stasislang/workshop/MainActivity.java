@@ -329,6 +329,7 @@ public final class MainActivity extends Activity {
     private boolean workshopResourceScopeAcceptanceRun;
     private boolean workshopTestRunnerAcceptanceRun;
     private boolean workshopDiagnosticSeamAcceptanceRun;
+    private boolean workshopSoakAcceptanceRun;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private int aiSimTouchX;
@@ -1480,6 +1481,25 @@ public final class MainActivity extends Activity {
                         gameRuntimeActive = false;
                         setStatusText("IT-031 diagnostic seam acceptance failed: "
                                 + diagnosticResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopDiagnosticSeamAcceptanceRun
+                        && !workshopSoakAcceptanceRun) {
+                    String soakResult = WorkshopSoakAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopSoakAcceptanceRun = true;
+                    boolean soakPassed = false;
+                    try {
+                        soakPassed = "passed".equals(
+                                new JSONObject(soakResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!soakPassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-032 Workshop soak acceptance failed: " + soakResult);
                     }
                 }
                 if (compileReady || gameRuntimeActive) {
@@ -5386,6 +5406,11 @@ public final class MainActivity extends Activity {
         return nativeSetRuntimeI32(projectRoot, path, value);
     }
 
+    int acceptanceRuntimeI32(String projectRoot, String path) {
+        return extractIntField(nativeGetRuntimeI32(projectRoot, path),
+                "value", Integer.MIN_VALUE);
+    }
+
     JSONObject acceptanceCompileDiagnostic(String compileResult) throws Exception {
         return compileResultToJson(compileResult);
     }
@@ -5412,6 +5437,44 @@ public final class MainActivity extends Activity {
                 nativeFrameValues);
         if (status != 0) return "RunError: " + nativeLastFrameError();
         return "passed";
+    }
+
+    JSONObject runIt032Frame(String projectRoot, int sequence) throws Exception {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || gamePreview == null) {
+            throw new IllegalStateException("IT-032 preview unavailable");
+        }
+        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
+                Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
+                nativeFrameValues);
+        if (status != 0) throw new IllegalStateException(nativeLastFrameError());
+        int token = gamePreview.frameToken();
+        long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
+        if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
+            throw new IllegalStateException("IT-032 GLES token timeout at frame " + sequence);
+        }
+        JSONObject guest = new JSONObject();
+        String[] names = {"tick_revision", "render_revision", "state_counter"};
+        String[] paths = {"seam_it028_tick_marker", "seam_it028_render_marker",
+                "seam_it028_state_counter"};
+        for (int index = 0; index < names.length; index += 1) {
+            String state = nativeGetRuntimeI32(projectRoot, paths[index]);
+            guest.put(names[index], extractIntField(state, "value", Integer.MIN_VALUE));
+        }
+        return new JSONObject().put("sequence", sequence).put("frame_token", token)
+                .put("command_trace", trace).put("runtime", acceptanceRuntimeState(projectRoot))
+                .put("guest", guest).put("buffers", gamePreview.acceptanceBufferSnapshot())
+                .put("resources", gamePreview.resourceScopeSnapshot())
+                .put("presentation", gamePreview.workshopSoakPresentationSnapshot())
+                .put("gles_presented", true).put("java_only", false)
+                .put("fallback", 0).put("stub", 0);
+    }
+
+    boolean recreateIt032Surface() {
+        return gamePreview != null && gamePreview.recreateEglContextForAcceptance(5_000L);
+    }
+
+    void setIt032Active(boolean active) {
+        if (gamePreview != null) gamePreview.setWorkshopSoakAcceptanceActive(active);
     }
 
     JSONObject acceptanceRecoverAfterHealthyFrame(String compileResult) throws Exception {
@@ -12378,6 +12441,24 @@ public final class MainActivity extends Activity {
                 snapshot.put("lifecycle_renderer_generation", renderer.rendererGeneration());
                 snapshot.put("resources_ready", renderer.resourcesReady());
                 return snapshot;
+            }
+        }
+
+        JSONObject acceptanceBufferSnapshot() throws Exception {
+            synchronized (renderer) {
+                return renderer.acceptanceBufferSnapshot();
+            }
+        }
+
+        void setWorkshopSoakAcceptanceActive(boolean active) {
+            synchronized (renderer) {
+                renderer.setWorkshopSoakAcceptanceActive(active);
+            }
+        }
+
+        JSONObject workshopSoakPresentationSnapshot() throws Exception {
+            synchronized (renderer) {
+                return renderer.workshopSoakPresentationSnapshot();
             }
         }
 

@@ -156,3 +156,37 @@
   unavailable result.
 - Adjustment: every new runtime export family must include one packaged AOT executable that crosses
   the dynamic boundary and asserts real host behavior, not only compiler resolution and C-local tests.
+
+## 2026-09-05 - Task 515: desktop game screenshots
+
+- Replaced scheduled-only capture acknowledgement with bounded, cancelable PNG completion evidence and runtime identity checks. Wired active-task attachment, PNG preview, content hashes, upload/analysis state, and fail-closed provider image routing.
+- Verification: 61 AI library tests, 18 desktop editor tests, five runtime capture tests, and a fresh SDL runtime integration capture; formatting and diff checks passed. Baseline `tools/validate_repo.sh` stops at existing unsafe-boundary findings in `stasis_network`; no unrelated policy files were changed.
+- Visual evidence: `target/task515-evidence/live-game.png` was inspected and shows the expected 320x180 red rectangle on a dark background. `capture.json` records matching PNG dimensions, byte length, SHA-256, and runtime identity with the game paused at tick 0. The native runtime and SDL dependencies were freshly built from pinned sources.
+- Theory gained: presentation continues while deterministic gameplay is paused, so a screenshot can complete without a gameplay step. The observed tick-0 PNG predicts that future paused-state inspection can share this presentation boundary without changing simulation state.
+- Good: task/request snapshots and content hashes prevent late completion from marking newly attached images uploaded.
+- Bad: the initial runtime fixture omitted the required `on_code_swap` entrypoint and failed before capture.
+- Adjustment: live runtime fixtures must include all required lifecycle entrypoints before testing a new host interaction.
+
+## 2026-09-06 - Task 354: native guest transport ABI
+
+- Added an optional Windows/Android native client using the existing browser WebSocket protocol, bounded mailbox, private pairing/resume identity, reconnect backoff, and shell background lifecycle. Client-only packages link transport support without host bundles or listeners.
+- Verification: 33 network tests, seven network package tests, focused package/runtime configuration tests, Windows static-link probe, Android x86_64 static-link and AOT bridge probes, and real Chrome guest acceptance passed. Release provenance, ABI contracts, formatting, and diff checks passed.
+- Validation limit: `tools/validate_repo.sh` reaches its existing ignored-test audit and fails on unchanged timing tests in `stasis_dynload/src/lib.rs` and `stasis_compiler/src/backend/program_snapshot.rs`; the workspace-wide Cargo phase therefore did not run. The optional Android Workshop source check also fails an unchanged `allowAiImageGeneration.setChecked(false)` assertion. No packaged graphical client or multi-device LAN run is claimed.
+- Visual evidence: inspected `target/network-browser-acceptance/browser.png` and all five one-second samples of `browser.mp4`; they show browser join, snapshot, bidirectional command, and resumed-session stages without credentials. Native probe results are in `target/native-client-windows/result.txt` and `target/android-network-client/result.txt`.
+- Theory gained: a connection generation owns socket work and queued messages. Lifecycle and slow-frame tests show obsolete work is discarded; another provisioning surface can reuse this boundary without adding sockets or credentials to deterministic state.
+- Good: independent review exposed lifecycle races before the final platform probes.
+- Bad: the first bridge include incorrectly treated the separately packaged network header as a runtime-local file.
+- Adjustment: validate optional external header provenance alongside ABI and package capability tests.
+
+### Task 354 review follow-up
+
+- Gate the Windows CMake mode helper with its caller's platform condition. Protect Android join provisioning with an app-namespaced signature permission on the explicit NetworkJoin alias; direct launcher intents discard join extras.
+- Replace blocking TCP establishment with a single cancellable nonblocking attempt, and replace 2 ms idle socket polling with a 25 ms command-interruptible wait. Regression coverage includes shutdown, background, generation cancellation, and component policy rejection cases.
+- Validation: the exact architecture characterization fast lane passed on Windows; a non-Windows warnings-as-errors probe passed after reproducing the CI failure. All 35 network tests, package generation, seven Java admission policy scenarios, fresh Windows static-link probes, Android target compilation, ABI audits, formatting, and diff checks passed.
+- Theory gained: the public launcher and private provisioning route need distinct component permissions even when they share an activity; lifecycle cancellation must also cover TCP establishment before a WebSocket exists.
+- Good: a non-Windows compile probe reproduced the CI warning without suppressing warnings.
+- Bad: the previous shutdown tests started after TCP establishment and missed dropped SYNs.
+- Adjustment: test each transport phase's cancellation authority, including an indefinitely pending TCP readiness probe.
+- Visual evidence: not applicable; this follow-up changes transport and component admission, with no graphical UI change.
+
+- Android admission evidence: API 35 fixture using the exact production policy and provisioning method admitted the same-signer alias caller, denied the differently signed caller with SecurityException before dispatch, and rejected direct MainActivity provisioning in onCreate and onNewIntent. Inspected target/android_admission_evidence/evidence.txt; this is a minimal admission fixture, not the packaged SDL game.

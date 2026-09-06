@@ -17,6 +17,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopSoakAcceptance.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
@@ -1511,6 +1512,12 @@ def main() -> int:
     assert "MISSING_EXTERN" in diagnostic_acceptance
     assert "runIt031Frame" in activity
     assert "WorkshopDiagnosticSeamAcceptance.run" in activity
+    soak_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopSoakAcceptance.java")
+    assert "FRAME_COUNT = 300" in soak_acceptance
+    assert "EDIT_FRAMES = {75, 150, 225, 300}" in soak_acceptance
+    assert "SURFACE_FRAMES = {100, 200}" in soak_acceptance
+    assert "WorkshopSoakAcceptance.run" in activity
+    assert "recreateIt032Surface" in activity
     touch_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java")
     assert "Stasis Workshop IT-027" in touch_acceptance
     assert "ACTION_DOWN" in touch_acceptance and "ACTION_MOVE" in touch_acceptance

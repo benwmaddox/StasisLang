@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+#include "stasis_network.h"
+#endif
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -31,6 +34,7 @@ static float last_audio_samples[4];
 static int last_audio_frames;
 static int sprite_handle_to_load = 1;
 static int released_sprite_handle;
+static char last_cached_text[64];
 static int released_sprite_count;
 static char saved_scope[64];
 static char saved_key[64];
@@ -43,6 +47,85 @@ static int profile_start_logs;
 static int profile_row_logs;
 static int profile_done_logs;
 static char profile_row[256];
+
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+struct stasis_network_client {
+    int32_t connected;
+    int32_t background;
+    int32_t seat;
+    int32_t sequence;
+    unsigned char queued[16];
+    size_t queued_length;
+    unsigned char sent[16];
+    size_t sent_length;
+};
+static int client_destroy_count;
+
+uint32_t stasis_network_client_abi_version(void) { return 1; }
+stasis_network_client *stasis_network_client_create(const char *url, size_t length) {
+    stasis_network_client *client;
+    if (url == NULL || length < 8 || memcmp(url, "http://", 7) != 0) return NULL;
+    client = (stasis_network_client *)calloc(1, sizeof(*client));
+    if (client != NULL) client->seat = -1;
+    return client;
+}
+int32_t stasis_network_client_connect(stasis_network_client *client) {
+    if (client == NULL) return -1;
+    client->connected = 1;
+    return 0;
+}
+int32_t stasis_network_client_disconnect(stasis_network_client *client) {
+    if (client == NULL) return -1;
+    client->connected = 0;
+    return 0;
+}
+int32_t stasis_network_client_set_background(stasis_network_client *client, int32_t value) {
+    if (client == NULL) return -1;
+    client->background = value != 0;
+    return 0;
+}
+int32_t stasis_network_client_status(stasis_network_client *client) {
+    return client != NULL && client->connected && !client->background
+        ? STASIS_NETWORK_CLIENT_STATUS_CONNECTED
+        : STASIS_NETWORK_CLIENT_STATUS_DISCONNECTED;
+}
+int32_t stasis_network_client_poll(stasis_network_client *client, unsigned char *out,
+        size_t capacity) {
+    if (client == NULL || out == NULL) return -1;
+    if (client->queued_length == 0) return 0;
+    if (capacity < client->queued_length) return -1;
+    memcpy(out, client->queued, client->queued_length);
+    int32_t length = (int32_t)client->queued_length;
+    client->queued_length = 0;
+    return length;
+}
+int32_t stasis_network_client_send(stasis_network_client *client,
+        const unsigned char *payload, size_t length) {
+    if (client == NULL || payload == NULL || length > sizeof(client->sent)) return -1;
+    memcpy(client->sent, payload, length);
+    client->sent_length = length;
+    memcpy(client->queued, payload, length);
+    client->queued_length = length;
+    return 0;
+}
+int32_t stasis_network_client_checkpoint(stasis_network_client *client, int32_t seat,
+        int32_t sequence) {
+    if (client == NULL) return -1;
+    client->seat = seat;
+    client->sequence = sequence;
+    return 0;
+}
+int32_t stasis_network_client_resume_seat(stasis_network_client *client) {
+    return client == NULL ? -1 : client->seat;
+}
+int32_t stasis_network_client_last_sequence(stasis_network_client *client) {
+    return client == NULL ? 0 : client->sequence;
+}
+void stasis_network_client_destroy(stasis_network_client *client) {
+    if (client != NULL) client_destroy_count += 1;
+    free(client);
+}
+#endif
 
 void stasis_host_log_message(const char *message) {
     if (message == NULL) return;
@@ -114,7 +197,13 @@ void stasis_gfx_release_sprite(int handle) {
 }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
 int stasis_gfx_dump_png(const char *path) { return path != NULL; }
-int stasis_gfx_cache_text(int font, const char *text) { return font + (text != NULL); }
+int stasis_gfx_cache_text(int font, const char *text) {
+    if (text != NULL) {
+        strncpy(last_cached_text, text, sizeof(last_cached_text) - 1);
+        last_cached_text[sizeof(last_cached_text) - 1] = '\0';
+    }
+    return font + (text != NULL);
+}
 int stasis_gfx_replace_text(int handle, int font, const char *text) { return handle > 0 ? handle : font + (text != NULL); }
 int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
@@ -176,11 +265,20 @@ int main(void) {
     uint8_t external_u8[4] = {1, 2, 3, 4};
     uint8_t aot_text_out[16] = {0};
     uint8_t dynamic_path[] = "sprite.bmp";
+    uint8_t dynamic_price[] = {0xe2, 0x82, 0xac, '2', '.', '9', '9'};
+    uint8_t malformed_utf8[] = {0xc3, 0x28};
     uint8_t ascii_value[] = "GG1-test";
     uint8_t ascii_out[32] = {0};
+    uint8_t platform_key[] = "power_up";
+    int32_t platform_fields[5] = {0};
+    uint8_t platform_text[32] = {0};
     uint8_t literal_out[8] = {0};
     uint8_t utf8_out[16] = {0};
     uint8_t raw_out[4] = {0};
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    uint8_t client_payload[4] = {9, 8, 7, 6};
+    uint8_t client_out[4] = {0};
+#endif
     int32_t sprite_handle[1] = {0};
     int32_t sprite_width[1] = {0};
     int32_t sprite_height[1] = {0};
@@ -285,6 +383,17 @@ int main(void) {
     CHECK(stasis_jit_text_run_replace_from(101, 0, 1, 0, 23) == 0);
     CHECK(text_font[0] == 9 && text_handle[0] == 8);
 
+    stasis_jit_register_global_u8_array(26, 0, dynamic_price, sizeof(dynamic_price));
+    stasis_jit_collection_i32_store(26, 1, sizeof(dynamic_price));
+    CHECK(stasis_jit_text_run_load_from(101, 0, 1, 7, 26) == 1);
+    CHECK(memcmp(last_cached_text, dynamic_price, sizeof(dynamic_price)) == 0);
+    CHECK(last_cached_text[sizeof(dynamic_price)] == '\0');
+
+    stasis_jit_register_global_u8_array(27, 0, malformed_utf8, sizeof(malformed_utf8));
+    stasis_jit_collection_i32_store(27, 1, sizeof(malformed_utf8));
+    CHECK(stasis_jit_text_run_load_from(101, 0, 1, 7, 27) == 0);
+    CHECK(text_font[0] == 7 && text_handle[0] == 8);
+
     stasis_jit_upsert_string_literal(40, "sample_game");
     stasis_jit_upsert_string_literal(41, "unlocked_tier");
     CHECK(stasis_jit_collection_i32_load(40, 1) == 11);
@@ -337,6 +446,50 @@ int main(void) {
     memset(ascii_out, 0, sizeof(ascii_out));
     CHECK(stasis_jit_clipboard_load_ascii(43, sizeof(ascii_out)) == 8);
     CHECK(memcmp(ascii_out, "GG1-test", 8) == 0);
+
+    stasis_jit_register_global_u8_array(44, 0, platform_key, sizeof(platform_key) - 1);
+    stasis_jit_collection_i32_store(44, 1, sizeof(platform_key) - 1);
+    stasis_jit_register_global_i32_array(45, 0, platform_fields, 5);
+    stasis_jit_register_global_u8_array(46, 0, platform_text, sizeof(platform_text));
+    CHECK(stasis_jit_platform_service_submit(1, 1, 77, 44, 8) == 1);
+    CHECK(stasis_jit_platform_service_poll(45, 5, 46, sizeof(platform_text)) == 1);
+    CHECK(platform_fields[0] == 1 && platform_fields[1] == 1);
+    CHECK(platform_fields[2] == 77 && platform_fields[3] == 4);
+    CHECK(platform_fields[4] == 0);
+    CHECK(stasis_jit_collection_i32_load(46, 1) == 0);
+    CHECK(stasis_jit_collection_i32_load(46, 3) == 0);
+    CHECK(stasis_jit_platform_service_poll(45, 5, 46, sizeof(platform_text)) == 0);
+
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    CHECK(stasis_web_network_supported() == 1);
+    CHECK(stasis_mobile_network_client_set_background(1) == 0);
+    CHECK(stasis_mobile_network_client_provision(
+        "http://10.0.0.2:9000/#secret=00112233",
+        strlen("http://10.0.0.2:9000/#secret=00112233")) == 0);
+    CHECK(stasis_web_network_supported() == 1);
+    CHECK(stasis_web_network_connect() == 0);
+    CHECK(stasis_web_network_status() == STASIS_NETWORK_CLIENT_STATUS_DISCONNECTED);
+    CHECK(stasis_mobile_network_client_set_background(0) == 0);
+    CHECK(stasis_web_network_status() == STASIS_NETWORK_CLIENT_STATUS_CONNECTED);
+    stasis_jit_register_global_u8_array(60, 0, client_payload, sizeof(client_payload));
+    stasis_jit_register_global_u8_array(61, 0, client_out, sizeof(client_out));
+    CHECK(stasis_web_network_send(60, sizeof(client_payload)) == 0);
+    CHECK(stasis_web_network_poll(61, 2) == -1);
+    CHECK(stasis_web_network_poll(9999, sizeof(client_out)) == -1);
+    CHECK(stasis_web_network_poll(61, sizeof(client_out)) == 4);
+    CHECK(memcmp(client_out, client_payload, sizeof(client_out)) == 0);
+    CHECK(stasis_web_network_send(60, 64 * 1024 + 1) == -1);
+    CHECK(stasis_web_network_checkpoint(3, 17) == 0);
+    CHECK(stasis_web_network_resume_seat() == 3);
+    CHECK(stasis_web_network_last_sequence() == 17);
+    CHECK(stasis_mobile_network_client_set_background(1) == 0);
+    CHECK(stasis_web_network_status() == STASIS_NETWORK_CLIENT_STATUS_DISCONNECTED);
+    CHECK(stasis_mobile_network_client_set_background(0) == 0);
+    CHECK(stasis_web_network_status() == STASIS_NETWORK_CLIENT_STATUS_CONNECTED);
+    stasis_mobile_network_client_shutdown();
+    CHECK(client_destroy_count == 1);
+    CHECK(stasis_web_network_supported() == 1);
+#endif
 
     for (stress_index = 0; stress_index < STRESS_LITERAL_COUNT; stress_index += 1) {
         snprintf(stress_literals[stress_index], sizeof(stress_literals[stress_index]),

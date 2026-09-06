@@ -70,6 +70,58 @@ python tools/cargo_cache.py run -- cargo run -p stasis_ai --example openrouter_c
 
 This evaluation is paid and mutates the named project; it is never run by normal tests. A successful provider transport is not code-validity success: the command succeeds only after the host reports its tested atomic-write receipt. Inspect the disposable project and `build/ai-traces/*.jsonl` plus `*.usage.jsonl`. Neither credentialed evaluation has been run as part of repository validation. If any action ID or arguments are invalid, the host executes none of that batch, retains every selection in the transcript, and asks the model to replace only the rejected IDs.
 
+## Desktop task replies
+
+The desktop editor sends replies through the UI-neutral `stasis_ai::task_controller`
+controller. Each request captures bounded context from one task and carries an
+immutable task ID and request ID. Switching the selected task never changes the
+destination of an in-flight reply. Provider work runs off the UI thread; polling
+only collects completed work. Editing tools produce task-owned semantic proposals;
+they do not write source during a provider turn. Accept approves a proposal, and
+Apply submits the approved payload to the host's atomic semantic-edit path.
+
+Each action retains its payload and prior revisions. Provider repair responses
+may replace only rejected actions or actions marked for repair; they cannot
+regenerate accepted or applied work. Repaired proposals require fresh acceptance.
+Legacy task records without payloads remain readable but cannot execute edits.
+
+Applying an edit invalidates prior focused-test validation. Changing the test
+scope or repairing an action also invalidates it, including a run already in
+flight. Background test results carry a run ID, so an obsolete result cannot
+finish a newer validation run. Provider context contains compact action metadata;
+executable payloads and revision history stay in the task rather than being
+copied into every request. Done requires resolved actions and passing validation
+for current project sources. Host results and failure replies belong to the originating task even
+when another task is selected.
+
+Host operations are serialized. Cancellation stops queued work; an atomic edit
+already executing finishes or rolls back, and any committed receipt is retained
+on its originating task. Source conflicts and failed edit tests preserve the
+previous source and return a repairable failure. An empty focused-test selection
+cannot unlock Done.
+
+Cancellation and reconnect invalidate the old request before another response can
+be accepted. A late response cannot append to the thread or update its metrics.
+Retry is a provider operation and does not reset focused-test validation. Worker
+capacity includes canceled calls until they exit, so repeated cancellation cannot
+create an unbounded number of background workers. Provider failures use a safe
+display message rather than forwarding transport errors or credentials.
+
+Live-session client clones have separate response ownership. Caller request IDs
+are local to each clone; the session assigns wire IDs and restores the caller ID
+only when delivering to its owner. Ownership survives `edit_preparing` and
+`completion_preparing` progress messages until the final reply, so cancellation
+can still target a preparing edit.
+Existing request validation, bounded output,
+queue backpressure, and host execution gates still apply.
+
+Unsolicited session events (`request_id == 0`, including watch updates and watch
+errors) have one explicitly selected recipient. The terminal UI claims that role
+when constructed, so its cloned client receives events even while the original
+client stays alive. Creating background clients does not transfer event ownership
+or change request-specific reply routing. Dropping the event recipient selects
+the oldest remaining client.
+
 ## Security
 
 Keep `OPENROUTER_API_KEY` only in the process environment or a secret manager. Never place it in prompts, project files, command transcripts, or bug reports. Stasis uses the key only as the Authorization header and sanitizes transport errors; audit logs omit provider envelopes and credentials. Treat prompts, source, tool observations, and model output as data sent to the selected provider. Review provider retention and privacy terms before enabling a remote transport.

@@ -7,7 +7,13 @@ import sys
 import tempfile
 import unittest
 
-from tools.generate_release_provenance import RUNTIME_DIRS, RUNTIME_FILES, render_contract_version
+from tools.generate_release_provenance import (
+    DESKTOP_NETWORK_ARTIFACTS,
+    RUNTIME_DIRS,
+    RUNTIME_FILES,
+    desktop_network_artifact_hashes,
+    render_contract_version,
+)
 from tools.verify_package_provenance import verify_asset_package_identities
 
 
@@ -16,6 +22,32 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    def test_desktop_network_artifact_hashes_are_exact_and_complete(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            self.assertEqual({}, desktop_network_artifact_hashes(root))
+
+            library = root / DESKTOP_NETWORK_ARTIFACTS[0]
+            header = root / DESKTOP_NETWORK_ARTIFACTS[1]
+            library.parent.mkdir(parents=True)
+            library.write_bytes(b"network library")
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                desktop_network_artifact_hashes(root)
+
+            header.parent.mkdir(parents=True)
+            header.write_bytes(b"network header")
+            self.assertEqual(
+                {
+                    DESKTOP_NETWORK_ARTIFACTS[0]: hashlib.sha256(
+                        b"network library"
+                    ).hexdigest(),
+                    DESKTOP_NETWORK_ARTIFACTS[1]: hashlib.sha256(
+                        b"network header"
+                    ).hexdigest(),
+                },
+                desktop_network_artifact_hashes(root),
+            )
+
     def test_asset_package_identity_binds_exact_manifest_bytes(self):
         class Parser:
             @staticmethod
@@ -184,6 +216,42 @@ class ReleaseProvenanceTests(unittest.TestCase):
 
         self.assertEqual(RUNTIME_FILES, rust_string_slice("MOBILE_RUNTIME_FILES"))
         self.assertEqual(RUNTIME_DIRS, rust_string_slice("MOBILE_RUNTIME_DIRS"))
+
+    def test_release_workflows_include_complete_knowledge_library(self):
+        toolchain = (ROOT / "apps/stasis/src/toolchain_cli.rs").read_text(
+            encoding="utf-8"
+        )
+        knowledge_match = re.search(
+            r"const KNOWLEDGE_FILES: &\[&str\]\s*=\s*&\[(.*?)\];",
+            toolchain,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(knowledge_match, "KNOWLEDGE_FILES")
+        knowledge_files = tuple(re.findall(r'"([^"]+)"', knowledge_match.group(1)))
+        self.assertTrue(knowledge_files)
+
+        knowledge_root = ROOT / "docs/knowledge"
+        for relative in knowledge_files:
+            source = knowledge_root.joinpath(*pathlib.PurePosixPath(relative).parts)
+            self.assertTrue(source.is_file(), relative)
+
+        for workflow_name in (
+            ".github/workflows/nightly-release.yml",
+            ".github/workflows/bootstrap-artifacts.yml",
+        ):
+            workflow = (ROOT / workflow_name).read_text(encoding="utf-8")
+            unix_copy = re.findall(
+                r'^\s+cp -R docs/knowledge "\$\{out\}/docs/"\s*$',
+                workflow,
+                re.MULTILINE,
+            )
+            windows_copy = re.findall(
+                r'^\s+Copy-Item docs/knowledge "\$out/docs/knowledge" -Recurse -Force\s*$',
+                workflow,
+                re.MULTILINE,
+            )
+            self.assertEqual(1, len(unix_copy), workflow_name)
+            self.assertEqual(1, len(windows_copy), workflow_name)
 
     def test_release_workflows_assemble_every_provenance_runtime_file(self):
         for workflow_name in (

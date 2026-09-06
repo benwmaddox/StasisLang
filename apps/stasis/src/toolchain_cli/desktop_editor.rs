@@ -1,13 +1,29 @@
 use eframe::egui::{self, Color32, RichText};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use stasis_ai::task_session::{
-    ActionState, Key, KeyChord, Modifiers, ShortcutMapper, TaskSession, TaskSessionCommand,
-    ThreadEntryKind,
+    ActionState, FallbackState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
+    ScreenshotAnalysisState, ShortcutMapper, TaskId, TaskSession, TaskSessionCommand,
+    ThreadEntryKind, UploadState,
 };
-use stasis_runner::live::{LiveCommand, LiveRequest, LiveSessionClient};
+use stasis_ai::{
+    action_id_for_tool, run_agent_with_profile, AgentEvent, AgentProfile, ProviderActionProposal,
+    ProviderConfig, ProviderReply, ProviderRequest, ProviderUsage, TaskController,
+    TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation, ToolSpec,
+};
+use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const CAPTURE_DEADLINE: Duration = Duration::from_secs(15);
+const CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusArea {
@@ -18,48 +34,786 @@ enum FocusArea {
 }
 const EMPTY_TASK: &str = "Create a task";
 
+#[derive(Default)]
+struct ProposalTools {
+    proposals: Vec<ProviderActionProposal>,
+}
+
+impl ToolExecutor for ProposalTools {
+    fn execute(&mut self, calls: &[ToolCall], canceled: &AtomicBool) -> Vec<ToolObservation> {
+        calls
+            .iter()
+            .map(|call| {
+                if canceled.load(Ordering::Acquire) {
+                    return ToolObservation::error(&call.tool, "AI request canceled");
+                }
+                let repair = call.tool == "repair_semantic_edit";
+                let result = (|| {
+                    let id = call
+                        .args
+                        .get("proposal_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "proposal_id must be a string".to_string())?;
+                    let description = call
+                        .args
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "description must be a string".to_string())?;
+                    let payload = call
+                        .args
+                        .get("batch")
+                        .cloned()
+                        .ok_or_else(|| "batch is required".to_string())?;
+                    let batch = serde_json::from_value::<
+                        stasis_compiler::frontend::workshop::WorkshopSemanticEditBatch,
+                    >(payload.clone())
+                    .map_err(|error| format!("invalid semantic edit batch: {error}"))?;
+                    if batch.edits.iter().any(|edit| {
+                        edit.operation
+                            != stasis_compiler::frontend::workshop::WorkshopSemanticEditOperation::Add
+                            && edit.expected_source_hash.is_none()
+                    }) {
+                        return Err(
+                            "desktop update/delete proposals require expected_source_hash"
+                                .to_string(),
+                        );
+                    }
+                    self.proposals.push(ProviderActionProposal {
+                        id: id.to_string(),
+                        kind: stasis_ai::ActionKind::Edit,
+                        description: description.to_string(),
+                        payload,
+                        repair,
+                    });
+                    Ok(json!({"status": "proposed", "proposal_id": id}))
+                })();
+                match result {
+                    Ok(value) => ToolObservation::result(&call.tool, value),
+                    Err(error) => ToolObservation::error(&call.tool, error),
+                }
+            })
+            .collect()
+    }
+}
+
+fn proposal_tool_specs() -> Vec<ToolSpec> {
+    [
+        (
+            "propose_semantic_edit",
+            "Propose an atomic semantic edit for explicit user acceptance.",
+        ),
+        (
+            "repair_semantic_edit",
+            "Replace only a rejected or needs-repair proposal; accepted work is retained.",
+        ),
+    ]
+    .into_iter()
+    .map(|(tool, purpose)| ToolSpec {
+        tool: tool.to_string(),
+        action_id: action_id_for_tool(tool),
+        purpose: purpose.to_string(),
+        required_args: vec![
+            "proposal_id".to_string(),
+            "description".to_string(),
+            "batch".to_string(),
+        ],
+        optional_args: Vec::new(),
+    })
+    .collect()
+}
+
+fn bounded_provider_label(value: Option<&str>, fallback: &str) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback)
+        .chars()
+        .take(96)
+        .collect()
+}
+
+fn usage_u64(usage: &Value, pointers: &[&str]) -> u64 {
+    pointers
+        .iter()
+        .find_map(|pointer| usage.pointer(pointer).and_then(Value::as_u64))
+        .unwrap_or(0)
+}
+
+fn configured_provider_state(config: &ProviderConfig) -> ProviderState {
+    let (route, fallback) = match config {
+        ProviderConfig::Codex => ("direct".to_string(), FallbackState::Unconfigured),
+        ProviderConfig::OpenRouter(openrouter) => {
+            let route = if !openrouter.routing.only.is_empty() {
+                format!("only:{}", openrouter.routing.only.join(","))
+            } else if !openrouter.routing.order.is_empty() {
+                format!("order:{}", openrouter.routing.order.join(","))
+            } else {
+                format!("openrouter:{:?}", openrouter.routing.sort).to_ascii_lowercase()
+            };
+            let fallback = if openrouter.routing.allow_fallbacks {
+                FallbackState::Ready {
+                    provider: "openrouter".to_string(),
+                    model: Some(bounded_provider_label(
+                        Some(&openrouter.model),
+                        "configured",
+                    )),
+                    route: Some(bounded_provider_label(Some(&route), "openrouter")),
+                }
+            } else {
+                FallbackState::Unconfigured
+            };
+            (route, fallback)
+        }
+    };
+    ProviderState {
+        provider: Some(config.provider_name().to_string()),
+        model: Some(bounded_provider_label(Some(&config.model()), "configured")),
+        routing: RoutingState::Assigned {
+            route: bounded_provider_label(Some(&route), "direct"),
+        },
+        fallback,
+    }
+}
+
+fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> ProviderState {
+    let provider = bounded_provider_label(
+        usage
+            .and_then(|value| value.get("resolved_provider"))
+            .and_then(Value::as_str),
+        config.provider_name(),
+    );
+    let model = bounded_provider_label(
+        usage
+            .and_then(|value| value.get("resolved_model"))
+            .and_then(Value::as_str),
+        &config.model(),
+    );
+    let route = match usage.and_then(|value| value.get("route")) {
+        Some(Value::String(route)) => bounded_provider_label(Some(route), "direct"),
+        Some(Value::Object(_)) => bounded_provider_label(
+            Some(&format!("{}:{provider}", config.provider_name())),
+            "direct",
+        ),
+        _ => {
+            let RoutingState::Assigned { route } = configured_provider_state(config).routing else {
+                unreachable!("configured provider route is always assigned")
+            };
+            route
+        }
+    };
+    let fallback = if usage
+        .and_then(|value| value.get("fallback"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        FallbackState::Active {
+            provider: provider.clone(),
+            model: Some(model.clone()),
+            route: Some(route.clone()),
+        }
+    } else {
+        configured_provider_state(config).fallback
+    };
+    ProviderState {
+        provider: Some(provider),
+        model: Some(model),
+        routing: RoutingState::Assigned { route },
+        fallback,
+    }
+}
+
+fn provider_reply_usage(usage: Option<&Value>) -> ProviderUsage {
+    let input_tokens = usage
+        .map(|value| {
+            usage_u64(
+                value,
+                &["/tokens/input_tokens", "/tokens/prompt", "/input_tokens"],
+            )
+        })
+        .unwrap_or(0);
+    let output_tokens = usage
+        .map(|value| {
+            usage_u64(
+                value,
+                &[
+                    "/tokens/output_tokens",
+                    "/tokens/completion",
+                    "/output_tokens",
+                ],
+            )
+        })
+        .unwrap_or(0);
+    let estimated_cost_micros = usage
+        .and_then(|value| value.get("cost"))
+        .and_then(Value::as_f64)
+        .filter(|cost| cost.is_finite() && *cost > 0.0)
+        .map(|cost| (cost * 1_000_000.0).round() as u64)
+        .unwrap_or(0);
+    ProviderUsage {
+        input_tokens,
+        output_tokens,
+        estimated_cost_micros,
+    }
+}
+
+fn run_reply_provider(
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    project_root: PathBuf,
+) -> Result<ProviderReply, String> {
+    let config = ProviderConfig::from_env()?;
+    let image_paths = verified_provider_screenshot_paths(&config, &request)?;
+    let mut provider = config
+        .clone()
+        .build()?
+        .with_timeout(Duration::from_secs(120))
+        .with_images(image_paths)?;
+    let prompt = request
+        .context
+        .last()
+        .map(|entry| entry.text.trim())
+        .filter(|text| !text.is_empty())
+        .unwrap_or(request.objective.as_str())
+        .to_string();
+    let source_context = super::desktop_source_context(&project_root)?;
+    let initial_context = json!({
+        "task_id": request.task_id,
+        "objective": request.objective,
+        "project_summary": request.project_summary,
+        "relevant_files": request.relevant_files,
+        "relevant_symbols": request.relevant_symbols,
+        "relevant_tests": request.relevant_tests,
+        "screenshots": request.screenshots,
+        "thread": request.context,
+        "actions": request.actions,
+        "editable_sources": source_context,
+    });
+    let profile = AgentProfile {
+        role: "Stasis desktop task assistant".to_string(),
+        instruction: "Answer the user's task-scoped message. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
+        max_turns: 3,
+        ..AgentProfile::default()
+    };
+    let mut usage = None;
+    let mut tools = ProposalTools::default();
+    let text = run_agent_with_profile(
+        &mut provider,
+        &mut tools,
+        &profile,
+        &prompt,
+        initial_context,
+        proposal_tool_specs(),
+        &canceled,
+        |event| {
+            if let AgentEvent::ProviderUsage(value) = event {
+                usage = Some(value);
+            }
+        },
+    )?;
+    let mut reply = ProviderReply::new(text);
+    reply.proposals = tools.proposals;
+    reply.provider = provider_reply_state(&config, usage.as_ref());
+    reply.usage = provider_reply_usage(usage.as_ref());
+    Ok(reply)
+}
+
+fn verified_provider_screenshot_paths(
+    config: &ProviderConfig,
+    request: &ProviderRequest,
+) -> Result<Vec<PathBuf>, String> {
+    if request.screenshots.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !config.supports_image_input() {
+        return Err(format!(
+            "selected {} model {} does not support image input",
+            config.provider_name(),
+            config.model()
+        ));
+    }
+    request
+        .screenshots
+        .iter()
+        .map(|screenshot| {
+            if screenshot.provenance.task_id != request.task_id {
+                return Err("screenshot provenance does not match provider task".to_string());
+            }
+            let expected = screenshot
+                .content_sha256
+                .as_deref()
+                .ok_or_else(|| "editor screenshot has no verified content SHA-256".to_string())?;
+            let path = PathBuf::from(&screenshot.source);
+            verify_screenshot_file(&path, expected)
+                .map_err(|error| format!("screenshot {} {error}", screenshot.id))?;
+            Ok(path)
+        })
+        .collect()
+}
+
+fn verify_screenshot_file(path: &std::path::Path, expected_sha256: &str) -> Result<(), String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("could not be opened at {}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_CAPTURE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not be read at {}: {error}", path.display()))?;
+    if bytes.len() > MAX_CAPTURE_BYTES {
+        return Err(format!("exceeds {MAX_CAPTURE_BYTES} bytes"));
+    }
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if actual != expected_sha256 {
+        return Err("changed after it was previewed".into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorIntent {
     SendReply(String, String),
     Apply(String, String),
-    Test(String),
+    Test(String, u64),
     Screenshot(String),
     GenerateImage(String),
     ImportImage(String, String),
     Cancel(String),
+    Retry(String),
     Reconnect(String),
+    MarkDone(String),
+}
+
+#[derive(Debug)]
+enum HostOperation {
+    Apply { action_id: String, payload: Value },
+    Test { paths: Vec<String>, run_id: u64 },
+}
+
+#[derive(Debug)]
+struct HostRequest {
+    task_id: String,
+    operation: HostOperation,
+    source_before: Option<String>,
+}
+
+#[derive(Debug)]
+struct HostResult {
+    task_id: String,
+    operation: HostOperation,
+    result: Result<(String, Value, String), String>,
+}
+
+fn receipt_has_test_evidence(receipt: &Value) -> bool {
+    [
+        "/validation/test_result/tests_run",
+        "/validation/test_result/scenario_cases_run",
+    ]
+    .into_iter()
+    .filter_map(|pointer| receipt.pointer(pointer).and_then(Value::as_u64))
+    .sum::<u64>()
+        > 0
+}
+
+fn bounded_failure(error: &str, max: usize) -> String {
+    let bounded = error.chars().take(max).collect::<String>();
+    if error.chars().count() > max {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
+}
+
+fn record_focused_test_failure(
+    task: &mut stasis_ai::Task,
+    run_id: u64,
+    error: &str,
+) -> Result<(), stasis_ai::TaskSessionError> {
+    let summary = bounded_failure(error, 3500);
+    task.finish_focused_test_run(
+        run_id,
+        stasis_ai::FocusedTestResult::failed(summary.clone()),
+    )?;
+    task.append_result(format!(
+        "Focused tests failed: {summary}. Fix the reported failure and rerun."
+    ))
+}
+
+struct HostExecutor {
+    requests: Option<mpsc::Sender<HostRequest>>,
+    results: mpsc::Receiver<HostResult>,
+    canceled: Arc<Mutex<BTreeSet<String>>>,
+    shutdown: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl HostExecutor {
+    fn new(project_root: PathBuf) -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<HostRequest>();
+        let (result_tx, result_rx) = mpsc::channel::<HostResult>();
+        let canceled = Arc::new(Mutex::new(BTreeSet::<String>::new()));
+        let worker_canceled = Arc::clone(&canceled);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker = thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                let skip = worker_shutdown.load(Ordering::Acquire)
+                    || worker_canceled
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .contains(&request.task_id);
+                let result = if skip {
+                    Err("operation canceled before execution".to_string())
+                } else {
+                    let operation_result = match &request.operation {
+                        HostOperation::Apply { payload, .. } => {
+                            super::desktop_apply_semantic_batch(&project_root, payload.clone())
+                        }
+                        HostOperation::Test { paths, .. } => {
+                            super::desktop_run_focused_tests(&project_root, paths)
+                        }
+                    };
+                    operation_result.and_then(|(summary, receipt)| match &request.operation {
+                        HostOperation::Apply { .. } => receipt
+                            .get("source_fingerprint")
+                            .and_then(Value::as_str)
+                            .map(|fingerprint| (summary, receipt.clone(), fingerprint.to_string()))
+                            .ok_or_else(|| {
+                                "semantic edit receipt omitted its source fingerprint".to_string()
+                            }),
+                        HostOperation::Test { paths, .. } => {
+                            super::desktop_source_fingerprint(&project_root, paths).and_then(
+                                |fingerprint| {
+                                    if request.source_before.as_ref() != Some(&fingerprint) {
+                                        Err("project sources changed while focused tests were running; validation was discarded".to_string())
+                                    } else {
+                                        Ok((summary, receipt, fingerprint))
+                                    }
+                                },
+                            )
+                        }
+                    })
+                };
+                if result_tx
+                    .send(HostResult {
+                        task_id: request.task_id,
+                        operation: request.operation,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self {
+            requests: Some(request_tx),
+            results: result_rx,
+            canceled,
+            shutdown,
+            worker: Some(worker),
+        }
+    }
+
+    fn submit(&self, request: HostRequest) -> Result<(), String> {
+        self.requests
+            .as_ref()
+            .ok_or_else(|| "desktop host executor is shut down".to_string())?
+            .send(request)
+            .map_err(|_| "desktop host executor is unavailable".to_string())
+    }
+
+    fn cancel(&self, task_id: &str) {
+        self.canceled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(task_id.to_string());
+    }
+
+    fn poll(&self) -> Vec<HostResult> {
+        self.results.try_iter().collect()
+    }
+
+    fn shutdown_and_join(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        // Disconnect before joining so an idle worker can leave recv().
+        self.requests.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for HostExecutor {
+    fn drop(&mut self) {
+        self.shutdown_and_join();
+    }
 }
 
 struct DesktopEditor {
     state: EditorState,
+    controller: TaskController,
     client: LiveSessionClient,
     project_root: PathBuf,
-    next_request: u64,
     shutdown: Arc<AtomicBool>,
+    host: HostExecutor,
+    validation_fingerprints: BTreeMap<String, (String, Vec<String>)>,
+    busy_tasks: BTreeSet<String>,
+    execution_receipts: BTreeMap<(String, String), Value>,
+    validation_receipts: BTreeMap<String, Value>,
+    capture: Option<PendingCapture>,
+    capture_results: Receiver<CaptureResult>,
+    capture_result_tx: mpsc::Sender<CaptureResult>,
+    next_capture: u64,
+    preview_texture: Option<(String, egui::TextureHandle)>,
+}
+
+#[derive(Debug)]
+struct PendingCapture {
+    task_id: TaskId,
+    screenshot_id: String,
+    request_id: u64,
+    canceled: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct CaptureResult {
+    task_id: TaskId,
+    screenshot_id: String,
+    request_id: u64,
+    result: Result<CaptureEvidence, String>,
+}
+
+#[derive(Debug)]
+struct CaptureEvidence {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    width: usize,
+    height: usize,
+    scheduled_tick: u64,
+    captured_tick: u64,
+    sha256: String,
+    runtime_identity: LiveRuntimeIdentity,
+}
+
+#[derive(Debug, Clone)]
+struct ScreenshotPreview {
+    task_id: TaskId,
+    screenshot_id: String,
+    path: PathBuf,
+    rgba: Vec<u8>,
+    width: usize,
+    height: usize,
+    scheduled_tick: u64,
+    captured_tick: u64,
+    sha256: String,
+    runtime_identity: LiveRuntimeIdentity,
+}
+
+fn cancel_live_capture(client: &LiveSessionClient, request_id: u64) {
+    let _ = client.submit(LiveRequest::new(
+        request_id.saturating_add(1),
+        LiveCommand::Cancel { request_id },
+    ));
+}
+
+fn capture_frame(
+    client: &LiveSessionClient,
+    request_id: u64,
+    artifact: String,
+    canceled: &AtomicBool,
+    deadline: Duration,
+) -> Result<CaptureEvidence, String> {
+    client.submit(LiveRequest::new(
+        request_id,
+        LiveCommand::CaptureFrame { artifact },
+    ))?;
+    let started = Instant::now();
+    loop {
+        if canceled.load(Ordering::Acquire) {
+            cancel_live_capture(client, request_id);
+            return Err("capture canceled".into());
+        }
+        let Some(remaining) = deadline.checked_sub(started.elapsed()) else {
+            cancel_live_capture(client, request_id);
+            return Err(format!(
+                "capture did not complete within {} seconds",
+                deadline.as_secs()
+            ));
+        };
+        let response = match client.receive_timeout(remaining.min(CAPTURE_POLL_INTERVAL)) {
+            Ok(response) => response,
+            Err(error) if error.contains("timed out") => continue,
+            Err(error) => return Err(error),
+        };
+        if response.request_id != request_id {
+            continue;
+        }
+        if !response.ok {
+            return Err(response
+                .error
+                .unwrap_or_else(|| "runtime rejected screenshot capture".into()));
+        }
+        if response.kind != "capture_completed" {
+            return Err(format!(
+                "runtime returned {} before screenshot completion",
+                response.kind
+            ));
+        }
+        let data = response
+            .data
+            .ok_or_else(|| "completed screenshot response has no evidence".to_string())?;
+        let path = data
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| "completed screenshot response has no path".to_string())?;
+        let width = data
+            .get("width")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "completed screenshot response has invalid width".to_string())?;
+        let height = data
+            .get("height")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "completed screenshot response has invalid height".to_string())?;
+        let scheduled_tick = data
+            .get("scheduled_tick")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "completed screenshot response has no scheduled tick".to_string())?;
+        let captured_tick = data
+            .get("captured_tick")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "completed screenshot response has no captured tick".to_string())?;
+        let expected_bytes = data
+            .get("byte_length")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "completed screenshot response has invalid byte length".to_string())?;
+        if expected_bytes > MAX_CAPTURE_BYTES {
+            return Err(format!(
+                "captured frame is {expected_bytes} bytes; limit is {MAX_CAPTURE_BYTES} bytes"
+            ));
+        }
+        let expected_sha256 = data
+            .get("sha256")
+            .and_then(Value::as_str)
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| "completed screenshot response has invalid SHA-256".to_string())?
+            .to_ascii_lowercase();
+        let runtime_identity = response
+            .runtime_identity
+            .ok_or_else(|| "completed screenshot response has no runtime provenance".to_string())?;
+        let file = std::fs::File::open(&path).map_err(|error| {
+            format!("failed opening captured frame {}: {error}", path.display())
+        })?;
+        let mut bytes = Vec::with_capacity(expected_bytes);
+        file.take((MAX_CAPTURE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                format!("failed reading captured frame {}: {error}", path.display())
+            })?;
+        if bytes.len() > MAX_CAPTURE_BYTES {
+            return Err(format!("captured frame exceeds {MAX_CAPTURE_BYTES} bytes"));
+        }
+        if bytes.len() != expected_bytes {
+            return Err(format!(
+                "captured frame byte length changed: expected {expected_bytes}, found {}",
+                bytes.len()
+            ));
+        }
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        if sha256 != expected_sha256 {
+            return Err("captured frame SHA-256 does not match runtime evidence".into());
+        }
+        return Ok(CaptureEvidence {
+            path,
+            bytes,
+            width,
+            height,
+            scheduled_tick,
+            captured_tick,
+            sha256,
+            runtime_identity,
+        });
+    }
+}
+
+fn screenshot_preview(
+    task_id: &TaskId,
+    screenshot_id: &str,
+    evidence: CaptureEvidence,
+) -> Result<ScreenshotPreview, String> {
+    let decoded = image::load_from_memory_with_format(&evidence.bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("captured frame is not a valid PNG: {error}"))?
+        .to_rgba8();
+    let (width, height) = decoded.dimensions();
+    if width as usize != evidence.width || height as usize != evidence.height {
+        return Err(format!(
+            "captured frame dimensions changed: runtime reported {}x{}, PNG is {width}x{height}",
+            evidence.width, evidence.height
+        ));
+    }
+    Ok(ScreenshotPreview {
+        task_id: task_id.clone(),
+        screenshot_id: screenshot_id.to_string(),
+        path: evidence.path,
+        rgba: decoded.into_raw(),
+        width: width as usize,
+        height: height as usize,
+        scheduled_tick: evidence.scheduled_tick,
+        captured_tick: evidence.captured_tick,
+        sha256: evidence.sha256,
+        runtime_identity: evidence.runtime_identity,
+    })
 }
 
 impl DesktopEditor {
     fn new(client: LiveSessionClient, project_root: PathBuf, shutdown: Arc<AtomicBool>) -> Self {
+        let host = HostExecutor::new(project_root.clone());
+        let provider_root = project_root.clone();
+        let (capture_result_tx, capture_results) = mpsc::channel();
         Self {
             state: EditorState::default(),
+            controller: TaskController::new(move |request, canceled| {
+                run_reply_provider(request, canceled, provider_root.clone())
+            }),
             client,
             project_root,
-            next_request: 1,
             shutdown,
+            host,
+            validation_fingerprints: BTreeMap::new(),
+            busy_tasks: BTreeSet::new(),
+            execution_receipts: BTreeMap::new(),
+            validation_receipts: BTreeMap::new(),
+            capture: None,
+            capture_results,
+            capture_result_tx,
+            next_capture: 1,
+            preview_texture: None,
         }
     }
 
     fn process_shortcuts(&mut self, context: &egui::Context) {
-        let commands = context.input(|input| {
-            input
-                .events
-                .iter()
-                .filter_map(EditorState::chord)
-                .filter_map(|chord| self.state.shortcuts.command_for(chord))
-                .collect::<Vec<_>>()
-        });
-        for command in commands {
-            self.state.dispatch(command);
+        if self.state.palette_open {
+            return;
+        }
+        let events = context.input(|input| input.events.clone());
+        for event in events {
+            if let Some(command) =
+                EditorState::chord(&event).and_then(|chord| self.state.shortcuts.command_for(chord))
+            {
+                if let egui::Event::Key { key, modifiers, .. } = event {
+                    context.input_mut(|input| {
+                        input.consume_key(modifiers, key);
+                    });
+                }
+                self.state.dispatch(command);
+                if self.state.palette_open {
+                    break;
+                }
+            }
         }
     }
 
@@ -68,18 +822,443 @@ impl DesktopEditor {
         let mut pending = Vec::with_capacity(intents.len());
         for intent in intents {
             match intent {
-                EditorIntent::Reconnect(task) => {
-                    let request = LiveRequest::new(self.next_request, LiveCommand::Status);
-                    self.next_request = self.next_request.saturating_add(1);
-                    if let Err(error) = self.client.submit(request) {
-                        self.state.notice = Some(error);
-                        pending.push(EditorIntent::Reconnect(task));
+                EditorIntent::SendReply(task, text) => {
+                    let task = TaskId::new(task);
+                    let mut candidate = self.state.session.clone();
+                    let accepted = candidate
+                        .task_mut(&task)
+                        .and_then(|task| task.append_reply(&text))
+                        .map_err(|error| error.to_string())
+                        .and_then(|()| {
+                            if let Ok(config) = ProviderConfig::from_env() {
+                                candidate
+                                    .task_mut(&task)
+                                    .and_then(|task| {
+                                        task.set_provider_state(configured_provider_state(&config))
+                                    })
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            let task = candidate
+                                .task_mut(&task)
+                                .map_err(|error| error.to_string())?;
+                            for screenshot in task.screenshots.values_mut() {
+                                screenshot.upload = UploadState::Pending;
+                                screenshot.analysis = ScreenshotAnalysisState::Pending;
+                            }
+                            Ok(())
+                        })
+                        .and_then(|()| {
+                            self.controller
+                                .send(&candidate, &task)
+                                .map_err(|error| error.to_string())
+                        });
+                    match accepted {
+                        Ok(_) => self.state.session = candidate,
+                        Err(error) => {
+                            if self.state.session.active_task_id() == Some(&task)
+                                && self.state.reply.is_empty()
+                            {
+                                self.state.reply = text;
+                            }
+                            self.state.notice = Some(error);
+                        }
                     }
                 }
+                EditorIntent::Retry(task) => {
+                    let task = TaskId::new(task);
+                    if let Err(error) = self.controller.retry(&mut self.state.session, &task) {
+                        self.state.notice = Some(error.to_string());
+                    }
+                }
+                EditorIntent::Cancel(task) => {
+                    let task = TaskId::new(task);
+                    self.host.cancel(task.as_str());
+                    let canceled_capture = self.cancel_capture_for(&task);
+                    if let Err(error) = self.controller.cancel(&mut self.state.session, &task) {
+                        if !canceled_capture {
+                            self.state.notice = Some(error.to_string());
+                        }
+                    }
+                }
+                EditorIntent::Reconnect(task) => {
+                    let task = TaskId::new(task);
+                    self.cancel_capture_for(&task);
+                    if let Err(error) = self.controller.reconnect(&mut self.state.session, &task) {
+                        self.state.notice = Some(error.to_string());
+                    }
+                }
+                EditorIntent::Apply(task, action) => {
+                    if !self.busy_tasks.insert(task.clone()) {
+                        self.state.notice = Some(format!(
+                            "An apply or focused-test operation is already running for {task}."
+                        ));
+                        continue;
+                    }
+                    let payload = self
+                        .state
+                        .session
+                        .task(task.as_str())
+                        .ok()
+                        .and_then(|task| task.actions.get(action.as_str()))
+                        .and_then(|action| action.payload.clone());
+                    let submitted = payload
+                        .ok_or_else(|| "accepted action has no semantic edit payload".to_string())
+                        .and_then(|payload| {
+                            self.host.submit(HostRequest {
+                                task_id: task.clone(),
+                                operation: HostOperation::Apply {
+                                    action_id: action.clone(),
+                                    payload,
+                                },
+                                source_before: None,
+                            })
+                        });
+                    if let Err(error) = submitted {
+                        self.busy_tasks.remove(&task);
+                        let reason = bounded_failure(&error, 900);
+                        if let Ok(task_state) = self.state.session.task_mut(task.as_str()) {
+                            let _ =
+                                task_state.mark_action_for_repair(action.as_str(), reason.clone());
+                            let _ = task_state.append_result(format!(
+                                "Could not apply {action}: {reason}. Repair this proposal and retry."
+                            ));
+                        }
+                        self.state.notice = Some(error);
+                    }
+                }
+                EditorIntent::Test(task, run_id) => {
+                    if !self.busy_tasks.insert(task.clone()) {
+                        let message = format!(
+                            "An apply or focused-test operation is already running for {task}."
+                        );
+                        if let Ok(task_state) = self.state.session.task_mut(task.as_str()) {
+                            let _ = record_focused_test_failure(task_state, run_id, &message);
+                        }
+                        self.state.notice = Some(message);
+                        continue;
+                    }
+                    let paths = self
+                        .state
+                        .session
+                        .task(task.as_str())
+                        .map(|task| task.relevant_tests.clone())
+                        .unwrap_or_default();
+                    let submitted = super::desktop_source_fingerprint(&self.project_root, &paths)
+                        .and_then(|source_before| {
+                            self.host.submit(HostRequest {
+                                task_id: task.clone(),
+                                operation: HostOperation::Test { paths, run_id },
+                                source_before: Some(source_before),
+                            })
+                        });
+                    if let Err(error) = submitted {
+                        self.busy_tasks.remove(&task);
+                        if let Ok(task_state) = self.state.session.task_mut(task.as_str()) {
+                            let _ = record_focused_test_failure(task_state, run_id, &error);
+                        }
+                        self.state.notice = Some(error);
+                    }
+                }
+                EditorIntent::MarkDone(task) => {
+                    let paths = self
+                        .validation_fingerprints
+                        .get(&task)
+                        .map(|(_, paths)| paths.clone())
+                        .unwrap_or_default();
+                    let current = super::desktop_source_fingerprint(&self.project_root, &paths);
+                    let expected = self
+                        .validation_fingerprints
+                        .get(&task)
+                        .map(|(fingerprint, _)| fingerprint);
+                    match current {
+                        Ok(current) if expected == Some(&current) => {
+                            if let Err(error) = self
+                                .state
+                                .session
+                                .task_mut(task.as_str())
+                                .and_then(|task| task.mark_done())
+                            {
+                                self.state.notice = Some(error.to_string());
+                            }
+                        }
+                        Ok(_) => {
+                            self.state.notice = Some(
+                                "Project sources changed after validation; run focused tests again."
+                                    .to_string(),
+                            );
+                        }
+                        Err(error) => self.state.notice = Some(error),
+                    }
+                }
+                EditorIntent::Screenshot(task) => self.start_capture(TaskId::new(task)),
                 intent => pending.push(intent),
             }
         }
         self.state.intents = pending;
+    }
+
+    fn start_capture(&mut self, task_id: TaskId) {
+        if self.capture.is_some() {
+            self.state.notice = Some("A game screenshot capture is already in progress.".into());
+            return;
+        }
+        if self.state.session.active_task_id() != Some(&task_id) {
+            self.state.notice = Some("Ignored screenshot request from an inactive task.".into());
+            return;
+        }
+        let config = match ProviderConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                self.state.notice = Some(format!("Cannot attach screenshot: {error}"));
+                return;
+            }
+        };
+        if !config.supports_image_input() {
+            self.state.notice = Some(format!(
+                "Cannot attach screenshot: selected {} model {} does not support image input.",
+                config.provider_name(),
+                config.model()
+            ));
+            return;
+        }
+        if let Err(error) = self
+            .state
+            .session
+            .task_mut(&task_id)
+            .and_then(|task| task.set_vision_capability(true))
+        {
+            self.state.notice = Some(error.to_string());
+            return;
+        }
+
+        let sequence = self.next_capture;
+        self.next_capture = self.next_capture.saturating_add(1);
+        let screenshot_id = format!("game-{sequence}");
+        let artifact = format!("editor-{}-{sequence}", task_id.as_str());
+        let request_id = 10_000_u64.saturating_add(sequence);
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = Arc::clone(&canceled);
+        let worker_task = task_id.clone();
+        let worker_screenshot = screenshot_id.clone();
+        let worker_client = self.client.clone();
+        let result_tx = self.capture_result_tx.clone();
+        std::thread::spawn(move || {
+            let result = capture_frame(
+                &worker_client,
+                request_id,
+                artifact,
+                &worker_canceled,
+                CAPTURE_DEADLINE,
+            );
+            let _ = result_tx.send(CaptureResult {
+                task_id: worker_task,
+                screenshot_id: worker_screenshot,
+                request_id,
+                result,
+            });
+        });
+        self.capture = Some(PendingCapture {
+            task_id,
+            screenshot_id,
+            request_id,
+            canceled,
+        });
+        self.state.notice = Some("Capturing the next presented game frame...".into());
+    }
+
+    fn cancel_capture_for(&mut self, task_id: &TaskId) -> bool {
+        if self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| &capture.task_id == task_id)
+        {
+            if let Some(capture) = self.capture.take() {
+                capture.canceled.store(true, Ordering::Release);
+                self.state.notice = Some(format!("Screenshot capture canceled for {task_id}."));
+                return true;
+            }
+        }
+        false
+    }
+
+    fn poll_capture(&mut self) {
+        loop {
+            let completed = match self.capture_results.try_recv() {
+                Ok(completed) => completed,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            };
+            let is_current = self.capture.as_ref().is_some_and(|pending| {
+                pending.task_id == completed.task_id
+                    && pending.screenshot_id == completed.screenshot_id
+                    && pending.request_id == completed.request_id
+            });
+            if !is_current {
+                continue;
+            }
+            self.capture = None;
+            if self.state.session.active_task_id() != Some(&completed.task_id) {
+                self.state.notice = Some(format!(
+                    "Ignored obsolete screenshot for inactive task {}.",
+                    completed.task_id
+                ));
+                continue;
+            }
+            match completed.result {
+                Ok(evidence) => {
+                    match screenshot_preview(&completed.task_id, &completed.screenshot_id, evidence)
+                    {
+                        Ok(preview) => {
+                            let source = preview.path.to_string_lossy().into_owned();
+                            match self
+                                .state
+                                .session
+                                .task_mut(&completed.task_id)
+                                .and_then(|task| {
+                                    task.attach_screenshot_with_sha256(
+                                        completed.screenshot_id.as_str(),
+                                        source,
+                                        preview.sha256.clone(),
+                                    )
+                                }) {
+                                Ok(()) => {
+                                    self.state.notice = Some(format!(
+                                        "Captured {}x{} game frame for {}.",
+                                        preview.width, preview.height, completed.task_id
+                                    ));
+                                    self.state.preview = Some(preview);
+                                    self.preview_texture = None;
+                                }
+                                Err(error) => self.state.notice = Some(error.to_string()),
+                            }
+                        }
+                        Err(error) => self.state.notice = Some(error),
+                    }
+                }
+                Err(error) => self.state.notice = Some(format!("Screenshot failed: {error}")),
+            }
+        }
+    }
+
+    fn poll_controller(&mut self) {
+        for event in self.controller.poll(&mut self.state.session) {
+            self.state.notice = match event {
+                TaskControllerEvent::Completed {
+                    task_id, proposals, ..
+                } => Some(format!(
+                    "AI reply completed for {task_id}; {} action(s) proposed",
+                    proposals.len()
+                )),
+                TaskControllerEvent::Failed {
+                    task_id, message, ..
+                } => Some(format!("AI reply failed for {task_id}: {message}")),
+                TaskControllerEvent::Canceled { task_id, .. } => {
+                    Some(format!("AI reply canceled for {task_id}"))
+                }
+                TaskControllerEvent::Stale { task_id, .. } => {
+                    Some(format!("Ignored an obsolete AI reply for {task_id}"))
+                }
+            };
+        }
+    }
+
+    fn poll_host(&mut self) {
+        for completed in self.host.poll() {
+            let task_id = completed.task_id;
+            self.busy_tasks.remove(&task_id);
+            let task = self.state.session.task_mut(task_id.as_str());
+            match (completed.operation, completed.result, task) {
+                (
+                    HostOperation::Apply { action_id, .. },
+                    Ok((summary, receipt, fingerprint)),
+                    Ok(task),
+                ) => {
+                    let validated = receipt_has_test_evidence(&receipt);
+                    let receipt_summary = receipt
+                        .get("receipt")
+                        .and_then(Value::as_str)
+                        .unwrap_or("recorded validation receipt")
+                        .to_string();
+                    self.execution_receipts
+                        .insert((task_id.clone(), action_id.clone()), receipt);
+                    if task.lifecycle == stasis_ai::TaskLifecycle::Active {
+                        let result = task.apply_action(action_id.as_str()).and_then(|()| {
+                            if validated {
+                                task.begin_focused_tests()?;
+                                task.finish_focused_tests(stasis_ai::FocusedTestResult::passed(
+                                    summary.clone(),
+                                ))?;
+                            }
+                            task.append_result(format!(
+                                "Applied {action_id}: {summary}\nValidation receipt: {receipt_summary}"
+                            ))?;
+                            Ok(())
+                        });
+                        if let Err(error) = result {
+                            self.state.notice = Some(error.to_string());
+                            continue;
+                        }
+                        if validated {
+                            self.validation_fingerprints
+                                .insert(task_id.clone(), (fingerprint, Vec::new()));
+                        }
+                        self.state.notice = Some(format!("Applied {action_id} for {task_id}"));
+                    } else if let Some(action) = task.actions.get_mut(action_id.as_str()) {
+                        action.state = ActionState::Applied;
+                        self.state.notice = Some(format!(
+                            "{action_id} committed before {task_id} cancellation completed"
+                        ));
+                    }
+                }
+                (HostOperation::Apply { action_id, .. }, Err(error), Ok(task)) => {
+                    let repair_reason = bounded_failure(&error, 900);
+                    if task.lifecycle == stasis_ai::TaskLifecycle::Active {
+                        let _ =
+                            task.mark_action_for_repair(action_id.as_str(), repair_reason.clone());
+                        let _ = task.append_result(format!(
+                            "Could not apply {action_id}: {repair_reason}. Repair this proposal and retry."
+                        ));
+                    }
+                    self.state.notice = Some(format!("Apply failed for {task_id}: {error}"));
+                }
+                (
+                    HostOperation::Test { paths, run_id },
+                    Ok((summary, receipt, fingerprint)),
+                    Ok(task),
+                ) => {
+                    let result = task
+                        .finish_focused_test_run(
+                            run_id,
+                            stasis_ai::FocusedTestResult::passed(summary.clone()),
+                        )
+                        .and_then(|()| {
+                            task.append_result(format!(
+                                "Focused tests passed: {summary}. Validation receipt recorded."
+                            ))
+                        });
+                    if let Err(error) = result {
+                        self.state.notice = Some(error.to_string());
+                        continue;
+                    }
+                    self.validation_receipts.insert(task_id.clone(), receipt);
+                    self.validation_fingerprints
+                        .insert(task_id.clone(), (fingerprint, paths));
+                    self.state.notice = Some(format!("Focused tests passed for {task_id}"));
+                }
+                (HostOperation::Test { run_id, .. }, Err(error), Ok(task)) => {
+                    if task.lifecycle == stasis_ai::TaskLifecycle::Active
+                        && record_focused_test_failure(task, run_id, &error).is_err()
+                    {
+                        self.state.notice = Some(format!(
+                            "Ignored obsolete focused-test result for {task_id}"
+                        ));
+                        continue;
+                    }
+                    self.state.notice =
+                        Some(format!("Focused tests failed for {task_id}: {error}"));
+                }
+                (_, _, Err(error)) => self.state.notice = Some(error.to_string()),
+            }
+        }
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -119,18 +1298,23 @@ impl DesktopEditor {
             })
             .collect::<Vec<_>>();
         for (id, objective, lifecycle, connection, elapsed, cost, retries) in cards {
-            let label = format!("{objective}\n{lifecycle:?} | {connection:?} | {elapsed}ms | ${:.4} | retry {retries}",
-                cost as f64 / 1_000_000.0);
+            let request = self.controller.snapshot(&TaskId::new(&id));
+            let request_status = request
+                .as_ref()
+                .map(|snapshot| format!(" | {:?}", snapshot.state))
+                .unwrap_or_default();
+            let retries = request
+                .as_ref()
+                .map_or(retries, |snapshot| snapshot.retry_count);
+            let label = format!(
+                "{objective}\n{lifecycle:?} | {connection:?}{request_status} | {elapsed}ms | ${:.4} | retry {retries}",
+                cost as f64 / 1_000_000.0
+            );
             if ui
                 .selectable_label(active.as_deref() == Some(&id), label)
                 .clicked()
             {
-                self.state.notice = self
-                    .state
-                    .session
-                    .switch_task(&id)
-                    .err()
-                    .map(|e| e.to_string());
+                self.state.notice = self.state.switch_task(&id).err().map(|e| e.to_string());
             }
         }
     }
@@ -146,9 +1330,13 @@ struct EditorState {
     reply: String,
     palette_query: String,
     palette_open: bool,
+    palette_selected: usize,
+    palette_return_focus: FocusArea,
+    drafts: BTreeMap<String, (String, String)>,
     next_task: u64,
     intents: Vec<EditorIntent>,
     notice: Option<String>,
+    preview: Option<ScreenshotPreview>,
 }
 
 impl Default for EditorState {
@@ -162,9 +1350,13 @@ impl Default for EditorState {
             reply: String::new(),
             palette_query: String::new(),
             palette_open: false,
+            palette_selected: 0,
+            palette_return_focus: FocusArea::Tasks,
+            drafts: BTreeMap::new(),
             next_task: 1,
             intents: Vec::new(),
             notice: None,
+            preview: None,
         }
     }
 }
@@ -194,22 +1386,28 @@ impl EditorState {
     }
 
     fn create_task(&mut self) -> Result<(), String> {
-        let objective = self.objective.trim();
+        let objective = self.objective.trim().to_string();
         if objective.is_empty() {
             self.focus = FocusArea::Tasks;
             return Err("Enter a task objective first.".into());
         }
         let id = format!("task-{}", self.next_task);
+        let previous = self.session.active_task_id().map(ToString::to_string);
         self.session
             .new_task(
                 id.as_str(),
-                objective,
+                &objective,
                 "Stasis project; fresh task-scoped context",
             )
             .map_err(|e| e.to_string())?;
         self.next_task = self.next_task.saturating_add(1);
         self.objective.clear();
-        self.reply.clear();
+        if let Some(previous) = previous {
+            self.drafts
+                .insert(previous, (String::new(), std::mem::take(&mut self.reply)));
+        } else {
+            self.reply.clear();
+        }
         self.focus = FocusArea::Reply;
         Ok(())
     }
@@ -229,9 +1427,28 @@ impl EditorState {
             .and_then(|id| ids.iter().position(|value| value == id.as_str()))
             .unwrap_or(0);
         let next = (current as isize + offset).rem_euclid(ids.len() as isize) as usize;
-        self.session
-            .switch_task(&ids[next])
-            .map_err(|e| e.to_string())
+        self.switch_task(&ids[next])
+    }
+
+    fn switch_task(&mut self, id: &str) -> Result<(), String> {
+        let previous = self.active_id()?;
+        self.session.switch_task(id).map_err(|e| e.to_string())?;
+        self.drafts.insert(
+            previous,
+            (
+                std::mem::take(&mut self.objective),
+                std::mem::take(&mut self.reply),
+            ),
+        );
+        (self.objective, self.reply) = self.drafts.remove(id).unwrap_or_default();
+        Ok(())
+    }
+
+    fn close_palette(&mut self) {
+        self.palette_open = false;
+        self.palette_query.clear();
+        self.palette_selected = 0;
+        self.focus = self.palette_return_focus;
     }
 
     fn first_action(&self, predicate: impl Fn(&ActionState) -> bool) -> Option<String> {
@@ -251,6 +1468,10 @@ impl EditorState {
     fn handle(&mut self, command: TaskSessionCommand) -> Result<(), String> {
         match command {
             TaskSessionCommand::OpenCommandPalette | TaskSessionCommand::Search => {
+                if !self.palette_open {
+                    self.palette_return_focus = self.focus;
+                    self.palette_selected = 0;
+                }
                 self.palette_open = true;
                 self.focus = FocusArea::Palette;
                 Ok(())
@@ -272,7 +1493,7 @@ impl EditorState {
                     .nth(usize::from(slot.saturating_sub(1)))
                     .map(|task| task.id.to_string())
                     .ok_or_else(|| format!("Task slot {slot} is empty."))?;
-                self.session.switch_task(id).map_err(|e| e.to_string())
+                self.switch_task(&id)
             }
             TaskSessionCommand::FocusReply => {
                 self.active_id()?;
@@ -289,9 +1510,6 @@ impl EditorState {
                 if text.is_empty() {
                     return Err("Reply is empty.".into());
                 }
-                self.session
-                    .append_reply(&text)
-                    .map_err(|e| e.to_string())?;
                 self.intents.push(EditorIntent::SendReply(task, text));
                 self.reply.clear();
                 Ok(())
@@ -325,10 +1543,19 @@ impl EditorState {
                 self.session
                     .begin_focused_tests()
                     .map_err(|e| e.to_string())?;
-                self.intents.push(EditorIntent::Test(task));
+                let run_id = self
+                    .session
+                    .active_task()
+                    .map_err(|error| error.to_string())?
+                    .validation_run_id;
+                self.intents.push(EditorIntent::Test(task, run_id));
                 Ok(())
             }
-            TaskSessionCommand::Retry => self.session.retry().map_err(|e| e.to_string()),
+            TaskSessionCommand::Retry => {
+                let task = self.active_id()?;
+                self.intents.push(EditorIntent::Retry(task));
+                Ok(())
+            }
             TaskSessionCommand::AttachScreenshot => {
                 let task = self.active_id()?;
                 self.intents.push(EditorIntent::Screenshot(task));
@@ -351,16 +1578,18 @@ impl EditorState {
                 self.intents.push(EditorIntent::ImportImage(task, image));
                 Ok(())
             }
-            TaskSessionCommand::MarkDone => self.session.mark_done().map_err(|e| e.to_string()),
+            TaskSessionCommand::MarkDone => {
+                let task = self.active_id()?;
+                self.intents.push(EditorIntent::MarkDone(task));
+                Ok(())
+            }
             TaskSessionCommand::Cancel => {
                 let task = self.active_id()?;
-                self.session.cancel().map_err(|e| e.to_string())?;
                 self.intents.push(EditorIntent::Cancel(task));
                 Ok(())
             }
             TaskSessionCommand::Reconnect => {
                 let task = self.active_id()?;
-                self.session.reconnect().map_err(|e| e.to_string())?;
                 self.intents.push(EditorIntent::Reconnect(task));
                 Ok(())
             }
@@ -440,6 +1669,28 @@ impl DesktopEditor {
             task.provider.routing,
             task.provider.fallback
         ));
+        ui.label(format!(
+            "{}ms | {} input / {} output tokens | ${:.4} | {} retries",
+            task.metrics.elapsed_ms,
+            task.metrics.input_tokens,
+            task.metrics.output_tokens,
+            task.metrics.estimated_cost_micros as f64 / 1_000_000.0,
+            task.metrics.retry_count,
+        ));
+        if let Some(request) = self.controller.snapshot(&task.id) {
+            ui.label(format!(
+                "Request {} | {:?} | {}ms | retry {}{}",
+                request.request_id.get(),
+                request.state,
+                request.elapsed_ms,
+                request.retry_count,
+                request
+                    .error
+                    .as_deref()
+                    .map(|error| format!(" | {error}"))
+                    .unwrap_or_default(),
+            ));
+        }
         ui.separator();
         egui::ScrollArea::vertical()
             .id_source("task-thread")
@@ -460,6 +1711,35 @@ impl DesktopEditor {
                     ui.group(|ui| {
                         ui.label(RichText::new(format!("Action | {:?}", action.state)).strong());
                         ui.label(&action.description);
+                        if let Some(payload) = &action.payload {
+                            ui.collapsing("Review semantic edit", |ui| {
+                                let preview =
+                                    serde_json::to_string_pretty(payload).unwrap_or_else(|_| {
+                                        "Invalid semantic edit payload".to_string()
+                                    });
+                                ui.add(
+                                    egui::Label::new(RichText::new(preview).monospace())
+                                        .selectable(true),
+                                );
+                            });
+                        }
+                    });
+                }
+                for screenshot in task.screenshots.values() {
+                    ui.group(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Screenshot {} | upload {:?} | analysis {:?}",
+                                screenshot.id, screenshot.upload, screenshot.analysis
+                            ))
+                            .strong(),
+                        );
+                        ui.label(format!(
+                            "task {} | sha256 {} | {}",
+                            screenshot.provenance.task_id,
+                            screenshot.content_sha256.as_deref().unwrap_or("unverified"),
+                            screenshot.source
+                        ));
                     });
                 }
             });
@@ -475,8 +1755,12 @@ impl DesktopEditor {
             for (label, command) in [
                 ("Send  Ctrl+Enter", TaskSessionCommand::SendReply),
                 ("Accept  Ctrl+Y", TaskSessionCommand::AcceptAction),
+                ("Reject", TaskSessionCommand::RejectAction),
                 ("Apply  Ctrl+Alt+Enter", TaskSessionCommand::ApplyAction),
                 ("Test  Ctrl+T", TaskSessionCommand::RunFocusedTests),
+                ("Retry  Ctrl+R", TaskSessionCommand::Retry),
+                ("Cancel  Ctrl+Esc", TaskSessionCommand::Cancel),
+                ("Reconnect  Ctrl+Shift+R", TaskSessionCommand::Reconnect),
                 ("Done  Ctrl+Shift+D", TaskSessionCommand::MarkDone),
             ] {
                 if ui.button(label).clicked() {
@@ -498,9 +1782,62 @@ impl DesktopEditor {
         } else {
             Color32::LIGHT_GRAY
         };
-        painter.text(response.rect.center(), egui::Align2::CENTER_CENTER,
-            "LIVE GAME\n\nThe interactive game runs in its native window\nand keeps independent keyboard and mouse focus.\n\nCtrl+Alt+G focuses this surface.",
-            egui::FontId::proportional(18.0), color);
+        let preview = self
+            .state
+            .preview
+            .as_ref()
+            .filter(|preview| self.state.session.active_task_id() == Some(&preview.task_id));
+        if let Some(preview) = preview {
+            let needs_texture = self
+                .preview_texture
+                .as_ref()
+                .map_or(true, |(id, _)| id != &preview.screenshot_id);
+            if needs_texture {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [preview.width, preview.height],
+                    &preview.rgba,
+                );
+                let texture = ui.ctx().load_texture(
+                    format!("screenshot-preview-{}", preview.screenshot_id),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                self.preview_texture = Some((preview.screenshot_id.clone(), texture));
+            }
+            let texture = &self.preview_texture.as_ref().expect("preview texture").1;
+            let available = response.rect.shrink2(egui::vec2(12.0, 42.0));
+            let scale = (available.width() / preview.width as f32)
+                .min(available.height() / preview.height as f32);
+            let size = egui::vec2(preview.width as f32, preview.height as f32) * scale;
+            let image_rect = egui::Rect::from_center_size(available.center(), size);
+            painter.image(
+                texture.id(),
+                image_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            painter.text(
+                response.rect.left_bottom() + egui::vec2(12.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!(
+                    "{} | {}x{} | tick {} -> {} | runtime {}:{} | sha256 {}",
+                    preview.screenshot_id,
+                    preview.width,
+                    preview.height,
+                    preview.scheduled_tick,
+                    preview.captured_tick,
+                    preview.runtime_identity.session_id,
+                    preview.runtime_identity.generation,
+                    &preview.sha256[..12]
+                ),
+                egui::FontId::proportional(13.0),
+                color,
+            );
+        } else {
+            painter.text(response.rect.center(), egui::Align2::CENTER_CENTER,
+                "LIVE GAME\n\nThe interactive game runs in its native window\nand keeps independent keyboard and mouse focus.\n\nCtrl+Alt+G focuses this surface.",
+                egui::FontId::proportional(18.0), color);
+        }
         if self.state.focus == FocusArea::Game {
             painter.rect_stroke(response.rect, 6.0, egui::Stroke::new(2.0_f32, color));
         }
@@ -512,6 +1849,15 @@ impl DesktopEditor {
         }
         let commands = [
             ("New task", TaskSessionCommand::NewTask),
+            ("Next task", TaskSessionCommand::SwitchNextTask),
+            ("Previous task", TaskSessionCommand::SwitchPreviousTask),
+            ("Send reply", TaskSessionCommand::SendReply),
+            ("Reject action", TaskSessionCommand::RejectAction),
+            ("Retry", TaskSessionCommand::Retry),
+            (
+                "Import generated image",
+                TaskSessionCommand::ImportGeneratedImage,
+            ),
             ("Focus reply", TaskSessionCommand::FocusReply),
             ("Accept action", TaskSessionCommand::AcceptAction),
             ("Apply action", TaskSessionCommand::ApplyAction),
@@ -526,39 +1872,132 @@ impl DesktopEditor {
             ("Mark done", TaskSessionCommand::MarkDone),
             ("Focus game", TaskSessionCommand::FocusGame),
         ];
+        let mut commands = commands
+            .into_iter()
+            .map(|(label, command)| (label.to_string(), command))
+            .collect::<Vec<_>>();
+        commands.extend(
+            self.state
+                .session
+                .tasks()
+                .take(255)
+                .enumerate()
+                .map(|(index, task)| {
+                    (
+                        format!("Switch to task {}: {}", index + 1, task.objective),
+                        TaskSessionCommand::SwitchTask((index + 1) as u8),
+                    )
+                }),
+        );
+        let mut keys = Vec::new();
+        context.input_mut(|input| {
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    key, pressed: true, ..
+                } = event
+                {
+                    if matches!(
+                        key,
+                        egui::Key::ArrowUp
+                            | egui::Key::ArrowDown
+                            | egui::Key::Enter
+                            | egui::Key::Escape
+                    ) {
+                        keys.push(*key);
+                        return false;
+                    }
+                }
+                true
+            });
+        });
         let mut chosen = None;
         egui::Window::new("Command palette  Ctrl+K")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, [0.0, 72.0])
             .show(context, |ui| {
-                ui.text_edit_singleline(&mut self.state.palette_query)
-                    .request_focus();
+                let query_id = ui.make_persistent_id("palette-query");
+                ui.memory_mut(|memory| memory.request_focus(query_id));
+                let response =
+                    ui.add(egui::TextEdit::singleline(&mut self.state.palette_query).id(query_id));
+                if response.changed() {
+                    self.state.palette_selected = 0;
+                }
                 let query = self.state.palette_query.to_ascii_lowercase();
-                for (label, command) in commands {
-                    if (query.is_empty() || label.to_ascii_lowercase().contains(&query))
-                        && ui.button(label).clicked()
-                    {
-                        chosen = Some(command);
+                let filtered = commands
+                    .iter()
+                    .filter(|(label, _)| label.to_ascii_lowercase().contains(&query))
+                    .collect::<Vec<_>>();
+                self.state.palette_selected = self
+                    .state
+                    .palette_selected
+                    .min(filtered.len().saturating_sub(1));
+                for key in &keys {
+                    match key {
+                        egui::Key::Escape => {
+                            self.state.close_palette();
+                            break;
+                        }
+                        egui::Key::ArrowUp => {
+                            self.state.palette_selected =
+                                self.state.palette_selected.saturating_sub(1)
+                        }
+                        egui::Key::ArrowDown => {
+                            self.state.palette_selected = (self.state.palette_selected + 1)
+                                .min(filtered.len().saturating_sub(1))
+                        }
+                        egui::Key::Enter => {
+                            chosen = filtered
+                                .get(self.state.palette_selected)
+                                .map(|(_, command)| command.clone());
+                            break;
+                        }
+                        _ => {}
                     }
                 }
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for (index, (label, command)) in filtered.iter().enumerate() {
+                            let response = ui.selectable_label(
+                                index == self.state.palette_selected,
+                                label.as_str(),
+                            );
+                            if index == self.state.palette_selected && !keys.is_empty() {
+                                response.scroll_to_me(None);
+                            }
+                            if response.clicked() {
+                                chosen = Some(command.clone());
+                            }
+                        }
+                        if filtered.is_empty() {
+                            ui.label("No matching commands");
+                        }
+                    });
             });
         if let Some(command) = chosen {
-            self.state.palette_open = false;
-            self.state.palette_query.clear();
+            self.state.close_palette();
             self.state.dispatch(command);
         }
     }
 }
 
-impl eframe::App for DesktopEditor {
-    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+impl DesktopEditor {
+    fn ui(&mut self, context: &egui::Context) {
         if self.shutdown.load(Ordering::Acquire) {
             context.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
         context.request_repaint_after(Duration::from_millis(100));
+        self.poll_controller();
+        self.poll_host();
+        self.poll_capture();
         self.process_shortcuts(context);
+        let palette_frame = self.state.palette_open;
+        self.palette(context);
+        if palette_frame {
+            context.input_mut(|input| input.events.clear());
+        }
         egui::TopBottomPanel::top("top-bar").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("STASIS EDITOR");
@@ -594,11 +2033,20 @@ impl eframe::App for DesktopEditor {
                 ui.allocate_ui(ui.available_size(), |ui| self.game(ui));
             });
         });
-        self.palette(context);
         self.flush_intents();
+    }
+}
+
+impl eframe::App for DesktopEditor {
+    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui(context);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.host.shutdown_and_join();
+        if let Some(capture) = self.capture.take() {
+            capture.canceled.store(true, Ordering::Release);
+        }
         let _ = self
             .client
             .submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
@@ -633,13 +2081,275 @@ mod tests {
     use stasis_ai::task_session::{
         ConnectionState, FocusedTestResult, TaskLifecycle, ValidationStatus,
     };
-    use stasis_runner::live::live_session;
+    use stasis_runner::live::{live_session, LiveResponse};
+    use std::sync::Barrier;
 
     fn task_state() -> EditorState {
         let mut state = EditorState::default();
         state.objective = "Change player speed".into();
         state.create_task().unwrap();
         state
+    }
+
+    fn test_png() -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                &[255, 0, 0, 255, 0, 255, 0, 255],
+                2,
+                1,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        bytes
+    }
+
+    fn test_runtime_identity() -> LiveRuntimeIdentity {
+        LiveRuntimeIdentity {
+            session_id: "runtime-test".into(),
+            generation: 3,
+            source_hashes: std::collections::BTreeMap::new(),
+            indexed_collections: Vec::new(),
+            complete: true,
+        }
+    }
+
+    fn temp_png_path(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "stasis-editor-{label}-{}-{nonce}.png",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn drafts_follow_all_task_switches_and_creation() {
+        let mut state = task_state();
+        state.reply = "unsent first".into();
+        state.objective = "second".into();
+        state.create_task().unwrap();
+        assert!(state.reply.is_empty());
+        state.reply = "unsent second".into();
+        state.objective = "future second objective".into();
+        state
+            .handle(TaskSessionCommand::SwitchPreviousTask)
+            .unwrap();
+        assert_eq!(state.reply, "unsent first");
+        assert!(state.objective.is_empty());
+        state.objective = "future first objective".into();
+        state.switch_task("task-1").unwrap();
+        assert_eq!(state.objective, "future first objective");
+        assert_eq!(state.reply, "unsent first");
+        state.handle(TaskSessionCommand::SwitchTask(2)).unwrap();
+        assert_eq!(state.reply, "unsent second");
+        assert_eq!(state.objective, "future second objective");
+        state.switch_task("task-1").unwrap();
+        assert_eq!(state.objective, "future first objective");
+        assert!(state.switch_task("missing").is_err());
+        assert_eq!(state.reply, "unsent first");
+        state.handle(TaskSessionCommand::SendReply).unwrap();
+        state.switch_relative(1).unwrap();
+        state.switch_relative(-1).unwrap();
+        assert!(state.reply.is_empty());
+    }
+
+    fn palette_frame(
+        editor: &mut DesktopEditor,
+        context: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        let _ = context.run(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |context| {
+                editor.ui(context);
+                assert!(!context.input(|input| input.key_pressed(egui::Key::Enter)
+                    || input.key_pressed(egui::Key::Escape)));
+            },
+        );
+    }
+
+    #[test]
+    fn palette_reopening_captures_text_before_underlying_fields() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state = task_state();
+        editor.state.focus = FocusArea::Tasks;
+        editor.state.objective = "unsent objective".into();
+        let context = egui::Context::default();
+        editor
+            .state
+            .handle(TaskSessionCommand::OpenCommandPalette)
+            .unwrap();
+        palette_frame(&mut editor, &context, vec![]);
+        editor.state.close_palette();
+        palette_frame(&mut editor, &context, vec![]);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![
+                key_event(egui::Key::K, egui::Modifiers::CTRL),
+                egui::Event::Text("focus game".into()),
+            ],
+        );
+        assert_eq!(editor.state.palette_query, "focus game");
+        assert_eq!(editor.state.objective, "unsent objective");
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(editor.state.focus, FocusArea::Game);
+        assert_eq!(editor.state.session.task_count(), 1);
+        assert_eq!(editor.state.objective, "unsent objective");
+    }
+
+    #[test]
+    fn palette_shortcut_blocks_other_task_shortcuts() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state = task_state();
+        editor.state.reply = "unsent".into();
+        editor.state.objective = "another task".into();
+        let context = egui::Context::default();
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![
+                key_event(egui::Key::K, egui::Modifiers::CTRL),
+                key_event(egui::Key::N, egui::Modifiers::CTRL),
+            ],
+        );
+        assert!(editor.state.palette_open);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::N, egui::Modifiers::CTRL)],
+        );
+        assert_eq!(editor.state.session.task_count(), 1);
+        assert_eq!(editor.state.objective, "another task");
+        assert_eq!(editor.state.reply, "unsent");
+    }
+
+    #[test]
+    fn palette_filters_navigates_invokes_and_consumes_keys() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state = task_state();
+        editor.state.reply = "do not send".into();
+        editor
+            .state
+            .handle(TaskSessionCommand::OpenCommandPalette)
+            .unwrap();
+        let context = egui::Context::default();
+        palette_frame(&mut editor, &context, vec![]);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![egui::Event::Text("focus".into())],
+        );
+        assert_eq!(editor.state.palette_query, "focus");
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+        );
+        assert_eq!(editor.state.palette_selected, 1);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+        );
+        assert_eq!(editor.state.palette_selected, 0);
+        editor.state.palette_query = "focus game".into();
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::Enter, egui::Modifiers::CTRL)],
+        );
+        assert!(!editor.state.palette_open);
+        assert_eq!(editor.state.focus, FocusArea::Game);
+        assert_eq!(editor.state.reply, "do not send");
+        assert!(editor.state.intents.is_empty());
+        editor
+            .state
+            .handle(TaskSessionCommand::OpenCommandPalette)
+            .unwrap();
+        editor.state.palette_query = "no such command".into();
+        editor.state.palette_selected = 999;
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![
+                key_event(egui::Key::ArrowDown, egui::Modifiers::NONE),
+                key_event(egui::Key::Enter, egui::Modifiers::NONE),
+            ],
+        );
+        assert_eq!(editor.state.palette_selected, 0);
+        assert!(editor.state.palette_open);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!editor.state.palette_open);
+        assert_eq!(editor.state.focus, FocusArea::Game);
+        assert_eq!(
+            editor.state.session.active_task().unwrap().lifecycle,
+            TaskLifecycle::Active
+        );
+    }
+
+    #[test]
+    fn palette_exposes_reject_retry_import_and_task_switching() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state = task_state();
+        let context = egui::Context::default();
+        for query in ["reject action", "retry", "import generated image"] {
+            editor
+                .state
+                .handle(TaskSessionCommand::OpenCommandPalette)
+                .unwrap();
+            editor.state.palette_query = query.into();
+            palette_frame(
+                &mut editor,
+                &context,
+                vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            assert!(!editor.state.palette_open, "{query} must be invocable");
+        }
+        editor.state.objective = "second".into();
+        editor.state.create_task().unwrap();
+        for (query, expected) in [
+            ("previous task", "task-1"),
+            ("next task", "task-2"),
+            ("switch to task 1:", "task-1"),
+        ] {
+            editor
+                .state
+                .handle(TaskSessionCommand::OpenCommandPalette)
+                .unwrap();
+            editor.state.palette_query = query.into();
+            editor.state.palette_selected = 999;
+            palette_frame(
+                &mut editor,
+                &context,
+                vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            assert_eq!(editor.state.active_id().unwrap(), expected);
+            assert!(!editor.state.palette_open);
+        }
     }
 
     #[test]
@@ -664,21 +2374,20 @@ mod tests {
     }
 
     #[test]
-    fn independent_tasks_keep_replies_scoped() {
+    fn independent_tasks_keep_queued_replies_scoped() {
         let mut state = task_state();
         state.reply = "First reply".into();
         state.handle(TaskSessionCommand::SendReply).unwrap();
-        let first = state.active_id().unwrap();
         state.objective = "Change enemy art".into();
         state.create_task().unwrap();
         state.reply = "Second reply".into();
         state.handle(TaskSessionCommand::SendReply).unwrap();
-        assert_eq!(state.session.active_task().unwrap().thread.len(), 1);
-        state.session.switch_task(first).unwrap();
-        assert_eq!(
-            state.session.active_task().unwrap().thread[0].text,
-            "First reply"
-        );
+        assert!(matches!(
+            state.intents.as_slice(),
+            [EditorIntent::SendReply(first, first_text), EditorIntent::SendReply(second, second_text)]
+                if first == "task-1" && first_text == "First reply"
+                    && second == "task-2" && second_text == "Second reply"
+        ));
     }
 
     #[test]
@@ -723,13 +2432,13 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_cancel_and_completion_follow_task_state() {
+    fn reconnect_and_cancel_commands_target_the_active_task() {
         let mut state = task_state();
         state.session.disconnect().unwrap();
         state.handle(TaskSessionCommand::Reconnect).unwrap();
         assert!(matches!(
-            state.session.active_task().unwrap().connection,
-            ConnectionState::Connected
+            state.intents.last(),
+            Some(EditorIntent::Reconnect(task)) if task == "task-1"
         ));
         state.session.begin_focused_tests().unwrap();
         state
@@ -738,20 +2447,20 @@ mod tests {
             .unwrap();
         state.handle(TaskSessionCommand::MarkDone).unwrap();
         assert!(matches!(
-            state.session.active_task().unwrap().lifecycle,
-            TaskLifecycle::Completed
+            state.intents.last(),
+            Some(EditorIntent::MarkDone(task)) if task == "task-1"
         ));
         state.objective = "Cancelable task".into();
         state.create_task().unwrap();
         state.handle(TaskSessionCommand::Cancel).unwrap();
         assert!(matches!(
-            state.session.active_task().unwrap().lifecycle,
-            TaskLifecycle::Canceled
+            state.intents.last(),
+            Some(EditorIntent::Cancel(task)) if task == "task-2"
         ));
     }
 
     #[test]
-    fn flush_keeps_unhandled_test_intent_and_running_validation() {
+    fn failed_test_submission_does_not_leave_validation_running() {
         let (client, _server) = live_session(4);
         let mut editor =
             DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
@@ -761,21 +2470,277 @@ mod tests {
             .state
             .handle(TaskSessionCommand::RunFocusedTests)
             .unwrap();
+        editor.state.objective = "Unrelated task".into();
+        editor.state.create_task().unwrap();
 
         editor.flush_intents();
 
+        assert!(editor.state.intents.is_empty());
+        assert!(!editor.busy_tasks.contains("task-1"));
         assert!(matches!(
-            editor.state.intents.as_slice(),
-            [EditorIntent::Test(task)] if task == "task-1"
+            editor.state.session.task("task-1").unwrap().validation,
+            ValidationStatus::Failed { .. }
         ));
-        assert!(matches!(
-            editor.state.session.active_task().unwrap().validation,
-            ValidationStatus::Running
-        ));
+        let first = editor.state.session.task("task-1").unwrap();
+        assert!(first
+            .thread
+            .last()
+            .unwrap()
+            .text
+            .contains("Focused tests failed:"));
+        assert!(first.thread.last().unwrap().text.contains("rerun"));
+        assert!(editor
+            .state
+            .session
+            .active_task()
+            .unwrap()
+            .thread
+            .is_empty());
+
+        let (request_tx, request_rx) = mpsc::channel();
+        editor.controller = TaskController::new(move |request, _| {
+            request_tx.send(request).unwrap();
+            Ok(ProviderReply::new("Repair the test configuration."))
+        });
+        editor.state.session.switch_task("task-1").unwrap();
+        editor.state.reply = "Fix the focused test failure".into();
+        editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+        editor.flush_intents();
+        let request = request_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(request.task_id.as_str(), "task-1");
+        assert!(request
+            .context
+            .iter()
+            .any(|entry| entry.text.contains("Focused tests failed:")));
     }
 
     #[test]
-    fn flush_removes_reconnect_after_status_submission() {
+    fn capture_waits_for_completed_png_evidence() {
+        let (client, server) = live_session(4);
+        let bytes = test_png();
+        let path = temp_png_path("capture");
+        std::fs::write(&path, &bytes).unwrap();
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let canceled = AtomicBool::new(false);
+        let worker = std::thread::spawn(move || {
+            capture_frame(
+                &client,
+                41,
+                "editor-task-1-1".into(),
+                &canceled,
+                Duration::from_secs(2),
+            )
+        });
+        let started = Instant::now();
+        let request = loop {
+            if let Some(request) = server.drain(1).pop() {
+                break request;
+            }
+            assert!(started.elapsed() < Duration::from_secs(1));
+            std::thread::yield_now();
+        };
+        assert!(matches!(request.command, LiveCommand::CaptureFrame { .. }));
+        server
+            .respond(
+                LiveResponse::success(
+                    request.request_id,
+                    7,
+                    "capture_completed",
+                    json!({
+                        "artifact": "editor-task-1-1",
+                        "path": path,
+                        "scheduled_tick": 6,
+                        "captured_tick": 7,
+                        "byte_length": bytes.len(),
+                        "width": 2,
+                        "height": 1,
+                        "sha256": sha256
+                    }),
+                )
+                .with_runtime_identity(test_runtime_identity()),
+            )
+            .unwrap();
+        let evidence = worker.join().unwrap().unwrap();
+        assert_eq!((evidence.width, evidence.height), (2, 1));
+        assert_eq!((evidence.scheduled_tick, evidence.captured_tick), (6, 7));
+        assert_eq!(evidence.bytes, bytes);
+        let _ = std::fs::remove_file(evidence.path);
+    }
+
+    #[test]
+    fn provider_rejects_a_screenshot_changed_after_preview() {
+        let path = temp_png_path("changed");
+        let previewed = test_png();
+        let expected = format!("{:x}", Sha256::digest(&previewed));
+        std::fs::write(&path, &previewed).unwrap();
+        verify_screenshot_file(&path, &expected).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+
+        let error = verify_screenshot_file(&path, &expected).unwrap_err();
+
+        assert!(error.contains("changed after it was previewed"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn completed_capture_attaches_only_to_still_active_task() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "First task".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .session
+            .task_mut("task-1")
+            .unwrap()
+            .set_vision_capability(true)
+            .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        editor.capture = Some(PendingCapture {
+            task_id: TaskId::new("task-1"),
+            screenshot_id: "game-1".into(),
+            request_id: 10_001,
+            canceled,
+        });
+        editor.state.objective = "Second task".into();
+        editor.state.create_task().unwrap();
+        editor
+            .capture_result_tx
+            .send(CaptureResult {
+                task_id: TaskId::new("task-1"),
+                screenshot_id: "game-1".into(),
+                request_id: 10_001,
+                result: Ok(CaptureEvidence {
+                    path: PathBuf::from("stale.png"),
+                    bytes: test_png(),
+                    width: 2,
+                    height: 1,
+                    scheduled_tick: 1,
+                    captured_tick: 2,
+                    sha256: format!("{:x}", Sha256::digest(test_png())),
+                    runtime_identity: test_runtime_identity(),
+                }),
+            })
+            .unwrap();
+
+        editor.poll_capture();
+
+        assert!(editor
+            .state
+            .session
+            .task("task-1")
+            .unwrap()
+            .screenshots
+            .is_empty());
+        assert!(editor.state.preview.is_none());
+        assert!(editor.state.notice.as_deref().unwrap().contains("obsolete"));
+    }
+
+    #[test]
+    fn completed_capture_retains_provenance_hash_and_preview() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Inspect game".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .session
+            .task_mut("task-1")
+            .unwrap()
+            .set_vision_capability(true)
+            .unwrap();
+        let bytes = test_png();
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        editor.capture = Some(PendingCapture {
+            task_id: TaskId::new("task-1"),
+            screenshot_id: "game-1".into(),
+            request_id: 10_001,
+            canceled: Arc::new(AtomicBool::new(false)),
+        });
+        editor
+            .capture_result_tx
+            .send(CaptureResult {
+                task_id: TaskId::new("task-1"),
+                screenshot_id: "game-1".into(),
+                request_id: 10_001,
+                result: Ok(CaptureEvidence {
+                    path: PathBuf::from("captured.png"),
+                    bytes,
+                    width: 2,
+                    height: 1,
+                    scheduled_tick: 8,
+                    captured_tick: 9,
+                    sha256: sha256.clone(),
+                    runtime_identity: test_runtime_identity(),
+                }),
+            })
+            .unwrap();
+
+        editor.poll_capture();
+
+        let screenshot = editor
+            .state
+            .session
+            .task("task-1")
+            .unwrap()
+            .screenshots
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(screenshot.provenance.task_id, TaskId::new("task-1"));
+        assert_eq!(screenshot.content_sha256.as_deref(), Some(sha256.as_str()));
+        assert!(matches!(screenshot.upload, UploadState::Pending));
+        assert!(matches!(
+            screenshot.analysis,
+            ScreenshotAnalysisState::Pending
+        ));
+        let preview = editor.state.preview.as_ref().unwrap();
+        assert_eq!((preview.width, preview.height), (2, 1));
+        assert_eq!(preview.runtime_identity.session_id, "runtime-test");
+    }
+
+    #[test]
+    fn cancel_suppresses_a_late_capture_result() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Cancelable capture".into();
+        editor.state.create_task().unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        editor.capture = Some(PendingCapture {
+            task_id: TaskId::new("task-1"),
+            screenshot_id: "game-1".into(),
+            request_id: 10_001,
+            canceled: Arc::clone(&canceled),
+        });
+
+        assert!(editor.cancel_capture_for(&TaskId::new("task-1")));
+        assert!(canceled.load(Ordering::Acquire));
+        editor
+            .capture_result_tx
+            .send(CaptureResult {
+                task_id: TaskId::new("task-1"),
+                screenshot_id: "game-1".into(),
+                request_id: 10_001,
+                result: Err("capture canceled".into()),
+            })
+            .unwrap();
+        editor.poll_capture();
+
+        assert!(editor
+            .state
+            .session
+            .active_task()
+            .unwrap()
+            .screenshots
+            .is_empty());
+        assert!(editor.state.notice.as_deref().unwrap().contains("canceled"));
+    }
+
+    #[test]
+    fn reconnect_without_a_request_preserves_disconnected_state() {
         let (client, server) = live_session(4);
         let mut editor =
             DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
@@ -787,17 +2752,81 @@ mod tests {
         editor.flush_intents();
 
         assert!(editor.state.intents.is_empty());
-        let requests = server.drain(4);
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].command, LiveCommand::Status);
+        assert!(matches!(
+            editor.state.session.active_task().unwrap().connection,
+            ConnectionState::Disconnected
+        ));
+        assert!(editor
+            .state
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("no AI request"));
+        assert!(server.drain(4).is_empty());
     }
 
     #[test]
-    fn flush_keeps_reconnect_when_status_submission_fails() {
+    fn provider_usage_reads_both_supported_transport_shapes() {
+        let openrouter = serde_json::json!({
+            "tokens": {"prompt": 12, "completion": 7},
+            "cost": 0.00125
+        });
+        assert_eq!(
+            provider_reply_usage(Some(&openrouter)),
+            ProviderUsage {
+                input_tokens: 12,
+                output_tokens: 7,
+                estimated_cost_micros: 1_250,
+            }
+        );
+        let codex = serde_json::json!({
+            "tokens": {"input_tokens": 20, "output_tokens": 5}
+        });
+        assert_eq!(provider_reply_usage(Some(&codex)).input_tokens, 20);
+        assert_eq!(provider_reply_usage(Some(&codex)).output_tokens, 5);
+        let codex_state = provider_reply_state(
+            &ProviderConfig::Codex,
+            Some(&serde_json::json!({
+                "resolved_provider": "installed_codex_subscription",
+                "resolved_model": "test-model",
+                "route": "direct"
+            })),
+        );
+        assert!(matches!(
+            codex_state.routing,
+            RoutingState::Assigned { route } if route == "direct"
+        ));
+    }
+
+    #[test]
+    fn openrouter_response_displays_the_resolved_route_without_raw_route_json() {
+        let config = ProviderConfig::OpenRouter(stasis_ai::OpenRouterConfig {
+            api_key: "test-only".into(),
+            base_url: "https://example.invalid".into(),
+            model: "example/model".into(),
+            routing: stasis_ai::RoutingConfig::default(),
+            timeout: Duration::from_secs(1),
+        });
+        let usage = serde_json::json!({
+            "resolved_provider": "cerebras",
+            "resolved_model": "example/model",
+            "route": {"sort": "throughput", "allow_fallbacks": true},
+            "fallback": true
+        });
+
+        let state = provider_reply_state(&config, Some(&usage));
+
+        assert_eq!(state.provider.as_deref(), Some("cerebras"));
+        assert!(matches!(
+            state.routing,
+            RoutingState::Assigned { route } if route == "openrouter:cerebras"
+        ));
+        assert!(matches!(state.fallback, FallbackState::Active { .. }));
+    }
+
+    #[test]
+    fn flush_does_not_send_reconnect_to_the_live_game_queue() {
         let (client, server) = live_session(1);
-        client
-            .submit(LiveRequest::new(99, LiveCommand::Status))
-            .unwrap();
         let mut editor =
             DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
         editor.state.objective = "Reconnect task".into();
@@ -807,15 +2836,39 @@ mod tests {
 
         editor.flush_intents();
 
-        assert!(matches!(
-            editor.state.intents.as_slice(),
-            [EditorIntent::Reconnect(task)] if task == "task-1"
-        ));
-        assert_eq!(
-            editor.state.notice.as_deref(),
-            Some("live-session command queue is full")
-        );
-        assert_eq!(server.drain(1).len(), 1);
+        assert!(editor.state.intents.is_empty());
+        assert!(server.drain(1).is_empty());
+    }
+
+    #[test]
+    fn busy_task_restores_the_unsent_reply_draft() {
+        let (client, _server) = live_session(1);
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.controller = TaskController::new(move |_, _| {
+            worker_barrier.wait();
+            Ok(ProviderReply::new("finished"))
+        });
+        editor.state.objective = "Busy task".into();
+        editor.state.create_task().unwrap();
+        editor.state.reply = "first".into();
+        editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+        editor.flush_intents();
+        editor.state.reply = "keep this draft".into();
+        editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+
+        editor.flush_intents();
+
+        assert_eq!(editor.state.reply, "keep this draft");
+        assert_eq!(editor.state.session.active_task().unwrap().thread.len(), 1);
+        assert!(editor
+            .state
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("already has an AI request")));
+        barrier.wait();
     }
 
     fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
@@ -852,5 +2905,353 @@ mod tests {
                 .and_then(|chord| state.shortcuts.command_for(chord)),
             Some(TaskSessionCommand::Search)
         );
+    }
+
+    #[test]
+    fn proposal_tools_require_hashes_for_existing_symbols() {
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "propose_semantic_edit".to_string(),
+                args: json!({
+                    "proposal_id": "edit-speed",
+                    "description": "Update speed",
+                    "batch": {
+                        "schema_version": 1,
+                        "edits": [{
+                            "operation": "update",
+                            "target": {"name": "tick", "file": "src/main.stasis"},
+                            "new_source": "function tick(): i32 { return 1; }"
+                        }]
+                    }
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(tools.proposals.is_empty());
+        assert!(observations[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("require expected_source_hash")));
+    }
+
+    #[test]
+    fn repaired_proposal_is_structured_and_keeps_its_action_id() {
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "repair_semantic_edit".to_string(),
+                args: json!({
+                    "proposal_id": "edit-speed",
+                    "description": "Repair speed update",
+                    "batch": {
+                        "schema_version": 1,
+                        "edits": [{
+                            "operation": "update",
+                            "target": {"name": "tick", "file": "src/main.stasis"},
+                            "new_source": "function tick(): i32 { return 1; }",
+                            "expected_source_hash": "0123456789abcdef"
+                        }]
+                    }
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0].error.is_none());
+        assert_eq!(tools.proposals.len(), 1);
+        assert_eq!(tools.proposals[0].id, "edit-speed");
+        assert!(tools.proposals[0].repair);
+    }
+
+    #[test]
+    fn apply_receipt_requires_executed_test_evidence_to_unlock_done() {
+        assert!(!receipt_has_test_evidence(&json!({
+            "validation": {"test_result": {"tests_run": 0, "scenario_cases_run": 0}}
+        })));
+        assert!(receipt_has_test_evidence(&json!({
+            "validation": {"test_result": {"tests_run": 1, "scenario_cases_run": 0}}
+        })));
+    }
+
+    #[test]
+    fn focused_test_failure_drains_only_to_originating_task_after_switch() {
+        let (client, _server) = live_session(1);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "First task".into();
+        editor.state.create_task().unwrap();
+        editor.state.session.begin_focused_tests().unwrap();
+        let first_run_id = editor
+            .state
+            .session
+            .active_task()
+            .unwrap()
+            .validation_run_id;
+        editor.state.objective = "Second task".into();
+        editor.state.create_task().unwrap();
+
+        let (request_tx, _request_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        editor.host = HostExecutor {
+            requests: Some(request_tx),
+            results: result_rx,
+            canceled: Arc::new(Mutex::new(BTreeSet::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            worker: None,
+        };
+        editor.busy_tasks.insert("task-1".to_string());
+        result_tx
+            .send(HostResult {
+                task_id: "task-1".to_string(),
+                operation: HostOperation::Test {
+                    paths: Vec::new(),
+                    run_id: first_run_id,
+                },
+                result: Err("test player_speed failed at tests/player.test.stasis".to_string()),
+            })
+            .unwrap();
+
+        editor.poll_host();
+
+        let first = editor.state.session.task("task-1").unwrap();
+        assert!(matches!(first.validation, ValidationStatus::Failed { .. }));
+        assert!(first.thread.last().unwrap().text.contains("player_speed"));
+        let second = editor.state.session.task("task-2").unwrap();
+        assert!(second.thread.is_empty());
+        assert_eq!(
+            editor.state.session.active_task_id().unwrap().as_str(),
+            "task-2"
+        );
+    }
+
+    #[test]
+    fn host_shutdown_waits_for_in_flight_work() {
+        let (request_tx, _request_rx) = mpsc::channel();
+        let (_result_tx, result_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = Arc::clone(&finished);
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !worker_shutdown.load(Ordering::Acquire) {
+                assert!(std::time::Instant::now() < deadline);
+                thread::yield_now();
+            }
+            shutdown_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            // Represents completion of receipt publication or rollback.
+            worker_finished.store(true, Ordering::Release);
+        });
+        let host = HostExecutor {
+            requests: Some(request_tx),
+            results: result_rx,
+            canceled: Arc::new(Mutex::new(BTreeSet::new())),
+            shutdown,
+            worker: Some(worker),
+        };
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let dropper = thread::spawn(move || {
+            drop(host);
+            dropped_tx.send(finished.load(Ordering::Acquire)).unwrap();
+        });
+        shutdown_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            dropped_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        assert!(dropped_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        dropper.join().unwrap();
+    }
+
+    #[test]
+    fn host_shutdown_disconnects_an_idle_worker() {
+        let host = HostExecutor::new(PathBuf::from("missing-workspace"));
+        let (done_tx, done_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(host);
+            done_tx.send(()).unwrap();
+        });
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        dropper.join().unwrap();
+    }
+
+    #[test]
+    fn canceled_task_is_rejected_before_queued_host_execution() {
+        let host = HostExecutor::new(PathBuf::from("missing-workspace"));
+        host.cancel("task-canceled");
+        host.submit(HostRequest {
+            task_id: "task-canceled".to_string(),
+            operation: HostOperation::Test {
+                paths: Vec::new(),
+                run_id: 1,
+            },
+            source_before: Some("unused".to_string()),
+        })
+        .unwrap();
+
+        let completed = host
+            .results
+            .recv_timeout(Duration::from_secs(1))
+            .expect("canceled request returns without touching the workspace");
+        assert_eq!(completed.task_id, "task-canceled");
+        assert!(completed
+            .result
+            .expect_err("canceled request cannot execute")
+            .contains("canceled before execution"));
+    }
+
+    #[test]
+    fn obsolete_and_canceled_test_failures_do_not_change_task_context() {
+        for canceled in [false, true] {
+            let (client, _server) = live_session(1);
+            let mut editor =
+                DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+            editor.state.objective = "Validate task".into();
+            editor.state.create_task().unwrap();
+            let task = editor.state.session.active_task_mut().unwrap();
+            task.begin_focused_tests().unwrap();
+            let old_run = task.validation_run_id;
+            if canceled {
+                task.cancel().unwrap();
+            } else {
+                task.finish_focused_tests(FocusedTestResult::failed("previous failure"))
+                    .unwrap();
+                task.begin_focused_tests().unwrap();
+            }
+            let before = task.clone();
+            let (request_tx, _request_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            editor.host = HostExecutor {
+                requests: Some(request_tx),
+                results: result_rx,
+                canceled: Arc::new(Mutex::new(BTreeSet::new())),
+                shutdown: Arc::new(AtomicBool::new(false)),
+                worker: None,
+            };
+            result_tx
+                .send(HostResult {
+                    task_id: "task-1".into(),
+                    operation: HostOperation::Test {
+                        paths: Vec::new(),
+                        run_id: old_run,
+                    },
+                    result: Err("late failure".into()),
+                })
+                .unwrap();
+
+            editor.poll_host();
+
+            assert_eq!(editor.state.session.active_task().unwrap(), &before);
+            assert!(editor.validation_receipts.is_empty());
+            assert!(editor.validation_fingerprints.is_empty());
+        }
+    }
+
+    #[test]
+    fn accepted_action_executes_and_completes_its_originating_task() {
+        let root = super::super::tests::desktop_editor_fixture("editor_host_execution");
+        let item = super::super::desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let batch = json!({"schema_version": 1, "edits": [{
+            "operation": "update",
+            "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+            "new_source": "function value(): i32 { return 2; }"
+        }]});
+        let (client, _server) = live_session(1);
+        let mut editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Change value".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .propose_action_with_payload(
+                "edit-value",
+                stasis_ai::ActionKind::Edit,
+                "Change value to two",
+                batch,
+            )
+            .unwrap();
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        editor
+            .state
+            .handle(TaskSessionCommand::ApplyAction)
+            .unwrap();
+        editor.flush_intents();
+        editor.state.objective = "Unrelated task".into();
+        editor.state.create_task().unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while editor.busy_tasks.contains("task-1") && std::time::Instant::now() < deadline {
+            editor.poll_host();
+            thread::yield_now();
+        }
+
+        let first = editor.state.session.task("task-1").unwrap();
+        assert!(matches!(
+            first.actions["edit-value"].state,
+            ActionState::Applied
+        ));
+        assert!(matches!(first.validation, ValidationStatus::Passed { .. }));
+        assert!(editor
+            .execution_receipts
+            .contains_key(&("task-1".to_string(), "edit-value".to_string())));
+        assert_eq!(
+            editor.state.session.active_task_id().unwrap().as_str(),
+            "task-2"
+        );
+
+        editor.state.session.switch_task("task-1").unwrap();
+        let source_path = root.join("src/main.stasis");
+        let mut source = std::fs::read_to_string(&source_path).unwrap();
+        source.push_str("\n// external edit after validation\n");
+        std::fs::write(&source_path, source).unwrap();
+        editor.state.handle(TaskSessionCommand::MarkDone).unwrap();
+        editor.flush_intents();
+        assert_eq!(
+            editor.state.session.task("task-1").unwrap().lifecycle,
+            stasis_ai::TaskLifecycle::Active
+        );
+        assert!(editor
+            .state
+            .notice
+            .as_ref()
+            .unwrap()
+            .contains("sources changed"));
+        editor
+            .state
+            .handle(TaskSessionCommand::RunFocusedTests)
+            .unwrap();
+        editor.flush_intents();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while editor.busy_tasks.contains("task-1") && std::time::Instant::now() < deadline {
+            editor.poll_host();
+            thread::yield_now();
+        }
+        assert!(editor.validation_receipts.contains_key("task-1"));
+        editor.state.handle(TaskSessionCommand::MarkDone).unwrap();
+        editor.flush_intents();
+        assert!(matches!(
+            editor.state.session.task("task-1").unwrap().lifecycle,
+            stasis_ai::TaskLifecycle::Completed
+        ));
+        super::super::tests::remove_temp(&root);
     }
 }

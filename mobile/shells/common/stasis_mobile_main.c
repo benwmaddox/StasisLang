@@ -15,6 +15,7 @@
 #endif
 
 #include "published_aot_symbols.h"
+#include "stasis_mobile_aot_runtime.h"
 #if defined(__has_include)
 #if __has_include("stasis_package_provenance.h")
 #include "stasis_package_provenance.h"
@@ -27,7 +28,6 @@
 #include "stasis_package_provenance.h"
 #endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
-#include "stasis_mobile_aot_runtime.h"
 int stasis_set_recording_audio_config(int enabled);
 int stasis_audio_get_queued_frames(void);
 int stasis_recording_audio_pull_f32_interleaved(float *output_stereo, int frame_count);
@@ -36,6 +36,7 @@ void stasis_audio_stop(int voice_handle);
 int stasis_audio_voice_is_playing(int voice_handle);
 #endif
 #include "stasis_mobile_runtime.h"
+#include "stasis_network_join_card.h"
 
 void stasis_host_report_runtime_error(const char *message);
 
@@ -52,6 +53,53 @@ static void stasis_pregraphics_info_log(const char *format, ...) {
 
 #if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
 void stasis_mobile_network_present_join_url(void);
+#endif
+
+#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
+int32_t stasis_mobile_network_copy_join_card(char *out, size_t capacity);
+int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity);
+
+static int stasis_desktop_network_write_clipboard(const char *text) {
+    return SDL_SetClipboardText(text) ? 1 : 0;
+}
+
+static void stasis_desktop_network_present_join_card(void) {
+    static const SDL_MessageBoxButtonData buttons[] = {
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Copy private join link"},
+        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Dismiss"},
+    };
+    char address[256] = {0};
+    char message[512];
+    int32_t address_length = stasis_mobile_network_copy_join_card(
+        address, sizeof(address));
+    if (address_length <= 0 || (size_t)address_length >= sizeof(address)) {
+        memcpy(address, "LAN host ready", sizeof("LAN host ready"));
+    }
+    snprintf(
+        message,
+        sizeof(message),
+        "%s\n\nCopy the private join link and send it only to players you trust. Press F1 to reopen this card.",
+        address
+    );
+    const SDL_MessageBoxData card = {
+        SDL_MESSAGEBOX_INFORMATION,
+        NULL,
+        "@STASIS_APP_NAME@ browser guest",
+        message,
+        (int)(sizeof(buttons) / sizeof(buttons[0])),
+        buttons,
+        NULL,
+    };
+    int button = 0;
+    if (SDL_ShowMessageBox(&card, &button) && button == 1) {
+        stasis_network_copy_private_join_url(
+            stasis_mobile_network_copy_join_url,
+            stasis_desktop_network_write_clipboard
+        );
+    }
+    memset(address, 0, sizeof(address));
+    memset(message, 0, sizeof(message));
+}
 #endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 int stasis_test_get_render_submission_state(int32_t *out_i32, int32_t capacity);
@@ -261,6 +309,24 @@ static void report_runtime_status(const char *stage, int status) {
     stasis_host_report_runtime_error(message);
 }
 
+static void stasis_network_client_provision_from_shell(void) {
+#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && \
+        defined(STASIS_NETWORK_CLIENT_ENABLED)
+    const char *join_url = SDL_getenv("STASIS_NETWORK_JOIN_URL");
+    if (join_url != NULL && join_url[0] != '\0') {
+        size_t length = strlen(join_url);
+        if (length <= 512) {
+            (void)stasis_mobile_network_client_provision(join_url, length);
+        }
+        SDL_Environment *environment = SDL_GetEnvironment();
+        if (environment != NULL) {
+            (void)SDL_UnsetEnvironmentVariable(environment, "STASIS_NETWORK_JOIN_URL");
+        }
+        (void)SDL_unsetenv_unsafe("STASIS_NETWORK_JOIN_URL");
+    }
+#endif
+}
+
 static void stasis_mobile_wait_for_error_surface_quit(void) {
 #if defined(__ANDROID__)
     SDL_Event event;
@@ -388,9 +454,11 @@ static int configure_asset_root(void) {
 int SDL_main(int argc, char **argv) {
     (void)argc;
     (void)argv;
+    stasis_network_client_provision_from_shell();
     if (configure_asset_root() != 0) {
         stasis_host_report_runtime_error("Stasis could not configure the bundled asset root");
         SDL_Log("Stasis could not configure the bundled asset root");
+        stasis_mobile_network_client_shutdown();
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
     const char *asset_error = SDL_getenv("STASIS_ASSET_VERIFICATION_ERROR");
@@ -405,6 +473,7 @@ int SDL_main(int argc, char **argv) {
             log_asset_rejection_marker(seam_test_id, asset_error);
         }
 #endif
+        stasis_mobile_network_client_shutdown();
         stasis_mobile_wait_for_error_surface_quit();
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
@@ -435,6 +504,14 @@ int SDL_main(int argc, char **argv) {
             SDL_Log("Stasis mobile initialization stopped with status %d", status);
         }
     } else {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+        if (stasis_web_network_supported()) {
+            (void)stasis_mobile_network_client_connect();
+        }
+#endif
+#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
+        stasis_desktop_network_present_join_card();
+#endif
 #if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
         stasis_mobile_network_present_join_url();
 #endif
@@ -445,6 +522,9 @@ int SDL_main(int argc, char **argv) {
 #endif
     }
     StasisMobileFramePacer frame_pacer;
+#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
+    int network_join_shortcut_down = 0;
+#endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
     int32_t frame = 0;
     int32_t last_probe_sequence = 0;
@@ -454,6 +534,14 @@ int SDL_main(int argc, char **argv) {
     while (status == STASIS_MOBILE_RUNTIME_OK) {
         status = stasis_mobile_runtime_step();
         if (status == STASIS_MOBILE_RUNTIME_OK) {
+#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
+            const bool *keys = SDL_GetKeyboardState(NULL);
+            int shortcut_down = keys != NULL && keys[SDL_SCANCODE_F1];
+            if (shortcut_down && !network_join_shortcut_down) {
+                stasis_desktop_network_present_join_card();
+            }
+            network_join_shortcut_down = shortcut_down;
+#endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
             frame++;
             if (seam_it021_audio && !seam_it021_audio_collected &&
@@ -516,6 +604,7 @@ int SDL_main(int argc, char **argv) {
         }
 #endif
     }
+    stasis_mobile_network_client_shutdown();
     stasis_mobile_runtime_shutdown();
     if (game_result != 0) {
 #if defined(__ANDROID__)

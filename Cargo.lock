@@ -3496,6 +3496,7 @@ name = "stasis_compiler"
 version = "0.1.0"
 dependencies = [
  "atomic-write-file",
+ "cc",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
@@ -3552,6 +3553,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "sha2",
+ "socket2",
  "thiserror 2.0.20",
  "tungstenite",
 ]

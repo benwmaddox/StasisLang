@@ -77,7 +77,7 @@ struct ProbeResult {
     checksum: i32,
 }
 
-fn representative_host_frame(pointer_count: i32) -> (Vec<i32>, Vec<f32>) {
+fn expected_host_frame(pointer_count: i32) -> (Vec<i32>, Vec<f32>) {
     let mut i32s = vec![0; 768];
     let mut f32s = vec![0.0; 64];
     for (index, value) in [
@@ -85,13 +85,13 @@ fn representative_host_frame(pointer_count: i32) -> (Vec<i32>, Vec<f32>) {
         (7, pointer_count),
         (8, 2),
         (9, 1),
-        (10, 17),
+        (10, 0),
         (11, 1),
         (12, 640),
         (13, 360),
         (14, 4),
         (15, 11),
-        (16, 60),
+        (16, 0),
         (17, 1),
         (18, 0),
         (19, 1001),
@@ -132,8 +132,8 @@ fn representative_host_frame(pointer_count: i32) -> (Vec<i32>, Vec<f32>) {
         (53, 5.0),
         (54, 300.0),
         (55, 170.0),
-        (56, 1920.0),
-        (57, 1040.0),
+        (56, 640.0),
+        (57, 360.0),
     ] {
         f32s[index] = value;
     }
@@ -141,7 +141,7 @@ fn representative_host_frame(pointer_count: i32) -> (Vec<i32>, Vec<f32>) {
 }
 
 fn expected_outputs(pointer_count: i32) -> (Vec<i32>, Vec<f32>) {
-    let (host_i32, host_f32) = representative_host_frame(pointer_count);
+    let (host_i32, host_f32) = expected_host_frame(pointer_count);
     let key_checksum = (0..512)
         .map(|index| host_i32[32 + index] * (index as i32 + 1))
         .sum();
@@ -158,10 +158,10 @@ fn expected_outputs(pointer_count: i32) -> (Vec<i32>, Vec<f32>) {
     let mut expected_i32 = vec![
         101,
         1001,
-        17,
+        0,
         4,
         11,
-        60,
+        0,
         1,
         0,
         1,
@@ -197,8 +197,8 @@ fn expected_outputs(pointer_count: i32) -> (Vec<i32>, Vec<f32>) {
         5.0,
         300.0,
         170.0,
-        1920.0,
-        1040.0,
+        640.0,
+        360.0,
         1.5,
         2.0,
         0.25,
@@ -233,7 +233,88 @@ fn expected_checksum(i32s: &[i32], f32s: &[f32]) -> i32 {
         .sum::<i32>()
 }
 
-fn run_probe(raw_host_source: &str, pointer_count: i32) -> ProbeResult {
+const NATIVE_SOURCE: &str = include_str!("../../../runtime/stasis_graphics.c");
+const NATIVE_HARNESS: &str = include_str!("../../../runtime/tests/host_frame_fixture.c");
+
+// Compile the production function verbatim; only its external inputs are stubbed.
+fn native_host_frame(pointer_count: i32, mutate_writer: bool) -> (Vec<i32>, Vec<f32>) {
+    let signature = "STASIS_EXPORT void stasis_host_get_frame(int32_t* out_i32, float* out_f32) {";
+    let native_source = NATIVE_SOURCE.replace("\r\n", "\n");
+    let start = native_source
+        .find(signature)
+        .expect("native writer definition");
+    let end = start
+        + native_source[start..]
+            .find("\n}\n")
+            .expect("native writer end")
+        + 3;
+    let mut writer = native_source[start..end].to_string();
+    if mutate_writer {
+        let mutated = writer.replacen(
+            "out_i32[0] = stasis_get_time_ms();",
+            "out_i32[1] = stasis_get_time_ms();",
+            1,
+        );
+        assert_ne!(writer, mutated, "writer mutation must apply");
+        writer = mutated;
+    }
+    let dir = evidence_path().parent().unwrap().join(format!(
+        "native-{}-{}",
+        std::process::id(),
+        mutate_writer
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let source = dir.join("fixture.c");
+    std::fs::write(
+        &source,
+        NATIVE_HARNESS.replace("/* NATIVE_WRITER */", &writer),
+    )
+    .unwrap();
+    let executable = dir.join(if cfg!(windows) {
+        "fixture.exe"
+    } else {
+        "fixture"
+    });
+    let target = target_lexicon::HOST.to_string();
+    let compiler = cc::Build::new()
+        .cargo_metadata(false)
+        .out_dir(&dir)
+        .opt_level(0)
+        .host(&target)
+        .target(&target)
+        .get_compiler();
+    let mut command = compiler.to_command();
+    command.current_dir(&dir).arg(&source);
+    if compiler.is_like_msvc() {
+        command
+            .arg("/std:c11")
+            .arg(format!("/Fe{}", executable.display()));
+    } else {
+        command.args(["-std=c11", "-o"]).arg(&executable);
+    }
+    let output = command.output().expect("compile native HostFrame writer");
+    assert!(
+        output.status.success(),
+        "native compiler: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = std::process::Command::new(&executable)
+        .arg(pointer_count.to_string())
+        .output()
+        .expect("run native writer");
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    let values: Vec<&str> = text.split_whitespace().collect();
+    assert_eq!(values.len(), 768 + 64);
+    (
+        values[..768].iter().map(|v| v.parse().unwrap()).collect(),
+        values[768..].iter().map(|v| v.parse().unwrap()).collect(),
+    )
+}
+
+fn run_probe(raw_host_source: &str, pointer_count: i32, mutate_writer: bool) -> ProbeResult {
     let mut process = JitProcess::new();
     process.set_required_emit_roots(&["probe_host_frame".to_string()]);
     process.upsert_file("internal/host_frame_raw.stasis", raw_host_source);
@@ -241,7 +322,7 @@ fn run_probe(raw_host_source: &str, pointer_count: i32) -> ProbeResult {
     process.upsert_file("host_frame_jit_probe.stasis", PROBE);
     process.compile().expect("compile HostFrame JIT probe");
 
-    let (host_i32, host_f32) = representative_host_frame(pointer_count);
+    let (host_i32, host_f32) = native_host_frame(pointer_count, mutate_writer);
     let host_i32 = Box::leak(host_i32.into_boxed_slice());
     let host_f32 = Box::leak(host_f32.into_boxed_slice());
     let probe_i32 = Box::leak(vec![0; I32_FIELDS.len()].into_boxed_slice());
@@ -312,9 +393,9 @@ fn evidence_path() -> PathBuf {
 
 #[test]
 fn caller_owned_host_frame_round_trips_through_desktop_jit() {
-    let high = run_probe(RAW_HOST_FRAME, 99);
+    let high = run_probe(RAW_HOST_FRAME, 99, false);
     verify(&high, 99).expect("canonical HostFrame probe with high clamp");
-    verify(&run_probe(RAW_HOST_FRAME, -3), -3).expect("HostFrame low clamp");
+    verify(&run_probe(RAW_HOST_FRAME, -3, false), -3).expect("HostFrame low clamp");
 
     let mutated = RAW_HOST_FRAME.replacen(
         "const HOST_I_TICK_INDEX: i32 = 10;",
@@ -325,12 +406,26 @@ fn caller_owned_host_frame_round_trips_through_desktop_jit() {
         mutated, RAW_HOST_FRAME,
         "offset mutation fixture must apply"
     );
-    let mutation_error = verify(&run_probe(&mutated, 99), 99).expect_err("offset drift must fail");
-    assert_eq!(mutation_error, "HostFrame mismatch: producer=desktop_host_frame consumer=compiled_stasis field=tick_index expected=17 actual=1");
+    let mutation_error =
+        verify(&run_probe(&mutated, 99, false), 99).expect_err("offset drift must fail");
+    assert_eq!(mutation_error, "HostFrame mismatch: producer=desktop_host_frame consumer=compiled_stasis field=tick_index expected=0 actual=1");
+
+    let writer_error = verify(&run_probe(RAW_HOST_FRAME, 99, true), 99)
+        .expect_err("native writer offset drift must fail");
+    assert_eq!(writer_error, "HostFrame mismatch: producer=desktop_host_frame consumer=compiled_stasis field=time_ms expected=101 actual=0");
 
     let fixture_revision = format!(
         "{:x}",
-        Sha256::digest([RAW_HOST_FRAME, PUBLIC_HOST_FRAME, PROBE].concat())
+        Sha256::digest(
+            [
+                RAW_HOST_FRAME,
+                PUBLIC_HOST_FRAME,
+                PROBE,
+                NATIVE_SOURCE,
+                NATIVE_HARNESS
+            ]
+            .concat()
+        )
     );
     let evidence = json!({
         "schema": "stasis.seam_test.v1",
@@ -338,13 +433,15 @@ fn caller_owned_host_frame_round_trips_through_desktop_jit() {
         "status": "passed",
         "target": "desktop-jit",
         "fixture_revision": fixture_revision,
-        "checks": I32_FIELDS.len() + F32_FIELDS.len() + 3,
+        "checks": I32_FIELDS.len() + F32_FIELDS.len() + 4,
         "oracle": {
             "checksum": high.checksum,
             "pointer_indices": [0, 7],
             "pointer_count_clamps": { "low": 0, "high": 8 },
             "key_indices": [0, 41, 511],
             "mutation_diagnostic": mutation_error,
+            "writer_mutation_diagnostic": writer_error,
+            "producer": "compiled runtime/stasis_graphics.c::stasis_host_get_frame",
         }
     });
     let path = evidence_path();

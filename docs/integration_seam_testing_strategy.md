@@ -1,10 +1,7 @@
 # Integration seam testing strategy
 
-Status: proposed backlog plan, 2026-08-10
-
-Maddox Tasks: parent #209; test children IT-001 through IT-032 are #210
-through #241 in the same order as the tables below. Every item is in Backlog so
-the program can be scheduled deliberately without displacing current Next work.
+Status: integration test design; rollout and task tracking belong to the
+[build checklist](build_checklist.md#integration-seam-testing-rollout).
 
 ## Purpose
 
@@ -16,7 +13,7 @@ convention, a host snapshot is populated after `tick`, a packaged asset exists
 but is rooted differently on Android, or a native failure is lost before Java
 can report it.
 
-This plan adds tests at those seams. It does not replace unit tests or create
+This strategy defines tests at those seams. It does not replace unit tests or create
 one slow end-to-end test that is hard to diagnose. Each proposed test crosses
 one named boundary, uses the smallest real implementation on both sides, and
 records a stable observable result.
@@ -200,67 +197,15 @@ boundaries remain separate jobs so their environments and evidence stay
 actionable. A focused command added for local debugging must not create a
 second CI invocation of a test already owned by one of these lanes.
 
-## Proposed integration tests
+## Integration test catalog and rollout
 
-The priority is the suggested implementation order within this test program,
-not a claim that it should preempt current product work. All items are created
-in Maddox Tasks as Backlog children of the integration-test program.
+The canonical [build checklist](build_checklist.md#integration-seam-testing-rollout)
+owns the IT-001 through IT-032 catalog, priorities, rollout order, and implementation
+tracking. Use its linked task table when selecting an already-authorized slice.
+This document supplies test design and acceptance mechanics; the runtime sequence
+of acceptance cases below does not establish implementation order.
 
-### Contract, Stasis, and host memory
-
-| ID | Pri | Test | Primary oracle | Lane |
-|---|---:|---|---|---|
-| IT-001 | 1 | Compare the authoritative ABI descriptor with Stasis constants, Rust allocations, AOT bindings, JNI buffers, and Java capacities. | Exact descriptor equality | Fast |
-| IT-002 | 1 | Populate every meaningful HostFrame lane in the desktop host, execute compiled Stasis accessors through JIT, and read a checksum back. | Expected checksum and bounds diagnostics | Fast |
-| IT-003 | 1 | Emit each gfx command category to capacity and one beyond in Stasis, then consume it with the native trace interpreter. | Counts, dropped counters, order, and trace | Fast |
-| IT-004 | 1 | Compile and call startup asset externs through JIT and linked AOT against one recording host implementation. | Symbol/signature calls and string/receiver values | Native |
-| IT-005 | 1 | Have Stasis `main` and a later tick publish window requests and prove the host applies each sequence once. | Ordered request/application log | Native |
-
-### Desktop runtime seams
-
-| ID | Pri | Test | Primary oracle | Lane |
-|---|---:|---|---|---|
-| IT-006 | 1 | Inject keyboard and pointer events through the desktop graphics host, run one tick, and verify changed Stasis state and frame trace. | State checksum plus command trace | Native |
-| IT-007 | 2 | Resize across odd, fractional, minimized, and restored drawable sizes and round-trip metrics through HostFrame and gfx metadata. | Dimensions, generations, pointer transform | Native |
-| IT-008 | 1 | Load a manifest sprite, font, and cached text from Stasis and render them through the real desktop runtime. | Asset identities, handles, trace, named pixel regions | Native |
-| IT-009 | 2 | Submit bad magic/version/count/text/order frames between valid frames and prove rejection does not poison the next frame. | Structured rejection followed by valid trace | Native |
-| IT-010 | 1 | Compile a live tick/render edit while frames run and prove one frame window never mixes entry-table generations. | Per-frame generation and trace pairs | Native |
-| IT-011 | 1 | Replay identical host snapshots through JIT and linked AOT and compare state checksum, entry results, and command trace at every tick. | Per-tick parity record | Native |
-
-### Generated AOT and shared mobile runtime
-
-| ID | Pri | Test | Primary oracle | Lane |
-|---|---:|---|---|---|
-| IT-012 | 1 | Link compiler-generated AOT objects and `published_aot_bindings.c` into the C mobile runtime test harness instead of fake entries. | Successful symbol binding and first frame trace | Native |
-| IT-013 | 1 | Run real AOT `main`, `tick`, and `render` entries through initialize/step/pause/shutdown, including deliberate non-zero results. | Ordered lifecycle and exact stop result | Native |
-| IT-014 | 1 | Prove the mobile runtime snapshots host input before tick and submits the command buffer only after a successful render. | Guest-observed input and call-order log | Native |
-| IT-015 | 2 | Resolve packaged sprite, font, text, and audio assets through the shared mobile asset root with a real AOT fixture. | Manifest hashes, handles, render trace, mixed audio samples | Native |
-| IT-016 | 1 | Package Android, compile/link the generated Gradle/CMake project, and audit the final native library for required entries, bindings, and forbidden desktop dependencies. | Link map/symbol/dependency audit | Native |
-
-### Generated Android release shell
-
-| ID | Pri | Test | Primary oracle | Lane |
-|---|---:|---|---|---|
-| IT-017 | 1 | Package, install, and launch the generated AOT Android release shell and prove a non-empty game reaches stable frames. | Lifecycle markers, state checksum, trace, capture | Emulator |
-| IT-018 | 1 | Send touch down/move/up through Android/SDL and prove HostFrame-to-Stasis state-to-frame behavior. | Pointer fields, state transition, frame trace | Emulator |
-| IT-019 | 1 | Rotate and resize the release shell and prove native/drawable/logical metrics and generations reach Stasis before the restored frame. | Metric/generation record and named pixel regions | Emulator |
-| IT-020 | 1 | Background/resume and recreate the release Activity after resources load; verify the first accepted frame restores sprite, fallback, and cached text. | Restore events, same-process counter advance, per-epoch generations, Android compositor capture | Emulator |
-| IT-021 | 2 | Package and load real sprite/font/text/audio assets in the release shell. | Manifest identity, render regions, offline/queued audio evidence | Emulator |
-| IT-022 | 2 | Build controlled packages with missing, tampered, traversal, duplicate, oversized, and malformed-manifest assets; reject before game initialization and prove a valid package recovers afterward. | Stable code/path agreement between Java/native diagnostics, no partial staging, bounded process | Emulator |
-| IT-023 | 2 | Write a Stasis preference through the Android platform store, kill/relaunch the process, and read it through AOT. | Persisted value and scoped storage path | Emulator |
-| IT-024 | 2 | Return distinct non-zero codes from generated-AOT main, tick, and render variants; verify exact entry/code propagation and stop ordering. | Native log plus Java accessibility overlay, exact call counts, zero submit/present, stable PID, no fatal evidence | Emulator |
-
-### Android Workshop JNI/JIT preview
-
-| ID | Pri | Test | Primary oracle | Lane |
-|---|---:|---|---|---|
-| IT-025 | 1 | From Java, load the C JNI shim and Rust bridge, compile a real project, run a JIT frame into direct buffers, and render it with GLES. | Compile marker, trace, state checksum, capture | Emulator |
-| IT-026 | 1 | Call the JNI frame bridge with exact, short, oversized, wrong-order, and non-direct buffers and verify bounded failure without writes past capacity. | Status, canaries, structured last-frame error | Emulator |
-| IT-027 | 1 | Send Workshop touch input through Java/JNI to JIT HostFrame, then inspect state and the resulting command frame. | Input/state/frame correlation | Emulator |
-| IT-028 | 1 | Apply a valid hot edit and an invalid edit while the preview runs; prove valid publication is atomic and failure preserves old state/code/frame. | Generation, state checksum, trace, diagnostic | Emulator |
-| IT-029 | 2 | Switch between two projects with colliding resource handles, then recreate the surface and verify resources remain project- and generation-scoped. | Resource identities, generations, captures | Emulator |
-| IT-030 | 2 | Run a real `.test.stasis` file through Java -> JNI -> Rust test runner after a source edit and verify pass/fail details and rollback behavior. | Structured test result and source checksum | Emulator |
-| IT-031 | 1 | Trigger parse, extern-resolution, runtime, render-schema, and resource errors and verify each crosses Rust/C/JNI/Java without losing its stage and detail. | UI diagnostic equal to structured native cause | Emulator |
+### Workshop acceptance details
 
 IT-029 runs in the Workshop acceptance build between IT-028 and IT-031. It creates
 two registered render-parity projects whose sprite, font, and text handles collide,
@@ -270,6 +215,21 @@ project A after switching back. `stasis.workshop_resource_scope.v1` binds each P
 hash to the native frame handles, exact resolver identities, renderer generation,
 stale-generation rejection count, restore uploads, and bounded atlas/text caches.
 Numeric GLES texture names are deliberately excluded because drivers may reuse them.
+
+IT-032 runs after IT-031 on the scheduled device lane. It publishes same-layout
+constant revisions before frames 75, 150, 225, and 300, recreates the real EGL
+surface before frames 100 and 200, and restores the packaged revision within frame
+300. Each frame must present its unique JNI token through GLES, observe one coherent
+runtime generation plus matching guest tick/render revision, reuse the same three
+direct buffers, report zero dropped commands, remain within the declared command and
+resource maxima, and leave no pending runtime candidate. The texture provider's
+renderer generation must equal the lifecycle renderer generation; its surface
+generation is the creation-time value exactly one before the lifecycle value added
+by `onSurfaceChanged`. Each recreation advances those epochs by one and two,
+respectively. Logs are bounded to seven
+milestones and one compact `stasis.workshop_soak.v1` summary. The summary carries the
+fixed schedule, source identities, traces, peaks, and a structured cleanup receipt;
+the emulator driver still force-stops the app in `finally` on success or failure.
 
 IT-030 runs immediately after IT-029 and before IT-031 in the Workshop acceptance
 build. The Java runner captures the packaged project with
@@ -294,26 +254,11 @@ duplicating result arrays. Cleanup must restore the packaged project exactly, ad
 the runtime generation, and prove the temporary test no longer exists. The strict CI
 verifier rejects missing or reordered records, truncated JSON, count/location/status
 loss, rollback mismatches, a missing subsequent pass, or leaked test files.
-| IT-032 | 3 | Run 300 Workshop frames while compiling edits and recreating the surface; prove bounded buffers/resources and no stale pointers or generation mixing. | Peak counts, generation/trace log, no crash | Device |
 
 ## Implementation order
 
-1. Implement IT-001 first. It turns silent constant drift into a cheap failure
-   and gives later harnesses a descriptor to record.
-2. Add the shared probe and evidence writer while implementing IT-002 and
-   IT-003. Keep the writer language-neutral JSON; do not build a new test
-   framework.
-3. Complete desktop and linked-native tests through IT-016. These provide fast
-   feedback for most failures before Android is involved.
-4. Add one reusable Android driver that can install a supplied APK, wait on
-   structured markers, inject events/lifecycle transitions, collect evidence,
-   and always restore device state and force-stop the app.
-5. Implement release-shell tests before Workshop tests. The release shell has a
-   smaller path and establishes whether a defect belongs to common runtime or
-   Workshop-specific JNI/GLES code.
-6. Add Workshop cases using the same fixtures and evidence fields. Keep Java
-   assertions focused on JNI and preview boundaries rather than duplicating
-   compiler unit tests.
+See the [canonical rollout order](build_checklist.md#integration-seam-rollout-order).
+Update ordering and implementation progress in that checklist only.
 
 ## Definition of done for each task
 

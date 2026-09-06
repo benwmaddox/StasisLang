@@ -1,8 +1,10 @@
 #![deny(warnings)]
 
+pub mod client;
 pub mod realtime;
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::raw::{c_char, c_uchar};
@@ -35,6 +37,7 @@ pub const MAX_HTTP_HEADER_BYTES: usize = 8 * 1024;
 pub const SESSION_SECRET_BYTES: usize = 32;
 pub const RESUME_CREDENTIAL_BYTES: usize = 16;
 const SESSION_PATH: &str = "/session";
+pub const ADVERTISE_IPV4_ENV: &str = "STASIS_NETWORK_ADVERTISE_IPV4";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -87,7 +90,7 @@ pub fn random_game_seed() -> i32 {
     positive_seed_from_bytes(bytes)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostOptions {
     pub bind_addr: IpAddr,
     pub port: u16,
@@ -125,6 +128,21 @@ impl HostOptions {
     }
 }
 
+impl fmt::Debug for HostOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostOptions")
+            .field("bind_addr", &self.bind_addr)
+            .field("port", &self.port)
+            .field("bundle", &self.bundle)
+            .field("expected_origin", &self.expected_origin)
+            .field("session_secret", &"[REDACTED]")
+            .field("max_connections", &self.max_connections)
+            .field("max_buffered_bytes", &self.max_buffered_bytes)
+            .finish()
+    }
+}
+
 enum HostCommand {
     Send { connection: u32, payload: Vec<u8> },
     Stop,
@@ -155,6 +173,40 @@ pub struct NetworkHost {
     events: Receiver<NetworkEvent>,
     thread: Option<JoinHandle<()>>,
     address: SocketAddr,
+    advertise_ipv4: Option<Ipv4Addr>,
+}
+
+/// Native UI data for a running LAN host.
+///
+/// Debug output contains only the display URL. The pairing secret is
+/// materialized solely by [`JoinCard::copy_url`].
+pub struct JoinCard<'a> {
+    display_url: String,
+    host: &'a NetworkHost,
+}
+
+impl JoinCard<'_> {
+    pub fn display_url(&self) -> &str {
+        &self.display_url
+    }
+
+    pub fn copy_url(&self) -> String {
+        format!(
+            "{}#secret={}",
+            self.display_url,
+            hex_encode(&self.host.shared.session_secret)
+        )
+    }
+}
+
+impl fmt::Debug for JoinCard<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JoinCard")
+            .field("display_url", &self.display_url)
+            .field("copy_url", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -354,7 +406,21 @@ impl NetworkHost {
         Self::bind_with_options(HostOptions::loopback(port, bundle)?)
     }
     pub fn bind_with_options(options: HostOptions) -> Result<Self, NetworkError> {
+        Self::bind_with_advertised_ipv4(options, None)
+    }
+    /// Binds a host with an explicit address for native join-card display.
+    ///
+    /// Passing `None` checks [`ADVERTISE_IPV4_ENV`] when the listener binds a
+    /// wildcard address, then falls back to routing-table selection.
+    pub fn bind_with_advertised_ipv4(
+        options: HostOptions,
+        advertise_ipv4: Option<Ipv4Addr>,
+    ) -> Result<Self, NetworkError> {
         options.validate()?;
+        if advertise_ipv4.is_some_and(|ip| !is_advertisable(ip)) {
+            return Err(NetworkError::InvalidArgument);
+        }
+        let advertise_ipv4 = resolve_advertised_ipv4(&options, advertise_ipv4)?;
         let listener = TcpListener::bind(SocketAddr::new(options.bind_addr, options.port))
             .map_err(|_| NetworkError::Io)?;
         listener
@@ -389,6 +455,7 @@ impl NetworkHost {
             events: event_rx,
             thread: Some(thread),
             address,
+            advertise_ipv4,
         })
     }
     pub fn address(&self) -> SocketAddr {
@@ -398,16 +465,17 @@ impl NetworkHost {
         &self.shared.session_secret
     }
     pub fn join_url(&self) -> String {
-        let host = match self.address.ip() {
-            IpAddr::V4(ip) if ip.is_unspecified() => advertised_ipv4().to_string(),
-            ip => ip.to_string(),
-        };
-        format!(
-            "http://{}:{}/#secret={}",
-            host,
-            self.address.port(),
-            hex_encode(&self.shared.session_secret)
-        )
+        self.join_card().copy_url()
+    }
+    pub fn join_card(&self) -> JoinCard<'_> {
+        let host = self
+            .advertise_ipv4
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| self.address.ip().to_string());
+        JoinCard {
+            display_url: format!("http://{}:{}/", host, self.address.port()),
+            host: self,
+        }
     }
     pub fn status(&self) -> u32 {
         if self.shared.stopped.load(Ordering::Acquire) {
@@ -462,18 +530,66 @@ impl Drop for NetworkHost {
     }
 }
 
-fn advertised_ipv4() -> Ipv4Addr {
-    let Ok(probe) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
-        return Ipv4Addr::LOCALHOST;
-    };
-    if probe.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).is_ok() {
-        if let Ok(SocketAddr::V4(address)) = probe.local_addr() {
-            if !address.ip().is_unspecified() {
-                return *address.ip();
+fn resolve_advertised_ipv4(
+    options: &HostOptions,
+    advertise_ipv4: Option<Ipv4Addr>,
+) -> Result<Option<Ipv4Addr>, NetworkError> {
+    if !options.bind_addr.is_unspecified() {
+        return Ok(None);
+    }
+    if let Some(ip) = advertise_ipv4 {
+        return Ok(Some(ip));
+    }
+    if let Some(value) = std::env::var_os(ADVERTISE_IPV4_ENV) {
+        let value = value.to_str().ok_or(NetworkError::InvalidArgument)?;
+        return parse_advertise_ipv4(value).map(Some);
+    }
+    Ok(Some(route_advertised_ipv4()))
+}
+
+fn parse_advertise_ipv4(value: &str) -> Result<Ipv4Addr, NetworkError> {
+    let ip = value
+        .parse::<Ipv4Addr>()
+        .map_err(|_| NetworkError::InvalidArgument)?;
+    if is_advertisable(ip) {
+        Ok(ip)
+    } else {
+        Err(NetworkError::InvalidArgument)
+    }
+}
+
+fn is_advertisable(ip: Ipv4Addr) -> bool {
+    !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast()
+}
+
+fn route_advertised_ipv4() -> Ipv4Addr {
+    // UDP connect consults the routing table without sending a packet. The
+    // documentation-only destinations avoid a dependency on a public service.
+    let candidates = [
+        Ipv4Addr::new(192, 0, 2, 1),
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(203, 0, 113, 1),
+    ]
+    .into_iter()
+    .filter_map(|destination| {
+        let Ok(probe) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+            return None;
+        };
+        if probe.connect((destination, 9)).is_ok() {
+            if let Ok(SocketAddr::V4(address)) = probe.local_addr() {
+                return Some(*address.ip());
             }
         }
-    }
-    Ipv4Addr::LOCALHOST
+        None
+    });
+    select_advertised_ipv4(candidates)
+}
+
+fn select_advertised_ipv4(candidates: impl IntoIterator<Item = Ipv4Addr>) -> Ipv4Addr {
+    candidates
+        .into_iter()
+        .find(|ip| is_advertisable(*ip))
+        .unwrap_or(Ipv4Addr::LOCALHOST)
 }
 fn reserve(shared: &Shared, amount: usize) -> Result<(), NetworkError> {
     loop {
@@ -1684,6 +1800,28 @@ pub unsafe extern "C" fn stasis_network_host_copy_join_url(
     0
 }
 #[no_mangle]
+pub unsafe extern "C" fn stasis_network_host_copy_join_card(
+    host: *mut NetworkHost,
+    out: *mut c_char,
+    capacity: usize,
+    out_length: *mut usize,
+) -> i32 {
+    if host.is_null() || out.is_null() || out_length.is_null() {
+        return -1;
+    }
+    let card = (&*host).join_card();
+    let bytes = card.display_url().as_bytes();
+    if capacity <= bytes.len() {
+        return -2;
+    }
+    unsafe {
+        std::slice::from_raw_parts_mut(out.cast::<u8>(), bytes.len()).copy_from_slice(bytes);
+        *out.add(bytes.len()) = 0;
+        *out_length = bytes.len();
+    }
+    0
+}
+#[no_mangle]
 pub unsafe extern "C" fn stasis_network_host_stop(host: *mut NetworkHost) {
     if !host.is_null() {
         let mut host = Box::from_raw(host);
@@ -1940,16 +2078,97 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_bind_never_advertises_unspecified_address() {
+    fn advertise_override_validation_is_deterministic() {
+        assert_eq!(
+            parse_advertise_ipv4("192.168.50.12"),
+            Ok(Ipv4Addr::new(192, 168, 50, 12))
+        );
+        assert_eq!(parse_advertise_ipv4("127.0.0.1"), Ok(Ipv4Addr::LOCALHOST));
+        for invalid in [
+            "",
+            "hostname.local",
+            "::1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+        ] {
+            assert_eq!(
+                parse_advertise_ipv4(invalid),
+                Err(NetworkError::InvalidArgument),
+                "accepted invalid override {invalid}"
+            );
+        }
+        assert_eq!(
+            select_advertised_ipv4([
+                Ipv4Addr::UNSPECIFIED,
+                Ipv4Addr::new(224, 0, 0, 1),
+                Ipv4Addr::new(10, 2, 3, 4),
+                Ipv4Addr::new(192, 168, 1, 8),
+            ]),
+            Ipv4Addr::new(10, 2, 3, 4)
+        );
+        assert_eq!(
+            select_advertised_ipv4([Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST]),
+            Ipv4Addr::LOCALHOST
+        );
+    }
+
+    #[test]
+    fn wildcard_bind_uses_explicit_advertise_override() {
         let mut options = HostOptions::loopback(0, host_bundle()).expect("options");
         options.bind_addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let mut host =
+            NetworkHost::bind_with_advertised_ipv4(options, Some(Ipv4Addr::new(192, 168, 50, 12)))
+                .expect("bind");
+        let card = host.join_card();
+        assert_eq!(
+            card.display_url(),
+            format!("http://192.168.50.12:{}/", host.address().port())
+        );
+        assert!(card.copy_url().starts_with(card.display_url()));
+        assert!(card.copy_url().contains("#secret="));
+        host.stop().expect("stop");
+    }
+
+    #[test]
+    fn join_card_and_options_debug_redact_pairing_secret() {
+        let secret = b"visible-secret-value".to_vec();
+        let mut options = HostOptions::loopback(0, host_bundle()).expect("options");
+        options.session_secret = secret.clone();
+        let options_debug = format!("{options:?}");
+        assert!(options_debug.contains("[REDACTED]"));
+        assert!(!options_debug.contains("visible-secret-value"));
+
         let mut host = NetworkHost::bind_with_options(options).expect("bind");
-        let url = host.join_url();
-        assert!(!url.contains("0.0.0.0"));
-        // A sandbox with no route legitimately falls back to localhost; the
-        // native Android overlay hides that value rather than presenting an
-        // unusable address to nearby players.
-        assert!(url.contains("localhost") || !url.contains("127.0.0.1"));
+        let card = host.join_card();
+        let card_debug = format!("{card:?}");
+        assert!(card_debug.contains(card.display_url()));
+        assert!(card_debug.contains("[REDACTED]"));
+        assert!(!card_debug.contains(&hex_encode(&secret)));
+        assert!(!card.display_url().contains("secret"));
+        assert!(card.copy_url().contains(&hex_encode(&secret)));
+        let display_url = card.display_url().as_bytes().to_vec();
+        drop(card);
+
+        let mut native_card = vec![0 as c_char; 128];
+        let mut native_length = 0;
+        let result = unsafe {
+            stasis_network_host_copy_join_card(
+                &mut host,
+                native_card.as_mut_ptr(),
+                native_card.len(),
+                &mut native_length,
+            )
+        };
+        assert_eq!(result, 0);
+        let native_card = native_card[..native_length]
+            .iter()
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        assert_eq!(native_card, display_url);
+        assert!(!native_card
+            .windows(secret.len())
+            .any(|bytes| bytes == secret));
         host.stop().expect("stop");
     }
 }

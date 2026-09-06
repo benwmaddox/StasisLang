@@ -2889,6 +2889,7 @@ pub fn clear_registered_global_memory() {
         .lock()
         .expect("direct array required-length table mutex poisoned")
         .clear();
+    unsafe { stasis_platform_service_reset_native() };
 }
 
 #[derive(Debug, Clone)]
@@ -3892,6 +3893,34 @@ unsafe extern "C" {
         cmd_f32: *const f32,
         cmd_u8: *const u8,
     ) -> u32;
+
+    #[link_name = "stasis_platform_service_submit"]
+    fn stasis_platform_service_submit_native(
+        service: i32,
+        action: i32,
+        request_id: i32,
+        key: *const c_char,
+        key_length: i32,
+    ) -> i32;
+    #[link_name = "stasis_platform_service_poll"]
+    fn stasis_platform_service_poll_native(
+        response: *mut NativePlatformServiceResponse,
+        text_capacity: i32,
+    ) -> i32;
+    #[link_name = "stasis_platform_service_reset"]
+    fn stasis_platform_service_reset_native();
+}
+
+#[repr(C)]
+struct NativePlatformServiceResponse {
+    service: i32,
+    action: i32,
+    request_id: i32,
+    status: i32,
+    value: i32,
+    text_length: i32,
+    text_char_length: i32,
+    text: [c_char; 513],
 }
 
 /// Computes the command trace for the current render ABI from host-owned buffers.
@@ -4784,6 +4813,12 @@ fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
     guard.get(&value_id).map(|text| text.as_bytes().to_vec())
 }
 
+fn validated_jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
+    let bytes = jit_text_arg_bytes(value_id)?;
+    std::str::from_utf8(&bytes).ok()?;
+    Some(bytes)
+}
+
 thread_local! {
     static JIT_TEXT_SCRATCH: std::cell::RefCell<Vec<u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
@@ -5240,6 +5275,75 @@ fn write_jit_ascii_buffer(out_id: i32, capacity: i32, bytes: &[u8]) -> i32 {
     bytes.len() as i32
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_jit_platform_service_submit(
+    service: i32,
+    action: i32,
+    request_id: i32,
+    key_id: i32,
+    key_length: i32,
+) -> i32 {
+    let Some(key) = jit_text_arg_bytes(key_id) else {
+        return -1;
+    };
+    let Ok(key_length_usize) = usize::try_from(key_length) else {
+        return -1;
+    };
+    if key_length_usize == 0
+        || key_length_usize > key.len()
+        || !printable_ascii(&key[..key_length_usize])
+    {
+        return -1;
+    }
+    unsafe {
+        stasis_platform_service_submit_native(
+            service,
+            action,
+            request_id,
+            key.as_ptr().cast::<c_char>(),
+            key_length,
+        )
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_platform_service_poll(
+    out_fields_id: i32,
+    out_field_capacity: i32,
+    out_text_id: i32,
+    out_text_capacity: i32,
+) -> i32 {
+    if out_field_capacity < 5 || out_text_capacity <= 0 {
+        return -1;
+    }
+    stasis_jit_collection_i32_store(out_text_id, 1, 0);
+    stasis_jit_collection_i32_store(out_text_id, 3, 0);
+    let mut response: NativePlatformServiceResponse = unsafe { std::mem::zeroed() };
+    let result = unsafe { stasis_platform_service_poll_native(&mut response, out_text_capacity) };
+    if result != 1 {
+        return result;
+    }
+    for (index, value) in [
+        response.service,
+        response.action,
+        response.request_id,
+        response.status,
+        response.value,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        stasis_jit_global_i32_array_store(out_fields_id, 0, index as i32, value);
+    }
+    for index in 0..response.text_length {
+        let byte = response.text[index as usize] as u8;
+        stasis_jit_global_i32_array_store(out_text_id, 0, index, i32::from(byte));
+    }
+    stasis_jit_collection_i32_store(out_text_id, 1, response.text_length);
+    stasis_jit_collection_i32_store(out_text_id, 3, response.text_char_length);
+    1
+}
+
 #[cfg(not(windows))]
 fn portable_storage_load_ascii(scope: &[u8], key: &[u8], capacity: i32) -> Option<Vec<u8>> {
     let path = preference_path(scope, key, "ascii")?;
@@ -5631,10 +5735,10 @@ pub extern "C" fn stasis_jit_measure_text(font: i32, text_id: i32) -> f32 {
 
 #[no_mangle]
 pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
+    let Some(text) = validated_jit_text_arg_bytes(text_id) else {
+        return 0;
+    };
     if asset_extern_seam_evidence_path().is_some() {
-        let Some(text) = jit_text_arg_bytes(text_id) else {
-            return 0;
-        };
         return if record_asset_extern_seam_call(
             "cache_text",
             &[
@@ -5649,10 +5753,10 @@ pub extern "C" fn stasis_jit_gfx_cache_text(font: i32, text_id: i32) -> i32 {
             0
         };
     }
-    if let (Some(host), Some(text)) = (embedded_graphics_host(), jit_text_arg_bytes(text_id)) {
+    if let Some(host) = embedded_graphics_host() {
         return (host.cache_text)(font, &text);
     }
-    let Ok(text) = jit_text_arg_to_cstring(text_id) else {
+    let Ok(text) = CString::new(text) else {
         return 0;
     };
     let Ok(api) = stasis_graphics_assets_api() else {
@@ -8458,6 +8562,45 @@ mod tests {
     }
 
     #[test]
+    fn validated_jit_text_arg_bytes_accepts_localized_price_utf8() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+
+        let collection_hash = 0x5566_7788i32;
+        let price = "€2.99".as_bytes();
+        stasis_jit_collection_i32_store(collection_hash, 1, price.len() as i32);
+        stasis_jit_collection_i32_store(collection_hash, 2, 16);
+        stasis_jit_collection_i32_store(collection_hash, 3, 5);
+        for (index, byte) in price.iter().copied().enumerate() {
+            stasis_jit_global_i32_array_store(collection_hash, 0, index as i32, i32::from(byte));
+        }
+
+        assert_eq!(
+            validated_jit_text_arg_bytes(collection_hash),
+            Some(price.to_vec())
+        );
+    }
+
+    #[test]
+    fn validated_jit_text_arg_bytes_rejects_malformed_utf8() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+
+        let collection_hash = 0x6677_8899i32;
+        stasis_jit_collection_i32_store(collection_hash, 1, 2);
+        stasis_jit_collection_i32_store(collection_hash, 2, 2);
+        stasis_jit_collection_i32_store(collection_hash, 3, 1);
+        stasis_jit_global_i32_array_store(collection_hash, 0, 0, 0xc3);
+        stasis_jit_global_i32_array_store(collection_hash, 0, 1, 0x28);
+
+        assert_eq!(validated_jit_text_arg_bytes(collection_hash), None);
+    }
+
+    #[test]
     fn jit_text_arg_bytes_prefers_runtime_buffer_over_literal_hash_collision() {
         let _lock = test_lock();
         clear_registered_global_memory();
@@ -8481,6 +8624,42 @@ mod tests {
         assert_eq!(stasis_jit_collection_i32_load(shared_id, 1), 6);
         assert_eq!(stasis_jit_collection_i32_load(shared_id, 2), 8);
         assert_eq!(stasis_jit_collection_i32_load(shared_id, 3), 6);
+    }
+
+    #[test]
+    fn platform_service_jit_bridge_reports_unsupported_without_an_adapter() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+
+        let key_id = 0x1020_3040i32;
+        let fields_id = 0x2030_4050i32;
+        let text_id = 0x3040_5060i32;
+        let mut key = *b"power_up";
+        let mut fields = [0i32; 5];
+        let mut text = [0u8; 32];
+        register_global_u8_array(key_id, 0, key.as_mut_ptr(), key.len());
+        register_global_i32_array(fields_id, 0, fields.as_mut_ptr(), fields.len());
+        register_global_u8_array(text_id, 0, text.as_mut_ptr(), text.len());
+        stasis_jit_collection_i32_store(key_id, 1, key.len() as i32);
+        stasis_jit_collection_i32_store(key_id, 2, key.len() as i32);
+        stasis_jit_collection_i32_store(key_id, 3, key.len() as i32);
+
+        assert_eq!(stasis_jit_platform_service_submit(1, 2, 77, key_id, 8), 1);
+        assert_eq!(
+            stasis_jit_platform_service_poll(fields_id, 5, text_id, 32),
+            1
+        );
+        assert_eq!(fields, [1, 2, 77, 4, 0]);
+        assert_eq!(stasis_jit_collection_i32_load(text_id, 1), 0);
+        assert_eq!(stasis_jit_collection_i32_load(text_id, 3), 0);
+        assert_eq!(
+            stasis_jit_platform_service_poll(fields_id, 5, text_id, 32),
+            0
+        );
+
+        clear_registered_global_memory();
     }
 
     #[test]

@@ -41,6 +41,9 @@ set(STASIS_MONOLITH_AOT_DIR "" CACHE PATH "Generated direct-bound AOT bundle")
 set(STASIS_MONOLITH_MAIN_SOURCE "" CACHE FILEPATH "Generated production host source")
 set(STASIS_MONOLITH_OUTPUT_DIR "" CACHE PATH "Production executable output directory")
 set(STASIS_MONOLITH_OUTPUT_NAME "stasis_game" CACHE STRING "Production executable file name")
+set(STASIS_MONOLITH_NETWORK_LIBRARY "" CACHE FILEPATH "stasis_network static library")
+set(STASIS_MONOLITH_NETWORK_INCLUDE_DIR "" CACHE PATH "stasis_network header directory")
+set(STASIS_MONOLITH_NETWORK_MODE "" CACHE STRING "stasis_network mode: host or client")
 option(
     STASIS_BUILD_MOBILE_RUNTIME
     "Build the shared SDL renderer mobile runtime core"
@@ -222,6 +225,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_runtime STATIC
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
+        stasis_platform_services.c
     )
     configure_stasis_target(stasis_mobile_runtime ON)
     set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD 11)
@@ -237,7 +241,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
     install(
         FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
-              stasis_performance_metrics.h
+              stasis_network_join_card.h stasis_performance_metrics.h stasis_platform_services.h
         DESTINATION include
     )
 endif()
@@ -271,6 +275,30 @@ if(STASIS_BUILD_MONOLITH)
             SDL3::SDL3-static
             SDL3_image::SDL3_image-static
     )
+    if(STASIS_MONOLITH_NETWORK_LIBRARY OR STASIS_MONOLITH_NETWORK_INCLUDE_DIR)
+        if(NOT STASIS_MONOLITH_NETWORK_LIBRARY OR NOT EXISTS "${STASIS_MONOLITH_NETWORK_LIBRARY}")
+            message(FATAL_ERROR "STASIS_MONOLITH_NETWORK_LIBRARY must name the built stasis_network library")
+        endif()
+        if(NOT STASIS_MONOLITH_NETWORK_INCLUDE_DIR OR
+           NOT EXISTS "${STASIS_MONOLITH_NETWORK_INCLUDE_DIR}/stasis_network.h")
+            message(FATAL_ERROR "STASIS_MONOLITH_NETWORK_INCLUDE_DIR must contain stasis_network.h")
+        endif()
+        if(STASIS_MONOLITH_NETWORK_MODE STREQUAL "host")
+            target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_ENABLED=1)
+            target_compile_definitions(stasis_monolith PRIVATE STASIS_NETWORK_ENABLED=1)
+        elseif(STASIS_MONOLITH_NETWORK_MODE STREQUAL "client")
+            target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)
+            target_compile_definitions(stasis_monolith PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)
+        else()
+            message(FATAL_ERROR "STASIS_MONOLITH_NETWORK_MODE must be host or client when native networking is linked")
+        endif()
+        target_include_directories(stasis_mobile_runtime PRIVATE "${STASIS_MONOLITH_NETWORK_INCLUDE_DIR}")
+        target_include_directories(stasis_monolith PRIVATE "${STASIS_MONOLITH_NETWORK_INCLUDE_DIR}")
+        target_link_libraries(stasis_monolith PRIVATE "${STASIS_MONOLITH_NETWORK_LIBRARY}")
+        if(WIN32)
+            target_link_libraries(stasis_monolith PRIVATE ws2_32 bcrypt userenv ntdll)
+        endif()
+    endif()
     set_property(TARGET stasis_monolith PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     target_compile_options(stasis_monolith PRIVATE /O1 /Gy /Gw)
     target_link_options(stasis_monolith PRIVATE /OPT:REF /OPT:ICF)
@@ -406,6 +434,7 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         tests/stasis_mobile_runtime_test.c
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
+        stasis_platform_services.c
     )
     set_property(TARGET stasis_mobile_runtime_test PROPERTY C_STANDARD 11)
     set_property(TARGET stasis_mobile_runtime_test PROPERTY C_STANDARD_REQUIRED ON)
@@ -414,6 +443,34 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     endif()
     target_include_directories(stasis_mobile_runtime_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME stasis_mobile_runtime_lifecycle COMMAND stasis_mobile_runtime_test)
+    add_executable(
+        stasis_mobile_runtime_network_test
+        tests/stasis_mobile_runtime_test.c
+        stasis_mobile_runtime.c
+        stasis_mobile_aot_runtime.c
+        stasis_platform_services.c
+    )
+    set_property(TARGET stasis_mobile_runtime_network_test PROPERTY C_STANDARD 11)
+    set_property(TARGET stasis_mobile_runtime_network_test PROPERTY C_STANDARD_REQUIRED ON)
+    target_compile_definitions(stasis_mobile_runtime_network_test PRIVATE STASIS_NETWORK_ENABLED=1)
+    target_include_directories(
+        stasis_mobile_runtime_network_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../crates/stasis_network/include"
+    )
+    if(MSVC)
+        target_compile_options(stasis_mobile_runtime_network_test PRIVATE /experimental:c11atomics)
+    endif()
+    if(NOT WIN32)
+        target_link_libraries(stasis_mobile_runtime_network_test PRIVATE m)
+    endif()
+    add_test(NAME stasis_mobile_runtime_network_lifecycle COMMAND stasis_mobile_runtime_network_test)
+    add_executable(
+        stasis_network_join_card_test
+        tests/stasis_network_join_card_test.c
+    )
+    target_include_directories(stasis_network_join_card_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME stasis_network_join_card_contract COMMAND stasis_network_join_card_test)
     add_executable(
         stasis_mobile_frame_pacer_test
         tests/stasis_mobile_frame_pacer_test.c
@@ -424,6 +481,7 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         stasis_mobile_aot_runtime_test
         tests/stasis_mobile_aot_runtime_test.c
         stasis_mobile_aot_runtime.c
+        stasis_platform_services.c
     )
     set_property(TARGET stasis_mobile_aot_runtime_test PROPERTY C_STANDARD 11)
     set_property(TARGET stasis_mobile_aot_runtime_test PROPERTY C_STANDARD_REQUIRED ON)
@@ -436,6 +494,39 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         target_link_libraries(stasis_mobile_aot_runtime_test PRIVATE m)
     endif()
     add_test(NAME stasis_mobile_aot_runtime_contract COMMAND stasis_mobile_aot_runtime_test)
+    add_executable(
+        stasis_mobile_aot_runtime_client_test
+        tests/stasis_mobile_aot_runtime_test.c
+        stasis_mobile_aot_runtime.c
+        stasis_platform_services.c
+    )
+    set_property(TARGET stasis_mobile_aot_runtime_client_test PROPERTY C_STANDARD 11)
+    set_property(TARGET stasis_mobile_aot_runtime_client_test PROPERTY C_STANDARD_REQUIRED ON)
+    target_compile_definitions(
+        stasis_mobile_aot_runtime_client_test PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)
+    target_include_directories(
+        stasis_mobile_aot_runtime_client_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../crates/stasis_network/include"
+    )
+    if(MSVC)
+        target_compile_options(stasis_mobile_aot_runtime_client_test PRIVATE /experimental:c11atomics)
+    else()
+        target_link_libraries(stasis_mobile_aot_runtime_client_test PRIVATE m)
+    endif()
+    add_test(
+        NAME stasis_mobile_aot_runtime_client_contract
+        COMMAND stasis_mobile_aot_runtime_client_test)
+    add_executable(
+        stasis_platform_services_test
+        tests/stasis_platform_services_test.c
+        stasis_platform_services.c
+    )
+    target_include_directories(stasis_platform_services_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(NOT WIN32)
+        target_link_libraries(stasis_platform_services_test PRIVATE pthread)
+    endif()
+    add_test(NAME stasis_platform_services_contract COMMAND stasis_platform_services_test)
     if(UNIX)
         add_executable(
             stasis_platform_storage_test
