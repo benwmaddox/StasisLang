@@ -86,6 +86,7 @@ extern int32_t stasis_network_host_send(StasisNetworkHost *, uint32_t, const uns
 extern int32_t stasis_network_host_status(StasisNetworkHost *);
 extern uint32_t stasis_network_host_overflow_count(StasisNetworkHost *);
 extern uint16_t stasis_network_host_port(StasisNetworkHost *);
+extern int32_t stasis_network_host_copy_join_card(StasisNetworkHost *, char *, size_t, size_t *);
 extern int32_t stasis_network_host_copy_join_url(StasisNetworkHost *, char *, size_t, size_t *);
 extern void stasis_network_host_stop(StasisNetworkHost *);
 #endif
@@ -1217,6 +1218,21 @@ int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity) {
     if (stasis_network_handle == NULL) { out[0] = '\0'; return -3; }
     size_t length = 0;
     int32_t result = stasis_network_host_copy_join_url(stasis_network_handle, out, capacity, &length);
+    if (result != 0) { out[0] = '\0'; return result; }
+    return (int32_t)length;
+#else
+    out[0] = '\0';
+    return -4;
+#endif
+}
+
+int32_t stasis_mobile_network_copy_join_card(char *out, size_t capacity) {
+    if (out == NULL || capacity == 0) return -1;
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_network_handle == NULL) { out[0] = '\0'; return -3; }
+    size_t length = 0;
+    int32_t result = stasis_network_host_copy_join_card(
+        stasis_network_handle, out, capacity, &length);
     if (result != 0) { out[0] = '\0'; return result; }
     return (int32_t)length;
 #else

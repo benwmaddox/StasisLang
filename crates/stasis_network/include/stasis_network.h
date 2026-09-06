@@ -6,6 +6,7 @@
 
 #define STASIS_NETWORK_ABI_VERSION 1u
 #define STASIS_NETWORK_MAX_MESSAGE_BYTES (64u * 1024u)
+#define STASIS_NETWORK_ADVERTISE_IPV4_ENV "STASIS_NETWORK_ADVERTISE_IPV4"
 
 typedef struct stasis_network_host stasis_network_host;
 typedef struct stasis_network_event {
@@ -53,6 +54,9 @@ int32_t stasis_network_host_status(stasis_network_host *host);
 uint32_t stasis_network_host_overflow_count(stasis_network_host *host);
 uint16_t stasis_network_host_port(stasis_network_host *host);
 int32_t stasis_network_host_copy_join_url(stasis_network_host *host, char *out,
+    size_t capacity, size_t *out_length);
+/* Display-safe URL without pairing or resume credentials. */
+int32_t stasis_network_host_copy_join_card(stasis_network_host *host, char *out,
     size_t capacity, size_t *out_length);
 void stasis_network_host_stop(stasis_network_host *host);
 

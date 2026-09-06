@@ -12,8 +12,9 @@ use stasis::{
     load_and_apply_play_data_bindings_for_test, provision_local_certificate,
     resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
     run_play_in_process_with_replay, run_play_in_process_with_window_title,
-    run_self_host_aot_cli_with_options, sign_artifacts, signing_status, verify_artifacts,
-    LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
+    run_self_host_aot_cli_with_desktop_network, run_self_host_aot_cli_with_options, sign_artifacts,
+    signing_status, verify_artifacts, LiveRunConfig, PlayReplayConfig, SigningOptions,
+    StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
@@ -67,6 +68,10 @@ const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const GFX_CMD_NAME: &str = "gfx_cmd";
 const GFX_CMD_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
+const DESKTOP_NETWORK_ARTIFACTS: &[&str] = &[
+    "desktop/network/windows-x86_64/stasis_network.lib",
+    "desktop/network/include/stasis_network.h",
+];
 const MOBILE_RUNTIME_FILES: &[&str] = &[
     "CMakeLists.txt",
     "MINIMP3-LICENSE.txt",
@@ -92,6 +97,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_mobile_aot_runtime.h",
     "stasis_mobile_runtime.c",
     "stasis_mobile_runtime.h",
+    "stasis_network_join_card.h",
     "stasis_platform_storage.c",
     "stasis_platform_storage.h",
     "stasis_platform_services.c",
@@ -4045,6 +4051,20 @@ fn build_workspace(
     mode: BuildMode,
     output: Option<&Path>,
 ) -> Result<CommandResult, String> {
+    build_workspace_with_desktop_network(workspace, mode, output, None)
+}
+
+struct DesktopNetworkBuild<'a> {
+    library: &'a Path,
+    include_dir: &'a Path,
+}
+
+fn build_workspace_with_desktop_network(
+    workspace: &Workspace,
+    mode: BuildMode,
+    output: Option<&Path>,
+    desktop_network: Option<DesktopNetworkBuild<'_>>,
+) -> Result<CommandResult, String> {
     match mode {
         BuildMode::Dev => {
             let jit = compile_workspace_jit(workspace)?;
@@ -4099,12 +4119,18 @@ fn build_workspace(
                 fs::create_dir_all(parent)
                     .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
             }
-            let summary = run_self_host_aot_cli_with_options(
-                &workspace.root,
-                &output,
-                None,
-                Some(Path::new(&workspace.manifest.entry)),
-            )?;
+            let entry = Path::new(&workspace.manifest.entry);
+            let summary = if let Some(network) = desktop_network {
+                run_self_host_aot_cli_with_desktop_network(
+                    &workspace.root,
+                    &output,
+                    entry,
+                    network.library,
+                    network.include_dir,
+                )?
+            } else {
+                run_self_host_aot_cli_with_options(&workspace.root, &output, None, Some(entry))?
+            };
             let build_snapshot = summary.program_snapshot.as_ref().ok_or_else(|| {
                 "release build did not publish its authoritative ProgramSnapshot".to_string()
             })?;
@@ -4194,6 +4220,125 @@ fn preflight_release_asset_preparation(
     cleanup
 }
 
+fn build_desktop_network_library(
+    staging_root: &Path,
+    development_build: bool,
+) -> Result<(PathBuf, PathBuf), String> {
+    if !cfg!(windows) {
+        return Err(
+            "network-enabled desktop production packaging currently requires Windows".to_string(),
+        );
+    }
+    if let Some((library, header)) = bundled_network_artifacts_for_executable(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+        PackageTarget::Desktop,
+    )? {
+        authenticate_bundled_desktop_network_artifacts(&library, &header, development_build)?;
+        return Ok((
+            library,
+            header
+                .parent()
+                .ok_or_else(|| "bundled desktop network header has no parent".to_string())?
+                .to_path_buf(),
+        ));
+    }
+    if release_provenance_path()?.is_some() {
+        return Err(
+            "installed toolchain release provenance requires its prebuilt desktop/network library and header"
+                .to_string(),
+        );
+    }
+    let source_root = source_network_workspace().ok_or_else(|| {
+        "installed toolchain is missing its prebuilt desktop/network library; reinstall the complete release archive"
+            .to_string()
+    })?;
+    let target_dir = staging_root.join(".network-rust-target");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str("-C target-feature=+crt-static");
+    let output = Command::new(cargo)
+        .current_dir(&source_root)
+        .args(["build", "-p", "stasis_network", "--release", "--target-dir"])
+        .arg(&target_dir)
+        .env("RUSTFLAGS", rustflags)
+        .output()
+        .map_err(|error| format!("failed to build stasis_network for desktop: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "desktop stasis_network build failed with exit code {}: stdout={} stderr={}",
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let library = target_dir.join("release").join(if cfg!(windows) {
+        "stasis_network.lib"
+    } else {
+        "libstasis_network.a"
+    });
+    if !library.is_file() {
+        return Err(format!(
+            "desktop stasis_network build did not produce {}",
+            library.display()
+        ));
+    }
+    let include_dir = source_root.join("crates/stasis_network/include");
+    if !include_dir.join("stasis_network.h").is_file() {
+        return Err(format!(
+            "desktop stasis_network headers are missing from {}",
+            include_dir.display()
+        ));
+    }
+    Ok((library, include_dir))
+}
+
+fn stage_desktop_network_guest(
+    workspace: &Workspace,
+    staging_root: &Path,
+    development_build: bool,
+) -> Result<(), String> {
+    let web_root = staging_root.join(".network-web");
+    package_web_workspace(workspace, &web_root, development_build)?;
+    for name in ["network_guest.bundle", "network_guest.bundle.json"] {
+        let source = web_root.join(name);
+        if !source.is_file() {
+            return Err(format!(
+                "network-enabled web packaging did not produce {}",
+                source.display()
+            ));
+        }
+        copy_file(&source, &staging_root.join(name))?;
+    }
+    fs::remove_dir_all(&web_root).map_err(|error| {
+        format!(
+            "failed to remove temporary web guest package {}: {error}",
+            web_root.display()
+        )
+    })
+}
+
+fn validate_desktop_network_guest_contract(manifest: &ProjectManifest) -> Result<(), String> {
+    if manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network)
+        && manifest
+            .web
+            .as_ref()
+            .map_or(true, |web| web.entry.is_empty())
+    {
+        return Err(
+            "network-enabled desktop projects must declare web.entry for the guest bundle"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn package_workspace(
     workspace: &Workspace,
     target: PackageTarget,
@@ -4231,6 +4376,7 @@ fn package_workspace(
             0,
         );
     }
+    validate_desktop_network_guest_contract(&workspace.manifest)?;
     let staging_name = format!(
         ".{}.staging",
         package_root
@@ -4246,12 +4392,42 @@ fn package_workspace(
         ));
     }
     let provenance = resolve_package_provenance(development_build)?;
+    let network_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network);
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let executable_file_name = executable_name(&workspace.manifest.name);
     let assembled = (|| -> Result<(), String> {
+        let network_build = if network_enabled {
+            stage_desktop_network_guest(workspace, &staging_root, development_build)?;
+            Some(build_desktop_network_library(
+                &staging_root,
+                development_build,
+            )?)
+        } else {
+            None
+        };
         let executable = staging_root.join(&executable_file_name);
-        build_workspace(workspace, BuildMode::Release, Some(&executable))?;
+        build_workspace_with_desktop_network(
+            workspace,
+            BuildMode::Release,
+            Some(&executable),
+            network_build
+                .as_ref()
+                .map(|(library, include_dir)| DesktopNetworkBuild {
+                    library,
+                    include_dir,
+                }),
+        )?;
+        let network_target = staging_root.join(".network-rust-target");
+        if network_target.exists() {
+            fs::remove_dir_all(&network_target).map_err(|error| {
+                format!("failed to remove temporary desktop network build: {error}")
+            })?;
+        }
         let summary = executable.with_file_name(format!(
             "{}.summary.json",
             executable.file_name().unwrap_or_default().to_string_lossy()
@@ -4308,6 +4484,11 @@ fn package_workspace(
                 PACKAGE_PROVENANCE_NAME.to_string()
             },
             "development_build": provenance["development_build"],
+            "network_guest_bundle": network_enabled.then_some(if cfg!(windows) {
+                format!("{WINDOWS_DESKTOP_PAYLOAD_DIR}/network_guest.bundle")
+            } else {
+                "network_guest.bundle".to_string()
+            }),
         }),
     ))
 }
@@ -5483,7 +5664,10 @@ fn network_support_target(target: PackageTarget) -> Option<&'static str> {
         PackageTarget::AndroidArm64 => Some("android-arm64"),
         PackageTarget::AndroidX86_64 => Some("android-x86_64"),
         PackageTarget::IosArm64 => Some("ios-arm64"),
-        PackageTarget::Desktop | PackageTarget::Web => None,
+        PackageTarget::Desktop if cfg!(windows) => Some("windows-x86_64"),
+        PackageTarget::Desktop if cfg!(target_os = "macos") => Some("macos-x86_64"),
+        PackageTarget::Desktop => Some("linux-x86_64"),
+        PackageTarget::Web => None,
     }
 }
 
@@ -5492,13 +5676,21 @@ fn bundled_network_artifacts_for_executable(
     target: PackageTarget,
 ) -> Result<Option<(PathBuf, PathBuf)>, String> {
     let target_name = network_support_target(target)
-        .ok_or_else(|| "network static library requires a mobile target".to_string())?;
+        .ok_or_else(|| "network static library is unavailable for this target".to_string())?;
     let executable_dir = executable.parent().unwrap_or(Path::new("."));
     for support_root in [
+        executable_dir.join("desktop/network"),
+        executable_dir.join("../desktop/network"),
         executable_dir.join("mobile/network"),
         executable_dir.join("../mobile/network"),
     ] {
-        let library = support_root.join(target_name).join("libstasis_network.a");
+        let library = support_root.join(target_name).join(
+            if matches!(target, PackageTarget::Desktop) && cfg!(windows) {
+                "stasis_network.lib"
+            } else {
+                "libstasis_network.a"
+            },
+        );
         let header = support_root.join("include/stasis_network.h");
         if library.is_file() && header.is_file() {
             return Ok(Some((library, header)));
@@ -6060,19 +6252,76 @@ fn provenance_string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| format!("release provenance is missing {field}"))
 }
 
-fn verify_release_provenance(path: &Path) -> Result<Value, String> {
+fn read_release_provenance(path: &Path) -> Result<Value, String> {
     let bytes = fs::read(path).map_err(|error| {
         format!(
             "failed to read release provenance {}: {error}",
             path.display()
         )
     })?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+    serde_json::from_slice(&bytes).map_err(|error| {
         format!(
             "failed to parse release provenance {}: {error}",
             path.display()
         )
+    })
+}
+
+fn verify_release_compiler(value: &Value, path: &Path) -> Result<(), String> {
+    let root = path.parent().unwrap_or(Path::new("."));
+    let compiler = &value["compiler"];
+    let compiler_path = provenance_relative_path(root, provenance_string_field(compiler, "path")?)?;
+    let expected_compiler = provenance_string_field(compiler, "sha256")?;
+    let actual_compiler = sha256_file(&compiler_path)?;
+    let running_compiler = sha256_file(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+    )?;
+    if actual_compiler != expected_compiler || running_compiler != expected_compiler {
+        return Err(format!(
+            "release compiler hash mismatch for {}: expected {expected_compiler}, packaged {actual_compiler}, running {running_compiler}",
+            compiler_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn verify_desktop_network_artifact_hashes(value: &Value, root: &Path) -> Result<(), String> {
+    let Some(artifacts) = value.get("desktop_network_artifacts") else {
+        return Ok(());
+    };
+    let artifacts = artifacts.as_object().ok_or_else(|| {
+        "release provenance desktop_network_artifacts must be an object".to_string()
     })?;
+    if artifacts.is_empty() {
+        return Ok(());
+    }
+    let expected_keys = DESKTOP_NETWORK_ARTIFACTS
+        .iter()
+        .map(|path| path.to_string())
+        .collect::<BTreeSet<_>>();
+    let actual_keys = artifacts.keys().cloned().collect::<BTreeSet<_>>();
+    if actual_keys != expected_keys {
+        return Err(format!(
+            "release provenance desktop network artifact set mismatch: expected {expected_keys:?}, found {actual_keys:?}"
+        ));
+    }
+    for relative in DESKTOP_NETWORK_ARTIFACTS {
+        let expected = artifacts[*relative].as_str().ok_or_else(|| {
+            format!("release provenance has an invalid desktop network hash for {relative}")
+        })?;
+        let actual = sha256_file(&provenance_relative_path(root, relative)?)?;
+        if actual != expected {
+            return Err(format!(
+                "release desktop network artifact hash mismatch for {relative}: expected {expected}, found {actual}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_release_provenance(path: &Path) -> Result<Value, String> {
+    let value = read_release_provenance(path)?;
     let command_buffer = &value["command_buffer"];
     let command_buffer_version = command_buffer["version"].as_i64();
     let current_command_buffer = command_buffer_version == Some(GFX_CMD_VERSION);
@@ -6117,20 +6366,7 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
         );
     }
     let root = path.parent().unwrap_or(Path::new("."));
-    let compiler = &value["compiler"];
-    let compiler_path = provenance_relative_path(root, provenance_string_field(compiler, "path")?)?;
-    let expected_compiler = provenance_string_field(compiler, "sha256")?;
-    let actual_compiler = sha256_file(&compiler_path)?;
-    let running_compiler = sha256_file(
-        &env::current_exe()
-            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
-    )?;
-    if actual_compiler != expected_compiler || running_compiler != expected_compiler {
-        return Err(format!(
-            "release compiler hash mismatch for {}: expected {expected_compiler}, packaged {actual_compiler}, running {running_compiler}",
-            compiler_path.display()
-        ));
-    }
+    verify_release_compiler(&value, path)?;
     let sources = value["runtime_sources"]
         .as_object()
         .ok_or_else(|| "release provenance is missing runtime_sources".to_string())?;
@@ -6172,7 +6408,90 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
             "release mobile shell source hashes do not match the installed templates".to_string(),
         );
     }
+    verify_desktop_network_artifact_hashes(&value, root)?;
     Ok(value)
+}
+
+fn authenticate_bundled_desktop_network_artifacts(
+    library: &Path,
+    header: &Path,
+    development_build: bool,
+) -> Result<(), String> {
+    let provenance_path = release_provenance_path()?.ok_or_else(|| {
+        "prebuilt desktop network artifacts require release provenance".to_string()
+    })?;
+    authenticate_bundled_desktop_network_artifacts_with_provenance(
+        library,
+        header,
+        &provenance_path,
+        development_build,
+    )
+}
+
+fn authenticate_bundled_desktop_network_artifacts_with_provenance(
+    library: &Path,
+    header: &Path,
+    provenance_path: &Path,
+    development_build: bool,
+) -> Result<(), String> {
+    let provenance = if development_build {
+        let provenance = read_release_provenance(provenance_path)?;
+        if provenance["development_build"] == false {
+            verify_release_provenance(provenance_path)?
+        } else {
+            if provenance["schema"] != "stasis.release_provenance.v1"
+                || provenance["development_build"] != true
+                || provenance["dirty_state"] != true
+            {
+                return Err(
+                    "development package requires valid development release provenance".to_string(),
+                );
+            }
+            verify_release_compiler(&provenance, provenance_path)?;
+            verify_desktop_network_artifact_hashes(
+                &provenance,
+                provenance_path.parent().unwrap_or(Path::new(".")),
+            )?;
+            provenance
+        }
+    } else {
+        verify_release_provenance(provenance_path)?
+    };
+    let artifacts = provenance["desktop_network_artifacts"]
+        .as_object()
+        .filter(|artifacts| !artifacts.is_empty())
+        .ok_or_else(|| {
+            "release provenance does not authenticate prebuilt desktop network artifacts"
+                .to_string()
+        })?;
+    let root = provenance_path.parent().unwrap_or(Path::new("."));
+    for (selected, relative) in [
+        (library, DESKTOP_NETWORK_ARTIFACTS[0]),
+        (header, DESKTOP_NETWORK_ARTIFACTS[1]),
+    ] {
+        if !artifacts.contains_key(relative) {
+            return Err(format!(
+                "release provenance does not authenticate desktop network artifact {relative}"
+            ));
+        }
+        let expected =
+            fs::canonicalize(provenance_relative_path(root, relative)?).map_err(|error| {
+                format!("failed to resolve authenticated artifact {relative}: {error}")
+            })?;
+        let selected = fs::canonicalize(selected).map_err(|error| {
+            format!(
+                "failed to resolve selected desktop network artifact {}: {error}",
+                selected.display()
+            )
+        })?;
+        if selected != expected {
+            return Err(format!(
+                "selected desktop network artifact {} is not the provenance-authenticated {relative}",
+                selected.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn git_text(args: &[&str]) -> Option<String> {
@@ -6228,6 +6547,7 @@ fn local_provenance(development_build: bool) -> Result<Value, String> {
         },
         "runtime_sources": sources,
         "mobile_shell_sources": content_hashes(&mobile_shells, "mobile/shells")?,
+        "desktop_network_artifacts": {},
         "command_buffer": {"name": GFX_CMD_NAME, "version": GFX_CMD_VERSION},
         "backends": ["sdl3"],
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
@@ -7743,6 +8063,49 @@ mod tests {
             r#"width="640" height="360" data-logical-width="1600" data-logical-height="900""#
         ));
         assert!(!html.contains("__STASIS_"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_network_guest_staging_reuses_the_declared_web_entry_bundle() {
+        let root = temp_dir("desktop_network_guest");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        // Match load_workspace: Windows temp paths can use a different spelling
+        // than the canonical source paths passed to the compiler.
+        let root = canonical_workspace_root(&root).expect("canonical workspace root");
+        fs::write(
+            root.join("src/guest.stasis"),
+            concat!(
+                "function main(): i32 { return 0; }\n",
+                "function tick(): i32 { return 0; }\n",
+                "function render(): i32 { return 0; }\n"
+            ),
+        )
+        .expect("guest entry source");
+        let mut manifest = ProjectManifest::new("network_guest".to_string());
+        manifest.capabilities = Some(ProjectCapabilities { network: true });
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/guest.stasis".to_string(),
+            loading_font: None,
+            viewport: None,
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+        };
+        let staging = root.join("desktop-stage");
+        fs::create_dir_all(&staging).expect("desktop staging directory");
+
+        stage_desktop_network_guest(&workspace, &staging, true)
+            .expect("stage desktop browser guest");
+
+        let encoded = fs::read(staging.join("network_guest.bundle")).expect("guest bundle");
+        let bundle = stasis_network::StaticBundle::decode(&encoded).expect("decode guest bundle");
+        for path in ["index.html", "game.js", "game.wasm"] {
+            assert!(bundle.get(path).is_some(), "missing bundled {path}");
+        }
+        assert!(staging.join("network_guest.bundle.json").is_file());
+        assert!(!staging.join(".network-web").exists());
         remove_temp(&root);
     }
 
@@ -9278,6 +9641,7 @@ mod tests {
             },
             "runtime_sources": runtime_sources,
             "mobile_shell_sources": mobile_shell_sources,
+            "desktop_network_artifacts": {},
             "command_buffer": {"name": "gfx_cmd", "version": GFX_CMD_VERSION},
             "backends": ["sdl3"],
             "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
@@ -9291,6 +9655,139 @@ mod tests {
         let manifest_path = root.join(RELEASE_PROVENANCE_NAME);
         write_json_file(&manifest_path, &manifest).expect("write provenance fixture");
         verify_release_provenance(&manifest_path).expect("accept matching release");
+
+        let desktop_network = root.join("desktop/network");
+        let library = desktop_network.join("windows-x86_64/stasis_network.lib");
+        let header = desktop_network.join("include/stasis_network.h");
+        fs::create_dir_all(library.parent().expect("library parent"))
+            .expect("create desktop network library directory");
+        fs::create_dir_all(header.parent().expect("header parent"))
+            .expect("create desktop network include directory");
+        fs::write(&library, b"official desktop network library")
+            .expect("write desktop network library");
+        fs::write(&header, b"official desktop network header")
+            .expect("write desktop network header");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect_err("reject empty desktop network provenance");
+        assert!(error.contains("does not authenticate prebuilt"));
+        let mut absent_manifest = manifest.clone();
+        absent_manifest
+            .as_object_mut()
+            .expect("provenance object")
+            .remove("desktop_network_artifacts");
+        write_json_file(&manifest_path, &absent_manifest)
+            .expect("write provenance without desktop network map");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect_err("reject absent desktop network provenance");
+        assert!(error.contains("does not authenticate prebuilt"));
+        let mut network_manifest = manifest.clone();
+        network_manifest["desktop_network_artifacts"] = json!({
+            (DESKTOP_NETWORK_ARTIFACTS[0]): sha256_file(&library).expect("hash network library"),
+            (DESKTOP_NETWORK_ARTIFACTS[1]): sha256_file(&header).expect("hash network header"),
+        });
+        write_json_file(&manifest_path, &network_manifest)
+            .expect("write desktop network provenance fixture");
+        authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect("authenticate desktop network artifacts");
+        let substituted_path = root.join("substituted/stasis_network.lib");
+        fs::create_dir_all(substituted_path.parent().expect("substitute parent"))
+            .expect("create substitute directory");
+        fs::copy(&library, &substituted_path).expect("copy substituted selected library");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &substituted_path,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect_err("reject selected artifact outside authenticated path");
+        assert!(error.contains("is not the provenance-authenticated"));
+        authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            true,
+        )
+        .expect("authenticate official artifacts for a development package");
+
+        let mut development_manifest = network_manifest.clone();
+        development_manifest["release_tag"] = json!("development-bootstrap-42");
+        development_manifest["development_build"] = json!(true);
+        development_manifest["dirty_state"] = json!(true);
+        write_json_file(&manifest_path, &development_manifest)
+            .expect("write development bootstrap provenance fixture");
+        authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            true,
+        )
+        .expect("authenticate development bootstrap artifacts");
+        fs::write(&header, b"substituted development network header")
+            .expect("substitute development network header");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            true,
+        )
+        .expect_err("reject substituted development bootstrap artifact");
+        assert!(error.contains("desktop network artifact hash mismatch"));
+        fs::write(&header, b"official desktop network header")
+            .expect("restore development network header");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect_err("reject development provenance for release package");
+        assert!(error.contains("clean official"));
+        write_json_file(&manifest_path, &network_manifest)
+            .expect("restore official desktop network provenance fixture");
+
+        fs::write(&library, b"substituted desktop network library")
+            .expect("substitute desktop network library");
+        let error = verify_release_provenance(&manifest_path)
+            .expect_err("reject substituted desktop network library");
+        assert!(error.contains("desktop network artifact hash mismatch"));
+        fs::write(&library, b"official desktop network library")
+            .expect("restore desktop network library");
+
+        let mut unrecorded_manifest = network_manifest.clone();
+        unrecorded_manifest["desktop_network_artifacts"]
+            .as_object_mut()
+            .expect("artifact map")
+            .remove(DESKTOP_NETWORK_ARTIFACTS[1]);
+        write_json_file(&manifest_path, &unrecorded_manifest)
+            .expect("write incomplete desktop network provenance fixture");
+        let error = verify_release_provenance(&manifest_path)
+            .expect_err("reject incomplete desktop network provenance");
+        assert!(error.contains("artifact set mismatch"));
+
+        write_json_file(&manifest_path, &network_manifest)
+            .expect("restore desktop network provenance fixture");
+        fs::remove_file(&header).expect("remove desktop network header");
+        let error = verify_release_provenance(&manifest_path)
+            .expect_err("reject missing desktop network header");
+        assert!(error.contains("failed to read provenance input"));
+        fs::write(&header, b"official desktop network header")
+            .expect("restore desktop network header");
+        write_json_file(&manifest_path, &manifest).expect("restore legacy provenance fixture");
 
         let mut legacy_manifest = manifest.clone();
         legacy_manifest["command_buffer"]["version"] = json!(4);
@@ -9466,8 +9963,9 @@ mod tests {
         assert!(mobile_main.contains("restore_failures"));
         assert!(mobile_main.contains("frame == 1"));
         assert!(mobile_main.contains("frame % 30 == 0"));
+        assert!(mobile_main.contains("stasis_desktop_network_present_join_card();"));
         assert!(mobile_main.contains(
-            "} else {\n#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)"
+            "#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)"
         ));
         assert!(mobile_main.contains("stasis_mobile_network_present_join_url();"));
         assert!(mobile_main.contains("if (seam_test_id != NULL && seam_test_id[0] != '\\0')"));
@@ -9865,6 +10363,35 @@ mod tests {
         remove_temp(&root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn bundled_desktop_network_artifacts_resolve_beside_the_cli() {
+        let root = temp_dir("relocated_desktop_network");
+        let executable = root.join("bin/stasis.exe");
+        let support = root.join("bin/desktop/network");
+        fs::create_dir_all(support.join("windows-x86_64")).expect("create library directory");
+        fs::create_dir_all(support.join("include")).expect("create include directory");
+        fs::write(&executable, b"relocated stasis executable").expect("write executable fixture");
+        fs::write(
+            support.join("windows-x86_64/stasis_network.lib"),
+            b"relocated desktop network library",
+        )
+        .expect("write relocated network library");
+        fs::write(
+            support.join("include/stasis_network.h"),
+            b"/* relocated network header */\n",
+        )
+        .expect("write relocated network header");
+
+        let (library, header) =
+            bundled_network_artifacts_for_executable(&executable, PackageTarget::Desktop)
+                .expect("resolve desktop support")
+                .expect("desktop support artifacts");
+        assert_eq!(library, support.join("windows-x86_64/stasis_network.lib"));
+        assert_eq!(header, support.join("include/stasis_network.h"));
+        remove_temp(&root);
+    }
+
     #[test]
     fn manifest_rejects_paths_that_escape_the_project() {
         let manifest = ProjectManifest {
@@ -10024,6 +10551,7 @@ mod tests {
         let mut manifest = ProjectManifest::new("network_game".to_string());
         manifest.capabilities = Some(ProjectCapabilities { network: true });
         assert!(manifest.validate().is_ok());
+        assert!(validate_desktop_network_guest_contract(&manifest).is_err());
         assert!(
             validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_err()
         );
@@ -10037,11 +10565,25 @@ mod tests {
             viewport: None,
         });
         assert!(manifest.validate().is_ok());
+        assert!(validate_desktop_network_guest_contract(&manifest).is_ok());
         assert!(
             validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_ok()
         );
         manifest.web.as_mut().unwrap().entry = "../guest.stasis".to_string();
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn desktop_monolith_cmake_links_network_only_when_configured() {
+        let cmake = include_str!("../../../runtime/CMakeLists.txt");
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_LIBRARY"));
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_INCLUDE_DIR"));
+        assert!(cmake.contains(
+            "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_ENABLED=1)"
+        ));
+        assert!(cmake.contains(
+            "target_link_libraries(stasis_monolith PRIVATE \"${STASIS_MONOLITH_NETWORK_LIBRARY}\")"
+        ));
     }
 
     #[test]
@@ -10444,6 +10986,8 @@ mod tests {
         fs::write(root.join("demo.exe.launch"), "dll=demo.dll").expect("write launch config");
         fs::write(root.join("demo.dll"), "game").expect("write game library");
         fs::write(root.join("stasis_graphics.dll"), "graphics").expect("write graphics runtime");
+        fs::write(root.join("network_guest.bundle"), "guest").expect("write guest bundle");
+        fs::write(root.join("network_guest.bundle.json"), "{}").expect("write bundle metadata");
 
         nest_windows_desktop_payload(&root, &executable).expect("nest package payload");
 
@@ -10461,6 +11005,8 @@ mod tests {
             "assets",
             "demo.dll",
             "demo.exe.launch",
+            "network_guest.bundle",
+            "network_guest.bundle.json",
             "stasis_graphics.dll",
         ] {
             assert!(root

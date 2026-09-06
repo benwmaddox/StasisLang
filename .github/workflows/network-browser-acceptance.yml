@@ -1,0 +1,75 @@
+name: Network browser acceptance
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/network-browser-acceptance.yml"
+      - "apps/stasis/**"
+      - "crates/stasis_network/**"
+      - "mobile/shells/common/**"
+      - "runtime/**"
+      - "tools/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop-package:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test optional desktop network configuration
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --lib windows_monolith_network_configuration_is_explicit_and_optional
+      - name: Test desktop network package contents and support lookup
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis network
+      - name: Test desktop package root layout
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis windows_desktop_package_keeps_only_the_launcher_at_root
+      - name: Test release provenance rejects substituted artifacts
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis release_provenance_rejects_substituted_renderer_sources
+
+  windows-browser-guest:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Test desktop package native network link and lifecycle
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_desktop_network_link.ps1
+      - name: Test Windows LAN and firewall diagnostics
+        shell: pwsh
+        run: python -m unittest tools.ci.test_desktop_network_diagnostics
+      - name: Build native host acceptance fixture
+        shell: pwsh
+        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --example browser_acceptance_host
+      - name: Ensure browser evidence encoder
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+          }
+          Get-Command ffmpeg -ErrorAction Stop
+      - name: Test browser video encoding dimensions
+        shell: pwsh
+        run: node --test tools/ci/network_browser_video.test.mjs
+      - name: Run real browser protocol acceptance
+        shell: pwsh
+        env:
+          STASIS_NETWORK_HOST_EXECUTABLE: ${{ github.workspace }}/build/codex-cargo-target/debug/examples/browser_acceptance_host.exe
+        run: node tools/run_network_browser_acceptance.mjs
+      - name: Upload secret-safe browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-browser-acceptance-windows
+          if-no-files-found: error
+          path: |
+            target/network-browser-acceptance/browser.png
+            target/network-browser-acceptance/browser.mp4
+            target/network-browser-acceptance/result.json

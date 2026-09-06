@@ -19,6 +19,7 @@ pub mod windows_signing;
 
 pub use compiler_backend::build_aot_direct_storage_source;
 pub use compiler_backend::run_self_host_aot_cli;
+pub use compiler_backend::run_self_host_aot_cli_with_desktop_network;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use compiler_backend::sign_output_artifact_if_configured;
 pub use events::RunnerEvent;
