@@ -204,19 +204,14 @@ if ! command -v stasis >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Stasis pre-commit: checking canonical source format"
-if ! stasis format --check; then
-    echo "Stasis pre-commit: formatting source before blocking this commit"
-    if ! stasis format; then
-        echo "Commit blocked: 'stasis format' failed." >&2
-        exit 1
-    fi
-    echo "Commit blocked: review and stage the formatting changes, then commit again." >&2
+echo "Stasis pre-commit: enforcing canonical source format"
+if ! stasis format; then
+    echo "Commit blocked: 'stasis format' failed." >&2
     exit 1
 fi
 
 if ! git diff --quiet -- ':(glob)**/*.stasis'; then
-    echo "Commit blocked: stage the formatted Stasis changes, then commit again." >&2
+    echo "Commit blocked: review and stage the enforced formatting changes, then commit again." >&2
     exit 1
 fi
 "#;

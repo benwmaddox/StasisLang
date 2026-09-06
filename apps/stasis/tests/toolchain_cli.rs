@@ -796,7 +796,8 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     );
     let pre_commit = fs::read_to_string(project.join(".githooks/pre-commit"))
         .expect("read generated pre-commit hook");
-    assert!(pre_commit.contains("stasis format --check"));
+    assert!(pre_commit.contains("stasis format"));
+    assert!(!pre_commit.contains("stasis format --check"));
     assert_eq!(
         fs::read(project.join(".gitattributes")).expect("read generated Git attributes"),
         b"*.[sS][vV][gG] text eol=lf\n"
@@ -1037,7 +1038,7 @@ fn new_refuses_to_overwrite_existing_git_ignore_policy() {
 }
 
 #[test]
-fn new_project_blocks_unformatted_commits() {
+fn new_project_enforces_formatting_before_commits() {
     let parent = temp_dir("format_hook");
     fs::create_dir_all(&parent).expect("create temp parent");
     let project = parent.join("demo");
@@ -1069,7 +1070,7 @@ fn new_project_blocks_unformatted_commits() {
     let blocked = git_with_stasis_on_path(&["commit", "-m", "unformatted"], &project);
     assert!(!blocked.status.success());
     assert!(
-        String::from_utf8_lossy(&blocked.stderr).contains("formatting required"),
+        String::from_utf8_lossy(&blocked.stderr).contains("stage the enforced formatting"),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&blocked.stdout),
         String::from_utf8_lossy(&blocked.stderr)
@@ -1080,7 +1081,9 @@ fn new_project_blocks_unformatted_commits() {
     );
     let still_blocked = git_with_stasis_on_path(&["commit", "-m", "still unformatted"], &project);
     assert!(!still_blocked.status.success());
-    assert!(String::from_utf8_lossy(&still_blocked.stderr).contains("stage the formatted"));
+    assert!(
+        String::from_utf8_lossy(&still_blocked.stderr).contains("stage the enforced formatting")
+    );
 
     assert!(git(&["add", "-A"], &project).status.success());
     let committed = git_with_stasis_on_path(&["commit", "-m", "formatted"], &project);
