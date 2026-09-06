@@ -638,6 +638,23 @@ fn assert_generated_knowledge(project: &Path) {
     let vendor_before = snapshot_project_bytes(&project.join("vendor/stasis"));
     let runnable_examples = project.join("build/knowledge-examples");
     copy_tree(&generated_examples, &runnable_examples);
+    let examples_prepared = stasis(
+        &[
+            "--json",
+            "--workspace",
+            "build/knowledge-examples",
+            "vendor",
+            "update",
+        ],
+        project,
+    );
+    assert_eq!(
+        examples_prepared.status.code(),
+        Some(0),
+        "copied knowledge vendor update failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&examples_prepared.stdout),
+        String::from_utf8_lossy(&examples_prepared.stderr)
+    );
 
     let examples_checked = stasis(
         &["--json", "--workspace", "build/knowledge-examples", "check"],

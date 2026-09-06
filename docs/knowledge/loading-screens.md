@@ -57,13 +57,12 @@ readiness on its smoothed `displayed_percent`: smoothing is presentation only.
 
 [Source](examples/src/loading_screen.stasis) and
 [regressions](examples/tests/loading_screen.test.stasis) accompany this guide.
-The examples manifest selects `"stdlib": "toolchain"`. In a generated project,
-follow the [knowledge-library instructions](README.md#executable-backing) to copy
-the whole example project from `vendor/stasis/docs/examples` to
-`build/knowledge-examples` before running it. Its toolchain cache then stays
-outside the fingerprinted vendor snapshot. To integrate only this source into a
-normal vendor-backed project, change its import to
-`/vendor/stasis/stdlib/audio.stasis`. Supply `assets/hero.svg` and
+Follow the [knowledge-library instructions](README.md#executable-backing) to copy
+the whole example project to `build/knowledge-examples` and run `vendor update`
+there before testing. The example uses `/vendor/stasis/stdlib/audio.stasis`, so
+its shipped import stays within the Stasis package. The copied workspace owns
+its own vendor snapshot; the original documentation remains unchanged.
+To integrate this source into a generated project, supply `assets/hero.svg` and
 `assets/music.wav` in the project assets directory (tiny fixtures are bundled).
 The tests inject outcomes without requiring an audio device; asset validation checks the files.
 The public API calls are checked against the bundled stdlib.
@@ -83,7 +82,7 @@ IO timeout. The error screen remains responsive; an explicit retry should releas
 old resources and call `prepare_loading` again, requiring a fresh loading frame.
 
 ```stasis
-import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
+import "/vendor/stasis/stdlib/audio.stasis";
 
 enum LoadingPhase {
     AwaitingFrame,
@@ -251,9 +250,9 @@ startup versus level-specific batches without assigning magic numeric stages.
 
 ## Regression coverage and limits
 
-In the Stasis source tree, run `stasis test` in `docs/knowledge/examples/`. In a
-generated project, first copy the vendored examples to the separate workspace
-described above, then run `stasis --workspace build/knowledge-examples test`.
+In both a Stasis checkout and a generated project, first copy the examples to
+the separate workspace and initialize its vendor as described above, then run
+`stasis --workspace build/knowledge-examples test`.
 The tests exercise the production gate with deterministic outcomes: no render,
 same-tick submission, later-tick admission exactly once, partial success, full success,
 failure/cancellation through the real polling path, tick-budget exhaustion, retry
@@ -296,6 +295,8 @@ To reproduce from a Stasis checkout with a matching CLI/runtime and FFmpeg on
 New-Item -ItemType Directory -Force build/loading-success, build/loading-failure
 Copy-Item -Recurse docs/knowledge/examples/* build/loading-success
 Copy-Item -Recurse docs/knowledge/examples/* build/loading-failure
+stasis --workspace build/loading-success vendor update
+stasis --workspace build/loading-failure vendor update
 Set-Content -NoNewline build/loading-failure/assets/music.wav 'not a wave file'
 stasis --workspace build/loading-success record src/loading_screen.stasis --output success.mp4 --width 640 --height 360 --fps 60 --frames 60
 stasis --workspace build/loading-failure record src/loading_screen.stasis --output failure.mp4 --width 640 --height 360 --fps 60 --frames 60

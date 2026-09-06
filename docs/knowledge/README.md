@@ -35,16 +35,14 @@ Each page solves one system problem for one style of game.
 ## Executable backing
 
 The Stasis snippets come from the source and test files under `examples/`.
-In the Stasis source tree, run `stasis format --check`, `stasis check`, and
-`stasis test` from `docs/knowledge/examples/` after changing a snippet or its
-backing behavior.
-
-In a generated project, keep `vendor/stasis` immutable. Copy the bundled
-example project into a separate workspace under `build` before running it:
+Keep both the source documentation and `vendor/stasis` immutable. Copy the
+example project to a separate workspace under `build`, then initialize its
+own vendor snapshot before running it. From a generated project root:
 
 ```powershell
 New-Item -ItemType Directory -Force build/knowledge-examples
 Copy-Item -Recurse vendor/stasis/docs/examples/* build/knowledge-examples
+stasis --workspace build/knowledge-examples vendor update
 stasis --workspace build/knowledge-examples format --check
 stasis --workspace build/knowledge-examples check
 stasis --workspace build/knowledge-examples test
@@ -53,10 +51,15 @@ stasis --workspace build/knowledge-examples test
 ```sh
 mkdir -p build/knowledge-examples
 cp -R vendor/stasis/docs/examples/. build/knowledge-examples/
+stasis --workspace build/knowledge-examples vendor update
 stasis --workspace build/knowledge-examples format --check
 stasis --workspace build/knowledge-examples check
 stasis --workspace build/knowledge-examples test
 ```
 
-The copied manifest uses the selected toolchain and writes its `.stasis_cache`
-under `build/knowledge-examples`, outside the fingerprinted vendor snapshot.
+In a Stasis checkout, use `docs/knowledge/examples` as the copy source instead.
+The example uses public `/vendor/stasis/stdlib/` imports, which remain inside
+the shipped package during vendor validation. `vendor update` installs the
+selected toolchain into the copied workspace's `vendor/stasis`, outside the
+original fingerprinted snapshot. Run these commands only in the copy: installing
+a vendor inside the source documentation would contaminate future packages.

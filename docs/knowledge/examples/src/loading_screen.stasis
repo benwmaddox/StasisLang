@@ -1,4 +1,4 @@
-import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
+import "/vendor/stasis/stdlib/audio.stasis";
 
 enum LoadingPhase {
     AwaitingFrame,
