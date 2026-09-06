@@ -44,7 +44,9 @@ fn proposal_is_drained_only_to_origin_and_requires_explicit_acceptance() {
         Ok(reply)
     });
     let mut session = session();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     session
         .new_task("other", "other objective", "project")
         .unwrap();
@@ -81,7 +83,9 @@ fn rejected_work_can_be_repaired_without_regenerating_applied_work() {
     task.apply_action("good").unwrap();
     task.reject_action("bad", "wrong target").unwrap();
     let accepted = task.actions["good"].clone();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     assert!(matches!(
         drain(&controller, &mut session)[0],
         TaskControllerEvent::Completed { .. }
@@ -108,7 +112,9 @@ fn provider_cannot_replace_accepted_work_even_in_a_mixed_reply() {
         .unwrap();
     task.accept_action("accepted").unwrap();
     let before = task.clone();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     assert!(matches!(
         drain(&controller, &mut session)[0],
         TaskControllerEvent::Failed { .. }
@@ -133,7 +139,9 @@ fn cancellation_discards_a_late_proposal() {
         Ok(reply)
     });
     let mut session = session();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     controller
         .cancel(&mut session, &TaskId::new("origin"))
@@ -176,7 +184,9 @@ fn provider_context_omits_payload_and_revision_history() {
     .unwrap();
     task.accept_action("edit").unwrap();
     task.mark_action_for_repair("edit", "fix conflict").unwrap();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     assert!(matches!(
         drain(&controller, &mut session)[0],
         TaskControllerEvent::Completed { .. }

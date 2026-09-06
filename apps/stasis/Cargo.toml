@@ -29,9 +29,11 @@ stasis_dynload = { path = "../../crates/stasis_dynload", features = ["network"] 
 stasis_assets = { path = "../../crates/stasis_assets" }
 stasis_network = { path = "../../crates/stasis_network" }
 stasis_ai = { path = "../../crates/stasis_ai" }
-image.workspace = true
+image = { workspace = true, features = ["jpeg"] }
 atomic-write-file.workspace = true
 eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow"] }
+rfd = "=0.14.1"
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 [dev-dependencies]
 object = "0.36"

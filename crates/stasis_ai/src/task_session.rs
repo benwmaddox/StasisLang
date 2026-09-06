@@ -491,10 +491,19 @@ pub struct ScreenshotAttachment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_sha256: Option<String>,
     pub provenance: TaskProvenance,
+    /// Most recent provider request that admitted this attachment, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u64>,
     pub vision: VisionCapability,
     pub upload: UploadState,
     #[serde(default)]
     pub analysis: ScreenshotAnalysisState,
+    /// Ephemeral selection for the next provider request. Selections never survive recovery.
+    #[serde(skip)]
+    pub selected_for_request: bool,
+    /// Explicit, one-use consent to send this attachment's pixels.
+    #[serde(skip)]
+    pub consent_to_send: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -869,6 +878,12 @@ impl Task {
 
     pub fn select_provider(&mut self, provider: ProviderSelection) -> Result<(), TaskSessionError> {
         self.ensure_open("select provider for")?;
+        if self.selected_provider != Some(provider) {
+            for screenshot in self.screenshots.values_mut() {
+                screenshot.selected_for_request = false;
+                screenshot.consent_to_send = false;
+            }
+        }
         self.selected_provider = Some(provider);
         Ok(())
     }
@@ -1189,13 +1204,95 @@ impl Task {
                 provenance: TaskProvenance {
                     task_id: self.id.clone(),
                 },
+                request_id: None,
                 vision: self.vision_capability,
                 upload: UploadState::Pending,
                 analysis: ScreenshotAnalysisState::Pending,
+                selected_for_request: false,
+                consent_to_send: false,
             },
         );
         self.record_screenshot_activity(&id);
         Ok(())
+    }
+
+    /// Selects this screenshot and grants consent to send its pixels once.
+    pub fn select_screenshot_for_request(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        self.ensure_open("select a screenshot on")?;
+        let id = ScreenshotId::new(id.as_ref());
+        let screenshot = self
+            .screenshots
+            .get_mut(&id)
+            .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
+        if screenshot.provenance.task_id != self.id
+            || screenshot.vision != VisionCapability::Available
+        {
+            return Err(TaskSessionError::VisionUnavailable);
+        }
+        screenshot.selected_for_request = true;
+        screenshot.consent_to_send = true;
+        Ok(())
+    }
+
+    /// Revokes any unconsumed selection and consent for this screenshot.
+    pub fn unselect_screenshot_for_request(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        self.ensure_open("unselect a screenshot on")?;
+        let id = ScreenshotId::new(id.as_ref());
+        let screenshot = self
+            .screenshots
+            .get_mut(&id)
+            .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
+        screenshot.selected_for_request = false;
+        screenshot.consent_to_send = false;
+        Ok(())
+    }
+
+    pub fn remove_screenshot(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<ScreenshotAttachment, TaskSessionError> {
+        self.ensure_open("remove a screenshot from")?;
+        let id = ScreenshotId::new(id.as_ref());
+        self.screenshots
+            .remove(&id)
+            .ok_or(TaskSessionError::ScreenshotNotFound(id))
+    }
+
+    pub(crate) fn take_consented_screenshots(
+        &mut self,
+        request_id: u64,
+    ) -> Vec<ScreenshotAttachment> {
+        let task_id = self.id.clone();
+        self.screenshots
+            .values_mut()
+            .filter_map(|screenshot| {
+                let admitted = screenshot.provenance.task_id == task_id
+                    && screenshot.vision == VisionCapability::Available
+                    && screenshot.selected_for_request
+                    && screenshot.consent_to_send;
+                if admitted {
+                    screenshot.request_id = Some(request_id);
+                }
+                let selected = admitted.then(|| screenshot.clone());
+                // Consent and selection are one-use even for malformed recovered state.
+                screenshot.selected_for_request = false;
+                screenshot.consent_to_send = false;
+                selected
+            })
+            .collect()
+    }
+
+    pub(crate) fn clear_screenshot_request_selections(&mut self) {
+        for screenshot in self.screenshots.values_mut() {
+            screenshot.selected_for_request = false;
+            screenshot.consent_to_send = false;
+        }
     }
 
     pub(crate) fn record_screenshot_activity(&mut self, id: &ScreenshotId) {
@@ -1540,6 +1637,7 @@ impl Task {
                 if self.validation.is_running() {
                     self.start_activity_recording();
                 }
+                self.clear_screenshot_request_selections();
                 self.lifecycle = TaskLifecycle::Canceled;
                 if self.validation.is_running() {
                     self.validation = ValidationStatus::NotRun;
@@ -1559,6 +1657,7 @@ impl Task {
         self.ensure_open("disconnect")?;
         match self.connection {
             ConnectionState::Connected => {
+                self.clear_screenshot_request_selections();
                 self.connection = ConnectionState::Disconnected;
                 Ok(())
             }
@@ -1866,6 +1965,27 @@ impl TaskSession {
     ) -> Result<(), TaskSessionError> {
         self.active_mut()?
             .attach_screenshot_with_sha256(id, source, content_sha256)
+    }
+
+    pub fn select_screenshot_for_request(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        self.active_mut()?.select_screenshot_for_request(id)
+    }
+
+    pub fn unselect_screenshot_for_request(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        self.active_mut()?.unselect_screenshot_for_request(id)
+    }
+
+    pub fn remove_screenshot(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<ScreenshotAttachment, TaskSessionError> {
+        self.active_mut()?.remove_screenshot(id)
     }
 
     pub fn mark_screenshot_uploaded(
@@ -2704,6 +2824,44 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_consent_is_explicit_one_use_and_recovery_safe() {
+        let mut task = Task::new("task", "inspect", "project").unwrap();
+        task.set_vision_capability(true).unwrap();
+        task.attach_screenshot("shot", "shot.png").unwrap();
+        let shot = &task.screenshots[&ScreenshotId::new("shot")];
+        assert!(!shot.selected_for_request);
+        assert!(!shot.consent_to_send);
+        assert!(task.take_consented_screenshots(1).is_empty());
+
+        task.select_screenshot_for_request("shot").unwrap();
+        let restored: Task = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
+        let restored_shot = &restored.screenshots[&ScreenshotId::new("shot")];
+        assert!(!restored_shot.selected_for_request);
+        assert!(!restored_shot.consent_to_send);
+
+        let selected = task.take_consented_screenshots(7);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].request_id, Some(7));
+        assert!(selected[0].consent_to_send);
+        let shot = &task.screenshots[&ScreenshotId::new("shot")];
+        assert_eq!(shot.request_id, Some(7));
+        assert!(!shot.selected_for_request);
+        assert!(!shot.consent_to_send);
+        assert!(task.take_consented_screenshots(8).is_empty());
+    }
+
+    #[test]
+    fn provider_change_revokes_pending_screenshot_consent() {
+        let mut task = Task::new("task", "inspect", "project").unwrap();
+        task.set_vision_capability(true).unwrap();
+        task.select_provider(ProviderSelection::Codex).unwrap();
+        task.attach_screenshot("shot", "shot.png").unwrap();
+        task.select_screenshot_for_request("shot").unwrap();
+        task.select_provider(ProviderSelection::OpenRouter).unwrap();
+        assert!(task.take_consented_screenshots(1).is_empty());
+    }
+
+    #[test]
     fn generated_images_require_explicit_review_and_import() {
         let mut session = session_with_task();
         let invalid_attribution = ImageAttribution {
@@ -2751,6 +2909,9 @@ mod tests {
     #[test]
     fn cancellation_and_connection_transitions_are_independent() {
         let mut canceled = session_with_task();
+        canceled.set_vision_capability(true).unwrap();
+        canceled.attach_screenshot("shot", "shot.png").unwrap();
+        canceled.select_screenshot_for_request("shot").unwrap();
         canceled.cancel().expect("cancel");
         assert_eq!(
             canceled.active_task().expect("task").lifecycle,
@@ -2763,8 +2924,12 @@ mod tests {
         assert!(canceled.reconnect().is_err());
         assert!(canceled.disconnect().is_err());
         assert!(canceled.append_reply("blocked").is_err());
+        assert!(!canceled.active_task().unwrap().screenshots["shot"].consent_to_send);
 
         let mut disconnected = session_with_task();
+        disconnected.set_vision_capability(true).unwrap();
+        disconnected.attach_screenshot("shot", "shot.png").unwrap();
+        disconnected.select_screenshot_for_request("shot").unwrap();
         disconnected.disconnect().expect("disconnect");
         assert_eq!(
             disconnected.active_task().expect("task").lifecycle,
@@ -2774,6 +2939,7 @@ mod tests {
             disconnected.active_task().expect("task").connection,
             ConnectionState::Disconnected
         );
+        assert!(!disconnected.active_task().unwrap().screenshots["shot"].consent_to_send);
         disconnected.reconnect().expect("reconnect");
         assert_eq!(
             disconnected.active_task().expect("task").lifecycle,

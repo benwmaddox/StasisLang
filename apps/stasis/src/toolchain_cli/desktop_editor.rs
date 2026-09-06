@@ -1,6 +1,10 @@
+mod image_attachments;
+#[cfg(test)]
+mod request_image_tests;
 mod semantic_diff;
 mod semantic_revisions;
 
+use image_attachments::{AttachmentOrigin, SessionAttachmentStore};
 use semantic_revisions::proposal_revisions;
 
 use eframe::egui::{self, Color32, RichText};
@@ -74,6 +78,10 @@ enum TimelineAction {
     ApproveImage(String, String),
     RejectImage(String, String),
     Import(String, String),
+    SelectAttachment(String, String),
+    UnselectAttachment(String, String),
+    RemoveAttachment(String, String),
+    PreviewAttachment(String, String),
 }
 
 #[derive(Default)]
@@ -316,11 +324,35 @@ fn run_reply_provider(
 ) -> Result<ProviderReply, String> {
     let config = selected_provider_config(request.selected_provider)?;
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
-    let mut provider = config
+    if canceled.load(Ordering::Acquire) {
+        return Err("AI request canceled".into());
+    }
+    let provider = config
         .clone()
         .build()?
-        .with_timeout(Duration::from_secs(120))
-        .with_images(image_paths)?;
+        .with_timeout(Duration::from_secs(120));
+    let mut provider = if matches!(config, ProviderConfig::OpenRouter(_)) {
+        let images = image_paths
+            .iter()
+            .zip(&request.screenshots)
+            .map(|(path, screenshot)| {
+                let bytes = image_attachments::read_bounded(path)?;
+                let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    "image/png"
+                } else {
+                    "image/jpeg"
+                };
+                stasis_ai::OpenRouterImageInput::new(
+                    mime,
+                    bytes,
+                    screenshot.content_sha256.as_deref().unwrap_or_default(),
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        provider.with_openrouter_image_inputs(images)?
+    } else {
+        provider.with_images(image_paths)?
+    };
     let prompt = request
         .context
         .last()
@@ -377,7 +409,7 @@ fn verified_provider_screenshot_paths(
     if request.screenshots.is_empty() {
         return Ok(Vec::new());
     }
-    if !config.supports_image_input() {
+    if matches!(config, ProviderConfig::Codex) && !config.supports_image_input() {
         return Err(format!(
             "selected {} model {} does not support image input",
             config.provider_name(),
@@ -390,6 +422,12 @@ fn verified_provider_screenshot_paths(
         .map(|screenshot| {
             if screenshot.provenance.task_id != request.task_id {
                 return Err("screenshot provenance does not match provider task".to_string());
+            }
+            if screenshot.request_id != Some(request.request_id.get()) {
+                return Err("image provenance does not match provider request".to_string());
+            }
+            if !screenshot.selected_for_request || !screenshot.consent_to_send {
+                return Err("image pixels require explicit request consent".to_string());
             }
             let expected = screenshot
                 .content_sha256
@@ -477,6 +515,16 @@ fn bounded_failure(error: &str, max: usize) -> String {
         format!("{bounded}...")
     } else {
         bounded
+    }
+}
+
+fn human_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -623,6 +671,14 @@ struct DesktopEditor {
     next_capture: u64,
     preview_texture: Option<(String, egui::TextureHandle)>,
     asset_textures: BTreeMap<(String, String), Option<egui::TextureHandle>>,
+    attachment_store: SessionAttachmentStore,
+    attachment_textures: BTreeMap<(String, String), egui::TextureHandle>,
+    next_attachment: u64,
+    attachment_preview: Option<(String, String)>,
+    capability_cache: BTreeMap<(String, String, String), Result<(), String>>,
+    capability_pending: BTreeSet<(String, String, String)>,
+    capability_results: Receiver<CapabilityResult>,
+    capability_result_tx: mpsc::Sender<CapabilityResult>,
     semantic_job: Option<SemanticPreviewJob>,
     next_semantic_check: Instant,
 }
@@ -767,6 +823,12 @@ struct CaptureResult {
 }
 
 #[derive(Debug)]
+struct CapabilityResult {
+    key: (String, String, String),
+    result: Result<(), String>,
+}
+
+#[derive(Debug)]
 struct CaptureEvidence {
     path: PathBuf,
     bytes: Vec<u8>,
@@ -782,7 +844,6 @@ struct CaptureEvidence {
 struct ScreenshotPreview {
     task_id: TaskId,
     screenshot_id: String,
-    path: PathBuf,
     rgba: Vec<u8>,
     width: usize,
     height: usize,
@@ -929,11 +990,10 @@ fn capture_frame(
 fn screenshot_preview(
     task_id: &TaskId,
     screenshot_id: &str,
-    evidence: CaptureEvidence,
+    evidence: &CaptureEvidence,
 ) -> Result<ScreenshotPreview, String> {
-    let decoded = image::load_from_memory_with_format(&evidence.bytes, image::ImageFormat::Png)
-        .map_err(|error| format!("captured frame is not a valid PNG: {error}"))?
-        .to_rgba8();
+    let decoded = image_attachments::decode_png_rgba_limited(&evidence.bytes)
+        .map_err(|error| format!("captured frame is not a valid bounded PNG: {error}"))?;
     let (width, height) = decoded.dimensions();
     if width as usize != evidence.width || height as usize != evidence.height {
         return Err(format!(
@@ -944,14 +1004,13 @@ fn screenshot_preview(
     Ok(ScreenshotPreview {
         task_id: task_id.clone(),
         screenshot_id: screenshot_id.to_string(),
-        path: evidence.path,
         rgba: decoded.into_raw(),
         width: width as usize,
         height: height as usize,
         scheduled_tick: evidence.scheduled_tick,
         captured_tick: evidence.captured_tick,
-        sha256: evidence.sha256,
-        runtime_identity: evidence.runtime_identity,
+        sha256: evidence.sha256.clone(),
+        runtime_identity: evidence.runtime_identity.clone(),
     })
 }
 
@@ -960,6 +1019,7 @@ impl DesktopEditor {
         let host = HostExecutor::new(project_root.clone());
         let provider_root = project_root.clone();
         let (capture_result_tx, capture_results) = mpsc::channel();
+        let (capability_result_tx, capability_results) = mpsc::channel();
         Self {
             state: EditorState {
                 project_root: Some(project_root.clone()),
@@ -982,6 +1042,14 @@ impl DesktopEditor {
             next_capture: 1,
             preview_texture: None,
             asset_textures: BTreeMap::new(),
+            attachment_store: SessionAttachmentStore::new(),
+            attachment_textures: BTreeMap::new(),
+            next_attachment: 1,
+            attachment_preview: None,
+            capability_cache: BTreeMap::new(),
+            capability_pending: BTreeSet::new(),
+            capability_results,
+            capability_result_tx,
             semantic_job: None,
             next_semantic_check: Instant::now(),
         }
@@ -993,6 +1061,21 @@ impl DesktopEditor {
         }
         let events = context.input(|input| input.events.clone());
         for event in events {
+            if let egui::Event::Key {
+                key: egui::Key::V,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            {
+                if modifiers.ctrl && modifiers.shift {
+                    if let Some(task_id) = self.state.session.active_task_id().cloned() {
+                        context.input_mut(|input| input.consume_key(modifiers, egui::Key::V));
+                        self.paste_clipboard_image(&task_id);
+                    }
+                    continue;
+                }
+            }
             if let Some(command) =
                 EditorState::chord(&event).and_then(|chord| self.state.shortcuts.command_for(chord))
             {
@@ -1048,7 +1131,7 @@ impl DesktopEditor {
                         })
                         .and_then(|()| {
                             self.controller
-                                .send(&candidate, &task)
+                                .send(&mut candidate, &task)
                                 .map_err(|error| error.to_string())
                         });
                     match accepted {
@@ -1208,6 +1291,260 @@ impl DesktopEditor {
         }
     }
 
+    fn image_attachment_capability(&self, task_id: &TaskId) -> Result<(), String> {
+        let task = self
+            .state
+            .session
+            .task(task_id)
+            .map_err(|error| error.to_string())?;
+        let config = selected_provider_config(task.selected_provider)?;
+        match &config {
+            ProviderConfig::Codex if config.supports_image_input() => Ok(()),
+            ProviderConfig::Codex => Err(format!(
+                "{} model {} does not support image input",
+                config.provider_name(),
+                config.model()
+            )),
+            ProviderConfig::OpenRouter(openrouter) => {
+                let key = (
+                    config.provider_name().to_string(),
+                    openrouter.base_url.clone(),
+                    config.model(),
+                );
+                self.capability_cache.get(&key).cloned().unwrap_or_else(|| {
+                    Err(format!(
+                        "image support has not been verified for {} model {}",
+                        key.0, key.2
+                    ))
+                })
+            }
+        }
+    }
+
+    fn poll_image_capabilities(&mut self) {
+        for completed in self.capability_results.try_iter() {
+            self.capability_pending.remove(&completed.key);
+            self.capability_cache
+                .insert(completed.key, completed.result);
+        }
+    }
+
+    fn ensure_active_image_capability(&mut self) {
+        let Some(task_id) = self.state.session.active_task_id().cloned() else {
+            return;
+        };
+        let Ok(task) = self.state.session.task(&task_id) else {
+            return;
+        };
+        let Ok(ProviderConfig::OpenRouter(mut config)) =
+            selected_provider_config(task.selected_provider)
+        else {
+            return;
+        };
+        let key = (
+            "openrouter".to_string(),
+            config.base_url.clone(),
+            config.model.clone(),
+        );
+        if self.capability_cache.contains_key(&key) || !self.capability_pending.insert(key.clone())
+        {
+            return;
+        }
+        let tx = self.capability_result_tx.clone();
+        let canceled = Arc::clone(&self.shutdown);
+        config.timeout = config.timeout.min(Duration::from_secs(15));
+        thread::spawn(move || {
+            let result = stasis_ai::OpenRouterProvider::new(config)
+                .and_then(|mut provider| provider.refresh_image_input_capability(&canceled))
+                .and_then(|capability| {
+                    if capability.supported {
+                        Ok(())
+                    } else {
+                        Err(capability.reason)
+                    }
+                });
+            let _ = tx.send(CapabilityResult { key, result });
+        });
+    }
+
+    fn refresh_active_image_capability(&mut self) {
+        let Some(task_id) = self.state.session.active_task_id().cloned() else {
+            return;
+        };
+        let Ok(task) = self.state.session.task(&task_id) else {
+            return;
+        };
+        let Ok(ProviderConfig::OpenRouter(config)) =
+            selected_provider_config(task.selected_provider)
+        else {
+            return;
+        };
+        let key = ("openrouter".to_string(), config.base_url, config.model);
+        self.capability_cache.remove(&key);
+        self.capability_pending.remove(&key);
+        self.ensure_active_image_capability();
+    }
+
+    fn next_attachment_id(&mut self, prefix: &str) -> String {
+        let sequence = self.next_attachment;
+        self.next_attachment = self.next_attachment.saturating_add(1);
+        format!("{prefix}-{sequence}")
+    }
+
+    fn attach_encoded_image(
+        &mut self,
+        task_id: &TaskId,
+        id: String,
+        name: String,
+        origin: AttachmentOrigin,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if self.state.session.active_task_id() != Some(task_id) {
+            return Err("image attachment belongs to an inactive task".into());
+        }
+        self.image_attachment_capability(task_id)?;
+        let attachment =
+            self.attachment_store
+                .insert_encoded(task_id, id.clone(), name, origin, bytes)?;
+        let result = self
+            .state
+            .session
+            .task_mut(task_id)
+            .and_then(|task| task.set_vision_capability(true))
+            .and_then(|()| {
+                self.state.session.task_mut(task_id).and_then(|task| {
+                    task.attach_screenshot_with_sha256(
+                        id.as_str(),
+                        attachment.path.to_string_lossy().into_owned(),
+                        attachment.sha256.clone(),
+                    )
+                })
+            })
+            .map_err(|error| error.to_string());
+        if result.is_err() {
+            self.attachment_store.remove(task_id, &id);
+        }
+        result
+    }
+
+    fn attach_file_path(
+        &mut self,
+        task_id: &TaskId,
+        path: &std::path::Path,
+        origin: AttachmentOrigin,
+    ) {
+        let result = image_attachments::read_bounded(path).and_then(|bytes| {
+            let id = self.next_attachment_id("image");
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image")
+                .to_string();
+            self.attach_encoded_image(task_id, id, name, origin, &bytes)
+        });
+        self.state.notice = Some(match result {
+            Ok(()) => format!(
+                "Attached image from {}. Select Include once before sending pixels.",
+                origin.label()
+            ),
+            Err(error) => format!("Could not attach image: {error}"),
+        });
+    }
+
+    fn select_image_files(&mut self, task_id: &TaskId) {
+        if let Err(reason) = self.image_attachment_capability(task_id) {
+            self.state.notice = Some(format!("Cannot attach image: {reason}."));
+            return;
+        }
+        let files = rfd::FileDialog::new()
+            .add_filter("PNG or JPEG image", &["png", "jpg", "jpeg"])
+            .pick_files()
+            .unwrap_or_default();
+        for path in files.into_iter().take(8) {
+            self.attach_file_path(task_id, &path, AttachmentOrigin::FilePicker);
+        }
+    }
+
+    fn paste_clipboard_image(&mut self, task_id: &TaskId) {
+        let result = (|| {
+            self.image_attachment_capability(task_id)?;
+            let mut clipboard = arboard::Clipboard::new()
+                .map_err(|error| format!("clipboard is unavailable: {error}"))?;
+            let image = clipboard
+                .get_image()
+                .map_err(|error| format!("clipboard has no readable image: {error}"))?;
+            let id = self.next_attachment_id("paste");
+            let attachment = self.attachment_store.insert_rgba(
+                task_id,
+                id.clone(),
+                "clipboard.png".into(),
+                AttachmentOrigin::Clipboard,
+                image.width,
+                image.height,
+                image.bytes.as_ref(),
+            )?;
+            let attach = self
+                .state
+                .session
+                .task_mut(task_id)
+                .and_then(|task| task.set_vision_capability(true))
+                .and_then(|()| {
+                    self.state.session.task_mut(task_id).and_then(|task| {
+                        task.attach_screenshot_with_sha256(
+                            id.as_str(),
+                            attachment.path.to_string_lossy().into_owned(),
+                            attachment.sha256.clone(),
+                        )
+                    })
+                })
+                .map_err(|error| error.to_string());
+            if attach.is_err() {
+                self.attachment_store.remove(task_id, &id);
+            }
+            attach
+        })();
+        self.state.notice = Some(match result {
+            Ok(()) => "Pasted clipboard image. Select Include once before sending pixels.".into(),
+            Err(error) => format!("Could not paste image: {error}"),
+        });
+    }
+
+    fn process_dropped_images(&mut self, context: &egui::Context) {
+        let dropped = context.input(|input| input.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        let Some(task_id) = self.state.session.active_task_id().cloned() else {
+            self.state.notice = Some("Create a task before dropping an image.".into());
+            return;
+        };
+        for file in dropped.into_iter().take(8) {
+            if let Some(path) = file.path {
+                self.attach_file_path(&task_id, &path, AttachmentOrigin::FileDrop);
+            } else if let Some(bytes) = file.bytes {
+                let id = self.next_attachment_id("drop");
+                let name = if file.name.is_empty() {
+                    "dropped-image".into()
+                } else {
+                    file.name
+                };
+                let result = self.attach_encoded_image(
+                    &task_id,
+                    id,
+                    name,
+                    AttachmentOrigin::FileDrop,
+                    bytes.as_ref(),
+                );
+                self.state.notice = Some(match result {
+                    Ok(()) => {
+                        "Attached dropped image. Select Include once before sending pixels.".into()
+                    }
+                    Err(error) => format!("Could not attach dropped image: {error}"),
+                });
+            }
+        }
+    }
+
     fn start_capture(&mut self, task_id: TaskId) {
         if self.capture.is_some() {
             self.state.notice = Some("A game screenshot capture is already in progress.".into());
@@ -1217,25 +1554,8 @@ impl DesktopEditor {
             self.state.notice = Some("Ignored screenshot request from an inactive task.".into());
             return;
         }
-        let config = match self
-            .state
-            .session
-            .task(&task_id)
-            .map_err(|error| error.to_string())
-            .and_then(|task| selected_provider_config(task.selected_provider))
-        {
-            Ok(config) => config,
-            Err(error) => {
-                self.state.notice = Some(format!("Cannot attach screenshot: {error}"));
-                return;
-            }
-        };
-        if !config.supports_image_input() {
-            self.state.notice = Some(format!(
-                "Cannot attach screenshot: selected {} model {} does not support image input.",
-                config.provider_name(),
-                config.model()
-            ));
+        if let Err(error) = self.image_attachment_capability(&task_id) {
+            self.state.notice = Some(format!("Cannot attach screenshot: {error}."));
             return;
         }
         if let Err(error) = self
@@ -1322,30 +1642,54 @@ impl DesktopEditor {
             }
             match completed.result {
                 Ok(evidence) => {
-                    match screenshot_preview(&completed.task_id, &completed.screenshot_id, evidence)
-                    {
+                    match screenshot_preview(
+                        &completed.task_id,
+                        &completed.screenshot_id,
+                        &evidence,
+                    ) {
                         Ok(preview) => {
-                            let source = preview.path.to_string_lossy().into_owned();
-                            match self
-                                .state
-                                .session
-                                .task_mut(&completed.task_id)
-                                .and_then(|task| {
-                                    task.attach_screenshot_with_sha256(
-                                        completed.screenshot_id.as_str(),
-                                        source,
-                                        preview.sha256.clone(),
-                                    )
-                                }) {
+                            let original = self.attachment_store.insert_encoded(
+                                &completed.task_id,
+                                completed.screenshot_id.clone(),
+                                "game-frame.png".into(),
+                                AttachmentOrigin::GameCapture,
+                                &evidence.bytes,
+                            );
+                            let _ = std::fs::remove_file(&evidence.path);
+                            let result = original.and_then(|owned| {
+                                if owned.sha256 != preview.sha256 {
+                                    self.attachment_store
+                                        .remove(&completed.task_id, &completed.screenshot_id);
+                                    return Err(
+                                        "captured frame changed before it could be copied".into()
+                                    );
+                                }
+                                self.state
+                                    .session
+                                    .task_mut(&completed.task_id)
+                                    .and_then(|task| {
+                                        task.attach_screenshot_with_sha256(
+                                            completed.screenshot_id.as_str(),
+                                            owned.path.to_string_lossy().into_owned(),
+                                            owned.sha256,
+                                        )
+                                    })
+                                    .map_err(|error| error.to_string())
+                            });
+                            match result {
                                 Ok(()) => {
                                     self.state.notice = Some(format!(
-                                        "Captured {}x{} game frame for {}.",
+                                        "Captured {}x{} game frame for {}. Select Include once before sending pixels.",
                                         preview.width, preview.height, completed.task_id
                                     ));
                                     self.state.preview = Some(preview);
                                     self.preview_texture = None;
                                 }
-                                Err(error) => self.state.notice = Some(error.to_string()),
+                                Err(error) => {
+                                    self.attachment_store
+                                        .remove(&completed.task_id, &completed.screenshot_id);
+                                    self.state.notice = Some(error);
+                                }
                             }
                         }
                         Err(error) => self.state.notice = Some(error),
@@ -2707,6 +3051,34 @@ impl DesktopEditor {
                         .push(EditorIntent::ImportImage(task, image));
                     Ok(())
                 }
+                TimelineAction::SelectAttachment(task, screenshot) => self
+                    .state
+                    .session
+                    .task_mut(task)
+                    .and_then(|task| task.select_screenshot_for_request(screenshot))
+                    .map_err(|error| error.to_string()),
+                TimelineAction::UnselectAttachment(task, screenshot) => self
+                    .state
+                    .session
+                    .task_mut(task)
+                    .and_then(|task| task.unselect_screenshot_for_request(screenshot))
+                    .map_err(|error| error.to_string()),
+                TimelineAction::RemoveAttachment(task, screenshot) => {
+                    let task_id = TaskId::new(task);
+                    self.attachment_textures
+                        .remove(&(task_id.to_string(), screenshot.clone()));
+                    self.attachment_store.remove(&task_id, &screenshot);
+                    self.state
+                        .session
+                        .task_mut(&task_id)
+                        .and_then(|task| task.remove_screenshot(screenshot))
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                }
+                TimelineAction::PreviewAttachment(task, screenshot) => {
+                    self.attachment_preview = Some((task, screenshot));
+                    Ok(())
+                }
             };
             self.state.notice = result.err();
         }
@@ -2725,7 +3097,7 @@ impl DesktopEditor {
         let (title, tint) = match &entry.kind {
             ActivityKind::UserMessage { .. } => ("You", Color32::from_rgb(190, 168, 255)),
             ActivityKind::AiReply { .. } => ("Stasis AI", Color32::from_rgb(228, 233, 240)),
-            ActivityKind::Attachment { .. } => ("Attached frame", Color32::from_rgb(101, 181, 246)),
+            ActivityKind::Attachment { .. } => ("Attached image", Color32::from_rgb(101, 181, 246)),
             ActivityKind::SemanticAction { .. } => {
                 ("Semantic change", Color32::from_rgb(118, 158, 246))
             }
@@ -2776,18 +3148,19 @@ impl DesktopEditor {
                             ui.horizontal_wrapped(|ui| {
                                 status_chip(
                                     ui,
-                                    &format!("{:?}", upload).to_ascii_lowercase(),
+                                    &format!("upload: {:?}", upload).to_ascii_lowercase(),
                                     status_for_upload(&upload),
                                 );
                                 status_chip(
                                     ui,
-                                    &format!("{:?}", analysis).to_ascii_lowercase(),
+                                    &format!("analysis: {:?}", analysis).to_ascii_lowercase(),
                                     status_for_analysis(&analysis),
                                 );
                                 ui.label(
                                     RichText::new(format!(
-                                        "task {} / {}",
+                                        "task {} / request {} / {}",
                                         screenshot.provenance.task_id,
+                                        screenshot.request_id.map(|id| id.to_string()).unwrap_or_else(|| "not sent".into()),
                                         screenshot
                                             .content_sha256
                                             .as_deref()
@@ -2798,12 +3171,64 @@ impl DesktopEditor {
                                     .color(muted_text()),
                                 );
                             });
-                            let name = std::path::Path::new(&screenshot.source)
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or(screenshot.id.as_str());
+                            let name = self
+                                .attachment_store
+                                .get(&task.id, screenshot.id.as_str())
+                                .map(|owned| owned.name.as_str())
+                                .unwrap_or_else(|| {
+                                    std::path::Path::new(&screenshot.source)
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or(screenshot.id.as_str())
+                                });
                             ui.label(RichText::new(name).size(12.0).strong())
                                 .on_hover_text(&screenshot.source);
+                            if let Some(owned) = self.attachment_store.get(&task.id, screenshot.id.as_str()) {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} x {} / {} / {} / {} / verified {}",
+                                        owned.width,
+                                        owned.height,
+                                        human_bytes(owned.byte_len),
+                                        owned.mime_type,
+                                        owned.origin.label(),
+                                        &owned.sha256[..12]
+                                    ))
+                                    .size(11.0)
+                                    .color(muted_text()),
+                                );
+                            }
+                            ui.horizontal_wrapped(|ui| {
+                                let destination = selected_provider_config(task.selected_provider)
+                                    .map(|config| (config.provider_name().to_string(), config.model()))
+                                    .unwrap_or_else(|_| ("unavailable provider".into(), "unconfigured model".into()));
+                                let (provider, model) = destination;
+                                if screenshot.consent_to_send && screenshot.selected_for_request {
+                                    status_chip(ui, "included once", accent());
+                                    ui.label(RichText::new(format!("will send once to {provider} / {model}")).size(11.0).color(muted_text()));
+                                    if can_interact && ui.button("Undo inclusion").clicked() {
+                                        command = Some(TimelineAction::UnselectAttachment(task.id.to_string(), screenshot.id.to_string()));
+                                    }
+                                } else {
+                                    let retry = matches!(upload, UploadState::Failed { .. })
+                                        || matches!(analysis, ScreenshotAnalysisState::Failed { .. } | ScreenshotAnalysisState::Canceled);
+                                    let capability = self.image_attachment_capability(&task.id);
+                                    let can_include = can_interact && capability.is_ok();
+                                    let include = ui.add_enabled(can_include, egui::Button::new(if retry { "Retry once" } else { "Include once" }));
+                                    let clicked = include.clicked();
+                                    if let Err(reason) = capability { include.on_disabled_hover_text(reason); }
+                                    if clicked {
+                                        command = Some(TimelineAction::SelectAttachment(task.id.to_string(), screenshot.id.to_string()));
+                                    }
+                                    ui.label(RichText::new(format!("pixels stay local; Include once sends them to {provider} / {model}")).size(11.0).color(muted_text()));
+                                }
+                                if ui.button("Preview").clicked() {
+                                    command = Some(TimelineAction::PreviewAttachment(task.id.to_string(), screenshot.id.to_string()));
+                                }
+                                if can_interact && ui.button("Remove").clicked() {
+                                    command = Some(TimelineAction::RemoveAttachment(task.id.to_string(), screenshot.id.to_string()));
+                                }
+                            });
                         }
                     }
                     ActivityKind::SemanticAction {
@@ -3004,13 +3429,40 @@ impl DesktopEditor {
     }
 
     fn inline_screenshot(&mut self, ui: &mut egui::Ui, screenshot_id: &str) {
-        let active = self.state.session.active_task_id();
+        let active = self.state.session.active_task_id().cloned();
+        if let Some(task_id) = active.as_ref() {
+            let key = (task_id.to_string(), screenshot_id.to_string());
+            if let Some(owned) = self.attachment_store.get(task_id, screenshot_id) {
+                if !self.attachment_textures.contains_key(&key) {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [
+                            owned.thumbnail_width as usize,
+                            owned.thumbnail_height as usize,
+                        ],
+                        &owned.thumbnail_rgba,
+                    );
+                    let texture = ui.ctx().load_texture(
+                        format!("attachment-{}-{screenshot_id}", task_id.as_str()),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.attachment_textures.insert(key.clone(), texture);
+                }
+                let texture = &self.attachment_textures[&key];
+                let original = texture.size_vec2();
+                let scale = (ui.available_width().min(560.0) / original.x)
+                    .min(160.0 / original.y)
+                    .min(1.0);
+                ui.image((texture.id(), original * scale));
+                return;
+            }
+        }
         let Some(preview) = self
             .state
             .preview
             .as_ref()
             .filter(|preview| {
-                preview.screenshot_id == screenshot_id && Some(&preview.task_id) == active
+                preview.screenshot_id == screenshot_id && Some(&preview.task_id) == active.as_ref()
             })
             .cloned()
         else {
@@ -3128,13 +3580,27 @@ impl DesktopEditor {
                 let interactive = task.lifecycle == TaskLifecycle::Active
                     && task.connection == ConnectionState::Connected
                     && !busy;
-                if ui.add_enabled(interactive, egui::Button::new("Attach frame")).on_hover_text(if interactive { "Capture a verified frame from the running native game" } else { "Attachments are unavailable while this task is closed, disconnected, or busy." }).clicked() {
+                let image_capability = self.image_attachment_capability(&task.id);
+                let can_attach = interactive && image_capability.is_ok();
+                let disabled_reason = image_capability.as_ref().err().map(String::as_str).unwrap_or("Attachments are unavailable while this task is closed, disconnected, or busy.");
+                if ui.add_enabled(can_attach, egui::Button::new("Attach frame")).on_hover_text("Capture a verified frame from the running native game; pixels remain local until Include once").on_disabled_hover_text(disabled_reason).clicked() {
                     self.state.dispatch(TaskSessionCommand::AttachScreenshot);
+                }
+                if ui.add_enabled(can_attach, egui::Button::new("Attach image")).on_hover_text("Select up to eight bounded PNG or JPEG files").on_disabled_hover_text(disabled_reason).clicked() {
+                    self.select_image_files(&task.id);
+                }
+                if ui.add_enabled(can_attach, egui::Button::new("Paste image")).on_hover_text("Copy clipboard image pixels into this task's session-only attachment storage").on_disabled_hover_text(disabled_reason).clicked() {
+                    self.paste_clipboard_image(&task.id);
+                }
+                if matches!(selected_provider_config(task.selected_provider), Ok(ProviderConfig::OpenRouter(_)))
+                    && ui.small_button("Refresh image support").clicked()
+                {
+                    self.refresh_active_image_capability();
                 }
                 if ui.add_enabled(false, egui::Button::new("Generate image")).on_disabled_hover_text("Image generation is unavailable in the desktop editor.").clicked() {
                     self.state.dispatch(TaskSessionCommand::GenerateImage);
                 }
-                ui.label(RichText::new("Ctrl+Enter sends").size(10.0).color(muted_text()));
+                ui.label(RichText::new("Ctrl+Enter sends | Ctrl+Shift+V pastes image").size(10.0).color(muted_text()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut primary = self.state.primary_action(busy);
                     if !self.state.review_command_enabled(&primary.command) {
@@ -3342,6 +3808,9 @@ impl DesktopEditor {
         }
         configure_visuals(context);
         context.request_repaint_after(Duration::from_millis(100));
+        self.poll_image_capabilities();
+        self.ensure_active_image_capability();
+        self.process_dropped_images(context);
         self.poll_controller();
         self.poll_host();
         self.poll_capture();
@@ -3410,7 +3879,45 @@ impl DesktopEditor {
             }
         }
         self.cancel_confirmation(context);
+        self.attachment_preview_window(context);
         self.flush_intents();
+    }
+
+    fn attachment_preview_window(&mut self, context: &egui::Context) {
+        let Some((task, screenshot)) = self.attachment_preview.clone() else {
+            return;
+        };
+        let task_id = TaskId::new(task.clone());
+        let mut open = true;
+        egui::Window::new("Image attachment preview")
+            .open(&mut open)
+            .resizable(true)
+            .default_size([620.0, 520.0])
+            .show(context, |ui| {
+                if let Some(owned) = self.attachment_store.get(&task_id, &screenshot) {
+                    let key = (task.clone(), screenshot.clone());
+                    if let Some(texture) = self.attachment_textures.get(&key) {
+                        let original = texture.size_vec2();
+                        let scale = (ui.available_width() / original.x)
+                            .min((ui.available_height() - 50.0).max(1.0) / original.y)
+                            .min(1.0);
+                        ui.image((texture.id(), original * scale));
+                    }
+                    ui.label(format!(
+                        "{} | {} x {} | {} | {}",
+                        owned.name,
+                        owned.width,
+                        owned.height,
+                        human_bytes(owned.byte_len),
+                        owned.mime_type
+                    ));
+                } else {
+                    ui.label("This attachment is no longer available in this editor session.");
+                }
+            });
+        if !open {
+            self.attachment_preview = None;
+        }
     }
 
     fn cancel_confirmation(&mut self, context: &egui::Context) {

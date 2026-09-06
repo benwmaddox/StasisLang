@@ -74,7 +74,7 @@ fn capture_native_task_timeline() {
             ))
             .unwrap();
         }
-    } else if attachment_mode.as_deref() != Some("reference") {
+    } else if !matches!(attachment_mode.as_deref(), Some("reference" | "multimodal")) {
         task.add_generated_image(
             "arena-asset",
             asset.display().to_string(),
@@ -91,7 +91,6 @@ fn capture_native_task_timeline() {
     editor.state.preview = Some(ScreenshotPreview {
         task_id,
         screenshot_id: "arena-reference".into(),
-        path: asset,
         width: pixels.width() as usize,
         height: pixels.height() as usize,
         rgba: pixels.into_raw(),
@@ -106,6 +105,18 @@ fn capture_native_task_timeline() {
             complete: true,
         },
     });
+    if attachment_mode.as_deref() == Some("multimodal") {
+        let task_id = editor.state.session.active_task_id().unwrap().clone();
+        editor
+            .attach_encoded_image(
+                &task_id,
+                "selected-reference".into(),
+                "arena_background.png".into(),
+                AttachmentOrigin::FilePicker,
+                &bytes,
+            )
+            .unwrap();
+    }
     let semantic_root = if std::env::var_os("STASIS_EDITOR_EVIDENCE_SEMANTIC").is_some() {
         let (mut preview_editor, root, _) = super::tests::review_fixture("merged_timeline_native");
         super::tests::finish_preview(&mut preview_editor);

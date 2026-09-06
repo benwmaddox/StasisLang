@@ -1,15 +1,93 @@
 use crate::{
     decode_model_response, model_response_schema_for_request, ModelProvider, ModelResponse,
 };
+use base64::Engine as _;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-oss-120b";
 const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
+pub const MAX_OPENROUTER_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_OPENROUTER_IMAGES: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenRouterImageInput {
+    mime_type: &'static str,
+    bytes: Arc<[u8]>,
+    sha256: String,
+}
+
+impl OpenRouterImageInput {
+    pub fn new(mime_type: &str, bytes: Vec<u8>, expected_sha256: &str) -> Result<Self, String> {
+        if bytes.is_empty() || bytes.len() > MAX_OPENROUTER_IMAGE_BYTES {
+            return Err(format!(
+                "image must contain between 1 and {MAX_OPENROUTER_IMAGE_BYTES} bytes"
+            ));
+        }
+        let mime_type = match mime_type.trim().to_ascii_lowercase().as_str() {
+            "image/png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => "image/png",
+            "image/jpeg" if bytes.starts_with(&[0xff, 0xd8, 0xff]) => "image/jpeg",
+            "image/png" => return Err("image bytes do not contain a PNG signature".to_string()),
+            "image/jpeg" => return Err("image bytes do not contain a JPEG signature".to_string()),
+            _ => return Err("image MIME type must be image/png or image/jpeg".to_string()),
+        };
+        let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        if expected_sha256.len() != 64
+            || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !actual_sha256.eq_ignore_ascii_case(expected_sha256)
+        {
+            return Err("image bytes changed after selection (SHA-256 mismatch)".to_string());
+        }
+        Ok(Self {
+            mime_type,
+            bytes: bytes.into(),
+            sha256: actual_sha256,
+        })
+    }
+
+    pub fn mime_type(&self) -> &'static str {
+        self.mime_type
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    fn data_url(&self) -> String {
+        format!(
+            "data:{};base64,{}",
+            self.mime_type,
+            base64::engine::general_purpose::STANDARD.encode(&self.bytes)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageInputCapability {
+    pub model: String,
+    pub supported: bool,
+    pub reason: String,
+}
+
+impl ImageInputCapability {
+    fn unknown(model: &str) -> Self {
+        Self {
+            model: model.to_string(),
+            supported: false,
+            reason: "image support has not been verified for the configured model".to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -223,6 +301,34 @@ pub enum ConfiguredProvider {
 }
 
 impl ConfiguredProvider {
+    pub fn cached_image_input_capability(&self) -> ImageInputCapability {
+        match self {
+            Self::Codex(provider) => {
+                let supported = codex_model_supports_image_input(&provider.model);
+                ImageInputCapability {
+                    model: provider.model.clone(),
+                    supported,
+                    reason: if supported {
+                        "Codex model is verified for image input".to_string()
+                    } else {
+                        "Codex model is not verified for image input".to_string()
+                    },
+                }
+            }
+            Self::OpenRouter(provider) => provider.cached_image_input_capability().clone(),
+        }
+    }
+
+    pub fn refresh_image_input_capability(
+        &mut self,
+        canceled: &AtomicBool,
+    ) -> Result<ImageInputCapability, String> {
+        match self {
+            Self::Codex(_) => Ok(self.cached_image_input_capability()),
+            Self::OpenRouter(provider) => provider.refresh_image_input_capability(canceled),
+        }
+    }
+
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         match &mut self {
             Self::Codex(provider) => provider.request_timeout = Some(timeout),
@@ -235,7 +341,10 @@ impl ConfiguredProvider {
         let model = model.into();
         match &mut self {
             Self::Codex(provider) => provider.model = model,
-            Self::OpenRouter(provider) => provider.config.model = model,
+            Self::OpenRouter(provider) => {
+                provider.config.model = model.clone();
+                provider.image_capability = ImageInputCapability::unknown(&model);
+            }
         }
         self
     }
@@ -262,6 +371,27 @@ impl ConfiguredProvider {
                 return Err("OpenRouter transport does not support image attachments in this workspace flow".to_string());
             }
             Self::OpenRouter(_) => {}
+        }
+        Ok(self)
+    }
+
+    pub fn with_openrouter_image_inputs(
+        mut self,
+        images: Vec<OpenRouterImageInput>,
+    ) -> Result<Self, String> {
+        match &mut self {
+            Self::OpenRouter(provider) => {
+                if images.len() > MAX_OPENROUTER_IMAGES {
+                    return Err(format!(
+                        "at most {MAX_OPENROUTER_IMAGES} images may be sent"
+                    ));
+                }
+                provider.images = images;
+            }
+            Self::Codex(_) if !images.is_empty() => {
+                return Err("OpenRouter image inputs require the OpenRouter provider".to_string())
+            }
+            Self::Codex(_) => {}
         }
         Ok(self)
     }
@@ -321,6 +451,8 @@ pub struct OpenRouterProvider {
     client: Client,
     last_usage: Option<Value>,
     call_count: u32,
+    images: Vec<OpenRouterImageInput>,
+    image_capability: ImageInputCapability,
 }
 
 impl OpenRouterProvider {
@@ -330,11 +462,114 @@ impl OpenRouterProvider {
             .connect_timeout(config.timeout.min(Duration::from_secs(30)))
             .build()
             .map_err(|error| format!("failed configuring OpenRouter HTTPS client: {error}"))?;
+        let image_capability = ImageInputCapability::unknown(&config.model);
         Ok(Self {
             config,
             client,
             last_usage: None,
             call_count: 0,
+            images: Vec::new(),
+            image_capability,
+        })
+    }
+
+    pub fn cached_image_input_capability(&self) -> &ImageInputCapability {
+        &self.image_capability
+    }
+
+    pub fn with_image_inputs(mut self, images: Vec<OpenRouterImageInput>) -> Result<Self, String> {
+        if images.len() > MAX_OPENROUTER_IMAGES {
+            return Err(format!(
+                "at most {MAX_OPENROUTER_IMAGES} images may be sent"
+            ));
+        }
+        self.images = images;
+        Ok(self)
+    }
+
+    pub fn refresh_image_input_capability(
+        &mut self,
+        canceled: &AtomicBool,
+    ) -> Result<ImageInputCapability, String> {
+        let deadline = Instant::now() + self.config.timeout;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed configuring OpenRouter async runtime: {error}"))?;
+        let capability = runtime.block_on(self.image_input_capability_async(deadline, canceled))?;
+        self.image_capability = capability.clone();
+        Ok(capability)
+    }
+
+    async fn image_input_capability_async(
+        &self,
+        deadline: Instant,
+        canceled: &AtomicBool,
+    ) -> Result<ImageInputCapability, String> {
+        if canceled.load(Ordering::Acquire) {
+            return Err("AI request canceled".to_string());
+        }
+        let response = await_cancelable(
+            self.client
+                .get(format!(
+                    "{}/models",
+                    self.config.base_url.trim_end_matches('/')
+                ))
+                .bearer_auth(&self.config.api_key)
+                .timeout(remaining_timeout(
+                    deadline,
+                    "OpenRouter model capability lookup",
+                )?)
+                .send(),
+            canceled,
+            deadline,
+            "OpenRouter model capability lookup",
+        )
+        .await?;
+        let status = response.status();
+        let value: Value = await_cancelable(
+            response.json(),
+            canceled,
+            deadline,
+            "OpenRouter model capability response",
+        )
+        .await?;
+        if !status.is_success() {
+            return Err(api_error(
+                "OpenRouter model capability lookup",
+                status.as_u16(),
+                &value,
+                &self.config.api_key,
+            ));
+        }
+        let models = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "OpenRouter model metadata omitted the model list".to_string())?;
+        let Some(model) = models
+            .iter()
+            .find(|model| model.get("id").and_then(Value::as_str) == Some(&self.config.model))
+        else {
+            return Ok(ImageInputCapability {
+                model: self.config.model.clone(),
+                supported: false,
+                reason: "configured model was absent from OpenRouter model metadata".to_string(),
+            });
+        };
+        let modalities = model
+            .pointer("/architecture/input_modalities")
+            .or_else(|| model.get("input_modalities"))
+            .and_then(Value::as_array);
+        let supported = modalities
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("image")));
+        Ok(ImageInputCapability {
+            model: self.config.model.clone(),
+            supported,
+            reason: if supported {
+                "OpenRouter reports image input for the configured model".to_string()
+            } else {
+                "OpenRouter does not report image input for the configured model".to_string()
+            },
         })
     }
 
@@ -497,7 +732,8 @@ impl ModelProvider for OpenRouterProvider {
             .enable_all()
             .build()
             .map_err(|error| format!("failed configuring OpenRouter async runtime: {error}"))?;
-        runtime.block_on(self.respond_async(request, canceled, turn_started, deadline))
+        let images = std::mem::take(&mut self.images);
+        runtime.block_on(self.respond_async(request, &images, canceled, turn_started, deadline))
     }
 
     fn take_usage(&mut self) -> Option<Value> {
@@ -513,12 +749,22 @@ impl OpenRouterProvider {
     async fn respond_async(
         &mut self,
         request: &str,
+        images: &[OpenRouterImageInput],
         canceled: &AtomicBool,
         turn_started: Instant,
         deadline: Instant,
     ) -> Result<ModelResponse, String> {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
+        }
+        if !images.is_empty() {
+            let capability = self
+                .image_input_capability_async(deadline, canceled)
+                .await?;
+            self.image_capability = capability.clone();
+            if !capability.supported {
+                return Err(capability.reason);
+            }
         }
         let (hard_only, metadata_time) = match self.config.routing.hard_min_throughput {
             Some(minimum) => {
@@ -537,6 +783,7 @@ impl OpenRouterProvider {
                 return self
                     .send(
                         request,
+                        images,
                         Some(tags),
                         metadata_time + elapsed,
                         turn_started,
@@ -548,6 +795,7 @@ impl OpenRouterProvider {
         }
         self.send(
             request,
+            images,
             hard_only,
             metadata_time,
             turn_started,
@@ -560,6 +808,7 @@ impl OpenRouterProvider {
     async fn send(
         &mut self,
         request: &str,
+        images: &[OpenRouterImageInput],
         only: Option<Vec<String>>,
         metadata_time: Duration,
         turn_started: Instant,
@@ -572,9 +821,19 @@ impl OpenRouterProvider {
         let timeout = remaining_timeout(deadline, "OpenRouter chat request")?;
         let route = self.route_json(only);
         let schema = model_response_schema_for_request(request)?;
+        let content =
+            if images.is_empty() {
+                Value::String(request.to_string())
+            } else {
+                let mut content = vec![json!({"type": "text", "text": request})];
+                content.extend(images.iter().map(
+                    |image| json!({"type": "image_url", "image_url": {"url": image.data_url()}}),
+                ));
+                Value::Array(content)
+            };
         let body = json!({
             "model": self.config.model,
-            "messages": [{"role": "user", "content": request}],
+            "messages": [{"role": "user", "content": content}],
             "stream": true,
             "stream_options": {"include_usage": true},
             "response_format": {"type": "json_schema", "json_schema": {"name": "stasis_model_response", "strict": true, "schema": schema}},
@@ -1057,6 +1316,163 @@ mod tests {
 
     fn test_request() -> String {
         json!({"tool_specs": crate::workshop_tool_specs()}).to_string()
+    }
+
+    fn test_png() -> OpenRouterImageInput {
+        let source = image::RgbaImage::from_pixel(1, 1, image::Rgba([17, 34, 51, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode test PNG");
+        let bytes = bytes.into_inner();
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        OpenRouterImageInput::new("image/png", bytes, &hash).expect("test image")
+    }
+
+    fn done_stream(summary: &str) -> String {
+        let fixture = json!({
+            "mode":"done", "working_notes":"Inspected the selected image.", "summary":summary
+        });
+        let chunk = json!({
+            "model":DEFAULT_OPENROUTER_MODEL,"provider":"openai",
+            "choices":[{"delta":{"content":fixture.to_string()}}]
+        });
+        format!("data: {chunk}\n\ndata: [DONE]\n\n")
+    }
+
+    #[test]
+    fn immutable_image_input_enforces_mime_bound_and_hash() {
+        let bytes = b"\x89PNG\r\n\x1a\nselected-pixels".to_vec();
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let image = OpenRouterImageInput::new("image/png", bytes.clone(), &hash)
+            .expect("valid PNG snapshot");
+        assert_eq!(image.bytes(), bytes);
+        assert_eq!(image.sha256(), hash);
+        assert!(
+            OpenRouterImageInput::new("image/jpeg", bytes.clone(), &hash)
+                .unwrap_err()
+                .contains("JPEG signature")
+        );
+        assert!(
+            OpenRouterImageInput::new("image/png", bytes, &"0".repeat(64))
+                .unwrap_err()
+                .contains("changed after selection")
+        );
+        let oversized = vec![0; MAX_OPENROUTER_IMAGE_BYTES + 1];
+        assert!(
+            OpenRouterImageInput::new("image/png", oversized, &"0".repeat(64))
+                .unwrap_err()
+                .contains("between 1")
+        );
+    }
+
+    #[test]
+    fn metadata_capability_gates_and_sends_exact_selected_bytes() {
+        let metadata = json!({"data":[{
+            "id":DEFAULT_OPENROUTER_MODEL,
+            "architecture":{"input_modalities":["text","image"]}
+        }]})
+        .to_string();
+        let stream = done_stream("selected pixels received");
+        let (base_url, requests, worker) = mock_server(vec![
+            http_response("application/json", &metadata),
+            http_response("text/event-stream", &stream),
+            http_response("text/event-stream", &stream),
+        ]);
+        let image = test_png();
+        let expected_url = image.data_url();
+        let mut provider = OpenRouterProvider::new(test_config(base_url))
+            .expect("provider")
+            .with_image_inputs(vec![image])
+            .expect("image inputs");
+        provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect("image response");
+        let metadata_request = requests.recv().expect("metadata request");
+        assert!(metadata_request.starts_with("GET /models "));
+        let chat_request = requests.recv().expect("chat request");
+        let json_start = chat_request.find("\r\n\r\n").expect("headers") + 4;
+        let body: Value = serde_json::from_str(&chat_request[json_start..]).expect("body");
+        assert_eq!(
+            body.pointer("/messages/0/content/1/image_url/url"),
+            Some(&Value::String(expected_url))
+        );
+        let encoded = body
+            .pointer("/messages/0/content/1/image_url/url")
+            .and_then(Value::as_str)
+            .and_then(|url| url.strip_prefix("data:image/png;base64,"))
+            .expect("PNG data URL");
+        let delivered = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("payload base64");
+        let decoded = image::load_from_memory_with_format(&delivered, image::ImageFormat::Png)
+            .expect("delivered PNG")
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [17, 34, 51, 255]);
+        assert!(provider.cached_image_input_capability().supported);
+        provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect("next text-only turn");
+        let next_request = requests.recv().expect("next chat request");
+        let next_json_start = next_request.find("\r\n\r\n").expect("headers") + 4;
+        let next_body: Value =
+            serde_json::from_str(&next_request[next_json_start..]).expect("next body");
+        assert!(next_body
+            .pointer("/messages/0/content")
+            .is_some_and(Value::is_string));
+        worker.join().expect("server");
+    }
+
+    #[test]
+    fn missing_image_modality_fails_before_chat_and_model_change_clears_cache() {
+        let metadata = json!({"data":[{
+            "id":DEFAULT_OPENROUTER_MODEL,
+            "architecture":{"input_modalities":["text"]}
+        }]})
+        .to_string();
+        let (base_url, requests, worker) =
+            mock_server(vec![http_response("application/json", &metadata)]);
+        let provider = OpenRouterProvider::new(test_config(base_url))
+            .expect("provider")
+            .with_image_inputs(vec![test_png()])
+            .expect("image inputs");
+        let mut configured = ConfiguredProvider::OpenRouter(provider);
+        let error = configured
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect_err("unsupported model");
+        assert!(error.contains("does not report image input"));
+        assert!(requests
+            .recv()
+            .expect("metadata request")
+            .starts_with("GET /models "));
+        configured = configured.with_model("vendor/new-model");
+        let ConfiguredProvider::OpenRouter(provider) = configured else {
+            unreachable!()
+        };
+        assert_eq!(
+            provider.cached_image_input_capability().model,
+            "vendor/new-model"
+        );
+        assert!(!provider.cached_image_input_capability().supported);
+        assert!(provider
+            .cached_image_input_capability()
+            .reason
+            .contains("not been verified"));
+        worker.join().expect("server");
+    }
+
+    #[test]
+    fn canceled_image_request_never_fetches_metadata_or_sends_chat() {
+        let mut provider = OpenRouterProvider::new(test_config("http://127.0.0.1:9".into()))
+            .expect("provider")
+            .with_image_inputs(vec![test_png()])
+            .expect("image inputs");
+        assert_eq!(
+            provider
+                .respond(&test_request(), &AtomicBool::new(true))
+                .unwrap_err(),
+            "AI request canceled"
+        );
     }
     #[test]
     fn openrouter_stream_and_codex_fixture_decode_identically() {
