@@ -241,10 +241,28 @@ impl ConfiguredProvider {
     }
 
     pub fn with_reasoning_effort(mut self, reasoning_effort: impl Into<String>) -> Self {
-        if let Self::Codex(provider) = &mut self {
-            provider.reasoning_effort = reasoning_effort.into();
+        let reasoning_effort = reasoning_effort.into();
+        match &mut self {
+            Self::Codex(provider) => provider.reasoning_effort = reasoning_effort,
+            Self::OpenRouter(provider) => provider.reasoning_effort = Some(reasoning_effort),
         }
         self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Result<Self, String> {
+        let session_id = session_id.into();
+        if session_id.trim().is_empty()
+            || session_id.len() > 256
+            || session_id.chars().any(char::is_control)
+        {
+            return Err(
+                "AI provider session_id must contain 1..=256 printable characters".to_string(),
+            );
+        }
+        if let Self::OpenRouter(provider) = &mut self {
+            provider.session_id = Some(session_id);
+        }
+        Ok(self)
     }
 
     pub fn with_images(mut self, images: Vec<std::path::PathBuf>) -> Result<Self, String> {
@@ -314,6 +332,12 @@ impl ModelProvider for ConfiguredProvider {
     fn requires_action_ids(&self) -> bool {
         true
     }
+
+    fn observe_tool_results(&mut self, observations: &[crate::ToolObservation]) {
+        if let Self::OpenRouter(provider) = self {
+            provider.observe_tool_results(observations);
+        }
+    }
 }
 
 pub struct OpenRouterProvider {
@@ -321,6 +345,8 @@ pub struct OpenRouterProvider {
     client: Client,
     last_usage: Option<Value>,
     call_count: u32,
+    reasoning_effort: Option<String>,
+    session_id: Option<String>,
 }
 
 impl OpenRouterProvider {
@@ -335,6 +361,8 @@ impl OpenRouterProvider {
             client,
             last_usage: None,
             call_count: 0,
+            reasoning_effort: None,
+            session_id: None,
         })
     }
 
@@ -454,7 +482,11 @@ impl OpenRouterProvider {
         let routing = &self.config.routing;
         let mut value = json!({
             "allow_fallbacks": routing.allow_fallbacks,
-            "sort": match routing.sort { RoutingSort::Price => "price", RoutingSort::Throughput => "throughput", RoutingSort::Latency => "latency" },
+            "sort": match routing.sort {
+                RoutingSort::Price => "price",
+                RoutingSort::Throughput => "throughput",
+                RoutingSort::Latency => "latency",
+            },
             "require_parameters": true,
         });
         let object = value.as_object_mut().expect("route object");
@@ -483,6 +515,20 @@ impl OpenRouterProvider {
             object.insert("max_price".to_string(), json!({"completion": max_price}));
         }
         value
+    }
+
+    fn observe_tool_results(&mut self, observations: &[crate::ToolObservation]) {
+        let rejected = observations
+            .iter()
+            .any(|observation| observation.error.is_some());
+        if rejected
+            && self
+                .reasoning_effort
+                .as_deref()
+                .is_some_and(|effort| matches!(effort, "minimal" | "low"))
+        {
+            self.reasoning_effort = Some("medium".to_string());
+        }
     }
 }
 
@@ -572,7 +618,7 @@ impl OpenRouterProvider {
         let timeout = remaining_timeout(deadline, "OpenRouter chat request")?;
         let route = self.route_json(only);
         let schema = model_response_schema_for_request(request)?;
-        let body = json!({
+        let mut body = json!({
             "model": self.config.model,
             "messages": [{"role": "user", "content": request}],
             "stream": true,
@@ -580,6 +626,13 @@ impl OpenRouterProvider {
             "response_format": {"type": "json_schema", "json_schema": {"name": "stasis_model_response", "strict": true, "schema": schema}},
             "provider": route,
         });
+        let body_object = body.as_object_mut().expect("OpenRouter request body");
+        if let Some(reasoning_effort) = self.reasoning_effort.as_deref() {
+            body_object.insert("reasoning".to_string(), json!({"effort": reasoning_effort}));
+        }
+        if let Some(session_id) = self.session_id.as_deref() {
+            body_object.insert("session_id".to_string(), json!(session_id));
+        }
         let request_started = Instant::now();
         let mut response = await_cancelable(
             self.client
@@ -939,6 +992,26 @@ mod tests {
     }
 
     #[test]
+    fn throughput_routing_and_rejection_escalation_are_turn_aware() {
+        let mut provider = OpenRouterProvider::new(OpenRouterConfig {
+            api_key: "secret".into(),
+            base_url: DEFAULT_OPENROUTER_URL.into(),
+            model: DEFAULT_OPENROUTER_MODEL.into(),
+            routing: RoutingConfig::default(),
+            timeout: Duration::from_secs(2),
+        })
+        .expect("provider");
+        provider.reasoning_effort = Some("low".to_string());
+        assert_eq!(provider.route_json(None)["sort"], "throughput");
+
+        provider.observe_tool_results(&[crate::ToolObservation::error(
+            "write_symbol",
+            "compile rejected",
+        )]);
+        assert_eq!(provider.reasoning_effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
     fn hard_and_preferred_thresholds_cannot_be_mixed() {
         let config = OpenRouterConfig {
             api_key: "secret".into(),
@@ -1074,6 +1147,8 @@ mod tests {
         let (base_url, requests, worker) =
             mock_server(vec![http_response("text/event-stream", &body)]);
         let mut provider = OpenRouterProvider::new(test_config(base_url)).expect("provider");
+        provider.reasoning_effort = Some("low".to_string());
+        provider.session_id = Some("stasis-test-session".to_string());
         let openrouter = provider
             .respond(&test_request(), &AtomicBool::new(false))
             .expect("stream response");
@@ -1107,6 +1182,11 @@ mod tests {
         assert_eq!(
             request.pointer("/provider/require_parameters"),
             Some(&json!(true))
+        );
+        assert_eq!(request.pointer("/reasoning/effort"), Some(&json!("low")));
+        assert_eq!(
+            request.get("session_id"),
+            Some(&json!("stasis-test-session"))
         );
         let usage = provider.take_usage().expect("usage");
         assert_eq!(usage["resolved_provider"], "cerebras");

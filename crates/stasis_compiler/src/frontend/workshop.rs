@@ -4589,7 +4589,12 @@ fn validate_replacement_struct_source(expected_name: &str, source: &str) -> Resu
 }
 
 fn reject_rust_style_replacement(kind: &str, source: &str) -> Result<(), String> {
-    if source.contains("&mut") || source.contains("->") {
+    let code = source
+        .lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if code.contains("&mut") || code.contains("->") {
         return Err(format!(
             "{} edit must use Stasis syntax, not Rust reference or arrow syntax",
             kind
@@ -4879,6 +4884,13 @@ mod ai_tests {
             apply_ai_code_response_to_file("src/player.stasis", source, &[symbol], &response)
                 .expect_err("expected syntax rejection");
         assert!(error.contains("Stasis function source"));
+    }
+
+    #[test]
+    fn rust_style_guard_ignores_arrow_text_in_line_comments() {
+        let source = "function update(): void {\n    // before -> after\n    return;\n}\n";
+        reject_rust_style_replacement("semantic", source)
+            .expect("line-comment prose is not Rust syntax");
     }
 }
 
