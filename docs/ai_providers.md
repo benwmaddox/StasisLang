@@ -122,6 +122,18 @@ client stays alive. Creating background clients does not transfer event ownershi
 or change request-specific reply routing. Dropping the event recipient selects
 the oldest remaining client.
 
+## Live edit round trips
+
+Live edit requests provide current source, hashes, and reference results in
+`resolved_targets`. The adjacent `edit_execution` guidance tells the model to
+reuse that context, use supported arithmetic syntax, and append `finish_task`
+to its final write response. Missing dependencies and stale hashes still allow
+additional reads. This guidance reduces round trips; it is not a correctness gate.
+
+Writes validate automatically. A following `run_tests` in the same response
+reuses a passing receipt, or is skipped when the preceding write failed, so
+tests of unchanged code cannot be mistaken for validation of a rejected edit.
+
 ## Security
 
 Keep `OPENROUTER_API_KEY` only in the process environment or a secret manager. Never place it in prompts, project files, command transcripts, or bug reports. Stasis uses the key only as the Authorization header and sanitizes transport errors; audit logs omit provider envelopes and credentials. Treat prompts, source, tool observations, and model output as data sent to the selected provider. Review provider retention and privacy terms before enabling a remote transport.
