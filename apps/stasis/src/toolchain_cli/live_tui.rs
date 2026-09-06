@@ -1096,6 +1096,9 @@ fn audit_agent_event(event: &AgentEvent) -> Value {
         AgentEvent::Turn { current, maximum } => {
             serde_json::json!({"event": "turn", "current": current, "maximum": maximum})
         }
+        AgentEvent::ProviderProgress(progress) => {
+            serde_json::json!({"event": "provider_progress", "progress": progress})
+        }
         AgentEvent::ProviderUsage(_) => unreachable!("provider usage has a separate log"),
         AgentEvent::WorkingNotes(notes) => {
             serde_json::json!({"event": "working_notes", "text": notes})
@@ -2334,6 +2337,11 @@ impl LiveTui {
                 AiUiEvent::Progress(AgentEvent::Turn { current, maximum }) => {
                     self.status = format!("AI turn {current}/{maximum}; Ctrl+C cancels");
                     self.audit(serde_json::json!({"event": "turn", "current": current, "maximum": maximum}));
+                }
+                AiUiEvent::Progress(AgentEvent::ProviderProgress(progress)) => {
+                    self.audit(
+                        serde_json::json!({"event": "provider_progress", "progress": progress}),
+                    );
                 }
                 AiUiEvent::Progress(AgentEvent::ProviderUsage(usage)) => {
                     if let Some(log) = &mut self.ai_audit {
