@@ -119,6 +119,74 @@ fn capture_native_task_timeline() {
         editor.state.handle(TaskSessionCommand::Cancel).unwrap();
     }
 
+    if let Ok(phase) = std::env::var("STASIS_EDITOR_EVIDENCE_PROGRESS") {
+        let (client, _server) = stasis_runner::live::live_session(16);
+        editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Progress fixture: review a bounded edit".into();
+        editor.state.create_task().unwrap();
+        let task = editor.state.session.active_task_mut().unwrap();
+        task.append_user_message("Demonstrate progress states. These are deterministic fixture events, not an executed provider request or source edit.").unwrap();
+        task.select_provider(ProviderSelection::Codex).unwrap();
+        editor.controller = TaskController::new_with_progress(|_, _, progress| {
+            progress.report(ProgressStage::InspectingSymbols);
+            progress.report(ProgressStage::ContactingProvider);
+            progress.report_provider(ProgressStage::FirstResponse, 120);
+            progress.report_provider(ProgressStage::FirstAction, 145);
+            progress.report(ProgressStage::PreparingProposal);
+            Ok(ProviderReply::new(
+                "Fixture response received. The host card demonstrates the subsequent phase.",
+            ))
+        });
+        editor
+            .controller
+            .send_active(&editor.state.session)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor
+            .controller
+            .snapshot(editor.state.session.active_task_id().unwrap())
+            .is_some_and(|snapshot| snapshot.state == stasis_ai::TaskRequestState::Running)
+        {
+            editor.poll_controller();
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        let task_id = editor.state.session.active_task_id().unwrap().to_string();
+        let mut progress = editor.host.progress.lock().unwrap();
+        let id = progress.admit(&task_id).unwrap();
+        let count = phase.parse::<usize>().unwrap();
+        for (index, stage) in [
+            ProgressStage::ApplyingAtomically,
+            ProgressStage::Compiling,
+            ProgressStage::RunningFocusedTests,
+            ProgressStage::Completed,
+        ]
+        .into_iter()
+        .enumerate()
+        .take(count)
+        {
+            progress.report_at(&task_id, id, stage, (index as u64 + 1) * 200);
+        }
+        let provider = editor
+            .controller
+            .snapshot(&TaskId::new(task_id.clone()))
+            .unwrap();
+        let host = &progress.snapshots[&task_id];
+        let audit = json!({
+            "fixture": true, "task_id": task_id,
+            "provider_request_id": provider.request_id.get(),
+            "provider_first_action_ms": provider.provider_first_action_ms,
+            "provider_events": provider.progress.iter().map(|event| json!({"sequence": event.sequence, "stage": event.stage.label(), "elapsed_ms": event.elapsed_ms, "provider_elapsed_ms": event.provider_elapsed_ms})).collect::<Vec<_>>(),
+            "host_request_id": host.request_id,
+            "host_events": host.events.iter().map(|(stage, elapsed)| json!({"stage": stage.label(), "elapsed_ms": elapsed})).collect::<Vec<_>>(),
+        });
+        std::fs::write(
+            PathBuf::from(&output).with_extension("json"),
+            serde_json::to_vec_pretty(&audit).unwrap(),
+        )
+        .unwrap();
+    }
+
     struct CaptureApp {
         editor: DesktopEditor,
         output: PathBuf,

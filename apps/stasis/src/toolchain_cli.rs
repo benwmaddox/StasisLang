@@ -2777,6 +2777,22 @@ fn execute_noarg_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
 }
 
 fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandResult, String> {
+    test_workspace_with_progress(workspace, path, &mut |_| {})
+}
+
+fn report_toolchain_progress(
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+    stage: stasis_ai::task_controller::ProgressStage,
+) {
+    // Progress is observational and must not interrupt a source transaction.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| progress(stage)));
+}
+
+fn test_workspace_with_progress(
+    workspace: &Workspace,
+    path: Option<&Path>,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<CommandResult, String> {
     let directory = path
         .map(|value| workspace.root.join(value))
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
@@ -2796,6 +2812,11 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         None,
     )?;
     let mut session = StasisTestRunSession::new();
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::Compiling,
+    );
+    let mut running_tests_reported = false;
     let summary = stasis::run_jit_tests_in_directory_with_project_root_session_and_validator(
         &directory,
         &workspace.root,
@@ -2809,9 +2830,23 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
                 snapshot,
                 manifest.as_ref(),
             )?;
-            load_and_apply_play_data_bindings_for_test(&data_binding_paths, jit)
+            load_and_apply_play_data_bindings_for_test(&data_binding_paths, jit)?;
+            if !running_tests_reported {
+                report_toolchain_progress(
+                    progress,
+                    stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+                );
+                running_tests_reported = true;
+            }
+            Ok(())
         },
     )?;
+    if !running_tests_reported {
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+        );
+    }
     let scenarios = headless::run_scenarios(workspace, &directory)?;
     let data = json!({
         "files_discovered": summary.files_discovered,
@@ -7075,6 +7110,15 @@ fn apply_symbol_plan(
     plan: WorkshopSemanticEditPlan,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
+    apply_symbol_plan_with_progress(workspace, plan, options, &mut |_| {})
+}
+
+fn apply_symbol_plan_with_progress(
+    workspace: &Workspace,
+    plan: WorkshopSemanticEditPlan,
+    options: SymbolEditOptions,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<CommandResult, String> {
     if options.dry_run {
         return Ok(CommandResult::success(
             format!(
@@ -7091,17 +7135,25 @@ fn apply_symbol_plan(
         ));
     }
 
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+    );
     write_workshop_semantic_plan(&workspace.root, &plan, false)?;
     let validation = if options.no_tests {
         Ok(json!({"compiler": "passed", "tests": "skipped"}))
     } else {
-        test_workspace(workspace, None).map(
+        test_workspace_with_progress(workspace, None, progress).map(
             |result| json!({"compiler": "passed", "tests": "passed", "test_result": result.data}),
         )
     };
     let validation = match validation {
         Ok(validation) => validation,
         Err(error) => {
+            report_toolchain_progress(
+                progress,
+                stasis_ai::task_controller::ProgressStage::RollingBack,
+            );
             write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
                 format!(
                     "semantic edit validation failed: {error}; rollback also failed: {rollback}"
@@ -7120,6 +7172,10 @@ fn apply_symbol_plan(
     let receipt = match write_symbol_receipt(workspace, &plan) {
         Ok(receipt) => receipt,
         Err(error) => {
+            report_toolchain_progress(
+                progress,
+                stasis_ai::task_controller::ProgressStage::RollingBack,
+            );
             write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
                 format!("semantic receipt failed: {error}; rollback also failed: {rollback}")
             })?;
@@ -7187,6 +7243,18 @@ fn desktop_apply_semantic_preview(
     root: &Path,
     preview: &DesktopSemanticPreview,
 ) -> Result<(String, Value), String> {
+    desktop_apply_semantic_preview_with_progress(root, preview, &mut |_| {})
+}
+
+fn desktop_apply_semantic_preview_with_progress(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<(String, Value), String> {
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+    );
     let current_fingerprint = desktop_source_fingerprint(root, &[])?;
     if current_fingerprint != preview.source_fingerprint {
         return Err("stale semantic preview: project sources changed; generate a new preview before applying".into());
@@ -7208,13 +7276,14 @@ fn desktop_apply_semantic_preview(
     }
     // Bind the receipt to the validated inputs overlaid with the exact reviewed plan.
     let committed_fingerprint = desktop_inputs_fingerprint(&validated_inputs);
-    let mut result = apply_symbol_plan(
+    let mut result = apply_symbol_plan_with_progress(
         &workspace,
         preview.plan.clone(),
         SymbolEditOptions {
             dry_run: false,
             no_tests: false,
         },
+        progress,
     )?;
     result.data["source_fingerprint"] = json!(committed_fingerprint);
     Ok((result.human, result.data))
@@ -7230,15 +7299,23 @@ fn desktop_run_focused_tests(
     root: &Path,
     relevant_tests: &[String],
 ) -> Result<(String, Value), String> {
+    desktop_run_focused_tests_with_progress(root, relevant_tests, &mut |_| {})
+}
+
+fn desktop_run_focused_tests_with_progress(
+    root: &Path,
+    relevant_tests: &[String],
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<(String, Value), String> {
     let workspace = load_workspace(Some(root))?;
     if relevant_tests.is_empty() {
-        let result = test_workspace(&workspace, None)?;
+        let result = test_workspace_with_progress(&workspace, None, progress)?;
         desktop_require_executed_tests(&result.data)?;
         return Ok((result.human, result.data));
     }
     let mut receipts = Vec::with_capacity(relevant_tests.len());
     for relative in relevant_tests {
-        let result = test_workspace(&workspace, Some(Path::new(relative)))?;
+        let result = test_workspace_with_progress(&workspace, Some(Path::new(relative)), progress)?;
         desktop_require_executed_tests(&result.data)?;
         receipts.push(result.data);
     }
@@ -9323,7 +9400,24 @@ mod tests {
         let preview = desktop_preview_semantic_batch(&root, payload.clone()).unwrap();
         assert_eq!(preview.payload, payload);
         let reviewed_plan = preview.plan.clone();
-        let (_, receipt) = desktop_apply_semantic_preview(&root, &preview).unwrap();
+        let mut progress = Vec::new();
+        let (_, receipt) =
+            desktop_apply_semantic_preview_with_progress(&root, &preview, &mut |stage| {
+                progress.push(stage)
+            })
+            .unwrap();
+        assert_eq!(
+            progress,
+            [
+                stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+                stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+                stasis_ai::task_controller::ProgressStage::Compiling,
+                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+            ]
+        );
+        assert!(
+            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
+        );
         assert_eq!(receipt["plan"], json!(reviewed_plan));
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).unwrap(),
@@ -9367,6 +9461,19 @@ mod tests {
     #[test]
     fn desktop_editor_fingerprints_selected_tests_and_rejects_empty_selection() {
         let root = desktop_editor_fixture("editor_fingerprint");
+        let mut progress = Vec::new();
+        desktop_run_focused_tests_with_progress(&root, &[], &mut |stage| progress.push(stage))
+            .unwrap();
+        assert_eq!(
+            progress,
+            [
+                stasis_ai::task_controller::ProgressStage::Compiling,
+                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+            ]
+        );
+        assert!(
+            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
+        );
         fs::create_dir_all(root.join("checks")).unwrap();
         fs::write(
             root.join("checks/selected.stasis"),
@@ -9419,8 +9526,26 @@ mod tests {
         };
         let (_, accepted_receipt) = desktop_apply_semantic_batch(&root, propose(2)).unwrap();
         let accepted_source = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        let error = desktop_apply_semantic_batch(&root, propose(-1)).unwrap_err();
+        let preview = desktop_preview_semantic_batch(&root, propose(-1)).unwrap();
+        let mut progress = Vec::new();
+        let error = desktop_apply_semantic_preview_with_progress(&root, &preview, &mut |stage| {
+            progress.push(stage)
+        })
+        .unwrap_err();
         assert!(error.contains("rolled back"), "{error}");
+        assert_eq!(
+            progress,
+            [
+                stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+                stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+                stasis_ai::task_controller::ProgressStage::Compiling,
+                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+                stasis_ai::task_controller::ProgressStage::RollingBack,
+            ]
+        );
+        assert!(
+            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
+        );
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).unwrap(),
             accepted_source

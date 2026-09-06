@@ -15,6 +15,7 @@ use std::time::Instant;
 const SAFE_PROVIDER_ERROR: &str = "AI provider request failed";
 const SAFE_SESSION_ERROR: &str = "AI response could not be added to the task";
 const MAX_WORKERS: usize = 8;
+const MAX_PROGRESS_EVENTS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(u64);
@@ -92,6 +93,67 @@ pub enum TaskRequestState {
     Canceled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressStage {
+    Queued,
+    InspectingSymbols,
+    ContactingProvider,
+    FirstResponse,
+    FirstAction,
+    PreparingProposal,
+    WaitingForApproval,
+    ApplyingAtomically,
+    Compiling,
+    RunningFocusedTests,
+    FocusedTestsPassed,
+    CommittingBetweenTicks,
+    RollingBack,
+    CancelRequested,
+    Failed,
+    Canceled,
+    Completed,
+    Fallback,
+}
+
+impl ProgressStage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::InspectingSymbols => "Inspecting symbols",
+            Self::ContactingProvider => "Contacting provider",
+            Self::FirstResponse => "First response received",
+            Self::FirstAction => "First action received",
+            Self::PreparingProposal => "Preparing proposal",
+            Self::WaitingForApproval => "Waiting for approval",
+            Self::ApplyingAtomically => "Applying atomically",
+            Self::Compiling => "Compiling",
+            Self::RunningFocusedTests => "Running focused tests",
+            Self::FocusedTestsPassed => "Focused tests passed",
+            Self::CommittingBetweenTicks => "Committing between ticks",
+            Self::RollingBack => "Rolling back",
+            Self::CancelRequested => "Cancel requested; finishing atomic work",
+            Self::Failed => "Failed",
+            Self::Canceled => "Canceled",
+            Self::Completed => "Completed",
+            Self::Fallback => "Using fallback",
+        }
+    }
+
+    const fn is_terminal(self) -> bool {
+        matches!(self, Self::Failed | Self::Canceled | Self::Completed)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressEvent {
+    pub task_id: TaskId,
+    pub request_id: RequestId,
+    pub sequence: u64,
+    pub stage: ProgressStage,
+    pub elapsed_ms: u64,
+    pub provider_elapsed_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRequestSnapshot {
     pub request_id: RequestId,
@@ -101,6 +163,10 @@ pub struct TaskRequestSnapshot {
     pub usage: ProviderUsage,
     pub retry_count: u32,
     pub error: Option<String>,
+    pub progress: Vec<ProgressEvent>,
+    pub provider_first_response_ms: Option<u64>,
+    pub provider_first_action_ms: Option<u64>,
+    pub focused_tests_passed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +243,7 @@ impl From<TaskSessionError> for TaskControllerError {
     }
 }
 
-type ProviderFn = dyn Fn(ProviderRequest, Arc<AtomicBool>) -> Result<ProviderReply, String>
+type ProviderFn = dyn Fn(ProviderRequest, Arc<AtomicBool>, ProgressReporter) -> Result<ProviderReply, String>
     + Send
     + Sync
     + 'static;
@@ -214,6 +280,79 @@ struct SharedState {
     completions: VecDeque<Completion>,
     events: VecDeque<(u64, TaskControllerEvent)>,
     admitted: usize,
+}
+
+#[derive(Clone)]
+pub struct ProgressReporter {
+    client_id: u64,
+    task_id: TaskId,
+    request_id: RequestId,
+    started_at: Instant,
+    state: Arc<Mutex<SharedState>>,
+    closed: Arc<AtomicBool>,
+}
+
+impl fmt::Debug for ProgressReporter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProgressReporter")
+            .field("task_id", &self.task_id)
+            .field("request_id", &self.request_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProgressReporter {
+    pub fn task_id(&self) -> &TaskId {
+        &self.task_id
+    }
+
+    pub fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    pub fn report(&self, stage: ProgressStage) -> bool {
+        if matches!(
+            stage,
+            ProgressStage::FirstResponse | ProgressStage::FirstAction
+        ) {
+            return false;
+        }
+        self.report_at(stage, None)
+    }
+
+    /// Records provider-measured latency without exposing provider payloads or transport details.
+    pub fn report_provider(&self, stage: ProgressStage, provider_elapsed_ms: u64) -> bool {
+        if !matches!(
+            stage,
+            ProgressStage::ContactingProvider
+                | ProgressStage::FirstResponse
+                | ProgressStage::FirstAction
+        ) {
+            return false;
+        }
+        self.report_at(stage, Some(provider_elapsed_ms))
+    }
+
+    fn report_at(&self, stage: ProgressStage, provider_elapsed_ms: Option<u64>) -> bool {
+        if stage.is_terminal() || self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut state = lock(&self.state);
+        let Some(record) = state
+            .requests
+            .get_mut(&(self.client_id, self.task_id.clone()))
+        else {
+            return false;
+        };
+        if record.snapshot.request_id != self.request_id
+            || record.snapshot.state != TaskRequestState::Running
+            || record.canceled.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let elapsed_ms = elapsed_ms(self.started_at);
+        push_progress(&mut record.snapshot, stage, elapsed_ms, provider_elapsed_ms)
+    }
 }
 
 pub struct TaskController {
@@ -304,6 +443,36 @@ impl TaskController {
     ) -> Result<Self, TaskControllerError>
     where
         F: Fn(ProviderRequest, Arc<AtomicBool>) -> Result<ProviderReply, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::with_config_and_progress(
+            move |request, canceled, reporter| {
+                reporter.report_provider(ProgressStage::ContactingProvider, 0);
+                provider(request, canceled)
+            },
+            config,
+        )
+    }
+
+    pub fn new_with_progress<F>(provider: F) -> Self
+    where
+        F: Fn(ProviderRequest, Arc<AtomicBool>, ProgressReporter) -> Result<ProviderReply, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self::with_config_and_progress(provider, TaskControllerConfig::default())
+            .expect("default task controller configuration is valid")
+    }
+
+    pub fn with_config_and_progress<F>(
+        provider: F,
+        config: TaskControllerConfig,
+    ) -> Result<Self, TaskControllerError>
+    where
+        F: Fn(ProviderRequest, Arc<AtomicBool>, ProgressReporter) -> Result<ProviderReply, String>
             + Send
             + Sync
             + 'static,
@@ -427,15 +596,7 @@ impl TaskController {
                 request: request.clone(),
                 canceled: Arc::clone(&canceled),
                 started_at,
-                snapshot: TaskRequestSnapshot {
-                    request_id,
-                    task_id: task_id.clone(),
-                    state: TaskRequestState::Running,
-                    elapsed_ms: 0,
-                    usage: ProviderUsage::default(),
-                    retry_count,
-                    error: None,
-                },
+                snapshot: initial_snapshot(request_id, task_id.clone(), retry_count),
             },
         );
         state.admitted = state.admitted.saturating_add(1);
@@ -457,6 +618,8 @@ impl TaskController {
             if let Some(record) = state.requests.get_mut(&(self.client_id, task_id.clone())) {
                 record.snapshot.state = TaskRequestState::Failed;
                 record.snapshot.error = Some(SAFE_PROVIDER_ERROR.to_string());
+                let elapsed = elapsed_ms(record.started_at);
+                push_progress(&mut record.snapshot, ProgressStage::Failed, elapsed, None);
             }
             return Err(TaskControllerError::CapacityReached);
         }
@@ -502,6 +665,8 @@ impl TaskController {
             record.snapshot.elapsed_ms =
                 u64::try_from(record.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
             record.snapshot.error = None;
+            let elapsed = record.snapshot.elapsed_ms;
+            push_progress(&mut record.snapshot, ProgressStage::Canceled, elapsed, None);
             let request_id = record.snapshot.request_id;
             update_screenshots(
                 &mut task,
@@ -579,15 +744,7 @@ impl TaskController {
                 request: request.clone(),
                 canceled: Arc::clone(&canceled),
                 started_at,
-                snapshot: TaskRequestSnapshot {
-                    request_id,
-                    task_id: task_id.clone(),
-                    state: TaskRequestState::Running,
-                    elapsed_ms: 0,
-                    usage: ProviderUsage::default(),
-                    retry_count,
-                    error: None,
-                },
+                snapshot: initial_snapshot(request_id, task_id.clone(), retry_count),
             },
         );
         state.admitted = state.admitted.saturating_add(1);
@@ -609,6 +766,8 @@ impl TaskController {
             if let Some(record) = state.requests.get_mut(&(self.client_id, task_id.clone())) {
                 record.snapshot.state = TaskRequestState::Failed;
                 record.snapshot.error = Some(SAFE_PROVIDER_ERROR.to_string());
+                let elapsed = elapsed_ms(record.started_at);
+                push_progress(&mut record.snapshot, ProgressStage::Failed, elapsed, None);
             }
             return Err(TaskControllerError::CapacityReached);
         }
@@ -756,6 +915,12 @@ impl TaskController {
                     }
                     record.snapshot.state = TaskRequestState::Failed;
                     record.snapshot.error = Some(SAFE_SESSION_ERROR.to_string());
+                    push_progress(
+                        &mut record.snapshot,
+                        ProgressStage::Failed,
+                        completion.elapsed_ms,
+                        None,
+                    );
                     return TaskControllerEvent::Failed {
                         request_id: completion.request_id,
                         task_id: completion.task_id,
@@ -765,8 +930,23 @@ impl TaskController {
                 *session
                     .task_mut(&completion.task_id)
                     .expect("task was present while response was validated") = updated_task;
+                if !proposals.is_empty() {
+                    reserve_progress_slots(&mut record.snapshot, 2);
+                    push_progress(
+                        &mut record.snapshot,
+                        ProgressStage::WaitingForApproval,
+                        completion.elapsed_ms,
+                        None,
+                    );
+                }
                 record.snapshot.state = TaskRequestState::Completed;
                 record.snapshot.usage = reply.usage;
+                push_progress(
+                    &mut record.snapshot,
+                    ProgressStage::Completed,
+                    completion.elapsed_ms,
+                    None,
+                );
                 TaskControllerEvent::Completed {
                     request_id: completion.request_id,
                     task_id: completion.task_id,
@@ -776,6 +956,12 @@ impl TaskController {
             Err(()) => {
                 record.snapshot.state = TaskRequestState::Failed;
                 record.snapshot.error = Some(SAFE_PROVIDER_ERROR.to_string());
+                push_progress(
+                    &mut record.snapshot,
+                    ProgressStage::Failed,
+                    completion.elapsed_ms,
+                    None,
+                );
                 if let Ok(task) = session.task_mut(&completion.task_id) {
                     update_screenshots(
                         task,
@@ -882,12 +1068,25 @@ fn worker_loop(
             });
             continue;
         }
+        let reporter = ProgressReporter {
+            client_id: job.client_id,
+            task_id: job.request.task_id.clone(),
+            request_id: job.request.request_id,
+            started_at: job.enqueued_at,
+            state: Arc::clone(&state),
+            closed: Arc::new(AtomicBool::new(false)),
+        };
         let result = catch_unwind(AssertUnwindSafe(|| {
-            provider(job.request.clone(), Arc::clone(&job.canceled))
+            provider(
+                job.request.clone(),
+                Arc::clone(&job.canceled),
+                reporter.clone(),
+            )
         }))
         .ok()
         .and_then(Result::ok)
         .ok_or(());
+        reporter.closed.store(true, Ordering::Release);
         let elapsed_ms = u64::try_from(job.enqueued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut state = lock(&state);
         if !job.client_alive.load(Ordering::Acquire) {
@@ -947,6 +1146,132 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn initial_snapshot(
+    request_id: RequestId,
+    task_id: TaskId,
+    retry_count: u32,
+) -> TaskRequestSnapshot {
+    let queued = ProgressEvent {
+        task_id: task_id.clone(),
+        request_id,
+        sequence: 0,
+        stage: ProgressStage::Queued,
+        elapsed_ms: 0,
+        provider_elapsed_ms: None,
+    };
+    TaskRequestSnapshot {
+        request_id,
+        task_id,
+        state: TaskRequestState::Running,
+        elapsed_ms: 0,
+        usage: ProviderUsage::default(),
+        retry_count,
+        error: None,
+        progress: vec![queued],
+        provider_first_response_ms: None,
+        provider_first_action_ms: None,
+        focused_tests_passed_ms: None,
+    }
+}
+
+fn push_progress(
+    snapshot: &mut TaskRequestSnapshot,
+    stage: ProgressStage,
+    elapsed_ms: u64,
+    provider_elapsed_ms: Option<u64>,
+) -> bool {
+    if snapshot
+        .progress
+        .last()
+        .is_some_and(|event| event.stage.is_terminal())
+    {
+        return false;
+    }
+    let elapsed_ms = snapshot
+        .progress
+        .last()
+        .map_or(elapsed_ms, |event| elapsed_ms.max(event.elapsed_ms));
+    if snapshot
+        .progress
+        .last()
+        .is_some_and(|event| event.stage == stage)
+    {
+        return false;
+    }
+    match stage {
+        ProgressStage::FirstResponse => {
+            if snapshot.provider_first_response_ms.is_some() {
+                return false;
+            }
+            snapshot.provider_first_response_ms = provider_elapsed_ms;
+        }
+        ProgressStage::FirstAction => {
+            if snapshot.provider_first_action_ms.is_some() {
+                return false;
+            }
+            snapshot.provider_first_action_ms = provider_elapsed_ms;
+        }
+        ProgressStage::FocusedTestsPassed => {
+            if snapshot.focused_tests_passed_ms.is_none() {
+                snapshot.focused_tests_passed_ms = Some(elapsed_ms);
+            }
+        }
+        _ => {}
+    }
+    let limit = if stage.is_terminal() {
+        MAX_PROGRESS_EVENTS
+    } else {
+        MAX_PROGRESS_EVENTS - 1
+    };
+    if snapshot.progress.len() >= limit {
+        if !stage.is_terminal() {
+            return false;
+        }
+        let Some(index) = snapshot
+            .progress
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(index, event)| (!event.stage.is_terminal()).then_some(index))
+        else {
+            return false;
+        };
+        snapshot.progress.remove(index);
+    }
+    let sequence = snapshot
+        .progress
+        .last()
+        .map_or(0, |event| event.sequence.saturating_add(1));
+    snapshot.progress.push(ProgressEvent {
+        task_id: snapshot.task_id.clone(),
+        request_id: snapshot.request_id,
+        sequence,
+        stage,
+        elapsed_ms,
+        provider_elapsed_ms,
+    });
+    true
+}
+
+fn reserve_progress_slots(snapshot: &mut TaskRequestSnapshot, slots: usize) {
+    while snapshot.progress.len().saturating_add(slots) > MAX_PROGRESS_EVENTS {
+        let Some(index) = snapshot
+            .progress
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(index, event)| (!event.stage.is_terminal()).then_some(index))
+        else {
+            break;
+        };
+        snapshot.progress.remove(index);
+    }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn release_admission(count: &mut usize, admitted: &AtomicBool) {
@@ -1484,5 +1809,203 @@ mod tests {
         assert!(
             matches!(&events[0], TaskControllerEvent::Failed { message, .. } if message == SAFE_PROVIDER_ERROR)
         );
+    }
+
+    #[test]
+    fn typed_progress_is_ordered_bounded_and_keeps_provider_timings() {
+        let controller = TaskController::new_with_progress(|_, _, reporter| {
+            assert!(reporter.report(ProgressStage::InspectingSymbols));
+            assert!(!reporter.report(ProgressStage::InspectingSymbols));
+            assert!(!reporter.report_provider(ProgressStage::Compiling, 3));
+            assert!(reporter.report_provider(ProgressStage::ContactingProvider, 0));
+            assert!(reporter.report_provider(ProgressStage::FirstResponse, 7));
+            assert!(reporter.report_provider(ProgressStage::FirstAction, 11));
+            assert!(reporter.report(ProgressStage::PreparingProposal));
+            assert!(!reporter.report_provider(ProgressStage::FirstResponse, 19));
+            assert!(!reporter.report_provider(ProgressStage::FirstAction, 23));
+            for index in 0..MAX_PROGRESS_EVENTS {
+                reporter.report(if index % 2 == 0 {
+                    ProgressStage::PreparingProposal
+                } else {
+                    ProgressStage::Compiling
+                });
+            }
+            let mut reply = ProviderReply::new("done");
+            reply.proposals.push(ProviderActionProposal {
+                id: "proposal".into(),
+                kind: ActionKind::Edit,
+                description: "bounded proposal".into(),
+                payload: Value::Null,
+                repair: false,
+            });
+            Ok(reply)
+        });
+        let mut session = session(&["one"]);
+        let request_id = controller.send(&session, &TaskId::new("one")).unwrap();
+        wait_for(&controller, &mut session);
+
+        let snapshot = controller.snapshot(&TaskId::new("one")).unwrap();
+        assert_eq!(snapshot.request_id, request_id);
+        assert_eq!(snapshot.provider_first_response_ms, Some(7));
+        assert_eq!(snapshot.provider_first_action_ms, Some(11));
+        assert_eq!(snapshot.progress.len(), MAX_PROGRESS_EVENTS);
+        assert_eq!(snapshot.progress[0].stage, ProgressStage::Queued);
+        assert_eq!(
+            snapshot.progress[MAX_PROGRESS_EVENTS - 2].stage,
+            ProgressStage::WaitingForApproval
+        );
+        assert_eq!(
+            snapshot.progress.last().unwrap().stage,
+            ProgressStage::Completed
+        );
+        assert!(snapshot
+            .progress
+            .windows(2)
+            .all(|events| events[0].sequence < events[1].sequence));
+        assert!(snapshot.progress.iter().all(|event| {
+            event.task_id == TaskId::new("one") && event.request_id == request_id
+        }));
+    }
+
+    #[test]
+    fn progress_is_isolated_between_clients_with_the_same_task_id() {
+        let (sent, received) = mpsc::channel();
+        let controller = TaskController::new_with_progress(move |_, _, reporter| {
+            let (release, wait) = mpsc::channel();
+            sent.send((reporter, release)).unwrap();
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(ProviderReply::new("done"))
+        });
+        let other = controller.clone();
+        let first_session = session(&["one"]);
+        let second_session = session(&["one"]);
+        let first_id = controller.send_active(&first_session).unwrap();
+        let second_id = other.send_active(&second_session).unwrap();
+        let mut releases = Vec::new();
+        for _ in 0..2 {
+            let (reporter, release) = received.recv_timeout(Duration::from_secs(5)).unwrap();
+            let latency = if reporter.request_id() == first_id {
+                11
+            } else {
+                22
+            };
+            assert!(reporter.report_provider(ProgressStage::FirstAction, latency));
+            releases.push(release);
+        }
+        let first = controller.snapshot(&TaskId::new("one")).unwrap();
+        let second = other.snapshot(&TaskId::new("one")).unwrap();
+        assert_eq!(first.provider_first_action_ms, Some(11));
+        assert_eq!(second.provider_first_action_ms, Some(22));
+        assert!(first
+            .progress
+            .iter()
+            .all(|event| event.request_id == first_id));
+        assert!(second
+            .progress
+            .iter()
+            .all(|event| event.request_id == second_id));
+        for release in releases {
+            release.send(()).unwrap();
+        }
+    }
+
+    #[test]
+    fn canceled_and_stale_reporters_cannot_publish_progress() {
+        let (sent, received) = mpsc::channel();
+        let release = Arc::new(Barrier::new(2));
+        let provider_release = Arc::clone(&release);
+        let controller = TaskController::new_with_progress(move |_, _, reporter| {
+            sent.send(reporter.clone()).unwrap();
+            provider_release.wait();
+            Ok(ProviderReply::new("late"))
+        });
+        let mut session = session(&["one"]);
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        let reporter = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        controller
+            .cancel(&mut session, &TaskId::new("one"))
+            .unwrap();
+        assert!(!reporter.report(ProgressStage::PreparingProposal));
+        let snapshot = controller.snapshot(&TaskId::new("one")).unwrap();
+        assert_eq!(
+            snapshot.progress.last().unwrap().stage,
+            ProgressStage::Canceled
+        );
+        release.wait();
+    }
+
+    #[test]
+    fn retries_replace_progress_ownership_and_reset_the_timeline() {
+        let reporters = Arc::new(Mutex::new(Vec::new()));
+        let provider_reporters = Arc::clone(&reporters);
+        let calls = Arc::new(AtomicU64::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let controller = TaskController::new_with_progress(move |_, _, reporter| {
+            provider_reporters.lock().unwrap().push(reporter.clone());
+            reporter.report(ProgressStage::Fallback);
+            if provider_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                Err("retry".into())
+            } else {
+                Ok(ProviderReply::new("done"))
+            }
+        });
+        let mut session = session(&["one"]);
+        let first = controller.send(&session, &TaskId::new("one")).unwrap();
+        wait_for(&controller, &mut session);
+        let second = controller.retry(&mut session, &TaskId::new("one")).unwrap();
+        assert_ne!(first, second);
+        wait_for(&controller, &mut session);
+
+        let reporters = reporters.lock().unwrap();
+        assert!(!reporters[0].report(ProgressStage::Compiling));
+        assert!(!reporters[1].report(ProgressStage::Compiling));
+        let snapshot = controller.snapshot(&TaskId::new("one")).unwrap();
+        assert_eq!(snapshot.request_id, second);
+        assert_eq!(snapshot.progress[0].sequence, 0);
+        assert_eq!(snapshot.progress[0].stage, ProgressStage::Queued);
+        assert!(snapshot
+            .progress
+            .iter()
+            .all(|event| event.request_id == second));
+    }
+
+    #[test]
+    fn timing_survives_capacity_and_total_elapsed_never_regresses() {
+        let mut snapshot = initial_snapshot(RequestId(1), TaskId::new("one"), 0);
+        for index in 1..MAX_PROGRESS_EVENTS - 1 {
+            assert!(push_progress(
+                &mut snapshot,
+                if index % 2 == 0 {
+                    ProgressStage::Compiling
+                } else {
+                    ProgressStage::PreparingProposal
+                },
+                100 + index as u64,
+                None,
+            ));
+        }
+        assert!(!push_progress(
+            &mut snapshot,
+            ProgressStage::FirstAction,
+            1,
+            Some(27),
+        ));
+        assert_eq!(snapshot.provider_first_action_ms, Some(27));
+        assert!(!push_progress(
+            &mut snapshot,
+            ProgressStage::FirstAction,
+            132,
+            Some(99),
+        ));
+        assert_eq!(snapshot.provider_first_action_ms, Some(27));
+        assert_eq!(snapshot.progress[0].stage, ProgressStage::Queued);
+        assert!(push_progress(
+            &mut snapshot,
+            ProgressStage::Completed,
+            1,
+            None,
+        ));
+        assert_eq!(snapshot.progress.last().unwrap().elapsed_ms, 130);
+        assert_eq!(snapshot.progress.len(), MAX_PROGRESS_EVENTS);
     }
 }

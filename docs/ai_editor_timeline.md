@@ -136,3 +136,92 @@ Theory gained: timeline sequence and compiler preview identity are independent:
 activity controls presentation order, while task/action/revision/payload and source
 fingerprints control acceptance and application. Combined ordering and stale-source
 tests support this invariant for future card types.
+
+## Bounded live progress (task 522)
+
+Each provider request retains at most 32 typed progress events in its controller
+snapshot. The client, task, and request IDs are captured at admission; switching
+UI tasks cannot redirect a reporter. Retry gets a new request ID and fresh bounded
+history. Cancellation, callback closure, stale IDs, and terminal state reject late
+events. Consecutive duplicates are coalesced; the queued and terminal states are
+retained at capacity. Progress contains fixed labels and timing values, never
+provider reasoning, response fragments, or transport errors.
+
+The timeline shows the latest provider and host request for the selected task.
+Provider first-response and first-action milestones are request-wide, while
+contacting-provider can recur across turns. OpenRouter records first nonempty
+content and the first root `tool_calls` key at the same millisecond used in its
+usage audit. These latencies start at the inference POST, excluding queue,
+source inspection, metadata lookup, and approval wait. Providers without streaming
+hooks report response completion as first response and leave first action
+unmeasured. Unknown route metadata never claims fallback.
+
+The host has one worker, eight admitted requests, and at most 32 events for each
+of the session's 32 tasks. Admission stays occupied until its result is drained.
+Progress is observational: a callback panic cannot interrupt source rollback.
+Cancellation requests do not pretend that an in-flight atomic operation stopped;
+the host retains its actual completion or failure after the request to cancel.
+Queued canceled operations never execute. Late events and results cannot replace
+a newer request's progress.
+
+Expandable details separate provider-boundary latency from source apply and the
+compile/test pipeline. The pipeline includes subsequent per-file compilations
+and scenario execution. Task-to-tests-passed starts with the first admitted
+message in this editor session and ends at the host's verified test result,
+including retries and approval wait; UI polling time is excluded. Missing or
+truncated measurements display as unmeasured. Progress snapshots are transient;
+the existing task activity and validation receipts retain completed outcomes.
+
+The desktop semantic source-write path has no runtime swap acknowledgment.
+`CommittingBetweenTicks` is a typed stage for hosts that can observe that boundary;
+this executor does not emit it or claim hot-swap latency. Extending it requires a
+runtime acknowledgment bound to the reviewed source revision.
+
+### Reproduction and limits
+
+Use the Cargo wrapper for focused checks (`--lib` for `stasis_ai`, `--bin stasis`
+with filter `desktop` for the editor). In restricted worktrees set
+`CARGO_TARGET_DIR` to a directory inside that worktree first.
+
+The existing native evidence test accepts `STASIS_EDITOR_EVIDENCE_PROGRESS=0..4`
+to capture queued, apply, compile, focused tests, and completed host states. Set
+`STASIS_EDITOR_EVIDENCE_PNG` to the desired PNG path; a sibling JSON file records
+the typed fixture events. These are explicitly labeled synthetic states, not
+executed edits or a live provider session.
+
+A credentialed provider trace can be reproduced with `OPENROUTER_API_KEY` and
+`STASIS_RUN_OPENROUTER_EVAL=1`, then:
+
+```powershell
+python tools/cargo_cache.py run -- cargo run -p stasis_ai --example openrouter_cerebras_eval
+```
+
+The example suppresses response content, requires an action, and compares typed
+first-response/action timing against the provider usage audit. The required live
+OpenRouter/UI acceptance trace remains unverified in this run because no API key
+is configured. It must be captured in a credentialed editor session before that
+acceptance criterion can be claimed.
+
+Theory gained: a progress label is evidence only when its owner observes the
+boundary. The source-apply path and its rollback tests show why successful source
+validation cannot stand in for a between-ticks runtime commit; a future swap
+observer must carry the same immutable revision and request identity.
+
+Validation (2026-09-06): 87 `stasis_ai --lib` tests and 76 desktop-filtered
+`stasis --bin stasis` tests passed on the final source. The OpenRouter example
+compiled with `cargo check`; formatting, unsafe-boundary, and diff checks passed.
+All Cargo commands used the repository wrapper. The full shell entrypoint could
+not start because `bash` is unavailable. One intermediate native capture was
+blocked by Device Guard; the final freshly built test executable and all five
+captures ran successfully through the repository signing runner. Optional signing
+reported no certificate. No test processes remained.
+
+Visual evidence: [phase3.png](evidence/ai-editor/task522/phase3.png) was inspected
+at native resolution for readable phase and latency labels, full-width cards,
+and a visible composer. [progress-fixture.mp4](evidence/ai-editor/task522/progress-fixture.mp4)
+was verified as 150 frames at 1100x900 over five seconds; its decoded
+[contact sheet](evidence/ai-editor/task522/video-contact.png) was inspected for
+queued, applying, compiling, running-tests, and completed ordering. The sibling
+`phase0.json` through `phase4.json` audits match these five synthetic states and
+the displayed 145 ms first-action value. This is fixture evidence only; the live
+OpenRouter trace remains outstanding.

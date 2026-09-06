@@ -1,7 +1,7 @@
 use serde_json::json;
 use stasis_ai::{
-    workshop_tool_specs, ModelProvider, OpenRouterConfig, OpenRouterProvider,
-    PreferredThroughputPolicy, RoutingConfig, RoutingSort,
+    workshop_tool_specs, ModelProvider, ModelResponse, OpenRouterConfig, OpenRouterProvider,
+    PreferredThroughputPolicy, ProviderProgress, RoutingConfig, RoutingSort,
 };
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -35,10 +35,44 @@ fn main() -> Result<(), String> {
     })
     .to_string();
     let mut provider = OpenRouterProvider::new(config)?;
-    let response = provider.respond(&request, &AtomicBool::new(false))?;
-    println!("response: {response:?}");
-    if let Some(usage) = provider.take_usage() {
-        println!("sanitized usage: {usage}");
+    let mut progress = Vec::new();
+    let response =
+        provider.respond_with_progress(&request, &AtomicBool::new(false), &mut |event| {
+            progress.push(event)
+        })?;
+    if !matches!(
+        response,
+        ModelResponse::ToolCalls { ref tool_calls, .. } if !tool_calls.is_empty()
+    ) {
+        return Err("live evaluation did not return an action".to_string());
     }
+    let usage = provider
+        .take_usage()
+        .ok_or_else(|| "live evaluation omitted usage audit data".to_string())?;
+    let first_response_ms = progress.iter().find_map(|event| match event {
+        ProviderProgress::FirstResponse { elapsed_ms } => Some(*elapsed_ms),
+        _ => None,
+    });
+    let first_action_ms = progress.iter().find_map(|event| match event {
+        ProviderProgress::FirstAction { elapsed_ms } => Some(*elapsed_ms),
+        _ => None,
+    });
+    if first_response_ms
+        != usage
+            .pointer("/timing_ms/first_content")
+            .and_then(|v| v.as_u64())
+        || first_action_ms
+            != usage
+                .pointer("/timing_ms/first_action")
+                .and_then(|v| v.as_u64())
+    {
+        return Err("live progress timestamps did not match the usage audit".to_string());
+    }
+    println!(
+        "safe progress: {}",
+        serde_json::to_string(&progress)
+            .map_err(|error| format!("failed encoding progress: {error}"))?
+    );
+    println!("sanitized usage: {usage}");
     Ok(())
 }
