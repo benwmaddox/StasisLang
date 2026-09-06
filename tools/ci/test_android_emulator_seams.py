@@ -21,6 +21,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.release_runner = read("tools/ci/run_android_release_shell_seam.py")
         cls.emulator_script = read("mobile/android/test_release_shell_emulator.ps1")
         cls.strategy = read("docs/integration_seam_testing_strategy.md")
+        cls.checklist = read("docs/build_checklist.md")
         cls.touch_expectations = json.loads(
             read("samples/android_touch_seam/android_seam_expectations.json")
         )
@@ -606,8 +607,30 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             self.strategy, r"Production Android\s+packaging remains ARM64"
         )
         for test_id in ("IT-017", "IT-018", "IT-019", "IT-021"):
-            row = next(line for line in self.strategy.splitlines() if f"| {test_id} |" in line)
+            row = next(line for line in self.checklist.splitlines() if f"| {test_id} |" in line)
             self.assertTrue(row.endswith("| Emulator |"), row)
+
+    def test_checklist_owns_integration_seam_catalog(self):
+        catalog_ids = re.findall(r"^\| (IT-\d{3}) \|", self.checklist, re.MULTILINE)
+        self.assertEqual([f"IT-{number:03}" for number in range(1, 33)], catalog_ids)
+        self.assertNotRegex(self.strategy, r"(?m)^\| IT-\d{3} \|")
+        self.assertIn(
+            "build_checklist.md#integration-seam-rollout-order", self.strategy
+        )
+        self.assertIn("### Integration seam rollout order", self.checklist)
+
+    def test_checklist_seams_have_status_and_evidence(self):
+        rows = re.findall(r"^\| IT-\d{3} \|.*$", self.checklist, re.MULTILINE)
+        self.assertEqual(32, len(rows))
+        for row in rows:
+            with self.subTest(task=row.split("|")[1].strip()):
+                cells = [cell.strip() for cell in row.strip("|").split("|")]
+                self.assertEqual(7, len(cells), "Expected status and evidence columns")
+                self.assertIn(cells[4], ("Implemented", "In progress", "Planned"))
+                links = re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", cells[5])
+                self.assertTrue(links, "Expected repository evidence link")
+                for link in links:
+                    self.assertTrue((ROOT / "docs" / link).exists(), link)
 
     def test_touch_drag_is_long_enough_for_hosted_emulator_sampling(self):
         inside_drag = next(
