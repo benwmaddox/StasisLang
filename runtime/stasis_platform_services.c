@@ -27,6 +27,213 @@ typedef struct StasisPlatformServiceState {
 
 static StasisPlatformServiceState service_state;
 
+static int external_url_hex(unsigned char byte) {
+    return (byte >= '0' && byte <= '9') ||
+        (byte >= 'a' && byte <= 'f') || (byte >= 'A' && byte <= 'F');
+}
+
+static int external_url_port(const unsigned char *value, int32_t length) {
+    int32_t index;
+    int32_t port = 0;
+    if (length <= 0 || length > 5) return 0;
+    for (index = 0; index < length; index += 1) {
+        if (value[index] < '0' || value[index] > '9') return 0;
+        port = port * 10 + (int32_t)(value[index] - '0');
+    }
+    return port >= 1 && port <= 65535;
+}
+
+static int external_url_dns_host(const unsigned char *host, int32_t length) {
+    int32_t index;
+    int32_t label_start = 0;
+    int32_t numeric_labels = 0;
+    int32_t label_count = 0;
+    int32_t ipv4_valid = 1;
+    if (length <= 0 || length > 253 || host[0] == '.' || host[length - 1] == '.') return 0;
+    for (index = 0; index <= length; index += 1) {
+        if (index == length || host[index] == '.') {
+            int32_t label_length = index - label_start;
+            int32_t digit_index;
+            int32_t numeric = 1;
+            int32_t numeric_value = 0;
+            if (label_length <= 0 || label_length > 63 ||
+                host[label_start] == '-' || host[index - 1] == '-') return 0;
+            label_count += 1;
+            for (digit_index = label_start; digit_index < index; digit_index += 1) {
+                if (host[digit_index] < '0' || host[digit_index] > '9') numeric = 0;
+                else if (digit_index - label_start < 3) {
+                    numeric_value = numeric_value * 10 + (int32_t)(host[digit_index] - '0');
+                }
+            }
+            if (numeric) {
+                if ((label_length > 1 && host[label_start] == '0') ||
+                    label_length > 3 || numeric_value > 255) ipv4_valid = 0;
+                numeric_labels += 1;
+            }
+            label_start = index + 1;
+        } else if (!((host[index] >= 'a' && host[index] <= 'z') ||
+                     (host[index] >= 'A' && host[index] <= 'Z') ||
+                     (host[index] >= '0' && host[index] <= '9') ||
+                     host[index] == '-')) {
+            return 0;
+        }
+    }
+    if (numeric_labels == label_count) return label_count == 4 && ipv4_valid;
+    return 1;
+}
+
+static int external_url_ipv6(const unsigned char *host, int32_t length) {
+    int32_t index = 0;
+    int32_t groups = 0;
+    int32_t compressed = 0;
+    if (length < 2) return 0;
+    while (index < length) {
+        int32_t digits = 0;
+        if (host[index] == ':') {
+            if (index + 1 >= length || host[index + 1] != ':' || compressed) return 0;
+            compressed = 1;
+            index += 2;
+            if (index == length) break;
+            continue;
+        }
+        while (index < length && host[index] != ':') {
+            if (!external_url_hex(host[index]) || digits >= 4) return 0;
+            digits += 1;
+            index += 1;
+        }
+        if (digits == 0) return 0;
+        groups += 1;
+        if (groups > 8) return 0;
+        if (index < length) {
+            if (index + 1 < length && host[index + 1] == ':') {
+                if (compressed) return 0;
+                compressed = 1;
+                index += 2;
+                if (index == length) break;
+            } else {
+                if (index + 1 == length) return 0;
+                index += 1;
+            }
+        }
+    }
+    return compressed ? groups < 8 : groups == 8;
+}
+
+static int external_url_authority(const unsigned char *value, int32_t length) {
+    int32_t index;
+    int32_t host_length = length;
+    if (length <= 0) return 0;
+    for (index = 0; index < length; index += 1) {
+        if (value[index] == '@' || value[index] >= 0x80) return 0;
+    }
+    if (value[0] == '[') {
+        int32_t close = 1;
+        while (close < length && value[close] != ']') {
+            close += 1;
+        }
+        if (close <= 1 || close >= length || !external_url_ipv6(value + 1, close - 1)) return 0;
+        if (close + 1 == length) return 1;
+        return value[close + 1] == ':' &&
+            external_url_port(value + close + 2, length - close - 2);
+    }
+    for (index = 0; index < length; index += 1) {
+        if (value[index] == ':') {
+            if (host_length != length) return 0;
+            host_length = index;
+        }
+    }
+    if (!external_url_dns_host(value, host_length)) return 0;
+    return host_length == length ||
+        external_url_port(value + host_length + 1, length - host_length - 1);
+}
+
+int stasis_external_url_validate(const char *url, int32_t length) {
+    const unsigned char *bytes = (const unsigned char *)url;
+    int32_t index;
+    int32_t authority_start;
+    int32_t authority_end;
+    if (url == NULL || length <= 0 || length > STASIS_EXTERNAL_URL_MAX_BYTES) return 0;
+    if (length >= 8 && memcmp(url, "https://", 8) == 0) authority_start = 8;
+    else if (length >= 7 && memcmp(url, "http://", 7) == 0) authority_start = 7;
+    else return 0;
+
+    authority_end = length;
+    for (index = authority_start; index < length; index += 1) {
+        unsigned char byte = bytes[index];
+        if (byte == '/' || byte == '?' || byte == '#') {
+            authority_end = index;
+            break;
+        }
+    }
+    if (!external_url_authority(bytes + authority_start, authority_end - authority_start)) return 0;
+
+    for (index = 0; index < length; index += 1) {
+        uint32_t codepoint;
+        uint32_t minimum;
+        int32_t remaining;
+        unsigned char first = bytes[index];
+        if (first == 0 || first == '\\' || first <= 0x20 || first == 0x7f) return 0;
+        if (first == '%') {
+            if (index + 2 >= length || !external_url_hex(bytes[index + 1]) ||
+                !external_url_hex(bytes[index + 2])) return 0;
+        }
+        if (first <= 0x7f) continue;
+        if (first >= 0xc2 && first <= 0xdf) {
+            codepoint = (uint32_t)(first & 0x1f);
+            minimum = 0x80;
+            remaining = 1;
+        } else if (first >= 0xe0 && first <= 0xef) {
+            codepoint = (uint32_t)(first & 0x0f);
+            minimum = 0x800;
+            remaining = 2;
+        } else if (first >= 0xf0 && first <= 0xf4) {
+            codepoint = (uint32_t)(first & 0x07);
+            minimum = 0x10000;
+            remaining = 3;
+        } else return 0;
+        if (index + remaining >= length) return 0;
+        while (remaining > 0) {
+            unsigned char continuation = bytes[++index];
+            if (continuation < 0x80 || continuation > 0xbf) return 0;
+            codepoint = (codepoint << 6) | (uint32_t)(continuation & 0x3f);
+            remaining -= 1;
+        }
+        if (codepoint < minimum || (codepoint >= 0xd800 && codepoint <= 0xdfff) ||
+            codepoint > 0x10ffff || (codepoint >= 0x80 && codepoint <= 0x9f)) return 0;
+    }
+    return 1;
+}
+
+void stasis_external_url_action_begin_frame(
+    StasisExternalUrlActionState *state,
+    int32_t has_input_edge,
+    int32_t disabled
+) {
+    if (state == NULL) return;
+    state->gesture_available = has_input_edge != 0 ? 1 : 0;
+    state->disabled = disabled != 0 ? 1 : 0;
+}
+
+void stasis_external_url_action_clear(StasisExternalUrlActionState *state) {
+    if (state != NULL) memset(state, 0, sizeof(*state));
+}
+
+int stasis_external_url_action_request(
+    StasisExternalUrlActionState *state,
+    const char *url,
+    int32_t length,
+    StasisExternalUrlOpener opener,
+    void *user_data
+) {
+    int result;
+    if (!stasis_external_url_validate(url, length)) return -1;
+    if (state == NULL || state->disabled || !state->gesture_available) return 0;
+    state->gesture_available = 0;
+    if (opener == NULL) return 0;
+    result = opener(url, length, user_data);
+    return result > 0 ? 1 : 0;
+}
+
 static int printable_ascii(const char *value, int32_t length) {
     int32_t index;
     if (value == NULL || length <= 0 || length > STASIS_PLATFORM_SERVICE_KEY_CAPACITY) return 0;

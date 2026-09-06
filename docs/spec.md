@@ -1112,6 +1112,23 @@ retains its wider internal tick domain. RTC1 buffers and snapshot arrays are
 capacity-checked at the JIT boundary, and authoritative hashes use two unsigned
 32-bit lanes so the guest ABI retains the complete 64-bit value.
 
+### External URL host action
+
+`src/stdlib/external_url.stasis` exposes `open_external_url(url: string): i32`
+with the `platform` effect. The host accepts bounded HTTP(S) URLs from an
+explicit pointer or keyboard activation. Results are `EXTERNAL_URL_INVALID`
+(-1), `EXTERNAL_URL_IGNORED` (0), and `EXTERNAL_URL_OPENED` (1). The last result
+means the platform accepted the dispatch, not that a page finished loading.
+Headless execution and recordings return ignored for valid requests and never
+launch a browser. Guests must not make gameplay state depend on browser success.
+
+The UTF-8 payload is limited to 2048 bytes before copying. Unsupported schemes,
+control characters, malformed URLs, and credentials are rejected. One input
+edge authorizes at most one valid attempt; holding input does not reauthorize
+it. Games should call only from an edge-triggered UI action and consume that
+action before gameplay input handling. Platform behavior and validation are
+specified in [external_url.md](external_url.md).
+
 ## 18. Status Note
 
 This document defines the current direction.

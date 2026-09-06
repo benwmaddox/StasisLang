@@ -96,6 +96,7 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_network_host_overflow_count",
     "stasis_jit_network_host_port",
     "stasis_jit_network_host_stop",
+    "stasis_jit_open_external_url",
 ];
 
 pub(crate) fn is_aot_runtime_export_symbol(symbol: &str) -> bool {
@@ -129,6 +130,7 @@ mod tests {
         assert!(is_aot_runtime_export_symbol(
             "stasis_jit_platform_service_poll"
         ));
+        assert!(is_aot_runtime_export_symbol("stasis_jit_open_external_url"));
         assert!(!is_aot_runtime_export_symbol(
             "stasis_jit_gfx_totally_missing"
         ));

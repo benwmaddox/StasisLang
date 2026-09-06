@@ -607,6 +607,48 @@ static const char *find_string(int32_t id) {
 }
 
 static int32_t collection_meta_hash(int32_t hash, int32_t kind);
+static char *resolve_text(int32_t id);
+static StasisMobileExternalUrlOpener external_url_opener;
+
+void stasis_mobile_set_external_url_opener(StasisMobileExternalUrlOpener opener) {
+    external_url_opener = opener;
+}
+
+int32_t stasis_jit_open_external_url(int32_t url) {
+    StasisArray *entry = find_array(url, 0, STASIS_VALUE_U8, 0);
+    int32_t length;
+    char *value;
+    const char *literal;
+    size_t literal_length;
+    int32_t result;
+    if (entry == NULL) entry = find_array(url, 0, STASIS_VALUE_I32, 0);
+    if (entry != NULL) {
+        length = stasis_jit_global_i32_load(collection_meta_hash(url, 1));
+        if (length <= 0 || length > STASIS_EXTERNAL_URL_MAX_BYTES ||
+            (size_t)length > entry->length) return -1;
+    } else {
+        literal = find_string(url);
+        if (literal == NULL) return -1;
+        literal_length = 0;
+        while (literal_length <= STASIS_EXTERNAL_URL_MAX_BYTES &&
+               literal[literal_length] != '\0') literal_length += 1;
+        if (literal_length == 0 || literal_length > STASIS_EXTERNAL_URL_MAX_BYTES) return -1;
+        length = (int32_t)literal_length;
+    }
+    value = resolve_text(url);
+    if (value == NULL) return -1;
+    if (!stasis_external_url_validate(value, length)) {
+        free(value);
+        return -1;
+    }
+    if (external_url_opener == NULL) {
+        free(value);
+        return 0;
+    }
+    result = external_url_opener(value, length);
+    free(value);
+    return result < 0 ? -1 : (result > 0 ? 1 : 0);
+}
 
 static char *resolve_text(int32_t id) {
     StasisArray *entry = find_array(id, 0, STASIS_VALUE_U8, 0);

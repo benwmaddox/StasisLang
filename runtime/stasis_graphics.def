@@ -29,6 +29,7 @@ EXPORTS
     stasis_get_time_ms
     stasis_get_time_us
     stasis_sleep_ms
+    stasis_open_external_url
     stasis_clipboard_load_ascii
     stasis_clipboard_save_ascii
     stasis_storage_load_ascii

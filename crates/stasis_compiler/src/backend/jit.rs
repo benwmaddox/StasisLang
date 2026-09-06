@@ -3030,6 +3030,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         | "stasis_jit_clipboard_save_ascii" => {
             function_address(stasis_dynload::stasis_jit_clipboard_save_ascii as *const ())
         }
+        "open_external_url" | "stasis_open_external_url" | "stasis_jit_open_external_url" => {
+            function_address(stasis_dynload::stasis_jit_open_external_url as *const ())
+        }
         "storage_load_ascii" | "stasis_storage_load_ascii" | "stasis_jit_storage_load_ascii" => {
             function_address(stasis_dynload::stasis_jit_storage_load_ascii as *const ())
         }
@@ -5040,6 +5043,74 @@ function main(): i32 {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 4);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_executes_external_url_edge_fixture_once_while_pointer_is_held() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static REQUESTS: AtomicUsize = AtomicUsize::new(0);
+        static LAST_URL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+
+        fn capture_url(url: &[u8]) -> i32 {
+            REQUESTS.fetch_add(1, Ordering::SeqCst);
+            *LAST_URL
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = url.to_vec();
+            1
+        }
+
+        REQUESTS.store(0, Ordering::SeqCst);
+        LAST_URL
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        stasis_dynload::set_external_url_host(Some(capture_url));
+
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture_path =
+            repository.join("tests/stasis/seams/external_url_edge_probe.test.stasis");
+        let mut process = JitProcess::new();
+        process
+            .set_project_root(repository.to_string_lossy())
+            .expect("set repository root");
+        process.set_required_emit_roots(&["run_edge_probe".to_string()]);
+        process.upsert_file(
+            fixture_path.to_string_lossy().into_owned(),
+            include_str!("../../../../tests/stasis/seams/external_url_edge_probe.test.stasis"),
+        );
+        process
+            .compile()
+            .expect("compile external URL edge fixture");
+
+        process
+            .execute_optional_on_code_swap()
+            .expect("execute swap hook with host actions suppressed");
+        assert_eq!(REQUESTS.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            process.read_i32_global_path("external_url_last_result"),
+            0,
+            "swap-time URL request should report ignored"
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("run_edge_probe"),
+            Ok(11),
+            "one activation and an accepted host request should be observable"
+        );
+        assert_eq!(REQUESTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            &*LAST_URL
+                .get()
+                .expect("URL capture")
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            b"https://www.maddoxlabs.com/"
+        );
+        stasis_dynload::set_external_url_host(None);
     }
 
     #[cfg(windows)]

@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -44,6 +44,101 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSymbolSelector,
 };
 use stasis_dynload::StasisAudioHostApi;
+
+const MAX_EXTERNAL_URL_BYTES: usize = 2048;
+
+type AndroidExternalUrlHost = extern "C" fn(*const u8, i32, *mut c_void) -> i32;
+
+#[derive(Clone, Copy, Default)]
+struct AndroidExternalUrlHostRegistration {
+    callback: Option<AndroidExternalUrlHost>,
+    context: usize,
+}
+
+fn android_external_url_host_registration() -> &'static Mutex<AndroidExternalUrlHostRegistration> {
+    static REGISTRATION: OnceLock<Mutex<AndroidExternalUrlHostRegistration>> = OnceLock::new();
+    REGISTRATION.get_or_init(|| Mutex::new(AndroidExternalUrlHostRegistration::default()))
+}
+
+thread_local! {
+    // Host actions are authorized only while a guest tick consumes a real input edge.
+    static EXTERNAL_URL_TICK_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static EXTERNAL_URL_ACTION_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ExternalUrlTickAuthorization;
+
+impl ExternalUrlTickAuthorization {
+    fn begin(armed: bool) -> Self {
+        EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(armed));
+        Self
+    }
+}
+
+impl Drop for ExternalUrlTickAuthorization {
+    fn drop(&mut self) {
+        EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(false));
+    }
+}
+
+fn dispatch_android_external_url(url: &[u8]) -> i32 {
+    if !EXTERNAL_URL_TICK_ARMED.with(|slot| slot.replace(false)) {
+        return 0;
+    }
+    if url.len() > MAX_EXTERNAL_URL_BYTES || std::str::from_utf8(url).is_err() {
+        return -1;
+    }
+    let registration = *android_external_url_host_registration()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(callback) = registration.callback else {
+        return 0;
+    };
+    // Own the bounded bytes for the complete callback. Native code must copy them
+    // before returning if it needs to post the browser request to the UI thread.
+    let copied = url.to_vec();
+    callback(
+        copied.as_ptr(),
+        copied.len() as i32,
+        registration.context as *mut c_void,
+    )
+}
+
+/// Installs the Android UI adapter used by the embedded JIT runtime.
+/// Passing a null callback removes the adapter and makes requests deterministic no-ops.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_set_external_url_host(
+    callback: Option<AndroidExternalUrlHost>,
+    context: *mut c_void,
+) {
+    *android_external_url_host_registration()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = AndroidExternalUrlHostRegistration {
+        callback,
+        context: if callback.is_some() {
+            context as usize
+        } else {
+            0
+        },
+    };
+    if callback.is_none() {
+        stasis_android_bridge_clear_external_url_action();
+    }
+}
+
+/// Arms one external URL request for the next embedded guest tick.
+/// Native callers must invoke this only for a real pointer or keyboard edge.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_arm_external_url_action() {
+    EXTERNAL_URL_ACTION_PENDING.with(|slot| slot.set(true));
+}
+
+/// Clears pending and in-progress authority on lifecycle or focus loss.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_clear_external_url_action() {
+    EXTERNAL_URL_ACTION_PENDING.with(|slot| slot.set(false));
+    EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(false));
+}
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
 pub const ANDROID_RENDER_GFX_I32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_I32_COUNT;
@@ -1510,6 +1605,14 @@ fn run_android_workshop_tick_internal(
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
 
+    // stasis_dynload host callbacks are guest-thread local. Rebind on each frame
+    // so a session created or resumed on this thread cannot inherit another mode.
+    stasis_dynload::set_external_url_host(Some(dispatch_android_external_url));
+    EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(false));
+    // Take authority before any fallible compile, init, or swap work. An error must
+    // never carry a user gesture into a later frame.
+    let external_url_authorized = EXTERNAL_URL_ACTION_PENDING.with(|slot| slot.replace(false));
+
     RUNTIME_SESSION.with(|session_cell| {
         let mut session_slot = session_cell.borrow_mut();
         let mut recompiled = false;
@@ -1567,8 +1670,11 @@ fn run_android_workshop_tick_internal(
                 .jit
                 .write_i32_global_path("Input.screen_h", metrics.logical_h);
         }
+        let external_url_authorization =
+            ExternalUrlTickAuthorization::begin(external_url_authorized);
         execute_lifecycle_noarg(&session.jit, "tick")
             .map_err(|error| AndroidBridgeError::phase("runtime_entry", "tick", error, None))?;
+        drop(external_url_authorization);
         take_embedded_resource_error().map_err(|error| resource_phase_error("tick", error))?;
         session.tick_count = session.tick_count.saturating_add(1);
         execute_optional_lifecycle_noarg(&session.jit, "render")
@@ -3571,6 +3677,9 @@ mod tests {
         RUNTIME_SESSION.with(|session| {
             *session.borrow_mut() = None;
         });
+        EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(false));
+        stasis_dynload::set_external_url_host(None);
+        stasis_android_bridge_set_external_url_host(None, std::ptr::null_mut());
     }
 
     fn ffi_json(ptr: *mut c_char) -> serde_json::Value {
@@ -3591,6 +3700,178 @@ mod tests {
             screen_w: 360,
             screen_h: 640,
         }
+    }
+
+    static EXTERNAL_URL_CALLBACK_COUNT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static EXTERNAL_URL_CALLBACK_CONTEXT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn captured_external_url() -> &'static Mutex<Vec<u8>> {
+        static URL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+        URL.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    extern "C" fn capture_external_url(value: *const u8, length: i32, context: *mut c_void) -> i32 {
+        if value.is_null() || length < 0 {
+            return -1;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(value, length as usize) };
+        *captured_external_url()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = bytes.to_vec();
+        EXTERNAL_URL_CALLBACK_CONTEXT.store(context as usize, std::sync::atomic::Ordering::SeqCst);
+        EXTERNAL_URL_CALLBACK_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        1
+    }
+
+    fn reset_external_url_capture() {
+        EXTERNAL_URL_CALLBACK_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+        EXTERNAL_URL_CALLBACK_CONTEXT.store(0, std::sync::atomic::Ordering::SeqCst);
+        captured_external_url()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    #[test]
+    fn android_external_url_adapter_bounds_copy_and_consumes_one_authorization() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        reset_external_url_capture();
+        stasis_android_bridge_set_external_url_host(
+            Some(capture_external_url),
+            0x1234usize as *mut c_void,
+        );
+
+        let authorization = ExternalUrlTickAuthorization::begin(true);
+        assert_eq!(
+            dispatch_android_external_url(b"https://www.maddoxlabs.com/"),
+            1
+        );
+        assert_eq!(dispatch_android_external_url(b"https://second.example/"), 0);
+        drop(authorization);
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_CONTEXT.load(std::sync::atomic::Ordering::SeqCst),
+            0x1234
+        );
+        assert_eq!(
+            &*captured_external_url()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            b"https://www.maddoxlabs.com/"
+        );
+
+        let authorization = ExternalUrlTickAuthorization::begin(true);
+        assert_eq!(dispatch_android_external_url(&vec![b'a'; 2049]), -1);
+        drop(authorization);
+        let authorization = ExternalUrlTickAuthorization::begin(true);
+        assert_eq!(dispatch_android_external_url(&[0xff]), -1);
+        drop(authorization);
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        stasis_android_bridge_set_external_url_host(None, std::ptr::null_mut());
+        let authorization = ExternalUrlTickAuthorization::begin(true);
+        assert_eq!(
+            dispatch_android_external_url(b"https://www.maddoxlabs.com/"),
+            0
+        );
+        drop(authorization);
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn android_jit_external_url_requires_explicit_edge_and_dispatches_once() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        reset_external_url_capture();
+        stasis_android_bridge_set_external_url_host(
+            Some(capture_external_url),
+            std::ptr::null_mut(),
+        );
+        let root = temp_project("external_url_pointer_edge");
+        let entry = Path::new("src/main.stasis");
+        fs::write(
+            root.join(entry),
+            "global host_i32: i32[768];\n\
+             global activation_count: i32;\n\
+             global main_result: i32;\n\
+             global first_result: i32;\n\
+             global second_result: i32;\n\
+             global render_result: i32;\n\
+             function @internal @effects(platform)@extern(\"stasis_jit_open_external_url\") open_url(url: string): i32;\n\
+             function main(): void { main_result = open_url(\"https://www.maddoxlabs.com/\"); }\n\
+             function tick(): void { if (host_i32[546] != 0) { activation_count += 1; first_result = open_url(\"https://www.maddoxlabs.com/\"); second_result = open_url(\"https://second.example/\"); } }\n\
+             function render(): void { render_result = open_url(\"https://render.example/\"); }\n",
+        )
+        .expect("write external URL edge fixture");
+
+        let released = AndroidBridgeTickInput {
+            touch_active: 0,
+            ..default_tick_input()
+        };
+        let pressed = default_tick_input();
+        run_android_workshop_tick(&root, entry, released).expect("initialize without an edge");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "main_result").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "render_result").unwrap(),
+            0
+        );
+
+        run_android_workshop_tick(&root, entry, pressed).expect("synthetic pointer-down tick");
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "input state without trusted native authority must not launch a browser"
+        );
+
+        run_android_workshop_tick(&root, entry, released).expect("release pointer");
+        stasis_android_bridge_arm_external_url_action();
+        run_android_workshop_tick(&root, entry, pressed).expect("consume trusted pointer edge");
+        run_android_workshop_tick(&root, entry, pressed).expect("held pointer tick");
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "activation_count").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "first_result").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "second_result").unwrap(),
+            0
+        );
+
+        run_android_workshop_tick(&root, entry, released).expect("release pointer");
+        stasis_android_bridge_arm_external_url_action();
+        run_android_workshop_tick(&root, entry, pressed).expect("consume next pointer-down edge");
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            &*captured_external_url()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            b"https://www.maddoxlabs.com/"
+        );
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
     }
 
     #[test]

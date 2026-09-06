@@ -14,6 +14,8 @@
   };
   const keys = new Set();
   const pointer = { id: 0, x: 0, y: 0, dx: 0, dy: 0, hover: false, down: false, wentDown: false, wentUp: false };
+  let externalActionGeneration = 0;
+  let pendingExternalActionGeneration = 0;
   const commands = [];
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
   const sprites = new Map();
@@ -911,11 +913,11 @@
     }
     return Number.isInteger(length) && length >= 0 && length <= memory.length ? length : null;
   };
-  const runtimeTextValue = reference => {
+  const runtimeTextValue = (reference, maxBytes = Number.POSITIVE_INFINITY) => {
     const memory = resolveU8Memory(reference);
     if (memory) {
       const length = runtimeCollectionLength(memory);
-      if (length === null) return null;
+      if (length === null || length > maxBytes) return null;
       const bytes = Array.from({ length }, (_, index) => readU8(memory, index));
       try {
         return { text: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)), bytes: bytes.length };
@@ -925,10 +927,115 @@
     }
     if (Object.prototype.hasOwnProperty.call(game.strings || {}, String(reference))) {
       const text = String(game.strings[String(reference)]);
-      return { text, bytes: new TextEncoder().encode(text).length };
+      if (text.length > maxBytes) return null;
+      const bytes = new TextEncoder().encode(text).length;
+      return bytes <= maxBytes ? { text, bytes } : null;
     }
     return null;
   };
+  const EXTERNAL_URL_MAX_BYTES = 2048;
+  const publishExternalUrlResult = result => {
+    if (document.body?.dataset) document.body.dataset.externalUrlResult = result;
+  };
+  const markExternalActionGesture = () => {
+    externalActionGeneration += 1;
+    pendingExternalActionGeneration = externalActionGeneration;
+  };
+  const clearExternalActionGesture = () => { pendingExternalActionGeneration = 0; };
+  const validExternalUrlPort = value => /^\d{1,5}$/.test(value)
+    && Number(value) >= 1 && Number(value) <= 65535;
+  const validExternalUrlDnsHost = value => {
+    if (value.length < 1 || value.length > 253 || value.startsWith(".") || value.endsWith(".")) return false;
+    const labels = value.split(".");
+    if (labels.some(label => label.length < 1 || label.length > 63
+        || label.startsWith("-") || label.endsWith("-") || !/^[a-zA-Z0-9-]+$/.test(label))) return false;
+    if (!labels.every(label => /^\d+$/.test(label))) return true;
+    return labels.length === 4 && labels.every(label => label.length <= 3
+      && (label.length === 1 || !label.startsWith("0")) && Number(label) <= 255);
+  };
+  const validExternalUrlAuthority = value => {
+    if (value.length < 1 || value.includes("@") || /[^\x00-\x7f]/.test(value)) return false;
+    if (value.startsWith("[")) {
+      const close = value.indexOf("]");
+      if (close <= 1 || !/^[0-9a-fA-F:]+$/.test(value.slice(1, close))) return false;
+      return close === value.length - 1
+        || (value[close + 1] === ":" && validExternalUrlPort(value.slice(close + 2)));
+    }
+    const colon = value.indexOf(":");
+    if (colon !== value.lastIndexOf(":")) return false;
+    const host = colon < 0 ? value : value.slice(0, colon);
+    return validExternalUrlDnsHost(host)
+      && (colon < 0 || validExternalUrlPort(value.slice(colon + 1)));
+  };
+  const validatedExternalUrl = reference => {
+    const value = runtimeTextValue(reference, EXTERNAL_URL_MAX_BYTES);
+    if (!value || value.bytes < 1 || value.bytes > EXTERNAL_URL_MAX_BYTES
+        || /[\u0000-\u0020\u007f-\u009f]/u.test(value.text)
+        || value.text.includes("\\") || /%(?![0-9a-fA-F]{2})/.test(value.text)
+        || !/^(?:http|https):\/\//.test(value.text)) return null;
+    try {
+      const bytes = new TextEncoder().encode(value.text);
+      if (bytes.length !== value.bytes
+          || new TextDecoder("utf-8", { fatal: true }).decode(bytes) !== value.text) return null;
+      const authority = value.text.slice(value.text.indexOf("//") + 2).split(/[/?#]/, 1)[0];
+      if (!validExternalUrlAuthority(authority)) return null;
+      const parsed = new URL(value.text);
+      if ((parsed.protocol !== "http:" && parsed.protocol !== "https:")
+          || parsed.username !== "" || parsed.password !== "" || parsed.hostname === "") return null;
+      return value.text;
+    } catch (_) {
+      return null;
+    }
+  };
+  const openExternalUrl = reference => {
+    const url = validatedExternalUrl(reference);
+    if (url === null) { publishExternalUrlResult("invalid"); return -1; }
+    if (pendingExternalActionGeneration === 0) {
+      publishExternalUrlResult("ignored");
+      return 0;
+    }
+    clearExternalActionGesture();
+    const userActivation = globalThis.navigator?.userActivation;
+    if (globalThis.STASIS_HEADLESS === true || globalThis.STASIS_RECORDING === true
+        || game.headless === true || game.recording === true
+        || userActivation?.isActive !== true || typeof window.open !== "function") {
+      publishExternalUrlResult("unavailable");
+      return 0;
+    }
+    let opened;
+    try {
+      opened = window.open("about:blank", "_blank");
+      if (!opened) { publishExternalUrlResult("blocked"); return 0; }
+      opened.opener = null;
+      const link = opened.document?.createElement?.("a");
+      if (!link) {
+        opened.close?.();
+        publishExternalUrlResult("blocked");
+        return 0;
+      }
+      link.href = url;
+      link.target = "_self";
+      link.rel = "noopener noreferrer";
+      link.referrerPolicy = "no-referrer";
+      opened.document.body?.append?.(link);
+      link.click();
+      link.remove?.();
+      publishExternalUrlResult("opened");
+      return 1;
+    } catch (_) {
+      opened?.close?.();
+      publishExternalUrlResult("blocked");
+      return 0;
+    }
+  };
+  if (globalThis.STASIS_CHARACTERIZATION_TEST === true) {
+    Object.assign(window.__STASIS_CHARACTERIZATION__, {
+      openExternalUrl,
+      validatedExternalUrl,
+      markExternalActionGesture,
+      clearExternalActionGesture,
+    });
+  }
   const getViewField = (base, index, field) => {
     const path = game.views?.[String(base)]?.[field];
     if (!path) return 0;
@@ -1945,6 +2052,9 @@
     // @stasis-import web_pointer_down begin
     web_pointer_down: () => pointer.down ? 1 : 0,
     // @stasis-import web_pointer_down end
+    // @stasis-import stasis_jit_open_external_url begin
+    stasis_jit_open_external_url: openExternalUrl,
+    // @stasis-import stasis_jit_open_external_url end
     web_begin_frame: (r, g, b) => { commands.length = 0; commands.push([0, r, g, b]); },
     web_draw_rect: (x, y, width, height, r, g, b) => commands.push([1, x, y, width, height, r, g, b]),
     web_draw_text: (x, y, value) => commands.push([2, x, y, value]),
@@ -3214,6 +3324,7 @@
   }
 
   function finishHostFrame() {
+    clearExternalActionGesture();
     pointer.wentDown = false;
     pointer.wentUp = false;
     pointer.dx = 0;
@@ -3403,6 +3514,7 @@
     pointer.hover = event.pointerType !== "touch" && inside;
   }
   addEventListener("keydown", event => {
+    if (!event.repeat && !keys.has(event.code)) markExternalActionGesture();
     keys.add(event.code);
     // @stasis-feature audio begin
     void enableWebAudio();
@@ -3417,6 +3529,7 @@
   // @stasis-feature audio end
   canvas.addEventListener("pointerdown", event => {
     updatePointer(event);
+    if (!pointer.down) markExternalActionGesture();
     pointer.down = true;
     pointer.wentDown = true;
     canvas.setPointerCapture(event.pointerId);
@@ -3429,6 +3542,10 @@
     pointer.wentUp = true;
   });
   canvas.addEventListener("pointercancel", () => { pointer.hover = false; pointer.down = false; pointer.wentUp = true; });
+  addEventListener("blur", clearExternalActionGesture);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) clearExternalActionGesture();
+  });
   addEventListener("resize", markResized);
   addEventListener("orientationchange", markResized);
   if (window.visualViewport) window.visualViewport.addEventListener("resize", markResized);

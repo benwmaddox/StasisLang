@@ -166,3 +166,14 @@
 - Good: task/request snapshots and content hashes prevent late completion from marking newly attached images uploaded.
 - Bad: the initial runtime fixture omitted the required `on_code_swap` entrypoint and failed before capture.
 - Adjustment: live runtime fixtures must include all required lifecycle entrypoints before testing a new host interaction.
+
+## 2026-09-06 - Task 312: safe external URL host action
+
+- Added `open_external_url(string): i32` with a 2048-byte UTF-8 bound, strict HTTP(S) validation, one-attempt input authority, and invalid/ignored/accepted results. Desktop SDL, Android release/Workshop, iOS, and web adapters use platform browser APIs; headless/recording execution cannot launch a browser. JIT swap hooks suppress the action before dispatch.
+- Preserved the existing string-handle ABI, AOT runtime export, wasm import, and release-package dynamic text metadata. The Stasis pointer fixture requests one Maddox Labs link on a down edge and does not repeat while held. No consumer UI was added in this task.
+- Verification: all seven focused compiler/dynload/Android bridge tests pass, including actual linked AOT execution and JIT edge/swap assertions. The 118 web runtime tests, web metadata and mobile-shell package tests, 44 enabled dynload tests, two fresh native C executables, and 38 Python host/runtime ABI tests pass. Full validation stops at existing `stasis_network` unsafe-boundary findings; the broader compiler run also encounters missing optional signing certificates and a shared-cache access denial. Task builds use the required Cargo wrapper with an explicit worktree-local target because the shared cache is outside the allowed worktree.
+- Visual evidence: browser/device media was not captured. There is no new in-canvas UI; real popup behavior remains a validation limit. The local web package harness rejected an unverified CLI build fingerprint and the Playwright wrapper did not become available. Android Java compilation could not resolve Android Gradle Plugin 8.7.3 from configured repositories. Android/iOS browser dispatch requires device validation; Xcode was unavailable on this Windows host.
+- Theory gained: guest input values are data, not proof of a user gesture. The native/Workshop/web tests show that host-owned authority must be transferred to one tick/frame and consumed once, while swap execution suppresses dispatch. Adjacent privileged host actions should reuse that explicit authority boundary rather than infer permission from simulated input.
+- Good: the edge fixture and host injection exercise real guest compilation without launching external applications.
+- Bad: an initial AOT check skipped execution because the optional signer lacked a certificate; initial Workshop authority also incorrectly relied on simulated touch state.
+- Adjustment: verify executable checks actually run, preserve required-signing policy, and supply trusted platform activation separately from guest-visible input.

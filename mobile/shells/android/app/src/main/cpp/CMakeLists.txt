@@ -85,6 +85,7 @@ endif()
 add_library(main SHARED
     "${STASIS_ROOT}/common/stasis_mobile_main.c"
     "${CMAKE_CURRENT_LIST_DIR}/stasis_android_assets.c"
+    "${CMAKE_CURRENT_LIST_DIR}/stasis_android_external_url.c"
     "${CMAKE_CURRENT_LIST_DIR}/stasis_android_network.c"
     "${STASIS_AOT_DIR}/published_aot_bindings.c"
     ${STASIS_PUBLISHED_AOT_OBJECTS}

@@ -4950,7 +4950,9 @@ fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTree
         })
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
-    let dynamic_text_paths = if imported_symbols.contains("stasis_jit_text_run_replace_from") {
+    let dynamic_text_paths = if imported_symbols.contains("stasis_jit_text_run_replace_from")
+        || imported_symbols.contains("stasis_jit_open_external_url")
+    {
         config["memory"]
             .as_object()
             .expect("generated memory layouts")
@@ -7962,6 +7964,28 @@ mod tests {
     }
 
     #[test]
+    fn release_web_runtime_retains_external_url_text_and_import() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".to_string()]);
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; global url: utf8[64]; function main(): i32 { url.length = 0; return open_external_url_raw(url); }",
+        );
+        process.compile().expect("compile Web external URL fixture");
+        assert!(process
+            .imported_symbols()
+            .contains("stasis_jit_open_external_url"));
+
+        let release = web_runtime_config(&workspace, &process, false);
+        assert_eq!(release["memory"]["url"]["byte_backed"], json!(true));
+        assert!(release["globals"].get("url.length").is_some());
+        let runtime = link_web_runtime(&process, false, false).expect("link Web runtime");
+        assert!(runtime.contains("stasis_jit_open_external_url: openExternalUrl"));
+    }
+
+    #[test]
     fn web_runtime_import_markers_follow_imports_and_reject_malformed_layout() {
         let source = "before\n// @stasis-import web_input_axis begin\naxis\n// @stasis-import web_input_axis end\nmiddle\n// @stasis-import web_input_fire begin\nfire\n// @stasis-import web_input_fire end\nafter";
         let imports = BTreeSet::from(["web_input_fire".to_string()]);
@@ -9542,6 +9566,7 @@ mod tests {
             fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
                 .expect("read Android CMake project");
         assert!(android_cmake.contains("STASIS_ENABLE_SEAM_TESTS"));
+        assert!(android_cmake.contains("stasis_android_external_url.c"));
         assert!(android_jni.contains("STASIS_SEAM_TEST_ID"));
         assert!(android_jni.contains("nativeSetAssetManifestSha256"));
         assert!(android_jni.contains("STASIS_ASSET_MANIFEST_SHA256"));
@@ -9609,6 +9634,8 @@ mod tests {
         assert!(java.contains("performanceHud.setSingleLine(false)"));
         assert!(java.contains("new AndroidAssetSource(getAssets())"));
         assert!(java.contains("Asset cache preparation failed before runtime startup"));
+        assert!(java.contains("Intent.ACTION_VIEW"));
+        assert!(java.contains("externalUrlHostActive"));
         assert!(java.contains("setOnApplyWindowInsetsListener"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
@@ -9770,6 +9797,17 @@ mod tests {
             fs::read_to_string(ios_network.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
                 .expect("read network iOS Xcode project")
                 .contains("stasis_ios_network.m in Sources")
+        );
+        let ios_external_url =
+            fs::read_to_string(ios_network.join("ios/StasisMobile/stasis_ios_external_url.m"))
+                .expect("read iOS external URL adapter");
+        assert!(
+            ios_external_url.contains("openURL:target options:@{} completionHandler:completion")
+        );
+        assert!(
+            fs::read_to_string(ios_network.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
+                .expect("read iOS Xcode project")
+                .contains("stasis_ios_external_url.m in Sources")
         );
 
         let android_network = root.join("android-network-package");

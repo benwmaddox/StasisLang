@@ -44,6 +44,14 @@ static int profile_start_logs;
 static int profile_row_logs;
 static int profile_done_logs;
 static char profile_row[256];
+static int external_url_calls;
+
+static int open_external_url(const char *url, int32_t length) {
+    CHECK(length == 27);
+    CHECK(memcmp(url, "https://www.maddoxlabs.com/", 27) == 0);
+    external_url_calls += 1;
+    return 1;
+}
 
 void stasis_host_log_message(const char *message) {
     if (message == NULL) return;
@@ -212,6 +220,13 @@ int main(void) {
     CHECK(escaped_json[0] == '\0');
 
     stasis_mobile_aot_reset();
+    stasis_jit_upsert_string_literal(60, "https://www.maddoxlabs.com/");
+    stasis_jit_upsert_string_literal(61, "file:///not-allowed");
+    CHECK(stasis_jit_open_external_url(61) == -1);
+    CHECK(stasis_jit_open_external_url(60) == 0);
+    stasis_mobile_set_external_url_opener(open_external_url);
+    CHECK(stasis_jit_open_external_url(60) == 1);
+    CHECK(external_url_calls == 1);
     stasis_jit_global_i32_store(10, 42);
     CHECK(stasis_jit_global_i32_load(10) == 42);
 

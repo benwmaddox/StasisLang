@@ -157,7 +157,7 @@ if(STASIS_GRAPHICS_BUILD_TESTS)
 endif()
 
 function(configure_stasis_target target is_static)
-    target_sources(${target} PRIVATE stasis_graphics.c stasis_image_writer.c stasis_audio_assets.c stasis_svg.cpp)
+    target_sources(${target} PRIVATE stasis_graphics.c stasis_image_writer.c stasis_audio_assets.c stasis_platform_services.c stasis_svg.cpp)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     target_compile_definitions(${target} PRIVATE STASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}")
     target_link_libraries(${target} PRIVATE
@@ -222,7 +222,6 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_runtime STATIC
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
-        stasis_platform_services.c
     )
     configure_stasis_target(stasis_mobile_runtime ON)
     set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD 11)

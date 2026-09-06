@@ -5,7 +5,10 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageInfo;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -21,6 +24,7 @@ import org.libsdl.app.SDLActivity;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 public final class MainActivity extends SDLActivity {
     private static final String STASIS_ANDROID_ORIENTATION = "@STASIS_ANDROID_ORIENTATION@";
@@ -54,6 +58,7 @@ public final class MainActivity extends SDLActivity {
     private Runnable hudUpdater;
     private String displayedRuntimeError;
     private String startupAssetVerificationDiagnostic;
+    private volatile boolean externalUrlHostActive;
 
     @Override
     public void setOrientationBis(int width, int height, boolean resizable, String hint) {
@@ -143,6 +148,46 @@ public final class MainActivity extends SDLActivity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        externalUrlHostActive = true;
+    }
+
+    @Override
+    protected void onPause() {
+        externalUrlHostActive = false;
+        super.onPause();
+    }
+
+    public boolean openExternalUrlFromNative(byte[] utf8Url) {
+        if (!externalUrlHostActive || utf8Url == null || utf8Url.length == 0
+                || utf8Url.length > 2048 || isFinishing()
+                || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1
+                        && isDestroyed())) {
+            return false;
+        }
+        final String url = new String(utf8Url, StandardCharsets.UTF_8);
+        final Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        intent.addCategory(Intent.CATEGORY_BROWSABLE);
+        try {
+            if (intent.resolveActivity(getPackageManager()) == null) return false;
+        } catch (RuntimeException error) {
+            return false;
+        }
+        runOnUiThread(() -> {
+            if (!externalUrlHostActive || isFinishing()
+                    || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1
+                            && isDestroyed())) return;
+            try {
+                startActivity(intent);
+            } catch (ActivityNotFoundException | SecurityException error) {
+                Log.w("Stasis", "External URL request was blocked", error);
+            }
+        });
+        return true;
+    }
+
+    @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
         if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN
                 && event.getPointerCount() >= 3) {
@@ -153,6 +198,7 @@ public final class MainActivity extends SDLActivity {
 
     @Override
     protected void onDestroy() {
+        externalUrlHostActive = false;
         nativeSetPerformanceMetricsEnabled(false);
         stopPerformanceHudUpdates();
         super.onDestroy();

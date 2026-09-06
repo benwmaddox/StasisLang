@@ -24,6 +24,9 @@ void stasis_jit_register_global_u16_array(
 void stasis_jit_register_code_ptr(int32_t fn_id, int64_t code_ptr);
 void stasis_jit_clear_string_literal_table(void);
 void stasis_jit_upsert_string_literal(int32_t id, const char *value);
+typedef int (*StasisMobileExternalUrlOpener)(const char *url, int32_t length);
+void stasis_mobile_set_external_url_opener(StasisMobileExternalUrlOpener opener);
+int32_t stasis_jit_open_external_url(int32_t url);
 void stasis_jit_profile_register_function(int32_t function_id, const char *name);
 void stasis_jit_profile_configure(int32_t warmup_frames, int32_t sample_frames);
 void stasis_jit_profile_frame_begin(void);

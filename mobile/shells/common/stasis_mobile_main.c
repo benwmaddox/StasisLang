@@ -26,8 +26,9 @@
 #else
 #include "stasis_package_provenance.h"
 #endif
-#if defined(STASIS_ENABLE_SEAM_TESTS)
 #include "stasis_mobile_aot_runtime.h"
+int stasis_open_external_url(const char *url, int length);
+#if defined(STASIS_ENABLE_SEAM_TESTS)
 int stasis_set_recording_audio_config(int enabled);
 int stasis_audio_get_queued_frames(void);
 int stasis_recording_audio_pull_f32_interleaved(float *output_stereo, int frame_count);
@@ -386,6 +387,7 @@ static int configure_asset_root(void) {
 }
 
 int SDL_main(int argc, char **argv) {
+    stasis_mobile_set_external_url_opener(stasis_open_external_url);
     (void)argc;
     (void)argv;
     if (configure_asset_root() != 0) {
