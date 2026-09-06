@@ -358,6 +358,9 @@ impl TaskController {
         if task.connection != ConnectionState::Connected {
             return Err(TaskControllerError::TaskDisconnected(task_id.clone()));
         }
+        if task.consented_screenshot_count() > crate::task_session::MAX_SCREENSHOTS_PER_REQUEST {
+            return Err(TaskSessionError::ScreenshotRequestLimitReached.into());
+        }
         let key = (self.client_id, task_id.clone());
         let mut state = lock(&self.state);
         if state
@@ -970,6 +973,67 @@ mod tests {
             session.append_reply(format!("reply {id}")).unwrap();
         }
         session
+    }
+
+    #[test]
+    fn aggregate_image_limit_preserves_consent_before_admission() {
+        let (sent, received) = mpsc::channel();
+        let controller = TaskController::new(move |request, _| {
+            sent.send(request.screenshots.len()).unwrap();
+            Ok(ProviderReply::new("complete"))
+        });
+        let mut session = session(&["one", "two"]);
+        let task = session.task_mut("one").unwrap();
+        task.select_provider(crate::task_session::ProviderSelection::OpenRouter)
+            .unwrap();
+        task.set_vision_capability(true).unwrap();
+        for index in 0..9 {
+            task.attach_screenshot(format!("image-{index}"), "image.png")
+                .unwrap();
+        }
+        for index in 0..8 {
+            task.select_screenshot_for_request(format!("image-{index}"))
+                .unwrap();
+        }
+        task.select_screenshot_for_request("image-0").unwrap();
+        assert_eq!(
+            task.select_screenshot_for_request("image-8"),
+            Err(TaskSessionError::ScreenshotRequestLimitReached)
+        );
+        assert_eq!(task.consented_screenshot_count(), 8);
+        // Admission also rejects invalid state introduced outside the selection API.
+        let extra = task
+            .screenshots
+            .get_mut(&crate::ScreenshotId::new("image-8"))
+            .unwrap();
+        extra.selected_for_request = true;
+        extra.consent_to_send = true;
+        let before = task.clone();
+        assert!(controller
+            .send(&mut session, &TaskId::new("one"))
+            .unwrap_err()
+            .to_string()
+            .contains("at most 8"));
+        assert_eq!(session.task("one").unwrap(), &before);
+        assert!(controller.snapshot(&TaskId::new("one")).is_none());
+        assert!(received.try_recv().is_err());
+        let other = session.task_mut("two").unwrap();
+        other.set_vision_capability(true).unwrap();
+        other.attach_screenshot("own", "own.png").unwrap();
+        other.select_screenshot_for_request("own").unwrap();
+        session
+            .task_mut("one")
+            .unwrap()
+            .unselect_screenshot_for_request("image-0")
+            .unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(2)).unwrap(), 8);
+        wait_for(&controller, &mut session);
+        assert_eq!(session.task("two").unwrap().consented_screenshot_count(), 1);
+        assert_eq!(
+            session.task("one").unwrap().connection,
+            ConnectionState::Connected
+        );
     }
 
     #[test]

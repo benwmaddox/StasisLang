@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-oss-120b";
 const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 pub const MAX_OPENROUTER_IMAGE_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_OPENROUTER_IMAGES: usize = 8;
+pub const MAX_OPENROUTER_IMAGES: usize = crate::task_session::MAX_SCREENSHOTS_PER_REQUEST;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenRouterImageInput {

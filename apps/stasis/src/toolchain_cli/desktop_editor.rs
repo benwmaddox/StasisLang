@@ -1120,13 +1120,6 @@ impl DesktopEditor {
                                         .map_err(|error| error.to_string())?;
                                 }
                             }
-                            let task = candidate
-                                .task_mut(&task)
-                                .map_err(|error| error.to_string())?;
-                            for screenshot in task.screenshots.values_mut() {
-                                screenshot.upload = UploadState::Pending;
-                                screenshot.analysis = ScreenshotAnalysisState::Pending;
-                            }
                             Ok(())
                         })
                         .and_then(|()| {
@@ -3212,7 +3205,8 @@ impl DesktopEditor {
                                 } else {
                                     let retry = matches!(upload, UploadState::Failed { .. })
                                         || matches!(analysis, ScreenshotAnalysisState::Failed { .. } | ScreenshotAnalysisState::Canceled);
-                                    let capability = self.image_attachment_capability(&task.id);
+                                    let capability = self.image_attachment_capability(&task.id)
+                                        .and_then(|()| task.validate_screenshot_selection(screenshot.id.as_str()).map_err(|error| error.to_string()));
                                     let can_include = can_interact && capability.is_ok();
                                     let include = ui.add_enabled(can_include, egui::Button::new(if retry { "Retry once" } else { "Include once" }));
                                     let clicked = include.clicked();

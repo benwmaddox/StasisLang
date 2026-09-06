@@ -18,6 +18,7 @@ pub const MAX_ACTION_TEXT_CHARS: usize = 1_024;
 pub const MAX_ACTION_REVISIONS: usize = 16;
 pub const MAX_ACTION_PAYLOAD_BYTES: usize = 256 * 1024;
 pub const MAX_SCREENSHOTS: usize = 16;
+pub const MAX_SCREENSHOTS_PER_REQUEST: usize = 8;
 pub const MAX_IMAGES: usize = 16;
 pub const MAX_ARTIFACT_SOURCE_CHARS: usize = 512;
 pub const MAX_ATTRIBUTION_CHARS: usize = 256;
@@ -105,6 +106,7 @@ pub enum TaskSessionError {
         state: String,
     },
     VisionUnavailable,
+    ScreenshotRequestLimitReached,
     InvalidScreenshotSha256,
 }
 
@@ -131,6 +133,9 @@ impl fmt::Display for TaskSessionError {
                 state,
             } => write!(f, "cannot {action} {entity} while it is {state}"),
             Self::VisionUnavailable => write!(f, "screenshot attachment requires available vision"),
+            Self::ScreenshotRequestLimitReached => write!(
+                f, "at most {MAX_SCREENSHOTS_PER_REQUEST} images may be included per request; undo an inclusion first"
+            ),
             Self::InvalidScreenshotSha256 => {
                 f.write_str("screenshot SHA-256 must be 64 lowercase hexadecimal characters")
             }
@@ -1221,20 +1226,50 @@ impl Task {
         &mut self,
         id: impl AsRef<str>,
     ) -> Result<(), TaskSessionError> {
-        self.ensure_open("select a screenshot on")?;
+        self.validate_screenshot_selection(id.as_ref())?;
         let id = ScreenshotId::new(id.as_ref());
         let screenshot = self
             .screenshots
             .get_mut(&id)
+            .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
+        screenshot.selected_for_request = true;
+        screenshot.consent_to_send = true;
+        Ok(())
+    }
+
+    pub fn validate_screenshot_selection(
+        &self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        self.ensure_open("select a screenshot on")?;
+        let id = ScreenshotId::new(id.as_ref());
+        let screenshot = self
+            .screenshots
+            .get(&id)
             .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
         if screenshot.provenance.task_id != self.id
             || screenshot.vision != VisionCapability::Available
         {
             return Err(TaskSessionError::VisionUnavailable);
         }
-        screenshot.selected_for_request = true;
-        screenshot.consent_to_send = true;
+        if !(screenshot.selected_for_request && screenshot.consent_to_send)
+            && self.consented_screenshot_count() >= MAX_SCREENSHOTS_PER_REQUEST
+        {
+            return Err(TaskSessionError::ScreenshotRequestLimitReached);
+        }
         Ok(())
+    }
+
+    pub(crate) fn consented_screenshot_count(&self) -> usize {
+        self.screenshots
+            .values()
+            .filter(|screenshot| {
+                screenshot.provenance.task_id == self.id
+                    && screenshot.vision == VisionCapability::Available
+                    && screenshot.selected_for_request
+                    && screenshot.consent_to_send
+            })
+            .count()
     }
 
     /// Revokes any unconsumed selection and consent for this screenshot.
@@ -1269,7 +1304,8 @@ impl Task {
         request_id: u64,
     ) -> Vec<ScreenshotAttachment> {
         let task_id = self.id.clone();
-        self.screenshots
+        let selected: Vec<_> = self
+            .screenshots
             .values_mut()
             .filter_map(|screenshot| {
                 let admitted = screenshot.provenance.task_id == task_id
@@ -1278,6 +1314,8 @@ impl Task {
                     && screenshot.consent_to_send;
                 if admitted {
                     screenshot.request_id = Some(request_id);
+                    screenshot.upload = UploadState::Pending;
+                    screenshot.analysis = ScreenshotAnalysisState::Pending;
                 }
                 let selected = admitted.then(|| screenshot.clone());
                 // Consent and selection are one-use even for malformed recovered state.
@@ -1285,7 +1323,11 @@ impl Task {
                 screenshot.consent_to_send = false;
                 selected
             })
-            .collect()
+            .collect();
+        for screenshot in &selected {
+            self.record_screenshot_activity(&screenshot.id);
+        }
+        selected
     }
 
     pub(crate) fn clear_screenshot_request_selections(&mut self) {

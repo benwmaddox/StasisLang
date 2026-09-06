@@ -5,6 +5,9 @@ file drop, clipboard images, and live captures enter the same task-scoped
 request flow. Adding an image does not authorize a provider upload. Select the
 inline consent control before sending; each grant authorizes one request only.
 Remove deletes the editor-owned copy. The original selected file is untouched.
+At most eight images can be included in one request, across all input sources
+and selection actions. Undo an inclusion to make room for another image.
+Text-only messages retain previously completed image states.
 
 PNG and JPEG inputs are limited to 16 MiB and 4096 pixels per dimension, with
 bounded decoder allocation. Thumbnails fit within 512 by 512 pixels.
@@ -12,6 +15,8 @@ The editor retains a bounded thumbnail and a SHA-256 of the owned encoded bytes.
 The provider boundary verifies those bytes again. Changed files are rejected,
 not silently substituted. Credentials and multimodal provider envelopes stay
 outside task state.
+On Unix, session storage is created with owner-only directory (`0700`) and
+file (`0600`) permissions. Storage initialization failures reject intake.
 
 Unknown image capabilities fail closed. OpenRouter image support comes from
 the exact configured model's reported input modalities. Refresh capability

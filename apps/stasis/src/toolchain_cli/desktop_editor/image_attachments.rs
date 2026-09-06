@@ -50,6 +50,8 @@ pub(super) struct OwnedImageAttachment {
 
 pub(super) struct SessionAttachmentStore {
     root: PathBuf,
+    owns_root: bool,
+    init_error: Option<String>,
     entries: BTreeMap<(TaskId, String), OwnedImageAttachment>,
 }
 
@@ -57,19 +59,38 @@ impl SessionAttachmentStore {
     pub(super) fn new() -> Self {
         let process = std::process::id();
         let mut sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let root = loop {
+        let mut attempts = 0_u16;
+        let (root, owns_root, init_error) = loop {
             let candidate =
                 std::env::temp_dir().join(format!("stasis-editor-{process}-{sequence}"));
-            match std::fs::create_dir(&candidate) {
-                Ok(()) => break candidate,
+            match create_private_directory(&candidate) {
+                Ok(()) => break (candidate, true, None),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    attempts = attempts.saturating_add(1);
+                    if attempts == 1024 {
+                        break (
+                            candidate,
+                            false,
+                            Some("could not allocate unique attachment storage".into()),
+                        );
+                    }
                     sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(_) => break candidate,
+                Err(error) => {
+                    break (
+                        candidate,
+                        false,
+                        Some(format!(
+                            "could not create private attachment storage: {error}"
+                        )),
+                    )
+                }
             }
         };
         Self {
             root,
+            owns_root,
+            init_error,
             entries: BTreeMap::new(),
         }
     }
@@ -158,19 +179,29 @@ impl SessionAttachmentStore {
         bytes: &[u8],
         decoded: DynamicImage,
     ) -> Result<OwnedImageAttachment, String> {
+        if let Some(error) = &self.init_error {
+            return Err(error.clone());
+        }
+        if !self.owns_root {
+            return Err("private attachment storage is unavailable".into());
+        }
+        validate_private_directory(&self.root)?;
         if self.entries.contains_key(&(task_id.clone(), id.clone())) {
             return Err("attachment ID is already in use for this task".into());
         }
-        std::fs::create_dir_all(&self.root)
-            .map_err(|error| format!("could not create attachment storage: {error}"))?;
         let sha256 = format!("{:x}", Sha256::digest(bytes));
         let task_hash = format!("{:x}", Sha256::digest(task_id.as_str().as_bytes()));
         let path = self
             .root
             .join(format!("{}-{id}-{sha256}.{extension}", &task_hash[..12]));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&path)
             .map_err(|error| format!("could not create owned attachment: {error}"))?;
         if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
@@ -205,16 +236,51 @@ impl SessionAttachmentStore {
 
 impl Drop for SessionAttachmentStore {
     fn drop(&mut self) {
-        if self.root.parent() == Some(std::env::temp_dir().as_path())
+        if self.owns_root
+            && self.root.parent() == Some(std::env::temp_dir().as_path())
             && self
                 .root
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("stasis-editor-"))
         {
-            let _ = std::fs::remove_dir_all(&self.root);
+            for attachment in self.entries.values() {
+                let _ = std::fs::remove_file(&attachment.path);
+            }
+            // Never recursively remove the directory: an unexpected file may not be ours.
+            let _ = std::fs::remove_dir(&self.root);
         }
     }
+}
+
+#[cfg(unix)]
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
+}
+
+fn validate_private_directory(path: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("private attachment storage is unavailable: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("private attachment storage is no longer a directory".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("private attachment storage permissions are unsafe".into());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
@@ -515,5 +581,60 @@ mod tests {
         assert!(!first.exists());
         assert!(!second.exists());
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn failed_private_storage_initialization_never_creates_files_later() {
+        let root = {
+            let store = SessionAttachmentStore::new();
+            store.root.clone()
+        };
+        assert!(!root.exists());
+        let mut store = SessionAttachmentStore {
+            root: root.clone(),
+            owns_root: false,
+            init_error: Some("private storage unavailable".into()),
+            entries: BTreeMap::new(),
+        };
+        let error = store
+            .insert_encoded(
+                &TaskId::new("one"),
+                "file".into(),
+                "image.png".into(),
+                AttachmentOrigin::FilePicker,
+                &png(1, 1, [1, 2, 3, 255]),
+            )
+            .unwrap_err();
+        assert_eq!(error, "private storage unavailable");
+        assert!(!root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_storage_has_no_group_or_other_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut store = SessionAttachmentStore::new();
+        assert_eq!(
+            std::fs::metadata(&store.root).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        let attachment = store
+            .insert_encoded(
+                &TaskId::new("one"),
+                "file".into(),
+                "image.png".into(),
+                AttachmentOrigin::FilePicker,
+                &png(1, 1, [1, 2, 3, 255]),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(attachment.path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
     }
 }

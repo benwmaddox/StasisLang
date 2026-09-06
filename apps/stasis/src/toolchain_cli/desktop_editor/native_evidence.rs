@@ -74,7 +74,10 @@ fn capture_native_task_timeline() {
             ))
             .unwrap();
         }
-    } else if !matches!(attachment_mode.as_deref(), Some("reference" | "multimodal")) {
+    } else if !matches!(
+        attachment_mode.as_deref(),
+        Some("reference" | "multimodal" | "limit")
+    ) {
         task.add_generated_image(
             "arena-asset",
             asset.display().to_string(),
@@ -116,6 +119,30 @@ fn capture_native_task_timeline() {
                 &bytes,
             )
             .unwrap();
+    }
+    if attachment_mode.as_deref() == Some("limit") {
+        let task_id = editor.state.session.active_task_id().unwrap().clone();
+        for index in 0..9 {
+            let id = format!("reference-{index}");
+            editor
+                .attach_encoded_image(
+                    &task_id,
+                    id.clone(),
+                    format!("reference-{}.png", index + 1),
+                    AttachmentOrigin::FilePicker,
+                    &bytes,
+                )
+                .unwrap();
+            if index < 8 {
+                editor
+                    .state
+                    .session
+                    .task_mut(&task_id)
+                    .unwrap()
+                    .select_screenshot_for_request(id)
+                    .unwrap();
+            }
+        }
     }
     let semantic_root = if std::env::var_os("STASIS_EDITOR_EVIDENCE_SEMANTIC").is_some() {
         let (mut preview_editor, root, _) = super::tests::review_fixture("merged_timeline_native");
