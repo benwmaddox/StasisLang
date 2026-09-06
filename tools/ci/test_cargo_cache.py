@@ -21,8 +21,10 @@ class CargoCacheTests(unittest.TestCase):
     def test_precommit_routes_cargo_through_shared_policy(self) -> None:
         hook = (ROOT / ".githooks" / "pre-commit.ps1").read_text(encoding="utf-8")
 
-        self.assertEqual(hook.count("$cargoPolicy run -- cargo"), 2)
-        self.assertLess(hook.index("cargo run --quiet -p stasis -- format"), hook.index("staged_repository_stasis_sources_are_formatted"))
+        self.assertEqual(hook.count("$cargoPolicy run -- cargo"), 1)
+        self.assertIn("cargo run --quiet -p stasis -- format", hook)
+        self.assertNotIn("cargo test", hook)
+        self.assertNotIn("staged_repository_stasis_sources_are_formatted", hook)
         self.assertNotIn("& cargo ", hook)
 
     def test_shared_target_is_owned_by_common_repository(self) -> None:
