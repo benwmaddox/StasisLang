@@ -185,6 +185,42 @@ class ReleaseProvenanceTests(unittest.TestCase):
         self.assertEqual(RUNTIME_FILES, rust_string_slice("MOBILE_RUNTIME_FILES"))
         self.assertEqual(RUNTIME_DIRS, rust_string_slice("MOBILE_RUNTIME_DIRS"))
 
+    def test_release_workflows_include_complete_knowledge_library(self):
+        toolchain = (ROOT / "apps/stasis/src/toolchain_cli.rs").read_text(
+            encoding="utf-8"
+        )
+        knowledge_match = re.search(
+            r"const KNOWLEDGE_FILES: &\[&str\]\s*=\s*&\[(.*?)\];",
+            toolchain,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(knowledge_match, "KNOWLEDGE_FILES")
+        knowledge_files = tuple(re.findall(r'"([^"]+)"', knowledge_match.group(1)))
+        self.assertTrue(knowledge_files)
+
+        knowledge_root = ROOT / "docs/knowledge"
+        for relative in knowledge_files:
+            source = knowledge_root.joinpath(*pathlib.PurePosixPath(relative).parts)
+            self.assertTrue(source.is_file(), relative)
+
+        for workflow_name in (
+            ".github/workflows/nightly-release.yml",
+            ".github/workflows/bootstrap-artifacts.yml",
+        ):
+            workflow = (ROOT / workflow_name).read_text(encoding="utf-8")
+            unix_copy = re.findall(
+                r'^\s+cp -R docs/knowledge "\$\{out\}/docs/"\s*$',
+                workflow,
+                re.MULTILINE,
+            )
+            windows_copy = re.findall(
+                r'^\s+Copy-Item docs/knowledge "\$out/docs/knowledge" -Recurse -Force\s*$',
+                workflow,
+                re.MULTILINE,
+            )
+            self.assertEqual(1, len(unix_copy), workflow_name)
+            self.assertEqual(1, len(windows_copy), workflow_name)
+
     def test_release_workflows_assemble_every_provenance_runtime_file(self):
         for workflow_name in (
             ".github/workflows/nightly-release.yml",

@@ -104,7 +104,7 @@ const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
 const PROJECT_GIT_ATTRIBUTES: &str = "*.[sS][vV][gG] text eol=lf\n";
-const PROJECT_GIT_IGNORE: &str = "/vendor/stasis/docs/\n";
+const PROJECT_GIT_IGNORE: &str = "# Track vendor/stasis/stdlib and vendor/stasis/docs together.\n";
 const KNOWLEDGE_FILES: &[&str] = &[
     "README.md",
     "a-little-stasis/01-three-entry-points.md",
@@ -511,7 +511,7 @@ enum ToolchainCommand {
 enum VendorCommand {
     /// Compare the checked-in snapshot with its manifest and this executable.
     Status,
-    /// Atomically replace the checked-in snapshot with this executable's sources.
+    /// Atomically update stdlib and offline vendor/stasis/docs from this toolchain.
     Update,
 }
 
@@ -2019,8 +2019,7 @@ fn directory_sha256(root: &Path) -> Result<String, String> {
 }
 
 fn bundled_vendor_sha256() -> Result<String, String> {
-    let stdlib = bundled_stdlib_dir()?;
-    let docs = bundled_knowledge_docs_dir()?;
+    let (stdlib, docs) = bundled_vendor_directories()?;
     let mut files = Vec::new();
     collect_mapped_files(&stdlib, &stdlib, Path::new("stdlib"), &mut files)?;
     collect_mapped_files(&docs, &docs, Path::new("docs"), &mut files)?;
@@ -2041,8 +2040,9 @@ fn current_vendor_manifest() -> Result<VendorManifest, String> {
 }
 
 fn copy_bundled_vendor_package(destination: &Path) -> Result<(), String> {
-    copy_dir_if_exists(&bundled_stdlib_dir()?, &destination.join("stdlib"))?;
-    copy_dir_if_exists(&bundled_knowledge_docs_dir()?, &destination.join("docs"))
+    let (stdlib, docs) = bundled_vendor_directories()?;
+    copy_dir_if_exists(&stdlib, &destination.join("stdlib"))?;
+    copy_dir_if_exists(&docs, &destination.join("docs"))
 }
 
 fn validate_vendor_sources(source_root: &Path) -> Result<(), String> {
@@ -2241,13 +2241,11 @@ fn update_vendor_snapshot(
         return Err("staged Stasis vendor fingerprint does not match the toolchain".to_string());
     }
 
-    manifest.vendor = Some(VendorManifest {
-        stasis: StasisVendorManifest {
-            release_id: status.installed.release_id.clone(),
-            sha256: status.installed.sha256.clone(),
-        },
+    let mut updated_manifest = manifest.clone();
+    updated_manifest.vendor = Some(VendorManifest {
+        stasis: status.installed.clone(),
     });
-    fs::write(&manifest_staging, serialized_manifest(manifest)?)
+    fs::write(&manifest_staging, serialized_manifest(&updated_manifest)?)
         .map_err(|error| format!("failed to stage {MANIFEST_NAME}: {error}"))?;
 
     let had_target = target.exists();
@@ -2281,6 +2279,7 @@ fn update_vendor_snapshot(
         }
         return Err(format!("failed to publish {MANIFEST_NAME}: {error}"));
     }
+    *manifest = updated_manifest;
     if had_target {
         fs::remove_dir_all(&backup)
             .map_err(|error| format!("failed to clear {}: {error}", backup.display()))?;
@@ -7358,22 +7357,40 @@ fn bundled_stdlib_dir() -> Result<PathBuf, String> {
     Err("installed toolchain is missing the complete src/stdlib hierarchy; reinstall the complete release archive".to_string())
 }
 
-fn bundled_knowledge_docs_dir() -> Result<PathBuf, String> {
-    let directory = bundled_toolchain_directory("docs/knowledge", "Stasis knowledge library")?;
-    let missing: Vec<_> = KNOWLEDGE_FILES
+fn bundled_vendor_directories() -> Result<(PathBuf, PathBuf), String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    let executable_dir = executable.parent().unwrap_or(Path::new("."));
+    resolve_vendor_directories(&[
+        executable_dir.to_path_buf(),
+        executable_dir.join(".."),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+    ])
+}
+
+fn resolve_vendor_directories(roots: &[PathBuf]) -> Result<(PathBuf, PathBuf), String> {
+    for root in roots {
+        let stdlib = root.join("src/stdlib");
+        let docs = root.join("docs/knowledge");
+        if !stdlib.exists() && !docs.exists() {
+            continue;
+        }
+        let complete_stdlib = [
+            "stdlib.stasis",
+            "internal/host_frame_raw.stasis",
+            "internal/gfx_cmd.stasis",
+        ]
         .iter()
-        .filter(|document| !directory.join(document).is_file())
-        .copied()
-        .collect();
-    if missing.is_empty() {
-        Ok(directory)
-    } else {
-        Err(format!(
-            "installed toolchain has an incomplete Stasis knowledge library at {} (missing {}); reinstall the complete release archive",
-            directory.display(),
-            missing.join(", ")
-        ))
+        .all(|file| stdlib.join(file).is_file());
+        if complete_stdlib && KNOWLEDGE_FILES.iter().all(|file| docs.join(file).is_file()) {
+            return Ok((stdlib, docs));
+        }
+        return Err(format!(
+            "installed toolchain has incomplete stdlib or documentation at {}; reinstall the complete release archive",
+            root.display()
+        ));
     }
+    Err("installed toolchain is missing stdlib and documentation; reinstall the complete release archive".to_string())
 }
 
 fn bundled_mobile_assets_dir() -> Result<PathBuf, String> {
@@ -8705,6 +8722,106 @@ mod tests {
         test_workspace(&workspace, None).expect("no-data test project");
         remove_temp(&root);
     }
+    #[test]
+    fn vendor_docs_creation_update_and_missing_directory_repair() {
+        let root = temp_dir("vendor_docs");
+        create_project(root.clone(), "vendor_docs".to_string()).expect("create project");
+        let package = root.join("vendor/stasis");
+        let docs = package.join("docs");
+        for file in KNOWLEDGE_FILES {
+            assert!(docs.join(file).is_file(), "{file}");
+        }
+        let source = fs::read(root.join("src/main.stasis")).expect("source");
+        let stdlib_hash = directory_sha256(&package.join("stdlib")).expect("stdlib hash");
+        let mut workspace = load_workspace(Some(&root)).expect("workspace");
+        let expected = workspace.manifest.vendor.clone();
+        assert_eq!(
+            expected.as_ref().unwrap().stasis.sha256,
+            directory_sha256(&package).expect("package hash")
+        );
+        fs::write(docs.join("README.md"), "old docs\n").expect("stale docs");
+        workspace.manifest.vendor.as_mut().unwrap().stasis.sha256 =
+            directory_sha256(&package).expect("old hash");
+        workspace
+            .manifest
+            .vendor
+            .as_mut()
+            .unwrap()
+            .stasis
+            .release_id = "old-release".into();
+        write_manifest(&root.join(MANIFEST_NAME), &workspace.manifest).expect("old manifest");
+        vendor_command(&workspace, VendorCommand::Update).expect("explicit docs update");
+        let current = load_workspace(Some(&root)).expect("updated workspace");
+        assert_eq!(current.manifest.vendor, expected);
+        fs::remove_dir_all(&docs).expect("remove docs");
+        let repaired = load_workspace(Some(&root)).expect("automatic docs repair");
+        assert_eq!(repaired.manifest.vendor, expected);
+        assert_eq!(
+            directory_sha256(&package).unwrap(),
+            expected.unwrap().stasis.sha256
+        );
+        assert_eq!(
+            directory_sha256(&package.join("stdlib")).unwrap(),
+            stdlib_hash
+        );
+        assert_eq!(fs::read(root.join("src/main.stasis")).unwrap(), source);
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_docs_rollback_preserves_package_and_in_memory_manifest() {
+        let root = temp_dir("vendor_docs_rollback");
+        create_project(root.clone(), "vendor_docs_rollback".to_string()).expect("project");
+        let mut workspace = load_workspace(Some(&root)).expect("workspace");
+        fs::write(root.join("vendor/stasis/docs/README.md"), "old docs\n").unwrap();
+        workspace
+            .manifest
+            .vendor
+            .as_mut()
+            .unwrap()
+            .stasis
+            .release_id = "old-release".into();
+        let before_manifest = serialized_manifest(&workspace.manifest).unwrap();
+        let before_package = directory_sha256(&root.join("vendor/stasis")).unwrap();
+        // Fail manifest publication after the complete vendor package has been replaced.
+        fs::remove_file(root.join(MANIFEST_NAME)).unwrap();
+        let error = update_vendor_snapshot(&root, &mut workspace.manifest).unwrap_err();
+        assert!(error.contains("failed to stage stasis.json"), "{error}");
+        assert_eq!(
+            directory_sha256(&root.join("vendor/stasis")).unwrap(),
+            before_package
+        );
+        assert_eq!(
+            serialized_manifest(&workspace.manifest).unwrap(),
+            before_manifest
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_release_content_must_come_from_one_complete_root() {
+        let root = temp_dir("vendor_release_content");
+        let installed = root.join("installed");
+        let fallback = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        fs::create_dir_all(installed.join("src/stdlib")).unwrap();
+        let error = resolve_vendor_directories(&[installed.clone(), fallback.clone()]).unwrap_err();
+        assert!(error.contains("incomplete stdlib or documentation"));
+        let (stdlib, docs) = resolve_vendor_directories(&[fallback]).unwrap();
+        copy_dir_if_exists(&stdlib, &installed.join("src/stdlib")).unwrap();
+        assert!(resolve_vendor_directories(&[installed.clone()]).is_err());
+        copy_dir_if_exists(&docs, &installed.join("docs/knowledge")).unwrap();
+        assert_eq!(
+            resolve_vendor_directories(&[installed.clone()]).unwrap(),
+            (
+                installed.join("src/stdlib"),
+                installed.join("docs/knowledge")
+            )
+        );
+        fs::remove_file(installed.join("docs/knowledge/README.md")).unwrap();
+        assert!(resolve_vendor_directories(&[installed]).is_err());
+        remove_temp(&root);
+    }
+
     #[test]
     fn vendor_upgrade_only_rewrites_the_release_when_content_changes() {
         let root = temp_dir("vendor_upgrade");
