@@ -106,6 +106,14 @@ fn capture_native_task_timeline() {
             complete: true,
         },
     });
+    let semantic_root = if std::env::var_os("STASIS_EDITOR_EVIDENCE_SEMANTIC").is_some() {
+        let (mut preview_editor, root, _) = super::tests::review_fixture("merged_timeline_native");
+        super::tests::finish_preview(&mut preview_editor);
+        editor = preview_editor;
+        Some(root)
+    } else {
+        None
+    };
     editor.state.focus = FocusArea::Game;
     if std::env::var_os("STASIS_EDITOR_EVIDENCE_CANCEL").is_some() {
         editor.state.handle(TaskSessionCommand::Cancel).unwrap();
@@ -195,4 +203,7 @@ fn capture_native_task_timeline() {
     )
     .unwrap();
     assert!(receipt.load(Ordering::Acquire));
+    if let Some(root) = semantic_root {
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

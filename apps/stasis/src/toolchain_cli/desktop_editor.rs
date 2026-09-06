@@ -1,3 +1,8 @@
+mod semantic_diff;
+mod semantic_revisions;
+
+use semantic_revisions::proposal_revisions;
+
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -431,8 +436,14 @@ enum EditorIntent {
 
 #[derive(Debug)]
 enum HostOperation {
-    Apply { action_id: String, payload: Value },
-    Test { paths: Vec<String>, run_id: u64 },
+    Apply {
+        action_id: String,
+        preview: super::DesktopSemanticPreview,
+    },
+    Test {
+        paths: Vec<String>,
+        run_id: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -511,8 +522,8 @@ impl HostExecutor {
                     Err("operation canceled before execution".to_string())
                 } else {
                     let operation_result = match &request.operation {
-                        HostOperation::Apply { payload, .. } => {
-                            super::desktop_apply_semantic_batch(&project_root, payload.clone())
+                        HostOperation::Apply { preview, .. } => {
+                            super::desktop_apply_semantic_preview(&project_root, preview)
                         }
                         HostOperation::Test { paths, .. } => {
                             super::desktop_run_focused_tests(&project_root, paths)
@@ -612,6 +623,131 @@ struct DesktopEditor {
     next_capture: u64,
     preview_texture: Option<(String, egui::TextureHandle)>,
     asset_textures: BTreeMap<(String, String), Option<egui::TextureHandle>>,
+    semantic_job: Option<SemanticPreviewJob>,
+    next_semantic_check: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SemanticPreviewKey {
+    task: String,
+    action: String,
+    revision: usize,
+    payload_hash: String,
+}
+
+impl SemanticPreviewKey {
+    fn new(task: &str, action: &str, revision: usize, payload: &Value) -> Self {
+        Self {
+            task: task.into(),
+            action: action.into(),
+            revision,
+            payload_hash: format!("{:x}", Sha256::digest(payload.to_string().as_bytes())),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SemanticPreviewRecord {
+    result: Option<Result<super::DesktopSemanticPreview, String>>,
+    stale: bool,
+}
+
+struct SemanticPreviewJob {
+    key: SemanticPreviewKey,
+    result: Receiver<Result<super::DesktopSemanticPreview, String>>,
+    worker: thread::JoinHandle<()>,
+}
+
+fn refresh_semantic_preview_staleness(
+    records: &mut BTreeMap<SemanticPreviewKey, SemanticPreviewRecord>,
+    next_check: &mut Instant,
+    now: Instant,
+    fingerprint: impl FnOnce() -> Result<String, String>,
+) {
+    if now < *next_check
+        || !records
+            .values()
+            .any(|record| !record.stale && matches!(&record.result, Some(Ok(_))))
+    {
+        return;
+    }
+    *next_check = now + Duration::from_millis(500);
+    let current = fingerprint();
+    for record in records.values_mut() {
+        if let Some(Ok(preview)) = &record.result {
+            record.stale |= current
+                .as_ref()
+                .map_or(true, |hash| hash != &preview.source_fingerprint);
+        }
+    }
+}
+
+impl DesktopEditor {
+    fn poll_semantic_previews(&mut self) {
+        if let Some(job) = &self.semantic_job {
+            let result = match job.result.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Disconnected) => Some(Err("Preview worker stopped".into())),
+                Err(TryRecvError::Empty) => None,
+            };
+            if let Some(result) = result {
+                let job = self.semantic_job.take().expect("pending preview");
+                let _ = job.worker.join();
+                if let Some(record) = self.state.semantic_previews.get_mut(&job.key) {
+                    record.result = Some(result);
+                }
+            }
+        }
+        // Retain each observed revision at its original position in the thread.
+        let mut queued = Vec::new();
+        for task in self.state.session.tasks() {
+            for action in task.actions.values() {
+                for proposal in proposal_revisions(action) {
+                    let Some(payload) = proposal.payload else {
+                        continue;
+                    };
+                    let key = SemanticPreviewKey::new(
+                        task.id.as_str(),
+                        action.id.as_str(),
+                        proposal.revision,
+                        payload,
+                    );
+                    let can_plan =
+                        proposal.current && matches!(proposal.state, ActionState::Proposed);
+                    self.state.semantic_previews.entry(key.clone()).or_insert_with(|| SemanticPreviewRecord {
+                        result: if can_plan { None } else {
+                            Some(Err("No retained preview for this proposal; it will not be regenerated".into()))
+                        },
+                        stale: false,
+                    });
+                    if can_plan && self.state.semantic_previews[&key].result.is_none() {
+                        queued.push((key, payload.clone()));
+                    }
+                }
+            }
+        }
+        let project_root = &self.project_root;
+        refresh_semantic_preview_staleness(
+            &mut self.state.semantic_previews,
+            &mut self.next_semantic_check,
+            Instant::now(),
+            move || super::desktop_source_fingerprint(project_root, &[]),
+        );
+        if self.semantic_job.is_none() {
+            if let Some((key, payload)) = queued.into_iter().next() {
+                let root = self.project_root.clone();
+                let (tx, result) = mpsc::channel();
+                let worker = thread::spawn(move || {
+                    let _ = tx.send(super::desktop_preview_semantic_batch(&root, payload));
+                });
+                self.semantic_job = Some(SemanticPreviewJob {
+                    key,
+                    result,
+                    worker,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -825,7 +961,10 @@ impl DesktopEditor {
         let provider_root = project_root.clone();
         let (capture_result_tx, capture_results) = mpsc::channel();
         Self {
-            state: EditorState::default(),
+            state: EditorState {
+                project_root: Some(project_root.clone()),
+                ..EditorState::default()
+            },
             controller: TaskController::new(move |request, canceled| {
                 run_reply_provider(request, canceled, provider_root.clone())
             }),
@@ -843,6 +982,8 @@ impl DesktopEditor {
             next_capture: 1,
             preview_texture: None,
             asset_textures: BTreeMap::new(),
+            semantic_job: None,
+            next_semantic_check: Instant::now(),
         }
     }
 
@@ -946,27 +1087,34 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::Apply(task, action) => {
+                    let accepted = self
+                        .state
+                        .session
+                        .task(task.as_str())
+                        .ok()
+                        .and_then(|task| task.actions.get(action.as_str()))
+                        .is_some_and(|action| matches!(action.state, ActionState::Accepted));
+                    if !accepted {
+                        self.state.notice =
+                            Some("Only the accepted action revision can be applied".into());
+                        continue;
+                    }
                     if !self.busy_tasks.insert(task.clone()) {
                         self.state.notice = Some(format!(
                             "An apply or focused-test operation is already running for {task}."
                         ));
                         continue;
                     }
-                    let payload = self
+                    let submitted = self
                         .state
-                        .session
-                        .task(task.as_str())
-                        .ok()
-                        .and_then(|task| task.actions.get(action.as_str()))
-                        .and_then(|action| action.payload.clone());
-                    let submitted = payload
-                        .ok_or_else(|| "accepted action has no semantic edit payload".to_string())
-                        .and_then(|payload| {
+                        .reviewed_preview(&task, &action)
+                        .cloned()
+                        .and_then(|preview| {
                             self.host.submit(HostRequest {
                                 task_id: task.clone(),
                                 operation: HostOperation::Apply {
                                     action_id: action.clone(),
-                                    payload,
+                                    preview,
                                 },
                                 source_before: None,
                             })
@@ -1642,51 +1790,6 @@ fn image_handoff_color(status: &ImageHandoffState) -> Color32 {
     }
 }
 
-fn render_semantic_summary(ui: &mut egui::Ui, payload: &Value) {
-    let Some(edits) = payload.get("edits").and_then(Value::as_array) else {
-        ui.label(
-            RichText::new("Semantic proposal details are unavailable.")
-                .size(11.0)
-                .color(muted_text()),
-        );
-        return;
-    };
-    ui.add_space(5.0);
-    ui.label(
-        RichText::new(format!(
-            "{} semantic operation{}",
-            edits.len(),
-            if edits.len() == 1 { "" } else { "s" }
-        ))
-        .size(12.0)
-        .strong(),
-    );
-    for edit in edits {
-        let operation = edit
-            .get("operation")
-            .and_then(Value::as_str)
-            .unwrap_or("edit");
-        let target = edit
-            .pointer("/target/name")
-            .and_then(Value::as_str)
-            .unwrap_or("new symbol");
-        let file = edit
-            .pointer("/target/file")
-            .and_then(Value::as_str)
-            .unwrap_or("project source");
-        ui.label(
-            RichText::new(format!("{operation}  {target}  /  {file}"))
-                .size(11.0)
-                .color(muted_text()),
-        );
-    }
-    ui.label(
-        RichText::new("Apply uses the compiler-owned semantic plan and source-hash checks.")
-            .size(10.0)
-            .color(muted_text()),
-    );
-}
-
 fn render_compiler_changes(ui: &mut egui::Ui, receipt: &Value) {
     let Some(changes) = receipt
         .pointer("/plan/changed_files")
@@ -1766,6 +1869,8 @@ struct EditorState {
     notice: Option<String>,
     preview: Option<ScreenshotPreview>,
     cancel_confirmation: Option<String>,
+    project_root: Option<PathBuf>,
+    semantic_previews: BTreeMap<SemanticPreviewKey, SemanticPreviewRecord>,
 }
 
 impl Default for EditorState {
@@ -1787,11 +1892,98 @@ impl Default for EditorState {
             notice: None,
             preview: None,
             cancel_confirmation: None,
+            project_root: None,
+            semantic_previews: BTreeMap::new(),
         }
     }
 }
 
 impl EditorState {
+    fn reviewed_preview(
+        &self,
+        task: &str,
+        action: &str,
+    ) -> Result<&super::DesktopSemanticPreview, String> {
+        self.check_preview(task, action, true)
+    }
+
+    fn check_preview(
+        &self,
+        task: &str,
+        action: &str,
+        read_sources: bool,
+    ) -> Result<&super::DesktopSemanticPreview, String> {
+        let action = self
+            .session
+            .task(task)
+            .map_err(|e| e.to_string())?
+            .actions
+            .get(action)
+            .ok_or_else(|| "Action no longer exists".to_string())?;
+        let payload = action
+            .payload
+            .as_ref()
+            .ok_or_else(|| "Action has no semantic payload".to_string())?;
+        let key = SemanticPreviewKey::new(
+            task,
+            action.id.as_str(),
+            proposal_revisions(action).len() - 1,
+            payload,
+        );
+        let record = self
+            .semantic_previews
+            .get(&key)
+            .ok_or_else(|| "Review the semantic preview first".to_string())?;
+        let preview = record
+            .result
+            .as_ref()
+            .ok_or_else(|| "Semantic preview is still loading".to_string())?
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let root = self
+            .project_root
+            .as_ref()
+            .ok_or_else(|| "Project is unavailable".to_string())?;
+        if record.stale
+            || preview.payload != *payload
+            || (read_sources
+                && super::desktop_source_fingerprint(root, &[])? != preview.source_fingerprint)
+        {
+            return Err(
+                "Stale preview: sources changed. Request a new proposal for the current sources."
+                    .into(),
+            );
+        }
+        if preview.plan.changed_files.is_empty() {
+            return Err("This revision has no source changes".into());
+        }
+        Ok(preview)
+    }
+
+    fn review_command_enabled(&self, command: &TaskSessionCommand) -> bool {
+        let accepted = match command {
+            TaskSessionCommand::AcceptAction => false,
+            TaskSessionCommand::ApplyAction => true,
+            _ => return true,
+        };
+        let Ok(task) = self.session.active_task() else {
+            return false;
+        };
+        task.actions
+            .values()
+            .find(|action| {
+                if accepted {
+                    matches!(action.state, ActionState::Accepted)
+                } else {
+                    matches!(action.state, ActionState::Proposed)
+                }
+            })
+            .is_some_and(|action| {
+                self.check_preview(task.id.as_str(), action.id.as_str(), false)
+                    .is_ok()
+            })
+    }
+
     fn primary_action(&self, busy: bool) -> PrimaryAction {
         let Ok(task) = self.session.active_task() else {
             return PrimaryAction {
@@ -2059,6 +2251,16 @@ impl EditorState {
                 let id = self
                     .first_action(|s| matches!(s, ActionState::Proposed))
                     .ok_or_else(|| "No proposed action to accept.".to_string())?;
+                if self
+                    .session
+                    .active_task()
+                    .map_err(|e| e.to_string())?
+                    .actions[id.as_str()]
+                .payload
+                .is_some()
+                {
+                    self.reviewed_preview(&self.active_id()?, &id)?;
+                }
                 self.session.accept_action(id).map_err(|e| e.to_string())
             }
             TaskSessionCommand::RejectAction => {
@@ -2076,6 +2278,16 @@ impl EditorState {
                 let action = self
                     .first_action(|s| matches!(s, ActionState::Accepted))
                     .ok_or_else(|| "Accept an action before applying it.".to_string())?;
+                if self
+                    .session
+                    .active_task()
+                    .map_err(|e| e.to_string())?
+                    .actions[action.as_str()]
+                .payload
+                .is_some()
+                {
+                    self.reviewed_preview(&task, &action)?;
+                }
                 self.intents.push(EditorIntent::Apply(task, action));
                 Ok(())
             }
@@ -2456,10 +2668,15 @@ impl DesktopEditor {
             let result = match command {
                 TimelineAction::Accept(task, action) => self
                     .state
-                    .session
-                    .task_mut(task)
-                    .and_then(|task| task.accept_action(action))
-                    .map_err(|error| error.to_string()),
+                    .reviewed_preview(&task, &action)
+                    .map(|_| ())
+                    .and_then(|()| {
+                        self.state
+                            .session
+                            .task_mut(task)
+                            .and_then(|task| task.accept_action(action))
+                            .map_err(|error| error.to_string())
+                    }),
                 TimelineAction::Reject(task, action) => self
                     .state
                     .session
@@ -2602,8 +2819,24 @@ impl DesktopEditor {
                         if latest_entity_snapshot {
                             let action = task.actions.get(&action_id);
                             if let Some(action) = action {
-                                if let Some(payload) = &action.payload {
-                                    render_semantic_summary(ui, payload);
+                                for proposal in proposal_revisions(action) {
+                                    let Some(payload) = proposal.payload else { continue; };
+                                    let key = SemanticPreviewKey::new(task.id.as_str(), action_id.as_str(), proposal.revision, payload);
+                                    ui.push_id((&key.task, &key.action, key.revision, &key.payload_hash), |ui| {
+                                        semantic_revisions::render_heading(ui, action_id.as_str(), &proposal);
+                                        if let Some(record) = self.state.semantic_previews.get(&key) {
+                                            if record.stale {
+                                                ui.colored_label(warning(), "Stale: project sources changed. Acceptance and Apply disabled.");
+                                            }
+                                            match &record.result {
+                                                None => { ui.spinner(); ui.label("Planning semantic changes..."); }
+                                                Some(Err(error)) => { ui.colored_label(failure(), format!("Preview unavailable: {error}")); }
+                                                Some(Ok(preview)) => { semantic_diff::render(ui, &preview.plan, "semantic-files"); }
+                                            }
+                                        } else {
+                                            ui.label("Planning semantic changes...");
+                                        }
+                                    });
                                 }
                                 if let Some(receipt) = self
                                     .execution_receipts
@@ -2619,7 +2852,7 @@ impl DesktopEditor {
                             (ActionState::Proposed, Some(ActionState::Proposed), true)
                                 if can_interact =>
                             {
-                                if ui.button("Accept").clicked() {
+                                if ui.add_enabled(self.state.check_preview(task.id.as_str(), action_id.as_str(), false).is_ok(), egui::Button::new("Accept")).clicked() {
                                     command = Some(TimelineAction::Accept(
                                         task.id.to_string(),
                                         action_id.to_string(),
@@ -2635,7 +2868,7 @@ impl DesktopEditor {
                             (ActionState::Accepted, Some(ActionState::Accepted), true)
                                 if can_interact =>
                             {
-                                if ui.button("Apply change").clicked() {
+                                if ui.add_enabled(self.state.check_preview(task.id.as_str(), action_id.as_str(), false).is_ok(), egui::Button::new("Apply change")).clicked() {
                                     command = Some(TimelineAction::Apply(
                                         task.id.to_string(),
                                         action_id.to_string(),
@@ -2904,6 +3137,10 @@ impl DesktopEditor {
                 ui.label(RichText::new("Ctrl+Enter sends").size(10.0).color(muted_text()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut primary = self.state.primary_action(busy);
+                    if !self.state.review_command_enabled(&primary.command) {
+                        primary.enabled = false;
+                        primary.disabled_reason = Some("Review a current compiler-owned preview before accepting or applying.".into());
+                    }
                     if primary.command == TaskSessionCommand::MarkDone && !self.validation_fingerprints.contains_key(task.id.as_str()) {
                         primary.enabled = false;
                         primary.disabled_reason = Some("Run focused tests against the current sources before marking done.".into());
@@ -3108,6 +3345,7 @@ impl DesktopEditor {
         self.poll_controller();
         self.poll_host();
         self.poll_capture();
+        self.poll_semantic_previews();
         self.process_shortcuts(context);
         let palette_frame = self.state.palette_open;
         self.palette(context);
@@ -3208,6 +3446,9 @@ impl eframe::App for DesktopEditor {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.host.shutdown_and_join();
+        if let Some(job) = self.semantic_job.take() {
+            let _ = job.worker.join();
+        }
         if let Some(capture) = self.capture.take() {
             capture.canceled.store(true, Ordering::Release);
         }
@@ -3259,6 +3500,378 @@ mod tests {
         state.objective = "Change player speed".into();
         state.create_task().unwrap();
         state
+    }
+
+    pub(super) fn review_fixture(name: &str) -> (DesktopEditor, PathBuf, Value) {
+        let root = super::super::tests::desktop_editor_fixture(name);
+        let item = super::super::desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let payload = json!({"schema_version": 1, "edits": [{
+            "operation": "update", "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+            "new_source": "function value(): i32 { return 2; }"
+        }]});
+        let (client, _server) = live_session(1);
+        let mut editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Review value".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .propose_action_with_payload(
+                "value",
+                stasis_ai::ActionKind::Edit,
+                "Update value",
+                payload.clone(),
+            )
+            .unwrap();
+        (editor, root, payload)
+    }
+
+    pub(super) fn finish_preview(editor: &mut DesktopEditor) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            editor.poll_semantic_previews();
+            if editor.semantic_job.is_none() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "preview worker exceeded deadline"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn semantic_preview_gates_keyboard_acceptance_and_apply_on_source_changes() {
+        let (mut editor, root, _) = review_fixture("preview_editor_stale");
+        assert!(editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .is_err());
+        finish_preview(&mut editor);
+        assert!(editor
+            .state
+            .review_command_enabled(&TaskSessionCommand::AcceptAction));
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        let entry = root.join("src/main.stasis");
+        let old = std::fs::read_to_string(&entry).unwrap();
+        std::fs::write(&entry, format!("{old}\n// external edit\n")).unwrap();
+        assert!(editor
+            .state
+            .handle(TaskSessionCommand::ApplyAction)
+            .unwrap_err()
+            .contains("Stale"));
+        editor.next_semantic_check = Instant::now();
+        editor.poll_semantic_previews();
+        assert!(!editor
+            .state
+            .review_command_enabled(&TaskSessionCommand::ApplyAction));
+        std::fs::write(&entry, old).unwrap();
+        assert!(
+            editor.state.reviewed_preview("task-1", "value").is_err(),
+            "observed staleness must be sticky"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn semantic_preview_never_regenerates_accepted_or_applied_work() {
+        let (mut editor, root, _) = review_fixture("preview_editor_immutable");
+        finish_preview(&mut editor);
+        let key = editor
+            .state
+            .semantic_previews
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let plan = editor
+            .state
+            .reviewed_preview("task-1", "value")
+            .unwrap()
+            .plan
+            .clone();
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .apply_action("value")
+            .unwrap();
+        editor.poll_semantic_previews();
+        assert!(editor.semantic_job.is_none());
+        assert_eq!(editor.state.semantic_previews.len(), 1);
+        assert_eq!(
+            editor.state.semantic_previews[&key]
+                .result
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .plan,
+            plan
+        );
+        // Restored accepted work with no retained preview must not be re-planned.
+        editor.state.semantic_previews.clear();
+        editor.poll_semantic_previews();
+        assert!(editor.semantic_job.is_none());
+        assert!(editor.state.semantic_previews[&key]
+            .result
+            .as_ref()
+            .unwrap()
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn revision_evidence_frame(label: &str, editor: &DesktopEditor) -> Value {
+        let plans = editor
+            .state
+            .semantic_previews
+            .iter()
+            .filter_map(|(key, record)| {
+                record.result.as_ref()?.as_ref().ok().map(|preview| {
+                    json!({
+                        "revision": key.revision, "plan": preview.plan,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({ "label": label, "task": editor.state.session.active_task().unwrap(), "plans": plans })
+    }
+
+    fn finish_apply(editor: &mut DesktopEditor) {
+        editor
+            .state
+            .handle(TaskSessionCommand::ApplyAction)
+            .unwrap();
+        editor.flush_intents();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !editor.busy_tasks.is_empty() {
+            editor.poll_host();
+            assert!(Instant::now() < deadline, "host apply exceeded deadline");
+            thread::sleep(Duration::from_millis(10));
+        }
+        editor.poll_semantic_previews();
+    }
+
+    #[test]
+    fn failed_apply_and_repair_keep_one_card_per_proposal() {
+        let (mut editor, root, mut payload) = review_fixture("preview_failed_apply_repair");
+        payload["edits"][0]["new_source"] = json!("function value(): i32 { return -1; }");
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .actions
+            .get_mut("value")
+            .unwrap()
+            .payload = Some(payload.clone());
+        finish_preview(&mut editor);
+        let original_key = editor
+            .state
+            .semantic_previews
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let original_plan = editor
+            .state
+            .reviewed_preview("task-1", "value")
+            .unwrap()
+            .plan
+            .clone();
+        let before = std::fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        let mut frames = vec![revision_evidence_frame(
+            "1. Original proposal accepted",
+            &editor,
+        )];
+        finish_apply(&mut editor);
+        assert!(matches!(
+            editor.state.session.active_task().unwrap().actions["value"].state,
+            ActionState::NeedsRepair { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before,
+            "failed Apply must roll back"
+        );
+        assert_eq!(editor.state.semantic_previews.len(), 1);
+        assert!(editor.semantic_job.is_none());
+        frames.push(revision_evidence_frame(
+            "2. Apply failed its test; original sources restored",
+            &editor,
+        ));
+
+        payload["edits"][0]["new_source"] = json!("function value(): i32 { return 3; }");
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .repair_action_with_payload(
+                "value",
+                "Repair value so the positive test passes",
+                payload.clone(),
+            )
+            .unwrap();
+        assert!(
+            editor.state.reviewed_preview("task-1", "value").is_err(),
+            "new proposal needs its own preview"
+        );
+        finish_preview(&mut editor);
+        let action = &editor.state.session.active_task().unwrap().actions["value"];
+        assert_eq!(
+            action.revisions.len(),
+            2,
+            "keep both state snapshots in the audit history"
+        );
+        let proposals = proposal_revisions(action);
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(
+            proposals[1].revision, 1,
+            "first repaired proposal displays Revision 2"
+        );
+        assert!(proposals[1].current);
+        assert_eq!(editor.state.semantic_previews.len(), 2);
+        assert!(editor
+            .state
+            .semantic_previews
+            .values()
+            .all(|record| matches!(record.result, Some(Ok(_)))));
+        assert_eq!(
+            editor.state.semantic_previews[&original_key]
+                .result
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .plan,
+            original_plan
+        );
+        assert_eq!(
+            editor
+                .state
+                .reviewed_preview("task-1", "value")
+                .unwrap()
+                .payload,
+            payload
+        );
+        frames.push(revision_evidence_frame(
+            "3. Repaired proposal is Revision 2; original preview retained",
+            &editor,
+        ));
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        finish_apply(&mut editor);
+        assert!(matches!(
+            editor.state.session.active_task().unwrap().actions["value"].state,
+            ActionState::Applied
+        ));
+        assert_eq!(editor.state.semantic_previews.len(), 2);
+        frames.push(revision_evidence_frame(
+            "4. Revision 2 applied successfully",
+            &editor,
+        ));
+
+        // Native evidence renders these real host results with the production grouping and cards.
+        let evidence =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/task-520-review");
+        std::fs::create_dir_all(&evidence).unwrap();
+        std::fs::write(
+            evidence.join("failed-apply-repair.json"),
+            serde_json::to_vec_pretty(&frames).unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn semantic_preview_retains_revisions_and_binds_task_and_exact_payload() {
+        let (mut editor, root, payload) = review_fixture("preview_editor_revisions");
+        finish_preview(&mut editor);
+        let original_key = editor
+            .state
+            .semantic_previews
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        assert!(editor.state.reviewed_preview("task-1", "value").is_ok());
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .append_reply("Please revise it")
+            .unwrap();
+        editor
+            .state
+            .handle(TaskSessionCommand::RejectAction)
+            .unwrap();
+        let mut repaired = payload.clone();
+        repaired["edits"][0]["new_source"] = json!("function value(): i32 { return 3; }");
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .repair_action_with_payload("value", "Repaired value", repaired.clone())
+            .unwrap();
+        assert!(editor.state.reviewed_preview("task-1", "value").is_err());
+        finish_preview(&mut editor);
+        assert_eq!(editor.state.semantic_previews.len(), 2);
+        assert_eq!(
+            editor.state.session.active_task().unwrap().actions["value"].revisions[0]
+                .thread_position,
+            0
+        );
+        let latest = editor.state.reviewed_preview("task-1", "value").unwrap();
+        assert_eq!(latest.payload, repaired);
+        assert_ne!(
+            latest.plan,
+            editor.state.semantic_previews[&original_key]
+                .result
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .plan
+        );
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .actions
+            .get_mut("value")
+            .unwrap()
+            .payload = Some(payload);
+        assert!(editor.state.reviewed_preview("task-1", "value").is_err());
+        editor.state.objective = "Other task".into();
+        editor.state.create_task().unwrap();
+        assert!(editor.state.reviewed_preview("task-2", "value").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn test_png() -> Vec<u8> {
@@ -4404,6 +5017,16 @@ mod tests {
                 batch,
             )
             .unwrap();
+        let preview_deadline = Instant::now() + Duration::from_secs(10);
+        while editor
+            .state
+            .reviewed_preview("task-1", "edit-value")
+            .is_err()
+            && Instant::now() < preview_deadline
+        {
+            editor.poll_semantic_previews();
+            thread::sleep(Duration::from_millis(10));
+        }
         editor
             .state
             .handle(TaskSessionCommand::AcceptAction)
@@ -4470,6 +5093,100 @@ mod tests {
             editor.state.session.task("task-1").unwrap().lifecycle,
             stasis_ai::TaskLifecycle::Completed
         ));
+        super::super::tests::remove_temp(&root);
+    }
+
+    #[test]
+    fn semantic_preview_fingerprint_refresh_requires_a_usable_preview() {
+        let (mut editor, root, _) = review_fixture("preview_editor_fingerprint_gate");
+        let mut next_check = Instant::now();
+        let mut reads = 0;
+        let due = next_check + Duration::from_secs(1);
+
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok("unused".into())
+            },
+        );
+        assert_eq!(reads, 0, "empty preview cache must not scan the workspace");
+
+        editor.next_semantic_check = Instant::now() + Duration::from_secs(60);
+        editor.poll_semantic_previews();
+        let mut next_check = Instant::now();
+        let due = next_check + Duration::from_secs(1);
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok("unused".into())
+            },
+        );
+        assert_eq!(reads, 0, "a pending preview must not scan the workspace");
+
+        editor.next_semantic_check = Instant::now() + Duration::from_secs(60);
+        finish_preview(&mut editor);
+        let expected = editor
+            .state
+            .semantic_previews
+            .values()
+            .find_map(|record| match &record.result {
+                Some(Ok(preview)) => Some(preview.source_fingerprint.clone()),
+                _ => None,
+            })
+            .expect("fixture should produce a usable preview");
+
+        let mut next_check = Instant::now();
+        let due = next_check + Duration::from_secs(1);
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok(expected.clone())
+            },
+        );
+        assert_eq!(reads, 1, "a usable preview should trigger one scan");
+
+        for record in editor.state.semantic_previews.values_mut() {
+            record.stale = true;
+        }
+        let mut next_check = Instant::now();
+        let due = next_check + Duration::from_secs(1);
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok(expected.clone())
+            },
+        );
+        assert_eq!(reads, 1, "a stale preview must not scan again");
+
+        for record in editor.state.semantic_previews.values_mut() {
+            record.stale = false;
+            record.result = Some(Err("preview failed".into()));
+        }
+        let mut next_check = Instant::now();
+        let due = next_check + Duration::from_secs(1);
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok(expected.clone())
+            },
+        );
+        assert_eq!(reads, 1, "a failed preview must not scan the workspace");
+
         super::super::tests::remove_temp(&root);
     }
 }

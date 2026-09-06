@@ -90,19 +90,41 @@ fn header_reports_repair_and_closed_states_instead_of_validation_only() {
 
 #[test]
 fn pointer_accepts_displayed_action_and_hover_uses_interactive_style() {
-    let mut editor = editor();
+    let (mut editor, root, payload) = super::tests::review_fixture("timeline_pointer_preview");
     editor
         .state
         .session
-        .propose_action("z-first", "First chronological proposal")
-        .unwrap();
+        .active_task_mut()
+        .unwrap()
+        .actions
+        .clear();
     editor
         .state
         .session
-        .propose_action("a-second", "Second chronological proposal")
-        .unwrap();
+        .active_task_mut()
+        .unwrap()
+        .activity
+        .clear();
+    for (id, description) in [
+        ("z-first", "First chronological proposal"),
+        ("a-second", "Second chronological proposal"),
+    ] {
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .propose_action_with_payload(
+                id,
+                stasis_ai::ActionKind::Edit,
+                description,
+                payload.clone(),
+            )
+            .unwrap();
+    }
+    super::tests::finish_preview(&mut editor);
     let context = egui::Context::default();
-    let size = egui::vec2(1100.0, 900.0);
+    let size = egui::vec2(1100.0, 1400.0);
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
     let buttons = text_rects(&output, "Accept");
@@ -133,6 +155,7 @@ fn pointer_accepts_displayed_action_and_hover_uses_interactive_style() {
     let task = editor.state.session.active_task().unwrap();
     assert_eq!(task.actions["z-first"].state, ActionState::Accepted);
     assert_eq!(task.actions["a-second"].state, ActionState::Proposed);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

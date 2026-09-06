@@ -409,6 +409,9 @@ impl ActionState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionRevision {
+    /// Number of thread entries preceding this proposal revision.
+    #[serde(default)]
+    pub thread_position: usize,
     pub description: String,
     pub state: ActionState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -417,6 +420,9 @@ pub struct ActionRevision {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskAction {
+    /// Number of thread entries preceding this proposal revision.
+    #[serde(default)]
+    pub thread_position: usize,
     pub id: ActionId,
     pub kind: ActionKind,
     pub description: String,
@@ -913,6 +919,7 @@ impl Task {
         self.actions.insert(
             id.clone(),
             TaskAction {
+                thread_position: self.thread.len(),
                 id: id.clone(),
                 kind,
                 description,
@@ -1033,6 +1040,7 @@ impl Task {
                     });
                 }
                 action.revisions.push(ActionRevision {
+                    thread_position: action.thread_position,
                     description: action.description.clone(),
                     state: action.state.clone(),
                     payload: action.payload.clone(),
@@ -1057,6 +1065,7 @@ impl Task {
             &description.into(),
             MAX_ACTION_TEXT_CHARS,
         )?;
+        let thread_position = self.thread.len();
         self.start_activity_recording();
         let id = ActionId::new(id.as_ref());
         let action = self.action_mut(&id)?;
@@ -1073,10 +1082,12 @@ impl Task {
             | ActionState::Accepted
             | ActionState::Applied => {
                 action.revisions.push(ActionRevision {
+                    thread_position: action.thread_position,
                     description: action.description.clone(),
                     state: action.state.clone(),
                     payload: action.payload.clone(),
                 });
+                action.thread_position = thread_position;
                 action.description = description;
                 action.payload = None;
                 action.state = ActionState::Proposed;
@@ -2585,6 +2596,22 @@ mod tests {
             .add_relevant_test("tests/second.test.stasis")
             .unwrap();
         assert!(session.mark_done().is_err());
+    }
+
+    #[test]
+    fn action_revisions_preserve_their_chronological_thread_positions() {
+        let mut task = Task::new("timeline", "Review revisions", "Project").unwrap();
+        task.append_reply("First request").unwrap();
+        task.propose_action("edit", "First proposal").unwrap();
+        assert_eq!(task.actions["edit"].thread_position, 1);
+        task.reject_action("edit", "Try again").unwrap();
+        task.append_reply("Second request").unwrap();
+        task.repair_action("edit", "Second proposal").unwrap();
+        assert_eq!(task.actions["edit"].thread_position, 2);
+        assert_eq!(task.actions["edit"].revisions[0].thread_position, 1);
+        let restored: Task = serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
+        assert_eq!(restored.actions["edit"].thread_position, 2);
+        assert_eq!(restored.actions["edit"].revisions[0].thread_position, 1);
     }
 
     #[test]

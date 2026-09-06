@@ -112,3 +112,27 @@ was captured from the native renderer and inspected. It shows the task-specific
 warning, both confirmation choices, and disabled generation control without
 clipping. Interaction assertions cover dismissal and confirmation after switching
 tasks. No MP4 of that interaction was captured.
+
+
+## Base integration
+
+Integrated base `fbd9b697` while retaining the chronological activity model,
+provider recovery, explicit task cancellation, and persistent composer. Semantic
+action cards now render the base compiler-owned preview and revision history.
+Both card acceptance and composer controls require a current preview; host Apply
+retains exact-payload and source-fingerprint checks. Action thread positions and
+activity sequence numbers are both retained for their respective consumers.
+
+Validation: 64 desktop tests and 77 AI library tests passed through the Cargo
+wrapper after integration. The pointer acceptance fixture now plans real semantic
+proposals and verifies the displayed action identity despite opposite ID ordering.
+
+Visual evidence: [merged-semantic-preview.png](evidence/ai-editor/task519/merged-semantic-preview.png)
+was captured natively and inspected; it shows a compiler-derived source diff in
+the chronological card with readable controls and the persistent composer.
+Set `STASIS_EDITOR_EVIDENCE_SEMANTIC=1` to reproduce it. No MP4 was captured.
+
+Theory gained: timeline sequence and compiler preview identity are independent:
+activity controls presentation order, while task/action/revision/payload and source
+fingerprints control acceptance and application. Combined ordering and stale-source
+tests support this invariant for future card types.
