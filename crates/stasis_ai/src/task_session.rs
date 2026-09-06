@@ -358,6 +358,7 @@ impl ProviderState {
 pub enum ThreadEntryKind {
     Reply,
     Result,
+    HostResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -548,6 +549,53 @@ pub struct GeneratedImageArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActivityKind {
+    UserMessage {
+        thread_sequence: u64,
+    },
+    AiReply {
+        thread_sequence: u64,
+    },
+    Attachment {
+        screenshot_id: ScreenshotId,
+        upload: UploadState,
+        analysis: ScreenshotAnalysisState,
+    },
+    SemanticAction {
+        action_id: ActionId,
+        kind: ActionKind,
+        description: String,
+        state: ActionState,
+    },
+    GeneratedAsset {
+        image_id: GeneratedImageId,
+        review: ImageReviewState,
+        handoff: ImageHandoffState,
+    },
+    HostResult {
+        thread_sequence: u64,
+    },
+    FocusedTest {
+        run_id: u64,
+        status: ValidationStatus,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    pub sequence: u64,
+    /// False for a deterministic snapshot synthesized from state saved before activity logging.
+    pub recorded: bool,
+    pub kind: ActivityKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderSelection {
+    Codex,
+    OpenRouter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
     pub objective: String,
@@ -561,9 +609,13 @@ pub struct Task {
     #[serde(default)]
     pub validation_run_id: u64,
     pub provider: ProviderState,
+    #[serde(default)]
+    pub selected_provider: Option<ProviderSelection>,
     pub metrics: TaskMetrics,
     pub screenshots: BTreeMap<ScreenshotId, ScreenshotAttachment>,
     pub generated_images: BTreeMap<GeneratedImageId, GeneratedImageArtifact>,
+    #[serde(default)]
+    pub activity: Vec<ActivityEntry>,
     pub vision_capability: VisionCapability,
     pub lifecycle: TaskLifecycle,
     pub connection: ConnectionState,
@@ -592,13 +644,103 @@ impl Task {
             validation: ValidationStatus::default(),
             validation_run_id: 0,
             provider: ProviderState::default(),
+            selected_provider: None,
             metrics: TaskMetrics::default(),
             screenshots: BTreeMap::new(),
             generated_images: BTreeMap::new(),
+            activity: Vec::new(),
             vision_capability: VisionCapability::default(),
             lifecycle: TaskLifecycle::default(),
             connection: ConnectionState::default(),
         })
+    }
+
+    fn record_activity(&mut self, kind: ActivityKind) {
+        let sequence = self
+            .activity
+            .last()
+            .map_or(1, |entry| entry.sequence.saturating_add(1));
+        self.activity.push(ActivityEntry {
+            sequence,
+            recorded: true,
+            kind,
+        });
+    }
+
+    pub(crate) fn start_activity_recording(&mut self) {
+        if self.activity.is_empty() {
+            self.activity = self.legacy_activity_snapshot();
+        }
+    }
+
+    fn legacy_activity_snapshot(&self) -> Vec<ActivityEntry> {
+        let mut kinds = Vec::new();
+        for entry in &self.thread {
+            kinds.push(match entry.kind {
+                ThreadEntryKind::Reply => ActivityKind::UserMessage {
+                    thread_sequence: entry.sequence,
+                },
+                ThreadEntryKind::Result => ActivityKind::AiReply {
+                    thread_sequence: entry.sequence,
+                },
+                ThreadEntryKind::HostResult => ActivityKind::HostResult {
+                    thread_sequence: entry.sequence,
+                },
+            });
+        }
+        kinds.extend(
+            self.screenshots
+                .values()
+                .map(|screenshot| ActivityKind::Attachment {
+                    screenshot_id: screenshot.id.clone(),
+                    upload: screenshot.upload.clone(),
+                    analysis: screenshot.analysis.clone(),
+                }),
+        );
+        kinds.extend(
+            self.actions
+                .values()
+                .map(|action| ActivityKind::SemanticAction {
+                    action_id: action.id.clone(),
+                    kind: action.kind.clone(),
+                    description: action.description.clone(),
+                    state: action.state.clone(),
+                }),
+        );
+        kinds.extend(
+            self.generated_images
+                .values()
+                .map(|image| ActivityKind::GeneratedAsset {
+                    image_id: image.id.clone(),
+                    review: image.review.clone(),
+                    handoff: image.handoff.clone(),
+                }),
+        );
+        if !matches!(self.validation, ValidationStatus::NotRun) {
+            kinds.push(ActivityKind::FocusedTest {
+                run_id: self.validation_run_id,
+                status: self.validation.clone(),
+            });
+        }
+        kinds
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| ActivityEntry {
+                sequence: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
+                recorded: false,
+                kind,
+            })
+            .collect()
+    }
+
+    /// Returns the recorded chronological log, or stable typed snapshots for legacy tasks.
+    /// Snapshot entries have `recorded == false` because their cross-type chronology is unknown.
+    pub fn activity_timeline(&self) -> Vec<ActivityEntry> {
+        if !self.activity.is_empty() {
+            return self.activity.clone();
+        }
+
+        self.legacy_activity_snapshot()
     }
 
     fn ensure_open(&self, action: &'static str) -> Result<(), TaskSessionError> {
@@ -615,6 +757,7 @@ impl Task {
         text: impl Into<String>,
     ) -> Result<(), TaskSessionError> {
         self.ensure_open("append thread history to")?;
+        self.start_activity_recording();
         if self.thread.len() >= MAX_THREAD_ENTRIES {
             return Err(TaskSessionError::FieldTooLong {
                 field: "thread history",
@@ -631,14 +774,31 @@ impl Task {
             kind,
             text,
         });
+        self.record_activity(match kind {
+            ThreadEntryKind::Reply => ActivityKind::UserMessage {
+                thread_sequence: sequence,
+            },
+            ThreadEntryKind::Result => ActivityKind::AiReply {
+                thread_sequence: sequence,
+            },
+            ThreadEntryKind::HostResult => ActivityKind::HostResult {
+                thread_sequence: sequence,
+            },
+        });
         Ok(())
     }
 
+    pub fn append_user_message(&mut self, text: impl Into<String>) -> Result<(), TaskSessionError> {
+        self.append_reply(text)
+    }
     pub fn append_reply(&mut self, text: impl Into<String>) -> Result<(), TaskSessionError> {
         self.append_thread(ThreadEntryKind::Reply, text)
     }
     pub fn append_result(&mut self, text: impl Into<String>) -> Result<(), TaskSessionError> {
         self.append_thread(ThreadEntryKind::Result, text)
+    }
+    pub fn append_host_result(&mut self, text: impl Into<String>) -> Result<(), TaskSessionError> {
+        self.append_thread(ThreadEntryKind::HostResult, text)
     }
 
     fn add_reference(
@@ -700,6 +860,12 @@ impl Task {
         self.provider = state.validate()?;
         Ok(())
     }
+
+    pub fn select_provider(&mut self, provider: ProviderSelection) -> Result<(), TaskSessionError> {
+        self.ensure_open("select provider for")?;
+        self.selected_provider = Some(provider);
+        Ok(())
+    }
     pub fn record_turn(
         &mut self,
         elapsed_ms: u64,
@@ -743,10 +909,11 @@ impl Task {
             &description.into(),
             MAX_ACTION_TEXT_CHARS,
         )?;
+        self.start_activity_recording();
         self.actions.insert(
             id.clone(),
             TaskAction {
-                id,
+                id: id.clone(),
                 kind,
                 description,
                 state: ActionState::Proposed,
@@ -754,6 +921,7 @@ impl Task {
                 payload: None,
             },
         );
+        self.record_action_activity(&id);
         Ok(())
     }
 
@@ -778,12 +946,25 @@ impl Task {
             .ok_or(TaskSessionError::ActionNotFound(id))
     }
 
+    fn record_action_activity(&mut self, id: &ActionId) {
+        let action = &self.actions[id];
+        self.record_activity(ActivityKind::SemanticAction {
+            action_id: action.id.clone(),
+            kind: action.kind.clone(),
+            description: action.description.clone(),
+            state: action.state.clone(),
+        });
+    }
+
     pub fn accept_action(&mut self, id: impl AsRef<str>) -> Result<(), TaskSessionError> {
         self.ensure_open("accept an action on")?;
-        let action = self.action_mut(id)?;
+        self.start_activity_recording();
+        let id = ActionId::new(id.as_ref());
+        let action = self.action_mut(&id)?;
         match &action.state {
             ActionState::Proposed => {
                 action.state = ActionState::Accepted;
+                self.record_action_activity(&id);
                 Ok(())
             }
             state => Err(invalid_transition("action", "accept", state.label())),
@@ -801,10 +982,13 @@ impl Task {
             &reason.into(),
             MAX_ACTION_TEXT_CHARS,
         )?;
-        let action = self.action_mut(id)?;
+        self.start_activity_recording();
+        let id = ActionId::new(id.as_ref());
+        let action = self.action_mut(&id)?;
         match &action.state {
             ActionState::Proposed | ActionState::NeedsRepair { .. } => {
                 action.state = ActionState::Rejected { reason };
+                self.record_action_activity(&id);
                 Ok(())
             }
             state => Err(invalid_transition("action", "reject", state.label())),
@@ -813,11 +997,14 @@ impl Task {
 
     pub fn apply_action(&mut self, id: impl AsRef<str>) -> Result<(), TaskSessionError> {
         self.ensure_open("apply an action on")?;
-        let action = self.action_mut(id)?;
+        self.start_activity_recording();
+        let id = ActionId::new(id.as_ref());
+        let action = self.action_mut(&id)?;
         match &action.state {
             ActionState::Accepted => {
                 action.state = ActionState::Applied;
                 self.validation = ValidationStatus::NotRun;
+                self.record_action_activity(&id);
                 Ok(())
             }
             state => Err(invalid_transition("action", "apply", state.label())),
@@ -830,7 +1017,9 @@ impl Task {
     ) -> Result<(), TaskSessionError> {
         self.ensure_open("mark an action for repair on")?;
         let reason = validate_text("repair reason", &reason.into(), MAX_ACTION_TEXT_CHARS)?;
-        let action = self.action_mut(id)?;
+        self.start_activity_recording();
+        let id = ActionId::new(id.as_ref());
+        let action = self.action_mut(&id)?;
         match &action.state {
             ActionState::Proposed
             | ActionState::Accepted
@@ -850,6 +1039,7 @@ impl Task {
                 });
                 action.state = ActionState::NeedsRepair { reason };
                 self.validation = ValidationStatus::NotRun;
+                self.record_action_activity(&id);
                 Ok(())
             }
             state => Err(invalid_transition("action", "repair", state.label())),
@@ -867,7 +1057,9 @@ impl Task {
             &description.into(),
             MAX_ACTION_TEXT_CHARS,
         )?;
-        let action = self.action_mut(id)?;
+        self.start_activity_recording();
+        let id = ActionId::new(id.as_ref());
+        let action = self.action_mut(&id)?;
         if action.revisions.len() >= MAX_ACTION_REVISIONS {
             return Err(TaskSessionError::FieldTooLong {
                 field: "action revisions",
@@ -889,6 +1081,7 @@ impl Task {
                 action.payload = None;
                 action.state = ActionState::Proposed;
                 self.validation = ValidationStatus::NotRun;
+                self.record_action_activity(&id);
                 Ok(())
             }
             state => Err(invalid_transition("action", "repair", state.label())),
@@ -975,10 +1168,11 @@ impl Task {
             &source.into(),
             MAX_ARTIFACT_SOURCE_CHARS,
         )?;
+        self.start_activity_recording();
         self.screenshots.insert(
             id.clone(),
             ScreenshotAttachment {
-                id,
+                id: id.clone(),
                 source,
                 content_sha256,
                 provenance: TaskProvenance {
@@ -989,7 +1183,17 @@ impl Task {
                 analysis: ScreenshotAnalysisState::Pending,
             },
         );
+        self.record_screenshot_activity(&id);
         Ok(())
+    }
+
+    pub(crate) fn record_screenshot_activity(&mut self, id: &ScreenshotId) {
+        let screenshot = &self.screenshots[id];
+        self.record_activity(ActivityKind::Attachment {
+            screenshot_id: screenshot.id.clone(),
+            upload: screenshot.upload.clone(),
+            analysis: screenshot.analysis.clone(),
+        });
     }
 
     pub fn mark_screenshot_uploaded(
@@ -997,12 +1201,14 @@ impl Task {
         id: impl AsRef<str>,
     ) -> Result<(), TaskSessionError> {
         self.ensure_open("mark a screenshot uploaded on")?;
+        self.start_activity_recording();
         let id = ScreenshotId::new(id.as_ref());
         let screenshot = self
             .screenshots
             .get_mut(&id)
             .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
         screenshot.upload = UploadState::Uploaded;
+        self.record_screenshot_activity(&id);
         Ok(())
     }
 
@@ -1017,12 +1223,14 @@ impl Task {
             &reason.into(),
             MAX_ACTION_TEXT_CHARS,
         )?;
+        self.start_activity_recording();
         let id = ScreenshotId::new(id.as_ref());
         let screenshot = self
             .screenshots
             .get_mut(&id)
             .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
         screenshot.upload = UploadState::Failed { reason };
+        self.record_screenshot_activity(&id);
         Ok(())
     }
 
@@ -1031,6 +1239,7 @@ impl Task {
         id: impl AsRef<str>,
     ) -> Result<(), TaskSessionError> {
         self.ensure_open("complete screenshot analysis on")?;
+        self.start_activity_recording();
         let id = ScreenshotId::new(id.as_ref());
         let screenshot = self
             .screenshots
@@ -1038,6 +1247,7 @@ impl Task {
             .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
         screenshot.upload = UploadState::Uploaded;
         screenshot.analysis = ScreenshotAnalysisState::Completed;
+        self.record_screenshot_activity(&id);
         Ok(())
     }
 
@@ -1052,6 +1262,7 @@ impl Task {
             &reason.into(),
             MAX_ACTION_TEXT_CHARS,
         )?;
+        self.start_activity_recording();
         let id = ScreenshotId::new(id.as_ref());
         let screenshot = self
             .screenshots
@@ -1061,6 +1272,7 @@ impl Task {
             reason: reason.clone(),
         };
         screenshot.analysis = ScreenshotAnalysisState::Failed { reason };
+        self.record_screenshot_activity(&id);
         Ok(())
     }
 
@@ -1069,12 +1281,14 @@ impl Task {
         id: impl AsRef<str>,
     ) -> Result<(), TaskSessionError> {
         self.ensure_open("cancel screenshot analysis on")?;
+        self.start_activity_recording();
         let id = ScreenshotId::new(id.as_ref());
         let screenshot = self
             .screenshots
             .get_mut(&id)
             .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
         screenshot.analysis = ScreenshotAnalysisState::Canceled;
+        self.record_screenshot_activity(&id);
         Ok(())
     }
 
@@ -1102,10 +1316,11 @@ impl Task {
             MAX_ARTIFACT_SOURCE_CHARS,
         )?;
         let attribution = attribution.validate()?;
+        self.start_activity_recording();
         self.generated_images.insert(
             id.clone(),
             GeneratedImageArtifact {
-                id,
+                id: id.clone(),
                 source,
                 provenance: TaskProvenance {
                     task_id: self.id.clone(),
@@ -1115,6 +1330,7 @@ impl Task {
                 handoff: ImageHandoffState::Pending,
             },
         );
+        self.record_image_activity(&id);
         Ok(())
     }
 
@@ -1128,12 +1344,24 @@ impl Task {
             .ok_or(TaskSessionError::ImageNotFound(id))
     }
 
+    fn record_image_activity(&mut self, id: &GeneratedImageId) {
+        let image = &self.generated_images[id];
+        self.record_activity(ActivityKind::GeneratedAsset {
+            image_id: image.id.clone(),
+            review: image.review.clone(),
+            handoff: image.handoff.clone(),
+        });
+    }
+
     pub fn approve_generated_image(&mut self, id: impl AsRef<str>) -> Result<(), TaskSessionError> {
         self.ensure_open("approve a generated image on")?;
-        let image = self.image_mut(id)?;
+        self.start_activity_recording();
+        let id = GeneratedImageId::new(id.as_ref());
+        let image = self.image_mut(&id)?;
         match &image.review {
             ImageReviewState::Pending => {
                 image.review = ImageReviewState::Approved;
+                self.record_image_activity(&id);
                 Ok(())
             }
             state => Err(invalid_transition(
@@ -1155,7 +1383,9 @@ impl Task {
             &reason.into(),
             MAX_ACTION_TEXT_CHARS,
         )?;
-        let image = self.image_mut(id)?;
+        self.start_activity_recording();
+        let id = GeneratedImageId::new(id.as_ref());
+        let image = self.image_mut(&id)?;
         if matches!(image.handoff, ImageHandoffState::Imported) {
             return Err(invalid_transition("generated image", "reject", "imported"));
         }
@@ -1163,16 +1393,20 @@ impl Task {
             reason: reason.clone(),
         };
         image.handoff = ImageHandoffState::Rejected { reason };
+        self.record_image_activity(&id);
         Ok(())
     }
 
     pub fn import_generated_image(&mut self, id: impl AsRef<str>) -> Result<(), TaskSessionError> {
         self.ensure_open("import a generated image on")?;
-        let image = self.image_mut(id)?;
+        self.start_activity_recording();
+        let id = GeneratedImageId::new(id.as_ref());
+        let image = self.image_mut(&id)?;
         match (&image.review, &image.handoff) {
             (ImageReviewState::Approved, ImageHandoffState::Pending) => {
                 image.handoff = ImageHandoffState::Imported;
                 self.validation = ValidationStatus::NotRun;
+                self.record_image_activity(&id);
                 Ok(())
             }
             (_, ImageHandoffState::Imported) => {
@@ -1210,11 +1444,16 @@ impl Task {
         if self.validation.is_running() {
             return Err(invalid_transition("focused tests", "begin", "running"));
         }
+        self.start_activity_recording();
         self.validation_run_id = self
             .validation_run_id
             .checked_add(1)
             .ok_or_else(|| invalid_transition("focused tests", "begin", "run IDs exhausted"))?;
         self.validation = ValidationStatus::Running;
+        self.record_activity(ActivityKind::FocusedTest {
+            run_id: self.validation_run_id,
+            status: self.validation.clone(),
+        });
         Ok(())
     }
 
@@ -1252,11 +1491,16 @@ impl Task {
         } else {
             validate_text("validation summary", &result.summary, MAX_THREAD_TEXT_CHARS)?
         };
+        self.start_activity_recording();
         self.validation = if result.passed {
             ValidationStatus::Passed { summary }
         } else {
             ValidationStatus::Failed { summary }
         };
+        self.record_activity(ActivityKind::FocusedTest {
+            run_id: self.validation_run_id,
+            status: self.validation.clone(),
+        });
         Ok(())
     }
 
@@ -1269,17 +1513,29 @@ impl Task {
                 validation_label(&self.validation),
             ));
         }
+        self.start_activity_recording();
         self.metrics.record_retry();
         self.validation = ValidationStatus::NotRun;
+        self.record_activity(ActivityKind::FocusedTest {
+            run_id: self.validation_run_id,
+            status: self.validation.clone(),
+        });
         Ok(())
     }
 
     pub fn cancel(&mut self) -> Result<(), TaskSessionError> {
         match self.lifecycle {
             TaskLifecycle::Active => {
+                if self.validation.is_running() {
+                    self.start_activity_recording();
+                }
                 self.lifecycle = TaskLifecycle::Canceled;
                 if self.validation.is_running() {
                     self.validation = ValidationStatus::NotRun;
+                    self.record_activity(ActivityKind::FocusedTest {
+                        run_id: self.validation_run_id,
+                        status: self.validation.clone(),
+                    });
                 }
                 Ok(())
             }
@@ -1480,8 +1736,16 @@ impl TaskSession {
         self.active_mut()?.append_reply(text)
     }
 
+    pub fn append_user_message(&mut self, text: impl Into<String>) -> Result<(), TaskSessionError> {
+        self.active_mut()?.append_user_message(text)
+    }
+
     pub fn append_result(&mut self, text: impl Into<String>) -> Result<(), TaskSessionError> {
         self.active_mut()?.append_result(text)
+    }
+
+    pub fn append_host_result(&mut self, text: impl Into<String>) -> Result<(), TaskSessionError> {
+        self.active_mut()?.append_host_result(text)
     }
 
     pub fn add_relevant_file(&mut self, path: impl Into<String>) -> Result<(), TaskSessionError> {
@@ -1952,6 +2216,156 @@ mod tests {
         session
             .finish_focused_tests(FocusedTestResult::passed("focused tests passed"))
             .expect("finish tests");
+    }
+
+    #[test]
+    fn activity_records_mixed_types_in_mutation_order() {
+        let mut session = session_with_task();
+        session
+            .append_user_message("make the player faster")
+            .unwrap();
+        session.set_vision_capability(true).unwrap();
+        session.attach_screenshot("before", "before.png").unwrap();
+        session
+            .append_result("I found the movement setting.")
+            .unwrap();
+        session
+            .propose_action_with_kind("speed", ActionKind::Edit, "Increase player speed")
+            .unwrap();
+        session.accept_action("speed").unwrap();
+        session
+            .add_generated_image(
+                "preview",
+                "preview.png",
+                ImageAttribution::new("local", None, None).unwrap(),
+            )
+            .unwrap();
+        session.append_host_result("Edit applied by host").unwrap();
+        session.begin_focused_tests().unwrap();
+        session
+            .finish_focused_tests(FocusedTestResult::passed("movement test passed"))
+            .unwrap();
+
+        let activity = &session.active_task().unwrap().activity;
+        assert_eq!(
+            activity
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            (1..=9).collect::<Vec<_>>()
+        );
+        assert!(activity.iter().all(|entry| entry.recorded));
+        assert!(matches!(activity[0].kind, ActivityKind::UserMessage { .. }));
+        assert!(matches!(activity[1].kind, ActivityKind::Attachment { .. }));
+        assert!(matches!(activity[2].kind, ActivityKind::AiReply { .. }));
+        assert!(matches!(
+            activity[3].kind,
+            ActivityKind::SemanticAction {
+                state: ActionState::Proposed,
+                ..
+            }
+        ));
+        assert!(matches!(
+            activity[4].kind,
+            ActivityKind::SemanticAction {
+                state: ActionState::Accepted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            activity[5].kind,
+            ActivityKind::GeneratedAsset { .. }
+        ));
+        assert!(matches!(activity[6].kind, ActivityKind::HostResult { .. }));
+        assert!(matches!(
+            activity[7].kind,
+            ActivityKind::FocusedTest {
+                status: ValidationStatus::Running,
+                ..
+            }
+        ));
+        assert!(matches!(
+            activity[8].kind,
+            ActivityKind::FocusedTest {
+                status: ValidationStatus::Passed { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn failed_mutations_do_not_append_activity() {
+        let mut session = session_with_task();
+        session.propose_action("edit", "safe edit").unwrap();
+        let before = session.active_task().unwrap().activity.clone();
+        assert!(session.apply_action("edit").is_err());
+        assert_eq!(session.active_task().unwrap().activity, before);
+    }
+
+    #[test]
+    fn activity_is_task_local() {
+        let mut session = session_with_task();
+        session.append_user_message("first task").unwrap();
+        session
+            .new_task("task-2", "second objective", "second summary")
+            .unwrap();
+        session.append_result("second task").unwrap();
+
+        let first = session.task("task-1").unwrap();
+        let second = session.task("task-2").unwrap();
+        assert_eq!(first.activity.len(), 1);
+        assert_eq!(second.activity.len(), 1);
+        assert!(matches!(
+            first.activity[0].kind,
+            ActivityKind::UserMessage { .. }
+        ));
+        assert!(matches!(
+            second.activity[0].kind,
+            ActivityKind::AiReply { .. }
+        ));
+    }
+
+    #[test]
+    fn legacy_task_builds_deterministic_unrecorded_typed_snapshots() {
+        let mut task = Task::new("legacy", "edit", "project").unwrap();
+        task.append_reply("existing reply").unwrap();
+        task.propose_action("z-edit", "existing edit").unwrap();
+        task.activity.clear();
+        let mut encoded = serde_json::to_value(&task).unwrap();
+        encoded.as_object_mut().unwrap().remove("activity");
+        let decoded: Task = serde_json::from_value(encoded).unwrap();
+
+        assert!(decoded.activity.is_empty());
+        let first = decoded.activity_timeline();
+        let second = decoded.activity_timeline();
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|entry| !entry.recorded));
+        assert!(matches!(first[0].kind, ActivityKind::UserMessage { .. }));
+        assert!(matches!(first[1].kind, ActivityKind::SemanticAction { .. }));
+    }
+
+    #[test]
+    fn first_new_activity_retains_legacy_snapshots_without_claiming_their_order() {
+        let mut task = Task::new("legacy", "edit", "project").unwrap();
+        task.append_reply("existing user request").unwrap();
+        task.activity.clear();
+
+        task.append_result("new AI response").unwrap();
+
+        assert_eq!(task.activity.len(), 2);
+        assert!(!task.activity[0].recorded);
+        assert!(matches!(
+            task.activity[0].kind,
+            ActivityKind::UserMessage { .. }
+        ));
+        assert!(task.activity[1].recorded);
+        assert!(matches!(
+            task.activity[1].kind,
+            ActivityKind::AiReply { .. }
+        ));
+        assert_eq!(task.activity[0].sequence, 1);
+        assert_eq!(task.activity[1].sequence, 2);
     }
 
     #[test]
