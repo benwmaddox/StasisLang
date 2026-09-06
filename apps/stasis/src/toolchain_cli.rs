@@ -13,8 +13,8 @@ use stasis::{
     resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
     run_play_in_process_with_replay, run_play_in_process_with_window_title,
     run_self_host_aot_cli_with_desktop_network, run_self_host_aot_cli_with_options, sign_artifacts,
-    signing_status, verify_artifacts, LiveRunConfig, PlayReplayConfig, SigningOptions,
-    StasisTestRunSession,
+    signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
+    SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
@@ -819,6 +819,8 @@ struct ProjectManifest {
 struct ProjectCapabilities {
     #[serde(default)]
     network: bool,
+    #[serde(default)]
+    network_client: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -898,6 +900,16 @@ impl ProjectManifest {
             if !web.entry.is_empty() {
                 validate_relative_path("web.entry", Path::new(&web.entry))?;
             }
+        }
+        if self
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network && capabilities.network_client)
+        {
+            return Err(
+                "capabilities.network and capabilities.network_client are mutually exclusive"
+                    .to_string(),
+            );
         }
         if self
             .stdlib
@@ -4057,6 +4069,7 @@ fn build_workspace(
 struct DesktopNetworkBuild<'a> {
     library: &'a Path,
     include_dir: &'a Path,
+    mode: DesktopNetworkMode,
 }
 
 fn build_workspace_with_desktop_network(
@@ -4127,6 +4140,7 @@ fn build_workspace_with_desktop_network(
                     entry,
                     network.library,
                     network.include_dir,
+                    network.mode,
                 )?
             } else {
                 run_self_host_aot_cli_with_options(&workspace.root, &output, None, Some(entry))?
@@ -4339,12 +4353,42 @@ fn validate_desktop_network_guest_contract(manifest: &ProjectManifest) -> Result
     Ok(())
 }
 
+fn validate_network_client_target(
+    manifest: &ProjectManifest,
+    target: PackageTarget,
+) -> Result<(), String> {
+    let Some(capabilities) = manifest.capabilities.as_ref() else {
+        return Ok(());
+    };
+    if capabilities.network && capabilities.network_client {
+        return Err(
+            "capabilities.network and capabilities.network_client are mutually exclusive"
+                .to_string(),
+        );
+    }
+    if !capabilities.network_client {
+        return Ok(());
+    }
+    if matches!(
+        target,
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64
+    ) || (matches!(target, PackageTarget::Desktop) && cfg!(windows))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "capabilities.network_client is not supported for {} packages",
+        target.as_str()
+    ))
+}
+
 fn package_workspace(
     workspace: &Workspace,
     target: PackageTarget,
     output: Option<&Path>,
     development_build: bool,
 ) -> Result<CommandResult, String> {
+    validate_network_client_target(&workspace.manifest, target)?;
     let package_root = output
         .map(|path| workspace.root.join(path))
         .unwrap_or_else(|| {
@@ -4397,12 +4441,19 @@ fn package_workspace(
         .capabilities
         .as_ref()
         .is_some_and(|capabilities| capabilities.network);
+    let network_client_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network_client);
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let executable_file_name = executable_name(&workspace.manifest.name);
     let assembled = (|| -> Result<(), String> {
-        let network_build = if network_enabled {
-            stage_desktop_network_guest(workspace, &staging_root, development_build)?;
+        let network_build = if network_enabled || network_client_enabled {
+            if network_enabled {
+                stage_desktop_network_guest(workspace, &staging_root, development_build)?;
+            }
             Some(build_desktop_network_library(
                 &staging_root,
                 development_build,
@@ -4420,6 +4471,11 @@ fn package_workspace(
                 .map(|(library, include_dir)| DesktopNetworkBuild {
                     library,
                     include_dir,
+                    mode: if network_enabled {
+                        DesktopNetworkMode::Host
+                    } else {
+                        DesktopNetworkMode::Client
+                    },
                 }),
         )?;
         let network_target = staging_root.join(".network-rust-target");
@@ -4489,6 +4545,7 @@ fn package_workspace(
             } else {
                 "network_guest.bundle".to_string()
             }),
+            "network_client": network_client_enabled,
         }),
     ))
 }
@@ -5499,6 +5556,7 @@ fn package_mobile_workspace(
     profile_warmup_frames: u32,
     profile_sample_frames: u32,
 ) -> Result<CommandResult, String> {
+    validate_network_client_target(&workspace.manifest, target)?;
     validate_mobile_network_guest_contract(&workspace.manifest, target)?;
     if matches!(target, PackageTarget::IosArm64)
         && workspace
@@ -5605,7 +5663,7 @@ fn package_mobile_workspace(
             .manifest
             .capabilities
             .as_ref()
-            .is_some_and(|capabilities| capabilities.network)
+            .is_some_and(|capabilities| capabilities.network || capabilities.network_client)
         {
             stage_mobile_network_library(&staging_root, target)?;
         }
@@ -5986,6 +6044,12 @@ fn assemble_mobile_shell(
         .capabilities
         .as_ref()
         .is_some_and(|capabilities| capabilities.network);
+    let network_client_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network_client);
+    let native_network_enabled = network_enabled || network_client_enabled;
     let local_network_usage = if network_enabled && matches!(target, PackageTarget::IosArm64) {
         format!(
             "    <key>NSLocalNetworkUsageDescription</key><string>{} uses your local network so nearby friends can join games hosted on this device.</string>\n",
@@ -6011,8 +6075,12 @@ fn assemble_mobile_shell(
             if network_enabled { "1" } else { "0" },
         ),
         (
+            "@STASIS_NETWORK_CLIENT_ENABLED@",
+            if network_client_enabled { "1" } else { "0" },
+        ),
+        (
             "@STASIS_NETWORK_PERMISSION@",
-            if network_enabled {
+            if native_network_enabled {
                 "    <uses-permission android:name=\"android.permission.INTERNET\" />\n"
             } else {
                 ""
@@ -6052,7 +6120,7 @@ fn assemble_mobile_shell(
             network_enabled,
         )?;
     }
-    let network_library = if network_enabled {
+    let network_library = if native_network_enabled {
         Some(match target {
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
                 "android/app/src/main/cpp/network/libstasis_network.a"
@@ -6063,7 +6131,7 @@ fn assemble_mobile_shell(
     } else {
         None
     };
-    let network_header = if network_enabled {
+    let network_header = if native_network_enabled {
         Some(match target {
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
                 "android/app/src/main/cpp/network/include/stasis_network.h"
@@ -6107,6 +6175,7 @@ fn assemble_mobile_shell(
                 PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
             "network": network_enabled,
+            "network_client": network_client_enabled,
             "network_library": network_library,
             "network_header": network_header,
             "network_guest_bundle": network_guest_bundle,
@@ -8083,7 +8152,10 @@ mod tests {
         )
         .expect("guest entry source");
         let mut manifest = ProjectManifest::new("network_guest".to_string());
-        manifest.capabilities = Some(ProjectCapabilities { network: true });
+        manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
         manifest.web = Some(WebProjectManifest {
             entry: "src/guest.stasis".to_string(),
             loading_font: None,
@@ -9857,6 +9929,45 @@ mod tests {
     }
 
     #[test]
+    fn native_network_client_package_targets_are_explicit() {
+        let mut manifest = ProjectManifest::new("network_client".to_string());
+        manifest.capabilities = Some(ProjectCapabilities {
+            network_client: true,
+            ..ProjectCapabilities::default()
+        });
+
+        if cfg!(windows) {
+            assert!(validate_network_client_target(&manifest, PackageTarget::Desktop).is_ok());
+        } else {
+            assert!(validate_network_client_target(&manifest, PackageTarget::Desktop).is_err());
+        }
+        assert!(validate_network_client_target(&manifest, PackageTarget::AndroidArm64).is_ok());
+        assert!(validate_desktop_network_guest_contract(&manifest).is_ok());
+        assert!(
+            validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_ok()
+        );
+        for target in [PackageTarget::Web, PackageTarget::IosArm64] {
+            let error = validate_network_client_target(&manifest, target)
+                .expect_err("reject unsupported native client package target");
+            assert!(error.contains("capabilities.network_client is not supported"));
+            assert!(error.contains(target.as_str()));
+        }
+
+        manifest
+            .capabilities
+            .as_mut()
+            .expect("capabilities")
+            .network = true;
+        let error = manifest
+            .validate()
+            .expect_err("reject simultaneous network host and client capabilities");
+        assert_eq!(
+            error,
+            "capabilities.network and capabilities.network_client are mutually exclusive"
+        );
+    }
+
+    #[test]
     fn project_names_allow_internal_ascii_spaces() {
         assert!(validate_project_name("Chess TD").is_ok());
         for invalid in [" Chess TD", "Chess TD ", "Chess\tTD", "Chess/TD"] {
@@ -9932,6 +10043,8 @@ mod tests {
         assert!(android_cmake.contains("-Wl,--gc-sections"));
         assert!(android_cmake.contains("-flto"));
         assert!(!android_cmake.contains("stasis_dynload"));
+        assert!(android_cmake.contains("STASIS_NETWORK_ENABLED 0"));
+        assert!(android_cmake.contains("STASIS_NETWORK_CLIENT_ENABLED 0"));
         let android_gradle = fs::read_to_string(android.join("android/app/build.gradle"))
             .expect("read Android Gradle");
         assert!(android_gradle.contains("applicationId 'com.example.mobile'"));
@@ -9950,6 +10063,7 @@ mod tests {
         assert!(android_manifest.matches("android:value=\"false\"").count() >= 2);
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
         assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
+        assert!(!android_manifest.contains("android.permission.INTERNET"));
         let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
             .expect("read shared mobile main")
             .replace("\r\n", "\n");
@@ -10175,7 +10289,10 @@ mod tests {
         assert!(!project.contains("@STASIS_"));
 
         let mut network_workspace = workspace.clone();
-        network_workspace.manifest.capabilities = Some(ProjectCapabilities { network: true });
+        network_workspace.manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
         network_workspace.manifest.web = Some(WebProjectManifest {
             entry: "src/main.stasis".to_string(),
             loading_font: None,
@@ -10320,6 +10437,74 @@ mod tests {
         assert!(android_network
             .join("android/app/src/main/assets/stasis_game/network_guest.bundle")
             .is_file());
+
+        let mut client_workspace = workspace.clone();
+        client_workspace.manifest.capabilities = Some(ProjectCapabilities {
+            network_client: true,
+            ..ProjectCapabilities::default()
+        });
+        let android_client = root.join("android-client-package");
+        fs::create_dir_all(android_client.join("android/app/src/main/cpp/network/include"))
+            .expect("create Android client network staging fixture");
+        fs::write(
+            android_client.join("android/app/src/main/cpp/network/libstasis_network.a"),
+            b"fixture Android client static library",
+        )
+        .expect("write Android client network library fixture");
+        fs::write(
+            android_client.join("android/app/src/main/cpp/network/include/stasis_network.h"),
+            b"/* fixture Android client network header */\n",
+        )
+        .expect("write Android client network header fixture");
+        assemble_mobile_shell(
+            &client_workspace,
+            PackageTarget::AndroidArm64,
+            &aot,
+            &android_client,
+            &provenance,
+            None,
+        )
+        .expect("assemble network-client Android shell");
+        let client_cmake =
+            fs::read_to_string(android_client.join("android/app/src/main/cpp/CMakeLists.txt"))
+                .expect("read client Android CMake");
+        assert!(client_cmake.contains("STASIS_NETWORK_CLIENT_ENABLED 1"));
+        assert!(client_cmake.contains("STASIS_NETWORK_ENABLED 0"));
+        assert!(client_cmake.contains("network/include"));
+        let client_manifest =
+            fs::read_to_string(android_client.join("android/app/src/main/AndroidManifest.xml"))
+                .expect("read client Android manifest");
+        assert!(client_manifest.contains("android.permission.INTERNET"));
+        let client_activity = fs::read_to_string(
+            android_client.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
+        )
+        .expect("read client Android activity");
+        assert!(client_activity.contains("stasis.network_join_url"));
+        assert!(client_activity.contains("intent.removeExtra"));
+        assert!(client_activity.contains("nativeProvisionNetworkClient"));
+        assert!(client_activity.contains("nativeSetNetworkClientBackground(false)"));
+        assert!(client_activity.contains("nativeSetNetworkClientBackground(true)"));
+        assert!(client_activity.contains("nativeShutdownNetworkClient"));
+        assert!(!client_activity.contains("@STASIS_NETWORK_CLIENT_ENABLED@"));
+        let client_receipt: Value = serde_json::from_str(
+            &fs::read_to_string(android_client.join("stasis_mobile_package.json"))
+                .expect("read client Android package receipt"),
+        )
+        .expect("parse client Android package receipt");
+        assert_eq!(client_receipt["network"], false);
+        assert_eq!(client_receipt["network_client"], true);
+        assert_eq!(
+            client_receipt["network_library"],
+            "android/app/src/main/cpp/network/libstasis_network.a"
+        );
+        assert_eq!(
+            client_receipt["network_header"],
+            "android/app/src/main/cpp/network/include/stasis_network.h"
+        );
+        assert!(client_receipt["network_guest_bundle"].is_null());
+        assert!(!android_client
+            .join("android/app/src/main/assets/stasis_game/network_guest.bundle")
+            .exists());
 
         remove_temp(&root);
     }
@@ -10549,7 +10734,10 @@ mod tests {
     #[test]
     fn manifest_validates_network_guest_entry_contract() {
         let mut manifest = ProjectManifest::new("network_game".to_string());
-        manifest.capabilities = Some(ProjectCapabilities { network: true });
+        manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
         assert!(manifest.validate().is_ok());
         assert!(validate_desktop_network_guest_contract(&manifest).is_err());
         assert!(
@@ -10578,8 +10766,14 @@ mod tests {
         let cmake = include_str!("../../../runtime/CMakeLists.txt");
         assert!(cmake.contains("STASIS_MONOLITH_NETWORK_LIBRARY"));
         assert!(cmake.contains("STASIS_MONOLITH_NETWORK_INCLUDE_DIR"));
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_MODE"));
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_MODE STREQUAL \"host\""));
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_MODE STREQUAL \"client\""));
         assert!(cmake.contains(
             "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_ENABLED=1)"
+        ));
+        assert!(cmake.contains(
+            "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)"
         ));
         assert!(cmake.contains(
             "target_link_libraries(stasis_monolith PRIVATE \"${STASIS_MONOLITH_NETWORK_LIBRARY}\")"

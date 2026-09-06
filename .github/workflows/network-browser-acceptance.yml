@@ -6,7 +6,7 @@ on:
       - ".github/workflows/network-browser-acceptance.yml"
       - "apps/stasis/**"
       - "crates/stasis_network/**"
-      - "mobile/shells/common/**"
+      - "mobile/shells/**"
       - "runtime/**"
       - "tools/**"
   workflow_dispatch:
@@ -15,12 +15,44 @@ permissions:
   contents: read
 
 jobs:
+  android-native-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run native client Android ABI integration
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ndk: 27.0.12077973
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: python tools/ci/test_android_network_client.py --serial emulator-5554 --ndk "$ANDROID_HOME/ndk/27.0.12077973"
+      - name: Upload Android native client result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-native-client
+          if-no-files-found: error
+          path: target/android-network-client/result.txt
+
   windows-desktop-package:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Test native client protocol and lifecycle
+        run: python tools/cargo_cache.py run -- cargo test -p stasis_network --test native_client
       - name: Test optional desktop network configuration
         run: python tools/cargo_cache.py run -- cargo test -p stasis --lib windows_monolith_network_configuration_is_explicit_and_optional
       - name: Test desktop network package contents and support lookup

@@ -3,6 +3,7 @@ package @STASIS_PACKAGE_ID@;
 import android.content.res.AssetManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageInfo;
 import android.graphics.Color;
@@ -28,6 +29,9 @@ public final class MainActivity extends SDLActivity {
     private static final long HUD_UPDATE_INTERVAL_MS = 200L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final boolean STASIS_NETWORK_ENABLED = @STASIS_NETWORK_ENABLED@ != 0;
+    private static final boolean STASIS_NETWORK_CLIENT_ENABLED =
+            @STASIS_NETWORK_CLIENT_ENABLED@ != 0;
+    private static final String NETWORK_JOIN_URL_EXTRA = "stasis.network_join_url";
 
     private static native void nativeSetAssetRoot(String path);
     private static native void nativeSetAssetVerificationError(String diagnostic);
@@ -37,6 +41,9 @@ public final class MainActivity extends SDLActivity {
     private static native void nativeSetPerformanceMetricsEnabled(boolean enabled);
     private static native String nativeReadRuntimeError();
     private static native String nativeReadNetworkJoinUrl();
+    private static native int nativeProvisionNetworkClient(String joinUrl);
+    private static native int nativeSetNetworkClientBackground(boolean background);
+    private static native void nativeShutdownNetworkClient();
 
     private final Handler hudHandler = new Handler(Looper.getMainLooper());
     private final float[] nativePerformance = new float[14];
@@ -78,6 +85,8 @@ public final class MainActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle state) {
         System.loadLibrary("main");
+        if (STASIS_NETWORK_CLIENT_ENABLED) nativeSetNetworkClientBackground(true);
+        provisionNetworkClient(getIntent());
         String seamTestId = getIntent().getStringExtra("stasis.seam_test_id");
         String assetVariant = getIntent().getStringExtra("stasis.asset_variant");
         if (BuildConfig.STASIS_SEAM_TESTS && seamTestId != null) {
@@ -143,6 +152,25 @@ public final class MainActivity extends SDLActivity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        provisionNetworkClient(intent);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (STASIS_NETWORK_CLIENT_ENABLED) nativeSetNetworkClientBackground(false);
+    }
+
+    @Override
+    protected void onPause() {
+        if (STASIS_NETWORK_CLIENT_ENABLED) nativeSetNetworkClientBackground(true);
+        super.onPause();
+    }
+
+    @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
         if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN
                 && event.getPointerCount() >= 3) {
@@ -155,7 +183,16 @@ public final class MainActivity extends SDLActivity {
     protected void onDestroy() {
         nativeSetPerformanceMetricsEnabled(false);
         stopPerformanceHudUpdates();
+        if (STASIS_NETWORK_CLIENT_ENABLED) nativeShutdownNetworkClient();
         super.onDestroy();
+    }
+
+    private void provisionNetworkClient(Intent intent) {
+        if (!STASIS_NETWORK_CLIENT_ENABLED || intent == null
+                || !intent.hasExtra(NETWORK_JOIN_URL_EXTRA)) return;
+        String joinUrl = intent.getStringExtra(NETWORK_JOIN_URL_EXTRA);
+        intent.removeExtra(NETWORK_JOIN_URL_EXTRA);
+        if (joinUrl != null && !joinUrl.isEmpty()) nativeProvisionNetworkClient(joinUrl);
     }
 
     private void installDiagnosticOverlay() {

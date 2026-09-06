@@ -166,3 +166,14 @@
 - Good: task/request snapshots and content hashes prevent late completion from marking newly attached images uploaded.
 - Bad: the initial runtime fixture omitted the required `on_code_swap` entrypoint and failed before capture.
 - Adjustment: live runtime fixtures must include all required lifecycle entrypoints before testing a new host interaction.
+
+## 2026-09-06 - Task 354: native guest transport ABI
+
+- Added an optional Windows/Android native client using the existing browser WebSocket protocol, bounded mailbox, private pairing/resume identity, reconnect backoff, and shell background lifecycle. Client-only packages link transport support without host bundles or listeners.
+- Verification: 33 network tests, seven network package tests, focused package/runtime configuration tests, Windows static-link probe, Android x86_64 static-link and AOT bridge probes, and real Chrome guest acceptance passed. Release provenance, ABI contracts, formatting, and diff checks passed.
+- Validation limit: `tools/validate_repo.sh` reaches its existing ignored-test audit and fails on unchanged timing tests in `stasis_dynload/src/lib.rs` and `stasis_compiler/src/backend/program_snapshot.rs`; the workspace-wide Cargo phase therefore did not run. The optional Android Workshop source check also fails an unchanged `allowAiImageGeneration.setChecked(false)` assertion. No packaged graphical client or multi-device LAN run is claimed.
+- Visual evidence: inspected `target/network-browser-acceptance/browser.png` and all five one-second samples of `browser.mp4`; they show browser join, snapshot, bidirectional command, and resumed-session stages without credentials. Native probe results are in `target/native-client-windows/result.txt` and `target/android-network-client/result.txt`.
+- Theory gained: a connection generation owns socket work and queued messages. Lifecycle and slow-frame tests show obsolete work is discarded; another provisioning surface can reuse this boundary without adding sockets or credentials to deterministic state.
+- Good: independent review exposed lifecycle races before the final platform probes.
+- Bad: the first bridge include incorrectly treated the separately packaged network header as a runtime-local file.
+- Adjustment: validate optional external header provenance alongside ABI and package capability tests.
