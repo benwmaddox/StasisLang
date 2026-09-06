@@ -11,6 +11,18 @@ ANDROID_SHELL = (
 
 
 class NightlyNetworkSupportContractTests(unittest.TestCase):
+    def test_windows_archive_ships_matching_desktop_network_support(self):
+        self.assertIn("name: Build desktop network support (windows)", self.workflow)
+        self.assertIn("RUSTFLAGS: -C target-feature=+crt-static", self.workflow)
+        self.assertIn(
+            "python tools/cargo_cache.py run -- cargo build -p stasis_network --release --target ${{ matrix.rust_target }} --target-dir target/desktop-network",
+            self.workflow,
+        )
+        self.assertIn('"$out/desktop/network/windows-x86_64/"', self.workflow)
+        self.assertIn('"$out/desktop/network/include/"', self.workflow)
+        self.assertIn('Copy-Item tools/diagnose_desktop_network.ps1', self.workflow)
+        self.assertIn('runtime/stasis_network_join_card.h', self.workflow)
+
     @classmethod
     def setUpClass(cls):
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")

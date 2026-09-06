@@ -319,6 +319,13 @@ struct DirectAotArtifactBundle {
 pub struct SelfHostedAotCliOptions {
     summary_file_path: Option<PathBuf>,
     entry_file: Option<PathBuf>,
+    desktop_network: Option<DesktopNetworkLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopNetworkLink {
+    library: PathBuf,
+    include_dir: PathBuf,
 }
 
 impl SelfHostedAotCliOptions {
@@ -326,7 +333,16 @@ impl SelfHostedAotCliOptions {
         Self {
             summary_file_path,
             entry_file,
+            desktop_network: None,
         }
+    }
+
+    fn with_desktop_network(mut self, library: PathBuf, include_dir: PathBuf) -> Self {
+        self.desktop_network = Some(DesktopNetworkLink {
+            library,
+            include_dir,
+        });
+        self
     }
 }
 
@@ -3536,11 +3552,46 @@ fn run_cmake_in_msvc_environment(arguments: &[String]) -> Result<std::process::O
 }
 
 #[cfg(windows)]
+fn monolith_configure_arguments(
+    runtime_root: &Path,
+    build_dir: &Path,
+    aot_root: &Path,
+    shell_source: &Path,
+    output_dir: &Path,
+    output_name: &str,
+    desktop_network: Option<&DesktopNetworkLink>,
+) -> Vec<String> {
+    let mut arguments = vec![
+        "-S".to_string(),
+        cmake_path(runtime_root),
+        "-B".to_string(),
+        cmake_path(build_dir),
+        "-DSTASIS_BUILD_MONOLITH=ON".to_string(),
+        format!("-DSTASIS_MONOLITH_AOT_DIR={}", cmake_path(aot_root)),
+        format!("-DSTASIS_MONOLITH_MAIN_SOURCE={}", cmake_path(shell_source)),
+        format!("-DSTASIS_MONOLITH_OUTPUT_DIR={}", cmake_path(output_dir)),
+        format!("-DSTASIS_MONOLITH_OUTPUT_NAME={output_name}"),
+    ];
+    if let Some(network) = desktop_network {
+        arguments.push(format!(
+            "-DSTASIS_MONOLITH_NETWORK_LIBRARY={}",
+            cmake_path(&network.library)
+        ));
+        arguments.push(format!(
+            "-DSTASIS_MONOLITH_NETWORK_INCLUDE_DIR={}",
+            cmake_path(&network.include_dir)
+        ));
+    }
+    arguments
+}
+
+#[cfg(windows)]
 fn package_engine_bundle_monolithic_windows(
     backend: &IncrementalCompilerBackend,
     bundle: &AotEngineBundle,
     output_exe: &Path,
     project_dir: &Path,
+    desktop_network: Option<&DesktopNetworkLink>,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let repo_root = self_host_repo_root()?;
     let aot_root = backend.aot_artifact_root.join("windows_monolith");
@@ -3620,20 +3671,15 @@ fn package_engine_bundle_monolithic_windows(
         .and_then(|value| value.to_str())
         .ok_or_else(|| format!("invalid monolith output name {}", output_exe.display()))?;
     let build_dir = create_monolith_cmake_build_dir(&aot_root, output_exe)?;
-    let configure_arguments = vec![
-        "-S".to_string(),
-        cmake_path(&repo_root.join("runtime")),
-        "-B".to_string(),
-        cmake_path(&build_dir.path),
-        "-DSTASIS_BUILD_MONOLITH=ON".to_string(),
-        format!("-DSTASIS_MONOLITH_AOT_DIR={}", cmake_path(&aot_root)),
-        format!(
-            "-DSTASIS_MONOLITH_MAIN_SOURCE={}",
-            cmake_path(&shell_source_path)
-        ),
-        format!("-DSTASIS_MONOLITH_OUTPUT_DIR={}", cmake_path(output_dir)),
-        format!("-DSTASIS_MONOLITH_OUTPUT_NAME={output_name}"),
-    ];
+    let configure_arguments = monolith_configure_arguments(
+        &repo_root.join("runtime"),
+        &build_dir.path,
+        &aot_root,
+        &shell_source_path,
+        output_dir,
+        output_name,
+        desktop_network,
+    );
     let configure = run_cmake_in_msvc_environment(&configure_arguments)?;
     if !configure.status.success() {
         return Err(format!(
@@ -3798,6 +3844,7 @@ fn package_engine_bundle_release(
     output_exe: &Path,
     project_dir: &Path,
     entry_file_override: Option<&Path>,
+    _desktop_network: Option<&DesktopNetworkLink>,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let manifest = backend.read_engine_bundle_manifest(&bundle.manifest_path)?;
     let entry_symbol = resolve_engine_bundle_symbol(&manifest, "main")?;
@@ -3847,6 +3894,7 @@ fn package_engine_bundle_release(
             bundle,
             packaged_output_exe,
             project_dir,
+            _desktop_network,
         );
     }
     let mut function_aliases = vec![PackagedFunctionAlias {
@@ -4088,6 +4136,41 @@ fn package_engine_bundle_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_monolith_network_configuration_is_explicit_and_optional() {
+        let base = monolith_configure_arguments(
+            Path::new("runtime"),
+            Path::new("build"),
+            Path::new("aot"),
+            Path::new("main.c"),
+            Path::new("dist"),
+            "game",
+            None,
+        );
+        assert!(!base.iter().any(|arg| arg.contains("NETWORK")));
+
+        let network = DesktopNetworkLink {
+            library: PathBuf::from("network/stasis_network.lib"),
+            include_dir: PathBuf::from("network/include"),
+        };
+        let configured = monolith_configure_arguments(
+            Path::new("runtime"),
+            Path::new("build"),
+            Path::new("aot"),
+            Path::new("main.c"),
+            Path::new("dist"),
+            "game",
+            Some(&network),
+        );
+        assert!(configured
+            .iter()
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_LIBRARY=network/stasis_network.lib"));
+        assert!(configured
+            .iter()
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_INCLUDE_DIR=network/include"));
+    }
 
     #[test]
     fn engine_manifest_accepts_versioned_hot_render_metadata() {
@@ -6944,6 +7027,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
             output_exe,
             project_dir,
             options.entry_file.as_deref(),
+            options.desktop_network.as_ref(),
         )?
     } else {
         let main_entries: Vec<_> = function_entries
@@ -7036,6 +7120,21 @@ pub fn run_self_host_aot_cli_with_options(
     summary_file_path: Option<&Path>,
     entry_file: Option<&Path>,
 ) -> Result<SelfHostedAotCliSummary, String> {
+    run_self_host_aot_cli_with_cli_options(
+        project_dir,
+        output_exe,
+        SelfHostedAotCliOptions::new(
+            summary_file_path.map(PathBuf::from),
+            entry_file.map(PathBuf::from),
+        ),
+    )
+}
+
+fn run_self_host_aot_cli_with_cli_options(
+    project_dir: &Path,
+    output_exe: &Path,
+    options: SelfHostedAotCliOptions,
+) -> Result<SelfHostedAotCliSummary, String> {
     let output_key = output_exe
         .file_stem()
         .and_then(|value| value.to_str())
@@ -7046,10 +7145,6 @@ pub fn run_self_host_aot_cli_with_options(
         .join("aot_cli")
         .join(output_key);
     let mut backend = IncrementalCompilerBackend::new_self_host_aot_cli(artifact_root);
-    let options = SelfHostedAotCliOptions::new(
-        summary_file_path.map(PathBuf::from),
-        entry_file.map(PathBuf::from),
-    );
     let mut summary = run_self_host_aot_cli_with_backend_and_options(
         &mut backend,
         project_dir,
@@ -7058,6 +7153,18 @@ pub fn run_self_host_aot_cli_with_options(
     )?;
     summary.program_snapshot = backend.last_program_snapshot.clone();
     Ok(summary)
+}
+
+pub fn run_self_host_aot_cli_with_desktop_network(
+    project_dir: &Path,
+    output_exe: &Path,
+    entry_file: &Path,
+    library: &Path,
+    include_dir: &Path,
+) -> Result<SelfHostedAotCliSummary, String> {
+    let options = SelfHostedAotCliOptions::new(None, Some(entry_file.to_path_buf()))
+        .with_desktop_network(library.to_path_buf(), include_dir.to_path_buf());
+    run_self_host_aot_cli_with_cli_options(project_dir, output_exe, options)
 }
 
 pub fn run_self_host_aot_cli(

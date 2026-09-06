@@ -162,6 +162,7 @@ int32_t stasis_mobile_network_copy_i32_payload(
     int32_t out_capacity
 );
 int32_t stasis_mobile_network_start_from_asset_root(void);
+int32_t stasis_mobile_network_copy_join_card(char *out, size_t capacity);
 int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity);
 void stasis_mobile_network_stop(void);
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity);

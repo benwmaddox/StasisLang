@@ -32,6 +32,8 @@ python3 -m unittest tools.ci.test_host_runtime_contract
 python3 -m unittest tools.ci.test_cargo_cache
 python3 -m unittest tools.ci.test_pr_ci_cargo_policy
 python3 -m unittest tools.ci.test_unsafe_boundaries
+python3 -m unittest tools.ci.test_desktop_network_diagnostics
+python3 -m unittest tools.ci.test_nightly_network_support
 python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance
 python3 -m unittest tools.ci.test_local_toolchain_install
@@ -48,6 +50,7 @@ node --test runtime/web/tests/sys_memcpy_u8.test.mjs
 node --test runtime/web/tests/sys_memcpy_typed.test.mjs
 node --test runtime/web/tests/asset_paths.test.mjs
 node --test runtime/web/tests/audio_suspended_queue.test.mjs
+node --test runtime/web/tests/network_mailbox_contract.test.mjs
 
 set +e
 ignored_tests="$(rg -n -U --pcre2 '#\s*\[\s*(?:ignore\b|cfg_attr\s*\([^\]]*\bignore\b)' apps crates mobile tests -g '*.rs' 2>&1)"

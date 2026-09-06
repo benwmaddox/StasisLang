@@ -6,6 +6,22 @@ from tools.ci.check_unsafe_boundaries import unexpected_unsafe_files
 
 
 class UnsafeBoundaryTests(unittest.TestCase):
+    def test_network_exemption_is_limited_to_native_abi_files(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in (
+                "crates/stasis_network/src/lib.rs",
+                "crates/stasis_network/tests/realtime_controls.rs",
+                "crates/stasis_network/src/realtime.rs",
+            ):
+                source = root / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("unsafe fn boundary() {}", encoding="utf-8")
+            self.assertEqual(
+                unexpected_unsafe_files(root),
+                ["crates/stasis_network/src/realtime.rs"],
+            )
+
     def test_rejects_unsafe_rust_in_orchestration_crates(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

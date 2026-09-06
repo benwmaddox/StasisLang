@@ -12,8 +12,9 @@ use stasis::{
     load_and_apply_play_data_bindings_for_test, provision_local_certificate,
     resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
     run_play_in_process_with_replay, run_play_in_process_with_window_title,
-    run_self_host_aot_cli_with_options, sign_artifacts, signing_status, verify_artifacts,
-    LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
+    run_self_host_aot_cli_with_desktop_network, run_self_host_aot_cli_with_options, sign_artifacts,
+    signing_status, verify_artifacts, LiveRunConfig, PlayReplayConfig, SigningOptions,
+    StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
@@ -92,6 +93,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_mobile_aot_runtime.h",
     "stasis_mobile_runtime.c",
     "stasis_mobile_runtime.h",
+    "stasis_network_join_card.h",
     "stasis_platform_storage.c",
     "stasis_platform_storage.h",
     "stasis_platform_services.c",
@@ -4045,6 +4047,20 @@ fn build_workspace(
     mode: BuildMode,
     output: Option<&Path>,
 ) -> Result<CommandResult, String> {
+    build_workspace_with_desktop_network(workspace, mode, output, None)
+}
+
+struct DesktopNetworkBuild<'a> {
+    library: &'a Path,
+    include_dir: &'a Path,
+}
+
+fn build_workspace_with_desktop_network(
+    workspace: &Workspace,
+    mode: BuildMode,
+    output: Option<&Path>,
+    desktop_network: Option<DesktopNetworkBuild<'_>>,
+) -> Result<CommandResult, String> {
     match mode {
         BuildMode::Dev => {
             let jit = compile_workspace_jit(workspace)?;
@@ -4099,12 +4115,18 @@ fn build_workspace(
                 fs::create_dir_all(parent)
                     .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
             }
-            let summary = run_self_host_aot_cli_with_options(
-                &workspace.root,
-                &output,
-                None,
-                Some(Path::new(&workspace.manifest.entry)),
-            )?;
+            let entry = Path::new(&workspace.manifest.entry);
+            let summary = if let Some(network) = desktop_network {
+                run_self_host_aot_cli_with_desktop_network(
+                    &workspace.root,
+                    &output,
+                    entry,
+                    network.library,
+                    network.include_dir,
+                )?
+            } else {
+                run_self_host_aot_cli_with_options(&workspace.root, &output, None, Some(entry))?
+            };
             let build_snapshot = summary.program_snapshot.as_ref().ok_or_else(|| {
                 "release build did not publish its authoritative ProgramSnapshot".to_string()
             })?;
@@ -4194,6 +4216,115 @@ fn preflight_release_asset_preparation(
     cleanup
 }
 
+fn build_desktop_network_library(staging_root: &Path) -> Result<(PathBuf, PathBuf), String> {
+    if !cfg!(windows) {
+        return Err(
+            "network-enabled desktop production packaging currently requires Windows".to_string(),
+        );
+    }
+    if let Some((library, header)) = bundled_network_artifacts_for_executable(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+        PackageTarget::Desktop,
+    )? {
+        return Ok((
+            library,
+            header
+                .parent()
+                .ok_or_else(|| "bundled desktop network header has no parent".to_string())?
+                .to_path_buf(),
+        ));
+    }
+    let source_root = source_network_workspace().ok_or_else(|| {
+        "installed toolchain is missing its prebuilt desktop/network library; reinstall the complete release archive"
+            .to_string()
+    })?;
+    let target_dir = staging_root.join(".network-rust-target");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str("-C target-feature=+crt-static");
+    let output = Command::new(cargo)
+        .current_dir(&source_root)
+        .args(["build", "-p", "stasis_network", "--release", "--target-dir"])
+        .arg(&target_dir)
+        .env("RUSTFLAGS", rustflags)
+        .output()
+        .map_err(|error| format!("failed to build stasis_network for desktop: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "desktop stasis_network build failed with exit code {}: stdout={} stderr={}",
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let library = target_dir.join("release").join(if cfg!(windows) {
+        "stasis_network.lib"
+    } else {
+        "libstasis_network.a"
+    });
+    if !library.is_file() {
+        return Err(format!(
+            "desktop stasis_network build did not produce {}",
+            library.display()
+        ));
+    }
+    let include_dir = source_root.join("crates/stasis_network/include");
+    if !include_dir.join("stasis_network.h").is_file() {
+        return Err(format!(
+            "desktop stasis_network headers are missing from {}",
+            include_dir.display()
+        ));
+    }
+    Ok((library, include_dir))
+}
+
+fn stage_desktop_network_guest(
+    workspace: &Workspace,
+    staging_root: &Path,
+    development_build: bool,
+) -> Result<(), String> {
+    let web_root = staging_root.join(".network-web");
+    package_web_workspace(workspace, &web_root, development_build)?;
+    for name in ["network_guest.bundle", "network_guest.bundle.json"] {
+        let source = web_root.join(name);
+        if !source.is_file() {
+            return Err(format!(
+                "network-enabled web packaging did not produce {}",
+                source.display()
+            ));
+        }
+        copy_file(&source, &staging_root.join(name))?;
+    }
+    fs::remove_dir_all(&web_root).map_err(|error| {
+        format!(
+            "failed to remove temporary web guest package {}: {error}",
+            web_root.display()
+        )
+    })
+}
+
+fn validate_desktop_network_guest_contract(manifest: &ProjectManifest) -> Result<(), String> {
+    if manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network)
+        && manifest
+            .web
+            .as_ref()
+            .map_or(true, |web| web.entry.is_empty())
+    {
+        return Err(
+            "network-enabled desktop projects must declare web.entry for the guest bundle"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn package_workspace(
     workspace: &Workspace,
     target: PackageTarget,
@@ -4231,6 +4362,7 @@ fn package_workspace(
             0,
         );
     }
+    validate_desktop_network_guest_contract(&workspace.manifest)?;
     let staging_name = format!(
         ".{}.staging",
         package_root
@@ -4246,12 +4378,39 @@ fn package_workspace(
         ));
     }
     let provenance = resolve_package_provenance(development_build)?;
+    let network_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network);
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let executable_file_name = executable_name(&workspace.manifest.name);
     let assembled = (|| -> Result<(), String> {
+        let network_build = if network_enabled {
+            stage_desktop_network_guest(workspace, &staging_root, development_build)?;
+            Some(build_desktop_network_library(&staging_root)?)
+        } else {
+            None
+        };
         let executable = staging_root.join(&executable_file_name);
-        build_workspace(workspace, BuildMode::Release, Some(&executable))?;
+        build_workspace_with_desktop_network(
+            workspace,
+            BuildMode::Release,
+            Some(&executable),
+            network_build
+                .as_ref()
+                .map(|(library, include_dir)| DesktopNetworkBuild {
+                    library,
+                    include_dir,
+                }),
+        )?;
+        let network_target = staging_root.join(".network-rust-target");
+        if network_target.exists() {
+            fs::remove_dir_all(&network_target).map_err(|error| {
+                format!("failed to remove temporary desktop network build: {error}")
+            })?;
+        }
         let summary = executable.with_file_name(format!(
             "{}.summary.json",
             executable.file_name().unwrap_or_default().to_string_lossy()
@@ -4308,6 +4467,11 @@ fn package_workspace(
                 PACKAGE_PROVENANCE_NAME.to_string()
             },
             "development_build": provenance["development_build"],
+            "network_guest_bundle": network_enabled.then_some(if cfg!(windows) {
+                format!("{WINDOWS_DESKTOP_PAYLOAD_DIR}/network_guest.bundle")
+            } else {
+                "network_guest.bundle".to_string()
+            }),
         }),
     ))
 }
@@ -5483,7 +5647,10 @@ fn network_support_target(target: PackageTarget) -> Option<&'static str> {
         PackageTarget::AndroidArm64 => Some("android-arm64"),
         PackageTarget::AndroidX86_64 => Some("android-x86_64"),
         PackageTarget::IosArm64 => Some("ios-arm64"),
-        PackageTarget::Desktop | PackageTarget::Web => None,
+        PackageTarget::Desktop if cfg!(windows) => Some("windows-x86_64"),
+        PackageTarget::Desktop if cfg!(target_os = "macos") => Some("macos-x86_64"),
+        PackageTarget::Desktop => Some("linux-x86_64"),
+        PackageTarget::Web => None,
     }
 }
 
@@ -5492,13 +5659,21 @@ fn bundled_network_artifacts_for_executable(
     target: PackageTarget,
 ) -> Result<Option<(PathBuf, PathBuf)>, String> {
     let target_name = network_support_target(target)
-        .ok_or_else(|| "network static library requires a mobile target".to_string())?;
+        .ok_or_else(|| "network static library is unavailable for this target".to_string())?;
     let executable_dir = executable.parent().unwrap_or(Path::new("."));
     for support_root in [
+        executable_dir.join("desktop/network"),
+        executable_dir.join("../desktop/network"),
         executable_dir.join("mobile/network"),
         executable_dir.join("../mobile/network"),
     ] {
-        let library = support_root.join(target_name).join("libstasis_network.a");
+        let library = support_root.join(target_name).join(
+            if matches!(target, PackageTarget::Desktop) && cfg!(windows) {
+                "stasis_network.lib"
+            } else {
+                "libstasis_network.a"
+            },
+        );
         let header = support_root.join("include/stasis_network.h");
         if library.is_file() && header.is_file() {
             return Ok(Some((library, header)));
@@ -7747,6 +7922,46 @@ mod tests {
     }
 
     #[test]
+    fn desktop_network_guest_staging_reuses_the_declared_web_entry_bundle() {
+        let root = temp_dir("desktop_network_guest");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        fs::write(
+            root.join("src/guest.stasis"),
+            concat!(
+                "function main(): i32 { return 0; }\n",
+                "function tick(): i32 { return 0; }\n",
+                "function render(): i32 { return 0; }\n"
+            ),
+        )
+        .expect("guest entry source");
+        let mut manifest = ProjectManifest::new("network_guest".to_string());
+        manifest.capabilities = Some(ProjectCapabilities { network: true });
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/guest.stasis".to_string(),
+            loading_font: None,
+            viewport: None,
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+        };
+        let staging = root.join("desktop-stage");
+        fs::create_dir_all(&staging).expect("desktop staging directory");
+
+        stage_desktop_network_guest(&workspace, &staging, true)
+            .expect("stage desktop browser guest");
+
+        let encoded = fs::read(staging.join("network_guest.bundle")).expect("guest bundle");
+        let bundle = stasis_network::StaticBundle::decode(&encoded).expect("decode guest bundle");
+        for path in ["index.html", "game.js", "game.wasm"] {
+            assert!(bundle.get(path).is_some(), "missing bundled {path}");
+        }
+        assert!(staging.join("network_guest.bundle.json").is_file());
+        assert!(!staging.join(".network-web").exists());
+        remove_temp(&root);
+    }
+
+    #[test]
     fn configured_web_loading_font_is_preloaded_and_used_by_shell() {
         let html = web_index_html("font-game", false, Some("assets/fonts/ui.ttf"), None);
         assert!(html.contains(
@@ -9466,8 +9681,9 @@ mod tests {
         assert!(mobile_main.contains("restore_failures"));
         assert!(mobile_main.contains("frame == 1"));
         assert!(mobile_main.contains("frame % 30 == 0"));
+        assert!(mobile_main.contains("stasis_desktop_network_present_join_card();"));
         assert!(mobile_main.contains(
-            "} else {\n#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)"
+            "#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)"
         ));
         assert!(mobile_main.contains("stasis_mobile_network_present_join_url();"));
         assert!(mobile_main.contains("if (seam_test_id != NULL && seam_test_id[0] != '\\0')"));
@@ -9865,6 +10081,35 @@ mod tests {
         remove_temp(&root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn bundled_desktop_network_artifacts_resolve_beside_the_cli() {
+        let root = temp_dir("relocated_desktop_network");
+        let executable = root.join("bin/stasis.exe");
+        let support = root.join("bin/desktop/network");
+        fs::create_dir_all(support.join("windows-x86_64")).expect("create library directory");
+        fs::create_dir_all(support.join("include")).expect("create include directory");
+        fs::write(&executable, b"relocated stasis executable").expect("write executable fixture");
+        fs::write(
+            support.join("windows-x86_64/stasis_network.lib"),
+            b"relocated desktop network library",
+        )
+        .expect("write relocated network library");
+        fs::write(
+            support.join("include/stasis_network.h"),
+            b"/* relocated network header */\n",
+        )
+        .expect("write relocated network header");
+
+        let (library, header) =
+            bundled_network_artifacts_for_executable(&executable, PackageTarget::Desktop)
+                .expect("resolve desktop support")
+                .expect("desktop support artifacts");
+        assert_eq!(library, support.join("windows-x86_64/stasis_network.lib"));
+        assert_eq!(header, support.join("include/stasis_network.h"));
+        remove_temp(&root);
+    }
+
     #[test]
     fn manifest_rejects_paths_that_escape_the_project() {
         let manifest = ProjectManifest {
@@ -10024,6 +10269,7 @@ mod tests {
         let mut manifest = ProjectManifest::new("network_game".to_string());
         manifest.capabilities = Some(ProjectCapabilities { network: true });
         assert!(manifest.validate().is_ok());
+        assert!(validate_desktop_network_guest_contract(&manifest).is_err());
         assert!(
             validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_err()
         );
@@ -10037,11 +10283,25 @@ mod tests {
             viewport: None,
         });
         assert!(manifest.validate().is_ok());
+        assert!(validate_desktop_network_guest_contract(&manifest).is_ok());
         assert!(
             validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_ok()
         );
         manifest.web.as_mut().unwrap().entry = "../guest.stasis".to_string();
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn desktop_monolith_cmake_links_network_only_when_configured() {
+        let cmake = include_str!("../../../runtime/CMakeLists.txt");
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_LIBRARY"));
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_INCLUDE_DIR"));
+        assert!(cmake.contains(
+            "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_ENABLED=1)"
+        ));
+        assert!(cmake.contains(
+            "target_link_libraries(stasis_monolith PRIVATE \"${STASIS_MONOLITH_NETWORK_LIBRARY}\")"
+        ));
     }
 
     #[test]
@@ -10444,6 +10704,8 @@ mod tests {
         fs::write(root.join("demo.exe.launch"), "dll=demo.dll").expect("write launch config");
         fs::write(root.join("demo.dll"), "game").expect("write game library");
         fs::write(root.join("stasis_graphics.dll"), "graphics").expect("write graphics runtime");
+        fs::write(root.join("network_guest.bundle"), "guest").expect("write guest bundle");
+        fs::write(root.join("network_guest.bundle.json"), "{}").expect("write bundle metadata");
 
         nest_windows_desktop_payload(&root, &executable).expect("nest package payload");
 
@@ -10461,6 +10723,8 @@ mod tests {
             "assets",
             "demo.dll",
             "demo.exe.launch",
+            "network_guest.bundle",
+            "network_guest.bundle.json",
             "stasis_graphics.dll",
         ] {
             assert!(root
