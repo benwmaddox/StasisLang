@@ -356,6 +356,21 @@ fn bounded_failure(error: &str, max: usize) -> String {
     }
 }
 
+fn record_focused_test_failure(
+    task: &mut stasis_ai::Task,
+    run_id: u64,
+    error: &str,
+) -> Result<(), stasis_ai::TaskSessionError> {
+    let summary = bounded_failure(error, 3500);
+    task.finish_focused_test_run(
+        run_id,
+        stasis_ai::FocusedTestResult::failed(summary.clone()),
+    )?;
+    task.append_result(format!(
+        "Focused tests failed: {summary}. Fix the reported failure and rerun."
+    ))
+}
+
 struct HostExecutor {
     requests: mpsc::Sender<HostRequest>,
     results: mpsc::Receiver<HostResult>,
@@ -609,10 +624,7 @@ impl DesktopEditor {
                             "An apply or focused-test operation is already running for {task}."
                         );
                         if let Ok(task_state) = self.state.session.task_mut(task.as_str()) {
-                            let _ = task_state.finish_focused_test_run(
-                                run_id,
-                                stasis_ai::FocusedTestResult::failed(message.clone()),
-                            );
+                            let _ = record_focused_test_failure(task_state, run_id, &message);
                         }
                         self.state.notice = Some(message);
                         continue;
@@ -633,12 +645,8 @@ impl DesktopEditor {
                         });
                     if let Err(error) = submitted {
                         self.busy_tasks.remove(&task);
-                        let summary = bounded_failure(&error, 3500);
                         if let Ok(task_state) = self.state.session.task_mut(task.as_str()) {
-                            let _ = task_state.finish_focused_test_run(
-                                run_id,
-                                stasis_ai::FocusedTestResult::failed(summary),
-                            );
+                            let _ = record_focused_test_failure(task_state, run_id, &error);
                         }
                         self.state.notice = Some(error);
                     }
@@ -786,22 +794,13 @@ impl DesktopEditor {
                     self.state.notice = Some(format!("Focused tests passed for {task_id}"));
                 }
                 (HostOperation::Test { run_id, .. }, Err(error), Ok(task)) => {
-                    let summary = bounded_failure(&error, 3500);
-                    if task.lifecycle == stasis_ai::TaskLifecycle::Active {
-                        let finished = task.finish_focused_test_run(
-                            run_id,
-                            stasis_ai::FocusedTestResult::failed(summary.clone()),
-                        );
-                        if finished.is_ok() {
-                            let _ = task.append_result(format!(
-                                "Focused tests failed: {summary}. Fix the reported failure and rerun."
-                            ));
-                        } else {
-                            self.state.notice = Some(format!(
-                                "Ignored obsolete focused-test result for {task_id}"
-                            ));
-                            continue;
-                        }
+                    if task.lifecycle == stasis_ai::TaskLifecycle::Active
+                        && record_focused_test_failure(task, run_id, &error).is_err()
+                    {
+                        self.state.notice = Some(format!(
+                            "Ignored obsolete focused-test result for {task_id}"
+                        ));
+                        continue;
                     }
                     self.state.notice =
                         Some(format!("Focused tests failed for {task_id}: {error}"));
@@ -1548,15 +1547,48 @@ mod tests {
             .state
             .handle(TaskSessionCommand::RunFocusedTests)
             .unwrap();
+        editor.state.objective = "Unrelated task".into();
+        editor.state.create_task().unwrap();
 
         editor.flush_intents();
 
         assert!(editor.state.intents.is_empty());
         assert!(!editor.busy_tasks.contains("task-1"));
         assert!(matches!(
-            editor.state.session.active_task().unwrap().validation,
+            editor.state.session.task("task-1").unwrap().validation,
             ValidationStatus::Failed { .. }
         ));
+        let first = editor.state.session.task("task-1").unwrap();
+        assert!(first
+            .thread
+            .last()
+            .unwrap()
+            .text
+            .contains("Focused tests failed:"));
+        assert!(first.thread.last().unwrap().text.contains("rerun"));
+        assert!(editor
+            .state
+            .session
+            .active_task()
+            .unwrap()
+            .thread
+            .is_empty());
+
+        let (request_tx, request_rx) = mpsc::channel();
+        editor.controller = TaskController::new(move |request, _| {
+            request_tx.send(request).unwrap();
+            Ok(ProviderReply::new("Repair the test configuration."))
+        });
+        editor.state.session.switch_task("task-1").unwrap();
+        editor.state.reply = "Fix the focused test failure".into();
+        editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+        editor.flush_intents();
+        let request = request_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(request.task_id.as_str(), "task-1");
+        assert!(request
+            .context
+            .iter()
+            .any(|entry| entry.text.contains("Focused tests failed:")));
     }
 
     #[test]
@@ -1868,6 +1900,52 @@ mod tests {
             .result
             .expect_err("canceled request cannot execute")
             .contains("canceled before execution"));
+    }
+
+    #[test]
+    fn obsolete_and_canceled_test_failures_do_not_change_task_context() {
+        for canceled in [false, true] {
+            let (client, _server) = live_session(1);
+            let mut editor =
+                DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+            editor.state.objective = "Validate task".into();
+            editor.state.create_task().unwrap();
+            let task = editor.state.session.active_task_mut().unwrap();
+            task.begin_focused_tests().unwrap();
+            let old_run = task.validation_run_id;
+            if canceled {
+                task.cancel().unwrap();
+            } else {
+                task.finish_focused_tests(FocusedTestResult::failed("previous failure"))
+                    .unwrap();
+                task.begin_focused_tests().unwrap();
+            }
+            let before = task.clone();
+            let (request_tx, _request_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            editor.host = HostExecutor {
+                requests: request_tx,
+                results: result_rx,
+                canceled: Arc::new(Mutex::new(BTreeSet::new())),
+                shutdown: Arc::new(AtomicBool::new(false)),
+            };
+            result_tx
+                .send(HostResult {
+                    task_id: "task-1".into(),
+                    operation: HostOperation::Test {
+                        paths: Vec::new(),
+                        run_id: old_run,
+                    },
+                    result: Err("late failure".into()),
+                })
+                .unwrap();
+
+            editor.poll_host();
+
+            assert_eq!(editor.state.session.active_task().unwrap(), &before);
+            assert!(editor.validation_receipts.is_empty());
+            assert!(editor.validation_fingerprints.is_empty());
+        }
     }
 
     #[test]
