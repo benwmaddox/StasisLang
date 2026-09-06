@@ -722,22 +722,6 @@ pub(crate) fn collection_meta_kind_from_suffix(suffix: &str) -> Option<Collectio
     }
 }
 
-pub(crate) fn is_unavailable_array_length(type_id: TypeId, type_table: &TypeTable) -> bool {
-    type_table.type_info(type_id).is_some_and(|info| {
-        matches!(
-            info.category,
-            TypeCategory::ArrayFixed | TypeCategory::ArrayView
-        )
-    })
-}
-
-pub(crate) fn unavailable_array_length_error(path: &str) -> String {
-    let collection_path = path.strip_suffix(".length").unwrap_or(path);
-    format!(
-        "array property '{path}' is unavailable; use '{collection_path}.max_length' for declared capacity"
-    )
-}
-
 pub(crate) fn declare_runtime_helper(
     module: &mut impl Module,
     symbol: &str,
@@ -2506,11 +2490,6 @@ pub(crate) fn emit_simple_statements(
                         if let Some((base, suffix)) = path.split_once('.') {
                             if let Some(local) = values_by_name.get(base).copied() {
                                 if let Some(kind) = collection_meta_kind_from_suffix(suffix) {
-                                    if suffix == "length"
-                                        && is_unavailable_array_length(local.type_id, type_table)
-                                    {
-                                        return Err(unavailable_array_length_error(path));
-                                    }
                                     if suffix == "max_length" {
                                         return Err(format!(
                                             "assignment target '{}.{}' is read-only in current jit path",
@@ -2758,16 +2737,6 @@ pub(crate) fn emit_simple_statements(
                                         field_type, base, suffix
                                     ));
                                 }
-                            }
-                        }
-                        if let Some(collection_path) = path.strip_suffix(".length") {
-                            if global_path_types
-                                .get(collection_path)
-                                .is_some_and(|type_id| {
-                                    is_unavailable_array_length(*type_id, type_table)
-                                })
-                            {
-                                return Err(unavailable_array_length_error(path));
                             }
                         }
                         let Some(path_type) = global_path_types.get(path).copied() else {
@@ -4433,11 +4402,6 @@ pub(crate) fn emit_simple_expression(
                 if let Some(local) = values_by_name.get(base).copied() {
                     if let Some(kind) = collection_meta_kind_from_suffix(suffix) {
                         if is_collection_handle_type(local.type_id, type_table) {
-                            if suffix == "length"
-                                && is_unavailable_array_length(local.type_id, type_table)
-                            {
-                                return Err(unavailable_array_length_error(name));
-                            }
                             let base_value = builder.use_var(local.var);
                             let kind_value =
                                 builder.ins().iconst(types::I32, i64::from(kind as i32));
@@ -4525,14 +4489,6 @@ pub(crate) fn emit_simple_expression(
             } else if let Some(constant) = constant_values.get(name) {
                 emit_constant_value(builder, constant)
             } else {
-                if let Some(collection_path) = name.strip_suffix(".length") {
-                    if global_path_types
-                        .get(collection_path)
-                        .is_some_and(|type_id| is_unavailable_array_length(*type_id, type_table))
-                    {
-                        return Err(unavailable_array_length_error(name));
-                    }
-                }
                 if let Some(collection_path) = name.strip_suffix(".max_length") {
                     if let Some(max_length) = global_path_types
                         .get(collection_path)

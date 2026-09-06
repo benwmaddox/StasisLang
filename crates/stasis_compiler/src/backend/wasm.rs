@@ -9,9 +9,7 @@ use crate::backend::compile_analysis::{
     compute_files_fingerprint, is_i32_numeric_type, resolve_extern_call_signatures_with,
     ConstantValue,
 };
-use crate::backend::emit::{
-    hash_global_path, is_unavailable_array_length, unavailable_array_length_error,
-};
+use crate::backend::emit::hash_global_path;
 use crate::backend::program_snapshot::ProgramSnapshot;
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
 use crate::frontend::types::{
@@ -2093,7 +2091,6 @@ fn encode_scalar_memory_store_from_stack(
 fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<TypeId, String> {
     match target {
         AssignTarget::Local(name) => {
-            reject_unavailable_array_length(context, name)?;
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 Ok(memory_binding(context, &binding.collection_path, suffix)?.type_id)
             } else if local_collection_meta(context, name).is_some() {
@@ -2115,7 +2112,6 @@ fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<Typ
             }
         }
         AssignTarget::GlobalPath(name) => {
-            reject_unavailable_array_length(context, name)?;
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 Ok(memory_binding(context, &binding.collection_path, suffix)?.type_id)
             } else if local_collection_meta(context, name).is_some() {
@@ -2370,21 +2366,6 @@ fn local_collection_meta<'a>(
         .types
         .indexed_element_type_id(binding.type_id)
         .map(|_| (binding, suffix))
-}
-
-fn reject_unavailable_array_length(context: &EncodeContext<'_>, path: &str) -> Result<(), String> {
-    let Some(collection_path) = path.strip_suffix(".length") else {
-        return Ok(());
-    };
-    let type_id = context
-        .locals
-        .get(collection_path)
-        .map(|binding| binding.type_id)
-        .or_else(|| context.global_types.get(collection_path).copied());
-    if type_id.is_some_and(|type_id| is_unavailable_array_length(type_id, context.types)) {
-        return Err(unavailable_array_length_error(path));
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -3565,7 +3546,6 @@ fn encode_expr_as(
             Ok(expected.unwrap_or(TYPE_ID_I32))
         }
         SimpleExpr::Identifier(name) => {
-            reject_unavailable_array_length(context, name)?;
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 encode_foreach_load(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
@@ -4233,6 +4213,11 @@ function render(): i32 { return 0; }
                 "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
             ),
             (
+                "conversion write",
+                "global values: i32[4]; function main(): i32 { values.length.from_f32(2.0); return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
                 "view compound write",
                 "global storage: i32[4]; function update(values: i32[]): i32 { values.length += 1; return 0; } function main(): i32 { return update(storage); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
                 "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
@@ -4529,7 +4514,7 @@ function render(): i32 { return 0; }
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
         process.upsert_file(
             "linear_state.stasis",
-            "struct Inner { value: i32; } struct State { inner: Inner; enabled: bool; values: i32[4]; } global state: State; global standalone: i32; function main(): i32 { state.inner.value = 7; state.enabled = true; state.values.length = 2; standalone = 9; return state.inner.value + state.values.length + standalone; } function tick(): i32 { return state.values.max_length; } function render(): i32 { return 0; }",
+            "struct Inner { value: i32; } struct State { inner: Inner; enabled: bool; values: i32[4]; } global state: State; global standalone: i32; function main(): i32 { state.inner.value = 7; state.enabled = true; standalone = 9; return state.inner.value + state.values.max_length + standalone; } function tick(): i32 { return state.values.max_length; } function render(): i32 { return 0; }",
         );
         process
             .compile()

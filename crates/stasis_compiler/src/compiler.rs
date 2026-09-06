@@ -2635,7 +2635,7 @@ struct Enemy { hp: i32; }
 struct State { enemies: Enemy[2]; player: Enemy; score: i32; }
 global state: State;
 function damage(enemy: Enemy): void { enemy.hp -= 1; }
-function damage_enemies(): void { state.enemies.length = 2; state.enemies[0].damage(); }
+function damage_enemies(): void { state.enemies[0].hp = 2; state.enemies[0].damage(); }
 function @effects(state.enemies) tick(): void { damage_enemies(); }
 "#,
         );
@@ -2908,6 +2908,64 @@ function @effects(allowed) tick(): void { clear(forbidden); }
             "struct State { swaps: i32; } global state: State; extern function @effects(code_swap) reject_code_swap(): void; function @effects(state, code_swap) on_code_swap(): void { state.swaps += 1; reject_code_swap(); }",
         );
         compiler.check().expect("explicit swap effects are allowed");
+    }
+
+    #[test]
+    fn check_rejects_array_length_across_statement_forms() {
+        for body in [
+            "return values.length;",
+            "values.length = 2; return 0;",
+            "values.length += 1; return 0;",
+            "values.length.from_f32(2.0); return 0;",
+            "let size: i32 = 1 + values.length; return size;",
+            "if (values.length > 0) { return 1; } return 0;",
+            "return consume(values.length);",
+        ] {
+            for parameter in ["", "values: i32[]", "values: i32[4]"] {
+                let mut compiler = Compiler::new();
+                compiler.upsert_file("length.stasis", &format!(
+                    "global values: i32[4]; function consume(n: i32): i32 {{ return n; }} function main(): i32 {{ return 0; }} function unused({parameter}): i32 {{ {body} }}"
+                ));
+                let error = compiler
+                    .check()
+                    .expect_err("array length must fail shared checking");
+                assert!(
+                    format!("{error:?}").contains("array property 'values.length' is unavailable"),
+                    "{body}: {error:?}"
+                );
+                let diagnostic = compiler
+                    .last_source_diagnostic()
+                    .expect("source diagnostic");
+                assert_eq!(diagnostic.symbol, "unused");
+                assert!(diagnostic.message.contains("values.max_length"));
+            }
+        }
+    }
+
+    #[test]
+    fn check_rejects_nested_array_length_properties() {
+        for source in [
+            "const CAP: i32 = 4; global values: i32[CAP]; function main(): i32 { return values.length; }",
+            "struct State { values: i32[4]; } global state: State; function main(): i32 { state.values.length.from_f32(2.0); return 0; }",
+            "struct State { values: i32[4]; } function unused(state: State): i32 { return state.values.length; } function main(): i32 { return 0; }",
+            "struct State { values: i32[4]; } global states: State[2]; function main(): i32 { return states[0].values.length; }",
+            "struct State { values: i32[4]; } global states: State[2]; function main(): i32 { states[0].values.length.from_f32(2.0); return 0; }",
+            "struct State { values: i32[4]; } global states: State[2]; function main(): i32 { foreach (let state in states) { return state.values.length; } return 0; }",
+        ] {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file("length.stasis", source);
+            let error = compiler.check().expect_err("nested array length must fail");
+            assert!(format!("{error:?}").contains(".max_length' for declared capacity"), "{source}: {error:?}");
+        }
+    }
+
+    #[test]
+    fn check_preserves_supported_length_properties() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("length.stasis", "struct Counter { length: i32; } global values: i32[4]; global text: ascii[8]; function size(values: Counter): i32 { values.length.from_f32(2.0); return values.length; } function main(): i32 { text.length = 2; return text.length + values.max_length; }");
+        compiler
+            .check()
+            .expect("strings and struct fields retain length");
     }
 
     #[test]

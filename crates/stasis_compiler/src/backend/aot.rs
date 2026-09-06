@@ -3957,6 +3957,11 @@ function on_code_swap(): void { return; }
                 "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
             ),
             (
+                "conversion write",
+                "global values: i32[4]; function main(): i32 { values.length.from_f32(2.0); return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
                 "view compound write",
                 "global storage: i32[4]; function update(values: i32[]): i32 { values.length += 1; return 0; } function main(): i32 { return update(storage); }",
                 "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
