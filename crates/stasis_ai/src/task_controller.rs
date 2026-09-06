@@ -29,6 +29,8 @@ impl RequestId {
 pub struct ProviderRequest {
     pub request_id: RequestId,
     pub task_id: TaskId,
+    /// Task-selected provider at admission; later task switches cannot reroute this request.
+    pub selected_provider: Option<crate::task_session::ProviderSelection>,
     pub objective: String,
     pub project_summary: String,
     pub relevant_files: Vec<String>,
@@ -269,6 +271,22 @@ impl Drop for TaskController {
 }
 
 impl TaskController {
+    /// Retained thread characters and their host budget, not model token-window occupancy.
+    pub fn thread_context_usage(&self, task: &Task) -> (usize, usize) {
+        let retained = bounded_context(
+            &task.thread,
+            self.config.max_context_entries,
+            self.config.max_context_chars,
+        );
+        (
+            retained
+                .iter()
+                .map(|entry| entry.text.chars().count())
+                .sum(),
+            self.config.max_context_chars,
+        )
+    }
+
     pub fn new<F>(provider: F) -> Self
     where
         F: Fn(ProviderRequest, Arc<AtomicBool>) -> Result<ProviderReply, String>
@@ -356,6 +374,7 @@ impl TaskController {
         let request = ProviderRequest {
             request_id,
             task_id: task_id.clone(),
+            selected_provider: task.selected_provider,
             objective: task.objective.clone(),
             project_summary: task.project_summary.clone(),
             relevant_files: task.relevant_files.clone(),
@@ -456,7 +475,7 @@ impl TaskController {
         if task.connection != ConnectionState::Connected {
             task.reconnect()?;
         }
-        let request_id = self.resubmit(task_id, false)?;
+        let request_id = self.resubmit(task_id, false, None)?;
         update_screenshots(
             &mut task,
             &self.requested_screenshots(task_id),
@@ -511,7 +530,7 @@ impl TaskController {
     ) -> Result<RequestId, TaskControllerError> {
         let mut task = session.task(task_id)?.clone();
         task.reconnect()?;
-        let request_id = self.resubmit(task_id, true)?;
+        let request_id = self.resubmit(task_id, true, task.selected_provider)?;
         update_screenshots(
             &mut task,
             &self.requested_screenshots(task_id),
@@ -528,6 +547,7 @@ impl TaskController {
         &self,
         task_id: &TaskId,
         replace_running: bool,
+        provider: Option<crate::task_session::ProviderSelection>,
     ) -> Result<RequestId, TaskControllerError> {
         let key = (self.client_id, task_id.clone());
         let mut state = lock(&self.state);
@@ -546,6 +566,9 @@ impl TaskController {
         let request_id = RequestId(self.next_request_id.fetch_add(1, Ordering::Relaxed));
         let mut request = prior.request;
         request.request_id = request_id;
+        if let Some(provider) = provider {
+            request.selected_provider = Some(provider);
+        }
         let canceled = Arc::new(AtomicBool::new(false));
         let admitted = Arc::new(AtomicBool::new(true));
         let started_at = Instant::now();
@@ -788,6 +811,7 @@ fn update_screenshots(
     requested: &[ScreenshotAttachment],
     outcome: ScreenshotOutcome<'_>,
 ) {
+    task.start_activity_recording();
     for requested_screenshot in requested {
         if requested_screenshot.provenance.task_id != task.id {
             continue;
@@ -801,6 +825,7 @@ fn update_screenshots(
         {
             continue;
         }
+        let previous = (screenshot.upload.clone(), screenshot.analysis.clone());
         match outcome {
             ScreenshotOutcome::Pending => {
                 screenshot.upload = UploadState::Pending;
@@ -821,6 +846,9 @@ fn update_screenshots(
             ScreenshotOutcome::Canceled => {
                 screenshot.analysis = ScreenshotAnalysisState::Canceled;
             }
+        }
+        if previous != (screenshot.upload.clone(), screenshot.analysis.clone()) {
+            task.record_screenshot_activity(&requested_screenshot.id);
         }
     }
 }
@@ -943,6 +971,99 @@ mod tests {
             session.append_reply(format!("reply {id}")).unwrap();
         }
         session
+    }
+
+    #[test]
+    fn provider_selection_is_snapshotted_per_request_and_task() {
+        let (sent, received) = mpsc::channel();
+        let controller = TaskController::new(move |request, _| {
+            sent.send((request.task_id, request.selected_provider))
+                .unwrap();
+            Ok(ProviderReply::new("complete"))
+        });
+        let mut session = session(&["one", "two"]);
+        let first = crate::task_session::ProviderSelection::Codex;
+        let second = crate::task_session::ProviderSelection::OpenRouter;
+        session
+            .task_mut("one")
+            .unwrap()
+            .select_provider(first)
+            .unwrap();
+        session
+            .task_mut("two")
+            .unwrap()
+            .select_provider(second)
+            .unwrap();
+        controller.send(&session, &TaskId::new("one")).unwrap();
+        session
+            .task_mut("one")
+            .unwrap()
+            .select_provider(second)
+            .unwrap();
+        controller.send(&session, &TaskId::new("two")).unwrap();
+        let mut snapshots = BTreeMap::new();
+        for _ in 0..2 {
+            let (task, provider) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+            snapshots.insert(task, provider);
+        }
+        assert_eq!(snapshots[&TaskId::new("one")], Some(first));
+        assert_eq!(snapshots[&TaskId::new("two")], Some(second));
+    }
+
+    #[test]
+    fn reconnect_uses_new_provider_after_failure_without_changing_prior_payload() {
+        use crate::task_session::ProviderSelection;
+        let (sent, received) = mpsc::channel();
+        let controller = TaskController::new(move |request, _| {
+            sent.send(request.clone()).unwrap();
+            Err("provider unavailable".into())
+        });
+        let mut session = session(&["one"]);
+        let id = TaskId::new("one");
+        session
+            .task_mut(&id)
+            .unwrap()
+            .select_provider(ProviderSelection::Codex)
+            .unwrap();
+        controller.send(&session, &id).unwrap();
+        wait_for(&controller, &mut session);
+        let prior = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            session.task(&id).unwrap().connection,
+            ConnectionState::Disconnected
+        );
+        session
+            .task_mut(&id)
+            .unwrap()
+            .select_provider(ProviderSelection::OpenRouter)
+            .unwrap();
+        controller.reconnect(&mut session, &id).unwrap();
+        wait_for(&controller, &mut session);
+        let next = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(next.selected_provider, Some(ProviderSelection::OpenRouter));
+        assert_eq!(prior.selected_provider, Some(ProviderSelection::Codex));
+        assert_ne!(next.request_id, prior.request_id);
+        assert_eq!(next.context, prior.context);
+        assert_eq!(next.task_id, prior.task_id);
+    }
+
+    #[test]
+    fn thread_meter_matches_retained_unicode_context_budget() {
+        let controller = TaskController::with_config(
+            |_, _| Ok(ProviderReply::new("complete")),
+            TaskControllerConfig {
+                workers: 1,
+                max_context_entries: 2,
+                max_context_chars: 5,
+            },
+        )
+        .unwrap();
+        let mut session = session(&["one"]);
+        session.append_reply("abc\u{e9}ef").unwrap();
+        assert_eq!(
+            controller.thread_context_usage(session.active_task().unwrap()),
+            (5, 5)
+        );
     }
 
     fn wait_for(
@@ -1084,6 +1205,19 @@ mod tests {
             task.screenshots[&crate::ScreenshotId::new("late")].analysis,
             ScreenshotAnalysisState::Pending
         );
+        let completed: Vec<_> = task
+            .activity
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                crate::task_session::ActivityKind::Attachment {
+                    screenshot_id,
+                    analysis: ScreenshotAnalysisState::Completed,
+                    ..
+                } => Some(screenshot_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completed, ["one-shot"]);
     }
 
     #[test]

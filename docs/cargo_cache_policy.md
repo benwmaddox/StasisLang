@@ -11,7 +11,7 @@ The policy separates those cases:
 - The wrapper derives `build/codex-cargo-target` from Git's common directory, so every linked worktree of the same repository resolves the same cache even when the worktrees live outside the main checkout.
 - The wrapper sets `CARGO_INCREMENTAL=0` only in the Cargo child environment. An explicit `CARGO_TARGET_DIR` remains authoritative for tests or platform builds that require isolation.
 - The noninteractive `tools/validate_repo.sh` gate routes its Cargo phase through the same wrapper, preventing mandatory validation in each worktree from rebuilding a private target.
-- The repository pre-commit hook uses the wrapper to force-format staged Stasis paths before its compiler-backed staged-format verification.
+- The repository pre-commit hook uses the wrapper to force-format staged Stasis paths. It blocks when formatting fails or changes files that must be reviewed and staged; compiler-backed checks belong in explicit validation and CI rather than the commit hook.
 - CI sets `CARGO_INCREMENTAL=0` because hosted runners are ephemeral and do not reuse local incremental state.
 
 Cargo's target locking makes concurrent commands safe. They may wait when they need the same artifact, but they must not corrupt the shared cache. Do not run cleanup while Cargo processes are active.

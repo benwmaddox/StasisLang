@@ -1,10 +1,16 @@
+mod semantic_diff;
+mod semantic_revisions;
+
+use semantic_revisions::proposal_revisions;
+
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis_ai::task_session::{
-    ActionState, FallbackState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
-    ScreenshotAnalysisState, ShortcutMapper, TaskId, TaskSession, TaskSessionCommand,
-    ThreadEntryKind, UploadState,
+    ActionState, ActivityKind, ConnectionState, FallbackState, ImageHandoffState, ImageReviewState,
+    Key, KeyChord, Modifiers, ProviderSelection, ProviderState, RoutingState,
+    ScreenshotAnalysisState, ShortcutMapper, TaskId, TaskLifecycle, TaskSession,
+    TaskSessionCommand, UploadState, ValidationStatus,
 };
 use stasis_ai::{
     action_id_for_tool, run_agent_with_profile, AgentEvent, AgentProfile, ProviderActionProposal,
@@ -13,7 +19,7 @@ use stasis_ai::{
 };
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -33,6 +39,42 @@ enum FocusArea {
     Palette,
 }
 const EMPTY_TASK: &str = "Create a task";
+const COMPACT_WIDTH: f32 = 760.0;
+const RAIL_WIDTH: f32 = 224.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorLayout {
+    Compact,
+    Wide,
+}
+
+impl EditorLayout {
+    fn for_width(width: f32) -> Self {
+        if width < COMPACT_WIDTH {
+            Self::Compact
+        } else {
+            Self::Wide
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrimaryAction {
+    label: &'static str,
+    command: TaskSessionCommand,
+    enabled: bool,
+    disabled_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TimelineAction {
+    Accept(String, String),
+    Reject(String, String),
+    Apply(String, String),
+    ApproveImage(String, String),
+    RejectImage(String, String),
+    Import(String, String),
+}
 
 #[derive(Default)]
 struct ProposalTools {
@@ -245,12 +287,24 @@ fn provider_reply_usage(usage: Option<&Value>) -> ProviderUsage {
     }
 }
 
+fn selected_provider_config(
+    selection: Option<ProviderSelection>,
+) -> Result<ProviderConfig, String> {
+    match selection {
+        Some(ProviderSelection::Codex) => Ok(ProviderConfig::Codex),
+        Some(ProviderSelection::OpenRouter) => Ok(ProviderConfig::OpenRouter(
+            stasis_ai::OpenRouterConfig::from_env()?,
+        )),
+        None => ProviderConfig::from_env(),
+    }
+}
+
 fn run_reply_provider(
     request: ProviderRequest,
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
 ) -> Result<ProviderReply, String> {
-    let config = ProviderConfig::from_env()?;
+    let config = selected_provider_config(request.selected_provider)?;
     let effective_reasoning_effort = (config.provider_name() == "openrouter").then_some("low");
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
     let mut provider = config
@@ -377,8 +431,14 @@ enum EditorIntent {
 
 #[derive(Debug)]
 enum HostOperation {
-    Apply { action_id: String, payload: Value },
-    Test { paths: Vec<String>, run_id: u64 },
+    Apply {
+        action_id: String,
+        preview: super::DesktopSemanticPreview,
+    },
+    Test {
+        paths: Vec<String>,
+        run_id: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -425,7 +485,7 @@ fn record_focused_test_failure(
         run_id,
         stasis_ai::FocusedTestResult::failed(summary.clone()),
     )?;
-    task.append_result(format!(
+    task.append_host_result(format!(
         "Focused tests failed: {summary}. Fix the reported failure and rerun."
     ))
 }
@@ -457,8 +517,8 @@ impl HostExecutor {
                     Err("operation canceled before execution".to_string())
                 } else {
                     let operation_result = match &request.operation {
-                        HostOperation::Apply { payload, .. } => {
-                            super::desktop_apply_semantic_batch(&project_root, payload.clone())
+                        HostOperation::Apply { preview, .. } => {
+                            super::desktop_apply_semantic_preview(&project_root, preview)
                         }
                         HostOperation::Test { paths, .. } => {
                             super::desktop_run_focused_tests(&project_root, paths)
@@ -557,6 +617,132 @@ struct DesktopEditor {
     capture_result_tx: mpsc::Sender<CaptureResult>,
     next_capture: u64,
     preview_texture: Option<(String, egui::TextureHandle)>,
+    asset_textures: BTreeMap<(String, String), Option<egui::TextureHandle>>,
+    semantic_job: Option<SemanticPreviewJob>,
+    next_semantic_check: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SemanticPreviewKey {
+    task: String,
+    action: String,
+    revision: usize,
+    payload_hash: String,
+}
+
+impl SemanticPreviewKey {
+    fn new(task: &str, action: &str, revision: usize, payload: &Value) -> Self {
+        Self {
+            task: task.into(),
+            action: action.into(),
+            revision,
+            payload_hash: format!("{:x}", Sha256::digest(payload.to_string().as_bytes())),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SemanticPreviewRecord {
+    result: Option<Result<super::DesktopSemanticPreview, String>>,
+    stale: bool,
+}
+
+struct SemanticPreviewJob {
+    key: SemanticPreviewKey,
+    result: Receiver<Result<super::DesktopSemanticPreview, String>>,
+    worker: thread::JoinHandle<()>,
+}
+
+fn refresh_semantic_preview_staleness(
+    records: &mut BTreeMap<SemanticPreviewKey, SemanticPreviewRecord>,
+    next_check: &mut Instant,
+    now: Instant,
+    fingerprint: impl FnOnce() -> Result<String, String>,
+) {
+    if now < *next_check
+        || !records
+            .values()
+            .any(|record| !record.stale && matches!(&record.result, Some(Ok(_))))
+    {
+        return;
+    }
+    *next_check = now + Duration::from_millis(500);
+    let current = fingerprint();
+    for record in records.values_mut() {
+        if let Some(Ok(preview)) = &record.result {
+            record.stale |= current
+                .as_ref()
+                .map_or(true, |hash| hash != &preview.source_fingerprint);
+        }
+    }
+}
+
+impl DesktopEditor {
+    fn poll_semantic_previews(&mut self) {
+        if let Some(job) = &self.semantic_job {
+            let result = match job.result.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Disconnected) => Some(Err("Preview worker stopped".into())),
+                Err(TryRecvError::Empty) => None,
+            };
+            if let Some(result) = result {
+                let job = self.semantic_job.take().expect("pending preview");
+                let _ = job.worker.join();
+                if let Some(record) = self.state.semantic_previews.get_mut(&job.key) {
+                    record.result = Some(result);
+                }
+            }
+        }
+        // Retain each observed revision at its original position in the thread.
+        let mut queued = Vec::new();
+        for task in self.state.session.tasks() {
+            for action in task.actions.values() {
+                for proposal in proposal_revisions(action) {
+                    let Some(payload) = proposal.payload else {
+                        continue;
+                    };
+                    let key = SemanticPreviewKey::new(
+                        task.id.as_str(),
+                        action.id.as_str(),
+                        proposal.revision,
+                        payload,
+                    );
+                    let can_plan =
+                        proposal.current && matches!(proposal.state, ActionState::Proposed);
+                    self.state.semantic_previews.entry(key.clone()).or_insert_with(|| SemanticPreviewRecord {
+                        result: if can_plan { None } else {
+                            Some(Err("No retained preview for this proposal; it will not be regenerated".into()))
+                        },
+                        stale: false,
+                    });
+                    if can_plan && self.state.semantic_previews[&key].result.is_none() {
+                        queued.push((key, payload.clone()));
+                    }
+                }
+            }
+        }
+        let project_root = &self.project_root;
+        refresh_semantic_preview_staleness(
+            &mut self.state.semantic_previews,
+            &mut self.next_semantic_check,
+            Instant::now(),
+            move || super::desktop_source_fingerprint(project_root, &[]),
+        );
+        if self.semantic_job.is_none() {
+            if let Some((key, payload)) = queued.into_iter().next() {
+                let root = self.project_root.clone();
+                let (tx, result) = mpsc::channel();
+                let worker = thread::spawn(move || {
+                    let _ = tx.send(super::desktop_preview_semantic_batch(&root, payload));
+                });
+                self.semantic_job = Some(SemanticPreviewJob {
+                    key,
+                    result,
+                    worker,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -770,7 +956,10 @@ impl DesktopEditor {
         let provider_root = project_root.clone();
         let (capture_result_tx, capture_results) = mpsc::channel();
         Self {
-            state: EditorState::default(),
+            state: EditorState {
+                project_root: Some(project_root.clone()),
+                ..EditorState::default()
+            },
             controller: TaskController::new(move |request, canceled| {
                 run_reply_provider(request, canceled, provider_root.clone())
             }),
@@ -787,6 +976,9 @@ impl DesktopEditor {
             capture_result_tx,
             next_capture: 1,
             preview_texture: None,
+            asset_textures: BTreeMap::new(),
+            semantic_job: None,
+            next_semantic_check: Instant::now(),
         }
     }
 
@@ -814,7 +1006,6 @@ impl DesktopEditor {
 
     fn flush_intents(&mut self) {
         let intents = std::mem::take(&mut self.state.intents);
-        let mut pending = Vec::with_capacity(intents.len());
         for intent in intents {
             match intent {
                 EditorIntent::SendReply(task, text) => {
@@ -822,16 +1013,24 @@ impl DesktopEditor {
                     let mut candidate = self.state.session.clone();
                     let accepted = candidate
                         .task_mut(&task)
-                        .and_then(|task| task.append_reply(&text))
+                        .and_then(|task| task.append_user_message(&text))
                         .map_err(|error| error.to_string())
                         .and_then(|()| {
-                            if let Ok(config) = ProviderConfig::from_env() {
-                                candidate
-                                    .task_mut(&task)
-                                    .and_then(|task| {
-                                        task.set_provider_state(configured_provider_state(&config))
-                                    })
-                                    .map_err(|error| error.to_string())?;
+                            let needs_provider = candidate
+                                .task(&task)
+                                .map(|task| task.provider.provider.is_none())
+                                .unwrap_or(false);
+                            if needs_provider {
+                                if let Ok(config) = ProviderConfig::from_env() {
+                                    candidate
+                                        .task_mut(&task)
+                                        .and_then(|task| {
+                                            task.set_provider_state(configured_provider_state(
+                                                &config,
+                                            ))
+                                        })
+                                        .map_err(|error| error.to_string())?;
+                                }
                             }
                             let task = candidate
                                 .task_mut(&task)
@@ -883,27 +1082,34 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::Apply(task, action) => {
+                    let accepted = self
+                        .state
+                        .session
+                        .task(task.as_str())
+                        .ok()
+                        .and_then(|task| task.actions.get(action.as_str()))
+                        .is_some_and(|action| matches!(action.state, ActionState::Accepted));
+                    if !accepted {
+                        self.state.notice =
+                            Some("Only the accepted action revision can be applied".into());
+                        continue;
+                    }
                     if !self.busy_tasks.insert(task.clone()) {
                         self.state.notice = Some(format!(
                             "An apply or focused-test operation is already running for {task}."
                         ));
                         continue;
                     }
-                    let payload = self
+                    let submitted = self
                         .state
-                        .session
-                        .task(task.as_str())
-                        .ok()
-                        .and_then(|task| task.actions.get(action.as_str()))
-                        .and_then(|action| action.payload.clone());
-                    let submitted = payload
-                        .ok_or_else(|| "accepted action has no semantic edit payload".to_string())
-                        .and_then(|payload| {
+                        .reviewed_preview(&task, &action)
+                        .cloned()
+                        .and_then(|preview| {
                             self.host.submit(HostRequest {
                                 task_id: task.clone(),
                                 operation: HostOperation::Apply {
                                     action_id: action.clone(),
-                                    payload,
+                                    preview,
                                 },
                                 source_before: None,
                             })
@@ -914,7 +1120,7 @@ impl DesktopEditor {
                         if let Ok(task_state) = self.state.session.task_mut(task.as_str()) {
                             let _ =
                                 task_state.mark_action_for_repair(action.as_str(), reason.clone());
-                            let _ = task_state.append_result(format!(
+                            let _ = task_state.append_host_result(format!(
                                 "Could not apply {action}: {reason}. Repair this proposal and retry."
                             ));
                         }
@@ -985,11 +1191,16 @@ impl DesktopEditor {
                         Err(error) => self.state.notice = Some(error),
                     }
                 }
+                EditorIntent::GenerateImage(task) | EditorIntent::ImportImage(task, _) => {
+                    let message = "Image generation and asset import are unavailable in the desktop editor. No asset was generated or imported.";
+                    if let Ok(task) = self.state.session.task_mut(task.as_str()) {
+                        let _ = task.append_host_result(message);
+                    }
+                    self.state.notice = Some(message.into());
+                }
                 EditorIntent::Screenshot(task) => self.start_capture(TaskId::new(task)),
-                intent => pending.push(intent),
             }
         }
-        self.state.intents = pending;
     }
 
     fn start_capture(&mut self, task_id: TaskId) {
@@ -1001,7 +1212,13 @@ impl DesktopEditor {
             self.state.notice = Some("Ignored screenshot request from an inactive task.".into());
             return;
         }
-        let config = match ProviderConfig::from_env() {
+        let config = match self
+            .state
+            .session
+            .task(&task_id)
+            .map_err(|error| error.to_string())
+            .and_then(|task| selected_provider_config(task.selected_provider))
+        {
             Ok(config) => config,
             Err(error) => {
                 self.state.notice = Some(format!("Cannot attach screenshot: {error}"));
@@ -1183,7 +1400,7 @@ impl DesktopEditor {
                                     summary.clone(),
                                 ))?;
                             }
-                            task.append_result(format!(
+                            task.append_host_result(format!(
                                 "Applied {action_id}: {summary}\nValidation receipt: {receipt_summary}"
                             ))?;
                             Ok(())
@@ -1209,7 +1426,7 @@ impl DesktopEditor {
                     if task.lifecycle == stasis_ai::TaskLifecycle::Active {
                         let _ =
                             task.mark_action_for_repair(action_id.as_str(), repair_reason.clone());
-                        let _ = task.append_result(format!(
+                        let _ = task.append_host_result(format!(
                             "Could not apply {action_id}: {repair_reason}. Repair this proposal and retry."
                         ));
                     }
@@ -1226,7 +1443,7 @@ impl DesktopEditor {
                             stasis_ai::FocusedTestResult::passed(summary.clone()),
                         )
                         .and_then(|()| {
-                            task.append_result(format!(
+                            task.append_host_result(format!(
                                 "Focused tests passed: {summary}. Validation receipt recorded."
                             ))
                         });
@@ -1257,24 +1474,48 @@ impl DesktopEditor {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.heading("AI tasks");
+        ui.add_space(8.0);
         ui.label(
-            RichText::new(self.project_root.display().to_string())
-                .small()
-                .weak(),
+            RichText::new("STASIS")
+                .size(11.0)
+                .strong()
+                .color(muted_text()),
         );
-        ui.horizontal(|ui| {
-            let objective = ui.text_edit_singleline(&mut self.state.objective);
-            if self.state.focus == FocusArea::Tasks {
-                objective.request_focus();
-            }
-            let submitted =
-                objective.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.button("Create").clicked() || submitted {
-                self.state.notice = self.state.create_task().err();
-            }
-        });
-        ui.separator();
+        ui.label(
+            RichText::new(project_name(&self.project_root))
+                .size(17.0)
+                .strong(),
+        );
+        ui.label(
+            RichText::new("Stasis project")
+                .size(12.0)
+                .color(muted_text()),
+        );
+        ui.add_space(16.0);
+        ui.label(
+            RichText::new("NEW TASK")
+                .size(10.0)
+                .strong()
+                .color(muted_text()),
+        );
+        let objective = ui.add_sized(
+            [ui.available_width(), 34.0],
+            egui::TextEdit::singleline(&mut self.state.objective).hint_text("What should change?"),
+        );
+        if self.state.focus == FocusArea::Tasks && self.state.focus_pending {
+            objective.request_focus();
+            self.state.focus_pending = false;
+        }
+        let submitted =
+            objective.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let create = ui.add_sized(
+            [ui.available_width(), 34.0],
+            egui::Button::new(RichText::new("+  Create task").strong()),
+        );
+        if create.clicked() || submitted {
+            self.state.notice = self.state.create_task().err();
+        }
+        ui.add_space(18.0);
         let active = self.state.session.active_task_id().map(|id| id.to_string());
         let cards = self
             .state
@@ -1292,27 +1533,317 @@ impl DesktopEditor {
                 )
             })
             .collect::<Vec<_>>();
-        for (id, objective, lifecycle, connection, elapsed, cost, retries) in cards {
+        let queued = cards.len().saturating_sub(usize::from(active.is_some()));
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("TASKS")
+                    .size(10.0)
+                    .strong()
+                    .color(muted_text()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(queued.to_string())
+                        .size(11.0)
+                        .color(muted_text()),
+                );
+            });
+        });
+        ui.add_space(4.0);
+        for (id, objective, lifecycle, connection, _elapsed, _cost, _retries) in cards {
             let request = self.controller.snapshot(&TaskId::new(&id));
             let request_status = request
                 .as_ref()
-                .map(|snapshot| format!(" | {:?}", snapshot.state))
-                .unwrap_or_default();
-            let retries = request
-                .as_ref()
-                .map_or(retries, |snapshot| snapshot.retry_count);
-            let label = format!(
-                "{objective}\n{lifecycle:?} | {connection:?}{request_status} | {elapsed}ms | ${:.4} | retry {retries}",
-                cost as f64 / 1_000_000.0
-            );
-            if ui
-                .selectable_label(active.as_deref() == Some(&id), label)
-                .clicked()
-            {
+                .map(|snapshot| format!("{:?}", snapshot.state).to_ascii_lowercase());
+            let selected = active.as_deref() == Some(&id);
+            let state = request_status.unwrap_or_else(|| {
+                if !selected && lifecycle == TaskLifecycle::Active {
+                    "queued".into()
+                } else {
+                    task_state_label(lifecycle, connection)
+                }
+            });
+            let fill = if selected {
+                selected_fill()
+            } else {
+                panel_fill()
+            };
+            let response = egui::Frame::none()
+                .fill(fill)
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    if selected { accent() } else { border() },
+                ))
+                .rounding(7.0)
+                .inner_margin(egui::Margin::symmetric(10.0, 9.0))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(RichText::new(&objective).size(13.0).strong());
+                    ui.label(RichText::new(state).size(11.0).color(if selected {
+                        accent()
+                    } else {
+                        muted_text()
+                    }));
+                })
+                .response
+                .interact(egui::Sense::click());
+            if response.clicked() {
                 self.state.notice = self.state.switch_task(&id).err().map(|e| e.to_string());
             }
+            response.on_hover_text(format!("Switch to {objective}"));
+            ui.add_space(6.0);
         }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            ui.label(
+                RichText::new("Ctrl+K  Command palette")
+                    .size(11.0)
+                    .color(muted_text()),
+            );
+        });
     }
+}
+
+fn project_name(root: &std::path::Path) -> String {
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Stasis project")
+        .to_string()
+}
+
+fn task_state_label(lifecycle: TaskLifecycle, connection: ConnectionState) -> String {
+    if connection == ConnectionState::Disconnected {
+        return "disconnected".into();
+    }
+    match lifecycle {
+        TaskLifecycle::Active => "current".into(),
+        TaskLifecycle::Canceled => "canceled".into(),
+        TaskLifecycle::Completed => "done".into(),
+    }
+}
+
+fn canvas_fill() -> Color32 {
+    Color32::from_rgb(11, 16, 23)
+}
+fn rail_fill() -> Color32 {
+    Color32::from_rgb(9, 14, 20)
+}
+fn panel_fill() -> Color32 {
+    Color32::from_rgb(17, 24, 34)
+}
+fn raised_fill() -> Color32 {
+    Color32::from_rgb(21, 30, 42)
+}
+fn selected_fill() -> Color32 {
+    Color32::from_rgb(21, 38, 55)
+}
+fn border() -> Color32 {
+    Color32::from_rgb(38, 49, 63)
+}
+fn muted_text() -> Color32 {
+    Color32::from_rgb(146, 158, 174)
+}
+fn accent() -> Color32 {
+    Color32::from_rgb(77, 226, 164)
+}
+fn warning() -> Color32 {
+    Color32::from_rgb(245, 183, 78)
+}
+fn failure() -> Color32 {
+    Color32::from_rgb(242, 112, 118)
+}
+
+fn configure_visuals(context: &egui::Context) {
+    let mut style = (*context.style()).clone();
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(12.0, 7.0);
+    style.spacing.interact_size.y = 30.0;
+    style.visuals = egui::Visuals::dark();
+    style.visuals.panel_fill = canvas_fill();
+    style.visuals.window_fill = panel_fill();
+    style.visuals.extreme_bg_color = Color32::from_rgb(7, 11, 17);
+    style.visuals.faint_bg_color = raised_fill();
+    style.visuals.widgets.inactive.bg_fill = raised_fill();
+    style.visuals.widgets.inactive.weak_bg_fill = raised_fill();
+    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, border());
+    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(29, 42, 56);
+    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(29, 42, 56);
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent());
+    style.visuals.widgets.active.bg_fill = selected_fill();
+    style.visuals.widgets.active.weak_bg_fill = selected_fill();
+    style.visuals.selection.bg_fill = Color32::from_rgb(31, 100, 82);
+    context.set_style(style);
+}
+
+fn status_chip(ui: &mut egui::Ui, label: &str, color: Color32) {
+    egui::Frame::none()
+        .fill(color.gamma_multiply(0.16))
+        .stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.6)))
+        .rounding(12.0)
+        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+        .show(ui, |ui| {
+            ui.label(RichText::new(label).size(10.0).strong().color(color));
+        });
+}
+
+fn validation_label_ui(status: &ValidationStatus) -> &'static str {
+    match status {
+        ValidationStatus::NotRun => "not tested",
+        ValidationStatus::Running => "testing",
+        ValidationStatus::Passed { .. } => "passed",
+        ValidationStatus::Failed { .. } => "failed",
+    }
+}
+
+fn validation_color(status: &ValidationStatus) -> Color32 {
+    match status {
+        ValidationStatus::Passed { .. } => accent(),
+        ValidationStatus::Failed { .. } => failure(),
+        ValidationStatus::Running => warning(),
+        ValidationStatus::NotRun => muted_text(),
+    }
+}
+
+fn task_header_status(task: &stasis_ai::Task) -> (&'static str, Color32) {
+    match task.lifecycle {
+        TaskLifecycle::Canceled => return ("canceled", failure()),
+        TaskLifecycle::Completed => return ("done", accent()),
+        TaskLifecycle::Active => {}
+    }
+    if task.connection == ConnectionState::Disconnected {
+        return ("disconnected", failure());
+    }
+    if task.validation.is_running() {
+        return ("testing", warning());
+    }
+    if task
+        .actions
+        .values()
+        .any(|action| matches!(action.state, ActionState::NeedsRepair { .. }))
+    {
+        return ("needs repair", failure());
+    }
+    (
+        validation_label_ui(&task.validation),
+        validation_color(&task.validation),
+    )
+}
+
+fn status_color(task: &stasis_ai::Task) -> Color32 {
+    task_header_status(task).1
+}
+
+fn action_state_label(state: &ActionState) -> &'static str {
+    match state {
+        ActionState::Proposed => "proposed",
+        ActionState::Accepted => "accepted",
+        ActionState::Applied => "applied",
+        ActionState::Rejected { .. } => "rejected",
+        ActionState::NeedsRepair { .. } => "needs repair",
+    }
+}
+
+fn action_state_color(state: &ActionState) -> Color32 {
+    match state {
+        ActionState::Applied => accent(),
+        ActionState::Rejected { .. } | ActionState::NeedsRepair { .. } => failure(),
+        ActionState::Accepted => Color32::from_rgb(104, 185, 255),
+        ActionState::Proposed => warning(),
+    }
+}
+
+fn status_for_upload(status: &UploadState) -> Color32 {
+    match status {
+        UploadState::Uploaded => accent(),
+        UploadState::Failed { .. } => failure(),
+        UploadState::Pending => warning(),
+    }
+}
+
+fn status_for_analysis(status: &ScreenshotAnalysisState) -> Color32 {
+    match status {
+        ScreenshotAnalysisState::Completed => accent(),
+        ScreenshotAnalysisState::Failed { .. } => failure(),
+        ScreenshotAnalysisState::Pending => warning(),
+        ScreenshotAnalysisState::Canceled => muted_text(),
+    }
+}
+
+fn image_review_color(status: &ImageReviewState) -> Color32 {
+    match status {
+        ImageReviewState::Approved => accent(),
+        ImageReviewState::Rejected { .. } => failure(),
+        ImageReviewState::Pending => warning(),
+    }
+}
+
+fn image_handoff_color(status: &ImageHandoffState) -> Color32 {
+    match status {
+        ImageHandoffState::Imported => accent(),
+        ImageHandoffState::Rejected { .. } => failure(),
+        ImageHandoffState::Pending => warning(),
+    }
+}
+
+fn render_compiler_changes(ui: &mut egui::Ui, receipt: &Value) {
+    let Some(changes) = receipt
+        .pointer("/plan/changed_files")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    ui.add_space(7.0);
+    ui.label(
+        RichText::new(format!(
+            "Compiler plan / {} changed file{}",
+            changes.len(),
+            if changes.len() == 1 { "" } else { "s" }
+        ))
+        .size(12.0)
+        .strong()
+        .color(accent()),
+    );
+    for change in changes {
+        let file = change
+            .get("file")
+            .and_then(Value::as_str)
+            .unwrap_or("source");
+        let before = change.get("before_source").and_then(Value::as_str);
+        let after = change.get("after_source").and_then(Value::as_str);
+        ui.collapsing(file, |ui| {
+            if let (Some(before), Some(after)) = (before, after) {
+                egui::ScrollArea::horizontal()
+                    .id_source(("compiler-diff", file))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Before").size(10.0).strong().color(failure()));
+                        render_numbered_source(ui, before, failure());
+                        ui.label(RichText::new("After").size(10.0).strong().color(accent()));
+                        render_numbered_source(ui, after, accent());
+                    });
+            } else {
+                ui.label(
+                    RichText::new("Exact source is unavailable in this receipt.")
+                        .size(11.0)
+                        .color(muted_text()),
+                );
+            }
+        });
+    }
+}
+
+fn render_numbered_source(ui: &mut egui::Ui, source: &str, color: Color32) {
+    let text = source
+        .lines()
+        .enumerate()
+        .map(|(line, text)| format!("{:>4}  {text}", line + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    egui::Frame::none()
+        .fill(color.gamma_multiply(0.08))
+        .inner_margin(egui::Margin::same(7.0))
+        .show(ui, |ui| {
+            ui.add(egui::Label::new(RichText::new(text).monospace().size(11.0)).selectable(true));
+        });
 }
 
 #[derive(Debug)]
@@ -1320,7 +1851,7 @@ struct EditorState {
     session: TaskSession,
     shortcuts: ShortcutMapper,
     focus: FocusArea,
-    task_fraction: f32,
+    focus_pending: bool,
     objective: String,
     reply: String,
     palette_query: String,
@@ -1332,6 +1863,9 @@ struct EditorState {
     intents: Vec<EditorIntent>,
     notice: Option<String>,
     preview: Option<ScreenshotPreview>,
+    cancel_confirmation: Option<String>,
+    project_root: Option<PathBuf>,
+    semantic_previews: BTreeMap<SemanticPreviewKey, SemanticPreviewRecord>,
 }
 
 impl Default for EditorState {
@@ -1340,7 +1874,7 @@ impl Default for EditorState {
             session: TaskSession::new(),
             shortcuts: ShortcutMapper::new(),
             focus: FocusArea::Tasks,
-            task_fraction: 0.42,
+            focus_pending: true,
             objective: String::new(),
             reply: String::new(),
             palette_query: String::new(),
@@ -1352,24 +1886,219 @@ impl Default for EditorState {
             intents: Vec::new(),
             notice: None,
             preview: None,
+            cancel_confirmation: None,
+            project_root: None,
+            semantic_previews: BTreeMap::new(),
         }
     }
 }
 
 impl EditorState {
-    fn pane_widths(&self, available: f32) -> (f32, f32) {
-        let task = if available <= 680.0 {
-            (available * self.task_fraction).clamp(0.0, available)
-        } else {
-            (available * self.task_fraction).clamp(320.0, available - 360.0)
-        };
-        (task, available - task)
+    fn reviewed_preview(
+        &self,
+        task: &str,
+        action: &str,
+    ) -> Result<&super::DesktopSemanticPreview, String> {
+        self.check_preview(task, action, true)
     }
 
-    fn set_task_width(&mut self, width: f32, available: f32) {
-        if available > 0.0 {
-            self.task_fraction = width / available;
-            self.task_fraction = self.pane_widths(available).0 / available;
+    fn check_preview(
+        &self,
+        task: &str,
+        action: &str,
+        read_sources: bool,
+    ) -> Result<&super::DesktopSemanticPreview, String> {
+        let action = self
+            .session
+            .task(task)
+            .map_err(|e| e.to_string())?
+            .actions
+            .get(action)
+            .ok_or_else(|| "Action no longer exists".to_string())?;
+        let payload = action
+            .payload
+            .as_ref()
+            .ok_or_else(|| "Action has no semantic payload".to_string())?;
+        let key = SemanticPreviewKey::new(
+            task,
+            action.id.as_str(),
+            proposal_revisions(action).len() - 1,
+            payload,
+        );
+        let record = self
+            .semantic_previews
+            .get(&key)
+            .ok_or_else(|| "Review the semantic preview first".to_string())?;
+        let preview = record
+            .result
+            .as_ref()
+            .ok_or_else(|| "Semantic preview is still loading".to_string())?
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let root = self
+            .project_root
+            .as_ref()
+            .ok_or_else(|| "Project is unavailable".to_string())?;
+        if record.stale
+            || preview.payload != *payload
+            || (read_sources
+                && super::desktop_source_fingerprint(root, &[])? != preview.source_fingerprint)
+        {
+            return Err(
+                "Stale preview: sources changed. Request a new proposal for the current sources."
+                    .into(),
+            );
+        }
+        if preview.plan.changed_files.is_empty() {
+            return Err("This revision has no source changes".into());
+        }
+        Ok(preview)
+    }
+
+    fn review_command_enabled(&self, command: &TaskSessionCommand) -> bool {
+        let accepted = match command {
+            TaskSessionCommand::AcceptAction => false,
+            TaskSessionCommand::ApplyAction => true,
+            _ => return true,
+        };
+        let Ok(task) = self.session.active_task() else {
+            return false;
+        };
+        task.actions
+            .values()
+            .find(|action| {
+                if accepted {
+                    matches!(action.state, ActionState::Accepted)
+                } else {
+                    matches!(action.state, ActionState::Proposed)
+                }
+            })
+            .is_some_and(|action| {
+                self.check_preview(task.id.as_str(), action.id.as_str(), false)
+                    .is_ok()
+            })
+    }
+
+    fn primary_action(&self, busy: bool) -> PrimaryAction {
+        let Ok(task) = self.session.active_task() else {
+            return PrimaryAction {
+                label: "Create task",
+                command: TaskSessionCommand::NewTask,
+                enabled: !self.objective.trim().is_empty(),
+                disabled_reason: Some("Enter a task objective in the project rail.".into()),
+            };
+        };
+        if task.connection == ConnectionState::Disconnected {
+            return PrimaryAction {
+                label: "Reconnect",
+                command: TaskSessionCommand::Reconnect,
+                enabled: task.lifecycle == TaskLifecycle::Active,
+                disabled_reason: Some("This task is closed.".into()),
+            };
+        }
+        if task.lifecycle != TaskLifecycle::Active {
+            return PrimaryAction {
+                label: "Task closed",
+                command: TaskSessionCommand::MarkDone,
+                enabled: false,
+                disabled_reason: Some(
+                    match task.lifecycle {
+                        TaskLifecycle::Canceled => "Canceled tasks are read-only.",
+                        TaskLifecycle::Completed => "This task is complete.",
+                        TaskLifecycle::Active => unreachable!(),
+                    }
+                    .into(),
+                ),
+            };
+        }
+        if busy {
+            return PrimaryAction {
+                label: "Cancel task",
+                command: TaskSessionCommand::Cancel,
+                enabled: true,
+                disabled_reason: None,
+            };
+        }
+        if task
+            .actions
+            .values()
+            .any(|action| matches!(action.state, ActionState::Proposed))
+        {
+            return PrimaryAction {
+                label: "Accept proposal",
+                command: TaskSessionCommand::AcceptAction,
+                enabled: true,
+                disabled_reason: None,
+            };
+        }
+        if task
+            .actions
+            .values()
+            .any(|action| matches!(action.state, ActionState::Accepted))
+        {
+            return PrimaryAction {
+                label: "Apply change",
+                command: TaskSessionCommand::ApplyAction,
+                enabled: true,
+                disabled_reason: None,
+            };
+        }
+        if task
+            .actions
+            .values()
+            .any(|action| matches!(action.state, ActionState::NeedsRepair { .. }))
+        {
+            let enabled = !self.reply.trim().is_empty();
+            return PrimaryAction {
+                label: "Request repair",
+                command: TaskSessionCommand::SendReply,
+                enabled,
+                disabled_reason: (!enabled).then(|| "Describe the repair before sending.".into()),
+            };
+        }
+        if task.validation.is_running() {
+            return PrimaryAction {
+                label: "Testing...",
+                command: TaskSessionCommand::RunFocusedTests,
+                enabled: false,
+                disabled_reason: Some("Focused tests are already running.".into()),
+            };
+        }
+        let has_applied_change = task
+            .actions
+            .values()
+            .any(|action| matches!(action.state, ActionState::Applied));
+        if has_applied_change && !task.validation.is_passing() {
+            return PrimaryAction {
+                label: "Run focused tests",
+                command: TaskSessionCommand::RunFocusedTests,
+                enabled: true,
+                disabled_reason: None,
+            };
+        }
+        if task.validation.is_passing()
+            && task.actions.values().all(|action| !action.is_pending())
+            && task.pending_generated_images().next().is_none()
+            && !task.screenshots.values().any(|screenshot| {
+                matches!(
+                    screenshot.upload,
+                    UploadState::Pending | UploadState::Failed { .. }
+                )
+            })
+        {
+            return PrimaryAction {
+                label: "Mark done",
+                command: TaskSessionCommand::MarkDone,
+                enabled: true,
+                disabled_reason: None,
+            };
+        }
+        let enabled = !self.reply.trim().is_empty();
+        PrimaryAction {
+            label: "Send to AI",
+            command: TaskSessionCommand::SendReply,
+            enabled,
+            disabled_reason: (!enabled).then(|| "Write a task-scoped message first.".into()),
         }
     }
 
@@ -1384,6 +2113,7 @@ impl EditorState {
         let objective = self.objective.trim().to_string();
         if objective.is_empty() {
             self.focus = FocusArea::Tasks;
+            self.focus_pending = true;
             return Err("Enter a task objective first.".into());
         }
         let id = format!("task-{}", self.next_task);
@@ -1404,6 +2134,7 @@ impl EditorState {
             self.reply.clear();
         }
         self.focus = FocusArea::Reply;
+        self.focus_pending = true;
         Ok(())
     }
 
@@ -1473,6 +2204,7 @@ impl EditorState {
             }
             TaskSessionCommand::NewTask => {
                 self.focus = FocusArea::Tasks;
+                self.focus_pending = true;
                 if self.objective.trim().is_empty() {
                     Ok(())
                 } else {
@@ -1493,6 +2225,7 @@ impl EditorState {
             TaskSessionCommand::FocusReply => {
                 self.active_id()?;
                 self.focus = FocusArea::Reply;
+                self.focus_pending = true;
                 Ok(())
             }
             TaskSessionCommand::FocusGame => {
@@ -1513,6 +2246,16 @@ impl EditorState {
                 let id = self
                     .first_action(|s| matches!(s, ActionState::Proposed))
                     .ok_or_else(|| "No proposed action to accept.".to_string())?;
+                if self
+                    .session
+                    .active_task()
+                    .map_err(|e| e.to_string())?
+                    .actions[id.as_str()]
+                .payload
+                .is_some()
+                {
+                    self.reviewed_preview(&self.active_id()?, &id)?;
+                }
                 self.session.accept_action(id).map_err(|e| e.to_string())
             }
             TaskSessionCommand::RejectAction => {
@@ -1530,6 +2273,16 @@ impl EditorState {
                 let action = self
                     .first_action(|s| matches!(s, ActionState::Accepted))
                     .ok_or_else(|| "Accept an action before applying it.".to_string())?;
+                if self
+                    .session
+                    .active_task()
+                    .map_err(|e| e.to_string())?
+                    .actions[action.as_str()]
+                .payload
+                .is_some()
+                {
+                    self.reviewed_preview(&task, &action)?;
+                }
                 self.intents.push(EditorIntent::Apply(task, action));
                 Ok(())
             }
@@ -1580,7 +2333,7 @@ impl EditorState {
             }
             TaskSessionCommand::Cancel => {
                 let task = self.active_id()?;
-                self.intents.push(EditorIntent::Cancel(task));
+                self.cancel_confirmation = Some(task);
                 Ok(())
             }
             TaskSessionCommand::Reconnect => {
@@ -1642,200 +2395,762 @@ impl EditorState {
 }
 
 impl DesktopEditor {
+    fn ui_busy(&self, task: &stasis_ai::Task) -> bool {
+        self.busy_tasks.contains(task.id.as_str())
+            || self
+                .controller
+                .snapshot(&task.id)
+                .is_some_and(|request| request.state == stasis_ai::TaskRequestState::Running)
+            || self
+                .capture
+                .as_ref()
+                .is_some_and(|capture| capture.task_id == task.id)
+    }
+
     fn detail(&mut self, ui: &mut egui::Ui) {
         let Ok(task) = self.state.session.active_task() else {
-            ui.centered_and_justified(|ui| {
-                ui.label("Create a focused task to start a fresh AI thread.");
+            egui::Frame::none().inner_margin(32.0).show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(80.0);
+                    ui.label(RichText::new("Start a focused change").size(24.0).strong());
+                    ui.label(RichText::new("Create a task in the project rail. Each task keeps its own requests, evidence, edits, and validation.").size(14.0).color(muted_text()));
+                });
             });
             return;
         };
         let task = task.clone();
-        ui.horizontal_wrapped(|ui| {
-            ui.heading(&task.objective);
-            ui.label(format!(
-                "{:?} | {:?} | {:?}",
-                task.validation, task.lifecycle, task.connection
-            ));
-        });
-        ui.label(format!(
-            "Provider: {} | Model: {} | Route: {:?} | Fallback: {:?}",
-            task.provider.provider.as_deref().unwrap_or("unresolved"),
-            task.provider.model.as_deref().unwrap_or("unresolved"),
-            task.provider.routing,
-            task.provider.fallback
-        ));
-        ui.label(format!(
-            "{}ms | {} input / {} output tokens | ${:.4} | {} retries",
-            task.metrics.elapsed_ms,
-            task.metrics.input_tokens,
-            task.metrics.output_tokens,
-            task.metrics.estimated_cost_micros as f64 / 1_000_000.0,
-            task.metrics.retry_count,
-        ));
-        if let Some(request) = self.controller.snapshot(&task.id) {
-            ui.label(format!(
-                "Request {} | {:?} | {}ms | retry {}{}",
-                request.request_id.get(),
-                request.state,
-                request.elapsed_ms,
-                request.retry_count,
-                request
-                    .error
-                    .as_deref()
-                    .map(|error| format!(" | {error}"))
-                    .unwrap_or_default(),
-            ));
-        }
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .id_source("task-thread")
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for entry in &task.thread {
-                    let speaker = if matches!(entry.kind, ThreadEntryKind::Reply) {
-                        "You"
-                    } else {
-                        "AI"
-                    };
-                    ui.group(|ui| {
-                        ui.label(RichText::new(speaker).strong());
-                        ui.label(&entry.text);
-                    });
-                }
-                for action in task.actions.values() {
-                    ui.group(|ui| {
-                        ui.label(RichText::new(format!("Action | {:?}", action.state)).strong());
-                        ui.label(&action.description);
-                        if let Some(payload) = &action.payload {
-                            ui.collapsing("Review semantic edit", |ui| {
-                                let preview =
-                                    serde_json::to_string_pretty(payload).unwrap_or_else(|_| {
-                                        "Invalid semantic edit payload".to_string()
-                                    });
-                                ui.add(
-                                    egui::Label::new(RichText::new(preview).monospace())
-                                        .selectable(true),
-                                );
-                            });
-                        }
-                    });
-                }
-                for screenshot in task.screenshots.values() {
-                    ui.group(|ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "Screenshot {} | upload {:?} | analysis {:?}",
-                                screenshot.id, screenshot.upload, screenshot.analysis
-                            ))
-                            .strong(),
-                        );
-                        ui.label(format!(
-                            "task {} | sha256 {} | {}",
-                            screenshot.provenance.task_id,
-                            screenshot.content_sha256.as_deref().unwrap_or("unverified"),
-                            screenshot.source
-                        ));
-                    });
-                }
+        egui::TopBottomPanel::bottom("task-composer")
+            .resizable(false)
+            .frame(
+                egui::Frame::none()
+                    .fill(canvas_fill())
+                    .inner_margin(egui::Margin::symmetric(18.0, 12.0)),
+            )
+            .show_inside(ui, |ui| self.composer(ui, &task));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(canvas_fill())
+                    .inner_margin(egui::Margin::symmetric(18.0, 12.0)),
+            )
+            .show_inside(ui, |ui| {
+                self.task_header(ui, &task);
+                ui.add_space(12.0);
+                self.timeline(ui, &task);
             });
-        ui.separator();
-        let reply = ui.add_sized(
-            [ui.available_width(), 72.0],
-            egui::TextEdit::multiline(&mut self.state.reply).hint_text("Reply to this task..."),
-        );
-        if self.state.focus == FocusArea::Reply {
-            reply.request_focus();
-        }
-        ui.horizontal_wrapped(|ui| {
-            for (label, command) in [
-                ("Send  Ctrl+Enter", TaskSessionCommand::SendReply),
-                ("Accept  Ctrl+Y", TaskSessionCommand::AcceptAction),
-                ("Reject", TaskSessionCommand::RejectAction),
-                ("Apply  Ctrl+Alt+Enter", TaskSessionCommand::ApplyAction),
-                ("Test  Ctrl+T", TaskSessionCommand::RunFocusedTests),
-                ("Retry  Ctrl+R", TaskSessionCommand::Retry),
-                ("Cancel  Ctrl+Esc", TaskSessionCommand::Cancel),
-                ("Reconnect  Ctrl+Shift+R", TaskSessionCommand::Reconnect),
-                ("Done  Ctrl+Shift+D", TaskSessionCommand::MarkDone),
-            ] {
-                if ui.button(label).clicked() {
-                    self.state.dispatch(command);
-                }
-            }
-        });
     }
 
-    fn game(&mut self, ui: &mut egui::Ui) {
-        let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
-        if response.clicked() {
-            self.state.focus = FocusArea::Game;
+    fn task_header(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        let mut provider_choice = None;
+        let openrouter = stasis_ai::OpenRouterConfig::from_env().ok();
+        egui::Frame::none()
+            .fill(panel_fill())
+            .stroke(egui::Stroke::new(1.0_f32, border()))
+            .rounding(8.0)
+            .inner_margin(egui::Margin::same(14.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 3.0, status_color(task));
+                    ui.label(RichText::new(&task.objective).size(20.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        status_chip(
+                            ui,
+                            task_header_status(task).0,
+                            status_color(task),
+                        );
+                    });
+                });
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    let provider = task
+                        .provider
+                        .provider
+                        .as_deref()
+                        .unwrap_or("Provider pending");
+                    let provider_label = if provider == "installed_codex_subscription" {
+                        "Codex"
+                    } else {
+                        provider
+                    };
+                    let model = task.provider.model.as_deref().unwrap_or("model pending");
+                    let provider_mutable = task.lifecycle == TaskLifecycle::Active
+                        && !self.ui_busy(task);
+                    ui.add_enabled_ui(provider_mutable, |ui| {
+                        ui.menu_button(format!("Provider: {provider_label} / {model}  v"), |ui| {
+                        ui.label(RichText::new("Provider").strong());
+                        if ui
+                            .selectable_label(
+                                provider == "installed_codex_subscription",
+                                "Codex subscription",
+                            )
+                            .clicked()
+                        {
+                            provider_choice =
+                                Some((ProviderSelection::Codex, ProviderConfig::Codex));
+                            ui.close_menu();
+                        }
+                        let available = openrouter.is_some();
+                        let response = ui.add_enabled(
+                            available,
+                            egui::SelectableLabel::new(
+                                provider != "installed_codex_subscription",
+                                "OpenRouter",
+                            ),
+                        );
+                        let clicked = response.clicked();
+                        if !available {
+                            response
+                                .on_hover_text("OpenRouter is not configured for this process.");
+                        }
+                        if clicked {
+                            provider_choice = openrouter.clone().map(|config| {
+                                (
+                                    ProviderSelection::OpenRouter,
+                                    ProviderConfig::OpenRouter(config),
+                                )
+                            });
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("Route: {:?}", task.provider.routing))
+                                .small()
+                                .color(muted_text()),
+                        );
+                        ui.label(
+                            RichText::new(format!("Fallback: {:?}", task.provider.fallback))
+                                .small()
+                                .color(muted_text()),
+                        );
+                    });
+                    });
+                    ui.separator();
+                    let (retained, budget) = self.controller.thread_context_usage(task);
+                    let fraction = if budget == 0 {
+                        0.0
+                    } else {
+                        retained as f32 / budget as f32
+                    };
+                    ui.label(RichText::new("Thread context").size(11.0).color(muted_text()));
+                    ui.add(
+                        egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                            .desired_width(112.0)
+                            .text(format!("{retained} / {budget} chars")),
+                    )
+                    .on_hover_text("Retained conversation characters; excludes source, tools, images, and the model token window.");
+                });
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    let total = task
+                        .metrics
+                        .input_tokens
+                        .saturating_add(task.metrics.output_tokens);
+                    ui.label(RichText::new(format!("Usage  {total} tokens")).size(12.0));
+                    ui.label(
+                        RichText::new(format!(
+                            "{} in / {} out",
+                            task.metrics.input_tokens, task.metrics.output_tokens
+                        ))
+                        .size(11.0)
+                        .color(muted_text()),
+                    );
+                    if task.metrics.estimated_cost_micros > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "${:.4}",
+                                task.metrics.estimated_cost_micros as f64 / 1_000_000.0
+                            ))
+                            .size(11.0)
+                            .color(muted_text()),
+                        );
+                    }
+                    if task.metrics.elapsed_ms > 0 {
+                        ui.label(
+                            RichText::new(format!("{} ms", task.metrics.elapsed_ms))
+                                .size(11.0)
+                                .color(muted_text()),
+                        );
+                    }
+                });
+                if let Some(request) = self.controller.snapshot(&task.id) {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Request {} / {:?} / {} ms / retry {}",
+                            request.request_id.get(),
+                            request.state,
+                            request.elapsed_ms,
+                            request.retry_count
+                        ))
+                        .size(11.0)
+                        .color(muted_text()),
+                    );
+                }
+            });
+        if let Some((selection, config)) = provider_choice {
+            self.state.notice = self
+                .state
+                .session
+                .task_mut(&task.id)
+                .and_then(|task| {
+                    task.select_provider(selection)?;
+                    task.set_provider_state(configured_provider_state(&config))
+                })
+                .err()
+                .map(|error| error.to_string());
         }
-        let painter = ui.painter_at(response.rect);
-        painter.rect_filled(response.rect, 6.0, Color32::from_rgb(15, 18, 24));
-        let color = if self.state.focus == FocusArea::Game {
-            Color32::from_rgb(115, 220, 190)
-        } else {
-            Color32::LIGHT_GRAY
+    }
+
+    fn timeline(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        let activity = task.activity_timeline();
+        let mut latest_actions = BTreeMap::new();
+        let mut latest_images = BTreeMap::new();
+        for item in &activity {
+            match &item.kind {
+                ActivityKind::SemanticAction { action_id, .. } => {
+                    latest_actions.insert(action_id.to_string(), item.sequence);
+                }
+                ActivityKind::GeneratedAsset { image_id, .. } => {
+                    latest_images.insert(image_id.to_string(), item.sequence);
+                }
+                _ => {}
+            }
+        }
+        let mut command = None;
+        egui::ScrollArea::vertical()
+            .id_source(("task-timeline", task.id.as_str()))
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if activity.is_empty() {
+                    ui.add_space(30.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("Ready for the first message")
+                                .size(15.0)
+                                .strong(),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Describe the change or attach a verified game frame below.",
+                            )
+                            .size(12.0)
+                            .color(muted_text()),
+                        );
+                    });
+                }
+                for entry in activity {
+                    let latest_entity_snapshot = match &entry.kind {
+                        ActivityKind::SemanticAction { action_id, .. } => latest_actions
+                            .get(action_id.as_str())
+                            .is_some_and(|sequence| *sequence == entry.sequence),
+                        ActivityKind::GeneratedAsset { image_id, .. } => latest_images
+                            .get(image_id.as_str())
+                            .is_some_and(|sequence| *sequence == entry.sequence),
+                        _ => true,
+                    };
+                    if command.is_none() {
+                        command = self.activity_card(ui, task, entry, latest_entity_snapshot);
+                    } else {
+                        self.activity_card(ui, task, entry, latest_entity_snapshot);
+                    }
+                    ui.add_space(9.0);
+                }
+            });
+        if let Some(command) = command {
+            let result = match command {
+                TimelineAction::Accept(task, action) => self
+                    .state
+                    .reviewed_preview(&task, &action)
+                    .map(|_| ())
+                    .and_then(|()| {
+                        self.state
+                            .session
+                            .task_mut(task)
+                            .and_then(|task| task.accept_action(action))
+                            .map_err(|error| error.to_string())
+                    }),
+                TimelineAction::Reject(task, action) => self
+                    .state
+                    .session
+                    .task_mut(task)
+                    .and_then(|task| task.reject_action(action, "Rejected in desktop editor"))
+                    .map_err(|error| error.to_string()),
+                TimelineAction::Apply(task, action) => {
+                    self.state.intents.push(EditorIntent::Apply(task, action));
+                    Ok(())
+                }
+                TimelineAction::ApproveImage(task, image) => self
+                    .state
+                    .session
+                    .task_mut(task)
+                    .and_then(|task| task.approve_generated_image(image))
+                    .map_err(|error| error.to_string()),
+                TimelineAction::RejectImage(task, image) => self
+                    .state
+                    .session
+                    .task_mut(task)
+                    .and_then(|task| {
+                        task.reject_generated_image(image, "Rejected in desktop editor")
+                    })
+                    .map_err(|error| error.to_string()),
+                TimelineAction::Import(task, image) => {
+                    self.state
+                        .intents
+                        .push(EditorIntent::ImportImage(task, image));
+                    Ok(())
+                }
+            };
+            self.state.notice = result.err();
+        }
+    }
+
+    fn activity_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        task: &stasis_ai::Task,
+        entry: stasis_ai::task_session::ActivityEntry,
+        latest_entity_snapshot: bool,
+    ) -> Option<TimelineAction> {
+        let can_interact = task.lifecycle == TaskLifecycle::Active
+            && task.connection == ConnectionState::Connected
+            && !self.ui_busy(task);
+        let (title, tint) = match &entry.kind {
+            ActivityKind::UserMessage { .. } => ("You", Color32::from_rgb(190, 168, 255)),
+            ActivityKind::AiReply { .. } => ("Stasis AI", Color32::from_rgb(228, 233, 240)),
+            ActivityKind::Attachment { .. } => ("Attached frame", Color32::from_rgb(101, 181, 246)),
+            ActivityKind::SemanticAction { .. } => {
+                ("Semantic change", Color32::from_rgb(118, 158, 246))
+            }
+            ActivityKind::GeneratedAsset { .. } => {
+                ("Generated asset", Color32::from_rgb(192, 132, 252))
+            }
+            ActivityKind::HostResult { .. } => ("Host result", Color32::from_rgb(113, 196, 205)),
+            ActivityKind::FocusedTest { .. } => ("Focused tests", accent()),
         };
-        let preview = self
+        let mut command = None;
+        egui::Frame::none()
+            .fill(panel_fill())
+            .stroke(egui::Stroke::new(1.0_f32, border()))
+            .rounding(8.0)
+            .inner_margin(egui::Margin::same(13.0))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).size(12.0).strong().color(tint));
+                    ui.label(
+                        RichText::new(format!("#{:02}", entry.sequence))
+                            .size(10.0)
+                            .color(muted_text()),
+                    );
+                    if !entry.recorded {
+                        ui.label(RichText::new("restored").size(10.0).color(muted_text()));
+                    }
+                });
+                match entry.kind {
+                    ActivityKind::UserMessage { thread_sequence }
+                    | ActivityKind::AiReply { thread_sequence }
+                    | ActivityKind::HostResult { thread_sequence } => {
+                        if let Some(message) = task
+                            .thread
+                            .iter()
+                            .find(|item| item.sequence == thread_sequence)
+                        {
+                            ui.label(RichText::new(&message.text).size(14.0));
+                        }
+                    }
+                    ActivityKind::Attachment {
+                        screenshot_id,
+                        upload,
+                        analysis,
+                    } => {
+                        if let Some(screenshot) = task.screenshots.get(&screenshot_id) {
+                            self.inline_screenshot(ui, screenshot.id.as_str());
+                            ui.horizontal_wrapped(|ui| {
+                                status_chip(
+                                    ui,
+                                    &format!("{:?}", upload).to_ascii_lowercase(),
+                                    status_for_upload(&upload),
+                                );
+                                status_chip(
+                                    ui,
+                                    &format!("{:?}", analysis).to_ascii_lowercase(),
+                                    status_for_analysis(&analysis),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "task {} / {}",
+                                        screenshot.provenance.task_id,
+                                        screenshot
+                                            .content_sha256
+                                            .as_deref()
+                                            .map(|hash| &hash[..12.min(hash.len())])
+                                            .unwrap_or("verification pending")
+                                    ))
+                                    .size(11.0)
+                                    .color(muted_text()),
+                                );
+                            });
+                            let name = std::path::Path::new(&screenshot.source)
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or(screenshot.id.as_str());
+                            ui.label(RichText::new(name).size(12.0).strong())
+                                .on_hover_text(&screenshot.source);
+                        }
+                    }
+                    ActivityKind::SemanticAction {
+                        action_id,
+                        description,
+                        state,
+                        ..
+                    } => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(description).size(14.0).strong());
+                            status_chip(ui, action_state_label(&state), action_state_color(&state));
+                        });
+                        if latest_entity_snapshot {
+                            let action = task.actions.get(&action_id);
+                            if let Some(action) = action {
+                                for proposal in proposal_revisions(action) {
+                                    let Some(payload) = proposal.payload else { continue; };
+                                    let key = SemanticPreviewKey::new(task.id.as_str(), action_id.as_str(), proposal.revision, payload);
+                                    ui.push_id((&key.task, &key.action, key.revision, &key.payload_hash), |ui| {
+                                        semantic_revisions::render_heading(ui, action_id.as_str(), &proposal);
+                                        if let Some(record) = self.state.semantic_previews.get(&key) {
+                                            if record.stale {
+                                                ui.colored_label(warning(), "Stale: project sources changed. Acceptance and Apply disabled.");
+                                            }
+                                            match &record.result {
+                                                None => { ui.spinner(); ui.label("Planning semantic changes..."); }
+                                                Some(Err(error)) => { ui.colored_label(failure(), format!("Preview unavailable: {error}")); }
+                                                Some(Ok(preview)) => { semantic_diff::render(ui, &preview.plan, "semantic-files"); }
+                                            }
+                                        } else {
+                                            ui.label("Planning semantic changes...");
+                                        }
+                                    });
+                                }
+                                if let Some(receipt) = self
+                                    .execution_receipts
+                                    .get(&(task.id.to_string(), action_id.to_string()))
+                                {
+                                    render_compiler_changes(ui, receipt);
+                                }
+                            }
+                        }
+                        let current_state =
+                            task.actions.get(&action_id).map(|action| &action.state);
+                        ui.horizontal(|ui| match (state, current_state, latest_entity_snapshot) {
+                            (ActionState::Proposed, Some(ActionState::Proposed), true)
+                                if can_interact =>
+                            {
+                                if ui.add_enabled(self.state.check_preview(task.id.as_str(), action_id.as_str(), false).is_ok(), egui::Button::new("Accept")).clicked() {
+                                    command = Some(TimelineAction::Accept(
+                                        task.id.to_string(),
+                                        action_id.to_string(),
+                                    ));
+                                }
+                                if ui.button("Reject").clicked() {
+                                    command = Some(TimelineAction::Reject(
+                                        task.id.to_string(),
+                                        action_id.to_string(),
+                                    ));
+                                }
+                            }
+                            (ActionState::Accepted, Some(ActionState::Accepted), true)
+                                if can_interact =>
+                            {
+                                if ui.add_enabled(self.state.check_preview(task.id.as_str(), action_id.as_str(), false).is_ok(), egui::Button::new("Apply change")).clicked() {
+                                    command = Some(TimelineAction::Apply(
+                                        task.id.to_string(),
+                                        action_id.to_string(),
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        });
+                    }
+                    ActivityKind::GeneratedAsset {
+                        image_id,
+                        review,
+                        handoff,
+                    } => {
+                        if let Some(image) = task.generated_images.get(&image_id) {
+                            self.inline_generated_asset(
+                                ui,
+                                task.id.as_str(),
+                                &image.id.to_string(),
+                                &image.source,
+                            );
+                            let name = std::path::Path::new(&image.source)
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or(image.id.as_str());
+                            ui.label(RichText::new(name).size(13.0).strong())
+                                .on_hover_text(&image.source);
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} / {}",
+                                    image.attribution.provider,
+                                    image
+                                        .attribution
+                                        .model
+                                        .as_deref()
+                                        .unwrap_or("model unavailable")
+                                ))
+                                .size(11.0)
+                                .color(muted_text()),
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            status_chip(
+                                ui,
+                                &format!("{:?}", review).to_ascii_lowercase(),
+                                image_review_color(&review),
+                            );
+                            status_chip(
+                                ui,
+                                &format!("{:?}", handoff).to_ascii_lowercase(),
+                                image_handoff_color(&handoff),
+                            );
+                            let current = task.generated_images.get(&image_id);
+                            if can_interact
+                                && latest_entity_snapshot
+                                && matches!(review, ImageReviewState::Pending)
+                                && current.is_some_and(|image| {
+                                    matches!(image.review, ImageReviewState::Pending)
+                                })
+                            {
+                                if ui.button("Approve").clicked() {
+                                    command = Some(TimelineAction::ApproveImage(
+                                        task.id.to_string(),
+                                        image_id.to_string(),
+                                    ));
+                                }
+                                if ui.button("Reject").clicked() {
+                                    command = Some(TimelineAction::RejectImage(
+                                        task.id.to_string(),
+                                        image_id.to_string(),
+                                    ));
+                                }
+                            }
+                            if can_interact
+                                && latest_entity_snapshot
+                                && matches!(review, ImageReviewState::Approved)
+                                && matches!(handoff, ImageHandoffState::Pending)
+                                && current.is_some_and(|image| {
+                                    matches!(image.review, ImageReviewState::Approved)
+                                        && matches!(image.handoff, ImageHandoffState::Pending)
+                                })
+                                && ui
+                                    .add_enabled(false, egui::Button::new("Import asset"))
+                                    .on_disabled_hover_text(
+                                        "Asset import is unavailable in the desktop editor.",
+                                    )
+                                    .clicked()
+                            {
+                                command = Some(TimelineAction::Import(
+                                    task.id.to_string(),
+                                    image_id.to_string(),
+                                ));
+                            }
+                        });
+                    }
+                    ActivityKind::FocusedTest { run_id, status } => {
+                        ui.horizontal_wrapped(|ui| {
+                            status_chip(
+                                ui,
+                                validation_label_ui(&status),
+                                validation_color(&status),
+                            );
+                            ui.label(
+                                RichText::new(format!("Run {run_id}"))
+                                    .size(11.0)
+                                    .color(muted_text()),
+                            );
+                        });
+                        match status {
+                            ValidationStatus::Passed { summary }
+                            | ValidationStatus::Failed { summary } => {
+                                ui.label(summary);
+                            }
+                            ValidationStatus::Running
+                                if run_id == task.validation_run_id
+                                    && task.validation.is_running() =>
+                            {
+                                ui.spinner();
+                            }
+                            ValidationStatus::Running => {
+                                ui.label(
+                                    RichText::new("phase completed")
+                                        .size(11.0)
+                                        .color(muted_text()),
+                                );
+                            }
+                            ValidationStatus::NotRun => {}
+                        }
+                    }
+                }
+            });
+        command
+    }
+
+    fn inline_screenshot(&mut self, ui: &mut egui::Ui, screenshot_id: &str) {
+        let active = self.state.session.active_task_id();
+        let Some(preview) = self
             .state
             .preview
             .as_ref()
-            .filter(|preview| self.state.session.active_task_id() == Some(&preview.task_id));
-        if let Some(preview) = preview {
-            let needs_texture = self
-                .preview_texture
-                .as_ref()
-                .map_or(true, |(id, _)| id != &preview.screenshot_id);
-            if needs_texture {
-                let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [preview.width, preview.height],
-                    &preview.rgba,
-                );
-                let texture = ui.ctx().load_texture(
-                    format!("screenshot-preview-{}", preview.screenshot_id),
-                    image,
+            .filter(|preview| {
+                preview.screenshot_id == screenshot_id && Some(&preview.task_id) == active
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let needs_texture = self
+            .preview_texture
+            .as_ref()
+            .map_or(true, |(id, _)| id != screenshot_id);
+        if needs_texture {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [preview.width, preview.height],
+                &preview.rgba,
+            );
+            let texture = ui.ctx().load_texture(
+                format!("timeline-preview-{screenshot_id}"),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            self.preview_texture = Some((screenshot_id.to_string(), texture));
+        }
+        let texture = &self.preview_texture.as_ref().expect("preview texture").1;
+        let max_width = ui.available_width().min(560.0);
+        let scale = (max_width / preview.width as f32)
+            .min(120.0 / preview.height as f32)
+            .min(1.0);
+        let size = egui::vec2(preview.width as f32, preview.height as f32) * scale;
+        ui.image((texture.id(), size));
+        ui.label(
+            RichText::new(format!(
+                "{} x {} / tick {} -> {} / runtime {}:{} / verified {}",
+                preview.width,
+                preview.height,
+                preview.scheduled_tick,
+                preview.captured_tick,
+                preview.runtime_identity.session_id,
+                preview.runtime_identity.generation,
+                &preview.sha256[..12]
+            ))
+            .size(11.0)
+            .color(muted_text()),
+        );
+    }
+
+    fn inline_generated_asset(
+        &mut self,
+        ui: &mut egui::Ui,
+        task_id: &str,
+        image_id: &str,
+        source: &str,
+    ) {
+        let key = (task_id.to_string(), image_id.to_string());
+        if !self.asset_textures.contains_key(&key) {
+            let source_path = PathBuf::from(source);
+            let path = if source_path.is_absolute() {
+                source_path
+            } else {
+                self.project_root.join(source_path)
+            };
+            let bytes = std::fs::symlink_metadata(&path)
+                .ok()
+                .filter(|metadata| {
+                    metadata.is_file()
+                        && !metadata.file_type().is_symlink()
+                        && metadata.len() <= 16 * 1024 * 1024
+                })
+                .and_then(|_| std::fs::read(path).ok());
+            let image = bytes.and_then(|bytes| {
+                let mut limits = image::Limits::default();
+                limits.max_image_width = Some(4096);
+                limits.max_image_height = Some(4096);
+                limits.max_alloc = Some(64 * 1024 * 1024);
+                let mut reader = image::ImageReader::new(Cursor::new(bytes));
+                reader.limits(limits);
+                reader.with_guessed_format().ok()?.decode().ok()
+            });
+            let texture = image.map(|image| {
+                let rgba = image.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                ui.ctx().load_texture(
+                    format!("generated-{task_id}-{image_id}"),
+                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
                     egui::TextureOptions::LINEAR,
-                );
-                self.preview_texture = Some((preview.screenshot_id.clone(), texture));
-            }
-            let texture = &self.preview_texture.as_ref().expect("preview texture").1;
-            let available = response.rect.shrink2(egui::vec2(12.0, 42.0));
-            let scale = (available.width() / preview.width as f32)
-                .min(available.height() / preview.height as f32);
-            let size = egui::vec2(preview.width as f32, preview.height as f32) * scale;
-            let image_rect = egui::Rect::from_center_size(available.center(), size);
-            painter.image(
-                texture.id(),
-                image_rect,
-                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-            painter.text(
-                response.rect.left_bottom() + egui::vec2(12.0, -10.0),
-                egui::Align2::LEFT_BOTTOM,
-                format!(
-                    "{} | {}x{} | tick {} -> {} | runtime {}:{} | sha256 {}",
-                    preview.screenshot_id,
-                    preview.width,
-                    preview.height,
-                    preview.scheduled_tick,
-                    preview.captured_tick,
-                    preview.runtime_identity.session_id,
-                    preview.runtime_identity.generation,
-                    &preview.sha256[..12]
-                ),
-                egui::FontId::proportional(13.0),
-                color,
-            );
+                )
+            });
+            self.asset_textures.insert(key.clone(), texture);
+        }
+        if let Some(Some(texture)) = self.asset_textures.get(&key) {
+            let original = texture.size_vec2();
+            let scale = (ui.available_width().min(460.0) / original.x)
+                .min(96.0 / original.y)
+                .min(1.0);
+            ui.image((texture.id(), original * scale));
         } else {
-            painter.text(response.rect.center(), egui::Align2::CENTER_CENTER,
-                "LIVE GAME\n\nThe interactive game runs in its native window\nand keeps independent keyboard and mouse focus.\n\nCtrl+Alt+G focuses this surface.",
-                egui::FontId::proportional(18.0), color);
+            ui.label(
+                RichText::new("Preview unavailable")
+                    .size(11.0)
+                    .color(muted_text()),
+            );
         }
-        if self.state.focus == FocusArea::Game {
-            painter.rect_stroke(response.rect, 6.0, egui::Stroke::new(2.0_f32, color));
-        }
+    }
+
+    fn composer(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        egui::Frame::none().fill(panel_fill()).stroke(egui::Stroke::new(1.0_f32, border())).rounding(9.0).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
+            let reply = ui.add_sized([ui.available_width(), 58.0], egui::TextEdit::multiline(&mut self.state.reply).hint_text("Reply to Stasis AI..."));
+            if self.state.focus == FocusArea::Reply && self.state.focus_pending {
+                reply.request_focus();
+                self.state.focus_pending = false;
+            }
+            if reply.has_focus() {
+                self.state.focus = FocusArea::Reply;
+            }
+            ui.horizontal_wrapped(|ui| {
+                let busy = self.ui_busy(task);
+                let interactive = task.lifecycle == TaskLifecycle::Active
+                    && task.connection == ConnectionState::Connected
+                    && !busy;
+                if ui.add_enabled(interactive, egui::Button::new("Attach frame")).on_hover_text(if interactive { "Capture a verified frame from the running native game" } else { "Attachments are unavailable while this task is closed, disconnected, or busy." }).clicked() {
+                    self.state.dispatch(TaskSessionCommand::AttachScreenshot);
+                }
+                if ui.add_enabled(false, egui::Button::new("Generate image")).on_disabled_hover_text("Image generation is unavailable in the desktop editor.").clicked() {
+                    self.state.dispatch(TaskSessionCommand::GenerateImage);
+                }
+                ui.label(RichText::new("Ctrl+Enter sends").size(10.0).color(muted_text()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut primary = self.state.primary_action(busy);
+                    if !self.state.review_command_enabled(&primary.command) {
+                        primary.enabled = false;
+                        primary.disabled_reason = Some("Review a current compiler-owned preview before accepting or applying.".into());
+                    }
+                    if primary.command == TaskSessionCommand::MarkDone && !self.validation_fingerprints.contains_key(task.id.as_str()) {
+                        primary.enabled = false;
+                        primary.disabled_reason = Some("Run focused tests against the current sources before marking done.".into());
+                    }
+                    let response = ui.add_enabled(primary.enabled, egui::Button::new(RichText::new(primary.label).strong().color(if primary.enabled { Color32::BLACK } else { muted_text() })).fill(if primary.enabled { accent() } else { raised_fill() }));
+                    let clicked = response.clicked();
+                    if let Some(reason) = primary.disabled_reason { response.on_hover_text(reason); }
+                    let is_test = primary.command == TaskSessionCommand::RunFocusedTests;
+                    if clicked { self.state.dispatch(primary.command); }
+                    if task.lifecycle == TaskLifecycle::Active && task.validation.is_passing() && !is_test {
+                        if ui.add_enabled(interactive, egui::Button::new("Run focused tests")).on_hover_text(if interactive { "Validate the current project sources" } else { "Tests are unavailable while disconnected or busy." }).clicked() { self.state.dispatch(TaskSessionCommand::RunFocusedTests); }
+                    }
+                });
+            });
+        });
     }
 
     fn palette(&mut self, context: &egui::Context) {
@@ -1978,57 +3293,144 @@ impl DesktopEditor {
 }
 
 impl DesktopEditor {
+    fn compact_rail(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(project_name(&self.project_root)).strong());
+            let input = ui.add_sized(
+                [ui.available_width().min(250.0), 30.0],
+                egui::TextEdit::singleline(&mut self.state.objective)
+                    .hint_text("New task objective"),
+            );
+            let submitted =
+                input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if ui.button("+ Task").clicked() || submitted {
+                self.state.notice = self.state.create_task().err();
+            }
+        });
+        let active = self.state.session.active_task_id().map(ToString::to_string);
+        let cards = self
+            .state
+            .session
+            .tasks()
+            .map(|task| (task.id.to_string(), task.objective.clone()))
+            .collect::<Vec<_>>();
+        egui::ScrollArea::horizontal()
+            .id_source("compact-task-rail")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (id, objective) in cards {
+                        if ui
+                            .selectable_label(active.as_deref() == Some(&id), objective)
+                            .clicked()
+                        {
+                            self.state.notice = self.state.switch_task(&id).err();
+                        }
+                    }
+                });
+            });
+    }
+
     fn ui(&mut self, context: &egui::Context) {
         if self.shutdown.load(Ordering::Acquire) {
             context.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
+        configure_visuals(context);
         context.request_repaint_after(Duration::from_millis(100));
         self.poll_controller();
         self.poll_host();
         self.poll_capture();
+        self.poll_semantic_previews();
         self.process_shortcuts(context);
         let palette_frame = self.state.palette_open;
         self.palette(context);
         if palette_frame {
             context.input_mut(|input| input.events.clear());
         }
-        egui::TopBottomPanel::top("top-bar").show(context, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong("STASIS EDITOR");
-                ui.separator();
-                ui.label("Ctrl+K commands | Ctrl+N new task | Ctrl+Alt+G game");
-                if let Some(notice) = &self.state.notice {
-                    ui.colored_label(Color32::from_rgb(245, 180, 80), notice);
-                }
+        egui::TopBottomPanel::top("top-bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(rail_fill())
+                    .inner_margin(egui::Margin::symmetric(12.0, 7.0)),
+            )
+            .show(context, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Stasis AI Editor").size(13.0).strong());
+                    ui.label(
+                        RichText::new("Ctrl+K commands  |  Ctrl+N new task")
+                            .size(11.0)
+                            .color(muted_text()),
+                    );
+                    if let Some(notice) = &self.state.notice {
+                        ui.colored_label(warning(), notice);
+                    }
+                });
             });
-        });
-        egui::CentralPanel::default().show(context, |ui| {
-            let available = ui.available_width();
-            let task_width = self.state.pane_widths(available).0;
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(task_width, ui.available_height()),
-                    egui::Layout::left_to_right(egui::Align::Min),
-                    |ui| {
-                        egui::SidePanel::left("tasks")
-                            .resizable(true)
-                            .default_width(210.0)
-                            .show_inside(ui, |ui| self.sidebar(ui));
-                        egui::CentralPanel::default().show_inside(ui, |ui| self.detail(ui));
-                    },
-                );
-                let splitter = ui
-                    .allocate_response(egui::vec2(8.0, ui.available_height()), egui::Sense::drag());
-                if splitter.dragged() {
-                    self.state
-                        .set_task_width(task_width + splitter.drag_delta().x, available);
-                    context.request_repaint();
-                }
-                ui.allocate_ui(ui.available_size(), |ui| self.game(ui));
-            });
-        });
+        let width = context.screen_rect().width();
+        match EditorLayout::for_width(width) {
+            EditorLayout::Compact => {
+                egui::TopBottomPanel::top("compact-rail")
+                    .frame(
+                        egui::Frame::none()
+                            .fill(rail_fill())
+                            .inner_margin(egui::Margin::symmetric(10.0, 7.0)),
+                    )
+                    .show(context, |ui| self.compact_rail(ui));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(canvas_fill()))
+                    .show(context, |ui| self.detail(ui));
+            }
+            EditorLayout::Wide => {
+                egui::SidePanel::left("project-task-rail")
+                    .resizable(false)
+                    .exact_width(RAIL_WIDTH)
+                    .frame(
+                        egui::Frame::none()
+                            .fill(rail_fill())
+                            .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                    )
+                    .show(context, |ui| self.sidebar(ui));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(canvas_fill()))
+                    .show(context, |ui| {
+                        let content_width = ui.available_width().min(980.0);
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(content_width, ui.available_height()),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| self.detail(ui),
+                            );
+                        });
+                    });
+            }
+        }
+        self.cancel_confirmation(context);
         self.flush_intents();
+    }
+
+    fn cancel_confirmation(&mut self, context: &egui::Context) {
+        let Some(task_id) = self.state.cancel_confirmation.clone() else {
+            return;
+        };
+        egui::Window::new("Cancel task?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                let objective = self.state.session.task(task_id.as_str())
+                    .map(|task| task.objective.as_str()).unwrap_or(&task_id);
+                ui.label(format!("Cancel {objective}?"));
+                ui.label("This stops its work and permanently closes the task. You cannot continue it afterward.");
+                ui.horizontal(|ui| {
+                    if ui.button("Keep task open").clicked() {
+                        self.state.cancel_confirmation = None;
+                    }
+                    if ui.button("Permanently cancel task").clicked() {
+                        self.state.intents.push(EditorIntent::Cancel(task_id.clone()));
+                        self.state.cancel_confirmation = None;
+                    }
+                });
+            });
     }
 }
 
@@ -2039,6 +3441,9 @@ impl eframe::App for DesktopEditor {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.host.shutdown_and_join();
+        if let Some(job) = self.semantic_job.take() {
+            let _ = job.worker.join();
+        }
         if let Some(capture) = self.capture.take() {
             capture.canceled.store(true, Ordering::Release);
         }
@@ -2057,7 +3462,7 @@ pub(super) fn run(
         viewport: egui::ViewportBuilder::default()
             .with_title("Stasis Editor")
             .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_min_inner_size([520.0, 600.0]),
         ..Default::default()
     };
     let quit_client = client.clone();
@@ -2069,6 +3474,12 @@ pub(super) fn run(
     let _ = quit_client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
     result.map_err(|error| format!("desktop editor failed: {error}"))
 }
+
+#[cfg(test)]
+mod interaction_tests;
+
+#[cfg(test)]
+mod native_evidence;
 
 #[cfg(test)]
 mod tests {
@@ -2084,6 +3495,378 @@ mod tests {
         state.objective = "Change player speed".into();
         state.create_task().unwrap();
         state
+    }
+
+    pub(super) fn review_fixture(name: &str) -> (DesktopEditor, PathBuf, Value) {
+        let root = super::super::tests::desktop_editor_fixture(name);
+        let item = super::super::desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let payload = json!({"schema_version": 1, "edits": [{
+            "operation": "update", "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+            "new_source": "function value(): i32 { return 2; }"
+        }]});
+        let (client, _server) = live_session(1);
+        let mut editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Review value".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .propose_action_with_payload(
+                "value",
+                stasis_ai::ActionKind::Edit,
+                "Update value",
+                payload.clone(),
+            )
+            .unwrap();
+        (editor, root, payload)
+    }
+
+    pub(super) fn finish_preview(editor: &mut DesktopEditor) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            editor.poll_semantic_previews();
+            if editor.semantic_job.is_none() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "preview worker exceeded deadline"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn semantic_preview_gates_keyboard_acceptance_and_apply_on_source_changes() {
+        let (mut editor, root, _) = review_fixture("preview_editor_stale");
+        assert!(editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .is_err());
+        finish_preview(&mut editor);
+        assert!(editor
+            .state
+            .review_command_enabled(&TaskSessionCommand::AcceptAction));
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        let entry = root.join("src/main.stasis");
+        let old = std::fs::read_to_string(&entry).unwrap();
+        std::fs::write(&entry, format!("{old}\n// external edit\n")).unwrap();
+        assert!(editor
+            .state
+            .handle(TaskSessionCommand::ApplyAction)
+            .unwrap_err()
+            .contains("Stale"));
+        editor.next_semantic_check = Instant::now();
+        editor.poll_semantic_previews();
+        assert!(!editor
+            .state
+            .review_command_enabled(&TaskSessionCommand::ApplyAction));
+        std::fs::write(&entry, old).unwrap();
+        assert!(
+            editor.state.reviewed_preview("task-1", "value").is_err(),
+            "observed staleness must be sticky"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn semantic_preview_never_regenerates_accepted_or_applied_work() {
+        let (mut editor, root, _) = review_fixture("preview_editor_immutable");
+        finish_preview(&mut editor);
+        let key = editor
+            .state
+            .semantic_previews
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let plan = editor
+            .state
+            .reviewed_preview("task-1", "value")
+            .unwrap()
+            .plan
+            .clone();
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .apply_action("value")
+            .unwrap();
+        editor.poll_semantic_previews();
+        assert!(editor.semantic_job.is_none());
+        assert_eq!(editor.state.semantic_previews.len(), 1);
+        assert_eq!(
+            editor.state.semantic_previews[&key]
+                .result
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .plan,
+            plan
+        );
+        // Restored accepted work with no retained preview must not be re-planned.
+        editor.state.semantic_previews.clear();
+        editor.poll_semantic_previews();
+        assert!(editor.semantic_job.is_none());
+        assert!(editor.state.semantic_previews[&key]
+            .result
+            .as_ref()
+            .unwrap()
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn revision_evidence_frame(label: &str, editor: &DesktopEditor) -> Value {
+        let plans = editor
+            .state
+            .semantic_previews
+            .iter()
+            .filter_map(|(key, record)| {
+                record.result.as_ref()?.as_ref().ok().map(|preview| {
+                    json!({
+                        "revision": key.revision, "plan": preview.plan,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({ "label": label, "task": editor.state.session.active_task().unwrap(), "plans": plans })
+    }
+
+    fn finish_apply(editor: &mut DesktopEditor) {
+        editor
+            .state
+            .handle(TaskSessionCommand::ApplyAction)
+            .unwrap();
+        editor.flush_intents();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !editor.busy_tasks.is_empty() {
+            editor.poll_host();
+            assert!(Instant::now() < deadline, "host apply exceeded deadline");
+            thread::sleep(Duration::from_millis(10));
+        }
+        editor.poll_semantic_previews();
+    }
+
+    #[test]
+    fn failed_apply_and_repair_keep_one_card_per_proposal() {
+        let (mut editor, root, mut payload) = review_fixture("preview_failed_apply_repair");
+        payload["edits"][0]["new_source"] = json!("function value(): i32 { return -1; }");
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .actions
+            .get_mut("value")
+            .unwrap()
+            .payload = Some(payload.clone());
+        finish_preview(&mut editor);
+        let original_key = editor
+            .state
+            .semantic_previews
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let original_plan = editor
+            .state
+            .reviewed_preview("task-1", "value")
+            .unwrap()
+            .plan
+            .clone();
+        let before = std::fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        let mut frames = vec![revision_evidence_frame(
+            "1. Original proposal accepted",
+            &editor,
+        )];
+        finish_apply(&mut editor);
+        assert!(matches!(
+            editor.state.session.active_task().unwrap().actions["value"].state,
+            ActionState::NeedsRepair { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before,
+            "failed Apply must roll back"
+        );
+        assert_eq!(editor.state.semantic_previews.len(), 1);
+        assert!(editor.semantic_job.is_none());
+        frames.push(revision_evidence_frame(
+            "2. Apply failed its test; original sources restored",
+            &editor,
+        ));
+
+        payload["edits"][0]["new_source"] = json!("function value(): i32 { return 3; }");
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .repair_action_with_payload(
+                "value",
+                "Repair value so the positive test passes",
+                payload.clone(),
+            )
+            .unwrap();
+        assert!(
+            editor.state.reviewed_preview("task-1", "value").is_err(),
+            "new proposal needs its own preview"
+        );
+        finish_preview(&mut editor);
+        let action = &editor.state.session.active_task().unwrap().actions["value"];
+        assert_eq!(
+            action.revisions.len(),
+            2,
+            "keep both state snapshots in the audit history"
+        );
+        let proposals = proposal_revisions(action);
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(
+            proposals[1].revision, 1,
+            "first repaired proposal displays Revision 2"
+        );
+        assert!(proposals[1].current);
+        assert_eq!(editor.state.semantic_previews.len(), 2);
+        assert!(editor
+            .state
+            .semantic_previews
+            .values()
+            .all(|record| matches!(record.result, Some(Ok(_)))));
+        assert_eq!(
+            editor.state.semantic_previews[&original_key]
+                .result
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .plan,
+            original_plan
+        );
+        assert_eq!(
+            editor
+                .state
+                .reviewed_preview("task-1", "value")
+                .unwrap()
+                .payload,
+            payload
+        );
+        frames.push(revision_evidence_frame(
+            "3. Repaired proposal is Revision 2; original preview retained",
+            &editor,
+        ));
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        finish_apply(&mut editor);
+        assert!(matches!(
+            editor.state.session.active_task().unwrap().actions["value"].state,
+            ActionState::Applied
+        ));
+        assert_eq!(editor.state.semantic_previews.len(), 2);
+        frames.push(revision_evidence_frame(
+            "4. Revision 2 applied successfully",
+            &editor,
+        ));
+
+        // Native evidence renders these real host results with the production grouping and cards.
+        let evidence =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/task-520-review");
+        std::fs::create_dir_all(&evidence).unwrap();
+        std::fs::write(
+            evidence.join("failed-apply-repair.json"),
+            serde_json::to_vec_pretty(&frames).unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn semantic_preview_retains_revisions_and_binds_task_and_exact_payload() {
+        let (mut editor, root, payload) = review_fixture("preview_editor_revisions");
+        finish_preview(&mut editor);
+        let original_key = editor
+            .state
+            .semantic_previews
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        assert!(editor.state.reviewed_preview("task-1", "value").is_ok());
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .append_reply("Please revise it")
+            .unwrap();
+        editor
+            .state
+            .handle(TaskSessionCommand::RejectAction)
+            .unwrap();
+        let mut repaired = payload.clone();
+        repaired["edits"][0]["new_source"] = json!("function value(): i32 { return 3; }");
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .repair_action_with_payload("value", "Repaired value", repaired.clone())
+            .unwrap();
+        assert!(editor.state.reviewed_preview("task-1", "value").is_err());
+        finish_preview(&mut editor);
+        assert_eq!(editor.state.semantic_previews.len(), 2);
+        assert_eq!(
+            editor.state.session.active_task().unwrap().actions["value"].revisions[0]
+                .thread_position,
+            0
+        );
+        let latest = editor.state.reviewed_preview("task-1", "value").unwrap();
+        assert_eq!(latest.payload, repaired);
+        assert_ne!(
+            latest.plan,
+            editor.state.semantic_previews[&original_key]
+                .result
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .plan
+        );
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .actions
+            .get_mut("value")
+            .unwrap()
+            .payload = Some(payload);
+        assert!(editor.state.reviewed_preview("task-1", "value").is_err());
+        editor.state.objective = "Other task".into();
+        editor.state.create_task().unwrap();
+        assert!(editor.state.reviewed_preview("task-2", "value").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn test_png() -> Vec<u8> {
@@ -2348,12 +4131,58 @@ mod tests {
     }
 
     #[test]
-    fn split_preserves_both_panes() {
+    fn responsive_layout_keeps_narrow_editor_on_one_task_canvas() {
+        assert_eq!(EditorLayout::for_width(480.0), EditorLayout::Compact);
+        assert_eq!(EditorLayout::for_width(759.0), EditorLayout::Compact);
+        assert_eq!(EditorLayout::for_width(760.0), EditorLayout::Wide);
+        assert_eq!(EditorLayout::for_width(1920.0), EditorLayout::Wide);
+    }
+
+    #[test]
+    fn primary_action_tracks_the_next_valid_task_transition() {
         let mut state = EditorState::default();
-        state.set_task_width(900.0, 1200.0);
-        assert_eq!(state.pane_widths(1200.0), (840.0, 360.0));
-        let panes = state.pane_widths(600.0);
-        assert_eq!(panes.0 + panes.1, 600.0);
+        let empty = state.primary_action(false);
+        assert_eq!(empty.command, TaskSessionCommand::NewTask);
+        assert!(!empty.enabled);
+
+        state.objective = "Change movement".into();
+        state.create_task().unwrap();
+        let message = state.primary_action(false);
+        assert_eq!(message.command, TaskSessionCommand::SendReply);
+        assert!(!message.enabled);
+        state.reply = "Make the player faster".into();
+        assert!(state.primary_action(false).enabled);
+
+        state
+            .session
+            .propose_action("edit-speed", "Update player speed")
+            .unwrap();
+        assert_eq!(
+            state.primary_action(false).command,
+            TaskSessionCommand::AcceptAction
+        );
+        state.session.accept_action("edit-speed").unwrap();
+        assert_eq!(
+            state.primary_action(false).command,
+            TaskSessionCommand::ApplyAction
+        );
+        assert_eq!(
+            state.primary_action(true).command,
+            TaskSessionCommand::Cancel
+        );
+    }
+
+    #[test]
+    fn explicit_focus_commands_request_focus_once() {
+        let mut state = task_state();
+        state.focus_pending = false;
+        state.handle(TaskSessionCommand::FocusReply).unwrap();
+        assert_eq!(state.focus, FocusArea::Reply);
+        assert!(state.focus_pending);
+        state.focus_pending = false;
+        state.handle(TaskSessionCommand::NewTask).unwrap();
+        assert_eq!(state.focus, FocusArea::Tasks);
+        assert!(state.focus_pending);
     }
 
     #[test]
@@ -2361,6 +4190,7 @@ mod tests {
         let mut state = task_state();
         state.handle(TaskSessionCommand::NewTask).unwrap();
         assert_eq!(state.focus, FocusArea::Tasks);
+        assert!(state.focus_pending);
         assert_eq!(state.session.task_count(), 1);
         state.objective = "Independent objective".into();
         state.handle(TaskSessionCommand::NewTask).unwrap();
@@ -2448,10 +4278,11 @@ mod tests {
         state.objective = "Cancelable task".into();
         state.create_task().unwrap();
         state.handle(TaskSessionCommand::Cancel).unwrap();
-        assert!(matches!(
-            state.intents.last(),
-            Some(EditorIntent::Cancel(task)) if task == "task-2"
-        ));
+        assert_eq!(state.cancel_confirmation.as_deref(), Some("task-2"));
+        assert_eq!(
+            state.session.active_task().unwrap().lifecycle,
+            TaskLifecycle::Active
+        );
     }
 
     #[test]
@@ -3176,6 +5007,16 @@ mod tests {
                 batch,
             )
             .unwrap();
+        let preview_deadline = Instant::now() + Duration::from_secs(10);
+        while editor
+            .state
+            .reviewed_preview("task-1", "edit-value")
+            .is_err()
+            && Instant::now() < preview_deadline
+        {
+            editor.poll_semantic_previews();
+            thread::sleep(Duration::from_millis(10));
+        }
         editor
             .state
             .handle(TaskSessionCommand::AcceptAction)
@@ -3242,6 +5083,100 @@ mod tests {
             editor.state.session.task("task-1").unwrap().lifecycle,
             stasis_ai::TaskLifecycle::Completed
         ));
+        super::super::tests::remove_temp(&root);
+    }
+
+    #[test]
+    fn semantic_preview_fingerprint_refresh_requires_a_usable_preview() {
+        let (mut editor, root, _) = review_fixture("preview_editor_fingerprint_gate");
+        let mut next_check = Instant::now();
+        let mut reads = 0;
+        let due = next_check + Duration::from_secs(1);
+
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok("unused".into())
+            },
+        );
+        assert_eq!(reads, 0, "empty preview cache must not scan the workspace");
+
+        editor.next_semantic_check = Instant::now() + Duration::from_secs(60);
+        editor.poll_semantic_previews();
+        let mut next_check = Instant::now();
+        let due = next_check + Duration::from_secs(1);
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok("unused".into())
+            },
+        );
+        assert_eq!(reads, 0, "a pending preview must not scan the workspace");
+
+        editor.next_semantic_check = Instant::now() + Duration::from_secs(60);
+        finish_preview(&mut editor);
+        let expected = editor
+            .state
+            .semantic_previews
+            .values()
+            .find_map(|record| match &record.result {
+                Some(Ok(preview)) => Some(preview.source_fingerprint.clone()),
+                _ => None,
+            })
+            .expect("fixture should produce a usable preview");
+
+        let mut next_check = Instant::now();
+        let due = next_check + Duration::from_secs(1);
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok(expected.clone())
+            },
+        );
+        assert_eq!(reads, 1, "a usable preview should trigger one scan");
+
+        for record in editor.state.semantic_previews.values_mut() {
+            record.stale = true;
+        }
+        let mut next_check = Instant::now();
+        let due = next_check + Duration::from_secs(1);
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok(expected.clone())
+            },
+        );
+        assert_eq!(reads, 1, "a stale preview must not scan again");
+
+        for record in editor.state.semantic_previews.values_mut() {
+            record.stale = false;
+            record.result = Some(Err("preview failed".into()));
+        }
+        let mut next_check = Instant::now();
+        let due = next_check + Duration::from_secs(1);
+        refresh_semantic_preview_staleness(
+            &mut editor.state.semantic_previews,
+            &mut next_check,
+            due,
+            || {
+                reads += 1;
+                Ok(expected.clone())
+            },
+        );
+        assert_eq!(reads, 1, "a failed preview must not scan the workspace");
+
         super::super::tests::remove_temp(&root);
     }
 }

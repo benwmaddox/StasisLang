@@ -7049,14 +7049,32 @@ fn apply_symbol_batch(
     workspace: &Workspace,
     editable_files: &[WorkshopSourceFile],
     query_files: &[WorkshopSourceFile],
-    mut batch: WorkshopSemanticEditBatch,
+    batch: WorkshopSemanticEditBatch,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
+    let plan = plan_symbol_batch(workspace, editable_files, query_files, batch)?;
+    apply_symbol_plan(workspace, plan, options)
+}
+
+fn plan_symbol_batch(
+    workspace: &Workspace,
+    editable_files: &[WorkshopSourceFile],
+    query_files: &[WorkshopSourceFile],
+    mut batch: WorkshopSemanticEditBatch,
+) -> Result<WorkshopSemanticEditPlan, String> {
     normalize_cli_semantic_batch(editable_files, &mut batch)?;
     let (after, plan) = plan_workshop_semantic_edits(editable_files, &batch)?;
     ensure_editable_semantic_plan(&plan)?;
     let validation_files = overlay_workshop_files(query_files, &after);
     validate_semantic_files(workspace, &validation_files)?;
+    Ok(plan)
+}
+
+fn apply_symbol_plan(
+    workspace: &Workspace,
+    plan: WorkshopSemanticEditPlan,
+    options: SymbolEditOptions,
+) -> Result<CommandResult, String> {
     if options.dry_run {
         return Ok(CommandResult::success(
             format!(
@@ -7130,9 +7148,19 @@ fn apply_symbol_batch(
     ))
 }
 
-fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, Value), String> {
+#[derive(Clone, Debug)]
+pub(super) struct DesktopSemanticPreview {
+    pub(super) payload: Value,
+    pub(super) source_fingerprint: String,
+    pub(super) plan: WorkshopSemanticEditPlan,
+}
+
+fn desktop_preview_semantic_batch(
+    root: &Path,
+    payload: Value,
+) -> Result<DesktopSemanticPreview, String> {
     let workspace = load_workspace(Some(root))?;
-    let mut validated_inputs = desktop_validation_inputs(root, &[])?;
+    let source_fingerprint = desktop_source_fingerprint(root, &[])?;
     let files =
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let editable_files = files
@@ -7140,29 +7168,62 @@ fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, 
         .filter(|file| is_editable_workshop_path(&file.path))
         .cloned()
         .collect::<Vec<_>>();
-    let batch = serde_json::from_value::<WorkshopSemanticEditBatch>(payload)
+    let batch = serde_json::from_value::<WorkshopSemanticEditBatch>(payload.clone())
         .map_err(|error| format!("invalid proposed semantic edit: {error}"))?;
-    let mut result = apply_symbol_batch(
+    let plan = plan_symbol_batch(&workspace, &editable_files, &files, batch)?;
+    if desktop_source_fingerprint(root, &[])? != source_fingerprint {
+        return Err(
+            "stale semantic preview: project sources changed while generating the preview".into(),
+        );
+    }
+    Ok(DesktopSemanticPreview {
+        payload,
+        source_fingerprint,
+        plan,
+    })
+}
+
+fn desktop_apply_semantic_preview(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+) -> Result<(String, Value), String> {
+    let current_fingerprint = desktop_source_fingerprint(root, &[])?;
+    if current_fingerprint != preview.source_fingerprint {
+        return Err("stale semantic preview: project sources changed; generate a new preview before applying".into());
+    }
+
+    let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
+    if replanned.source_fingerprint != preview.source_fingerprint || replanned.plan != preview.plan
+    {
+        return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+    }
+
+    let workspace = load_workspace(Some(root))?;
+    let mut validated_inputs = desktop_validation_inputs(root, &[])?;
+    if desktop_inputs_fingerprint(&validated_inputs) != preview.source_fingerprint {
+        return Err("stale semantic preview: project sources changed before apply".into());
+    }
+    for change in &preview.plan.changed_files {
+        validated_inputs.insert(change.file.clone(), change.after_hash.clone());
+    }
+    // Bind the receipt to the validated inputs overlaid with the exact reviewed plan.
+    let committed_fingerprint = desktop_inputs_fingerprint(&validated_inputs);
+    let mut result = apply_symbol_plan(
         &workspace,
-        &editable_files,
-        &files,
-        batch,
+        preview.plan.clone(),
         SymbolEditOptions {
             dry_run: false,
             no_tests: false,
         },
     )?;
-    // Bind validation to the inputs and the committed plan, not a later disk read.
-    let plan: WorkshopSemanticEditPlan = serde_json::from_value(result.data["plan"].clone())
-        .map_err(|error| format!("invalid host semantic receipt: {error}"))?;
-    for change in plan.changed_files {
-        validated_inputs.insert(
-            change.file,
-            format!("{:x}", Sha256::digest(change.after_source.as_bytes())),
-        );
-    }
-    result.data["source_fingerprint"] = json!(desktop_inputs_fingerprint(&validated_inputs));
+    result.data["source_fingerprint"] = json!(committed_fingerprint);
     Ok((result.human, result.data))
+}
+
+#[cfg(test)]
+fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, Value), String> {
+    let preview = desktop_preview_semantic_batch(root, payload)?;
+    desktop_apply_semantic_preview(root, &preview)
 }
 
 fn desktop_run_focused_tests(
@@ -9092,6 +9153,187 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    fn desktop_semantic_update(root: &Path, name: &str, new_source: &str) -> Value {
+        let item = desktop_source_context(root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == name)
+            .unwrap();
+        json!({"schema_version": 1, "edits": [{
+            "operation": "update",
+            "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+            "new_source": new_source,
+        }]})
+    }
+
+    fn desktop_semantic_delete(root: &Path, name: &str) -> Value {
+        let item = desktop_source_context(root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == name)
+            .unwrap();
+        json!({"schema_version": 1, "edits": [{
+            "operation": "delete",
+            "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+        }]})
+    }
+
+    #[test]
+    fn desktop_semantic_preview_plans_add_update_delete_and_multifile_deterministically() {
+        let root = desktop_editor_fixture("semantic_preview_operations");
+        let update = desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }");
+        let first = desktop_preview_semantic_batch(&root, update.clone()).unwrap();
+        let second = desktop_preview_semantic_batch(&root, update).unwrap();
+        assert_eq!(first.source_fingerprint, second.source_fingerprint);
+        assert_eq!(first.plan, second.plan);
+        assert_eq!(first.plan.changed_files.len(), 1);
+        assert!(first.plan.changed_files[0]
+            .after_source
+            .contains("return 2"));
+
+        let add = json!({"schema_version": 1, "edits": [{
+            "operation": "add",
+            "target": {"file": "src/main.stasis", "kind": "function", "name": "added"},
+            "new_source": "function added(): i32 { return 3; }",
+        }]});
+        let added = desktop_preview_semantic_batch(&root, add).unwrap();
+        assert_eq!(added.plan.changed_files.len(), 1);
+        assert!(added.plan.changed_files[0]
+            .after_source
+            .contains("function added"));
+
+        let deleted =
+            desktop_preview_semantic_batch(&root, desktop_semantic_delete(&root, "value")).unwrap();
+        assert_eq!(deleted.plan.changed_files.len(), 1);
+        assert!(!deleted.plan.changed_files[0]
+            .after_source
+            .contains("function value"));
+
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"values.stasis\";\nfunction main(): i32 { return value(); }\nfunction local(): i32 { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/values.stasis"),
+            "function value(): i32 { return 1; }\n",
+        )
+        .unwrap();
+        let local = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "local")
+            .unwrap();
+        let value = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let multifile = json!({"schema_version": 1, "edits": [
+            {"operation": "update", "target": local["target"],
+             "expected_source_hash": local["expected_source_hash"],
+             "new_source": "function local(): i32 { return 2; }"},
+            {"operation": "update", "target": value["target"],
+             "expected_source_hash": value["expected_source_hash"],
+             "new_source": "function value(): i32 { return 3; }"},
+        ]});
+        let multifile = desktop_preview_semantic_batch(&root, multifile).unwrap();
+        assert_eq!(
+            multifile
+                .plan
+                .changed_files
+                .iter()
+                .map(|change| change.file.as_str())
+                .collect::<Vec<_>>(),
+            ["src/main.stasis", "src/values.stasis"]
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_semantic_preview_rejects_noop_conflict_stale_and_identity_mismatch() {
+        let root = desktop_editor_fixture("semantic_preview_rejections");
+        let unchanged = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let noop = json!({"schema_version": 1, "edits": [{
+            "operation": "update", "target": unchanged["target"],
+            "expected_source_hash": unchanged["expected_source_hash"],
+            "new_source": unchanged["source"],
+        }]});
+        assert!(desktop_preview_semantic_batch(&root, noop)
+            .unwrap_err()
+            .contains("made no changes"));
+
+        let conflict = json!({"schema_version": 1, "edits": [{
+            "operation": "update", "target": unchanged["target"],
+            "expected_source_hash": "wrong-hash",
+            "new_source": "function value(): i32 { return 2; }",
+        }]});
+        assert!(desktop_preview_semantic_batch(&root, conflict)
+            .unwrap_err()
+            .contains("stale semantic"));
+
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }");
+        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
+        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "import \"../src/main.stasis\";\n// changed after preview\ntest `positive`(): bool { return value() > 0; }\n",
+        )
+        .unwrap();
+        assert!(desktop_apply_semantic_preview(&root, &preview)
+            .unwrap_err()
+            .contains("stale semantic preview"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+
+        let mut mismatched = desktop_preview_semantic_batch(
+            &root,
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 4; }"),
+        )
+        .unwrap();
+        mismatched.plan.changed_files[0]
+            .after_source
+            .push_str("// tampered\n");
+        assert!(desktop_apply_semantic_preview(&root, &mismatched)
+            .unwrap_err()
+            .contains("identity mismatch"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_semantic_preview_applies_the_exact_reviewed_plan() {
+        let root = desktop_editor_fixture("semantic_preview_identity");
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 7; }");
+        let preview = desktop_preview_semantic_batch(&root, payload.clone()).unwrap();
+        assert_eq!(preview.payload, payload);
+        let reviewed_plan = preview.plan.clone();
+        let (_, receipt) = desktop_apply_semantic_preview(&root, &preview).unwrap();
+        assert_eq!(receipt["plan"], json!(reviewed_plan));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            preview.plan.changed_files[0].after_source
+        );
+        assert_eq!(
+            receipt["source_fingerprint"],
+            desktop_source_fingerprint(&root, &[]).unwrap()
+        );
+        remove_temp(&root);
     }
 
     #[test]

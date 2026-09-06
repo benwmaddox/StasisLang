@@ -3455,6 +3455,7 @@ dependencies = [
  "stasis_lsp",
  "stasis_network",
  "stasis_runner",
+ "winit",
 ]
 
 [[package]]
