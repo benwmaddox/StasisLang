@@ -207,7 +207,7 @@ impl EffectSets {
     }
 
     fn record_scanned_path(&mut self, path: &str) {
-        if !path.contains("[*]") || path.ends_with(".length") {
+        if !path.contains("[*]") || path.ends_with(".length") || path.ends_with(".max_length") {
             return;
         }
         if let Some(iteration_id) = self.active_iterations.last().copied() {
@@ -1799,7 +1799,7 @@ fn analyze_statements(
                 let normalized = state_collection
                     .clone()
                     .unwrap_or_else(|| collection_path.clone());
-                let bound_path = format!("{normalized}.length");
+                let bound_path = format!("{normalized}.max_length");
                 if context.globals.contains(root_name(&normalized)) {
                     effects.insert_read(bound_path.clone());
                 } else if normalized.starts_with('$') {

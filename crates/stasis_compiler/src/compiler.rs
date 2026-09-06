@@ -2506,6 +2506,14 @@ function tick(): i32 {
             vec!["state.enemies[*].hp", "state.score"]
         );
         assert!(tick.aggregate.calls.contains(&"damage_all".to_string()));
+        assert!(tick
+            .aggregate
+            .reads
+            .contains(&"state.enemies.max_length".to_string()));
+        assert!(!tick
+            .aggregate
+            .reads
+            .contains(&"state.enemies.length".to_string()));
         let damage = summaries
             .iter()
             .find(|summary| summary.function == "damage")
@@ -2519,7 +2527,7 @@ function tick(): i32 {
         assert_eq!(damage_view.direct.bounded_iterations[0].bound, "enemies");
         assert_eq!(
             damage_view.direct.bounded_iterations[0].reads,
-            vec!["enemies.length"]
+            vec!["enemies.max_length"]
         );
         assert_eq!(
             damage_view.direct.bounded_iterations[0].max_iterations,
