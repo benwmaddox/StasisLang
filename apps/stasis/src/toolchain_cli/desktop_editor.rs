@@ -12,6 +12,7 @@ use stasis_ai::{
     ToolObservation,
 };
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -530,16 +531,24 @@ impl DesktopEditor {
     }
 
     fn process_shortcuts(&mut self, context: &egui::Context) {
-        let commands = context.input(|input| {
-            input
-                .events
-                .iter()
-                .filter_map(EditorState::chord)
-                .filter_map(|chord| self.state.shortcuts.command_for(chord))
-                .collect::<Vec<_>>()
-        });
-        for command in commands {
-            self.state.dispatch(command);
+        if self.state.palette_open {
+            return;
+        }
+        let events = context.input(|input| input.events.clone());
+        for event in events {
+            if let Some(command) =
+                EditorState::chord(&event).and_then(|chord| self.state.shortcuts.command_for(chord))
+            {
+                if let egui::Event::Key { key, modifiers, .. } = event {
+                    context.input_mut(|input| {
+                        input.consume_key(modifiers, key);
+                    });
+                }
+                self.state.dispatch(command);
+                if self.state.palette_open {
+                    break;
+                }
+            }
         }
     }
 
@@ -833,12 +842,7 @@ impl DesktopEditor {
                 .selectable_label(active.as_deref() == Some(&id), label)
                 .clicked()
             {
-                self.state.notice = self
-                    .state
-                    .session
-                    .switch_task(&id)
-                    .err()
-                    .map(|e| e.to_string());
+                self.state.notice = self.state.switch_task(&id).err().map(|e| e.to_string());
             }
         }
     }
@@ -854,6 +858,9 @@ struct EditorState {
     reply: String,
     palette_query: String,
     palette_open: bool,
+    palette_selected: usize,
+    palette_return_focus: FocusArea,
+    drafts: BTreeMap<String, (String, String)>,
     next_task: u64,
     intents: Vec<EditorIntent>,
     notice: Option<String>,
@@ -871,6 +878,9 @@ impl Default for EditorState {
             reply: String::new(),
             palette_query: String::new(),
             palette_open: false,
+            palette_selected: 0,
+            palette_return_focus: FocusArea::Tasks,
+            drafts: BTreeMap::new(),
             next_task: 1,
             intents: Vec::new(),
             notice: None,
@@ -904,22 +914,28 @@ impl EditorState {
     }
 
     fn create_task(&mut self) -> Result<(), String> {
-        let objective = self.objective.trim();
+        let objective = self.objective.trim().to_string();
         if objective.is_empty() {
             self.focus = FocusArea::Tasks;
             return Err("Enter a task objective first.".into());
         }
         let id = format!("task-{}", self.next_task);
+        let previous = self.session.active_task_id().map(ToString::to_string);
         self.session
             .new_task(
                 id.as_str(),
-                objective,
+                &objective,
                 "Stasis project; fresh task-scoped context",
             )
             .map_err(|e| e.to_string())?;
         self.next_task = self.next_task.saturating_add(1);
         self.objective.clear();
-        self.reply.clear();
+        if let Some(previous) = previous {
+            self.drafts
+                .insert(previous, (String::new(), std::mem::take(&mut self.reply)));
+        } else {
+            self.reply.clear();
+        }
         self.focus = FocusArea::Reply;
         Ok(())
     }
@@ -939,9 +955,28 @@ impl EditorState {
             .and_then(|id| ids.iter().position(|value| value == id.as_str()))
             .unwrap_or(0);
         let next = (current as isize + offset).rem_euclid(ids.len() as isize) as usize;
-        self.session
-            .switch_task(&ids[next])
-            .map_err(|e| e.to_string())
+        self.switch_task(&ids[next])
+    }
+
+    fn switch_task(&mut self, id: &str) -> Result<(), String> {
+        let previous = self.active_id()?;
+        self.session.switch_task(id).map_err(|e| e.to_string())?;
+        self.drafts.insert(
+            previous,
+            (
+                std::mem::take(&mut self.objective),
+                std::mem::take(&mut self.reply),
+            ),
+        );
+        (self.objective, self.reply) = self.drafts.remove(id).unwrap_or_default();
+        Ok(())
+    }
+
+    fn close_palette(&mut self) {
+        self.palette_open = false;
+        self.palette_query.clear();
+        self.palette_selected = 0;
+        self.focus = self.palette_return_focus;
     }
 
     fn first_action(&self, predicate: impl Fn(&ActionState) -> bool) -> Option<String> {
@@ -961,6 +996,10 @@ impl EditorState {
     fn handle(&mut self, command: TaskSessionCommand) -> Result<(), String> {
         match command {
             TaskSessionCommand::OpenCommandPalette | TaskSessionCommand::Search => {
+                if !self.palette_open {
+                    self.palette_return_focus = self.focus;
+                    self.palette_selected = 0;
+                }
                 self.palette_open = true;
                 self.focus = FocusArea::Palette;
                 Ok(())
@@ -982,7 +1021,7 @@ impl EditorState {
                     .nth(usize::from(slot.saturating_sub(1)))
                     .map(|task| task.id.to_string())
                     .ok_or_else(|| format!("Task slot {slot} is empty."))?;
-                self.session.switch_task(id).map_err(|e| e.to_string())
+                self.switch_task(&id)
             }
             TaskSessionCommand::FocusReply => {
                 self.active_id()?;
@@ -1316,6 +1355,15 @@ impl DesktopEditor {
         }
         let commands = [
             ("New task", TaskSessionCommand::NewTask),
+            ("Next task", TaskSessionCommand::SwitchNextTask),
+            ("Previous task", TaskSessionCommand::SwitchPreviousTask),
+            ("Send reply", TaskSessionCommand::SendReply),
+            ("Reject action", TaskSessionCommand::RejectAction),
+            ("Retry", TaskSessionCommand::Retry),
+            (
+                "Import generated image",
+                TaskSessionCommand::ImportGeneratedImage,
+            ),
             ("Focus reply", TaskSessionCommand::FocusReply),
             ("Accept action", TaskSessionCommand::AcceptAction),
             ("Apply action", TaskSessionCommand::ApplyAction),
@@ -1330,33 +1378,118 @@ impl DesktopEditor {
             ("Mark done", TaskSessionCommand::MarkDone),
             ("Focus game", TaskSessionCommand::FocusGame),
         ];
+        let mut commands = commands
+            .into_iter()
+            .map(|(label, command)| (label.to_string(), command))
+            .collect::<Vec<_>>();
+        commands.extend(
+            self.state
+                .session
+                .tasks()
+                .take(255)
+                .enumerate()
+                .map(|(index, task)| {
+                    (
+                        format!("Switch to task {}: {}", index + 1, task.objective),
+                        TaskSessionCommand::SwitchTask((index + 1) as u8),
+                    )
+                }),
+        );
+        let mut keys = Vec::new();
+        context.input_mut(|input| {
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    key, pressed: true, ..
+                } = event
+                {
+                    if matches!(
+                        key,
+                        egui::Key::ArrowUp
+                            | egui::Key::ArrowDown
+                            | egui::Key::Enter
+                            | egui::Key::Escape
+                    ) {
+                        keys.push(*key);
+                        return false;
+                    }
+                }
+                true
+            });
+        });
         let mut chosen = None;
         egui::Window::new("Command palette  Ctrl+K")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, [0.0, 72.0])
             .show(context, |ui| {
-                ui.text_edit_singleline(&mut self.state.palette_query)
-                    .request_focus();
+                let query_id = ui.make_persistent_id("palette-query");
+                ui.memory_mut(|memory| memory.request_focus(query_id));
+                let response =
+                    ui.add(egui::TextEdit::singleline(&mut self.state.palette_query).id(query_id));
+                if response.changed() {
+                    self.state.palette_selected = 0;
+                }
                 let query = self.state.palette_query.to_ascii_lowercase();
-                for (label, command) in commands {
-                    if (query.is_empty() || label.to_ascii_lowercase().contains(&query))
-                        && ui.button(label).clicked()
-                    {
-                        chosen = Some(command);
+                let filtered = commands
+                    .iter()
+                    .filter(|(label, _)| label.to_ascii_lowercase().contains(&query))
+                    .collect::<Vec<_>>();
+                self.state.palette_selected = self
+                    .state
+                    .palette_selected
+                    .min(filtered.len().saturating_sub(1));
+                for key in &keys {
+                    match key {
+                        egui::Key::Escape => {
+                            self.state.close_palette();
+                            break;
+                        }
+                        egui::Key::ArrowUp => {
+                            self.state.palette_selected =
+                                self.state.palette_selected.saturating_sub(1)
+                        }
+                        egui::Key::ArrowDown => {
+                            self.state.palette_selected = (self.state.palette_selected + 1)
+                                .min(filtered.len().saturating_sub(1))
+                        }
+                        egui::Key::Enter => {
+                            chosen = filtered
+                                .get(self.state.palette_selected)
+                                .map(|(_, command)| command.clone());
+                            break;
+                        }
+                        _ => {}
                     }
                 }
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for (index, (label, command)) in filtered.iter().enumerate() {
+                            let response = ui.selectable_label(
+                                index == self.state.palette_selected,
+                                label.as_str(),
+                            );
+                            if index == self.state.palette_selected && !keys.is_empty() {
+                                response.scroll_to_me(None);
+                            }
+                            if response.clicked() {
+                                chosen = Some(command.clone());
+                            }
+                        }
+                        if filtered.is_empty() {
+                            ui.label("No matching commands");
+                        }
+                    });
             });
         if let Some(command) = chosen {
-            self.state.palette_open = false;
-            self.state.palette_query.clear();
+            self.state.close_palette();
             self.state.dispatch(command);
         }
     }
 }
 
-impl eframe::App for DesktopEditor {
-    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+impl DesktopEditor {
+    fn ui(&mut self, context: &egui::Context) {
         if self.shutdown.load(Ordering::Acquire) {
             context.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
@@ -1365,6 +1498,11 @@ impl eframe::App for DesktopEditor {
         self.poll_controller();
         self.poll_capture();
         self.process_shortcuts(context);
+        let palette_frame = self.state.palette_open;
+        self.palette(context);
+        if palette_frame {
+            context.input_mut(|input| input.events.clear());
+        }
         egui::TopBottomPanel::top("top-bar").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("STASIS EDITOR");
@@ -1400,8 +1538,13 @@ impl eframe::App for DesktopEditor {
                 ui.allocate_ui(ui.available_size(), |ui| self.game(ui));
             });
         });
-        self.palette(context);
         self.flush_intents();
+    }
+}
+
+impl eframe::App for DesktopEditor {
+    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui(context);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1485,6 +1628,232 @@ mod tests {
             "stasis-editor-{label}-{}-{nonce}.png",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn drafts_follow_all_task_switches_and_creation() {
+        let mut state = task_state();
+        state.reply = "unsent first".into();
+        state.objective = "second".into();
+        state.create_task().unwrap();
+        assert!(state.reply.is_empty());
+        state.reply = "unsent second".into();
+        state.objective = "future second objective".into();
+        state
+            .handle(TaskSessionCommand::SwitchPreviousTask)
+            .unwrap();
+        assert_eq!(state.reply, "unsent first");
+        assert!(state.objective.is_empty());
+        state.objective = "future first objective".into();
+        state.switch_task("task-1").unwrap();
+        assert_eq!(state.objective, "future first objective");
+        assert_eq!(state.reply, "unsent first");
+        state.handle(TaskSessionCommand::SwitchTask(2)).unwrap();
+        assert_eq!(state.reply, "unsent second");
+        assert_eq!(state.objective, "future second objective");
+        state.switch_task("task-1").unwrap();
+        assert_eq!(state.objective, "future first objective");
+        assert!(state.switch_task("missing").is_err());
+        assert_eq!(state.reply, "unsent first");
+        state.handle(TaskSessionCommand::SendReply).unwrap();
+        state.switch_relative(1).unwrap();
+        state.switch_relative(-1).unwrap();
+        assert!(state.reply.is_empty());
+    }
+
+    fn palette_frame(
+        editor: &mut DesktopEditor,
+        context: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        let _ = context.run(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |context| {
+                editor.ui(context);
+                assert!(!context.input(|input| input.key_pressed(egui::Key::Enter)
+                    || input.key_pressed(egui::Key::Escape)));
+            },
+        );
+    }
+
+    #[test]
+    fn palette_reopening_captures_text_before_underlying_fields() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state = task_state();
+        editor.state.focus = FocusArea::Tasks;
+        editor.state.objective = "unsent objective".into();
+        let context = egui::Context::default();
+        editor
+            .state
+            .handle(TaskSessionCommand::OpenCommandPalette)
+            .unwrap();
+        palette_frame(&mut editor, &context, vec![]);
+        editor.state.close_palette();
+        palette_frame(&mut editor, &context, vec![]);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![
+                key_event(egui::Key::K, egui::Modifiers::CTRL),
+                egui::Event::Text("focus game".into()),
+            ],
+        );
+        assert_eq!(editor.state.palette_query, "focus game");
+        assert_eq!(editor.state.objective, "unsent objective");
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert_eq!(editor.state.focus, FocusArea::Game);
+        assert_eq!(editor.state.session.task_count(), 1);
+        assert_eq!(editor.state.objective, "unsent objective");
+    }
+
+    #[test]
+    fn palette_shortcut_blocks_other_task_shortcuts() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state = task_state();
+        editor.state.reply = "unsent".into();
+        editor.state.objective = "another task".into();
+        let context = egui::Context::default();
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![
+                key_event(egui::Key::K, egui::Modifiers::CTRL),
+                key_event(egui::Key::N, egui::Modifiers::CTRL),
+            ],
+        );
+        assert!(editor.state.palette_open);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::N, egui::Modifiers::CTRL)],
+        );
+        assert_eq!(editor.state.session.task_count(), 1);
+        assert_eq!(editor.state.objective, "another task");
+        assert_eq!(editor.state.reply, "unsent");
+    }
+
+    #[test]
+    fn palette_filters_navigates_invokes_and_consumes_keys() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state = task_state();
+        editor.state.reply = "do not send".into();
+        editor
+            .state
+            .handle(TaskSessionCommand::OpenCommandPalette)
+            .unwrap();
+        let context = egui::Context::default();
+        palette_frame(&mut editor, &context, vec![]);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![egui::Event::Text("focus".into())],
+        );
+        assert_eq!(editor.state.palette_query, "focus");
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+        );
+        assert_eq!(editor.state.palette_selected, 1);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+        );
+        assert_eq!(editor.state.palette_selected, 0);
+        editor.state.palette_query = "focus game".into();
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::Enter, egui::Modifiers::CTRL)],
+        );
+        assert!(!editor.state.palette_open);
+        assert_eq!(editor.state.focus, FocusArea::Game);
+        assert_eq!(editor.state.reply, "do not send");
+        assert!(editor.state.intents.is_empty());
+        editor
+            .state
+            .handle(TaskSessionCommand::OpenCommandPalette)
+            .unwrap();
+        editor.state.palette_query = "no such command".into();
+        editor.state.palette_selected = 999;
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![
+                key_event(egui::Key::ArrowDown, egui::Modifiers::NONE),
+                key_event(egui::Key::Enter, egui::Modifiers::NONE),
+            ],
+        );
+        assert_eq!(editor.state.palette_selected, 0);
+        assert!(editor.state.palette_open);
+        palette_frame(
+            &mut editor,
+            &context,
+            vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(!editor.state.palette_open);
+        assert_eq!(editor.state.focus, FocusArea::Game);
+        assert_eq!(
+            editor.state.session.active_task().unwrap().lifecycle,
+            TaskLifecycle::Active
+        );
+    }
+
+    #[test]
+    fn palette_exposes_reject_retry_import_and_task_switching() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state = task_state();
+        let context = egui::Context::default();
+        for query in ["reject action", "retry", "import generated image"] {
+            editor
+                .state
+                .handle(TaskSessionCommand::OpenCommandPalette)
+                .unwrap();
+            editor.state.palette_query = query.into();
+            palette_frame(
+                &mut editor,
+                &context,
+                vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            assert!(!editor.state.palette_open, "{query} must be invocable");
+        }
+        editor.state.objective = "second".into();
+        editor.state.create_task().unwrap();
+        for (query, expected) in [
+            ("previous task", "task-1"),
+            ("next task", "task-2"),
+            ("switch to task 1:", "task-1"),
+        ] {
+            editor
+                .state
+                .handle(TaskSessionCommand::OpenCommandPalette)
+                .unwrap();
+            editor.state.palette_query = query.into();
+            editor.state.palette_selected = 999;
+            palette_frame(
+                &mut editor,
+                &context,
+                vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
+            );
+            assert_eq!(editor.state.active_id().unwrap(), expected);
+            assert!(!editor.state.palette_open);
+        }
     }
 
     #[test]
