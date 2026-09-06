@@ -619,6 +619,19 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         )
         self.assertIn("### Integration seam rollout order", self.checklist)
 
+    def test_checklist_seams_have_status_and_evidence(self):
+        rows = re.findall(r"^\| IT-\d{3} \|.*$", self.checklist, re.MULTILINE)
+        self.assertEqual(32, len(rows))
+        for row in rows:
+            with self.subTest(task=row.split("|")[1].strip()):
+                cells = [cell.strip() for cell in row.strip("|").split("|")]
+                self.assertEqual(7, len(cells), "Expected status and evidence columns")
+                self.assertIn(cells[4], ("Implemented", "In progress", "Planned"))
+                links = re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", cells[5])
+                self.assertTrue(links, "Expected repository evidence link")
+                for link in links:
+                    self.assertTrue((ROOT / "docs" / link).exists(), link)
+
     def test_touch_drag_is_long_enough_for_hosted_emulator_sampling(self):
         inside_drag = next(
             gesture
