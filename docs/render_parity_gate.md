@@ -2,7 +2,8 @@
 
 `samples/render_parity` is the framework-owned current gfx_cmd conformance scene. It
 does not depend on a game. One frame contains a clear, two overlapping lines,
-one translucent filled rectangle, five resolved atlas-backed sprite instances
+one translucent filled rectangle and five non-positive rectangles (negative width,
+negative height, both negative, zero width, and zero height), five resolved atlas-backed sprite instances
 (a full-canvas SVG, the same SVG repeated smaller, opaque and translucent SVGs,
 and a rotated/scaled opaque SVG), direct UTF-8 text, cached text, and present.
 Missing resources use the renderer's same-path placeholder region, but are tested
@@ -11,6 +12,10 @@ separately instead of being part of this normal resource fixture.
 The checked-in test font is intentionally synthetic. Regenerate it with
 `python tools/ci/generate_render_parity_font.py`; it contains only deterministic
 bar glyphs and carries no third-party font data.
+
+The non-positive rectangles overlap the background pixel probe and must leave it
+unchanged; the positive rectangle remains visible in its own probe. The command
+counts retain all six rectangles, since skipping geometry must not mutate the trace.
 
 ## Automated gates
 

@@ -1203,12 +1203,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             int chunk = Math.min(SPRITE_CHUNK_SIZE, end - first);
             int texture = textures.solidTextureFor(0);
             spriteVertices.clear();
+            int quads = 0;
             for (int index = 0; index < chunk; index += 1) {
+                if (!hasPositiveRectDimensions(frameF32, first + index)) continue;
                 appendSolid(first + index, texture);
+                quads += 1;
             }
             spriteVertices.flip();
-            drawPreparedTextureBatch(chunk * VERTICES_PER_QUAD, texture);
-            frameSubmittedQuads += chunk;
+            if (quads > 0) drawPreparedTextureBatch(quads * VERTICES_PER_QUAD, texture);
+            frameSubmittedQuads += quads;
             first += chunk;
         }
     }
@@ -1225,7 +1228,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             int index = orderIndex(entry);
             if (kind != ORDER_RECT && kind != ORDER_SPRITE) break;
             if (kind == ORDER_RECT) {
-                if (index >= 0 && index < rectCount) {
+                if (index >= 0 && index < rectCount
+                        && hasPositiveRectDimensions(frameF32, index)) {
                     int wanted = WorkshopSpriteAtlas.chooseSolidTexture(texture,
                             nextSpriteTexture(position + 1,
                             orderCount, spriteRunCount));
@@ -1289,6 +1293,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             }
         }
         return 0;
+    }
+
+    static boolean hasPositiveRectDimensions(FloatBuffer values, int index) {
+        int base = F_RECT_REVERSE_BASE - index * GEOMETRY_F32_STRIDE;
+        return !(values.get(base + 2) <= 0.0f || values.get(base + 3) <= 0.0f);
     }
 
     private void appendSolid(int index, int texture) {

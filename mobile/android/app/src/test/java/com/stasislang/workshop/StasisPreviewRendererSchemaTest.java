@@ -17,6 +17,26 @@ import org.junit.Test;
 
 public final class StasisPreviewRendererSchemaTest {
     @Test
+    public void filledRectDimensionsMatchDesktopWithoutChangingFrameData() {
+        FloatBuffer values = FloatBuffer.allocate(StasisPreviewRenderer.FRAME_F32_CAPACITY);
+        float[] dimensions = {-12.0f, -0.0f, 0.0f, 12.0f};
+        int index = 0;
+        for (float width : dimensions) {
+            for (float height : dimensions) {
+                int base = StasisPreviewRenderer.F_RECT_REVERSE_BASE
+                        - index * StasisPreviewRenderer.GEOMETRY_F32_STRIDE;
+                values.put(base + 2, width);
+                values.put(base + 3, height);
+                assertEquals(width > 0 && height > 0,
+                        StasisPreviewRenderer.hasPositiveRectDimensions(values, index));
+                assertEquals(width, values.get(base + 2), 0.0f);
+                assertEquals(height, values.get(base + 3), 0.0f);
+                index += 1;
+            }
+        }
+    }
+
+    @Test
     public void twoLineContextRestoreLabelNeedsNoTextureOrFontAsset() {
         assertTrue(StasisPreviewRenderer.isValidRestoreLabel());
     }

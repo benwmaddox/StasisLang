@@ -9,7 +9,7 @@
   "required_commands": {
     "clear": 1,
     "lines": 2,
-    "filled_rectangles": 1,
+    "filled_rectangles": 6,
     "sprites": 5,
     "direct_text": 1,
     "cached_text": 1,
