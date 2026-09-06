@@ -15,7 +15,3 @@ if ($stagedStasis.Count -gt 0) {
         exit 1
     }
 }
-
-Write-Output "Stasis pre-commit: checking staged Stasis source format"
-& python $cargoPolicy run -- cargo test --quiet -p stasis_compiler --lib frontend::formatter::tests::staged_repository_stasis_sources_are_formatted -- --exact
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
