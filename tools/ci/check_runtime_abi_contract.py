@@ -502,6 +502,71 @@ def without_c_comments(text: str) -> str:
     return re.sub(r"/\*.*?\*/|//[^\r\n]*", "", text, flags=re.S)
 
 
+# Source-use checks complement constant mapping: a correct declaration does not
+# protect a consumer that adds an offset or substitutes a different base.
+DYNLOAD_F32_ASSIGNMENTS = {
+    "line_end": "STASIS_RENDER_F_LINE_BASE + counts.lines * STASIS_RENDER_LINE_STRIDE",
+    "rect_start": """if counts.rects == 0 {
+        STASIS_RENDER_SPRITE_BASE_F32
+    } else {
+        STASIS_RENDER_RECT_REVERSE_BASE_F32 - (counts.rects - 1) * STASIS_RENDER_GEOMETRY_STRIDE_F32
+    }""",
+    "sprite_f32_end": "STASIS_RENDER_SPRITE_BASE_F32 + counts.sprites * STASIS_RENDER_SPRITE_STRIDE_F32",
+    "source_text_base": "STASIS_RENDER_TEXT_BASE_F32",
+    "text_values": "counts.text * STASIS_RENDER_TEXT_STRIDE_F32",
+    "clip_values": "counts.clips * STASIS_RENDER_CLIP_STRIDE_F32",
+}
+DYNLOAD_F32_RANGES = (
+    "STASIS_RENDER_F_CLEAR_BASE..STASIS_RENDER_F_LINE_BASE",
+    "STASIS_RENDER_F_LINE_BASE..line_end",
+    "rect_start..STASIS_RENDER_SPRITE_BASE_F32",
+    "STASIS_RENDER_SPRITE_BASE_F32..sprite_f32_end",
+    "STASIS_RENDER_TEXT_BASE_F32..STASIS_RENDER_TEXT_BASE_F32 + text_values",
+    "STASIS_RENDER_CLIP_BASE_F32..STASIS_RENDER_CLIP_BASE_F32 + clip_values",
+)
+
+
+def check_dynload_render_uses(text: str, render: dict[str, int]) -> tuple[list[Mismatch], int]:
+    text = without_c_comments(text)
+    match = re.search(r"pub fn copy_jit_render_active\b(.*?)\n}", text, re.S)
+    body = match.group(1) if match else ""
+    failures = []
+    checks = 0
+
+    def verify(field, expected, actual):
+        nonlocal checks
+        checks += 1
+        if actual != expected:
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(DYNLOAD),
+                "render_active." + field, expected, actual,
+            ))
+
+    for name, canonical in (
+        ("let lines =", "STASIS_RENDER_I_LINE_COUNT"),
+        ("sprites:", "STASIS_RENDER_I_SPRITE_COUNT"),
+        ("text:", "STASIS_RENDER_I_TEXT_COUNT"),
+        ("text_bytes:", "STASIS_RENDER_I_TEXT_BYTES_USED"),
+    ):
+        indices = re.findall(re.escape(name) + r"\s*source_i32\[([^]]+)\]", body)
+        verify(canonical, [str(render[canonical])], [value.strip() for value in indices])
+
+    def compact(value):
+        return re.sub(r"\s+", "", value)
+
+    for name, expression in DYNLOAD_F32_ASSIGNMENTS.items():
+        actual = re.findall(r"\blet\s+" + name + r"\s*=\s*([^;]+);", body)
+        verify(name, [compact(expression)], [compact(value) for value in actual])
+    for buffer in ("out_f32", "source_f32"):
+        expected = list(DYNLOAD_F32_RANGES)
+        if buffer == "source_f32":
+            expected[4] = "source_text_base..source_text_base + text_values"
+        actual = re.findall(r"\b" + buffer + r"\[([^]]+)\]", body)
+        verify(buffer + ".ranges", [compact(value) for value in expected],
+               [compact(value) for value in actual])
+    return failures, checks
+
+
 def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[list[Mismatch], dict[str, object]]:
     overlays = overlays or {}
     sources = {path: overlays.get(path, (root / path).read_text(encoding="utf-8")) for path in REQUIRED}
@@ -526,6 +591,9 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
                     "render_abi.legacy_token", "current-only render ABI", match.group(0),
                 ))
     failures += compare(label(RENDER_HEADER), label(DYNLOAD), render, rust, RENDER_TO_RUST)
+    use_failures, use_checks = check_dynload_render_uses(sources[DYNLOAD], render)
+    failures += use_failures
+    checks += use_checks
     failures += compare(label(RENDER_HEADER), label(JAVA_RENDERER), render, java, RENDER_TO_JAVA)
     failures += compare(label(RENDER_HEADER), label(WEB), render, web, RENDER_TO_WEB)
     failures += compare(label(RENDER_HEADER), label(TOOLCHAIN), render, toolchain_provenance, RENDER_TO_TOOLCHAIN_PROVENANCE)

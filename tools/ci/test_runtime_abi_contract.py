@@ -1,4 +1,5 @@
 import copy
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,57 @@ class RuntimeAbiContractTests(unittest.TestCase):
         self.assertIn(old, overlays[path])
         overlays[path] = overlays[path].replace(old, new, 1)
         return contract.check(overlays=overlays)
+
+    def assert_dynload_use_mutation(self, old, new, field):
+        failures, evidence = self.run_with(contract.DYNLOAD, old, new)
+        failure = next(item for item in failures if item.field == "render_active." + field)
+        self.assertEqual(contract.RENDER_HEADER.as_posix(), failure.producer)
+        self.assertEqual(contract.DYNLOAD.as_posix(), failure.consumer)
+        self.assertEqual("failed", evidence["status"])
+
+    def test_dynload_consumed_count_offsets_reject_drift(self):
+        for prefix, index, field in (
+            ("let lines =", 3, "STASIS_RENDER_I_LINE_COUNT"),
+            ("sprites:", 4, "STASIS_RENDER_I_SPRITE_COUNT"),
+            ("text:", 7, "STASIS_RENDER_I_TEXT_COUNT"),
+            ("text_bytes:", 9, "STASIS_RENDER_I_TEXT_BYTES_USED"),
+        ):
+            with self.subTest(field=field):
+                self.assert_dynload_use_mutation(
+                    f"{prefix} source_i32[{index}]",
+                    f"{prefix} source_i32[{index + 1}]", field,
+                )
+
+    def test_dynload_computed_f32_offsets_reject_drift(self):
+        source = self.sources[contract.DYNLOAD]
+        for name in ("line_end", "rect_start", "sprite_f32_end", "source_text_base",
+                     "text_values", "clip_values"):
+            assignment = re.search(r"\blet " + name + r"\s*=\s*[^;]+;", source).group(0)
+            # Mutate each consumed base, stride, and arithmetic literal separately.
+            for token in re.finditer(r"STASIS_RENDER_[A-Z0-9_]+|\b[01]\b", assignment):
+                with self.subTest(name=name, token=token.group()):
+                    mutated = assignment[:token.start()] + "(" + token.group() + " + 1)" + assignment[token.end():]
+                    self.assert_dynload_use_mutation(assignment, mutated, name)
+
+    def test_dynload_f32_copy_range_offsets_reject_drift(self):
+        source = self.sources[contract.DYNLOAD]
+        body = re.search(r"pub fn copy_jit_render_active\b(.*?)\n}", source, re.S).group(1)
+        for match in re.finditer(r"\b(out_f32|source_f32)\[([^]]+)\]", body):
+            for bound in (0, 1):
+                with self.subTest(expression=match.group(), bound=bound):
+                    bounds = match.group(2).split("..")
+                    bounds[bound] += " + 1"
+                    self.assert_dynload_use_mutation(
+                        match.group(), match.group(1) + "[" + "..".join(bounds) + "]",
+                        match.group(1) + ".ranges",
+                    )
+
+    def test_dynload_source_checks_ignore_comments_and_whitespace(self):
+        failures, _ = self.run_with(
+            contract.DYNLOAD, "let source_text_base = STASIS_RENDER_TEXT_BASE_F32;",
+            "// let source_text_base = 123;\nlet source_text_base =\n STASIS_RENDER_TEXT_BASE_F32;",
+        )
+        self.assertEqual([], failures)
 
     def test_source_discovery_ignores_generated_copies(self):
         with tempfile.TemporaryDirectory() as directory:
