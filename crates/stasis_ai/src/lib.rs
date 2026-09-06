@@ -14,8 +14,9 @@ pub mod task_controller;
 pub mod task_session;
 
 pub use openrouter::{
-    ConfiguredProvider, OpenRouterConfig, OpenRouterProvider, PreferredThroughputPolicy,
-    ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+    ConfiguredProvider, ImageInputCapability, OpenRouterConfig, OpenRouterImageInput,
+    OpenRouterProvider, PreferredThroughputPolicy, ProviderConfig, ProviderKind, RoutingConfig,
+    RoutingSort, MAX_OPENROUTER_IMAGES, MAX_OPENROUTER_IMAGE_BYTES,
 };
 
 pub use task_controller::{

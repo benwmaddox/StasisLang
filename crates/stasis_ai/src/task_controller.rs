@@ -1,7 +1,7 @@
 use crate::{
     ActionId, ActionKind, ActionState, ConnectionState, ProviderState, ScreenshotAnalysisState,
     ScreenshotAttachment, Task, TaskId, TaskLifecycle, TaskSession, TaskSessionError, ThreadEntry,
-    UploadState, VisionCapability,
+    UploadState,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -338,7 +338,7 @@ impl TaskController {
         })
     }
 
-    pub fn send_active(&self, session: &TaskSession) -> Result<RequestId, TaskControllerError> {
+    pub fn send_active(&self, session: &mut TaskSession) -> Result<RequestId, TaskControllerError> {
         let task_id = session
             .active_task_id()
             .cloned()
@@ -348,7 +348,7 @@ impl TaskController {
 
     pub fn send(
         &self,
-        session: &TaskSession,
+        session: &mut TaskSession,
         task_id: &TaskId,
     ) -> Result<RequestId, TaskControllerError> {
         let task = session.task(task_id)?;
@@ -357,6 +357,9 @@ impl TaskController {
         }
         if task.connection != ConnectionState::Connected {
             return Err(TaskControllerError::TaskDisconnected(task_id.clone()));
+        }
+        if task.consented_screenshot_count() > crate::task_session::MAX_SCREENSHOTS_PER_REQUEST {
+            return Err(TaskSessionError::ScreenshotRequestLimitReached.into());
         }
         let key = (self.client_id, task_id.clone());
         let mut state = lock(&self.state);
@@ -371,6 +374,8 @@ impl TaskController {
             return Err(TaskControllerError::CapacityReached);
         }
         let request_id = RequestId(self.next_request_id.fetch_add(1, Ordering::Relaxed));
+        let task = session.task_mut(task_id)?;
+        let screenshots = task.take_consented_screenshots(request_id.get());
         let request = ProviderRequest {
             request_id,
             task_id: task_id.clone(),
@@ -404,15 +409,7 @@ impl TaskController {
                         .collect(),
                 })
                 .collect(),
-            screenshots: task
-                .screenshots
-                .values()
-                .filter(|screenshot| {
-                    screenshot.provenance.task_id == task.id
-                        && screenshot.vision == VisionCapability::Available
-                })
-                .cloned()
-                .collect(),
+            screenshots,
         };
         let canceled = Arc::new(AtomicBool::new(false));
         let admitted = Arc::new(AtomicBool::new(true));
@@ -475,6 +472,7 @@ impl TaskController {
         if task.connection != ConnectionState::Connected {
             task.reconnect()?;
         }
+        task.clear_screenshot_request_selections();
         let request_id = self.resubmit(task_id, false, None)?;
         update_screenshots(
             &mut task,
@@ -530,6 +528,7 @@ impl TaskController {
     ) -> Result<RequestId, TaskControllerError> {
         let mut task = session.task(task_id)?.clone();
         task.reconnect()?;
+        task.clear_screenshot_request_selections();
         let request_id = self.resubmit(task_id, true, task.selected_provider)?;
         update_screenshots(
             &mut task,
@@ -569,6 +568,8 @@ impl TaskController {
         if let Some(provider) = provider {
             request.selected_provider = Some(provider);
         }
+        // Automated retry and reconnect require fresh selection and consent for pixels.
+        request.screenshots.clear();
         let canceled = Arc::new(AtomicBool::new(false));
         let admitted = Arc::new(AtomicBool::new(true));
         let started_at = Instant::now();
@@ -822,6 +823,7 @@ fn update_screenshots(
         if screenshot.provenance.task_id != task.id
             || screenshot.source != requested_screenshot.source
             || screenshot.content_sha256 != requested_screenshot.content_sha256
+            || screenshot.request_id != requested_screenshot.request_id
         {
             continue;
         }
@@ -974,6 +976,67 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_image_limit_preserves_consent_before_admission() {
+        let (sent, received) = mpsc::channel();
+        let controller = TaskController::new(move |request, _| {
+            sent.send(request.screenshots.len()).unwrap();
+            Ok(ProviderReply::new("complete"))
+        });
+        let mut session = session(&["one", "two"]);
+        let task = session.task_mut("one").unwrap();
+        task.select_provider(crate::task_session::ProviderSelection::OpenRouter)
+            .unwrap();
+        task.set_vision_capability(true).unwrap();
+        for index in 0..9 {
+            task.attach_screenshot(format!("image-{index}"), "image.png")
+                .unwrap();
+        }
+        for index in 0..8 {
+            task.select_screenshot_for_request(format!("image-{index}"))
+                .unwrap();
+        }
+        task.select_screenshot_for_request("image-0").unwrap();
+        assert_eq!(
+            task.select_screenshot_for_request("image-8"),
+            Err(TaskSessionError::ScreenshotRequestLimitReached)
+        );
+        assert_eq!(task.consented_screenshot_count(), 8);
+        // Admission also rejects invalid state introduced outside the selection API.
+        let extra = task
+            .screenshots
+            .get_mut(&crate::ScreenshotId::new("image-8"))
+            .unwrap();
+        extra.selected_for_request = true;
+        extra.consent_to_send = true;
+        let before = task.clone();
+        assert!(controller
+            .send(&mut session, &TaskId::new("one"))
+            .unwrap_err()
+            .to_string()
+            .contains("at most 8"));
+        assert_eq!(session.task("one").unwrap(), &before);
+        assert!(controller.snapshot(&TaskId::new("one")).is_none());
+        assert!(received.try_recv().is_err());
+        let other = session.task_mut("two").unwrap();
+        other.set_vision_capability(true).unwrap();
+        other.attach_screenshot("own", "own.png").unwrap();
+        other.select_screenshot_for_request("own").unwrap();
+        session
+            .task_mut("one")
+            .unwrap()
+            .unselect_screenshot_for_request("image-0")
+            .unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(2)).unwrap(), 8);
+        wait_for(&controller, &mut session);
+        assert_eq!(session.task("two").unwrap().consented_screenshot_count(), 1);
+        assert_eq!(
+            session.task("one").unwrap().connection,
+            ConnectionState::Connected
+        );
+    }
+
+    #[test]
     fn provider_selection_is_snapshotted_per_request_and_task() {
         let (sent, received) = mpsc::channel();
         let controller = TaskController::new(move |request, _| {
@@ -994,13 +1057,13 @@ mod tests {
             .unwrap()
             .select_provider(second)
             .unwrap();
-        controller.send(&session, &TaskId::new("one")).unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         session
             .task_mut("one")
             .unwrap()
             .select_provider(second)
             .unwrap();
-        controller.send(&session, &TaskId::new("two")).unwrap();
+        controller.send(&mut session, &TaskId::new("two")).unwrap();
         let mut snapshots = BTreeMap::new();
         for _ in 0..2 {
             let (task, provider) = received.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1025,7 +1088,7 @@ mod tests {
             .unwrap()
             .select_provider(ProviderSelection::Codex)
             .unwrap();
-        controller.send(&session, &id).unwrap();
+        controller.send(&mut session, &id).unwrap();
         wait_for(&controller, &mut session);
         let prior = received.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(
@@ -1087,7 +1150,7 @@ mod tests {
         let clone = controller.clone();
         let mut owner = session(&["one", "two"]);
         let mut stranger = session(&["other"]);
-        controller.send(&owner, &TaskId::new("one")).unwrap();
+        controller.send(&mut owner, &TaskId::new("one")).unwrap();
         assert!(clone.poll(&mut stranger).is_empty());
         let events = wait_for(&controller, &mut owner);
         assert!(
@@ -1122,7 +1185,12 @@ mod tests {
             .unwrap()
             .attach_screenshot("shot", "shot.png")
             .unwrap();
-        controller.send(&session, &TaskId::new("one")).unwrap();
+        session
+            .task_mut("one")
+            .unwrap()
+            .select_screenshot_for_request("shot")
+            .unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         started.wait();
         controller
             .cancel(&mut session, &TaskId::new("one"))
@@ -1174,8 +1242,13 @@ mod tests {
             .unwrap()
             .screenshots
             .insert(crate::ScreenshotId::new("foreign"), foreign);
+        session
+            .task_mut("one")
+            .unwrap()
+            .select_screenshot_for_request("one-shot")
+            .unwrap();
 
-        controller.send(&session, &TaskId::new("one")).unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         session
             .task_mut("one")
             .unwrap()
@@ -1191,6 +1264,10 @@ mod tests {
         assert_eq!(
             requests[0].screenshots[0].provenance.task_id.as_str(),
             "one"
+        );
+        assert_eq!(
+            requests[0].screenshots[0].request_id,
+            Some(requests[0].request_id.get())
         );
         let task = session.task("one").unwrap();
         assert_eq!(
@@ -1224,7 +1301,13 @@ mod tests {
     fn provider_failure_and_retry_keep_screenshot_lifecycle_truthful() {
         let calls = Arc::new(AtomicU64::new(0));
         let provider_calls = Arc::clone(&calls);
-        let controller = TaskController::new(move |_, _| {
+        let screenshot_counts = Arc::new(Mutex::new(Vec::new()));
+        let provider_screenshot_counts = Arc::clone(&screenshot_counts);
+        let controller = TaskController::new(move |request, _| {
+            provider_screenshot_counts
+                .lock()
+                .unwrap()
+                .push(request.screenshots.len());
             if provider_calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 Err("private provider error".to_string())
             } else {
@@ -1235,8 +1318,9 @@ mod tests {
         let task = session.task_mut("one").unwrap();
         task.set_vision_capability(true).unwrap();
         task.attach_screenshot("shot", "shot.png").unwrap();
+        task.select_screenshot_for_request("shot").unwrap();
 
-        controller.send(&session, &TaskId::new("one")).unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         wait_for(&controller, &mut session);
         let shot = &session.task("one").unwrap().screenshots[&crate::ScreenshotId::new("shot")];
         assert!(matches!(shot.upload, UploadState::Failed { .. }));
@@ -1245,14 +1329,32 @@ mod tests {
             ScreenshotAnalysisState::Failed { .. }
         ));
 
+        // Even a pending selection is revoked by text-request retry admission.
+        session
+            .task_mut("one")
+            .unwrap()
+            .select_screenshot_for_request("shot")
+            .unwrap();
         controller.retry(&mut session, &TaskId::new("one")).unwrap();
         let shot = &session.task("one").unwrap().screenshots[&crate::ScreenshotId::new("shot")];
-        assert_eq!(shot.upload, UploadState::Pending);
-        assert_eq!(shot.analysis, ScreenshotAnalysisState::Pending);
+        assert!(matches!(shot.upload, UploadState::Failed { .. }));
+        assert!(!shot.consent_to_send);
+        wait_for(&controller, &mut session);
+        let shot = &session.task("one").unwrap().screenshots[&crate::ScreenshotId::new("shot")];
+        assert!(matches!(shot.upload, UploadState::Failed { .. }));
+        assert_eq!(*screenshot_counts.lock().unwrap(), [1, 0]);
+
+        session
+            .task_mut("one")
+            .unwrap()
+            .select_screenshot_for_request("shot")
+            .unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         wait_for(&controller, &mut session);
         let shot = &session.task("one").unwrap().screenshots[&crate::ScreenshotId::new("shot")];
         assert_eq!(shot.upload, UploadState::Uploaded);
         assert_eq!(shot.analysis, ScreenshotAnalysisState::Completed);
+        assert_eq!(*screenshot_counts.lock().unwrap(), [1, 0, 1]);
     }
 
     #[test]
@@ -1285,7 +1387,7 @@ mod tests {
             Ok(reply)
         });
         let mut session = session(&["one"]);
-        controller.send(&session, &TaskId::new("one")).unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         let failure = wait_for(&controller, &mut session);
         assert!(
             matches!(&failure[0], TaskControllerEvent::Failed { message, .. } if message == SAFE_PROVIDER_ERROR)
@@ -1324,7 +1426,7 @@ mod tests {
             }
         });
         let mut session = session(&["one"]);
-        controller.send(&session, &TaskId::new("one")).unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         started.wait();
         session.task_mut("one").unwrap().disconnect().unwrap();
         controller
@@ -1362,12 +1464,12 @@ mod tests {
             },
         )
         .unwrap();
-        let session = session(&["one", "two", "three", "four", "five"]);
+        let mut session = session(&["one", "two", "three", "four", "five"]);
         for id in ["one", "two", "three", "four"] {
-            controller.send(&session, &TaskId::new(id)).unwrap();
+            controller.send(&mut session, &TaskId::new(id)).unwrap();
         }
         assert!(matches!(
-            controller.send(&session, &TaskId::new("five")),
+            controller.send(&mut session, &TaskId::new("five")),
             Err(TaskControllerError::CapacityReached)
         ));
         barrier.wait();
@@ -1393,7 +1495,7 @@ mod tests {
         )
         .unwrap();
         let mut session = session(&["one"]);
-        controller.send(&session, &TaskId::new("one")).unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         for _ in 0..3 {
             session.task_mut("one").unwrap().disconnect().unwrap();
             controller
@@ -1433,7 +1535,7 @@ mod tests {
         session.switch_task("one").unwrap();
         session.append_reply("abcdefgh").unwrap();
         session.append_reply("ijklmnop").unwrap();
-        let first = controller.send(&session, &TaskId::new("one")).unwrap();
+        let first = controller.send(&mut session, &TaskId::new("one")).unwrap();
         wait_for(&controller, &mut session);
         let second = controller.retry(&mut session, &TaskId::new("one")).unwrap();
         assert_ne!(first, second);
@@ -1468,7 +1570,7 @@ mod tests {
         });
         let mut session = session(&["one"]);
         let before = session.task("one").unwrap().clone();
-        controller.send(&session, &TaskId::new("one")).unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         let events = wait_for(&controller, &mut session);
         assert!(matches!(&events[0], TaskControllerEvent::Failed { .. }));
         assert_eq!(session.task("one").unwrap(), &before);
@@ -1479,7 +1581,7 @@ mod tests {
         let controller =
             TaskController::new(|_, _| -> Result<ProviderReply, String> { panic!("secret panic") });
         let mut session = session(&["one"]);
-        controller.send(&session, &TaskId::new("one")).unwrap();
+        controller.send(&mut session, &TaskId::new("one")).unwrap();
         let events = wait_for(&controller, &mut session);
         assert!(
             matches!(&events[0], TaskControllerEvent::Failed { message, .. } if message == SAFE_PROVIDER_ERROR)
