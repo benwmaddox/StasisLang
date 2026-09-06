@@ -4205,6 +4205,54 @@ function render(): i32 { return 0; }
     }
 
     #[test]
+    fn rejects_fixed_array_and_view_length_access() {
+        let cases = [
+            (
+                "global read",
+                "global values: i32[4]; function main(): i32 { return values.length; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "conversion write",
+                "global values: i32[4]; function main(): i32 { values.length.from_f32(2.0); return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view compound write",
+                "global storage: i32[4]; function update(values: i32[]): i32 { values.length += 1; return 0; } function main(): i32 { return update(storage); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view read",
+                "global storage: i32[4]; function size(values: i32[]): i32 { return values.length; } function main(): i32 { return size(storage); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "fixed parameter read",
+                "global storage: i32[4]; function size(values: i32[4]): i32 { return values.length; } function main(): i32 { return size(storage); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "nested global write",
+                "struct State { values: i32[4]; } global state: State; function main(): i32 { state.values.length = 2; return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'state.values.length' is unavailable; use 'state.values.max_length' for declared capacity",
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            let mut process = WasmProcess::new();
+            process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+            process.upsert_file("array_length.stasis", source);
+            let error = process.compile().expect_err(name);
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains(expected),
+                "unexpected {name} diagnostic: {error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn lowers_foreach_over_struct_collection_storage() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
@@ -4466,7 +4514,7 @@ function render(): i32 { return 0; }
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
         process.upsert_file(
             "linear_state.stasis",
-            "struct Inner { value: i32; } struct State { inner: Inner; enabled: bool; values: i32[4]; } global state: State; global standalone: i32; function main(): i32 { state.inner.value = 7; state.enabled = true; state.values.length = 2; standalone = 9; return state.inner.value + state.values.length + standalone; } function tick(): i32 { return state.values.max_length; } function render(): i32 { return 0; }",
+            "struct Inner { value: i32; } struct State { inner: Inner; enabled: bool; values: i32[4]; } global state: State; global standalone: i32; function main(): i32 { state.inner.value = 7; state.enabled = true; standalone = 9; return state.inner.value + state.values.max_length + standalone; } function tick(): i32 { return state.values.max_length; } function render(): i32 { return 0; }",
         );
         process
             .compile()

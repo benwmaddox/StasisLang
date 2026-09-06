@@ -3665,6 +3665,54 @@ function main(): i32 {
     }
 
     #[test]
+    fn network_client_send_uses_explicit_bounded_length() {
+        let source = include_str!("../../../../src/stdlib/network_client.stasis");
+        assert_eq!(
+            crate::frontend::formatter::format_source(source).expect("format network client"),
+            source
+        );
+        // Record the host boundary without opening a network connection.
+        let source = source.replace(
+            "function @internal @extern(\"stasis_web_network_send\") network_client_send_raw(payload: u8[], length: i32): i32;",
+            "global send_calls: i32; function network_client_send_raw(payload: u8[], length: i32): i32 { send_calls += 1; return length; }",
+        );
+        let mut process = JitProcess::new();
+        process
+            .set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)
+            .expect("configure inert network imports");
+        process.upsert_file("network_client.stasis", &source);
+        process.upsert_file(
+            "main.stasis",
+            r#"
+import "network_client.stasis";
+global payload: u8[4];
+global large: u8[65537];
+function main(): i32 {
+    if (network_client_send(payload, -1) != -1) { return 1; }
+    if (network_client_send(payload, 5) != -1) { return 2; }
+    if (network_client_send(large, 65537) != -1) { return 3; }
+    if (send_calls != 0) { return 4; }
+    if (network_client_send(payload, 0) != 0) { return 5; }
+    if (network_client_send(payload, 2) != 2) { return 6; }
+    if (network_client_send(payload, 4) != 4) { return 7; }
+    if (network_client_send(large, 65536) != 65536) { return 8; }
+    if (send_calls != 4) { return 9; }
+    return 0;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("compile explicit network send lengths");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute bounded sends"),
+            0
+        );
+    }
+
+    #[test]
     fn offline_web_network_profile_is_copied_to_staged_candidates() {
         let mut active = JitProcess::new();
         active
@@ -4988,6 +5036,54 @@ function main(): i32 {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 12);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_rejects_fixed_array_and_view_length_access() {
+        let cases = [
+            (
+                "global read",
+                "global values: i32[4]; function main(): i32 { return values.length; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "conversion write",
+                "global values: i32[4]; function main(): i32 { values.length.from_f32(2.0); return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view compound write",
+                "global storage: i32[4]; function update(values: i32[]): i32 { values.length += 1; return 0; } function main(): i32 { return update(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view read",
+                "global storage: i32[4]; function size(values: i32[]): i32 { return values.length; } function main(): i32 { return size(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "fixed parameter read",
+                "global storage: i32[4]; function size(values: i32[4]): i32 { return values.length; } function main(): i32 { return size(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "nested global write",
+                "struct State { values: i32[4]; } global state: State; function main(): i32 { state.values.length = 2; return 0; }",
+                "array property 'state.values.length' is unavailable; use 'state.values.max_length' for declared capacity",
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            let mut process = JitProcess::new();
+            process.upsert_file("array_length.stasis", source);
+            let error = process.compile().expect_err(name);
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains(expected),
+                "unexpected {name} diagnostic: {error:?}"
+            );
+        }
     }
 
     #[cfg(windows)]
