@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tungstenite::client::{client_with_config, IntoClientRequest};
 use tungstenite::handshake::HandshakeError;
 use tungstenite::protocol::{Message, WebSocket, WebSocketConfig};
@@ -34,6 +35,11 @@ enum OpenError {
     Retry,
     Rejected,
     Cancelled,
+}
+
+enum ReadState {
+    Progress,
+    Idle,
 }
 
 #[derive(Clone)]
@@ -384,7 +390,7 @@ fn worker_loop(config: ClientConfig, shared: Arc<Shared>, commands: Receiver<Com
         if socket.is_none() && Instant::now() >= next_attempt {
             let attempt_generation = shared.generation.load(Ordering::Acquire);
             shared.status.store(STATUS_CONNECTING, Ordering::Release);
-            match open_socket(&config, &shared) {
+            match open_socket(&config, &shared, attempt_generation) {
                 Ok(open)
                     if shared.desired.load(Ordering::Acquire)
                         && !shared.background.load(Ordering::Acquire)
@@ -418,15 +424,29 @@ fn worker_loop(config: ClientConfig, shared: Arc<Shared>, commands: Receiver<Com
             }
         }
         if let Some(open) = socket.as_mut() {
-            let failed = flush_pending(open, &shared, &mut pending, socket_generation)
-                || read_one(open, &shared, socket_generation).is_err();
-            if failed {
+            let read = if flush_pending(open, &shared, &mut pending, socket_generation) {
+                Err(())
+            } else {
+                read_one(open, &shared, socket_generation)
+            };
+            if read.is_err() {
                 close_socket(&mut socket);
                 shared.generation.fetch_add(1, Ordering::AcqRel);
                 clear_pending_only(&shared, &mut pending);
                 connection_lost(&shared);
                 next_attempt = Instant::now() + backoff;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
+            } else if matches!(read, Ok(ReadState::Idle)) {
+                match commands.recv_timeout(IO_POLL_INTERVAL) {
+                    Ok(command) => {
+                        if handle_command(command, &shared, &mut socket, &mut pending) {
+                            clear_pending(&shared, &mut pending, &commands);
+                            return;
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
             }
         } else {
             thread::sleep(
@@ -469,11 +489,44 @@ fn handle_command(
     false
 }
 
-fn open_socket(config: &ClientConfig, shared: &Shared) -> Result<WebSocket<TcpStream>, OpenError> {
-    let stream = TcpStream::connect_timeout(&config.address, CONNECT_TIMEOUT)
-        .map_err(|_| OpenError::Retry)?;
+fn open_socket(
+    config: &ClientConfig,
+    shared: &Shared,
+    generation: usize,
+) -> Result<WebSocket<TcpStream>, OpenError> {
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    let socket = Socket::new(
+        Domain::for_address(config.address),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )
+    .map_err(|_| OpenError::Retry)?;
+    socket.set_nonblocking(true).map_err(|_| OpenError::Retry)?;
+    match socket.connect(&SockAddr::from(config.address)) {
+        Ok(()) => {}
+        Err(error) if connect_in_progress(&error) => {
+            wait_for_pending_connect(shared, generation, deadline, || {
+                if let Some(error) = socket.take_error()? {
+                    return Err(error);
+                }
+                match socket.peer_addr() {
+                    Ok(_) => Ok(true),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotConnected | std::io::ErrorKind::WouldBlock
+                        ) =>
+                    {
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                }
+            })?
+        }
+        Err(_) => return Err(OpenError::Retry),
+    }
+    let stream: TcpStream = socket.into();
     stream.set_nodelay(true).map_err(|_| OpenError::Retry)?;
-    stream.set_nonblocking(true).map_err(|_| OpenError::Retry)?;
     let request = config.request().map_err(|_| OpenError::Rejected)?;
     let websocket_config = WebSocketConfig::default()
         .read_buffer_size(MAX_MESSAGE_BYTES)
@@ -481,7 +534,6 @@ fn open_socket(config: &ClientConfig, shared: &Shared) -> Result<WebSocket<TcpSt
         .max_write_buffer_size(MAX_BUFFERED_PAYLOAD)
         .max_message_size(Some(MAX_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_MESSAGE_BYTES));
-    let deadline = Instant::now() + CONNECT_TIMEOUT;
     let mut handshake = client_with_config(request, stream, Some(websocket_config));
     let (socket, response) = loop {
         match handshake {
@@ -489,13 +541,14 @@ fn open_socket(config: &ClientConfig, shared: &Shared) -> Result<WebSocket<TcpSt
             Err(HandshakeError::Interrupted(mid)) => {
                 if !shared.desired.load(Ordering::Acquire)
                     || shared.background.load(Ordering::Acquire)
+                    || shared.generation.load(Ordering::Acquire) != generation
                 {
                     return Err(OpenError::Cancelled);
                 }
                 if Instant::now() >= deadline {
                     return Err(OpenError::Retry);
                 }
-                thread::sleep(Duration::from_millis(2));
+                thread::sleep(IO_POLL_INTERVAL);
                 handshake = mid.handshake();
             }
             Err(HandshakeError::Failure(error)) => return Err(classify_handshake_error(error)),
@@ -509,6 +562,39 @@ fn open_socket(config: &ClientConfig, shared: &Shared) -> Result<WebSocket<TcpSt
         return Err(OpenError::Rejected);
     }
     Ok(socket)
+}
+
+fn connect_in_progress(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    return matches!(error.raw_os_error(), Some(10035 | 10036 | 10037));
+    #[cfg(not(windows))]
+    return matches!(error.raw_os_error(), Some(36 | 114 | 115));
+}
+
+fn wait_for_pending_connect(
+    shared: &Shared,
+    generation: usize,
+    deadline: Instant,
+    mut ready: impl FnMut() -> std::io::Result<bool>,
+) -> Result<(), OpenError> {
+    loop {
+        if !shared.desired.load(Ordering::Acquire)
+            || shared.background.load(Ordering::Acquire)
+            || shared.generation.load(Ordering::Acquire) != generation
+        {
+            return Err(OpenError::Cancelled);
+        }
+        if ready().map_err(|_| OpenError::Retry)? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(OpenError::Retry);
+        }
+        thread::sleep(IO_POLL_INTERVAL);
+    }
 }
 
 fn classify_handshake_error(error: WebSocketError) -> OpenError {
@@ -552,12 +638,18 @@ fn read_one(
     socket: &mut WebSocket<TcpStream>,
     shared: &Shared,
     generation: usize,
-) -> Result<(), ()> {
+) -> Result<ReadState, ()> {
     match socket.read() {
-        Ok(Message::Binary(payload)) => enqueue_incoming(shared, payload.to_vec(), generation),
+        Ok(Message::Binary(payload)) => {
+            enqueue_incoming(shared, payload.to_vec(), generation)?;
+            Ok(ReadState::Progress)
+        }
         Ok(Message::Text(_)) => Err(()),
-        Ok(Message::Ping(payload)) => socket.send(Message::Pong(payload)).map_err(|_| ()),
-        Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => Ok(()),
+        Ok(Message::Ping(payload)) => {
+            socket.send(Message::Pong(payload)).map_err(|_| ())?;
+            Ok(ReadState::Progress)
+        }
+        Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => Ok(ReadState::Progress),
         Ok(Message::Close(frame)) => {
             let _ = socket.close(frame);
             Err(())
@@ -566,8 +658,7 @@ fn read_one(
             if error.kind() == std::io::ErrorKind::WouldBlock
                 || error.kind() == std::io::ErrorKind::TimedOut =>
         {
-            thread::sleep(Duration::from_millis(2));
-            Ok(())
+            Ok(ReadState::Idle)
         }
         Err(_) => Err(()),
     }
@@ -811,5 +902,54 @@ pub unsafe extern "C" fn stasis_network_client_last_sequence(client: *mut Networ
 pub unsafe extern "C" fn stasis_network_client_destroy(client: *mut NetworkClient) {
     if !client.is_null() {
         drop(unsafe { Box::from_raw(client) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared_for_connect_test() -> Shared {
+        Shared {
+            desired: AtomicBool::new(true),
+            background: AtomicBool::new(false),
+            accepting_incoming: AtomicBool::new(false),
+            status: AtomicI32::new(STATUS_CONNECTING),
+            error: AtomicI32::new(0),
+            outbound_bytes: AtomicUsize::new(0),
+            outbound_records: AtomicUsize::new(0),
+            generation: AtomicUsize::new(7),
+            incoming: Mutex::new(IncomingQueue {
+                records: VecDeque::new(),
+                bytes: 0,
+            }),
+            resume_seat: AtomicI32::new(-1),
+            last_sequence: AtomicI32::new(0),
+        }
+    }
+
+    #[test]
+    fn pending_tcp_connect_observes_shutdown_background_and_generation() {
+        let cancellations: [fn(&Shared); 3] = [
+            |shared| shared.desired.store(false, Ordering::Release),
+            |shared| shared.background.store(true, Ordering::Release),
+            |shared| {
+                shared.generation.fetch_add(1, Ordering::AcqRel);
+            },
+        ];
+        for cancel in cancellations {
+            let shared = shared_for_connect_test();
+            let mut readiness_polls = 0;
+            let started = Instant::now();
+            let result = wait_for_pending_connect(&shared, 7, started + CONNECT_TIMEOUT, || {
+                readiness_polls += 1;
+                cancel(&shared);
+                Ok(false)
+            });
+
+            assert!(matches!(result, Err(OpenError::Cancelled)));
+            assert_eq!(readiness_polls, 1);
+            assert!(started.elapsed() < Duration::from_secs(1));
+        }
     }
 }

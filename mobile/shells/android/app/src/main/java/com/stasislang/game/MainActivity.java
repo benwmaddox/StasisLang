@@ -4,6 +4,7 @@ import android.content.res.AssetManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.ComponentName;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageInfo;
 import android.graphics.Color;
@@ -18,6 +19,7 @@ import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import com.stasislang.shell.StasisAssetCache;
+import com.stasislang.shell.NetworkJoinPolicy;
 import org.libsdl.app.SDLActivity;
 import java.io.File;
 import java.io.IOException;
@@ -188,9 +190,14 @@ public final class MainActivity extends SDLActivity {
     }
 
     private void provisionNetworkClient(Intent intent) {
-        if (!STASIS_NETWORK_CLIENT_ENABLED || intent == null
-                || !intent.hasExtra(NETWORK_JOIN_URL_EXTRA)) return;
-        String joinUrl = intent.getStringExtra(NETWORK_JOIN_URL_EXTRA);
+        if (intent == null || !intent.hasExtra(NETWORK_JOIN_URL_EXTRA)) return;
+        ComponentName component = intent.getComponent();
+        // Android enforces the signature permission on the NetworkJoin alias.
+        // The public launcher activity must never consume provisioning extras.
+        boolean trusted = STASIS_NETWORK_CLIENT_ENABLED && component != null
+                && NetworkJoinPolicy.acceptsComponent(getPackageName(),
+                        component.getPackageName(), component.getClassName());
+        String joinUrl = trusted ? intent.getStringExtra(NETWORK_JOIN_URL_EXTRA) : null;
         intent.removeExtra(NETWORK_JOIN_URL_EXTRA);
         if (joinUrl != null && !joinUrl.isEmpty()) nativeProvisionNetworkClient(joinUrl);
     }

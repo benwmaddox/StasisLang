@@ -6058,6 +6058,20 @@ fn assemble_mobile_shell(
     } else {
         String::new()
     };
+    let client_permission = if network_client_enabled {
+        format!(
+            "    <permission android:name=\"{package_id}.permission.PROVISION_NETWORK_CLIENT\" android:protectionLevel=\"signature\" />"
+        )
+    } else {
+        String::new()
+    };
+    let client_alias = if network_client_enabled {
+        format!(
+            "        <activity-alias android:name=\".NetworkJoin\" android:targetActivity=\".MainActivity\" android:exported=\"true\" android:permission=\"{package_id}.permission.PROVISION_NETWORK_CLIENT\" />"
+        )
+    } else {
+        String::new()
+    };
     let replacements = [
         ("@STASIS_APP_NAME@", app_name),
         ("@STASIS_PACKAGE_ID@", package_id.as_str()),
@@ -6078,6 +6092,11 @@ fn assemble_mobile_shell(
             "@STASIS_NETWORK_CLIENT_ENABLED@",
             if network_client_enabled { "1" } else { "0" },
         ),
+        (
+            "@STASIS_NETWORK_CLIENT_PERMISSION@",
+            client_permission.as_str(),
+        ),
+        ("@STASIS_NETWORK_CLIENT_ALIAS@", client_alias.as_str()),
         (
             "@STASIS_NETWORK_PERMISSION@",
             if native_network_enabled {
@@ -10064,6 +10083,8 @@ mod tests {
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
         assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
         assert!(!android_manifest.contains("android.permission.INTERNET"));
+        assert!(!android_manifest.contains("PROVISION_NETWORK_CLIENT"));
+        assert!(!android_manifest.contains("<activity-alias"));
         let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
             .expect("read shared mobile main")
             .replace("\r\n", "\n");
@@ -10417,6 +10438,7 @@ mod tests {
             fs::read_to_string(android_network.join("android/app/src/main/AndroidManifest.xml"))
                 .expect("read network Android manifest");
         assert!(android_network_manifest.contains("android.permission.INTERNET"));
+        assert!(!android_network_manifest.contains("PROVISION_NETWORK_CLIENT"));
         let android_network_receipt: Value = serde_json::from_str(
             &fs::read_to_string(android_network.join("stasis_mobile_package.json"))
                 .expect("read network Android package receipt"),
@@ -10475,12 +10497,22 @@ mod tests {
             fs::read_to_string(android_client.join("android/app/src/main/AndroidManifest.xml"))
                 .expect("read client Android manifest");
         assert!(client_manifest.contains("android.permission.INTERNET"));
+        assert!(client_manifest.contains(
+            "<permission android:name=\"com.example.mobile.permission.PROVISION_NETWORK_CLIENT\" android:protectionLevel=\"signature\""
+        ));
+        assert!(client_manifest.contains("<activity-alias android:name=\".NetworkJoin\""));
+        assert!(client_manifest.contains("android:targetActivity=\".MainActivity\""));
+        assert!(client_manifest.contains(
+            "android:permission=\"com.example.mobile.permission.PROVISION_NETWORK_CLIENT\""
+        ));
         let client_activity = fs::read_to_string(
             android_client.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
         )
         .expect("read client Android activity");
         assert!(client_activity.contains("stasis.network_join_url"));
         assert!(client_activity.contains("intent.removeExtra"));
+        assert!(client_activity.contains("NetworkJoinPolicy.acceptsComponent"));
+        assert!(client_activity.contains("trusted ? intent.getStringExtra"));
         assert!(client_activity.contains("nativeProvisionNetworkClient"));
         assert!(client_activity.contains("nativeSetNetworkClientBackground(false)"));
         assert!(client_activity.contains("nativeSetNetworkClientBackground(true)"));

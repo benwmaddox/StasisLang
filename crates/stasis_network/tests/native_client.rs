@@ -280,3 +280,25 @@ fn shutdown_interrupts_a_slow_incomplete_websocket_frame() {
     );
     server.join().expect("server");
 }
+
+#[test]
+fn idle_connected_client_handles_disconnect_without_poll_delay() {
+    let mut host = host();
+    let client = NetworkClient::new(&host.join_url()).expect("client");
+    assert_eq!(client.connect(), 0);
+    wait_status(&client, STATUS_CONNECTED);
+    wait_event(&host, EventKind::Connected);
+
+    thread::sleep(Duration::from_millis(75));
+    let disconnect_started = Instant::now();
+    assert_eq!(client.disconnect(), 0);
+    wait_event(&host, EventKind::Disconnected);
+    assert!(
+        disconnect_started.elapsed() < Duration::from_millis(250),
+        "idle command handling took {:?}",
+        disconnect_started.elapsed()
+    );
+
+    drop(client);
+    host.stop().expect("stop host");
+}

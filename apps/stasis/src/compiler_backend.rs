@@ -335,6 +335,7 @@ pub enum DesktopNetworkMode {
     Client,
 }
 
+#[cfg(windows)]
 impl DesktopNetworkMode {
     fn cmake_value(self) -> &'static str {
         match self {

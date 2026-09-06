@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 @STASIS_NETWORK_PERMISSION@
+@STASIS_NETWORK_CLIENT_PERMISSION@
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
     <application
         android:allowBackup="false"
@@ -23,5 +24,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+@STASIS_NETWORK_CLIENT_ALIAS@
     </application>
 </manifest>

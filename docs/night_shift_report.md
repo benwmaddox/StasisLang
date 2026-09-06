@@ -177,3 +177,16 @@
 - Good: independent review exposed lifecycle races before the final platform probes.
 - Bad: the first bridge include incorrectly treated the separately packaged network header as a runtime-local file.
 - Adjustment: validate optional external header provenance alongside ABI and package capability tests.
+
+### Task 354 review follow-up
+
+- Gate the Windows CMake mode helper with its caller's platform condition. Protect Android join provisioning with an app-namespaced signature permission on the explicit NetworkJoin alias; direct launcher intents discard join extras.
+- Replace blocking TCP establishment with a single cancellable nonblocking attempt, and replace 2 ms idle socket polling with a 25 ms command-interruptible wait. Regression coverage includes shutdown, background, generation cancellation, and component policy rejection cases.
+- Validation: the exact architecture characterization fast lane passed on Windows; a non-Windows warnings-as-errors probe passed after reproducing the CI failure. All 35 network tests, package generation, seven Java admission policy scenarios, fresh Windows static-link probes, Android target compilation, ABI audits, formatting, and diff checks passed.
+- Theory gained: the public launcher and private provisioning route need distinct component permissions even when they share an activity; lifecycle cancellation must also cover TCP establishment before a WebSocket exists.
+- Good: a non-Windows compile probe reproduced the CI warning without suppressing warnings.
+- Bad: the previous shutdown tests started after TCP establishment and missed dropped SYNs.
+- Adjustment: test each transport phase's cancellation authority, including an indefinitely pending TCP readiness probe.
+- Visual evidence: not applicable; this follow-up changes transport and component admission, with no graphical UI change.
+
+- Android admission evidence: API 35 fixture using the exact production policy and provisioning method admitted the same-signer alias caller, denied the differently signed caller with SecurityException before dispatch, and rejected direct MainActivity provisioning in onCreate and onNewIntent. Inspected target/android_admission_evidence/evidence.txt; this is a minimal admission fixture, not the packaged SDL game.

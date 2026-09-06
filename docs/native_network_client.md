@@ -17,9 +17,14 @@ adapter. Native client packaging currently supports Windows and Android.
 
 The native shell receives the host's existing private join link. On Windows,
 set `STASIS_NETWORK_JOIN_URL` in the launching process environment. Android's
-production activity accepts the private string Intent extra
-`stasis.network_join_url`; the activity removes that extra after provisioning.
-Supply credentials through a trusted launcher; do not include private links in
+client accepts the private string Intent extra `stasis.network_join_url` only
+through the explicit `<applicationId>.NetworkJoin` activity alias. Android
+requires `<applicationId>.permission.PROVISION_NETWORK_CLIENT`, a signature
+permission: a companion launcher must request it and use the same signing
+certificate as the game. The exported `MainActivity` ignores and removes join
+extras sent directly to it, including later intents. The alias uses Android's
+[component permission enforcement](https://developer.android.com/guide/topics/manifest/activity-alias-element#prmsn).
+The activity removes accepted extras after provisioning. Do not include private links in
 logs, screenshots, package manifests, source, or deterministic game state.
 The initial native client supports the host's `http://IPv4:port/#secret=...`
 LAN links. It does not add DNS resolution, TLS, or a new browser protocol.
@@ -52,6 +57,10 @@ Connection status uses the existing mailbox convention: `0` disconnected,
 `1` connected, and `2` connecting or waiting for a retry. Negative results
 report bounded argument, transport, capacity, or configuration failures.
 The adapter retries transient connection failures with bounded backoff.
+TCP establishment uses one nonblocking socket with lifecycle checks every
+25 ms, so shutdown does not wait for a dropped SYN's full connection timeout.
+An idle connected socket waits up to 25 ms on the command receiver; commands
+wake it immediately instead of waiting for the next socket poll.
 Explicit disconnect and background suspension close the socket. Foreground
 resumes a connection that was desired before suspension. Shutdown destroys
 the adapter before runtime teardown.
@@ -70,6 +79,7 @@ set `CARGO_TARGET_DIR` to a path inside that worktree.
 
 ```text
 python tools/cargo_cache.py run -- cargo test -p stasis_network --test native_client
+python tools/ci/test_android_network_join_policy.py
 node --test runtime/web/tests/network_mailbox_contract.test.mjs
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_desktop_network_link.ps1
 python tools/ci/test_android_network_client.py --serial emulator-5554 --ndk C:/Android/Sdk/ndk/27.0.12077973
