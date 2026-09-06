@@ -6864,7 +6864,8 @@ fn desktop_source_context(root: &Path) -> Result<Vec<Value>, String> {
         .map(|item| {
             json!({
                 "target": {"file": item.file, "kind": item.kind, "name": item.name,
-                    "owner": item.owner, "signature": item.signature},
+                    "owner": item.owner, "signature": item.signature,
+                    "symbol_id": item.symbol_id},
                 "expected_source_hash": item.source_hash,
                 "source": item.source,
             })
@@ -8631,7 +8632,10 @@ mod tests {
             .into_iter()
             .find(|item| item["target"]["name"] == "value")
             .unwrap();
-        let batch = json!({"schema_version": 1, "edits": [{
+        assert!(item["target"]["symbol_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        let batch = json!({"schema_version": 2, "edits": [{
             "operation": "update", "target": item["target"],
             "expected_source_hash": item["expected_source_hash"],
             "new_source": "function value(): i32 { return 2; }"

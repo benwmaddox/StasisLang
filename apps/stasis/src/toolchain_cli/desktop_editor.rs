@@ -372,10 +372,11 @@ fn record_focused_test_failure(
 }
 
 struct HostExecutor {
-    requests: mpsc::Sender<HostRequest>,
+    requests: Option<mpsc::Sender<HostRequest>>,
     results: mpsc::Receiver<HostResult>,
     canceled: Arc<Mutex<BTreeSet<String>>>,
     shutdown: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl HostExecutor {
@@ -386,7 +387,7 @@ impl HostExecutor {
         let worker_canceled = Arc::clone(&canceled);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
-        thread::spawn(move || {
+        let worker = thread::spawn(move || {
             while let Ok(request) = request_rx.recv() {
                 let skip = worker_shutdown.load(Ordering::Acquire)
                     || worker_canceled
@@ -438,15 +439,18 @@ impl HostExecutor {
             }
         });
         Self {
-            requests: request_tx,
+            requests: Some(request_tx),
             results: result_rx,
             canceled,
             shutdown,
+            worker: Some(worker),
         }
     }
 
     fn submit(&self, request: HostRequest) -> Result<(), String> {
         self.requests
+            .as_ref()
+            .ok_or_else(|| "desktop host executor is shut down".to_string())?
             .send(request)
             .map_err(|_| "desktop host executor is unavailable".to_string())
     }
@@ -462,14 +466,19 @@ impl HostExecutor {
         self.results.try_iter().collect()
     }
 
-    fn cancel_all(&self) {
+    fn shutdown_and_join(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        // Disconnect before joining so an idle worker can leave recv().
+        self.requests.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
 impl Drop for HostExecutor {
     fn drop(&mut self) {
-        self.cancel_all();
+        self.shutdown_and_join();
     }
 }
 
@@ -1386,7 +1395,7 @@ impl eframe::App for DesktopEditor {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.host.cancel_all();
+        self.host.shutdown_and_join();
         let _ = self
             .client
             .submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
@@ -1847,10 +1856,11 @@ mod tests {
         let (request_tx, _request_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         editor.host = HostExecutor {
-            requests: request_tx,
+            requests: Some(request_tx),
             results: result_rx,
             canceled: Arc::new(Mutex::new(BTreeSet::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
+            worker: None,
         };
         editor.busy_tasks.insert("task-1".to_string());
         result_tx
@@ -1875,6 +1885,64 @@ mod tests {
             editor.state.session.active_task_id().unwrap().as_str(),
             "task-2"
         );
+    }
+
+    #[test]
+    fn host_shutdown_waits_for_in_flight_work() {
+        let (request_tx, _request_rx) = mpsc::channel();
+        let (_result_tx, result_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = Arc::clone(&finished);
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !worker_shutdown.load(Ordering::Acquire) {
+                assert!(std::time::Instant::now() < deadline);
+                thread::yield_now();
+            }
+            shutdown_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            // Represents completion of receipt publication or rollback.
+            worker_finished.store(true, Ordering::Release);
+        });
+        let host = HostExecutor {
+            requests: Some(request_tx),
+            results: result_rx,
+            canceled: Arc::new(Mutex::new(BTreeSet::new())),
+            shutdown,
+            worker: Some(worker),
+        };
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let dropper = thread::spawn(move || {
+            drop(host);
+            dropped_tx.send(finished.load(Ordering::Acquire)).unwrap();
+        });
+        shutdown_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            dropped_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        assert!(dropped_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        dropper.join().unwrap();
+    }
+
+    #[test]
+    fn host_shutdown_disconnects_an_idle_worker() {
+        let host = HostExecutor::new(PathBuf::from("missing-workspace"));
+        let (done_tx, done_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(host);
+            done_tx.send(()).unwrap();
+        });
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        dropper.join().unwrap();
     }
 
     #[test]
@@ -1924,10 +1992,11 @@ mod tests {
             let (request_tx, _request_rx) = mpsc::channel();
             let (result_tx, result_rx) = mpsc::channel();
             editor.host = HostExecutor {
-                requests: request_tx,
+                requests: Some(request_tx),
                 results: result_rx,
                 canceled: Arc::new(Mutex::new(BTreeSet::new())),
                 shutdown: Arc::new(AtomicBool::new(false)),
+                worker: None,
             };
             result_tx
                 .send(HostResult {

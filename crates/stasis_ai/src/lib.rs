@@ -1099,6 +1099,7 @@ fn semantic_edit_batch_schema() -> Value {
             ("name", string_schema()),
             ("owner", string_schema()),
             ("signature", string_schema()),
+            ("symbol_id", string_schema()),
         ],
         &["file", "kind", "name"],
     );
@@ -1804,6 +1805,10 @@ mod tests {
             assert_eq!(batch["type"], "object");
             let edit = &batch["properties"]["edits"]["items"];
             assert_eq!(edit["properties"]["target"]["type"], "object");
+            assert_eq!(
+                edit["properties"]["target"]["properties"]["symbol_id"]["anyOf"][0]["type"],
+                "string"
+            );
             assert_eq!(
                 edit["properties"]["operation"]["enum"],
                 json!(["add", "update", "delete"])
