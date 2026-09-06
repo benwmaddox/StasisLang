@@ -103,8 +103,9 @@ rolls every touched file back on failure. Do not use `--no-tests` unless the use
   motion, timing, animation, input, state transitions, or a multi-step interaction. Inspect the
   resulting pixels or recording; merely producing the file does not validate the behavior. Prefer
   deterministic `stasis record` output when available; see `docs/headless_recording.md`.
-- Finish with `stasis fmt --check`, `stasis check`, and `stasis test`. Semantic symbol edits already
-  preserve untouched formatting; do not run mutating whole-project formatting as routine cleanup.
+- Finish with `stasis fmt`, `stasis fmt --check`, `stasis check`, and `stasis test`. Treat formatter
+  changes as part of the implementation, review them, and stage them deliberately. CI keeps the
+  nonmutating `--check` verification.
 - Keep the generated `.githooks/pre-commit` active. `stasis new` configures it automatically; after
   cloning the project, run `git config --local core.hooksPath .githooks`. The hook formats source
   when necessary and blocks the first attempt so formatting changes can be reviewed and staged.
