@@ -8070,6 +8070,9 @@ mod tests {
     fn desktop_network_guest_staging_reuses_the_declared_web_entry_bundle() {
         let root = temp_dir("desktop_network_guest");
         fs::create_dir_all(root.join("src")).expect("source directory");
+        // Match load_workspace: Windows temp paths can use a different spelling
+        // than the canonical source paths passed to the compiler.
+        let root = canonical_workspace_root(&root).expect("canonical workspace root");
         fs::write(
             root.join("src/guest.stasis"),
             concat!(
