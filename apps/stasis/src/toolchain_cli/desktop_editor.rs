@@ -1576,7 +1576,7 @@ impl DesktopEditor {
             let response = egui::Frame::none()
                 .fill(fill)
                 .stroke(egui::Stroke::new(
-                    1.0,
+                    1.0_f32,
                     if selected { accent() } else { border() },
                 ))
                 .rounding(7.0)
@@ -1670,10 +1670,10 @@ fn configure_visuals(context: &egui::Context) {
     style.visuals.faint_bg_color = raised_fill();
     style.visuals.widgets.inactive.bg_fill = raised_fill();
     style.visuals.widgets.inactive.weak_bg_fill = raised_fill();
-    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border());
+    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, border());
     style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(29, 42, 56);
     style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(29, 42, 56);
-    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent());
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent());
     style.visuals.widgets.active.bg_fill = selected_fill();
     style.visuals.widgets.active.weak_bg_fill = selected_fill();
     style.visuals.selection.bg_fill = Color32::from_rgb(31, 100, 82);
@@ -1683,7 +1683,7 @@ fn configure_visuals(context: &egui::Context) {
 fn status_chip(ui: &mut egui::Ui, label: &str, color: Color32) {
     egui::Frame::none()
         .fill(color.gamma_multiply(0.16))
-        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.6)))
+        .stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.6)))
         .rounding(12.0)
         .inner_margin(egui::Margin::symmetric(8.0, 3.0))
         .show(ui, |ui| {
@@ -2450,7 +2450,7 @@ impl DesktopEditor {
         let openrouter = stasis_ai::OpenRouterConfig::from_env().ok();
         egui::Frame::none()
             .fill(panel_fill())
-            .stroke(egui::Stroke::new(1.0, border()))
+            .stroke(egui::Stroke::new(1.0_f32, border()))
             .rounding(8.0)
             .inner_margin(egui::Margin::same(14.0))
             .show(ui, |ui| {
@@ -2738,7 +2738,7 @@ impl DesktopEditor {
         let mut command = None;
         egui::Frame::none()
             .fill(panel_fill())
-            .stroke(egui::Stroke::new(1.0, border()))
+            .stroke(egui::Stroke::new(1.0_f32, border()))
             .rounding(8.0)
             .inner_margin(egui::Margin::same(13.0))
             .show(ui, |ui| {
@@ -3114,7 +3114,7 @@ impl DesktopEditor {
     }
 
     fn composer(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
-        egui::Frame::none().fill(panel_fill()).stroke(egui::Stroke::new(1.0, border())).rounding(9.0).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
+        egui::Frame::none().fill(panel_fill()).stroke(egui::Stroke::new(1.0_f32, border())).rounding(9.0).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
             let reply = ui.add_sized([ui.available_width(), 58.0], egui::TextEdit::multiline(&mut self.state.reply).hint_text("Reply to Stasis AI..."));
             if self.state.focus == FocusArea::Reply && self.state.focus_pending {
                 reply.request_focus();
