@@ -48,7 +48,7 @@ impl ToolExecutor for ProposalTools {
                     return ToolObservation::error(&call.tool, "AI request canceled");
                 }
                 let repair = call.tool == "repair_semantic_edit";
-                let result = (|| {
+                let result: Result<Value, String> = (|| {
                     let id = call
                         .args
                         .get("proposal_id")
@@ -64,20 +64,10 @@ impl ToolExecutor for ProposalTools {
                         .get("batch")
                         .cloned()
                         .ok_or_else(|| "batch is required".to_string())?;
-                    let batch = serde_json::from_value::<
+                    serde_json::from_value::<
                         stasis_compiler::frontend::workshop::WorkshopSemanticEditBatch,
                     >(payload.clone())
                     .map_err(|error| format!("invalid semantic edit batch: {error}"))?;
-                    if batch.edits.iter().any(|edit| {
-                        edit.operation
-                            != stasis_compiler::frontend::workshop::WorkshopSemanticEditOperation::Add
-                            && edit.expected_source_hash.is_none()
-                    }) {
-                        return Err(
-                            "desktop update/delete proposals require expected_source_hash"
-                                .to_string(),
-                        );
-                    }
                     self.proposals.push(ProviderActionProposal {
                         id: id.to_string(),
                         kind: stasis_ai::ActionKind::Edit,
@@ -2913,7 +2903,7 @@ mod tests {
     }
 
     #[test]
-    fn proposal_tools_require_hashes_for_existing_symbols() {
+    fn proposal_tools_accept_existing_symbols_without_model_hashes() {
         let mut tools = ProposalTools::default();
         let observations = tools.execute(
             &[ToolCall {
@@ -2934,11 +2924,8 @@ mod tests {
             &AtomicBool::new(false),
         );
 
-        assert!(tools.proposals.is_empty());
-        assert!(observations[0]
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("require expected_source_hash")));
+        assert_eq!(tools.proposals.len(), 1);
+        assert!(observations[0].error.is_none());
     }
 
     #[test]
@@ -2955,8 +2942,7 @@ mod tests {
                         "edits": [{
                             "operation": "update",
                             "target": {"name": "tick", "file": "src/main.stasis"},
-                            "new_source": "function tick(): i32 { return 1; }",
-                            "expected_source_hash": "0123456789abcdef"
+                            "new_source": "function tick(): i32 { return 1; }"
                         }]
                     }
                 }),
@@ -3172,7 +3158,6 @@ mod tests {
         let batch = json!({"schema_version": 1, "edits": [{
             "operation": "update",
             "target": item["target"],
-            "expected_source_hash": item["expected_source_hash"],
             "new_source": "function value(): i32 { return 2; }"
         }]});
         let (client, _server) = live_session(1);

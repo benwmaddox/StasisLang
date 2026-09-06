@@ -389,8 +389,8 @@ fn load_ai_initial_context(
     let mut context = ai_initial_context(project_hints);
     if !resolved_targets.is_empty() {
         context["edit_execution"] = serde_json::json!({
-            "provided": "resolved_targets contains current compiler-read source, expected_source_hash, exact selectors, and reference results. These reads have already executed; reuse them directly.",
-            "next_action": "If the supplied targets cover the request, write the related source and tests together now. Read only missing dependencies or refresh a hash after a stale-source rejection.",
+            "provided": "resolved_targets contains current compiler-read source, exact selectors, and reference results. These reads have already executed; reuse them directly.",
+            "next_action": "If the supplied targets cover the request, write the related source and tests together now. Read only missing dependencies.",
             "completion": "Append finish_task as the final call in that same response when the batch completes the request. The executor checks the receipt and contract before finishing; no separate confirmation turn is needed.",
             "tests": "Writes already compile and run tests. Do not append run_tests; it is only useful for an explicitly needed baseline before edits.",
             "integer_absolute_value": "let offset: i32 = column - 3; if (offset < 0) { offset = -offset; }",
@@ -539,7 +539,7 @@ fn load_ai_task_contract(
             "required_changes": required_changes,
             "invariants": workflow.get("invariants").cloned().unwrap_or_else(|| serde_json::json!([])),
             "acceptance": workflow.get("acceptance").cloned().unwrap_or_else(|| serde_json::json!([])),
-            "instruction": "The final atomic batch must modify every required_changes selector and satisfy every invariant and acceptance item. Use each compiler-owned symbol_id exactly.",
+            "instruction": "Across accepted edits, cover every required_changes selector and satisfy the invariants and acceptance items. Repairs need only change the remaining incorrect symbols. Use each compiler-owned symbol_id exactly.",
         }),
         required_targets,
         source_rules,
@@ -3749,7 +3749,7 @@ impl LiveAiTools {
                     operation,
                     target,
                     source: string_arg(args, "new_source"),
-                    expected_source_hash: string_arg(args, "expected_source_hash"),
+                    expected_source_hash: None,
                 })
             })
             .collect::<Result<Vec<_>, _>>();
@@ -4228,9 +4228,6 @@ fn compact_ai_read_result(call: &ToolCall, data: Value) -> Value {
                     result.insert(key.into(), value.clone());
                 }
             }
-            if let Some(hash) = data.get("source_hash") {
-                result.insert("expected_source_hash".into(), hash.clone());
-            }
             Value::Object(result)
         }
         "read_imports" => {
@@ -4419,19 +4416,15 @@ impl ToolExecutor for LiveAiTools {
                     .collect()
             }
         };
-        if let Some(finish_index) = calls.iter().position(|call| call.tool == "finish_task") {
-            let valid = finish_index + 1 == calls.len()
-                && (write_range
-                    .as_ref()
-                    .is_some_and(|range| range.end <= finish_index)
-                    || (!has_source_write && self.current_write_passed));
+        if calls.iter().any(|call| call.tool == "finish_task") {
+            let valid = write_range.is_some() || self.current_write_passed;
             if !valid {
                 return calls
                     .iter()
                     .map(|call| {
                         ToolObservation::error(
                             &call.tool,
-                            "finish_task must be final and follow either this source write batch or its still-current passing receipt",
+                            "finish_task requires a source write batch or its still-current passing receipt",
                         )
                     })
                     .collect();
@@ -5946,10 +5939,9 @@ mod tests {
         responder.join().expect("prefetch responder");
 
         assert_eq!(bundles.len(), 1);
-        assert_eq!(
-            bundles[0]["definition"]["expected_source_hash"],
-            "source-hash"
-        );
+        assert!(bundles[0]["definition"]
+            .get("expected_source_hash")
+            .is_none());
         assert_eq!(bundles[0]["references"]["symbol"], "update_enemies");
         assert!(tools.reference_search_ready);
     }
@@ -6049,7 +6041,10 @@ mod tests {
         .expect("matching workflow");
 
         assert_eq!(contract.required_targets.len(), 4);
-        assert_eq!(contract.source_rules.len(), 4);
+        assert_eq!(contract.source_rules.len(), 2);
+        for requirement in &contract.context["required_changes"].as_array().unwrap()[2..] {
+            assert_eq!(requirement["source_require"], json!([]));
+        }
         assert_eq!(contract.context["workflow"], "brick_layout_hot_swap");
         assert_eq!(
             contract.context["required_changes"][0]["symbol_id"],
@@ -6622,7 +6617,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_symbol_read_keeps_only_editable_identity_source_and_stale_write_hash() {
+    fn ai_symbol_read_keeps_editable_identity_and_source_without_hashes() {
         let call = ToolCall {
             tool: "read_symbol".into(),
             args: json!({"name":"tick"}),
@@ -6649,8 +6644,7 @@ mod tests {
                 "name":"tick",
                 "file":"src/main.stasis",
                 "signature":"function tick(): i32",
-                "source":"function tick(): i32 { return 0; }",
-                "expected_source_hash":"abc123"
+                "source":"function tick(): i32 { return 0; }"
             })
         );
     }
@@ -6698,7 +6692,7 @@ mod tests {
     }
 
     #[test]
-    fn import_only_write_is_sorted_atomic_and_does_not_require_references() {
+    fn import_write_accepts_early_duplicate_finish_and_cached_trailing_tests() {
         let (client, server) = stasis_runner::live::live_session(1);
         let responder = thread::spawn(move || loop {
             let requests = server.drain(1);
@@ -6737,6 +6731,10 @@ mod tests {
         let observations = tools.execute(
             &[
                 ToolCall {
+                    tool: "finish_task".to_string(),
+                    args: json!({}),
+                },
+                ToolCall {
                     tool: "write_imports".to_string(),
                     args: json!({
                         "file":"src/main.stasis",
@@ -6751,11 +6749,18 @@ mod tests {
                     tool: "finish_task".to_string(),
                     args: json!({}),
                 },
+                ToolCall {
+                    tool: "run_tests".to_string(),
+                    args: json!({}),
+                },
             ],
             &AtomicBool::new(false),
         );
         responder.join().expect("import edit responder");
-        assert!(observations[0].error.is_none());
+        assert!(observations
+            .iter()
+            .all(|observation| observation.error.is_none()));
+        assert_eq!(observations[3].result.as_ref().unwrap()["cached"], true);
         tools
             .validate_completion()
             .expect("tested import-only batch completes");

@@ -959,7 +959,6 @@ fn tool_args_schema(spec: &ToolSpec) -> Value {
                 ("kind", string_schema()),
                 ("owner", string_schema()),
                 ("signature", string_schema()),
-                ("expected_source_hash", string_schema()),
             ],
             &["file", "name", "new_source"],
         ),
@@ -971,7 +970,6 @@ fn tool_args_schema(spec: &ToolSpec) -> Value {
                 ("kind", string_schema()),
                 ("owner", string_schema()),
                 ("signature", string_schema()),
-                ("expected_source_hash", string_schema()),
             ],
             &["name"],
         ),
@@ -1124,7 +1122,6 @@ fn semantic_edit_batch_schema() -> Value {
             ("operation", enum_schema(&["add", "update", "delete"])),
             ("target", target),
             ("new_source", string_schema()),
-            ("expected_source_hash", string_schema()),
         ],
         &["operation", "target"],
     );
@@ -1268,9 +1265,9 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("get_stdlib_api", "No module lists valid modules; module returns filtered/paged public signatures, externs, and canonical_import (64 max).", &[], &["module", "query", "kind", "page", "limit"]),
         spec("find_references", "Group compiler-owned definition/read/write/call uses by containing symbol.", &["symbol"], &["limit"]),
         spec("list_owner_symbols", "List compact symbols owned by one type or group.", &["owner"], &[]),
-        spec("read_symbol", "Read source/hash; prefer symbol_id.", &["name"], &["symbol_id", "kind", "file", "owner", "signature"]),
-        spec("write_symbol", "Atomically add/replace and test; replacements prefer symbol_id.", &["file", "name", "new_source"], &["symbol_id", "operation", "kind", "owner", "signature", "expected_source_hash"]),
-        spec("delete_symbol", "Delete; prefer symbol_id.", &["name"], &["symbol_id", "file", "kind", "owner", "signature", "expected_source_hash"]),
+        spec("read_symbol", "Read source; prefer symbol_id.", &["name"], &["symbol_id", "kind", "file", "owner", "signature"]),
+        spec("write_symbol", "Atomically add/replace and test; replacements prefer symbol_id.", &["file", "name", "new_source"], &["symbol_id", "operation", "kind", "owner", "signature"]),
+        spec("delete_symbol", "Delete; prefer symbol_id.", &["name"], &["symbol_id", "file", "kind", "owner", "signature"]),
         spec("read_imports", "Read one source file's imports group.", &["file"], &[]),
         spec("write_imports", "Atomically replace imports from path strings, including canonical_import.", &["file", "imports"], &[]),
         spec("get_diagnostics", "Read the latest compiler diagnostics.", &[], &[]),
@@ -1823,7 +1820,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn semantic_proposal_schema_exposes_a_native_batch_and_hash_guard() {
+    fn semantic_proposal_schema_exposes_a_native_batch_without_model_hashes() {
         for tool in ["propose_semantic_edit", "repair_semantic_edit"] {
             let spec = ToolSpec {
                 tool: tool.into(),
@@ -1845,10 +1842,7 @@ mod tests {
                 edit["properties"]["operation"]["enum"],
                 json!(["add", "update", "delete"])
             );
-            assert_eq!(
-                edit["properties"]["expected_source_hash"]["anyOf"][0]["type"],
-                "string"
-            );
+            assert!(edit["properties"].get("expected_source_hash").is_none());
             assert_eq!(edit["additionalProperties"], false);
         }
     }

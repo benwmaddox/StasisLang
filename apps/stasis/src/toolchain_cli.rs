@@ -7142,15 +7142,6 @@ fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, 
         .collect::<Vec<_>>();
     let batch = serde_json::from_value::<WorkshopSemanticEditBatch>(payload)
         .map_err(|error| format!("invalid proposed semantic edit: {error}"))?;
-    if batch.edits.iter().any(|edit| {
-        edit.operation != WorkshopSemanticEditOperation::Add
-            && edit
-                .expected_source_hash
-                .as_deref()
-                .is_none_or(str::is_empty)
-    }) {
-        return Err("Update and delete proposals require the target's expected_source_hash; read the current symbol and repair the proposal.".into());
-    }
     let mut result = apply_symbol_batch(
         &workspace,
         &editable_files,
@@ -7282,7 +7273,6 @@ fn desktop_source_context(root: &Path) -> Result<Vec<Value>, String> {
                 "target": {"file": item.file, "kind": item.kind, "name": item.name,
                     "owner": item.owner, "signature": item.signature,
                     "symbol_id": item.symbol_id},
-                "expected_source_hash": item.source_hash,
                 "source": item.source,
             })
         })
@@ -9105,7 +9095,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_editor_context_drives_hash_checked_apply_and_receipt() {
+    fn desktop_editor_context_drives_apply_without_model_hash_and_receipt() {
         let root = desktop_editor_fixture("editor_receipt");
         let item = desktop_source_context(&root)
             .unwrap()
@@ -9117,10 +9107,9 @@ mod tests {
             .is_some_and(|id| !id.is_empty()));
         let batch = json!({"schema_version": 2, "edits": [{
             "operation": "update", "target": item["target"],
-            "expected_source_hash": item["expected_source_hash"],
             "new_source": "function value(): i32 { return 2; }"
         }]});
-        let (_, receipt) = desktop_apply_semantic_batch(&root, batch.clone()).unwrap();
+        let (_, receipt) = desktop_apply_semantic_batch(&root, batch).unwrap();
         assert_eq!(
             receipt["source_fingerprint"],
             desktop_source_fingerprint(&root, &[]).unwrap()
@@ -9128,13 +9117,8 @@ mod tests {
         assert!(root.join(receipt["receipt"].as_str().unwrap()).is_file());
         assert_eq!(receipt["validation"]["test_result"]["tests_passed"], 1);
         let committed = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        assert!(desktop_apply_semantic_batch(&root, batch)
-            .unwrap_err()
-            .contains("stale semantic"));
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            committed
-        );
+        assert!(item.get("expected_source_hash").is_none());
+        assert!(committed.contains("function value(): i32 { return 2; }"));
         remove_temp(&root);
     }
 
@@ -9162,13 +9146,13 @@ mod tests {
     }
 
     #[test]
-    fn desktop_editor_apply_rejects_missing_hash_without_writing() {
+    fn desktop_editor_apply_rejects_invalid_delete_without_model_hash() {
         let root = desktop_editor_fixture("editor_missing_hash");
         let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
         let error = desktop_apply_semantic_batch(&root, json!({"schema_version": 1, "edits": [{
             "operation": "delete", "target": {"file": "src/main.stasis", "kind": "function", "name": "value"}
         }]})).unwrap_err();
-        assert!(error.contains("expected_source_hash"));
+        assert!(!error.contains("expected_source_hash"));
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).unwrap(),
             before

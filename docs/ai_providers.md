@@ -1,6 +1,6 @@
 # AI providers
 
-Stasis live workspace AI uses one provider-neutral agent loop and one host `ToolExecutor`. Changing the transport does not change symbol selection, stale-hash checks, atomic writes, compilation, tests, cancellation gates, or completion validation.
+Stasis live workspace AI uses one provider-neutral agent loop and one host `ToolExecutor`. Changing the transport does not change symbol selection, atomic writes, compilation, tests, cancellation gates, or completion validation.
 
 ## Codex subscription (default)
 
@@ -124,11 +124,22 @@ the oldest remaining client.
 
 ## Live edit round trips
 
-Live edit requests provide current source, hashes, and reference results in
+Live edit requests provide current source, selectors, and reference results in
 `resolved_targets`. The adjacent `edit_execution` guidance tells the model to
 reuse that context, use supported arithmetic syntax, and append `finish_task`
-to its final write response. Missing dependencies and stale hashes still allow
-additional reads. This guidance reduces round trips; it is not a correctness gate.
+to its final write response. Missing dependencies still allow additional reads.
+Model tools and desktop proposals do not carry source hashes. Host transaction
+input verification and manual editor hash guards remain internal. This guidance
+reduces round trips; it is not a correctness gate.
+
+`finish_task` is idempotent within a response and is evaluated after all its
+calls execute. Early or repeated finish calls cannot bypass receipt, tests, or
+task-contract validation, and no longer reject an otherwise valid write batch.
+
+The brick-layout sample keeps test acceptance criteria in behavioral instructions,
+not exact assertion text. Equivalent equality and early-return assertions do not
+require extra repair turns. Required test edits and passing tests remain gates;
+the instructions alone are not an independent semantic oracle.
 
 Writes validate automatically. A following `run_tests` in the same response
 reuses a passing receipt, or is skipped when the preceding write failed, so
