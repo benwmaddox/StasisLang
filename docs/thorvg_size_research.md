@@ -167,10 +167,17 @@ automatically update Xcode.
 Start with this dependency-isolated baseline from the repository root:
 
 ```powershell
-cmake -S runtime -B target/thorvg-size-research -DSTASIS_GRAPHICS_BUILD_SHARED=OFF -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF -DSTASIS_BUILD_MOBILE_RUNTIME=OFF -DSTASIS_SVG_BUILD_TESTS=ON
+cmake -S runtime -B target/thorvg-size-research -DCMAKE_BUILD_TYPE=Release -DSTASIS_GRAPHICS_BUILD_SHARED=OFF -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF -DSTASIS_BUILD_MOBILE_RUNTIME=OFF -DSTASIS_SVG_BUILD_TESTS=ON
 cmake --build target/thorvg-size-research --config Release --target stasis_svg_smoke
 ctest --test-dir target/thorvg-size-research -C Release -R '^stasis_svg_smoke$' --output-on-failure --timeout 120
 ```
+
+`CMAKE_BUILD_TYPE=Release` selects optimization for single-config generators
+such as Ninja and Unix Makefiles; `--config Release` and `ctest -C Release`
+select the configuration for multi-config generators such as Visual Studio.
+For the MinSizeRel variant, use a fresh build directory and replace all three
+configuration selections with `MinSizeRel` (`-DCMAKE_BUILD_TYPE=MinSizeRel`,
+`--config MinSizeRel`, and `-C MinSizeRel`).
 
 Use separate fresh build directories for baseline, size optimization, partial-off,
 threads-off, and the winning combination. Bound each build/test to 900 seconds.
