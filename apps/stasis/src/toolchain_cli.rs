@@ -2940,6 +2940,9 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
     if prompt.trim().is_empty() {
         return Err("AI prompt must not be empty".to_string());
     }
+    let configured_provider = stasis_ai::ProviderConfig::from_env()?
+        .provider_name()
+        .to_string();
     let entry = workspace.root.join(&workspace.manifest.entry);
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
     let ai_root = workspace.root.clone();
@@ -2976,7 +2979,7 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
         ),
         json!({
             "backend": "jit",
-            "provider": "installed_codex_subscription",
+            "provider": configured_provider,
             "summary": summary,
             "trace": trace,
             "usage_trace": usage_trace,

@@ -45,7 +45,7 @@ pub const MIN_COMPACTION_BYTES: usize = 256 * 1024;
 pub const MAX_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMPACTION_RETAINED_TURNS: usize = 16;
 const MAX_COMPLETION_REJECTIONS: usize = 3;
-const AGENT_INSTRUCTION: &str = "Stasis is statically typed and C-like. Declarations use import, struct, global, function, and test `name`(): bool. Receivers put self first: function damage(self: Enemy, amount: i32): void; call enemy.damage(5). Read exact local syntax before editing. Use host-mediated tools through structured tool_calls, not native tools. Later JSONL records are completed; do not repeat them. initial_context start actions are lexical leads, not proof; refine them or use list_symbols. Its options expose stdlib discovery and optional baseline tests. Use canonical_import with read_imports/write_imports. Before behavior writes, batch relevant reads and find_references. Submit related symbols/imports/tests in one contiguous atomic tested write batch; its successful receipt proves completion. Tests are default evidence; get runtime/assets capability only when necessary. Return one response-contract object.";
+const AGENT_INSTRUCTION: &str = "Stasis is statically typed, C-like. Syntax: import, struct, global, function, test `name`(): bool. Receiver: function damage(self: Enemy, amount: i32): void; enemy.damage(5). Use local syntax and no unproven helpers such as abs. Use structured tool_calls only. start actions are leads; resolved_targets are exact. Reuse source, selectors, and symbol_id exactly; omit absent fields and do not reread. task_contract required_changes, invariants, and acceptance are mandatory. Refine via list_symbols. Use canonical_import via read_imports/write_imports. Before writes, batch remaining reads/references. Preserve live state. Use on_code_swap only for requested migration/reinit. Submit related code/imports/tests in one contiguous atomic tested write batch; its successful receipt proves completion. Include finish_task last only for the entire request. Get runtime/assets capability only when necessary. Return one response-contract object.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfile {
@@ -203,6 +203,8 @@ pub trait ModelProvider {
     fn requires_action_ids(&self) -> bool {
         false
     }
+
+    fn observe_tool_results(&mut self, _observations: &[ToolObservation]) {}
 }
 
 pub trait ToolExecutor {
@@ -213,6 +215,10 @@ pub trait ToolExecutor {
     }
 
     fn terminal_failure(&self) -> Option<String> {
+        None
+    }
+
+    fn terminal_success(&self) -> Option<String> {
         None
     }
 }
@@ -412,6 +418,7 @@ where
                 emit(AgentEvent::ToolBatch(tool_calls.clone()));
                 let observations = bound_observations(executor.execute(&tool_calls, canceled));
                 emit(AgentEvent::Observations(observations.clone()));
+                provider.observe_tool_results(&observations);
                 let mut newly_active_specs = Vec::new();
                 for (call, observation) in tool_calls.iter().zip(&observations) {
                     if call.tool != "get_capability" || observation.error.is_some() {
@@ -440,6 +447,10 @@ where
                 }
                 if let Some(error) = executor.terminal_failure() {
                     return Err(error);
+                }
+                if let Some(summary) = executor.terminal_success() {
+                    emit(AgentEvent::Completed(summary.clone()));
+                    return Ok(summary);
                 }
                 transcript.append(&response_record, &observations)?;
                 transcript.append_active_capabilities(&newly_active_specs)?;
@@ -929,6 +940,7 @@ fn tool_args_schema(spec: &ToolSpec) -> Value {
         "list_owner_symbols" => object_schema(&[("owner", string_schema())], &["owner"]),
         "read_symbol" => object_schema(
             &[
+                ("symbol_id", string_schema()),
                 ("name", string_schema()),
                 ("kind", string_schema()),
                 ("file", string_schema()),
@@ -939,6 +951,7 @@ fn tool_args_schema(spec: &ToolSpec) -> Value {
         ),
         "write_symbol" => object_schema(
             &[
+                ("symbol_id", string_schema()),
                 ("file", string_schema()),
                 ("name", string_schema()),
                 ("new_source", string_schema()),
@@ -952,6 +965,7 @@ fn tool_args_schema(spec: &ToolSpec) -> Value {
         ),
         "delete_symbol" => object_schema(
             &[
+                ("symbol_id", string_schema()),
                 ("name", string_schema()),
                 ("file", string_schema()),
                 ("kind", string_schema()),
@@ -974,7 +988,8 @@ fn tool_args_schema(spec: &ToolSpec) -> Value {
         | "run_frame"
         | "take_screenshot"
         | "list_tests"
-        | "run_tests" => object_schema(&[], &[]),
+        | "run_tests"
+        | "finish_task" => object_schema(&[], &[]),
         "set_input_state" => object_schema(
             &[
                 ("x", number_schema()),
@@ -1253,9 +1268,9 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("get_stdlib_api", "No module lists valid modules; module returns filtered/paged public signatures, externs, and canonical_import (64 max).", &[], &["module", "query", "kind", "page", "limit"]),
         spec("find_references", "Group compiler-owned definition/read/write/call uses by containing symbol.", &["symbol"], &["limit"]),
         spec("list_owner_symbols", "List compact symbols owned by one type or group.", &["owner"], &[]),
-        spec("read_symbol", "Read one symbol's full source and reusable expected_source_hash.", &["name"], &["kind", "file", "owner", "signature"]),
-        spec("write_symbol", "Atomically add or replace a symbol; operation=add creates it. The batch compiles and tests.", &["file", "name", "new_source"], &["operation", "kind", "owner", "signature", "expected_source_hash"]),
-        spec("delete_symbol", "Atomically delete a symbol.", &["name"], &["file", "kind", "owner", "signature", "expected_source_hash"]),
+        spec("read_symbol", "Read source/hash; prefer symbol_id.", &["name"], &["symbol_id", "kind", "file", "owner", "signature"]),
+        spec("write_symbol", "Atomically add/replace and test; replacements prefer symbol_id.", &["file", "name", "new_source"], &["symbol_id", "operation", "kind", "owner", "signature", "expected_source_hash"]),
+        spec("delete_symbol", "Delete; prefer symbol_id.", &["name"], &["symbol_id", "file", "kind", "owner", "signature", "expected_source_hash"]),
         spec("read_imports", "Read one source file's imports group.", &["file"], &[]),
         spec("write_imports", "Atomically replace imports from path strings, including canonical_import.", &["file", "imports"], &[]),
         spec("get_diagnostics", "Read the latest compiler diagnostics.", &[], &[]),
@@ -1268,6 +1283,7 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("write_test_file", "Create or replace one Stasis test file.", &["file", "source"], &[]),
         spec("delete_test_file", "Delete one Stasis test file.", &["file"], &[]),
         spec("run_tests", "Run the optional baseline/current suite; writes compile and test automatically.", &[], &[]),
+        spec("finish_task", "End after a complete tested write batch. Final call only.", &[], &[]),
     ]
 }
 
@@ -1282,6 +1298,7 @@ pub fn live_tool_specs() -> Vec<ToolSpec> {
         "read_imports",
         "write_imports",
         "run_tests",
+        "finish_task",
     ];
     let mut tools = workshop_tool_specs()
         .into_iter()
@@ -1915,6 +1932,51 @@ mod tests {
         .expect("agent");
         assert_eq!(result, "verified");
         assert_eq!(tools.0, 1);
+    }
+
+    #[test]
+    fn terminal_tool_success_ends_without_another_provider_turn() {
+        struct TerminalTools(bool);
+        impl ToolExecutor for TerminalTools {
+            fn execute(
+                &mut self,
+                calls: &[ToolCall],
+                _canceled: &AtomicBool,
+            ) -> Vec<ToolObservation> {
+                self.0 = true;
+                calls
+                    .iter()
+                    .map(|call| ToolObservation::result(&call.tool, json!({"tests":"passed"})))
+                    .collect()
+            }
+
+            fn terminal_success(&self) -> Option<String> {
+                self.0.then(|| "applied and tested".to_string())
+            }
+        }
+
+        let mut provider = Responses(vec![ModelResponse::ToolCalls {
+            working_notes: "Apply the validated write.".to_string(),
+            summary: String::new(),
+            tool_calls: vec![ToolCall {
+                tool: "list_symbols".to_string(),
+                args: json!({}),
+            }],
+        }]);
+        let mut tools = TerminalTools(false);
+        let result = run_agent(
+            &mut provider,
+            &mut tools,
+            "apply",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("terminal success");
+
+        assert_eq!(result, "applied and tested");
+        assert!(provider.0.is_empty());
     }
 
     #[test]

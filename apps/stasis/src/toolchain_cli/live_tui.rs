@@ -164,23 +164,29 @@ pub(super) fn run_scripted_ai_profile(
         .model
         .clone()
         .unwrap_or_else(|| provider_config.model());
+    let effective_reasoning_effort = profile
+        .reasoning_effort
+        .as_deref()
+        .or_else(|| (provider_config.provider_name() == "openrouter").then_some("low"));
+    let provider_session_id = format!("stasis-live-{}-{}", std::process::id(), unix_ms());
     let mut audit = AiAuditLog::create_with_provider(
         project_root,
         prompt,
         provider_config.provider_name(),
         &configured_model,
-        profile.reasoning_effort.as_deref(),
+        effective_reasoning_effort,
     )?;
     let trace_path = audit.path.clone();
     let usage_path = audit.usage_path.clone();
     let mut provider = provider_config
         .build()?
+        .with_session_id(provider_session_id)?
         .with_images(images)?
         .with_web_search(web_search)?;
     if let Some(model) = profile.model.as_deref() {
         provider = provider.with_model(model);
     }
-    if let Some(reasoning_effort) = profile.reasoning_effort.as_deref() {
+    if let Some(reasoning_effort) = effective_reasoning_effort {
         provider = provider.with_reasoning_effort(reasoning_effort);
     }
     if let Some(timeout) = profile.request_timeout {
@@ -342,12 +348,359 @@ fn load_ai_initial_context(
             format_live_response(&response)
         ));
     }
-    let project_hints =
-        build_project_hints(response.data.as_ref().unwrap_or(&Value::Null), user_prompt);
+    let mut indexed_symbols = response.data.unwrap_or(Value::Null);
+    if lexical_tokens(user_prompt).contains("test") {
+        if let Ok(test_response) = tools.request(
+            LiveCommand::Symbols {
+                query: None,
+                kind: Some("test".to_string()),
+                files: Vec::new(),
+                owner: None,
+                page: 0,
+                limit: 64,
+            },
+            canceled,
+        ) {
+            if test_response.ok {
+                let test_items = test_response
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("items"))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                indexed_symbols["items"]
+                    .as_array_mut()
+                    .map(|items| items.extend(test_items));
+            }
+        }
+    }
+    tools.register_indexed_symbols(&indexed_symbols);
+    let project_hints = build_project_hints(&indexed_symbols, user_prompt);
+    let task_contract = load_ai_task_contract(project_root, user_prompt, &indexed_symbols)?;
+    if let Some(contract) = task_contract.as_ref() {
+        tools.required_completion_targets = contract.required_targets.clone();
+        tools.completion_source_rules = contract.source_rules.clone();
+    }
+    let resolved_targets = prefetch_target_bundles(tools, &indexed_symbols, user_prompt, canceled);
     let stdlib_root = resolve_stdlib_api_root(project_root)?;
     tools.stdlib_root = stdlib_root;
     tools.test_project_root = Some(project_root.to_path_buf());
-    Ok(ai_initial_context(project_hints))
+    let mut context = ai_initial_context(project_hints);
+    if !resolved_targets.is_empty() {
+        context["resolved_targets"] = Value::Array(resolved_targets);
+    }
+    if let Some(contract) = task_contract {
+        context["task_contract"] = contract.context;
+    }
+    Ok(context)
+}
+
+fn positive_intent_prompt(user_prompt: &str) -> &str {
+    ["Do not change", "Do not modify"]
+        .into_iter()
+        .filter_map(|marker| user_prompt.find(marker))
+        .min()
+        .map_or(user_prompt, |index| &user_prompt[..index])
+}
+
+struct AiTaskContract {
+    context: Value,
+    required_targets: Vec<LiveSymbolTarget>,
+    source_rules: Vec<CompletionSourceRule>,
+}
+
+#[derive(Clone)]
+struct CompletionSourceRule {
+    target: LiveSymbolTarget,
+    required: Vec<String>,
+    forbidden: Vec<String>,
+}
+
+fn load_ai_task_contract(
+    project_root: &Path,
+    user_prompt: &str,
+    symbols: &Value,
+) -> Result<Option<AiTaskContract>, String> {
+    let path = project_root.join(".stasis-ai.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let source = fs::read_to_string(&path)
+        .map_err(|error| format!("failed reading {}: {error}", path.display()))?;
+    let document: Value = serde_json::from_str(&source)
+        .map_err(|error| format!("failed parsing {}: {error}", path.display()))?;
+    if document.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err(format!("{} requires schema_version 1", path.display()));
+    }
+    let prompt_tokens = lexical_tokens(positive_intent_prompt(user_prompt));
+    let workflows = document
+        .get("workflows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{} requires a workflows array", path.display()))?;
+    let Some(workflow) = workflows.iter().find(|workflow| {
+        let trigger = workflow.get("trigger").unwrap_or(&Value::Null);
+        let all_match = trigger
+            .get("all")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .all(|token| prompt_tokens.contains(&token.to_ascii_lowercase()));
+        let any = trigger
+            .get("any")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        let any_match = any.is_empty()
+            || any
+                .iter()
+                .any(|token| prompt_tokens.contains(&token.to_ascii_lowercase()));
+        all_match && any_match
+    }) else {
+        return Ok(None);
+    };
+    let required = workflow
+        .get("required_symbols")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "matched AI workflow requires required_symbols".to_string())?;
+    let indexed = symbols
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "AI symbol index omitted items".to_string())?;
+    let mut required_targets = Vec::with_capacity(required.len());
+    let mut required_changes = Vec::with_capacity(required.len());
+    let mut source_rules = Vec::new();
+    for requirement in required {
+        let name = requirement
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "required AI symbol requires name".to_string())?;
+        let kind = requirement.get("kind").and_then(Value::as_str);
+        let file = requirement.get("file").and_then(Value::as_str);
+        let item = indexed
+            .iter()
+            .find(|item| {
+                item.get("name").and_then(Value::as_str) == Some(name)
+                    && kind
+                        .is_none_or(|kind| item.get("kind").and_then(Value::as_str) == Some(kind))
+                    && file
+                        .is_none_or(|file| item.get("file").and_then(Value::as_str) == Some(file))
+            })
+            .ok_or_else(|| format!("AI workflow required symbol not found: {name}"))?;
+        let target = LiveSymbolTarget {
+            name: name.to_string(),
+            kind: item.get("kind").and_then(Value::as_str).map(str::to_string),
+            file: item.get("file").and_then(Value::as_str).map(str::to_string),
+            owner: item
+                .get("owner")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            signature: item
+                .get("signature")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
+        required_targets.push(target.clone());
+        let required_fragments = string_values(requirement.get("source_require"));
+        let forbidden_fragments = string_values(requirement.get("source_forbid"));
+        if !required_fragments.is_empty() || !forbidden_fragments.is_empty() {
+            source_rules.push(CompletionSourceRule {
+                target: target.clone(),
+                required: required_fragments.clone(),
+                forbidden: forbidden_fragments.clone(),
+            });
+        }
+        required_changes.push(serde_json::json!({
+            "symbol_id": item.get("symbol_id").cloned().unwrap_or(Value::Null),
+            "name": target.name,
+            "kind": target.kind,
+            "file": target.file,
+            "owner": target.owner,
+            "signature": target.signature,
+            "purpose": requirement.get("purpose").cloned().unwrap_or(Value::Null),
+            "source_require": required_fragments,
+            "source_forbid": forbidden_fragments,
+        }));
+    }
+    Ok(Some(AiTaskContract {
+        context: serde_json::json!({
+            "workflow": workflow.get("id").cloned().unwrap_or(Value::Null),
+            "required_changes": required_changes,
+            "invariants": workflow.get("invariants").cloned().unwrap_or_else(|| serde_json::json!([])),
+            "acceptance": workflow.get("acceptance").cloned().unwrap_or_else(|| serde_json::json!([])),
+            "instruction": "The final atomic batch must modify every required_changes selector and satisfy every invariant and acceptance item. Use each compiler-owned symbol_id exactly.",
+        }),
+        required_targets,
+        source_rules,
+    }))
+}
+
+fn string_values(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn prefetch_target_bundles(
+    tools: &mut LiveAiTools,
+    symbols: &Value,
+    user_prompt: &str,
+    canceled: &AtomicBool,
+) -> Vec<Value> {
+    let intent_prompt = positive_intent_prompt(user_prompt);
+    let prompt_tokens = lexical_tokens(intent_prompt);
+    let required_targets = tools.required_completion_targets.clone();
+    let mut candidates = symbols
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let kind = item.get("kind").and_then(Value::as_str)?;
+            if !matches!(kind, "function" | "test") {
+                return None;
+            }
+            let file = item.get("file").and_then(Value::as_str)?;
+            if !matches!(file.split('/').next(), Some("src" | "tests")) {
+                return None;
+            }
+            let name = item.get("name").and_then(Value::as_str)?;
+            if !required_targets.is_empty()
+                && !required_targets.iter().any(|target| {
+                    target.name == name
+                        && target
+                            .file
+                            .as_deref()
+                            .is_none_or(|target_file| target_file == file)
+                        && target
+                            .kind
+                            .as_deref()
+                            .is_none_or(|target_kind| target_kind == kind)
+                })
+            {
+                return None;
+            }
+            let name_matches = lexical_match_count(&prompt_tokens, name);
+            if name_matches == 0 && required_targets.is_empty() {
+                return None;
+            }
+            let required_score = usize::from(!required_targets.is_empty()) * 1_000;
+            let score = required_score
+                + name_matches * 8
+                + lexical_match_count(
+                    &prompt_tokens,
+                    item.get("owner").and_then(Value::as_str).unwrap_or(""),
+                ) * 6
+                + lexical_match_count(
+                    &prompt_tokens,
+                    item.get("file").and_then(Value::as_str).unwrap_or(""),
+                ) * 4
+                + lexical_match_count(
+                    &prompt_tokens,
+                    item.get("signature").and_then(Value::as_str).unwrap_or(""),
+                ) * 2;
+            Some((score, item.clone()))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(left_score, left), (right_score, right)| {
+        right_score.cmp(left_score).then_with(|| {
+            let key = |item: &Value| {
+                format!(
+                    "{}\0{}\0{}\0{}\0{}",
+                    item.get("file").and_then(Value::as_str).unwrap_or(""),
+                    item.get("owner").and_then(Value::as_str).unwrap_or(""),
+                    item.get("kind").and_then(Value::as_str).unwrap_or(""),
+                    item.get("name").and_then(Value::as_str).unwrap_or(""),
+                    item.get("signature").and_then(Value::as_str).unwrap_or("")
+                )
+            };
+            key(left).cmp(&key(right))
+        })
+    });
+    let mut function_count = 0_usize;
+    let mut test_count = 0_usize;
+    candidates
+        .into_iter()
+        .filter(|(_, item)| match item.get("kind").and_then(Value::as_str) {
+            Some("function") if function_count < 4 => {
+                function_count += 1;
+                true
+            }
+            Some("test") if test_count < 4 => {
+                test_count += 1;
+                true
+            }
+            _ => false,
+        })
+        .filter_map(|(_, item)| {
+            let name = item.get("name").and_then(Value::as_str)?.to_string();
+            let selector = ["symbol_id", "name", "kind", "file", "owner", "signature"]
+                .into_iter()
+                .filter_map(|key| {
+                    item.get(key)
+                        .and_then(Value::as_str)
+                        .map(|value| (key.to_string(), Value::String(value.to_string())))
+                })
+                .collect::<serde_json::Map<_, _>>();
+            let read = tools
+                .request(
+                    LiveCommand::Read {
+                        name: name.clone(),
+                        kind: selector
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        file: selector
+                            .get("file")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        owner: selector
+                            .get("owner")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        signature: selector
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    },
+                    canceled,
+                )
+                .ok()
+                .filter(|response| response.ok)?;
+            let read_call = ToolCall {
+                tool: "read_symbol".to_string(),
+                args: Value::Object(selector.clone()),
+            };
+            let definition = compact_ai_read_result(&read_call, read.data.unwrap_or(Value::Null));
+            let references = tools
+                .request(
+                    LiveCommand::References {
+                        symbol: name,
+                        limit: 128,
+                    },
+                    canceled,
+                )
+                .ok()
+                .filter(|response| response.ok)
+                .map(|response| {
+                    tools.reference_search_ready = true;
+                    compact_ai_references(&response.data.unwrap_or(Value::Null))
+                })
+                .unwrap_or(Value::Null);
+            Some(serde_json::json!({
+                "selector": selector,
+                "definition": definition,
+                "references": references,
+            }))
+        })
+        .collect()
 }
 
 fn insert_lexical_variants(tokens: &mut BTreeSet<String>, token: String) {
@@ -360,6 +713,12 @@ fn insert_lexical_variants(tokens: &mut BTreeSet<String>, token: String) {
     tokens.insert(token.clone());
     if let Some(stem) = token.strip_suffix("ies").filter(|stem| stem.len() >= 2) {
         tokens.insert(format!("{stem}y"));
+    } else if let Some(stem) = token.strip_suffix("ed").filter(|stem| stem.len() >= 3) {
+        tokens.insert(stem.to_string());
+        let bytes = stem.as_bytes();
+        if bytes.len() >= 2 && bytes[bytes.len() - 1] == bytes[bytes.len() - 2] {
+            tokens.insert(stem[..stem.len() - 1].to_string());
+        }
     } else if let Some(stem) = token.strip_suffix('s').filter(|stem| stem.len() >= 2) {
         tokens.insert(stem.to_string());
     } else if let Some(stem) = token.strip_suffix('y').filter(|stem| stem.len() >= 2) {
@@ -507,7 +866,7 @@ fn build_project_hints(symbols: &Value, user_prompt: &str) -> Value {
             .take(MAX_PROJECT_HINT_SYMBOLS)
             .map(|(_, item)| {
                 let mut args = serde_json::Map::new();
-                for key in ["name"] {
+                for key in ["symbol_id", "name", "kind", "file", "owner", "signature"] {
                     if let Some(value) = item.get(key).and_then(Value::as_str) {
                         args.insert(key.to_string(), Value::String(value.to_string()));
                     }
@@ -2624,6 +2983,12 @@ struct LiveAiTools {
     imagegen_staged: bool,
     imagegen_staged_paths: Vec<String>,
     imagegen_committed: bool,
+    finish_requested: bool,
+    current_write_passed: bool,
+    symbol_selectors: BTreeMap<String, LiveSymbolTarget>,
+    required_completion_targets: Vec<LiveSymbolTarget>,
+    completion_source_rules: Vec<CompletionSourceRule>,
+    applied_contract_targets: BTreeSet<String>,
 }
 
 impl LiveAiTools {
@@ -2648,6 +3013,12 @@ impl LiveAiTools {
             imagegen_staged: false,
             imagegen_staged_paths: Vec::new(),
             imagegen_committed: false,
+            finish_requested: false,
+            current_write_passed: false,
+            symbol_selectors: BTreeMap::new(),
+            required_completion_targets: Vec::new(),
+            completion_source_rules: Vec::new(),
+            applied_contract_targets: BTreeSet::new(),
         }
     }
 
@@ -2666,6 +3037,51 @@ impl LiveAiTools {
             decision_role: Some(decision_role),
             require_imagegen,
             ..Self::new(client)
+        }
+    }
+
+    fn register_indexed_symbols(&mut self, symbols: &Value) {
+        self.symbol_selectors = symbols
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let symbol_id = item.get("symbol_id").and_then(Value::as_str)?.to_string();
+                let name = item.get("name").and_then(Value::as_str)?.to_string();
+                Some((
+                    symbol_id,
+                    LiveSymbolTarget {
+                        name,
+                        kind: item.get("kind").and_then(Value::as_str).map(str::to_string),
+                        file: item.get("file").and_then(Value::as_str).map(str::to_string),
+                        owner: item
+                            .get("owner")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        signature: item
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    },
+                ))
+            })
+            .collect();
+    }
+
+    fn symbol_target(&self, args: &serde_json::Map<String, Value>) -> LiveSymbolTarget {
+        if let Some(target) = string_arg(args, "symbol_id")
+            .as_deref()
+            .and_then(|symbol_id| self.symbol_selectors.get(symbol_id))
+        {
+            return target.clone();
+        }
+        LiveSymbolTarget {
+            name: string_arg(args, "name").unwrap_or_default(),
+            kind: string_arg(args, "kind"),
+            file: string_arg(args, "file"),
+            owner: semantic_owner_arg(args),
+            signature: semantic_signature_arg(args),
         }
     }
 
@@ -3056,6 +3472,27 @@ impl LiveAiTools {
     fn execute_read(&mut self, call: &ToolCall, canceled: &AtomicBool) -> ToolObservation {
         let args = call.args.as_object().expect("validated tool args");
         if call.tool == "run_tests" {
+            if self.current_write_passed
+                && self.last_write.as_ref().is_some_and(|response| {
+                    response.ok
+                        && response.kind == "edit_applied"
+                        && response
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("tests"))
+                            .and_then(Value::as_str)
+                            == Some("passed")
+                })
+            {
+                return ToolObservation::result(
+                    &call.tool,
+                    serde_json::json!({
+                        "passed":true,
+                        "cached":true,
+                        "evidence":"atomic_write_receipt"
+                    }),
+                );
+            }
             let Some(project_root) = self.test_project_root.as_ref() else {
                 return ToolObservation::error(&call.tool, "project test root is unavailable");
             };
@@ -3111,13 +3548,16 @@ impl LiveAiTools {
                 page: usize_arg(args, "page").unwrap_or(0).min(u32::MAX as usize) as u32,
                 limit: usize_arg(args, "limit").unwrap_or(32).min(64),
             },
-            "read_symbol" => LiveCommand::Read {
-                name: string_arg(args, "name").unwrap_or_default(),
-                kind: string_arg(args, "kind"),
-                file: string_arg(args, "file"),
-                owner: string_arg(args, "owner"),
-                signature: string_arg(args, "signature"),
-            },
+            "read_symbol" => {
+                let target = self.symbol_target(args);
+                LiveCommand::Read {
+                    name: target.name,
+                    kind: target.kind,
+                    file: target.file,
+                    owner: target.owner,
+                    signature: target.signature,
+                }
+            }
             "read_imports" => LiveCommand::Read {
                 name: "imports".to_string(),
                 kind: Some("imports".to_string()),
@@ -3262,6 +3702,7 @@ impl LiveAiTools {
         calls: &[&ToolCall],
         canceled: &AtomicBool,
     ) -> Vec<ToolObservation> {
+        self.current_write_passed = false;
         let includes_behavior_write = calls
             .iter()
             .any(|call| matches!(call.tool.as_str(), "write_symbol" | "delete_symbol"));
@@ -3295,15 +3736,10 @@ impl LiveAiTools {
                 } else {
                     LiveEditOperation::Update
                 };
+                let target = self.symbol_target(args);
                 Ok(LiveEdit {
                     operation,
-                    target: LiveSymbolTarget {
-                        name: string_arg(args, "name").unwrap_or_default(),
-                        kind: string_arg(args, "kind"),
-                        file: string_arg(args, "file"),
-                        owner: string_arg(args, "owner"),
-                        signature: string_arg(args, "signature"),
-                    },
+                    target,
                     source: string_arg(args, "new_source"),
                     expected_source_hash: string_arg(args, "expected_source_hash"),
                 })
@@ -3319,18 +3755,31 @@ impl LiveAiTools {
                 return failed_write_observations(calls, error);
             }
         }
-        match self.request(
+        let snapshot_started = Instant::now();
+        let provisional_snapshot = self.test_project_root.is_some()
+            && self
+                .request(LiveCommand::ValidationSnapshot, canceled)
+                .is_ok_and(|response| response.ok);
+        let snapshot_ms = duration_millis(snapshot_started.elapsed());
+        let swap_started = Instant::now();
+        let response = self.request(
             LiveCommand::EditBatch {
                 edits,
                 preview: false,
-                run_tests: true,
+                run_tests: !provisional_snapshot,
             },
             canceled,
-        ) {
+        );
+        match response {
             Ok(response) => {
-                let response =
+                let mut response =
                     if self.auto_apply_layout && response.ok && response.kind == "edit_preview" {
-                        match self.request(LiveCommand::Apply { run_tests: true }, canceled) {
+                        match self.request(
+                            LiveCommand::Apply {
+                                run_tests: !provisional_snapshot,
+                            },
+                            canceled,
+                        ) {
                             Ok(applied) => applied,
                             Err(error) => {
                                 if let Some(transaction) = self.asset_transaction.take() {
@@ -3345,10 +3794,71 @@ impl LiveAiTools {
                     } else {
                         response
                     };
-                let response = preserve_truncated_applied_write_evidence(response);
+                let compile_and_swap_ms = duration_millis(swap_started.elapsed());
+                if provisional_snapshot && response.ok && response.kind == "edit_applied" {
+                    let test_root = self
+                        .test_project_root
+                        .clone()
+                        .or_else(|| self.project_root.clone());
+                    let tests_started = Instant::now();
+                    let validation = test_root
+                        .as_deref()
+                        .ok_or_else(|| "project test root is unavailable".to_string())
+                        .and_then(|root| stasis::run_project_tests_bounded(root, canceled));
+                    match validation {
+                        Ok(()) => {
+                            let tests_ms = duration_millis(tests_started.elapsed());
+                            if let Some(data) = response.data.as_mut() {
+                                data["tests"] = Value::String("passed".to_string());
+                                data["validation_order"] =
+                                    Value::String("compile_swap_then_tests".to_string());
+                                data["provisional_timing_ms"] = serde_json::json!({
+                                    "snapshot": snapshot_ms,
+                                    "compile_and_swap": compile_and_swap_ms,
+                                    "tests_after_swap": tests_ms,
+                                });
+                            }
+                            let _ = self.request(LiveCommand::ValidationClear, canceled);
+                        }
+                        Err(test_error) => {
+                            let undo =
+                                self.request(LiveCommand::Undo { run_tests: false }, canceled);
+                            let restore = self.request(LiveCommand::ValidationRestore, canceled);
+                            let _ = self.request(LiveCommand::ValidationClear, canceled);
+                            let rollback_ok =
+                                undo.as_ref().is_ok_and(|response| {
+                                    response.ok && response.kind == "edit_undone"
+                                }) && restore.as_ref().is_ok_and(|response| response.ok);
+                            let error = if rollback_ok {
+                                format!(
+                                    "provisional live edit tests failed; code, disk, and runtime state were rolled back: {test_error}"
+                                )
+                            } else {
+                                self.terminal_blocker = Some(format!(
+                                    "provisional live edit tests failed and automatic rollback did not complete: {test_error}"
+                                ));
+                                format!(
+                                    "provisional live edit tests failed and automatic rollback did not complete: {test_error}"
+                                )
+                            };
+                            response =
+                                LiveResponse::failure(response.request_id, response.tick, error);
+                        }
+                    }
+                } else if provisional_snapshot {
+                    let _ = self.request(LiveCommand::ValidationClear, canceled);
+                }
+                let mut response = preserve_truncated_applied_write_evidence(response);
+                if response.ok && response.kind == "edit_applied" {
+                    self.record_applied_contract_targets(&response);
+                    if let Err(error) = self.validate_completion_source_rules(canceled) {
+                        response = LiveResponse::failure(response.request_id, response.tick, error);
+                    }
+                }
                 let applied = response.ok && response.kind == "edit_applied";
                 if applied {
                     self.last_write = Some(response.clone());
+                    self.current_write_passed = true;
                     self.last_write_failure_key = None;
                     self.consecutive_write_failures = 0;
                     self.reference_search_ready = false;
@@ -3393,6 +3903,9 @@ impl LiveAiTools {
                 }
             }
             Err(error) => {
+                if provisional_snapshot {
+                    let _ = self.request(LiveCommand::ValidationClear, canceled);
+                }
                 if let Some(transaction) = self.asset_transaction.take() {
                     self.imagegen_staged = false;
                     self.imagegen_staged_paths.clear();
@@ -3407,6 +3920,96 @@ impl LiveAiTools {
                 let error = self.model_write_failure(error);
                 failed_write_observations(calls, error)
             }
+        }
+    }
+
+    fn validate_completion_source_rules(&mut self, canceled: &AtomicBool) -> Result<(), String> {
+        for rule in self.completion_source_rules.clone() {
+            let response = self.request(
+                LiveCommand::Read {
+                    name: rule.target.name.clone(),
+                    kind: rule.target.kind.clone(),
+                    file: rule.target.file.clone(),
+                    owner: rule.target.owner.clone(),
+                    signature: rule.target.signature.clone(),
+                },
+                canceled,
+            )?;
+            if !response.ok {
+                return Err(format!(
+                    "task contract could not read {} after the write: {}",
+                    rule.target.name,
+                    format_live_response(&response)
+                ));
+            }
+            let source = response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("source"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!("task contract read for {} omitted source", rule.target.name)
+                })?;
+            let normalized_source = source
+                .chars()
+                .filter(|char| !char.is_whitespace())
+                .collect::<String>();
+            let missing = rule
+                .required
+                .iter()
+                .filter(|fragment| {
+                    let fragment = fragment
+                        .chars()
+                        .filter(|char| !char.is_whitespace())
+                        .collect::<String>();
+                    !normalized_source.contains(&fragment)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let forbidden = rule
+                .forbidden
+                .iter()
+                .filter(|fragment| {
+                    let fragment = fragment
+                        .chars()
+                        .filter(|char| !char.is_whitespace())
+                        .collect::<String>();
+                    normalized_source.contains(&fragment)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() || !forbidden.is_empty() {
+                return Err(format!(
+                    "task contract rejected {}: missing [{}]; forbidden present [{}]",
+                    rule.target.name,
+                    missing.join(", "),
+                    forbidden.join(", ")
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn record_applied_contract_targets(&mut self, response: &LiveResponse) {
+        let changed = response
+            .data
+            .as_ref()
+            .and_then(|data| {
+                data.pointer("/plan/reload/changed_symbols")
+                    .or_else(|| data.get("changed_symbols"))
+            })
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for item in changed {
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            self.applied_contract_targets.insert(contract_target_key(
+                name,
+                item.get("kind").and_then(Value::as_str),
+                item.get("file").and_then(Value::as_str),
+            ));
         }
     }
 
@@ -3604,7 +4207,15 @@ fn compact_ai_read_result(call: &ToolCall, data: Value) -> Value {
         }
         "read_symbol" => {
             let mut result = serde_json::Map::new();
-            for key in ["file", "kind", "name", "owner", "signature", "source"] {
+            for key in [
+                "symbol_id",
+                "file",
+                "kind",
+                "name",
+                "owner",
+                "signature",
+                "source",
+            ] {
                 if let Some(value) = data.get(key).filter(|value| !value.is_null()) {
                     result.insert(key.into(), value.clone());
                 }
@@ -3741,6 +4352,9 @@ fn compact_write_transaction(transaction: Option<&Value>) -> Value {
     serde_json::json!({
         "receipt": transaction.get("receipt").cloned().unwrap_or(Value::Null),
         "tests": transaction.get("tests").cloned().unwrap_or(Value::Null),
+        "validation_order": transaction.get("validation_order").cloned().unwrap_or(Value::Null),
+        "provisional_timing_ms": transaction.get("provisional_timing_ms").cloned().unwrap_or(Value::Null),
+        "jit_patch": transaction.get("jit_patch").cloned().unwrap_or(Value::Null),
         "changed_symbols": transaction.pointer("/plan/reload/changed_symbols").cloned().unwrap_or_else(|| serde_json::json!([])),
         "expected_reload": transaction.pointer("/plan/reload/expected_reload").cloned().unwrap_or(Value::Null),
         "state_layout_compatible": transaction.pointer("/swap/state_layout_compatible").cloned().unwrap_or(Value::Null),
@@ -3776,6 +4390,18 @@ fn contiguous_write_range(calls: &[ToolCall]) -> Result<Option<std::ops::Range<u
 
 impl ToolExecutor for LiveAiTools {
     fn execute(&mut self, calls: &[ToolCall], canceled: &AtomicBool) -> Vec<ToolObservation> {
+        self.finish_requested = false;
+        let has_source_write = calls.iter().any(|call| {
+            matches!(
+                call.tool.as_str(),
+                "write_symbol" | "delete_symbol" | "write_imports"
+            )
+        });
+        // A new write attempt supersedes the prior receipt even when its batch shape is invalid.
+        // Read-only work and an explicit confirmation turn may retain the latest passing receipt.
+        if has_source_write {
+            self.current_write_passed = false;
+        }
         let write_range = match contiguous_write_range(calls) {
             Ok(range) => range,
             Err(error) => {
@@ -3785,6 +4411,24 @@ impl ToolExecutor for LiveAiTools {
                     .collect()
             }
         };
+        if let Some(finish_index) = calls.iter().position(|call| call.tool == "finish_task") {
+            let valid = finish_index + 1 == calls.len()
+                && (write_range
+                    .as_ref()
+                    .is_some_and(|range| range.end <= finish_index)
+                    || (!has_source_write && self.current_write_passed));
+            if !valid {
+                return calls
+                    .iter()
+                    .map(|call| {
+                        ToolObservation::error(
+                            &call.tool,
+                            "finish_task must be final and follow either this source write batch or its still-current passing receipt",
+                        )
+                    })
+                    .collect();
+            }
+        }
         let asset_indexes = calls
             .iter()
             .enumerate()
@@ -3892,6 +4536,13 @@ impl ToolExecutor for LiveAiTools {
             } else if calls[index].tool == "report_blocked" {
                 observations.push(self.report_blocked(&calls[index]));
                 index += 1;
+            } else if calls[index].tool == "finish_task" {
+                self.finish_requested = true;
+                observations.push(ToolObservation::result(
+                    "finish_task",
+                    serde_json::json!({"status":"completion_requested"}),
+                ));
+                index += 1;
             } else {
                 observations.push(self.execute_read(&calls[index], canceled));
                 index += 1;
@@ -3901,7 +4552,13 @@ impl ToolExecutor for LiveAiTools {
     }
 
     fn validate_completion(&self) -> Result<(), String> {
-        let result = match &self.last_write {
+        let result = if !self.finish_requested {
+            Err("completion rejected: finish_task was not included after the final complete write batch".to_string())
+        } else {
+            match &self.last_write {
+            Some(_) if !self.current_write_passed => {
+                Err("completion rejected: the current atomic write batch did not pass".to_string())
+            }
             Some(response)
                 if response.ok
                     && response.kind == "edit_applied"
@@ -3935,6 +4592,7 @@ impl ToolExecutor for LiveAiTools {
                     .map(Value::to_string)
                     .unwrap_or_else(|| "missing".to_string())
             )),
+            }
         };
         let result = result.and_then(|()| {
             if self.require_imagegen && !self.imagegen_committed {
@@ -3943,6 +4601,7 @@ impl ToolExecutor for LiveAiTools {
                 Ok(())
             }
         });
+        let result = result.and_then(|()| validate_required_completion_targets(self));
         if let Err(error) = &result {
             let missing_imagegen_use = self.require_imagegen && !self.imagegen_committed;
             let summary = if missing_imagegen_use {
@@ -3963,6 +4622,89 @@ impl ToolExecutor for LiveAiTools {
     fn terminal_failure(&self) -> Option<String> {
         self.terminal_blocker.clone()
     }
+
+    fn terminal_success(&self) -> Option<String> {
+        let response = self.last_write.as_ref()?;
+        let tested = response.ok
+            && response.kind == "edit_applied"
+            && response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("tests"))
+                .and_then(Value::as_str)
+                == Some("passed");
+        if self.finish_requested
+            && self.current_write_passed
+            && tested
+            && (!self.require_imagegen || self.imagegen_committed)
+            && validate_required_completion_targets(self).is_ok()
+        {
+            Some("Applied the requested semantic edit with passing tests.".to_string())
+        } else {
+            None
+        }
+    }
+}
+
+fn validate_required_completion_targets(tools: &LiveAiTools) -> Result<(), String> {
+    if tools.required_completion_targets.is_empty() {
+        return Ok(());
+    }
+    let mut changed_targets = tools.applied_contract_targets.clone();
+    let changed = tools
+        .last_write
+        .as_ref()
+        .and_then(|response| response.data.as_ref())
+        .and_then(|data| {
+            data.pointer("/plan/reload/changed_symbols")
+                .or_else(|| data.get("changed_symbols"))
+        })
+        .and_then(Value::as_array);
+    if let Some(changed) = changed {
+        for item in changed {
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                changed_targets.insert(contract_target_key(
+                    name,
+                    item.get("kind").and_then(Value::as_str),
+                    item.get("file").and_then(Value::as_str),
+                ));
+            }
+        }
+    }
+    if changed_targets.is_empty() {
+        return Err(
+            "completion rejected: task contract could not verify changed symbols".to_string(),
+        );
+    }
+    let missing = tools
+        .required_completion_targets
+        .iter()
+        .filter(|target| {
+            !changed_targets.contains(&contract_target_key(
+                &target.name,
+                target.kind.as_deref(),
+                target.file.as_deref(),
+            ))
+        })
+        .map(|target| target.name.clone())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "completion rejected: final atomic batch omitted required task-contract symbols: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+fn contract_target_key(name: &str, kind: Option<&str>, file: Option<&str>) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}",
+        name,
+        kind.unwrap_or(""),
+        file.unwrap_or("")
+    )
 }
 
 fn imported_imagegen_is_used_by_project_source(
@@ -4012,6 +4754,25 @@ fn string_arg(args: &serde_json::Map<String, Value>, name: &str) -> Option<Strin
         .and_then(Value::as_str)
         .map(str::to_string)
         .filter(|value| !value.trim().is_empty())
+}
+
+fn semantic_owner_arg(args: &serde_json::Map<String, Value>) -> Option<String> {
+    let owner = string_arg(args, "owner")?;
+    let is_free_function = string_arg(args, "kind").as_deref() == Some("function")
+        && string_arg(args, "signature")
+            .as_deref()
+            .is_some_and(|signature| !signature.contains("self:"));
+    (!is_free_function).then_some(owner)
+}
+
+fn semantic_signature_arg(args: &serde_json::Map<String, Value>) -> Option<String> {
+    let signature = string_arg(args, "signature")?;
+    Some(
+        signature
+            .strip_prefix("function ")
+            .unwrap_or(&signature)
+            .to_string(),
+    )
 }
 
 fn usize_arg(args: &serde_json::Map<String, Value>, name: &str) -> Option<usize> {
@@ -5068,10 +5829,11 @@ mod tests {
         assert!(list["purpose"]
             .as_str()
             .is_some_and(|value| !value.is_empty()));
-        assert!(actions
-            .iter()
-            .any(|action| action["action_id"] == read_id
-                && action["args"]["name"] == "update_enemies"));
+        assert!(actions.iter().any(|action| action["action_id"] == read_id
+            && action["args"]["name"] == "update_enemies"
+            && action["args"]["kind"] == "function"
+            && action["args"]["file"] == "src/enemies.stasis"
+            && action["args"]["signature"] == "update_enemies(speed: f32): void"));
         assert!(actions.iter().all(|action| action.get("tool").is_none()));
         assert_eq!(
             hints,
@@ -5106,6 +5868,202 @@ mod tests {
         );
         assert!(bytes < raw_bytes);
         assert!(actions.len() <= 1 + MAX_PROJECT_HINT_SYMBOLS);
+    }
+
+    #[test]
+    fn prompt_matched_targets_are_prefetched_with_definition_and_references() {
+        let symbols = synthetic_project_symbols(43);
+        let (client, server) = stasis_runner::live::live_session(4);
+        let responder = thread::spawn(move || {
+            let mut handled = 0;
+            while handled < 2 {
+                for request in server.drain(4) {
+                    match request.command {
+                        LiveCommand::Read {
+                            name,
+                            kind,
+                            file,
+                            signature,
+                            ..
+                        } => {
+                            assert_eq!(name, "update_enemies");
+                            assert_eq!(kind.as_deref(), Some("function"));
+                            assert_eq!(file.as_deref(), Some("src/enemies.stasis"));
+                            assert_eq!(
+                                signature.as_deref(),
+                                Some("update_enemies(speed: f32): void")
+                            );
+                            server
+                                .respond(LiveResponse::success(
+                                    request.request_id,
+                                    1,
+                                    "symbol",
+                                    json!({
+                                        "name":"update_enemies",
+                                        "kind":"function",
+                                        "file":"src/enemies.stasis",
+                                        "signature":"update_enemies(speed: f32): void",
+                                        "source":"function update_enemies(speed: f32): void { return; }",
+                                        "source_hash":"source-hash"
+                                    }),
+                                ))
+                                .expect("read response");
+                        }
+                        LiveCommand::References { symbol, .. } => {
+                            assert_eq!(symbol, "update_enemies");
+                            server
+                                .respond(LiveResponse::success(
+                                    request.request_id,
+                                    1,
+                                    "references",
+                                    json!({"symbol":symbol,"references":[]}),
+                                ))
+                                .expect("references response");
+                        }
+                        command => panic!("unexpected prefetch command: {command:?}"),
+                    }
+                    handled += 1;
+                }
+                thread::yield_now();
+            }
+        });
+        let mut tools = LiveAiTools::new(client);
+        let bundles = prefetch_target_bundles(
+            &mut tools,
+            &symbols,
+            "make update_enemies faster",
+            &AtomicBool::new(false),
+        );
+        responder.join().expect("prefetch responder");
+
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(
+            bundles[0]["definition"]["expected_source_hash"],
+            "source-hash"
+        );
+        assert_eq!(bundles[0]["references"]["symbol"], "update_enemies");
+        assert!(tools.reference_search_ready);
+    }
+
+    #[test]
+    fn target_prefetch_ignores_negative_constraint_tail() {
+        let symbols = json!({
+            "items": [
+                {
+                    "kind":"function",
+                    "name":"initialize_bricks",
+                    "file":"src/main.stasis",
+                    "signature":"initialize_bricks(): void"
+                },
+                {
+                    "kind":"function",
+                    "name":"on_code_swap",
+                    "file":"src/main.stasis",
+                    "signature":"on_code_swap(): void"
+                },
+                {
+                    "kind":"function",
+                    "name":"load_assets",
+                    "file":"src/main.stasis",
+                    "signature":"load_assets(): void"
+                }
+            ]
+        });
+        let (client, server) = stasis_runner::live::live_session(1);
+        let responder = thread::spawn(move || {
+            let mut handled = 0;
+            while handled < 4 {
+                for request in server.drain(1) {
+                    match request.command {
+                        LiveCommand::Read { name, .. } => server
+                            .respond(LiveResponse::success(
+                                request.request_id,
+                                1,
+                                "read",
+                                json!({
+                                    "name":name,
+                                    "source":format!("function {name}(): void {{}}"),
+                                    "source_hash":format!("hash-{name}")
+                                }),
+                            ))
+                            .expect("read response"),
+                        LiveCommand::References { symbol, .. } => server
+                            .respond(LiveResponse::success(
+                                request.request_id,
+                                1,
+                                "references",
+                                json!({"symbol":symbol,"references":[]}),
+                            ))
+                            .expect("references response"),
+                        command => panic!("unexpected prefetch command: {command:?}"),
+                    }
+                    handled += 1;
+                }
+                thread::yield_now();
+            }
+        });
+        let mut tools = LiveAiTools::new(client);
+        let bundles = prefetch_target_bundles(
+            &mut tools,
+            &symbols,
+            "Repopulate the brick level when code is swapped. Do not change assets or unrelated gameplay.",
+            &AtomicBool::new(false),
+        );
+        responder.join().expect("prefetch responder");
+
+        let selected = bundles
+            .iter()
+            .filter_map(|bundle| bundle["selector"]["name"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            selected,
+            BTreeSet::from(["initialize_bricks", "on_code_swap"])
+        );
+    }
+
+    #[test]
+    fn project_ai_contract_resolves_required_symbols_for_matching_workflow() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../samples/asset_breakout");
+        let symbols = json!({"items":[
+            {"symbol_id":"init-id","name":"initialize_bricks","kind":"function","file":"src/main.stasis","signature":"initialize_bricks(): void"},
+            {"symbol_id":"swap-id","name":"on_code_swap","kind":"function","file":"src/main.stasis","signature":"on_code_swap(): void"},
+            {"symbol_id":"layout-test-id","name":"brick layout is deterministic","kind":"test","file":"tests/asset_breakout.test.stasis","signature":"test `brick layout is deterministic`"},
+            {"symbol_id":"swap-test-id","name":"hot swap preserves active round","kind":"test","file":"tests/asset_breakout.test.stasis","signature":"test `hot swap preserves active round`"}
+        ]});
+
+        let contract = load_ai_task_contract(
+            &root,
+            "Repopulate the brick layout when code is swapped.",
+            &symbols,
+        )
+        .expect("project AI contract")
+        .expect("matching workflow");
+
+        assert_eq!(contract.required_targets.len(), 4);
+        assert_eq!(contract.source_rules.len(), 4);
+        assert_eq!(contract.context["workflow"], "brick_layout_hot_swap");
+        assert_eq!(
+            contract.context["required_changes"][0]["symbol_id"],
+            "init-id"
+        );
+        assert_eq!(
+            contract.context["required_changes"][1]["source_require"][0],
+            "initialize_bricks();"
+        );
+        assert!(load_ai_task_contract(
+            &root,
+            "Change the 7-column brick field into a centered chevron pattern and apply it through on_code_swap.",
+            &symbols,
+        )
+        .expect("natural layout prompt")
+        .is_some());
+        assert!(load_ai_task_contract(
+            &root,
+            "Change the brick colors. Do not reset the level on code swap.",
+            &symbols,
+        )
+        .expect("nonmatching project AI contract")
+        .is_none());
     }
 
     #[test]
@@ -5494,6 +6452,89 @@ mod tests {
     }
 
     #[test]
+    fn finish_task_requires_a_current_passing_write_receipt() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "finish_task".into(),
+                args: json!({}),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("still-current passing receipt")));
+        assert!(!tools.finish_requested);
+    }
+
+    #[test]
+    fn finish_task_can_confirm_the_previous_passing_write_turn() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.last_write = Some(LiveResponse::success(
+            1,
+            0,
+            "edit_applied",
+            json!({"tests":"passed"}),
+        ));
+        tools.current_write_passed = true;
+
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "finish_task".into(),
+                args: json!({}),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0].error.is_none());
+        assert!(tools.finish_requested);
+        tools
+            .validate_completion()
+            .expect("current passing receipt completes");
+    }
+
+    #[test]
+    fn semantic_selectors_normalize_common_model_decorations() {
+        let free_function = json!({
+            "kind":"function",
+            "file":"src/main.stasis",
+            "name":"initialize_bricks",
+            "owner":"src",
+            "signature":"initialize_bricks(): void"
+        });
+        let method = json!({
+            "kind":"function",
+            "file":"src/player.stasis",
+            "name":"update",
+            "owner":"Player",
+            "signature":"update(self: Player): void"
+        });
+
+        assert_eq!(
+            semantic_owner_arg(free_function.as_object().expect("free function args")),
+            None
+        );
+        assert_eq!(
+            semantic_owner_arg(method.as_object().expect("method args")).as_deref(),
+            Some("Player")
+        );
+        let decorated_signature = json!({"signature":"function initialize_bricks(): void"});
+        assert_eq!(
+            semantic_signature_arg(
+                decorated_signature
+                    .as_object()
+                    .expect("decorated signature args")
+            )
+            .as_deref(),
+            Some("initialize_bricks(): void")
+        );
+    }
+
+    #[test]
     fn live_ai_reads_imports_through_the_compiler_owned_group() {
         let (client, server) = stasis_runner::live::live_session(1);
         let responder = thread::spawn(move || loop {
@@ -5580,7 +6621,7 @@ mod tests {
         let result = compact_ai_read_result(
             &call,
             json!({
-                "symbol_id":"ignored",
+                "symbol_id":"v1|function|src/main.stasis|tick|()",
                 "kind":"function",
                 "name":"tick",
                 "file":"src/main.stasis",
@@ -5594,6 +6635,7 @@ mod tests {
         assert_eq!(
             result,
             json!({
+                "symbol_id":"v1|function|src/main.stasis|tick|()",
                 "kind":"function",
                 "name":"tick",
                 "file":"src/main.stasis",
@@ -5684,17 +6726,23 @@ mod tests {
         });
         let mut tools = LiveAiTools::new(client);
         let observations = tools.execute(
-            &[ToolCall {
-                tool: "write_imports".to_string(),
-                args: json!({
-                    "file":"src/main.stasis",
-                    "imports":[
-                        "/stdlib/graphics.stasis",
-                        "/stdlib/audio.stasis",
-                        "/stdlib/graphics.stasis"
-                    ]
-                }),
-            }],
+            &[
+                ToolCall {
+                    tool: "write_imports".to_string(),
+                    args: json!({
+                        "file":"src/main.stasis",
+                        "imports":[
+                            "/stdlib/graphics.stasis",
+                            "/stdlib/audio.stasis",
+                            "/stdlib/graphics.stasis"
+                        ]
+                    }),
+                },
+                ToolCall {
+                    tool: "finish_task".to_string(),
+                    args: json!({}),
+                },
+            ],
             &AtomicBool::new(false),
         );
         responder.join().expect("import edit responder");
@@ -5797,9 +6845,15 @@ mod tests {
         let (client, _server) = stasis_runner::live::live_session(1);
         let mut tools = LiveAiTools::new(client);
         tools.last_write = Some(response);
+        tools.finish_requested = true;
+        tools.current_write_passed = true;
         tools
             .validate_completion()
             .expect("tested truncated write completes");
+        assert_eq!(
+            tools.terminal_success().as_deref(),
+            Some("Applied the requested semantic edit with passing tests.")
+        );
     }
 
     #[test]
@@ -5809,6 +6863,8 @@ mod tests {
         let mut response = LiveResponse::success(7, 9, "edit_applied", json!({"tests": "passed"}));
         response.data = None;
         tools.last_write = Some(response);
+        tools.finish_requested = true;
+        tools.current_write_passed = true;
 
         assert_eq!(
             tools.validate_completion().unwrap_err(),
@@ -5826,7 +6882,7 @@ mod tests {
         fs::create_dir_all(&root).expect("failure memory root");
         let decisions = root.join("decisions.jsonl");
         let (client, _server) = stasis_runner::live::live_session(1);
-        let tools = LiveAiTools::new_project_assets(
+        let mut tools = LiveAiTools::new_project_assets(
             client,
             root.clone(),
             true,
@@ -5834,6 +6890,7 @@ mod tests {
             "builder".to_string(),
             false,
         );
+        tools.finish_requested = true;
 
         let error = tools.validate_completion().expect_err("write required");
         let memory = fs::read_to_string(decisions).expect("durable failure memory");
@@ -5957,6 +7014,11 @@ mod tests {
         let mut tools = LiveAiTools::new(client);
         assert_eq!(
             tools.validate_completion().expect_err("write required"),
+            "completion rejected: finish_task was not included after the final complete write batch"
+        );
+        tools.finish_requested = true;
+        assert_eq!(
+            tools.validate_completion().expect_err("write required"),
             "completion rejected: no atomic write was attempted"
         );
 
@@ -5966,6 +7028,7 @@ mod tests {
             "edit_applied",
             json!({"tests": "skipped"}),
         ));
+        tools.current_write_passed = true;
         assert_eq!(
             tools.validate_completion().unwrap_err(),
             "completion rejected: the successful edit_applied transaction reported tests=\"skipped\""
@@ -5977,7 +7040,138 @@ mod tests {
             "edit_applied",
             json!({"tests": "passed"}),
         ));
+        tools.current_write_passed = true;
         tools.validate_completion().expect("tested write completes");
+    }
+
+    #[test]
+    fn run_tests_reuses_the_accepted_atomic_write_receipt() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.last_write = Some(LiveResponse::success(
+            1,
+            0,
+            "edit_applied",
+            json!({"tests":"passed"}),
+        ));
+        tools.current_write_passed = true;
+
+        let observation = tools.execute_read(
+            &ToolCall {
+                tool: "run_tests".to_string(),
+                args: json!({}),
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert!(observation.error.is_none());
+        assert_eq!(
+            observation.result.expect("cached test result")["cached"],
+            true
+        );
+    }
+
+    #[test]
+    fn failed_current_batch_cannot_reuse_an_earlier_passing_receipt() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.last_write = Some(LiveResponse::success(
+            1,
+            0,
+            "edit_applied",
+            json!({"tests":"passed"}),
+        ));
+        tools.current_write_passed = true;
+
+        let observations = tools.execute(
+            &[
+                ToolCall {
+                    tool: "write_symbol".to_string(),
+                    args: json!({
+                        "file":"src/main.stasis",
+                        "name":"tick",
+                        "new_source":"function tick(): i32 { return 1; }"
+                    }),
+                },
+                ToolCall {
+                    tool: "finish_task".to_string(),
+                    args: json!({}),
+                },
+            ],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0].error.is_some());
+        assert_eq!(tools.terminal_success(), None);
+        assert_eq!(
+            tools.validate_completion().expect_err("current failure"),
+            "completion rejected: the current atomic write batch did not pass"
+        );
+        let cached = tools.execute_read(
+            &ToolCall {
+                tool: "run_tests".to_string(),
+                args: json!({}),
+            },
+            &AtomicBool::new(false),
+        );
+        assert!(cached.error.is_some());
+    }
+
+    #[test]
+    fn completion_contract_requires_every_declared_symbol_in_final_batch() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.finish_requested = true;
+        tools.current_write_passed = true;
+        tools.required_completion_targets = vec![
+            LiveSymbolTarget {
+                name: "initialize_bricks".to_string(),
+                kind: Some("function".to_string()),
+                file: Some("src/main.stasis".to_string()),
+                owner: None,
+                signature: Some("initialize_bricks(): void".to_string()),
+            },
+            LiveSymbolTarget {
+                name: "on_code_swap".to_string(),
+                kind: Some("function".to_string()),
+                file: Some("src/main.stasis".to_string()),
+                owner: None,
+                signature: Some("on_code_swap(): void".to_string()),
+            },
+        ];
+        tools.last_write = Some(LiveResponse::success(
+            1,
+            0,
+            "edit_applied",
+            json!({
+                "tests":"passed",
+                "plan":{"reload":{"changed_symbols":[
+                    {"name":"initialize_bricks","kind":"function","file":"src/main.stasis"}
+                ]}}
+            }),
+        ));
+
+        assert!(tools
+            .validate_completion()
+            .expect_err("missing contract symbol")
+            .contains("on_code_swap"));
+        tools
+            .last_write
+            .as_mut()
+            .expect("write")
+            .data
+            .as_mut()
+            .expect("data")["plan"]["reload"]["changed_symbols"] = json!([
+            {"name":"on_code_swap","kind":"function","file":"src/main.stasis"}
+        ]);
+        tools.applied_contract_targets.insert(contract_target_key(
+            "initialize_bricks",
+            Some("function"),
+            Some("src/main.stasis"),
+        ));
+        tools
+            .validate_completion()
+            .expect("contract symbols may be completed across accepted repair batches");
     }
 
     #[test]
@@ -5985,6 +7179,8 @@ mod tests {
         let (client, _server) = stasis_runner::live::live_session(1);
         let mut tools = LiveAiTools::new(client);
         tools.require_imagegen = true;
+        tools.finish_requested = true;
+        tools.current_write_passed = true;
         tools.last_write = Some(LiveResponse::success(
             1,
             0,

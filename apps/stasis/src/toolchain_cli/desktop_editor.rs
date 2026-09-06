@@ -261,12 +261,17 @@ fn run_reply_provider(
     project_root: PathBuf,
 ) -> Result<ProviderReply, String> {
     let config = ProviderConfig::from_env()?;
+    let effective_reasoning_effort = (config.provider_name() == "openrouter").then_some("low");
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
     let mut provider = config
         .clone()
         .build()?
+        .with_session_id(format!("stasis-desktop-task-{}", request.task_id))?
         .with_timeout(Duration::from_secs(120))
         .with_images(image_paths)?;
+    if let Some(reasoning_effort) = effective_reasoning_effort {
+        provider = provider.with_reasoning_effort(reasoning_effort);
+    }
     let prompt = request
         .context
         .last()

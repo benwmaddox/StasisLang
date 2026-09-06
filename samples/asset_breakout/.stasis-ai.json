@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "workflows": [
+    {
+      "id": "brick_layout_hot_swap",
+      "trigger": {
+        "all": ["brick", "swap"],
+        "any": ["repopulate", "reposition", "reinitialize", "layout", "pattern", "chevron"]
+      },
+      "required_symbols": [
+        {
+          "name": "initialize_bricks",
+          "kind": "function",
+          "file": "src/main.stasis",
+          "purpose": "Define the requested layout while retaining the existing slot indexing and horizontal placement.",
+          "source_require": [
+            "brick.x = 25.0 + i32_to_f32(column) * 82.0;"
+          ]
+        },
+        {
+          "name": "on_code_swap",
+          "kind": "function",
+          "file": "src/main.stasis",
+          "purpose": "Call initialize_bricks() to apply this level-layout change to the running game. Keep this as a call to the authoritative initializer; do not copy its loop into on_code_swap.",
+          "source_require": [
+            "initialize_bricks();"
+          ],
+          "source_forbid": [
+            "foreach"
+          ]
+        },
+        {
+          "name": "brick layout is deterministic",
+          "kind": "test",
+          "file": "tests/asset_breakout.test.stasis",
+          "purpose": "Prove representative edge and center coordinates, horizontal placement, and the complete brick count.",
+          "source_require": [
+            "bricks[0].x",
+            "bricks[3].x",
+            "bricks[0].y != 60.0",
+            "bricks[3].y != 36.0",
+            "bricks[34].y != 172.0",
+            "bricks_left == 35"
+          ]
+        },
+        {
+          "name": "hot swap preserves active round",
+          "kind": "test",
+          "file": "tests/asset_breakout.test.stasis",
+          "purpose": "Prove brick repopulation and preservation of active gameplay state, including velocity.",
+          "source_require": [
+            "bricks_left == 35",
+            "bricks[0].alive = false;",
+            "ball_vx = 1.25;",
+            "ball_vy = -2.5;",
+            "ball_vx == 1.25",
+            "ball_vy == -2.5"
+          ]
+        }
+      ],
+      "invariants": [
+        "Keep all 35 brick slots and the existing seven-column, five-row indexing.",
+        "Keep each brick's existing horizontal coordinate formula.",
+        "For this level-layout workflow, on_code_swap must call initialize_bricks() exactly once and must not duplicate brick initialization logic.",
+        "initialize_bricks may reset brick state and bricks_left, but on_code_swap must not reset ball, paddle, score, or round state.",
+        "Preserve presentation_variant behavior."
+      ],
+      "acceptance": [
+        "The layout oracle uses index 0 = (25, 60), index 3 = (271, 36), and index 34 = (517, 172), with bricks_left == 35.",
+        "The hot-swap test must not assume reset_round velocity values: assign ball_vx = 1.25 and ball_vy = -2.5 before the call, then compare against those exact values afterward.",
+        "Before on_code_swap, set bricks[0].alive = false and reduce bricks_left; afterward require bricks[0].alive and bricks_left == 35."
+      ]
+    }
+  ]
+}
