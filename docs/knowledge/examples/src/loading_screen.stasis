@@ -1,0 +1,144 @@
+import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
+
+enum LoadingPhase {
+    AwaitingFrame,
+    Loading,
+    Gameplay,
+    Error,
+}
+
+struct LoadingGate {
+    phase: LoadingPhase;
+    frame_submitted: bool;
+    submitted_tick: i32;
+    loaded: i32;
+    failed: i32;
+    total: i32;
+    waited_ticks: i32;
+}
+
+global gate: LoadingGate;
+global loading_tick: i32;
+global hero: ImageAsset;
+global music: AudioAsset;
+global music_voice: AudioVoice;
+global level_number: i32;
+
+function prepare_loading(self: LoadingGate, total: i32): void {
+    self.phase = LoadingPhase.AwaitingFrame;
+    self.frame_submitted = false;
+    self.submitted_tick = 0;
+    self.loaded = 0;
+    self.failed = 0;
+    self.total = total;
+    self.waited_ticks = 0;
+}
+
+function loading_frame_submitted(self: LoadingGate, tick_number: i32): void {
+    if (self.phase == LoadingPhase.AwaitingFrame && !self.frame_submitted) {
+        self.frame_submitted = true;
+        self.submitted_tick = tick_number;
+    }
+}
+
+function begin_loading_batch(self: LoadingGate, tick_number: i32): bool {
+    if (self.phase != LoadingPhase.AwaitingFrame || !self.frame_submitted || tick_number <= self.submitted_tick) {
+        return false;
+    }
+    self.phase = LoadingPhase.Loading;
+    return true;
+}
+
+function settle_loading(self: LoadingGate, loaded: i32, failed: i32): void {
+    self.loaded = loaded;
+    self.failed = failed;
+    if (self.loaded + self.failed >= self.total) {
+        if (self.failed > 0) {
+            self.phase = LoadingPhase.Error;
+        } else {
+            self.phase = LoadingPhase.Gameplay;
+        }
+    }
+}
+
+function start_content_batch(): void {
+    hero.load_image("assets/hero.svg", 64, 64);
+    music.load_audio("assets/music.wav");
+}
+
+function poll_content_batch(): void {
+    let loaded: i32 = 0;
+    let failed: i32 = 0;
+    if (hero.ready()) {
+        loaded += 1;
+    } else if (hero.failed()) {
+        failed += 1;
+    }
+    if (music.ready()) {
+        loaded += 1;
+    } else if (music.failed()) {
+        failed += 1;
+    }
+    gate.waited_ticks += 1;
+    // Bounded policy for a request that never reaches a terminal state.
+    if (gate.waited_ticks >= 600 && loaded + failed < gate.total) {
+        hero.release();
+        music.release();
+        gate.settle_loading(0, gate.total);
+        return;
+    }
+    gate.settle_loading(loaded, failed);
+    if (gate.phase == LoadingPhase.Gameplay) {
+        music_voice.play(music, true, 0.5, 0.0);
+    }
+}
+
+function next_level(): void {
+    if (gate.phase == LoadingPhase.Gameplay) {
+        // This example's levels are in-memory rules, sharing hero and music.
+        level_number += 1;
+    }
+}
+
+function main(): i32 {
+    init_window(640, 360, "Loading example");
+    loading_tick = 0;
+    level_number = 1;
+    gate.prepare_loading(2);
+    return 0;
+}
+
+function tick(): i32 {
+    loading_tick += 1;
+    if (gate.begin_loading_batch(loading_tick)) {
+        start_content_batch();
+    }
+    if (gate.phase == LoadingPhase.Loading) {
+        poll_content_batch();
+    }
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    clear(0.04, 0.06, 0.1, 1.0);
+    if (gate.phase == LoadingPhase.Gameplay) {
+        draw_sprite(hero.sprite_ref, 288.0, 148.0, 64.0, 64.0, 0, 255);
+    } else {
+        // IO-free status: blue = waiting/loading, red = error.
+        let red: f32 = 0.1;
+        if (gate.phase == LoadingPhase.Error) {
+            red = 1.0;
+        }
+        fill_rect(120.0, 140.0, 400.0, 12.0, red, 0.3, 0.6, 1.0);
+        // One segment per settled operation, including failures.
+        let segment_x: f32 = 120.0;
+        for (let i: i32 = 0; i < gate.loaded + gate.failed; i += 1) {
+            fill_rect(segment_x, 170.0, 192.0, 20.0, red, 0.7, 0.6, 1.0);
+            segment_x += 200.0;
+        }
+    }
+    end_frame();
+    gate.loading_frame_submitted(loading_tick);
+    return 0;
+}

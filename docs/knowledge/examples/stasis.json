@@ -1,5 +1,6 @@
 {
   "manifest_version": 1,
+  "stdlib": "toolchain",
   "name": "Knowledge Library Examples",
   "entry": "src/game_patterns.stasis",
   "tests": "tests",

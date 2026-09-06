@@ -124,13 +124,18 @@ const KNOWLEDGE_FILES: &[&str] = &[
     "examples/src/platformer_landing.stasis",
     "examples/src/pong_goal.stasis",
     "examples/src/snake_turn.stasis",
+    "examples/src/loading_screen.stasis",
+    "examples/assets/hero.svg",
+    "examples/assets/music.wav",
     "examples/stasis.json",
     "examples/tests/breakout_brick.test.stasis",
     "examples/tests/game_patterns.test.stasis",
     "examples/tests/platformer_landing.test.stasis",
     "examples/tests/pong_goal.test.stasis",
     "examples/tests/snake_turn.test.stasis",
+    "examples/tests/loading_screen.test.stasis",
     "geometry-and-collision.md",
+    "loading-screens.md",
     "semantic-edit-and-validation.md",
 ];
 const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";

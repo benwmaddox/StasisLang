@@ -136,6 +136,12 @@ staged Stasis changes. A retry then commits the canonical source. Git must be av
 cloning a generated repository, reactivate the checked-in hook with
 `git config --local core.hooksPath .githooks`.
 
+Release archives ship the offline knowledge page
+[`docs/knowledge/loading-screens.md`](knowledge/loading-screens.md). `stasis new` and
+`stasis vendor update` install the matching copy at
+`vendor/stasis/docs/loading-screens.md`, so generated projects can discover the asset-IO
+loading-state guidance without network access.
+
 ### Generated GitHub Actions
 
 `stasis new NAME` adds `.github/workflows/stasis-pr.yml`,
