@@ -19,8 +19,9 @@ pub use openrouter::{
 };
 
 pub use task_controller::{
-    ProviderReply, ProviderRequest, ProviderUsage, RequestId, TaskController, TaskControllerConfig,
-    TaskControllerError, TaskControllerEvent, TaskRequestSnapshot, TaskRequestState,
+    ProviderActionContext, ProviderActionProposal, ProviderReply, ProviderRequest, ProviderUsage,
+    RequestId, TaskController, TaskControllerConfig, TaskControllerError, TaskControllerEvent,
+    TaskRequestSnapshot, TaskRequestState,
 };
 
 pub use task_session::{
@@ -889,6 +890,14 @@ fn model_response_schema_for_request(request: &str) -> Result<Value, String> {
 
 fn tool_args_schema(spec: &ToolSpec) -> Value {
     match spec.tool.as_str() {
+        "propose_semantic_edit" | "repair_semantic_edit" => object_schema(
+            &[
+                ("proposal_id", string_schema()),
+                ("description", string_schema()),
+                ("batch", semantic_edit_batch_schema()),
+            ],
+            &["proposal_id", "description", "batch"],
+        ),
         "list_symbols" => object_schema(
             &[
                 ("files", array_schema(string_schema(), Some(16))),
@@ -1078,6 +1087,39 @@ fn tool_args_schema(spec: &ToolSpec) -> Value {
             object_schema(&properties, &required)
         }
     }
+}
+
+fn semantic_edit_batch_schema() -> Value {
+    let target = object_schema(
+        &[
+            ("file", string_schema()),
+            (
+                "kind",
+                enum_schema(&["imports", "globals", "struct", "function", "test"]),
+            ),
+            ("name", string_schema()),
+            ("owner", string_schema()),
+            ("signature", string_schema()),
+            ("symbol_id", string_schema()),
+        ],
+        &["file", "kind", "name"],
+    );
+    let edit = object_schema(
+        &[
+            ("operation", enum_schema(&["add", "update", "delete"])),
+            ("target", target),
+            ("new_source", string_schema()),
+            ("expected_source_hash", string_schema()),
+        ],
+        &["operation", "target"],
+    );
+    object_schema(
+        &[
+            ("schema_version", integer_schema(Some(1), Some(2))),
+            ("edits", array_schema(edit, Some(64))),
+        ],
+        &["schema_version", "edits"],
+    )
 }
 
 fn string_schema() -> Value {
@@ -1762,6 +1804,37 @@ pub fn contract_json() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_proposal_schema_exposes_a_native_batch_and_hash_guard() {
+        for tool in ["propose_semantic_edit", "repair_semantic_edit"] {
+            let spec = ToolSpec {
+                tool: tool.into(),
+                action_id: action_id_for_tool(tool),
+                purpose: "review edits".into(),
+                required_args: vec!["proposal_id".into(), "description".into(), "batch".into()],
+                optional_args: Vec::new(),
+            };
+            let schema = tool_args_schema(&spec);
+            let batch = &schema["properties"]["batch"];
+            assert_eq!(batch["type"], "object");
+            let edit = &batch["properties"]["edits"]["items"];
+            assert_eq!(edit["properties"]["target"]["type"], "object");
+            assert_eq!(
+                edit["properties"]["target"]["properties"]["symbol_id"]["anyOf"][0]["type"],
+                "string"
+            );
+            assert_eq!(
+                edit["properties"]["operation"]["enum"],
+                json!(["add", "update", "delete"])
+            );
+            assert_eq!(
+                edit["properties"]["expected_source_hash"]["anyOf"][0]["type"],
+                "string"
+            );
+            assert_eq!(edit["additionalProperties"], false);
+        }
+    }
 
     #[cfg(windows)]
     #[test]

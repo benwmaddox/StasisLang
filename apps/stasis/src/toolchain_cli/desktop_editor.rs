@@ -7,17 +7,18 @@ use stasis_ai::task_session::{
     ThreadEntryKind, UploadState,
 };
 use stasis_ai::{
-    run_agent_with_profile, AgentEvent, AgentProfile, ProviderConfig, ProviderReply,
-    ProviderRequest, ProviderUsage, TaskController, TaskControllerEvent, ToolCall, ToolExecutor,
-    ToolObservation,
+    action_id_for_tool, run_agent_with_profile, AgentEvent, AgentProfile, ProviderActionProposal,
+    ProviderConfig, ProviderReply, ProviderRequest, ProviderUsage, TaskController,
+    TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation, ToolSpec,
 };
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const CAPTURE_DEADLINE: Duration = Duration::from_secs(15);
@@ -33,15 +34,92 @@ enum FocusArea {
 }
 const EMPTY_TASK: &str = "Create a task";
 
-struct ReplyOnlyTools;
+#[derive(Default)]
+struct ProposalTools {
+    proposals: Vec<ProviderActionProposal>,
+}
 
-impl ToolExecutor for ReplyOnlyTools {
-    fn execute(&mut self, calls: &[ToolCall], _canceled: &AtomicBool) -> Vec<ToolObservation> {
+impl ToolExecutor for ProposalTools {
+    fn execute(&mut self, calls: &[ToolCall], canceled: &AtomicBool) -> Vec<ToolObservation> {
         calls
             .iter()
-            .map(|call| ToolObservation::error(&call.tool, "desktop chat is reply-only"))
+            .map(|call| {
+                if canceled.load(Ordering::Acquire) {
+                    return ToolObservation::error(&call.tool, "AI request canceled");
+                }
+                let repair = call.tool == "repair_semantic_edit";
+                let result = (|| {
+                    let id = call
+                        .args
+                        .get("proposal_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "proposal_id must be a string".to_string())?;
+                    let description = call
+                        .args
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "description must be a string".to_string())?;
+                    let payload = call
+                        .args
+                        .get("batch")
+                        .cloned()
+                        .ok_or_else(|| "batch is required".to_string())?;
+                    let batch = serde_json::from_value::<
+                        stasis_compiler::frontend::workshop::WorkshopSemanticEditBatch,
+                    >(payload.clone())
+                    .map_err(|error| format!("invalid semantic edit batch: {error}"))?;
+                    if batch.edits.iter().any(|edit| {
+                        edit.operation
+                            != stasis_compiler::frontend::workshop::WorkshopSemanticEditOperation::Add
+                            && edit.expected_source_hash.is_none()
+                    }) {
+                        return Err(
+                            "desktop update/delete proposals require expected_source_hash"
+                                .to_string(),
+                        );
+                    }
+                    self.proposals.push(ProviderActionProposal {
+                        id: id.to_string(),
+                        kind: stasis_ai::ActionKind::Edit,
+                        description: description.to_string(),
+                        payload,
+                        repair,
+                    });
+                    Ok(json!({"status": "proposed", "proposal_id": id}))
+                })();
+                match result {
+                    Ok(value) => ToolObservation::result(&call.tool, value),
+                    Err(error) => ToolObservation::error(&call.tool, error),
+                }
+            })
             .collect()
     }
+}
+
+fn proposal_tool_specs() -> Vec<ToolSpec> {
+    [
+        (
+            "propose_semantic_edit",
+            "Propose an atomic semantic edit for explicit user acceptance.",
+        ),
+        (
+            "repair_semantic_edit",
+            "Replace only a rejected or needs-repair proposal; accepted work is retained.",
+        ),
+    ]
+    .into_iter()
+    .map(|(tool, purpose)| ToolSpec {
+        tool: tool.to_string(),
+        action_id: action_id_for_tool(tool),
+        purpose: purpose.to_string(),
+        required_args: vec![
+            "proposal_id".to_string(),
+            "description".to_string(),
+            "batch".to_string(),
+        ],
+        optional_args: Vec::new(),
+    })
+    .collect()
 }
 
 fn bounded_provider_label(value: Option<&str>, fallback: &str) -> String {
@@ -180,6 +258,7 @@ fn provider_reply_usage(usage: Option<&Value>) -> ProviderUsage {
 fn run_reply_provider(
     request: ProviderRequest,
     canceled: Arc<AtomicBool>,
+    project_root: PathBuf,
 ) -> Result<ProviderReply, String> {
     let config = ProviderConfig::from_env()?;
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
@@ -195,6 +274,7 @@ fn run_reply_provider(
         .filter(|text| !text.is_empty())
         .unwrap_or(request.objective.as_str())
         .to_string();
+    let source_context = super::desktop_source_context(&project_root)?;
     let initial_context = json!({
         "task_id": request.task_id,
         "objective": request.objective,
@@ -204,21 +284,24 @@ fn run_reply_provider(
         "relevant_tests": request.relevant_tests,
         "screenshots": request.screenshots,
         "thread": request.context,
+        "actions": request.actions,
+        "editable_sources": source_context,
     });
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Do not edit files or claim that actions were executed. Keep the response concise and self-contained.".to_string(),
-        max_turns: 1,
+        instruction: "Answer the user's task-scoped message. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
+        max_turns: 3,
         ..AgentProfile::default()
     };
     let mut usage = None;
+    let mut tools = ProposalTools::default();
     let text = run_agent_with_profile(
         &mut provider,
-        &mut ReplyOnlyTools,
+        &mut tools,
         &profile,
         &prompt,
         initial_context,
-        Vec::new(),
+        proposal_tool_specs(),
         &canceled,
         |event| {
             if let AgentEvent::ProviderUsage(value) = event {
@@ -227,6 +310,7 @@ fn run_reply_provider(
         },
     )?;
     let mut reply = ProviderReply::new(text);
+    reply.proposals = tools.proposals;
     reply.provider = provider_reply_state(&config, usage.as_ref());
     reply.usage = provider_reply_usage(usage.as_ref());
     Ok(reply)
@@ -286,13 +370,180 @@ fn verify_screenshot_file(path: &std::path::Path, expected_sha256: &str) -> Resu
 enum EditorIntent {
     SendReply(String, String),
     Apply(String, String),
-    Test(String),
+    Test(String, u64),
     Screenshot(String),
     GenerateImage(String),
     ImportImage(String, String),
     Cancel(String),
     Retry(String),
     Reconnect(String),
+    MarkDone(String),
+}
+
+#[derive(Debug)]
+enum HostOperation {
+    Apply { action_id: String, payload: Value },
+    Test { paths: Vec<String>, run_id: u64 },
+}
+
+#[derive(Debug)]
+struct HostRequest {
+    task_id: String,
+    operation: HostOperation,
+    source_before: Option<String>,
+}
+
+#[derive(Debug)]
+struct HostResult {
+    task_id: String,
+    operation: HostOperation,
+    result: Result<(String, Value, String), String>,
+}
+
+fn receipt_has_test_evidence(receipt: &Value) -> bool {
+    [
+        "/validation/test_result/tests_run",
+        "/validation/test_result/scenario_cases_run",
+    ]
+    .into_iter()
+    .filter_map(|pointer| receipt.pointer(pointer).and_then(Value::as_u64))
+    .sum::<u64>()
+        > 0
+}
+
+fn bounded_failure(error: &str, max: usize) -> String {
+    let bounded = error.chars().take(max).collect::<String>();
+    if error.chars().count() > max {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
+}
+
+fn record_focused_test_failure(
+    task: &mut stasis_ai::Task,
+    run_id: u64,
+    error: &str,
+) -> Result<(), stasis_ai::TaskSessionError> {
+    let summary = bounded_failure(error, 3500);
+    task.finish_focused_test_run(
+        run_id,
+        stasis_ai::FocusedTestResult::failed(summary.clone()),
+    )?;
+    task.append_result(format!(
+        "Focused tests failed: {summary}. Fix the reported failure and rerun."
+    ))
+}
+
+struct HostExecutor {
+    requests: Option<mpsc::Sender<HostRequest>>,
+    results: mpsc::Receiver<HostResult>,
+    canceled: Arc<Mutex<BTreeSet<String>>>,
+    shutdown: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl HostExecutor {
+    fn new(project_root: PathBuf) -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<HostRequest>();
+        let (result_tx, result_rx) = mpsc::channel::<HostResult>();
+        let canceled = Arc::new(Mutex::new(BTreeSet::<String>::new()));
+        let worker_canceled = Arc::clone(&canceled);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker = thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                let skip = worker_shutdown.load(Ordering::Acquire)
+                    || worker_canceled
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .contains(&request.task_id);
+                let result = if skip {
+                    Err("operation canceled before execution".to_string())
+                } else {
+                    let operation_result = match &request.operation {
+                        HostOperation::Apply { payload, .. } => {
+                            super::desktop_apply_semantic_batch(&project_root, payload.clone())
+                        }
+                        HostOperation::Test { paths, .. } => {
+                            super::desktop_run_focused_tests(&project_root, paths)
+                        }
+                    };
+                    operation_result.and_then(|(summary, receipt)| match &request.operation {
+                        HostOperation::Apply { .. } => receipt
+                            .get("source_fingerprint")
+                            .and_then(Value::as_str)
+                            .map(|fingerprint| (summary, receipt.clone(), fingerprint.to_string()))
+                            .ok_or_else(|| {
+                                "semantic edit receipt omitted its source fingerprint".to_string()
+                            }),
+                        HostOperation::Test { paths, .. } => {
+                            super::desktop_source_fingerprint(&project_root, paths).and_then(
+                                |fingerprint| {
+                                    if request.source_before.as_ref() != Some(&fingerprint) {
+                                        Err("project sources changed while focused tests were running; validation was discarded".to_string())
+                                    } else {
+                                        Ok((summary, receipt, fingerprint))
+                                    }
+                                },
+                            )
+                        }
+                    })
+                };
+                if result_tx
+                    .send(HostResult {
+                        task_id: request.task_id,
+                        operation: request.operation,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self {
+            requests: Some(request_tx),
+            results: result_rx,
+            canceled,
+            shutdown,
+            worker: Some(worker),
+        }
+    }
+
+    fn submit(&self, request: HostRequest) -> Result<(), String> {
+        self.requests
+            .as_ref()
+            .ok_or_else(|| "desktop host executor is shut down".to_string())?
+            .send(request)
+            .map_err(|_| "desktop host executor is unavailable".to_string())
+    }
+
+    fn cancel(&self, task_id: &str) {
+        self.canceled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(task_id.to_string());
+    }
+
+    fn poll(&self) -> Vec<HostResult> {
+        self.results.try_iter().collect()
+    }
+
+    fn shutdown_and_join(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        // Disconnect before joining so an idle worker can leave recv().
+        self.requests.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for HostExecutor {
+    fn drop(&mut self) {
+        self.shutdown_and_join();
+    }
 }
 
 struct DesktopEditor {
@@ -301,6 +552,11 @@ struct DesktopEditor {
     client: LiveSessionClient,
     project_root: PathBuf,
     shutdown: Arc<AtomicBool>,
+    host: HostExecutor,
+    validation_fingerprints: BTreeMap<String, (String, Vec<String>)>,
+    busy_tasks: BTreeSet<String>,
+    execution_receipts: BTreeMap<(String, String), Value>,
+    validation_receipts: BTreeMap<String, Value>,
     capture: Option<PendingCapture>,
     capture_results: Receiver<CaptureResult>,
     capture_result_tx: mpsc::Sender<CaptureResult>,
@@ -515,13 +771,22 @@ fn screenshot_preview(
 
 impl DesktopEditor {
     fn new(client: LiveSessionClient, project_root: PathBuf, shutdown: Arc<AtomicBool>) -> Self {
+        let host = HostExecutor::new(project_root.clone());
+        let provider_root = project_root.clone();
         let (capture_result_tx, capture_results) = mpsc::channel();
         Self {
             state: EditorState::default(),
-            controller: TaskController::new(run_reply_provider),
+            controller: TaskController::new(move |request, canceled| {
+                run_reply_provider(request, canceled, provider_root.clone())
+            }),
             client,
             project_root,
             shutdown,
+            host,
+            validation_fingerprints: BTreeMap::new(),
+            busy_tasks: BTreeSet::new(),
+            execution_receipts: BTreeMap::new(),
+            validation_receipts: BTreeMap::new(),
             capture: None,
             capture_results,
             capture_result_tx,
@@ -607,6 +872,7 @@ impl DesktopEditor {
                 }
                 EditorIntent::Cancel(task) => {
                     let task = TaskId::new(task);
+                    self.host.cancel(task.as_str());
                     let canceled_capture = self.cancel_capture_for(&task);
                     if let Err(error) = self.controller.cancel(&mut self.state.session, &task) {
                         if !canceled_capture {
@@ -619,6 +885,109 @@ impl DesktopEditor {
                     self.cancel_capture_for(&task);
                     if let Err(error) = self.controller.reconnect(&mut self.state.session, &task) {
                         self.state.notice = Some(error.to_string());
+                    }
+                }
+                EditorIntent::Apply(task, action) => {
+                    if !self.busy_tasks.insert(task.clone()) {
+                        self.state.notice = Some(format!(
+                            "An apply or focused-test operation is already running for {task}."
+                        ));
+                        continue;
+                    }
+                    let payload = self
+                        .state
+                        .session
+                        .task(task.as_str())
+                        .ok()
+                        .and_then(|task| task.actions.get(action.as_str()))
+                        .and_then(|action| action.payload.clone());
+                    let submitted = payload
+                        .ok_or_else(|| "accepted action has no semantic edit payload".to_string())
+                        .and_then(|payload| {
+                            self.host.submit(HostRequest {
+                                task_id: task.clone(),
+                                operation: HostOperation::Apply {
+                                    action_id: action.clone(),
+                                    payload,
+                                },
+                                source_before: None,
+                            })
+                        });
+                    if let Err(error) = submitted {
+                        self.busy_tasks.remove(&task);
+                        let reason = bounded_failure(&error, 900);
+                        if let Ok(task_state) = self.state.session.task_mut(task.as_str()) {
+                            let _ =
+                                task_state.mark_action_for_repair(action.as_str(), reason.clone());
+                            let _ = task_state.append_result(format!(
+                                "Could not apply {action}: {reason}. Repair this proposal and retry."
+                            ));
+                        }
+                        self.state.notice = Some(error);
+                    }
+                }
+                EditorIntent::Test(task, run_id) => {
+                    if !self.busy_tasks.insert(task.clone()) {
+                        let message = format!(
+                            "An apply or focused-test operation is already running for {task}."
+                        );
+                        if let Ok(task_state) = self.state.session.task_mut(task.as_str()) {
+                            let _ = record_focused_test_failure(task_state, run_id, &message);
+                        }
+                        self.state.notice = Some(message);
+                        continue;
+                    }
+                    let paths = self
+                        .state
+                        .session
+                        .task(task.as_str())
+                        .map(|task| task.relevant_tests.clone())
+                        .unwrap_or_default();
+                    let submitted = super::desktop_source_fingerprint(&self.project_root, &paths)
+                        .and_then(|source_before| {
+                            self.host.submit(HostRequest {
+                                task_id: task.clone(),
+                                operation: HostOperation::Test { paths, run_id },
+                                source_before: Some(source_before),
+                            })
+                        });
+                    if let Err(error) = submitted {
+                        self.busy_tasks.remove(&task);
+                        if let Ok(task_state) = self.state.session.task_mut(task.as_str()) {
+                            let _ = record_focused_test_failure(task_state, run_id, &error);
+                        }
+                        self.state.notice = Some(error);
+                    }
+                }
+                EditorIntent::MarkDone(task) => {
+                    let paths = self
+                        .validation_fingerprints
+                        .get(&task)
+                        .map(|(_, paths)| paths.clone())
+                        .unwrap_or_default();
+                    let current = super::desktop_source_fingerprint(&self.project_root, &paths);
+                    let expected = self
+                        .validation_fingerprints
+                        .get(&task)
+                        .map(|(fingerprint, _)| fingerprint);
+                    match current {
+                        Ok(current) if expected == Some(&current) => {
+                            if let Err(error) = self
+                                .state
+                                .session
+                                .task_mut(task.as_str())
+                                .and_then(|task| task.mark_done())
+                            {
+                                self.state.notice = Some(error.to_string());
+                            }
+                        }
+                        Ok(_) => {
+                            self.state.notice = Some(
+                                "Project sources changed after validation; run focused tests again."
+                                    .to_string(),
+                            );
+                        }
+                        Err(error) => self.state.notice = Some(error),
                     }
                 }
                 EditorIntent::Screenshot(task) => self.start_capture(TaskId::new(task)),
@@ -773,9 +1142,12 @@ impl DesktopEditor {
     fn poll_controller(&mut self) {
         for event in self.controller.poll(&mut self.state.session) {
             self.state.notice = match event {
-                TaskControllerEvent::Completed { task_id, .. } => {
-                    Some(format!("AI reply completed for {task_id}"))
-                }
+                TaskControllerEvent::Completed {
+                    task_id, proposals, ..
+                } => Some(format!(
+                    "AI reply completed for {task_id}; {} action(s) proposed",
+                    proposals.len()
+                )),
                 TaskControllerEvent::Failed {
                     task_id, message, ..
                 } => Some(format!("AI reply failed for {task_id}: {message}")),
@@ -786,6 +1158,106 @@ impl DesktopEditor {
                     Some(format!("Ignored an obsolete AI reply for {task_id}"))
                 }
             };
+        }
+    }
+
+    fn poll_host(&mut self) {
+        for completed in self.host.poll() {
+            let task_id = completed.task_id;
+            self.busy_tasks.remove(&task_id);
+            let task = self.state.session.task_mut(task_id.as_str());
+            match (completed.operation, completed.result, task) {
+                (
+                    HostOperation::Apply { action_id, .. },
+                    Ok((summary, receipt, fingerprint)),
+                    Ok(task),
+                ) => {
+                    let validated = receipt_has_test_evidence(&receipt);
+                    let receipt_summary = receipt
+                        .get("receipt")
+                        .and_then(Value::as_str)
+                        .unwrap_or("recorded validation receipt")
+                        .to_string();
+                    self.execution_receipts
+                        .insert((task_id.clone(), action_id.clone()), receipt);
+                    if task.lifecycle == stasis_ai::TaskLifecycle::Active {
+                        let result = task.apply_action(action_id.as_str()).and_then(|()| {
+                            if validated {
+                                task.begin_focused_tests()?;
+                                task.finish_focused_tests(stasis_ai::FocusedTestResult::passed(
+                                    summary.clone(),
+                                ))?;
+                            }
+                            task.append_result(format!(
+                                "Applied {action_id}: {summary}\nValidation receipt: {receipt_summary}"
+                            ))?;
+                            Ok(())
+                        });
+                        if let Err(error) = result {
+                            self.state.notice = Some(error.to_string());
+                            continue;
+                        }
+                        if validated {
+                            self.validation_fingerprints
+                                .insert(task_id.clone(), (fingerprint, Vec::new()));
+                        }
+                        self.state.notice = Some(format!("Applied {action_id} for {task_id}"));
+                    } else if let Some(action) = task.actions.get_mut(action_id.as_str()) {
+                        action.state = ActionState::Applied;
+                        self.state.notice = Some(format!(
+                            "{action_id} committed before {task_id} cancellation completed"
+                        ));
+                    }
+                }
+                (HostOperation::Apply { action_id, .. }, Err(error), Ok(task)) => {
+                    let repair_reason = bounded_failure(&error, 900);
+                    if task.lifecycle == stasis_ai::TaskLifecycle::Active {
+                        let _ =
+                            task.mark_action_for_repair(action_id.as_str(), repair_reason.clone());
+                        let _ = task.append_result(format!(
+                            "Could not apply {action_id}: {repair_reason}. Repair this proposal and retry."
+                        ));
+                    }
+                    self.state.notice = Some(format!("Apply failed for {task_id}: {error}"));
+                }
+                (
+                    HostOperation::Test { paths, run_id },
+                    Ok((summary, receipt, fingerprint)),
+                    Ok(task),
+                ) => {
+                    let result = task
+                        .finish_focused_test_run(
+                            run_id,
+                            stasis_ai::FocusedTestResult::passed(summary.clone()),
+                        )
+                        .and_then(|()| {
+                            task.append_result(format!(
+                                "Focused tests passed: {summary}. Validation receipt recorded."
+                            ))
+                        });
+                    if let Err(error) = result {
+                        self.state.notice = Some(error.to_string());
+                        continue;
+                    }
+                    self.validation_receipts.insert(task_id.clone(), receipt);
+                    self.validation_fingerprints
+                        .insert(task_id.clone(), (fingerprint, paths));
+                    self.state.notice = Some(format!("Focused tests passed for {task_id}"));
+                }
+                (HostOperation::Test { run_id, .. }, Err(error), Ok(task)) => {
+                    if task.lifecycle == stasis_ai::TaskLifecycle::Active
+                        && record_focused_test_failure(task, run_id, &error).is_err()
+                    {
+                        self.state.notice = Some(format!(
+                            "Ignored obsolete focused-test result for {task_id}"
+                        ));
+                        continue;
+                    }
+                    self.state.notice =
+                        Some(format!("Focused tests failed for {task_id}: {error}"));
+                }
+                (_, _, Err(error)) => self.state.notice = Some(error.to_string()),
+            }
         }
     }
 
@@ -1071,7 +1543,12 @@ impl EditorState {
                 self.session
                     .begin_focused_tests()
                     .map_err(|e| e.to_string())?;
-                self.intents.push(EditorIntent::Test(task));
+                let run_id = self
+                    .session
+                    .active_task()
+                    .map_err(|error| error.to_string())?
+                    .validation_run_id;
+                self.intents.push(EditorIntent::Test(task, run_id));
                 Ok(())
             }
             TaskSessionCommand::Retry => {
@@ -1101,7 +1578,11 @@ impl EditorState {
                 self.intents.push(EditorIntent::ImportImage(task, image));
                 Ok(())
             }
-            TaskSessionCommand::MarkDone => self.session.mark_done().map_err(|e| e.to_string()),
+            TaskSessionCommand::MarkDone => {
+                let task = self.active_id()?;
+                self.intents.push(EditorIntent::MarkDone(task));
+                Ok(())
+            }
             TaskSessionCommand::Cancel => {
                 let task = self.active_id()?;
                 self.intents.push(EditorIntent::Cancel(task));
@@ -1230,6 +1711,18 @@ impl DesktopEditor {
                     ui.group(|ui| {
                         ui.label(RichText::new(format!("Action | {:?}", action.state)).strong());
                         ui.label(&action.description);
+                        if let Some(payload) = &action.payload {
+                            ui.collapsing("Review semantic edit", |ui| {
+                                let preview =
+                                    serde_json::to_string_pretty(payload).unwrap_or_else(|_| {
+                                        "Invalid semantic edit payload".to_string()
+                                    });
+                                ui.add(
+                                    egui::Label::new(RichText::new(preview).monospace())
+                                        .selectable(true),
+                                );
+                            });
+                        }
                     });
                 }
                 for screenshot in task.screenshots.values() {
@@ -1262,6 +1755,7 @@ impl DesktopEditor {
             for (label, command) in [
                 ("Send  Ctrl+Enter", TaskSessionCommand::SendReply),
                 ("Accept  Ctrl+Y", TaskSessionCommand::AcceptAction),
+                ("Reject", TaskSessionCommand::RejectAction),
                 ("Apply  Ctrl+Alt+Enter", TaskSessionCommand::ApplyAction),
                 ("Test  Ctrl+T", TaskSessionCommand::RunFocusedTests),
                 ("Retry  Ctrl+R", TaskSessionCommand::Retry),
@@ -1496,6 +1990,7 @@ impl DesktopEditor {
         }
         context.request_repaint_after(Duration::from_millis(100));
         self.poll_controller();
+        self.poll_host();
         self.poll_capture();
         self.process_shortcuts(context);
         let palette_frame = self.state.palette_open;
@@ -1548,6 +2043,7 @@ impl eframe::App for DesktopEditor {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.host.shutdown_and_join();
         if let Some(capture) = self.capture.take() {
             capture.canceled.store(true, Ordering::Release);
         }
@@ -1951,8 +2447,8 @@ mod tests {
             .unwrap();
         state.handle(TaskSessionCommand::MarkDone).unwrap();
         assert!(matches!(
-            state.session.active_task().unwrap().lifecycle,
-            TaskLifecycle::Completed
+            state.intents.last(),
+            Some(EditorIntent::MarkDone(task)) if task == "task-1"
         ));
         state.objective = "Cancelable task".into();
         state.create_task().unwrap();
@@ -1964,7 +2460,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_keeps_unhandled_test_intent_and_running_validation() {
+    fn failed_test_submission_does_not_leave_validation_running() {
         let (client, _server) = live_session(4);
         let mut editor =
             DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
@@ -1974,17 +2470,48 @@ mod tests {
             .state
             .handle(TaskSessionCommand::RunFocusedTests)
             .unwrap();
+        editor.state.objective = "Unrelated task".into();
+        editor.state.create_task().unwrap();
 
         editor.flush_intents();
 
+        assert!(editor.state.intents.is_empty());
+        assert!(!editor.busy_tasks.contains("task-1"));
         assert!(matches!(
-            editor.state.intents.as_slice(),
-            [EditorIntent::Test(task)] if task == "task-1"
+            editor.state.session.task("task-1").unwrap().validation,
+            ValidationStatus::Failed { .. }
         ));
-        assert!(matches!(
-            editor.state.session.active_task().unwrap().validation,
-            ValidationStatus::Running
-        ));
+        let first = editor.state.session.task("task-1").unwrap();
+        assert!(first
+            .thread
+            .last()
+            .unwrap()
+            .text
+            .contains("Focused tests failed:"));
+        assert!(first.thread.last().unwrap().text.contains("rerun"));
+        assert!(editor
+            .state
+            .session
+            .active_task()
+            .unwrap()
+            .thread
+            .is_empty());
+
+        let (request_tx, request_rx) = mpsc::channel();
+        editor.controller = TaskController::new(move |request, _| {
+            request_tx.send(request).unwrap();
+            Ok(ProviderReply::new("Repair the test configuration."))
+        });
+        editor.state.session.switch_task("task-1").unwrap();
+        editor.state.reply = "Fix the focused test failure".into();
+        editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+        editor.flush_intents();
+        let request = request_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(request.task_id.as_str(), "task-1");
+        assert!(request
+            .context
+            .iter()
+            .any(|entry| entry.text.contains("Focused tests failed:")));
     }
 
     #[test]
@@ -2378,5 +2905,353 @@ mod tests {
                 .and_then(|chord| state.shortcuts.command_for(chord)),
             Some(TaskSessionCommand::Search)
         );
+    }
+
+    #[test]
+    fn proposal_tools_require_hashes_for_existing_symbols() {
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "propose_semantic_edit".to_string(),
+                args: json!({
+                    "proposal_id": "edit-speed",
+                    "description": "Update speed",
+                    "batch": {
+                        "schema_version": 1,
+                        "edits": [{
+                            "operation": "update",
+                            "target": {"name": "tick", "file": "src/main.stasis"},
+                            "new_source": "function tick(): i32 { return 1; }"
+                        }]
+                    }
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(tools.proposals.is_empty());
+        assert!(observations[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("require expected_source_hash")));
+    }
+
+    #[test]
+    fn repaired_proposal_is_structured_and_keeps_its_action_id() {
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "repair_semantic_edit".to_string(),
+                args: json!({
+                    "proposal_id": "edit-speed",
+                    "description": "Repair speed update",
+                    "batch": {
+                        "schema_version": 1,
+                        "edits": [{
+                            "operation": "update",
+                            "target": {"name": "tick", "file": "src/main.stasis"},
+                            "new_source": "function tick(): i32 { return 1; }",
+                            "expected_source_hash": "0123456789abcdef"
+                        }]
+                    }
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0].error.is_none());
+        assert_eq!(tools.proposals.len(), 1);
+        assert_eq!(tools.proposals[0].id, "edit-speed");
+        assert!(tools.proposals[0].repair);
+    }
+
+    #[test]
+    fn apply_receipt_requires_executed_test_evidence_to_unlock_done() {
+        assert!(!receipt_has_test_evidence(&json!({
+            "validation": {"test_result": {"tests_run": 0, "scenario_cases_run": 0}}
+        })));
+        assert!(receipt_has_test_evidence(&json!({
+            "validation": {"test_result": {"tests_run": 1, "scenario_cases_run": 0}}
+        })));
+    }
+
+    #[test]
+    fn focused_test_failure_drains_only_to_originating_task_after_switch() {
+        let (client, _server) = live_session(1);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "First task".into();
+        editor.state.create_task().unwrap();
+        editor.state.session.begin_focused_tests().unwrap();
+        let first_run_id = editor
+            .state
+            .session
+            .active_task()
+            .unwrap()
+            .validation_run_id;
+        editor.state.objective = "Second task".into();
+        editor.state.create_task().unwrap();
+
+        let (request_tx, _request_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        editor.host = HostExecutor {
+            requests: Some(request_tx),
+            results: result_rx,
+            canceled: Arc::new(Mutex::new(BTreeSet::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            worker: None,
+        };
+        editor.busy_tasks.insert("task-1".to_string());
+        result_tx
+            .send(HostResult {
+                task_id: "task-1".to_string(),
+                operation: HostOperation::Test {
+                    paths: Vec::new(),
+                    run_id: first_run_id,
+                },
+                result: Err("test player_speed failed at tests/player.test.stasis".to_string()),
+            })
+            .unwrap();
+
+        editor.poll_host();
+
+        let first = editor.state.session.task("task-1").unwrap();
+        assert!(matches!(first.validation, ValidationStatus::Failed { .. }));
+        assert!(first.thread.last().unwrap().text.contains("player_speed"));
+        let second = editor.state.session.task("task-2").unwrap();
+        assert!(second.thread.is_empty());
+        assert_eq!(
+            editor.state.session.active_task_id().unwrap().as_str(),
+            "task-2"
+        );
+    }
+
+    #[test]
+    fn host_shutdown_waits_for_in_flight_work() {
+        let (request_tx, _request_rx) = mpsc::channel();
+        let (_result_tx, result_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = Arc::clone(&finished);
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !worker_shutdown.load(Ordering::Acquire) {
+                assert!(std::time::Instant::now() < deadline);
+                thread::yield_now();
+            }
+            shutdown_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            // Represents completion of receipt publication or rollback.
+            worker_finished.store(true, Ordering::Release);
+        });
+        let host = HostExecutor {
+            requests: Some(request_tx),
+            results: result_rx,
+            canceled: Arc::new(Mutex::new(BTreeSet::new())),
+            shutdown,
+            worker: Some(worker),
+        };
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let dropper = thread::spawn(move || {
+            drop(host);
+            dropped_tx.send(finished.load(Ordering::Acquire)).unwrap();
+        });
+        shutdown_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            dropped_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        assert!(dropped_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        dropper.join().unwrap();
+    }
+
+    #[test]
+    fn host_shutdown_disconnects_an_idle_worker() {
+        let host = HostExecutor::new(PathBuf::from("missing-workspace"));
+        let (done_tx, done_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(host);
+            done_tx.send(()).unwrap();
+        });
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        dropper.join().unwrap();
+    }
+
+    #[test]
+    fn canceled_task_is_rejected_before_queued_host_execution() {
+        let host = HostExecutor::new(PathBuf::from("missing-workspace"));
+        host.cancel("task-canceled");
+        host.submit(HostRequest {
+            task_id: "task-canceled".to_string(),
+            operation: HostOperation::Test {
+                paths: Vec::new(),
+                run_id: 1,
+            },
+            source_before: Some("unused".to_string()),
+        })
+        .unwrap();
+
+        let completed = host
+            .results
+            .recv_timeout(Duration::from_secs(1))
+            .expect("canceled request returns without touching the workspace");
+        assert_eq!(completed.task_id, "task-canceled");
+        assert!(completed
+            .result
+            .expect_err("canceled request cannot execute")
+            .contains("canceled before execution"));
+    }
+
+    #[test]
+    fn obsolete_and_canceled_test_failures_do_not_change_task_context() {
+        for canceled in [false, true] {
+            let (client, _server) = live_session(1);
+            let mut editor =
+                DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+            editor.state.objective = "Validate task".into();
+            editor.state.create_task().unwrap();
+            let task = editor.state.session.active_task_mut().unwrap();
+            task.begin_focused_tests().unwrap();
+            let old_run = task.validation_run_id;
+            if canceled {
+                task.cancel().unwrap();
+            } else {
+                task.finish_focused_tests(FocusedTestResult::failed("previous failure"))
+                    .unwrap();
+                task.begin_focused_tests().unwrap();
+            }
+            let before = task.clone();
+            let (request_tx, _request_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            editor.host = HostExecutor {
+                requests: Some(request_tx),
+                results: result_rx,
+                canceled: Arc::new(Mutex::new(BTreeSet::new())),
+                shutdown: Arc::new(AtomicBool::new(false)),
+                worker: None,
+            };
+            result_tx
+                .send(HostResult {
+                    task_id: "task-1".into(),
+                    operation: HostOperation::Test {
+                        paths: Vec::new(),
+                        run_id: old_run,
+                    },
+                    result: Err("late failure".into()),
+                })
+                .unwrap();
+
+            editor.poll_host();
+
+            assert_eq!(editor.state.session.active_task().unwrap(), &before);
+            assert!(editor.validation_receipts.is_empty());
+            assert!(editor.validation_fingerprints.is_empty());
+        }
+    }
+
+    #[test]
+    fn accepted_action_executes_and_completes_its_originating_task() {
+        let root = super::super::tests::desktop_editor_fixture("editor_host_execution");
+        let item = super::super::desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let batch = json!({"schema_version": 1, "edits": [{
+            "operation": "update",
+            "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+            "new_source": "function value(): i32 { return 2; }"
+        }]});
+        let (client, _server) = live_session(1);
+        let mut editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Change value".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .propose_action_with_payload(
+                "edit-value",
+                stasis_ai::ActionKind::Edit,
+                "Change value to two",
+                batch,
+            )
+            .unwrap();
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        editor
+            .state
+            .handle(TaskSessionCommand::ApplyAction)
+            .unwrap();
+        editor.flush_intents();
+        editor.state.objective = "Unrelated task".into();
+        editor.state.create_task().unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while editor.busy_tasks.contains("task-1") && std::time::Instant::now() < deadline {
+            editor.poll_host();
+            thread::yield_now();
+        }
+
+        let first = editor.state.session.task("task-1").unwrap();
+        assert!(matches!(
+            first.actions["edit-value"].state,
+            ActionState::Applied
+        ));
+        assert!(matches!(first.validation, ValidationStatus::Passed { .. }));
+        assert!(editor
+            .execution_receipts
+            .contains_key(&("task-1".to_string(), "edit-value".to_string())));
+        assert_eq!(
+            editor.state.session.active_task_id().unwrap().as_str(),
+            "task-2"
+        );
+
+        editor.state.session.switch_task("task-1").unwrap();
+        let source_path = root.join("src/main.stasis");
+        let mut source = std::fs::read_to_string(&source_path).unwrap();
+        source.push_str("\n// external edit after validation\n");
+        std::fs::write(&source_path, source).unwrap();
+        editor.state.handle(TaskSessionCommand::MarkDone).unwrap();
+        editor.flush_intents();
+        assert_eq!(
+            editor.state.session.task("task-1").unwrap().lifecycle,
+            stasis_ai::TaskLifecycle::Active
+        );
+        assert!(editor
+            .state
+            .notice
+            .as_ref()
+            .unwrap()
+            .contains("sources changed"));
+        editor
+            .state
+            .handle(TaskSessionCommand::RunFocusedTests)
+            .unwrap();
+        editor.flush_intents();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while editor.busy_tasks.contains("task-1") && std::time::Instant::now() < deadline {
+            editor.poll_host();
+            thread::yield_now();
+        }
+        assert!(editor.validation_receipts.contains_key("task-1"));
+        editor.state.handle(TaskSessionCommand::MarkDone).unwrap();
+        editor.flush_intents();
+        assert!(matches!(
+            editor.state.session.task("task-1").unwrap().lifecycle,
+            stasis_ai::TaskLifecycle::Completed
+        ));
+        super::super::tests::remove_temp(&root);
     }
 }

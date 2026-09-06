@@ -7132,6 +7132,176 @@ fn apply_symbol_batch(
     ))
 }
 
+fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, Value), String> {
+    let workspace = load_workspace(Some(root))?;
+    let mut validated_inputs = desktop_validation_inputs(root, &[])?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let editable_files = files
+        .iter()
+        .filter(|file| is_editable_workshop_path(&file.path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let batch = serde_json::from_value::<WorkshopSemanticEditBatch>(payload)
+        .map_err(|error| format!("invalid proposed semantic edit: {error}"))?;
+    if batch.edits.iter().any(|edit| {
+        edit.operation != WorkshopSemanticEditOperation::Add
+            && edit
+                .expected_source_hash
+                .as_deref()
+                .is_none_or(str::is_empty)
+    }) {
+        return Err("Update and delete proposals require the target's expected_source_hash; read the current symbol and repair the proposal.".into());
+    }
+    let mut result = apply_symbol_batch(
+        &workspace,
+        &editable_files,
+        &files,
+        batch,
+        SymbolEditOptions {
+            dry_run: false,
+            no_tests: false,
+        },
+    )?;
+    // Bind validation to the inputs and the committed plan, not a later disk read.
+    let plan: WorkshopSemanticEditPlan = serde_json::from_value(result.data["plan"].clone())
+        .map_err(|error| format!("invalid host semantic receipt: {error}"))?;
+    for change in plan.changed_files {
+        validated_inputs.insert(
+            change.file,
+            format!("{:x}", Sha256::digest(change.after_source.as_bytes())),
+        );
+    }
+    result.data["source_fingerprint"] = json!(desktop_inputs_fingerprint(&validated_inputs));
+    Ok((result.human, result.data))
+}
+
+fn desktop_run_focused_tests(
+    root: &Path,
+    relevant_tests: &[String],
+) -> Result<(String, Value), String> {
+    let workspace = load_workspace(Some(root))?;
+    if relevant_tests.is_empty() {
+        let result = test_workspace(&workspace, None)?;
+        desktop_require_executed_tests(&result.data)?;
+        return Ok((result.human, result.data));
+    }
+    let mut receipts = Vec::with_capacity(relevant_tests.len());
+    for relative in relevant_tests {
+        let result = test_workspace(&workspace, Some(Path::new(relative)))?;
+        desktop_require_executed_tests(&result.data)?;
+        receipts.push(result.data);
+    }
+    Ok((
+        format!("{} focused test path(s) passed", relevant_tests.len()),
+        json!({"focused_paths": relevant_tests, "receipts": receipts}),
+    ))
+}
+
+fn desktop_source_fingerprint(root: &Path, relevant_tests: &[String]) -> Result<String, String> {
+    Ok(desktop_inputs_fingerprint(&desktop_validation_inputs(
+        root,
+        relevant_tests,
+    )?))
+}
+
+fn desktop_require_executed_tests(receipt: &Value) -> Result<(), String> {
+    let count = receipt["tests_run"].as_u64().unwrap_or(0)
+        + receipt["scenario_cases_run"].as_u64().unwrap_or(0);
+    if count == 0 {
+        return Err(
+            "No focused tests matched; select a test file or add a test before marking Done."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn desktop_inputs_fingerprint(inputs: &BTreeMap<String, String>) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(inputs).expect("string map serializes"))
+    )
+}
+
+fn desktop_validation_inputs(
+    root: &Path,
+    relevant_tests: &[String],
+) -> Result<BTreeMap<String, String>, String> {
+    let workspace = load_workspace(Some(root))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let mut mapped = files
+        .iter()
+        .map(|file| (PathBuf::from(&file.path), workspace.root.join(&file.path)))
+        .collect::<Vec<_>>();
+    mapped.push((
+        PathBuf::from(MANIFEST_NAME),
+        workspace.root.join(MANIFEST_NAME),
+    ));
+    let mut test_roots = if relevant_tests.is_empty() {
+        vec![workspace.root.join(&workspace.manifest.tests)]
+    } else {
+        relevant_tests
+            .iter()
+            .map(|path| workspace.root.join(path))
+            .collect()
+    };
+    for path in test_roots.drain(..) {
+        validate_workspace_destination(&workspace, "focused test path", &path)?;
+        if path.is_dir() {
+            collect_mapped_files(&workspace.root, &path, Path::new(""), &mut mapped)?;
+        } else if path.is_file() {
+            let relative = path
+                .strip_prefix(&workspace.root)
+                .map_err(|_| format!("test path escaped workspace: {}", path.display()))?;
+            mapped.push((relative.to_path_buf(), path));
+        }
+    }
+    mapped.sort_by(|left, right| left.0.cmp(&right.0));
+    mapped.dedup_by(|left, right| left.0 == right.0);
+    mapped
+        .into_iter()
+        .map(|(relative, physical)| {
+            Ok((
+                relative.to_string_lossy().replace('\\', "/"),
+                sha256_file(&physical)?,
+            ))
+        })
+        .collect()
+}
+
+fn desktop_source_context(root: &Path) -> Result<Vec<Value>, String> {
+    let workspace = load_workspace(Some(root))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let items = workshop_source_items(&files)?;
+    let context = items
+        .into_iter()
+        .filter(|item| is_editable_workshop_path(&item.file))
+        .map(|item| {
+            json!({
+                "target": {"file": item.file, "kind": item.kind, "name": item.name,
+                    "owner": item.owner, "signature": item.signature,
+                    "symbol_id": item.symbol_id},
+                "expected_source_hash": item.source_hash,
+                "source": item.source,
+            })
+        })
+        .collect::<Vec<_>>();
+    if serde_json::to_vec(&context)
+        .map_err(|error| error.to_string())?
+        .len()
+        > 256 * 1024
+    {
+        return Err(
+            "Project source context exceeds 256 KiB; narrow the project before requesting edits."
+                .into(),
+        );
+    }
+    Ok(context)
+}
+
 fn overlay_workshop_files(
     query_files: &[WorkshopSourceFile],
     edited_files: &[WorkshopSourceFile],
@@ -8914,8 +9084,128 @@ mod tests {
         ))
     }
 
-    fn remove_temp(path: &Path) {
+    pub(super) fn remove_temp(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    pub(super) fn desktop_editor_fixture(name: &str) -> PathBuf {
+        let root = temp_dir(name);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(root.join(MANIFEST_NAME), r#"{"manifest_version":1,"name":"editor_fixture","entry":"src/main.stasis","tests":"tests","output":"build"}"#).unwrap();
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 { return 0; }\nfunction value(): i32 { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "import \"../src/main.stasis\";\ntest `positive`(): bool { return value() > 0; }\n",
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn desktop_editor_context_drives_hash_checked_apply_and_receipt() {
+        let root = desktop_editor_fixture("editor_receipt");
+        let item = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        assert!(item["target"]["symbol_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        let batch = json!({"schema_version": 2, "edits": [{
+            "operation": "update", "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+            "new_source": "function value(): i32 { return 2; }"
+        }]});
+        let (_, receipt) = desktop_apply_semantic_batch(&root, batch.clone()).unwrap();
+        assert_eq!(
+            receipt["source_fingerprint"],
+            desktop_source_fingerprint(&root, &[]).unwrap()
+        );
+        assert!(root.join(receipt["receipt"].as_str().unwrap()).is_file());
+        assert_eq!(receipt["validation"]["test_result"]["tests_passed"], 1);
+        let committed = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        assert!(desktop_apply_semantic_batch(&root, batch)
+            .unwrap_err()
+            .contains("stale semantic"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            committed
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_editor_fingerprints_selected_tests_and_rejects_empty_selection() {
+        let root = desktop_editor_fixture("editor_fingerprint");
+        fs::create_dir_all(root.join("checks")).unwrap();
+        fs::write(
+            root.join("checks/selected.stasis"),
+            "function helper(): i32 { return 1; }",
+        )
+        .unwrap();
+        let paths = vec!["checks/selected.stasis".into()];
+        let before = desktop_source_fingerprint(&root, &paths).unwrap();
+        fs::write(
+            root.join("checks/selected.stasis"),
+            "function helper(): i32 { return 2; }",
+        )
+        .unwrap();
+        assert_ne!(before, desktop_source_fingerprint(&root, &paths).unwrap());
+        assert!(desktop_run_focused_tests(&root, &paths)
+            .unwrap_err()
+            .contains("No focused tests matched"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_editor_apply_rejects_missing_hash_without_writing() {
+        let root = desktop_editor_fixture("editor_missing_hash");
+        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let error = desktop_apply_semantic_batch(&root, json!({"schema_version": 1, "edits": [{
+            "operation": "delete", "target": {"file": "src/main.stasis", "kind": "function", "name": "value"}
+        }]})).unwrap_err();
+        assert!(error.contains("expected_source_hash"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_editor_failed_apply_rolls_back_and_keeps_prior_accepted_work() {
+        let root = desktop_editor_fixture("editor_rollback");
+        let propose = |value: i32| {
+            let item = desktop_source_context(&root)
+                .unwrap()
+                .into_iter()
+                .find(|item| item["target"]["name"] == "value")
+                .unwrap();
+            json!({"schema_version": 1, "edits": [{
+                "operation": "update", "target": item["target"],
+                "expected_source_hash": item["expected_source_hash"],
+                "new_source": format!("function value(): i32 {{ return {value}; }}")
+            }]})
+        };
+        let (_, accepted_receipt) = desktop_apply_semantic_batch(&root, propose(2)).unwrap();
+        let accepted_source = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let error = desktop_apply_semantic_batch(&root, propose(-1)).unwrap_err();
+        assert!(error.contains("rolled back"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            accepted_source
+        );
+        assert!(root
+            .join(accepted_receipt["receipt"].as_str().unwrap())
+            .is_file());
+        desktop_apply_semantic_batch(&root, propose(3)).unwrap();
+        remove_temp(&root);
     }
 
     #[test]
