@@ -7,6 +7,19 @@ system:
   JIT/AOT guest-memory ABI.
 - `crates/stasis_android_bridge/src/` owns JNI/C pointer conversion at the Android boundary.
 - `mobile/android/codex_native/src/` owns the Codex Android JNI/C string boundary.
+- `crates/stasis_network/src/lib.rs` owns the native network and realtime C ABI.
+  Its opaque host pointer is owned from start until exactly one stop; callers must
+  serialize calls against stop and provide valid, aligned buffers of the declared
+  lengths. Poll copies owned event bytes, send copies caller bytes into the bounded
+  queue, and join-URL copying is reserved for native presentation. The exact
+  `crates/stasis_network/tests/realtime_controls.rs` seam exercises this pointer ABI;
+  other network modules and tests do not receive a blanket unsafe exemption.
+- `crates/stasis_network/src/client.rs` owns the additive native client C ABI.
+  The caller retains the opaque client until exactly one destroy and must
+  serialize destruction against all calls. Input pointers borrow readable
+  buffers for the call; polling borrows a writable output buffer of the declared
+  capacity. No pointer or credential is exposed to Stasis. The native runtime
+  serializes handle access, replacement, and shutdown across SDL and JNI.
 
 All compiler, runner, language-service, editor, and application orchestration code must remain safe
 Rust. `tools/validate_repo.sh` enforces this file-level boundary.

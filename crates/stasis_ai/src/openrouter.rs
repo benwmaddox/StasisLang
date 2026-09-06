@@ -192,6 +192,15 @@ impl ProviderConfig {
         }
     }
 
+    /// Returns true only when this exact configured transport/model pairing is
+    /// known to accept local image inputs in the repository's Codex flow.
+    pub fn supports_image_input(&self) -> bool {
+        match self {
+            Self::Codex => codex_model_supports_image_input(&self.model()),
+            Self::OpenRouter(_) => false,
+        }
+    }
+
     pub fn build(self) -> Result<ConfiguredProvider, String> {
         Ok(match self {
             Self::Codex => ConfiguredProvider::Codex(crate::CodexExecProvider::default()),
@@ -200,6 +209,12 @@ impl ProviderConfig {
             }
         })
     }
+}
+
+pub(crate) fn codex_model_supports_image_input(model: &str) -> bool {
+    // The Gauntlet visual and gameplay critics exercise image input with this
+    // explicit model. Unknown aliases stay disabled so capture fails closed.
+    matches!(model.trim(), "gpt-5.6-sol")
 }
 
 pub enum ConfiguredProvider {
@@ -234,6 +249,14 @@ impl ConfiguredProvider {
 
     pub fn with_images(mut self, images: Vec<std::path::PathBuf>) -> Result<Self, String> {
         match &mut self {
+            Self::Codex(provider)
+                if !images.is_empty() && !codex_model_supports_image_input(&provider.model) =>
+            {
+                return Err(format!(
+                    "Codex model {} does not support image input",
+                    provider.model
+                ));
+            }
             Self::Codex(provider) => provider.images = images,
             Self::OpenRouter(_) if !images.is_empty() => {
                 return Err("OpenRouter transport does not support image attachments in this workspace flow".to_string());
@@ -1275,5 +1298,43 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         release_server.send(()).expect("release server");
         worker.join().expect("server thread");
+    }
+
+    #[test]
+    fn image_input_capability_is_explicit_and_fails_closed() {
+        assert!(codex_model_supports_image_input("gpt-5.6-sol"));
+        assert!(!codex_model_supports_image_input("gpt-5.6-luna"));
+        assert!(!codex_model_supports_image_input("latest"));
+        assert!(!codex_model_supports_image_input("unknown-model"));
+
+        let openrouter = ProviderConfig::OpenRouter(OpenRouterConfig {
+            api_key: "unit-secret".to_string(),
+            base_url: "http://127.0.0.1:9".to_string(),
+            model: DEFAULT_OPENROUTER_MODEL.to_string(),
+            routing: RoutingConfig::default(),
+            timeout: Duration::from_secs(1),
+        });
+        assert!(!openrouter.supports_image_input());
+
+        let unsupported = ProviderConfig::Codex
+            .build()
+            .expect("Codex provider")
+            .with_model("gpt-5.6-luna")
+            .with_images(vec![std::path::PathBuf::from("frame.png")]);
+        assert!(
+            matches!(unsupported, Err(error) if error.contains("does not support image input"))
+        );
+
+        let mut switched_after_images = ProviderConfig::Codex
+            .build()
+            .expect("Codex provider")
+            .with_model("gpt-5.6-sol")
+            .with_images(vec![std::path::PathBuf::from("frame.png")])
+            .expect("supported image model")
+            .with_model("unknown-model");
+        let error = switched_after_images
+            .respond("request", &AtomicBool::new(false))
+            .expect_err("dispatch must recheck image capability");
+        assert!(error.contains("does not support image input"));
     }
 }

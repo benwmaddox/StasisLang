@@ -69,25 +69,11 @@ int stasis_clipboard_load_ascii(char *out, int capacity);
 int stasis_clipboard_save_ascii(const char *value, int length);
 void stasis_host_log_message(const char *message);
 
-typedef struct StasisNetworkHost StasisNetworkHost;
-#if defined(STASIS_NETWORK_ENABLED)
-typedef struct StasisNetworkEvent {
-    uint32_t kind;
-    uint32_t connection;
-    uint32_t length;
-    unsigned char payload[64u * 1024u];
-} StasisNetworkEvent;
-extern int32_t stasis_network_supported(void);
-extern int32_t stasis_network_random_seed(void);
-extern StasisNetworkHost *stasis_network_host_start_bind(uint16_t port, uint32_t bind_ipv4,
-    const unsigned char *bundle, size_t bundle_length, uint16_t *out_port);
-extern int32_t stasis_network_host_poll(StasisNetworkHost *, StasisNetworkEvent *);
-extern int32_t stasis_network_host_send(StasisNetworkHost *, uint32_t, const unsigned char *, size_t);
-extern int32_t stasis_network_host_status(StasisNetworkHost *);
-extern uint32_t stasis_network_host_overflow_count(StasisNetworkHost *);
-extern uint16_t stasis_network_host_port(StasisNetworkHost *);
-extern int32_t stasis_network_host_copy_join_url(StasisNetworkHost *, char *, size_t, size_t *);
-extern void stasis_network_host_stop(StasisNetworkHost *);
+#if defined(STASIS_NETWORK_ENABLED) && defined(STASIS_NETWORK_CLIENT_ENABLED)
+#error "Host and client networking capabilities are mutually exclusive"
+#endif
+#if defined(STASIS_NETWORK_ENABLED) || defined(STASIS_NETWORK_CLIENT_ENABLED)
+#include <stasis_network.h>
 #endif
 
 typedef union StasisScalarValue {
@@ -1025,7 +1011,9 @@ int stasis_jit_storage_save_i32(int32_t scope, int32_t key, int32_t value) {
 /* Optional network capability. The mobile AOT runtime owns this handle; the
  * Rust library remains absent from ordinary builds and every operation then
  * returns the explicit unsupported result. */
-static StasisNetworkHost *stasis_network_handle;
+#if defined(STASIS_NETWORK_ENABLED)
+static stasis_network_host *stasis_network_handle;
+#endif
 
 int32_t stasis_jit_network_supported(void) {
 #if defined(STASIS_NETWORK_ENABLED)
@@ -1048,7 +1036,7 @@ static int32_t stasis_jit_network_host_start_bytes(const uint8_t *bundle, size_t
 #if defined(STASIS_NETWORK_ENABLED)
     if (stasis_network_handle != NULL || bundle == NULL || length == 0 || length > 32 * 1024 * 1024) return -1;
     uint16_t port = 0;
-    StasisNetworkHost *host = stasis_network_host_start_bind(0, (uint32_t)bind_ipv4, bundle, length, &port);
+    stasis_network_host *host = stasis_network_host_start_bind(0, (uint32_t)bind_ipv4, bundle, length, &port);
     if (host == NULL) return -3;
     stasis_network_handle = host;
     return (int32_t)port;
@@ -1062,7 +1050,7 @@ int32_t stasis_jit_network_host_start_bind(int32_t content_id, int32_t content_l
     uint8_t *bundle = stasis_jit_global_u8_array_ptr(content_id, 0, content_length);
     if (bundle == NULL) return -1;
     uint16_t port = 0;
-    StasisNetworkHost *host = stasis_network_host_start_bind(0, (uint32_t)bind_ipv4, bundle, (size_t)content_length, &port);
+    stasis_network_host *host = stasis_network_host_start_bind(0, (uint32_t)bind_ipv4, bundle, (size_t)content_length, &port);
     if (host == NULL) return -3;
     stasis_network_handle = host;
     return (int32_t)port;
@@ -1118,7 +1106,7 @@ int32_t stasis_jit_network_host_port(void) {
 int32_t stasis_jit_network_host_poll(int32_t fields_id, int32_t field_capacity, int32_t payload_id, int32_t payload_capacity) {
 #if defined(STASIS_NETWORK_ENABLED)
     if (stasis_network_handle == NULL || field_capacity < 3 || payload_capacity < 0) return -1;
-    StasisNetworkEvent event;
+    stasis_network_event event;
     int32_t result = stasis_network_host_poll(stasis_network_handle, &event);
     if (result <= 0) return result;
     if ((int32_t)event.length > payload_capacity) return -1;
@@ -1201,7 +1189,7 @@ int32_t stasis_mobile_network_start_from_asset_root(void) {
     }
     fclose(file);
     uint16_t port = 0;
-    StasisNetworkHost *host = stasis_network_host_start_bind(0, 0, bundle, (size_t)size, &port);
+    stasis_network_host *host = stasis_network_host_start_bind(0, 0, bundle, (size_t)size, &port);
     free(bundle);
     if (host == NULL) return -3;
     stasis_network_handle = host;
@@ -1225,8 +1213,223 @@ int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity) {
 #endif
 }
 
+int32_t stasis_mobile_network_copy_join_card(char *out, size_t capacity) {
+    if (out == NULL || capacity == 0) return -1;
+#if defined(STASIS_NETWORK_ENABLED)
+    if (stasis_network_handle == NULL) { out[0] = '\0'; return -3; }
+    size_t length = 0;
+    int32_t result = stasis_network_host_copy_join_card(
+        stasis_network_handle, out, capacity, &length);
+    if (result != 0) { out[0] = '\0'; return result; }
+    return (int32_t)length;
+#else
+    out[0] = '\0';
+    return -4;
+#endif
+}
+
 void stasis_mobile_network_stop(void) {
     stasis_jit_network_host_stop();
+}
+
+/* The shell owns provisioning and lifecycle. Only payload bytes and numeric
+ * mailbox state are visible through the Stasis extern imports. */
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+static stasis_network_client *stasis_network_client_handle;
+static atomic_flag stasis_network_client_lock = ATOMIC_FLAG_INIT;
+static int32_t stasis_network_client_background;
+
+static uint8_t *stasis_mobile_registered_u8(int32_t id, int32_t length) {
+    StasisArray *entry;
+    if (length < 0 || length > 64 * 1024) return NULL;
+    entry = find_array(id, 0, STASIS_VALUE_U8, 0);
+    if (entry == NULL || (size_t)length > entry->length) return NULL;
+    return (uint8_t *)entry->data;
+}
+
+static void stasis_mobile_network_client_lock(void) {
+    while (atomic_flag_test_and_set_explicit(
+            &stasis_network_client_lock, memory_order_acquire)) {}
+}
+
+static void stasis_mobile_network_client_unlock(void) {
+    atomic_flag_clear_explicit(&stasis_network_client_lock, memory_order_release);
+}
+#endif
+
+int32_t stasis_mobile_network_client_provision(const char *join_url, size_t length) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    stasis_network_client *replacement;
+    stasis_network_client *previous;
+    if (join_url == NULL || length == 0 || length > 512) return -1;
+    if (stasis_network_client_abi_version() != STASIS_NETWORK_CLIENT_ABI_VERSION) return -4;
+    replacement = stasis_network_client_create(join_url, length);
+    if (replacement == NULL) return -4;
+    stasis_mobile_network_client_lock();
+    if (stasis_network_client_background &&
+            stasis_network_client_set_background(replacement, 1) != 0) {
+        stasis_mobile_network_client_unlock();
+        stasis_network_client_destroy(replacement);
+        return -2;
+    }
+    previous = stasis_network_client_handle;
+    stasis_network_client_handle = replacement;
+    stasis_mobile_network_client_unlock();
+    if (previous != NULL) stasis_network_client_destroy(previous);
+    return 0;
+#else
+    (void)join_url; (void)length;
+    return -4;
+#endif
+}
+
+int32_t stasis_mobile_network_client_connect(void) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    int32_t result;
+    stasis_mobile_network_client_lock();
+    result = stasis_network_client_abi_version() != STASIS_NETWORK_CLIENT_ABI_VERSION
+        ? -4 : stasis_network_client_handle == NULL
+        ? -4 : stasis_network_client_connect(stasis_network_client_handle);
+    stasis_mobile_network_client_unlock();
+    return result;
+#else
+    return -4;
+#endif
+}
+
+int32_t stasis_mobile_network_client_set_background(int32_t background) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    int32_t result;
+    stasis_mobile_network_client_lock();
+    stasis_network_client_background = background != 0;
+    result = stasis_network_client_handle == NULL ? 0
+        : stasis_network_client_set_background(
+            stasis_network_client_handle, stasis_network_client_background);
+    stasis_mobile_network_client_unlock();
+    return result;
+#else
+    (void)background;
+    return -4;
+#endif
+}
+
+void stasis_mobile_network_client_shutdown(void) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    stasis_network_client *client;
+    stasis_mobile_network_client_lock();
+    client = stasis_network_client_handle;
+    stasis_network_client_handle = NULL;
+    stasis_mobile_network_client_unlock();
+    if (client != NULL) stasis_network_client_destroy(client);
+#endif
+}
+
+int32_t stasis_web_network_supported(void) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    return stasis_network_client_abi_version() == STASIS_NETWORK_CLIENT_ABI_VERSION;
+#else
+    return 0;
+#endif
+}
+
+int32_t stasis_web_network_connect(void) {
+    return stasis_mobile_network_client_connect();
+}
+
+int32_t stasis_web_network_status(void) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    int32_t result;
+    stasis_mobile_network_client_lock();
+    result = stasis_network_client_handle == NULL
+        ? STASIS_NETWORK_CLIENT_STATUS_DISCONNECTED
+        : stasis_network_client_status(stasis_network_client_handle);
+    stasis_mobile_network_client_unlock();
+    return result;
+#else
+    return 0;
+#endif
+}
+
+int32_t stasis_web_network_poll(int32_t out_id, int32_t capacity) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    uint8_t *out;
+    int32_t result;
+    out = stasis_mobile_registered_u8(out_id, capacity);
+    if (out == NULL) return -1;
+    stasis_mobile_network_client_lock();
+    result = stasis_network_client_handle == NULL ? -4
+        : stasis_network_client_poll(
+            stasis_network_client_handle, out, (size_t)capacity);
+    stasis_mobile_network_client_unlock();
+    return result;
+#else
+    (void)out_id; (void)capacity;
+    return -4;
+#endif
+}
+
+int32_t stasis_web_network_send(int32_t payload_id, int32_t length) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    static const uint8_t empty_payload = 0;
+    uint8_t *payload;
+    int32_t result;
+    if (length == 0) {
+        payload = (uint8_t *)&empty_payload;
+    } else {
+        payload = stasis_mobile_registered_u8(payload_id, length);
+        if (payload == NULL) return -1;
+    }
+    stasis_mobile_network_client_lock();
+    result = stasis_network_client_handle == NULL ? -4
+        : stasis_network_client_send(
+            stasis_network_client_handle, payload, (size_t)length);
+    stasis_mobile_network_client_unlock();
+    return result;
+#else
+    (void)payload_id; (void)length;
+    return -4;
+#endif
+}
+
+int32_t stasis_web_network_checkpoint(int32_t seat, int32_t last_sequence) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    int32_t result;
+    stasis_mobile_network_client_lock();
+    result = stasis_network_client_handle == NULL ? -4
+        : stasis_network_client_checkpoint(
+            stasis_network_client_handle, seat, last_sequence);
+    stasis_mobile_network_client_unlock();
+    return result;
+#else
+    (void)seat; (void)last_sequence;
+    return -4;
+#endif
+}
+
+int32_t stasis_web_network_resume_seat(void) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    int32_t result;
+    stasis_mobile_network_client_lock();
+    result = stasis_network_client_handle == NULL ? -1
+        : stasis_network_client_resume_seat(stasis_network_client_handle);
+    stasis_mobile_network_client_unlock();
+    return result;
+#else
+    return -1;
+#endif
+}
+
+int32_t stasis_web_network_last_sequence(void) {
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    int32_t result;
+    stasis_mobile_network_client_lock();
+    result = stasis_network_client_handle == NULL ? 0
+        : stasis_network_client_last_sequence(stasis_network_client_handle);
+    stasis_mobile_network_client_unlock();
+    return result;
+#else
+    return 0;
+#endif
 }
 
 #define DEFINE_SCALAR_ACCESSORS(name, type, kind, member) \

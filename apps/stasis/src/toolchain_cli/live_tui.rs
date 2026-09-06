@@ -1311,6 +1311,7 @@ struct LiveTui {
 
 impl LiveTui {
     fn new(client: LiveSessionClient, project_root: PathBuf) -> Self {
+        client.claim_unsolicited_responses();
         Self {
             client,
             project_root,
@@ -6911,6 +6912,59 @@ mod tests {
             .values()
             .any(|action| matches!(action, PendingAction::DefaultInspect)));
         assert!(app.status.contains("delayed by backpressure"));
+    }
+
+    #[test]
+    fn cloned_tui_receives_watch_events_while_original_client_stays_alive() {
+        let (client, server) = stasis_runner::live::live_session(1);
+        let mut app = LiveTui::new(client.clone(), std::env::temp_dir());
+        let background = client.clone();
+        app.handle_response(LiveResponse::success(
+            10,
+            1,
+            "inspection",
+            serde_json::json!({"path": "score", "static_type": "i32", "value": 1}),
+        ));
+        let watch_request = server.drain(1).pop().expect("watch request");
+        assert!(matches!(&watch_request.command, LiveCommand::Watch { path } if path == "score"));
+        server
+            .respond(LiveResponse::success(
+                watch_request.request_id,
+                1,
+                "watch_added",
+                serde_json::json!({"path": "score", "value": 1}),
+            ))
+            .unwrap();
+        app.drain_responses().unwrap();
+
+        for tick in 2..6 {
+            let response = LiveResponse::success(
+                0,
+                tick,
+                "watch",
+                serde_json::json!({"path": "score", "value": tick}),
+            );
+            let expected = format_live_response(&response);
+            server
+                .respond(response)
+                .expect("watch mailbox stays drained");
+            app.drain_responses().unwrap();
+            assert_eq!(app.inspector.lines, vec![expected]);
+            assert!(client.try_receive().unwrap().is_none());
+            assert!(background.try_receive().unwrap().is_none());
+        }
+        let error = LiveResponse::success(
+            0,
+            6,
+            "watch_error",
+            serde_json::json!({"path": "score", "error": "score is unavailable"}),
+        );
+        let expected = format_live_response(&error);
+        server.respond(error).unwrap();
+        app.drain_responses().unwrap();
+        assert_eq!(app.transcript.back(), Some(&expected));
+        assert!(client.try_receive().unwrap().is_none());
+        assert!(background.try_receive().unwrap().is_none());
     }
 
     #[test]

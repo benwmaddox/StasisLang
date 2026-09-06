@@ -162,8 +162,21 @@ int32_t stasis_mobile_network_copy_i32_payload(
     int32_t out_capacity
 );
 int32_t stasis_mobile_network_start_from_asset_root(void);
+int32_t stasis_mobile_network_copy_join_card(char *out, size_t capacity);
 int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity);
 void stasis_mobile_network_stop(void);
+int32_t stasis_mobile_network_client_provision(const char *join_url, size_t length);
+int32_t stasis_mobile_network_client_connect(void);
+int32_t stasis_mobile_network_client_set_background(int32_t background);
+void stasis_mobile_network_client_shutdown(void);
+int32_t stasis_web_network_supported(void);
+int32_t stasis_web_network_connect(void);
+int32_t stasis_web_network_status(void);
+int32_t stasis_web_network_poll(int32_t out_id, int32_t capacity);
+int32_t stasis_web_network_send(int32_t payload_id, int32_t length);
+int32_t stasis_web_network_checkpoint(int32_t seat, int32_t last_sequence);
+int32_t stasis_web_network_resume_seat(void);
+int32_t stasis_web_network_last_sequence(void);
 int stasis_mobile_json_escape(const char *input, char *output, size_t capacity);
 void stasis_mobile_aot_reset(void);
 

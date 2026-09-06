@@ -104,6 +104,7 @@ pub enum TaskSessionError {
         state: String,
     },
     VisionUnavailable,
+    InvalidScreenshotSha256,
 }
 
 impl fmt::Display for TaskSessionError {
@@ -129,6 +130,9 @@ impl fmt::Display for TaskSessionError {
                 state,
             } => write!(f, "cannot {action} {entity} while it is {state}"),
             Self::VisionUnavailable => write!(f, "screenshot attachment requires available vision"),
+            Self::InvalidScreenshotSha256 => {
+                f.write_str("screenshot SHA-256 must be 64 lowercase hexadecimal characters")
+            }
         }
     }
 }
@@ -434,6 +438,17 @@ pub enum UploadState {
     Uploaded,
     Failed { reason: String },
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenshotAnalysisState {
+    #[default]
+    Pending,
+    Completed,
+    Failed {
+        reason: String,
+    },
+    Canceled,
+}
 impl UploadState {
     fn is_pending(&self) -> bool {
         matches!(self, Self::Pending | Self::Failed { .. })
@@ -449,9 +464,13 @@ pub struct TaskProvenance {
 pub struct ScreenshotAttachment {
     pub id: ScreenshotId,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
     pub provenance: TaskProvenance,
     pub vision: VisionCapability,
     pub upload: UploadState,
+    #[serde(default)]
+    pub analysis: ScreenshotAnalysisState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -855,6 +874,32 @@ impl Task {
         id: impl Into<ScreenshotId>,
         source: impl Into<String>,
     ) -> Result<(), TaskSessionError> {
+        self.attach_screenshot_inner(id, source, None)
+    }
+
+    pub fn attach_screenshot_with_sha256(
+        &mut self,
+        id: impl Into<ScreenshotId>,
+        source: impl Into<String>,
+        content_sha256: impl Into<String>,
+    ) -> Result<(), TaskSessionError> {
+        let content_sha256 = content_sha256.into();
+        if content_sha256.len() != 64
+            || !content_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(TaskSessionError::InvalidScreenshotSha256);
+        }
+        self.attach_screenshot_inner(id, source, Some(content_sha256))
+    }
+
+    fn attach_screenshot_inner(
+        &mut self,
+        id: impl Into<ScreenshotId>,
+        source: impl Into<String>,
+        content_sha256: Option<String>,
+    ) -> Result<(), TaskSessionError> {
         self.ensure_open("attach a screenshot to")?;
         if self.vision_capability != VisionCapability::Available {
             return Err(TaskSessionError::VisionUnavailable);
@@ -880,11 +925,13 @@ impl Task {
             ScreenshotAttachment {
                 id,
                 source,
+                content_sha256,
                 provenance: TaskProvenance {
                     task_id: self.id.clone(),
                 },
                 vision: self.vision_capability,
                 upload: UploadState::Pending,
+                analysis: ScreenshotAnalysisState::Pending,
             },
         );
         Ok(())
@@ -921,6 +968,58 @@ impl Task {
             .get_mut(&id)
             .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
         screenshot.upload = UploadState::Failed { reason };
+        Ok(())
+    }
+
+    pub fn complete_screenshot_analysis(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        self.ensure_open("complete screenshot analysis on")?;
+        let id = ScreenshotId::new(id.as_ref());
+        let screenshot = self
+            .screenshots
+            .get_mut(&id)
+            .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
+        screenshot.upload = UploadState::Uploaded;
+        screenshot.analysis = ScreenshotAnalysisState::Completed;
+        Ok(())
+    }
+
+    pub fn fail_screenshot_analysis(
+        &mut self,
+        id: impl AsRef<str>,
+        reason: impl Into<String>,
+    ) -> Result<(), TaskSessionError> {
+        self.ensure_open("record a screenshot analysis failure on")?;
+        let reason = validate_text(
+            "screenshot analysis failure",
+            &reason.into(),
+            MAX_ACTION_TEXT_CHARS,
+        )?;
+        let id = ScreenshotId::new(id.as_ref());
+        let screenshot = self
+            .screenshots
+            .get_mut(&id)
+            .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
+        screenshot.upload = UploadState::Failed {
+            reason: reason.clone(),
+        };
+        screenshot.analysis = ScreenshotAnalysisState::Failed { reason };
+        Ok(())
+    }
+
+    pub fn cancel_screenshot_analysis(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        self.ensure_open("cancel screenshot analysis on")?;
+        let id = ScreenshotId::new(id.as_ref());
+        let screenshot = self
+            .screenshots
+            .get_mut(&id)
+            .ok_or_else(|| TaskSessionError::ScreenshotNotFound(id.clone()))?;
+        screenshot.analysis = ScreenshotAnalysisState::Canceled;
         Ok(())
     }
 
@@ -1405,6 +1504,16 @@ impl TaskSession {
         self.active_mut()?.attach_screenshot(id, source)
     }
 
+    pub fn attach_screenshot_with_sha256(
+        &mut self,
+        id: impl Into<ScreenshotId>,
+        source: impl Into<String>,
+        content_sha256: impl Into<String>,
+    ) -> Result<(), TaskSessionError> {
+        self.active_mut()?
+            .attach_screenshot_with_sha256(id, source, content_sha256)
+    }
+
     pub fn mark_screenshot_uploaded(
         &mut self,
         id: impl AsRef<str>,
@@ -1418,6 +1527,28 @@ impl TaskSession {
         reason: impl Into<String>,
     ) -> Result<(), TaskSessionError> {
         self.active_mut()?.fail_screenshot_upload(id, reason)
+    }
+
+    pub fn complete_screenshot_analysis(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        self.active_mut()?.complete_screenshot_analysis(id)
+    }
+
+    pub fn fail_screenshot_analysis(
+        &mut self,
+        id: impl AsRef<str>,
+        reason: impl Into<String>,
+    ) -> Result<(), TaskSessionError> {
+        self.active_mut()?.fail_screenshot_analysis(id, reason)
+    }
+
+    pub fn cancel_screenshot_analysis(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        self.active_mut()?.cancel_screenshot_analysis(id)
     }
 
     pub fn add_generated_image(
@@ -1930,6 +2061,20 @@ mod tests {
                 .is_pending()
         );
         session.mark_screenshot_uploaded("shot-1").expect("upload");
+
+        assert_eq!(
+            session.attach_screenshot_with_sha256("bad-hash", "bad.png", "ABC"),
+            Err(TaskSessionError::InvalidScreenshotSha256)
+        );
+        session
+            .attach_screenshot_with_sha256("hashed", "hashed.png", "a".repeat(64))
+            .expect("attach screenshot with hash");
+        assert_eq!(
+            session.active_task().expect("task").screenshots[&ScreenshotId::new("hashed")]
+                .content_sha256
+                .as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
     }
 
     #[test]
