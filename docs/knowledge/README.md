@@ -35,5 +35,28 @@ Each page solves one system problem for one style of game.
 ## Executable backing
 
 The Stasis snippets come from the source and test files under `examples/`.
-Run `stasis format --check`, `stasis check`, and `stasis test` from
-`examples/` after changing a snippet or its backing behavior.
+In the Stasis source tree, run `stasis format --check`, `stasis check`, and
+`stasis test` from `docs/knowledge/examples/` after changing a snippet or its
+backing behavior.
+
+In a generated project, keep `vendor/stasis` immutable. Copy the bundled
+example project into a separate workspace under `build` before running it:
+
+```powershell
+New-Item -ItemType Directory -Force build/knowledge-examples
+Copy-Item -Recurse vendor/stasis/docs/examples/* build/knowledge-examples
+stasis --workspace build/knowledge-examples format --check
+stasis --workspace build/knowledge-examples check
+stasis --workspace build/knowledge-examples test
+```
+
+```sh
+mkdir -p build/knowledge-examples
+cp -R vendor/stasis/docs/examples/. build/knowledge-examples/
+stasis --workspace build/knowledge-examples format --check
+stasis --workspace build/knowledge-examples check
+stasis --workspace build/knowledge-examples test
+```
+
+The copied manifest uses the selected toolchain and writes its `.stasis_cache`
+under `build/knowledge-examples`, outside the fingerprinted vendor snapshot.

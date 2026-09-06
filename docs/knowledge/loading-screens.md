@@ -57,15 +57,19 @@ readiness on its smoothed `displayed_percent`: smoothing is presentation only.
 
 [Source](examples/src/loading_screen.stasis) and
 [regressions](examples/tests/loading_screen.test.stasis) accompany this guide.
-The examples manifest selects `"stdlib": "toolchain"`. To copy the source into a
-normal vendor-backed generated project, change its import to
-`/vendor/stasis/stdlib/audio.stasis`. Supply `assets/hero.svg`
-and `assets/music.wav` in the project assets directory (tiny fixtures are bundled).
+The examples manifest selects `"stdlib": "toolchain"`. In a generated project,
+follow the [knowledge-library instructions](README.md#executable-backing) to copy
+the whole example project from `vendor/stasis/docs/examples` to
+`build/knowledge-examples` before running it. Its toolchain cache then stays
+outside the fingerprinted vendor snapshot. To integrate only this source into a
+normal vendor-backed project, change its import to
+`/vendor/stasis/stdlib/audio.stasis`. Supply `assets/hero.svg` and
+`assets/music.wav` in the project assets directory (tiny fixtures are bundled).
 The tests inject outcomes without requiring an audio device; asset validation checks the files.
 The public API calls are checked against the bundled stdlib.
 
 The loading UI uses only rectangles, so even a missing font cannot prevent its
-first frame. Blue means waiting/loading, red means failure; two segments show
+first frame. Blue means waiting/loading, pink means failure; two segments show
 settled operations. A bulk load may finish before any intermediate percentage is
 rendered, which is fine. For text, use an already-resident font, or load the desired
 font with `load_font(path, size)` after the gate and count `font <= 0` as failure.
@@ -223,6 +227,10 @@ function render(): i32 {
     gate.loading_frame_submitted(loading_tick);
     return 0;
 }
+
+function on_code_swap(): void {
+    return;
+}
 ```
 
 `load_image` / `load_audio` returning true means a request was accepted, not that
@@ -243,9 +251,11 @@ startup versus level-specific batches without assigning magic numeric stages.
 
 ## Regression coverage and limits
 
-Run `stasis test` in `examples/` (vendored copies have the same layout). The tests
-exercise the production gate with deterministic outcomes: no render, same-tick
-submission, later-tick admission exactly once, partial success, full success,
+In the Stasis source tree, run `stasis test` in `docs/knowledge/examples/`. In a
+generated project, first copy the vendored examples to the separate workspace
+described above, then run `stasis --workspace build/knowledge-examples test`.
+The tests exercise the production gate with deterministic outcomes: no render,
+same-tick submission, later-tick admission exactly once, partial success, full success,
 failure/cancellation through the real polling path, tick-budget exhaustion, retry
 reset, and asset reuse during an in-memory transition.
 They do not perform disk decoding or prove physical display presentation. When
@@ -253,3 +263,44 @@ integrating with a host, also capture a loading-frame PNG and a startup/transiti
 MP4 and inspect them, including a missing asset run. Verify that the first content
 request occurs after the loading frame, failure exits loading, and gameplay never
 observes partial required resources.
+
+## Inspected visual evidence
+
+Captured with the normal desktop JIT host's hidden SDL software renderer at
+640x360, 60 fps, for 60 frames per run. No sleeps, altered loading schedule, or
+injected asset states were used. The fixture WAV is silent; the failure run
+replaces only that file's contents with invalid WAV bytes, exercising real decode
+failure rather than preflight rejection of a missing path.
+
+- [Success recording](media/loading-screen/success.mp4): frame 1 shows the IO-free
+  loading bar, frame 2 shows one settled operation, and frames 3-60 show gameplay.
+- [Failure recording](media/loading-screen/failure.mp4): frames 1-2 show loading
+  and partial progress; frames 3-60 show the pink error bar and two settled segments.
+  The failed audio operation settles without entering gameplay or hanging loading.
+- Inspected stills extracted from those MP4s: [loading, frame 1](media/loading-screen/loading.png),
+  [partial progress, frame 2](media/loading-screen/progress.png),
+  [gameplay, frame 3](media/loading-screen/gameplay.png), and
+  [error, frame 3](media/loading-screen/error.png).
+
+The recordings were inspected through their decoded frames, including each
+transition and the final state. These are captured host framebuffers, not proof
+of a physical monitor scanout. Combined with the guest ordering regressions, they
+verify the presentation-before-IO sequence on this host. Small assets complete
+quickly: scrub the first three frames instead of expecting an artificial pause.
+Async completion may take different numbers of frames on another machine.
+
+To reproduce from a Stasis checkout with a matching CLI/runtime and FFmpeg on
+`PATH`, copy the examples outside the documentation snapshot, then record:
+
+```powershell
+New-Item -ItemType Directory -Force build/loading-success, build/loading-failure
+Copy-Item -Recurse docs/knowledge/examples/* build/loading-success
+Copy-Item -Recurse docs/knowledge/examples/* build/loading-failure
+Set-Content -NoNewline build/loading-failure/assets/music.wav 'not a wave file'
+stasis --workspace build/loading-success record src/loading_screen.stasis --output success.mp4 --width 640 --height 360 --fps 60 --frames 60
+stasis --workspace build/loading-failure record src/loading_screen.stasis --output failure.mp4 --width 640 --height 360 --fps 60 --frames 60
+```
+
+In a generated project, use `vendor/stasis/docs/examples/*` as the copy source.
+The source includes the normal host's no-op `on_code_swap(): void` hook; a code
+swap preserves the current loading gate and asset ownership.

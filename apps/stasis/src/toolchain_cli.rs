@@ -136,6 +136,12 @@ const KNOWLEDGE_FILES: &[&str] = &[
     "examples/tests/loading_screen.test.stasis",
     "geometry-and-collision.md",
     "loading-screens.md",
+    "media/loading-screen/success.mp4",
+    "media/loading-screen/failure.mp4",
+    "media/loading-screen/loading.png",
+    "media/loading-screen/progress.png",
+    "media/loading-screen/gameplay.png",
+    "media/loading-screen/error.png",
     "semantic-edit-and-validation.md",
 ];
 const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";

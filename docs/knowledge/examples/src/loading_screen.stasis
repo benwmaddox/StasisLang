@@ -142,3 +142,7 @@ function render(): i32 {
     gate.loading_frame_submitted(loading_tick);
     return 0;
 }
+
+function on_code_swap(): void {
+    return;
+}

@@ -93,6 +93,20 @@ fn json_stderr(output: &Output) -> Value {
     serde_json::from_slice(&output.stderr).expect("single JSON stderr object")
 }
 
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create copied tree directory");
+    for entry in fs::read_dir(source).expect("read copied tree directory") {
+        let entry = entry.expect("read copied tree entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).expect("copy tree file");
+        }
+    }
+}
+
 #[test]
 fn help_explains_how_to_build_each_supported_target() {
     let output = stasis(&["help"], Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -559,6 +573,12 @@ fn assert_generated_knowledge(project: &Path) {
         "examples/src/loading_screen.stasis",
         "examples/assets/hero.svg",
         "examples/assets/music.wav",
+        "media/loading-screen/success.mp4",
+        "media/loading-screen/failure.mp4",
+        "media/loading-screen/loading.png",
+        "media/loading-screen/progress.png",
+        "media/loading-screen/gameplay.png",
+        "media/loading-screen/error.png",
         "examples/stasis.json",
         "examples/tests/breakout_brick.test.stasis",
         "examples/tests/game_patterns.test.stasis",
@@ -615,7 +635,14 @@ fn assert_generated_knowledge(project: &Path) {
     );
 
     let generated_examples = project.join("vendor/stasis/docs/examples");
-    let examples_checked = stasis(&["--json", "check"], &generated_examples);
+    let vendor_before = snapshot_project_bytes(&project.join("vendor/stasis"));
+    let runnable_examples = project.join("build/knowledge-examples");
+    copy_tree(&generated_examples, &runnable_examples);
+
+    let examples_checked = stasis(
+        &["--json", "--workspace", "build/knowledge-examples", "check"],
+        project,
+    );
     assert_eq!(
         examples_checked.status.code(),
         Some(0),
@@ -623,7 +650,10 @@ fn assert_generated_knowledge(project: &Path) {
         String::from_utf8_lossy(&examples_checked.stdout),
         String::from_utf8_lossy(&examples_checked.stderr)
     );
-    let examples_tested = stasis(&["--json", "test"], &generated_examples);
+    let examples_tested = stasis(
+        &["--json", "--workspace", "build/knowledge-examples", "test"],
+        project,
+    );
     assert_eq!(
         examples_tested.status.code(),
         Some(0),
@@ -639,6 +669,24 @@ fn assert_generated_knowledge(project: &Path) {
         "generated knowledge examples discovered no tests"
     );
     assert_eq!(examples_test_result["result"]["tests_failed"], 0);
+
+    assert!(
+        !generated_examples.join(".stasis_cache").exists(),
+        "running the knowledge examples changed the vendored package"
+    );
+    assert_eq!(
+        snapshot_project_bytes(&project.join("vendor/stasis")),
+        vendor_before,
+        "running the knowledge examples changed the vendor fingerprint inputs"
+    );
+    let symbols = stasis(&["--json", "symbol", "list", "--limit", "1"], project);
+    assert_eq!(
+        symbols.status.code(),
+        Some(0),
+        "parent read-only symbol query rejected vendor snapshot: stdout={} stderr={}",
+        String::from_utf8_lossy(&symbols.stdout),
+        String::from_utf8_lossy(&symbols.stderr)
+    );
 }
 
 #[test]
