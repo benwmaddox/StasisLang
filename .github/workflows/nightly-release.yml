@@ -218,7 +218,7 @@ jobs:
         if: runner.os == 'Windows'
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --release --target ${{ matrix.rust_target }} --target-dir target/desktop-network
+        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --release --target ${{ matrix.rust_target }}
 
       - name: Build stasis_graphics runtime (windows)
         if: runner.os == 'Windows'
@@ -363,7 +363,7 @@ jobs:
           }
           Copy-Item mobile/network "$out/mobile/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/desktop/network/windows-x86_64", "$out/desktop/network/include" | Out-Null
-          Copy-Item "target/desktop-network/${{ matrix.rust_target }}/release/stasis_network.lib" "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
+          Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.lib" "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
           Copy-Item crates/stasis_network/include/stasis_network.h "$out/desktop/network/include/" -ErrorAction Stop
           Copy-Item tools/diagnose_desktop_network.ps1 "$out/tools/" -ErrorAction Stop
           New-Item -ItemType Directory -Force -Path "$out/runtime" | Out-Null

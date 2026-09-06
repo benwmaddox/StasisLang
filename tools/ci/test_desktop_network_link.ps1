@@ -1,14 +1,19 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
-$targetDir = Join-Path $repoRoot "target/task353-desktop-network-link"
+$probeDir = Join-Path $repoRoot "target/desktop-network-link"
 $previousRustFlags = $env:RUSTFLAGS
 Push-Location $repoRoot
 try {
     $env:RUSTFLAGS = (($previousRustFlags, "-C target-feature=+crt-static") -join " ").Trim()
     & python (Join-Path $repoRoot "tools/cargo_cache.py") run -- cargo build `
-        -p stasis_network --release --target-dir $targetDir
+        -p stasis_network --release
     if ($LASTEXITCODE -ne 0) { throw "stasis_network release build failed" }
+    $metadataJson = & python (Join-Path $repoRoot "tools/cargo_cache.py") run -- cargo metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) { throw "Cargo target metadata query failed" }
+    $metadata = $metadataJson | ConvertFrom-Json
+    if (-not $metadata.target_directory) { throw "Cargo target directory is missing" }
+    New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
 
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
     if (-not (Test-Path -LiteralPath $vswhere)) {
@@ -21,13 +26,13 @@ try {
     $vcvars = Join-Path $installation "VC/Auxiliary/Build/vcvars64.bat"
     $source = Join-Path $repoRoot "runtime/tests/stasis_network_link_test.c"
     $include = Join-Path $repoRoot "crates/stasis_network/include"
-    $library = Join-Path $targetDir "release/stasis_network.lib"
-    $executable = Join-Path $targetDir "stasis_network_link_test.exe"
+    $library = Join-Path $metadata.target_directory "release/stasis_network.lib"
+    $executable = Join-Path $probeDir "stasis_network_link_test.exe"
     foreach ($required in @($vcvars, $source, $library)) {
         if (-not (Test-Path -LiteralPath $required)) { throw "required link input missing: $required" }
     }
 
-    $object = Join-Path $targetDir "stasis_network_link_test.obj"
+    $object = Join-Path $probeDir "stasis_network_link_test.obj"
     $compile = 'call "{0}" >nul && cl /nologo /W4 /WX /MT /I"{1}" "{2}" /Fo:"{3}" /Fe:"{4}" "{5}" ws2_32.lib bcrypt.lib userenv.lib ntdll.lib' -f `
         $vcvars, $include, $source, $object, $executable, $library
     & cmd.exe /d /c $compile

@@ -77,10 +77,11 @@ and native copy callback are portable C seams for later Linux and macOS shells;
 this milestone does not claim production monolith packaging for those targets.
 Downstream Maddox and Friends application adoption is separate.
 
-Windows nightly toolchain archives include
+Windows nightly and bootstrap toolchain archives include
 `desktop/network/windows-x86_64/stasis_network.lib` and
 `desktop/network/include/stasis_network.h`. Installed packaging resolves these
-relative to the compiler executable. Source checkouts build a fresh release
+relative to the compiler executable and checks their recorded provenance hashes
+before linking. Source checkouts build a fresh release
 static library with the static CRT in package staging. Missing installed
 support fails packaging rather than producing an executable with a disabled
 network capability.

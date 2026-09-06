@@ -22,11 +22,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Test optional desktop network configuration
-        run: python tools/cargo_cache.py run -- cargo test -p stasis --lib windows_monolith_network_configuration_is_explicit_and_optional --target-dir target/task353-cargo
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --lib windows_monolith_network_configuration_is_explicit_and_optional
       - name: Test desktop network package contents and support lookup
-        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis network --target-dir target/task353-cargo
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis network
       - name: Test desktop package root layout
-        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis windows_desktop_package_keeps_only_the_launcher_at_root --target-dir target/task353-cargo
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis windows_desktop_package_keeps_only_the_launcher_at_root
+      - name: Test release provenance rejects substituted artifacts
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis release_provenance_rejects_substituted_renderer_sources
 
   windows-browser-guest:
     runs-on: windows-latest
@@ -45,7 +47,7 @@ jobs:
         run: python -m unittest tools.ci.test_desktop_network_diagnostics
       - name: Build native host acceptance fixture
         shell: pwsh
-        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --example browser_acceptance_host --target-dir target/task353-cargo
+        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --example browser_acceptance_host
       - name: Ensure browser evidence encoder
         shell: pwsh
         run: |
@@ -59,7 +61,7 @@ jobs:
       - name: Run real browser protocol acceptance
         shell: pwsh
         env:
-          STASIS_NETWORK_HOST_EXECUTABLE: ${{ github.workspace }}\target\task353-cargo\debug\examples\browser_acceptance_host.exe
+          STASIS_NETWORK_HOST_EXECUTABLE: ${{ github.workspace }}/build/codex-cargo-target/debug/examples/browser_acceptance_host.exe
         run: node tools/run_network_browser_acceptance.mjs
       - name: Upload secret-safe browser evidence
         if: always()
