@@ -3867,17 +3867,6 @@ mod tests {
     }
 
     fn project() -> (PathBuf, LiveRunConfig) {
-        // stasis_compiler is a dependency of this test binary, so its cfg(test) JIT isolation is
-        // not enabled here. Clear process-global runtime storage before each app-level fixture;
-        // otherwise registrations can retain pointers into a previous test's dropped host Vec.
-        stasis_dynload::clear_jit_i32_global_table();
-        stasis_dynload::clear_jit_f32_global_table();
-        stasis_dynload::clear_jit_f64_global_table();
-        stasis_dynload::clear_jit_i32_array_global_table();
-        stasis_dynload::clear_jit_f32_array_global_table();
-        stasis_dynload::clear_jit_f64_array_global_table();
-        stasis_dynload::clear_jit_string_literal_table();
-        stasis_dynload::clear_registered_global_memory();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4118,6 +4107,7 @@ mod tests {
 
     #[test]
     fn test_symbol_default_scope_uses_all_known_test_files() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("tests/secondary.test.stasis"),
@@ -4154,6 +4144,7 @@ mod tests {
 
     #[test]
     fn live_edit_batch_plans_all_symbols_as_one_transaction() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
         let (after, plan) = plan_live_edit_batch(
@@ -4199,6 +4190,7 @@ mod tests {
 
     #[test]
     fn compile_candidate_does_not_reload_imports_under_a_second_path() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -4303,6 +4295,7 @@ mod tests {
 
     #[test]
     fn live_commit_advances_from_external_watch_host_revision() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let initial_revision = stasis_dynload::jit_host_entry_targets()
@@ -4345,6 +4338,7 @@ mod tests {
 
     #[test]
     fn scalar_transactions_preview_and_commit_atomically() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (jit, _) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -4359,6 +4353,7 @@ mod tests {
 
     #[test]
     fn default_state_inspection_is_bounded_and_typed() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (jit, _) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -4373,6 +4368,7 @@ mod tests {
 
     #[test]
     fn state_inspection_includes_bounded_collection_rows() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -4446,6 +4442,7 @@ mod tests {
 
     #[test]
     fn staged_tests_include_recursive_project_local_test_imports() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("stasis.json"),
@@ -4561,6 +4558,7 @@ mod tests {
 
     #[test]
     fn live_runtime_candidate_excludes_test_only_symbols() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -4585,6 +4583,7 @@ mod tests {
 
     #[test]
     fn reference_request_returns_compact_containing_symbols() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -4623,6 +4622,7 @@ mod tests {
 
     #[test]
     fn rename_preview_is_compiler_validated_and_does_not_write_sources() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let source_path = root.join("src/main.stasis");
         let before = fs::read_to_string(&source_path).expect("source before preview");
@@ -4672,6 +4672,7 @@ mod tests {
 
     #[test]
     fn tui_quick_fix_preview_uses_structured_language_service_actions() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let source_path = root.join("src/main.stasis");
         let before = fs::read_to_string(&source_path).expect("source before quick fix");
@@ -4715,6 +4716,7 @@ mod tests {
 
     #[test]
     fn tui_language_queries_share_persistent_service_and_live_hover() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let source_path = root.join("src/main.stasis");
         let source = fs::read_to_string(&source_path)
@@ -4861,6 +4863,7 @@ mod tests {
 
     #[test]
     fn symbol_search_is_filtered_compact_and_hash_free() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5001,6 +5004,7 @@ mod tests {
 
     #[test]
     fn validation_snapshot_restores_the_same_runtime_baseline() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5067,6 +5071,7 @@ mod tests {
 
     #[test]
     fn validation_reinitialize_runs_current_main_and_startup_tick_before_snapshot() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5127,6 +5132,7 @@ mod tests {
 
     #[test]
     fn human_runtime_validation_restores_live_state_after_frames() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5179,6 +5185,7 @@ mod tests {
 
     #[test]
     fn pause_step_and_expression_watch_events_are_boundary_exact() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5270,6 +5277,7 @@ mod tests {
 
     #[test]
     fn hidden_live_view_stops_snapshot_and_watch_polling() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5389,6 +5397,7 @@ mod tests {
 
     #[test]
     fn expression_watch_reports_and_deduplicates_evaluation_errors() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5449,6 +5458,7 @@ mod tests {
 
     #[test]
     fn predicate_watches_share_one_per_tick_scan_budget() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5486,6 +5496,7 @@ mod tests {
 
     #[test]
     fn code_aware_edit_preview_apply_and_undo_preserve_runtime_and_disk() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5563,6 +5574,7 @@ mod tests {
 
     #[test]
     fn live_batch_can_add_and_call_a_helper_after_hot_swap() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5622,6 +5634,7 @@ mod tests {
 
     #[test]
     fn layout_hot_swap_keeps_validation_restore_and_new_helper_calls_safe() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -5791,6 +5804,7 @@ mod tests {
 
     #[test]
     fn layout_edit_previews_then_preserves_state_and_initializes_new_field() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -5865,6 +5879,7 @@ mod tests {
 
     #[test]
     fn collection_capacity_shrink_warns_and_copies_only_retained_elements() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let sample = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -5945,6 +5960,7 @@ mod tests {
 
     #[test]
     fn collection_capacity_growth_preserves_prefix_and_initializes_tail() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6022,6 +6038,7 @@ mod tests {
 
     #[test]
     fn collection_growth_preview_rejects_host_owned_storage() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6076,6 +6093,7 @@ mod tests {
 
     #[test]
     fn collection_growth_preview_rejects_unbounded_allocation() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6122,6 +6140,7 @@ mod tests {
 
     #[test]
     fn new_collection_commit_allocates_and_initializes_storage() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6186,6 +6205,7 @@ mod tests {
 
     #[test]
     fn new_collection_preview_rejects_unbounded_allocation() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6232,6 +6252,7 @@ mod tests {
 
     #[test]
     fn text_capacity_shrink_copies_bytes_and_clamps_lengths() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6358,6 +6379,7 @@ mod tests {
 
     #[test]
     fn hook_rejection_rolls_back_hook_mutation_code_and_disk() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6424,6 +6446,7 @@ mod tests {
 
     #[test]
     fn hook_rejection_after_growth_restores_old_collection_registration() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6492,6 +6515,7 @@ mod tests {
 
     #[test]
     fn incompatible_state_type_preview_cannot_commit() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6557,6 +6581,7 @@ mod tests {
 
     #[test]
     fn code_aware_add_delete_refreshes_completion_and_rejects_stale_hash() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -6679,6 +6704,7 @@ mod tests {
 
     #[test]
     fn dirty_unbalanced_definition_overlay_completes_new_typed_local() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (jit, _) = compile(&config);
         let (_, server) = stasis_runner::live::live_session(8);
@@ -6703,6 +6729,7 @@ mod tests {
 
     #[test]
     fn dirty_document_overlay_infers_scope_and_completes_new_local() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (jit, _) = compile(&config);
         let (_, server) = stasis_runner::live::live_session(8);
@@ -6743,6 +6770,7 @@ mod tests {
 
     #[test]
     fn static_type_fields_are_hidden_at_root_and_available_while_editing() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/main.stasis"),
@@ -6801,6 +6829,7 @@ mod tests {
 
     #[test]
     fn dirty_overlay_removes_deleted_locals_from_the_accepted_catalog() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let path = root.join("src/main.stasis");
         let source = fs::read_to_string(&path).expect("source").replace(
@@ -6831,6 +6860,7 @@ mod tests {
 
     #[test]
     fn dirty_overlay_keeps_scope_identity_when_a_parameter_is_renamed() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let path = root.join("src/main.stasis");
         let mut source = fs::read_to_string(&path).expect("source");
@@ -6860,6 +6890,7 @@ mod tests {
 
     #[test]
     fn completion_analysis_returns_preparing_before_the_background_result() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -6911,6 +6942,7 @@ mod tests {
 
     #[test]
     fn watch_paths_are_bounded() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -6940,6 +6972,7 @@ mod tests {
 
     #[test]
     fn large_palette_query_stays_bounded_and_completes_in_one_graphics_boundary() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(4);
@@ -7014,6 +7047,7 @@ mod tests {
 
     #[test]
     fn receipt_failure_rolls_back_disk_dispatch_and_state() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, mut config) = project();
         config.output = PathBuf::from("receipt-blocker");
         fs::write(root.join("receipt-blocker"), "not a directory").expect("block receipt");
@@ -7062,6 +7096,7 @@ mod tests {
 
     #[test]
     fn compiler_failure_leaves_disk_dispatch_and_state_unchanged() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         jit.execute_i32_noarg_by_name("main").expect("main");
@@ -7106,6 +7141,7 @@ mod tests {
 
     #[test]
     fn cached_browse_disambiguates_same_name_overloads_and_completion_keeps_both() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("src/overloads.stasis"),
@@ -7154,6 +7190,7 @@ mod tests {
 
     #[test]
     fn background_edit_preparation_keeps_status_responsive() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(8);
@@ -7222,6 +7259,7 @@ mod tests {
 
     #[test]
     fn queued_cancel_wins_over_a_ready_background_commit() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let before = fs::read_to_string(root.join("src/main.stasis")).expect("before");
         let prepared = prepared_tick_edit(&config, 50);
@@ -7274,6 +7312,7 @@ mod tests {
 
     #[test]
     fn sustained_request_refill_keeps_internal_backlog_bounded() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(MAX_PENDING_LIVE_REQUESTS);
@@ -7305,6 +7344,7 @@ mod tests {
 
     #[test]
     fn unrelated_source_change_rejects_a_ready_background_commit() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let before = fs::read_to_string(root.join("src/main.stasis")).expect("before");
         let prepared = prepared_tick_edit(&config, 60);
@@ -7340,6 +7380,7 @@ mod tests {
 
     #[test]
     fn cancellation_in_same_boundary_prevents_command_execution() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(4);
@@ -7368,6 +7409,7 @@ mod tests {
 
     #[test]
     fn quit_cancels_and_joins_background_preparation() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         let (mut jit, package) = compile(&config);
         let (client, server) = stasis_runner::live::live_session(4);
@@ -7404,6 +7446,7 @@ mod tests {
 
     #[test]
     fn failing_live_edit_tests_restore_source_dispatch_and_state() {
+        let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
         fs::write(
             root.join("tests/main.test.stasis"),

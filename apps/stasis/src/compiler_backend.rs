@@ -4161,6 +4161,7 @@ mod tests {
 
     #[test]
     fn runner_diagnostic_uses_second_file_source_span() {
+        let _global_guard = crate::jit_test_support::lock();
         let mut backend = IncrementalCompilerBackend::new();
         backend.source_by_path.insert(
             "main.stasis".to_string(),
@@ -4223,11 +4224,13 @@ mod tests {
 
     #[test]
     fn jit_rejection_reports_imported_file_source_span() {
+        let _global_guard = crate::jit_test_support::lock();
         assert_second_file_diagnostic(TargetMode::JitDev);
     }
 
     #[test]
     fn explicit_project_root_keeps_identity_stable_when_new_directory_is_added() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4321,11 +4324,13 @@ mod tests {
 
     #[test]
     fn aot_rejection_reports_imported_file_source_span() {
+        let _global_guard = crate::jit_test_support::lock();
         assert_second_file_diagnostic(TargetMode::AotProd);
     }
 
     #[test]
     fn rejected_jit_parse_preserves_accepted_snapshot() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4376,6 +4381,7 @@ mod tests {
 
     #[test]
     fn failed_prepared_jit_send_preserves_accepted_snapshot() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4433,6 +4439,7 @@ mod tests {
 
     #[test]
     fn prepared_jit_rejection_reports_second_file_candidate_diagnostic() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4481,6 +4488,7 @@ mod tests {
 
     #[test]
     fn aot_write_fault_preserves_accepted_snapshot_and_bundle() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4556,6 +4564,7 @@ mod tests {
 
     #[test]
     fn successful_aot_snapshot_mappings_reference_existing_objects() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4965,6 +4974,7 @@ mod tests {
 
     #[test]
     fn jit_dev_with_engine_entrypoints_builds_jit_engine_package_contract() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5014,6 +5024,7 @@ mod tests {
 
     #[test]
     fn jit_dev_rejects_on_code_swap_with_non_void_return_type() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5048,6 +5059,7 @@ mod tests {
 
     #[test]
     fn jit_dev_rejects_on_code_swap_with_parameters() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5083,6 +5095,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_dev_brickout_v1_builds_engine_package_with_render_pointer() {
+        let _global_guard = crate::jit_test_support::lock();
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -5115,6 +5128,7 @@ mod tests {
 
     #[test]
     fn aot_brickout_revenge_v1_compiles_full_engine_bundle() {
+        let _global_guard = crate::jit_test_support::lock();
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -5203,6 +5217,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn aot_brickout_revenge_v1_engine_bundle_executes_two_ticks() {
+        let _global_guard = crate::jit_test_support::lock();
         fn hash_global_path(path: &str) -> i32 {
             let mut hash: u32 = 2_166_136_261;
             for byte in path.bytes() {
@@ -5378,6 +5393,7 @@ mod tests {
 
     #[test]
     fn jit_dev_engine_mode_rebuilds_one_complete_generation_between_compiles() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5448,6 +5464,7 @@ mod tests {
 
     #[test]
     fn jit_layout_hash_ignores_function_body_only_edits() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5490,6 +5507,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_source_exposes_canonical_jit_code_ptr_overrides() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5543,6 +5561,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_accepts_for_loop_decrement_step() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5581,6 +5600,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_accepts_if_else_if_else_shape() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5620,6 +5640,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_accepts_logical_condition_shape() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5659,6 +5680,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_accepts_for_loop_logical_condition_shape() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5699,6 +5721,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_rejects_duplicate_function_names_without_legacy_fallback() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5732,6 +5755,7 @@ mod tests {
 
     #[test]
     fn aot_prod_with_engine_entrypoints_builds_aot_engine_bundle_contract() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5770,6 +5794,7 @@ mod tests {
 
     #[test]
     fn aot_compile_rejects_unresolved_direct_call_target() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5799,6 +5824,7 @@ mod tests {
 
     #[test]
     fn aot_compile_accepts_known_host_direct_call_target_without_fallback() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5834,6 +5860,7 @@ mod tests {
 
     #[test]
     fn aot_compile_writes_manifest_with_artifacts_on_success() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5870,6 +5897,7 @@ mod tests {
 
     #[test]
     fn aot_compile_emits_hook_fn_symbol_mapping_and_patch_coverage() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5929,6 +5957,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn aot_compile_with_real_linker_exports_emitted_symbols_when_available() {
+        let _global_guard = crate::jit_test_support::lock();
         let Some(linker_path) = find_lld_link() else {
             return;
         };
@@ -5992,6 +6021,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn aot_emitted_symbol_executes_direct_call_semantics_if_real_link_available() {
+        let _global_guard = crate::jit_test_support::lock();
         let Some(linker_path) = find_lld_link() else {
             return;
         };
@@ -6077,6 +6107,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn aot_bundle_executes_direct_global_storage_if_real_link_available() {
+        let _global_guard = crate::jit_test_support::lock();
         let Some(linker_path) = find_lld_link() else {
             return;
         };
@@ -6184,6 +6215,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn bounded_performance_sample_links_and_executes_aot_if_real_link_available() {
+        let _global_guard = crate::jit_test_support::lock();
         let Some(linker_path) = find_lld_link() else {
             return;
         };
@@ -6389,6 +6421,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_links_runnable_executable_with_main_entry_symbol() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
@@ -6434,6 +6467,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_links_standalone_storage_for_non_engine_globals() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
@@ -6476,6 +6510,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_invokes_signer_when_configured() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
         let stamp = SystemTime::now()
@@ -6580,6 +6615,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_writes_default_summary_sidecar() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
@@ -6622,6 +6658,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_writes_summary_to_configured_path() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
@@ -6665,6 +6702,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_is_deterministic_across_repeated_runs_with_same_source() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
