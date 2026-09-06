@@ -753,7 +753,7 @@ impl OpenRouterProvider {
         if !saw_done {
             return Err("OpenRouter stream ended before the [DONE] marker".to_string());
         }
-        let parsed = decode_model_response(&content, "OpenRouter")?;
+        let parsed = decode_model_response(&content, "OpenRouter");
         let resolved_model = resolved_model
             .as_deref()
             .map(sanitize_label)
@@ -782,9 +782,9 @@ impl OpenRouterProvider {
             "tokens": {"prompt": prompt_tokens, "completion": completion_tokens, "reasoning": reasoning_tokens, "cache": cache_tokens},
             "cost": metric_number(usage.get("cost")),
             "throughput_tokens_per_second": throughput(&usage, request_started.elapsed()),
-            "validation": {"structured_schema": "accepted", "repair_count": 0}
+            "validation": {"structured_schema": if parsed.is_ok() { "accepted" } else { "rejected" }, "repair_count": 0}
         }));
-        Ok(parsed)
+        parsed
     }
 }
 
@@ -1172,11 +1172,11 @@ mod tests {
             })
             .expect("read-symbol variant");
         assert_eq!(
-            read_variant.pointer("/properties/args/type"),
+            read_variant.pointer("/properties/args/anyOf/0/type"),
             Some(&json!("object"))
         );
         assert_eq!(
-            read_variant.pointer("/properties/args/additionalProperties"),
+            read_variant.pointer("/properties/args/anyOf/0/additionalProperties"),
             Some(&json!(false))
         );
         assert_eq!(
@@ -1196,6 +1196,26 @@ mod tests {
         assert!(usage["timing_ms"]["turn_total"].is_number());
         assert!(usage["timing_ms"].get("total").is_none());
         worker.join().expect("mock worker");
+    }
+
+    #[test]
+    fn malformed_completed_response_retains_usage() {
+        let chunk = json!({"choices":[{"delta":{"content":"{invalid"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"cost":0.001}});
+        let body = format!("data: {}\n\ndata: [DONE]\n\n", chunk);
+        let (base_url, requests, worker) =
+            mock_server(vec![http_response("text/event-stream", &body)]);
+        let mut provider = OpenRouterProvider::new(test_config(base_url)).unwrap();
+        assert!(provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .is_err());
+        let usage = provider.take_usage().expect("failed response usage");
+        assert_eq!(usage["cost"], 0.001);
+        assert_eq!(usage["tokens"]["prompt"], 10);
+        assert_eq!(usage["tokens"]["completion"], 5);
+        assert_eq!(usage["validation"]["structured_schema"], "rejected");
+        assert!(provider.take_usage().is_none());
+        requests.recv().unwrap();
+        worker.join().unwrap();
     }
 
     #[test]
