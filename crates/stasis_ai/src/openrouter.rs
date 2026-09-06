@@ -1172,11 +1172,11 @@ mod tests {
             })
             .expect("read-symbol variant");
         assert_eq!(
-            read_variant.pointer("/properties/args/type"),
+            read_variant.pointer("/properties/args/anyOf/0/type"),
             Some(&json!("object"))
         );
         assert_eq!(
-            read_variant.pointer("/properties/args/additionalProperties"),
+            read_variant.pointer("/properties/args/anyOf/0/additionalProperties"),
             Some(&json!(false))
         );
         assert_eq!(

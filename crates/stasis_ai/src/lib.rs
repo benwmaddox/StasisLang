@@ -45,7 +45,7 @@ pub const MIN_COMPACTION_BYTES: usize = 256 * 1024;
 pub const MAX_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMPACTION_RETAINED_TURNS: usize = 16;
 const MAX_COMPLETION_REJECTIONS: usize = 3;
-const AGENT_INSTRUCTION: &str = "Stasis is statically typed, C-like. Syntax: import, struct, global, function, test `name`(): bool. Receiver: function damage(self: Enemy, amount: i32): void; enemy.damage(5). Use local syntax and no unproven helpers such as abs. Use structured tool_calls only. start actions are leads; resolved_targets are exact. Reuse source, selectors, and symbol_id exactly; omit absent fields and do not reread. task_contract required_changes, invariants, and acceptance are mandatory. Refine via list_symbols. Use canonical_import via read_imports/write_imports. Before writes, batch remaining reads/references. Preserve live state. Use on_code_swap only for requested migration/reinit. Submit related code/imports/tests in one contiguous atomic tested write batch; its successful receipt proves completion. Include finish_task last only for the entire request. Get runtime/assets capability only when necessary. Return one response-contract object.";
+const AGENT_INSTRUCTION: &str = "Stasis is statically typed, C-like. Syntax: import, struct, global, function, test `name`(): bool. Receiver: function damage(self: Enemy, amount: i32): void; enemy.damage(5). Use local syntax and no unproven helpers such as abs. Use structured tool_calls only. start actions are leads; resolved_targets are exact. Reuse supplied source and references; do not reread them. For existing symbols use symbol_id only, plus new_source for writes; omit redundant selectors. task_contract required_changes, invariants, and acceptance are mandatory. Refine via list_symbols. Use canonical_import via read_imports/write_imports. Before writes, batch remaining reads/references. Preserve live state. Use on_code_swap only for requested migration/reinit. Submit related code/imports/tests in one contiguous atomic tested write batch. Writes test automatically; do not append run_tests. Set complete=true for the entire request; the host validates completion after all calls. Get runtime/assets capability only when necessary. Return one response-contract object.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfile {
@@ -306,7 +306,10 @@ where
         validation_tool_specs.extend(runtime_tool_specs());
     }
     let mut active_tool_specs = tool_specs.clone();
-    let response_contract = response_contract();
+    let mut response_contract = response_contract();
+    if known_tools.contains("finish_task") {
+        response_contract["complete"] = json!("Set true only when all requested work is covered; the host validates the receipt after all calls.");
+    }
     let header = serde_json::to_string(&ModelRequestHeader {
         record: "request",
         schema_version: 1,
@@ -371,7 +374,10 @@ where
                 if tool_calls.is_empty() {
                     return Err("model returned an empty tool-call batch".to_string());
                 }
-                if tool_calls.len() > MAX_TOOL_CALLS_PER_TURN {
+                let host_finish = usize::from(tool_calls.last().is_some_and(|call| {
+                    call.tool == action_id_for_tool("finish_task") || call.tool == "finish_task"
+                }));
+                if tool_calls.len().saturating_sub(host_finish) > MAX_TOOL_CALLS_PER_TURN {
                     return Err(format!(
                         "model returned {} tool calls; limit is {MAX_TOOL_CALLS_PER_TURN}",
                         tool_calls.len()
@@ -771,7 +777,28 @@ fn validate_tool_call(
         .args
         .as_object()
         .ok_or_else(|| format!("AI action {} requires an object args value", call.tool))?;
-    for required in &spec.required_args {
+    let by_id = matches!(
+        spec.tool.as_str(),
+        "read_symbol" | "write_symbol" | "delete_symbol"
+    ) && args
+        .get("symbol_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+        && args.get("operation").and_then(Value::as_str) != Some("add");
+    let selectors: &[&str] = if by_id {
+        &[]
+    } else {
+        match spec.tool.as_str() {
+            "write_symbol" => &["file", "name"],
+            "read_symbol" | "delete_symbol" => &["name"],
+            _ => &[],
+        }
+    };
+    for required in selectors
+        .iter()
+        .copied()
+        .chain(spec.required_args.iter().map(String::as_str))
+    {
         if !args.contains_key(required) {
             return Err(format!("AI action {} requires arg: {required}", call.tool));
         }
@@ -846,6 +873,13 @@ pub fn response_contract() -> Value {
 
 pub fn model_response_schema_for(tool_specs: &[ToolSpec]) -> Value {
     let mut schema = model_response_schema();
+    if tool_specs.iter().any(|spec| spec.tool == "finish_task") {
+        schema["properties"]["complete"] = json!({"type":"boolean"});
+        schema["required"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("complete"));
+    }
     let action_ids = tool_specs
         .iter()
         .map(|spec| Value::String(spec.action_id.clone()))
@@ -853,6 +887,7 @@ pub fn model_response_schema_for(tool_specs: &[ToolSpec]) -> Value {
     if !action_ids.is_empty() {
         let variants = tool_specs
             .iter()
+            .filter(|spec| spec.tool != "finish_task")
             .map(|spec| {
                 json!({
                     "type": "object",
@@ -900,7 +935,46 @@ fn model_response_schema_for_request(request: &str) -> Result<Value, String> {
 }
 
 fn tool_args_schema(spec: &ToolSpec) -> Value {
+    let full = full_tool_args_schema(spec);
+    if !matches!(
+        spec.tool.as_str(),
+        "read_symbol" | "write_symbol" | "delete_symbol"
+    ) {
+        return full;
+    }
+    let mut fields = vec![("symbol_id", string_schema())];
+    let mut required = vec!["symbol_id"];
+    if spec.tool == "write_symbol" {
+        fields.push(("new_source", string_schema()));
+        required.push("new_source");
+    }
+    if spec.required_args.iter().any(|field| field == "symbol_id") {
+        return object_schema(&fields, &required);
+    }
+    let mut by_selector = full;
+    by_selector["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("symbol_id");
+    by_selector["required"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|field| field != "symbol_id");
+    json!({"anyOf": [object_schema(&fields, &required), by_selector]})
+}
+
+fn full_tool_args_schema(spec: &ToolSpec) -> Value {
     match spec.tool.as_str() {
+        "add_symbol" => object_schema(
+            &[
+                ("file", string_schema()),
+                ("name", string_schema()),
+                ("new_source", string_schema()),
+                ("kind", string_schema()),
+                ("owner", string_schema()),
+            ],
+            &["file", "name", "new_source"],
+        ),
         "propose_semantic_edit" | "repair_semantic_edit" => object_schema(
             &[
                 ("proposal_id", string_schema()),
@@ -1265,9 +1339,9 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("get_stdlib_api", "No module lists valid modules; module returns filtered/paged public signatures, externs, and canonical_import (64 max).", &[], &["module", "query", "kind", "page", "limit"]),
         spec("find_references", "Group compiler-owned definition/read/write/call uses by containing symbol.", &["symbol"], &["limit"]),
         spec("list_owner_symbols", "List compact symbols owned by one type or group.", &["owner"], &[]),
-        spec("read_symbol", "Read source; prefer symbol_id.", &["name"], &["symbol_id", "kind", "file", "owner", "signature"]),
-        spec("write_symbol", "Atomically add/replace and test; replacements prefer symbol_id.", &["file", "name", "new_source"], &["symbol_id", "operation", "kind", "owner", "signature"]),
-        spec("delete_symbol", "Delete; prefer symbol_id.", &["name"], &["symbol_id", "file", "kind", "owner", "signature"]),
+        spec("read_symbol", "Read by symbol_id only, or name plus selectors for discovery.", &[], &["symbol_id", "name", "kind", "file", "owner", "signature"]),
+        spec("write_symbol", "Atomically replace and test using symbol_id + new_source. Adding requires file, name, operation=add instead of ID.", &["new_source"], &["symbol_id", "file", "name", "operation", "kind", "owner", "signature"]),
+        spec("delete_symbol", "Delete by symbol_id only, or name plus selectors.", &[], &["symbol_id", "name", "file", "kind", "owner", "signature"]),
         spec("read_imports", "Read one source file's imports group.", &["file"], &[]),
         spec("write_imports", "Atomically replace imports from path strings, including canonical_import.", &["file", "imports"], &[]),
         spec("get_diagnostics", "Read the latest compiler diagnostics.", &[], &[]),
@@ -1280,7 +1354,7 @@ pub fn workshop_tool_specs() -> Vec<ToolSpec> {
         spec("write_test_file", "Create or replace one Stasis test file.", &["file", "source"], &[]),
         spec("delete_test_file", "Delete one Stasis test file.", &["file"], &[]),
         spec("run_tests", "Run the optional baseline/current suite; writes compile and test automatically.", &[], &[]),
-        spec("finish_task", "Append last in the final write response; validates receipt and ends without another turn.", &[], &[]),
+        spec("finish_task", "Host completion gate. Set response complete=true; do not emit a call.", &[], &[]),
     ]
 }
 
@@ -1301,6 +1375,22 @@ pub fn live_tool_specs() -> Vec<ToolSpec> {
         .into_iter()
         .filter(|spec| LIVE_TOOLS.contains(&spec.tool.as_str()))
         .collect::<Vec<_>>();
+    for tool in &mut tools {
+        if matches!(tool.tool.as_str(), "write_symbol" | "delete_symbol") {
+            tool.required_args = vec!["symbol_id".into()];
+            if tool.tool == "write_symbol" {
+                tool.required_args.push("new_source".into());
+            }
+            tool.optional_args.clear();
+            tool.purpose = "Use the exact ID from read_symbol or resolved_targets. Writes replace and test atomically; additions use add_symbol.".into();
+        }
+    }
+    tools.push(spec(
+        "add_symbol",
+        "Add a new symbol in the same atomic batch as related replacements and tests.",
+        &["file", "name", "new_source"],
+        &["kind", "owner"],
+    ));
     tools.push(spec(
         "get_capability",
         "Load tools and policy; name must be assets or runtime.",
@@ -1722,12 +1812,12 @@ fn read_codex_usage(stdout: impl Read) -> Result<Option<Value>, String> {
 }
 
 fn decode_model_response(source: &str, provider: &str) -> Result<ModelResponse, String> {
-    let value: Value = serde_json::from_str(source)
+    let mut value: Value = serde_json::from_str(source)
         .map_err(|error| format!("{provider} returned invalid agent JSON: {error}"))?;
     let object = value
         .as_object()
         .ok_or_else(|| format!("{provider} returned a non-object agent response"))?;
-    let allowed = ["mode", "working_notes", "summary", "tool_calls"]
+    let allowed = ["mode", "working_notes", "summary", "tool_calls", "complete"]
         .into_iter()
         .collect::<BTreeSet<_>>();
     if let Some(field) = object
@@ -1738,8 +1828,24 @@ fn decode_model_response(source: &str, provider: &str) -> Result<ModelResponse, 
             "{provider} returned unknown response field: {field}"
         ));
     }
-    let response: ModelResponse = serde_json::from_value(value)
+    let complete = match value.as_object_mut().unwrap().remove("complete") {
+        None => false, // Retain compatibility with existing provider fixtures.
+        Some(Value::Bool(complete)) => complete,
+        Some(_) => return Err(format!("{provider} returned non-boolean complete")),
+    };
+    let mut response: ModelResponse = serde_json::from_value(value)
         .map_err(|error| format!("{provider} returned invalid agent response: {error}"))?;
+    if complete {
+        if let ModelResponse::ToolCalls { tool_calls, .. } = &mut response {
+            // Reuse the existing executor gate, including rejected-write protection.
+            let finish_id = action_id_for_tool("finish_task");
+            tool_calls.retain(|call| call.tool != finish_id && call.tool != "finish_task");
+            tool_calls.push(ToolCall {
+                tool: finish_id,
+                args: json!({}),
+            });
+        }
+    }
     if let ModelResponse::ToolCalls { tool_calls, .. } = &response {
         if tool_calls.iter().any(|call| !call.args.is_object()) {
             return Err(format!(
@@ -2704,7 +2810,7 @@ mod tests {
         assert!(live.len() < workshop.len());
         assert!(live
             .iter()
-            .filter(|tool| tool.tool != "get_capability")
+            .filter(|tool| !matches!(tool.tool.as_str(), "get_capability" | "add_symbol"))
             .all(|tool| workshop.iter().any(|candidate| candidate.tool == tool.tool)));
         assert!(live.iter().any(|tool| tool.tool == "write_symbol"));
         assert!(live.iter().any(|tool| tool.tool == "find_references"));
@@ -2718,7 +2824,7 @@ mod tests {
             .any(|tool| tool.tool == "validate_runtime_state"));
         assert!(!live.iter().any(|tool| tool.tool == "capture_screenshot"));
         let instruction = AgentProfile::default().instruction;
-        assert!(instruction.contains("successful receipt proves completion"));
+        assert!(instruction.contains("host validates completion after all calls"));
         for syntax in [
             "import",
             "struct",
@@ -2811,7 +2917,8 @@ mod tests {
         let encoded = serde_json::to_value(write).expect("serialized tool spec");
         assert!(encoded.get("use").is_some());
         assert!(encoded.get("required").is_some());
-        assert!(encoded.get("optional").is_some());
+        assert!(encoded.get("optional").is_none());
+        assert_eq!(encoded["required"], json!(["symbol_id", "new_source"]));
         assert!(encoded.get("purpose").is_none());
         assert!(encoded.get("required_args").is_none());
         let decoded: ToolSpec = serde_json::from_value(encoded).expect("compact tool spec");
@@ -3045,13 +3152,16 @@ mod tests {
             .as_array()
             .expect("action variants");
         let args = |tool: &str| {
-            variants
+            let result = variants
                 .iter()
                 .find(|variant| {
                     variant["properties"]["action_id"]["enum"][0] == json!(action_id_for_tool(tool))
                 })
                 .expect("tool variant")["properties"]["args"]
-                .clone()
+                .clone();
+            result
+                .get("anyOf")
+                .map_or(result.clone(), |variants| variants[1].clone())
         };
         for tool in [
             "read_symbol",
@@ -3104,6 +3214,105 @@ mod tests {
         )
         .expect_err("string args must be rejected");
         assert!(error.contains("native JSON objects"));
+    }
+
+    #[test]
+    fn compact_symbol_actions_accept_ids_without_redundant_selectors() {
+        let specs = workshop_tool_specs();
+        let known = specs.iter().map(|spec| spec.tool.clone()).collect();
+        for tool in ["read_symbol", "write_symbol", "delete_symbol"] {
+            let spec = specs.iter().find(|spec| spec.tool == tool).unwrap();
+            let schema = tool_args_schema(spec);
+            let mut args = json!({"symbol_id":"existing-id"});
+            if tool == "write_symbol" {
+                args["new_source"] = json!("function tick(): void {}");
+            }
+            assert_eq!(
+                schema["anyOf"][0]["properties"].as_object().unwrap().len(),
+                args.as_object().unwrap().len()
+            );
+            validate_tool_call(
+                &ToolCall {
+                    tool: tool.into(),
+                    args,
+                },
+                &specs,
+                &known,
+                false,
+            )
+            .unwrap();
+        }
+        for args in [
+            json!({"symbol_id":"", "new_source":"source"}),
+            json!({"symbol_id":"id", "operation":"add", "new_source":"source"}),
+        ] {
+            assert!(validate_tool_call(
+                &ToolCall {
+                    tool: "write_symbol".into(),
+                    args
+                },
+                &specs,
+                &known,
+                false
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn live_replacements_require_ids_and_additions_have_a_separate_action() {
+        let specs = live_tool_specs();
+        let known = specs.iter().map(|spec| spec.tool.clone()).collect();
+        for tool in ["write_symbol", "delete_symbol"] {
+            let spec = specs.iter().find(|spec| spec.tool == tool).unwrap();
+            let schema = tool_args_schema(spec);
+            assert_eq!(schema["type"], "object");
+            assert!(schema["properties"].get("file").is_none());
+            assert!(schema["properties"].get("signature").is_none());
+            assert!(validate_tool_call(
+                &ToolCall {
+                    tool: tool.into(),
+                    args: json!({"file":"src/main.stasis", "name":"tick", "new_source":"source"})
+                },
+                &specs,
+                &known,
+                false
+            )
+            .is_err());
+        }
+        validate_tool_call(&ToolCall {tool:"add_symbol".into(), args:json!({"file":"src/main.stasis", "name":"helper", "new_source":"function helper(): i32 { return 1; }"})}, &specs, &known, false).unwrap();
+    }
+
+    #[test]
+    fn completion_flag_reuses_one_host_gate_after_all_actions() {
+        let schema = model_response_schema_for(&live_tool_specs());
+        assert_eq!(schema["properties"]["complete"]["type"], "boolean");
+        let finish = action_id_for_tool("finish_task");
+        assert!(schema["properties"]["tool_calls"]["items"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|variant| variant["properties"]["action_id"]["enum"][0] != finish));
+        let response = decode_model_response(&json!({
+            "mode":"tool_calls", "working_notes":"Apply.", "complete":true,
+            "tool_calls":[
+                {"action_id":finish, "args":{}},
+                {"action_id":action_id_for_tool("write_symbol"), "args":{"symbol_id":"id", "new_source":"source"}},
+                {"action_id":finish, "args":{}}
+            ]
+        }).to_string(), "fixture").unwrap();
+        let ModelResponse::ToolCalls { tool_calls, .. } = response else {
+            panic!("calls")
+        };
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].tool, action_id_for_tool("write_symbol"));
+        assert_eq!(tool_calls[1].tool, finish);
+        assert!(decode_model_response(
+            r#"{"mode":"done","working_notes":"Done","complete":"yes"}"#,
+            "fixture"
+        )
+        .unwrap_err()
+        .contains("non-boolean"));
     }
 
     #[test]

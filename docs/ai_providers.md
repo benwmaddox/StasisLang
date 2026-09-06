@@ -126,15 +126,24 @@ the oldest remaining client.
 
 Live edit requests provide current source, selectors, and reference results in
 `resolved_targets`. The adjacent `edit_execution` guidance tells the model to
-reuse that context, use supported arithmetic syntax, and append `finish_task`
-to its final write response. Missing dependencies still allow additional reads.
+reuse that context, use supported arithmetic syntax, and set `complete: true`
+on its final write response. Missing dependencies still allow additional reads.
 Model tools and desktop proposals do not carry source hashes. Host transaction
 input verification and manual editor hash guards remain internal. This guidance
 reduces round trips; it is not a correctness gate.
 
-`finish_task` is idempotent within a response and is evaluated after all its
-calls execute. Early or repeated finish calls cannot bypass receipt, tests, or
-task-contract validation, and no longer reject an otherwise valid write batch.
+The structured response exposes one completion flag rather than a repeatable
+finish action. The provider decoder maps it to the existing host `finish_task`
+gate after all calls; it cannot bypass receipt, tests, or task-contract validation.
+Legacy finish calls remain compatible internally.
+
+Live replacements require ID and new source; deletes require ID alone.
+Name/file selectors remain available for read discovery; `add_symbol` creates
+new symbols in the same atomic batch. Legacy workshop selectors remain supported.
+The host registers IDs returned by reads as well as symbol indexes, so a correct
+read-derived ID does not fall back to model-authored selectors. Prefetched
+definitions replace redundant discovery suggestions and baseline-test prompts;
+the discovery tools remain available for missing dependencies.
 
 The brick-layout sample keeps test acceptance criteria in behavioral instructions,
 not exact assertion text. Equivalent equality and early-return assertions do not

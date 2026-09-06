@@ -388,17 +388,30 @@ fn load_ai_initial_context(
     tools.test_project_root = Some(project_root.to_path_buf());
     let mut context = ai_initial_context(project_hints);
     if !resolved_targets.is_empty() {
+        // Prefetched definitions replace discovery leads, not the discovery tools.
+        context.as_object_mut().unwrap().remove("start");
+        context.as_object_mut().unwrap().remove("options");
         context["edit_execution"] = serde_json::json!({
             "provided": "resolved_targets contains current compiler-read source, exact selectors, and reference results. These reads have already executed; reuse them directly.",
             "next_action": "If the supplied targets cover the request, write the related source and tests together now. Read only missing dependencies.",
-            "completion": "Append finish_task as the final call in that same response when the batch completes the request. The executor checks the receipt and contract before finishing; no separate confirmation turn is needed.",
+            "completion": "Set complete=true when this response completes the request. The executor checks the receipt and contract after executing all calls; no confirmation turn is needed.",
             "tests": "Writes already compile and run tests. Do not append run_tests; it is only useful for an explicitly needed baseline before edits.",
             "integer_absolute_value": "let offset: i32 = column - 3; if (offset < 0) { offset = -offset; }",
             "syntax": "Use if statements for absolute value; do not invent abs() or ternary expressions."
         });
         context["resolved_targets"] = Value::Array(resolved_targets);
     }
-    if let Some(contract) = task_contract {
+    if let Some(mut contract) = task_contract {
+        for requirement in contract.context["required_changes"].as_array_mut().unwrap() {
+            if let Some((id, _)) = tools.symbol_selectors.iter().find(|(_, target)| {
+                requirement["name"].as_str() == Some(target.name.as_str())
+                    && requirement["file"].as_str() == target.file.as_deref()
+                    && requirement["kind"].as_str() == target.kind.as_deref()
+                    && requirement["signature"].as_str() == target.signature.as_deref()
+            }) {
+                requirement["symbol_id"] = serde_json::json!(id);
+            }
+        }
         context["task_contract"] = contract.context;
     }
     Ok(context)
@@ -687,6 +700,7 @@ fn prefetch_target_bundles(
                 args: Value::Object(selector.clone()),
             };
             let definition = compact_ai_read_result(&read_call, read.data.unwrap_or(Value::Null));
+            tools.register_symbol(&definition);
             let references = tools
                 .request(
                     LiveCommand::References {
@@ -3049,32 +3063,39 @@ impl LiveAiTools {
     }
 
     fn register_indexed_symbols(&mut self, symbols: &Value) {
-        self.symbol_selectors = symbols
+        for item in symbols
             .get("items")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|item| {
-                let symbol_id = item.get("symbol_id").and_then(Value::as_str)?.to_string();
-                let name = item.get("name").and_then(Value::as_str)?.to_string();
-                Some((
-                    symbol_id,
-                    LiveSymbolTarget {
-                        name,
-                        kind: item.get("kind").and_then(Value::as_str).map(str::to_string),
-                        file: item.get("file").and_then(Value::as_str).map(str::to_string),
-                        owner: item
-                            .get("owner")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        signature: item
-                            .get("signature")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                    },
-                ))
-            })
-            .collect();
+        {
+            self.register_symbol(item);
+        }
+    }
+
+    fn register_symbol(&mut self, item: &Value) {
+        let Some(symbol_id) = item.get("symbol_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            return;
+        };
+        self.symbol_selectors.insert(
+            symbol_id.to_string(),
+            LiveSymbolTarget {
+                name: name.to_string(),
+                kind: item.get("kind").and_then(Value::as_str).map(str::to_string),
+                file: item.get("file").and_then(Value::as_str).map(str::to_string),
+                owner: item
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                signature: item
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
+        );
     }
 
     fn symbol_target(&self, args: &serde_json::Map<String, Value>) -> LiveSymbolTarget {
@@ -3590,10 +3611,13 @@ impl LiveAiTools {
                 if call.tool == "find_references" {
                     self.reference_search_ready = true;
                 }
-                ToolObservation::result(
-                    &call.tool,
-                    compact_ai_read_result(call, response.data.unwrap_or(Value::Null)),
-                )
+                let data = response.data.unwrap_or(Value::Null);
+                if call.tool == "read_symbol" {
+                    self.register_symbol(&data);
+                } else if call.tool == "list_symbols" {
+                    self.register_indexed_symbols(&data);
+                }
+                ToolObservation::result(&call.tool, compact_ai_read_result(call, data))
             }
             Ok(response) => ToolObservation::error(&call.tool, format_live_response(&response)),
             Err(error) => ToolObservation::error(&call.tool, error),
@@ -3711,9 +3735,12 @@ impl LiveAiTools {
         canceled: &AtomicBool,
     ) -> Vec<ToolObservation> {
         self.current_write_passed = false;
-        let includes_behavior_write = calls
-            .iter()
-            .any(|call| matches!(call.tool.as_str(), "write_symbol" | "delete_symbol"));
+        let includes_behavior_write = calls.iter().any(|call| {
+            matches!(
+                call.tool.as_str(),
+                "write_symbol" | "add_symbol" | "delete_symbol"
+            )
+        });
         if includes_behavior_write && !self.reference_search_ready {
             let error = "run find_references for a behavior-bearing symbol before a live AI write";
             self.note_write_failure(error);
@@ -3739,7 +3766,9 @@ impl LiveAiTools {
                 }
                 let operation = if call.tool == "delete_symbol" {
                     LiveEditOperation::Delete
-                } else if string_arg(args, "operation").as_deref() == Some("add") {
+                } else if call.tool == "add_symbol"
+                    || string_arg(args, "operation").as_deref() == Some("add")
+                {
                     LiveEditOperation::Add
                 } else {
                     LiveEditOperation::Update
@@ -4375,7 +4404,7 @@ fn contiguous_write_range(calls: &[ToolCall]) -> Result<Option<std::ops::Range<u
         .filter_map(|(index, call)| {
             matches!(
                 call.tool.as_str(),
-                "write_symbol" | "delete_symbol" | "write_imports"
+                "write_symbol" | "add_symbol" | "delete_symbol" | "write_imports"
             )
             .then_some(index)
         })
@@ -4399,7 +4428,7 @@ impl ToolExecutor for LiveAiTools {
         let has_source_write = calls.iter().any(|call| {
             matches!(
                 call.tool.as_str(),
-                "write_symbol" | "delete_symbol" | "write_imports"
+                "write_symbol" | "add_symbol" | "delete_symbol" | "write_imports"
             )
         });
         // A new write attempt supersedes the prior receipt even when its batch shape is invalid.
@@ -5906,6 +5935,7 @@ mod tests {
                                         "file":"src/enemies.stasis",
                                         "signature":"update_enemies(speed: f32): void",
                                         "source":"function update_enemies(speed: f32): void { return; }",
+                                        "symbol_id":"prefetched-enemies",
                                         "source_hash":"source-hash"
                                     }),
                                 ))
@@ -5944,6 +5974,29 @@ mod tests {
             .is_none());
         assert_eq!(bundles[0]["references"]["symbol"], "update_enemies");
         assert!(tools.reference_search_ready);
+        let target = tools.symbol_target(
+            json!({
+                "symbol_id":"prefetched-enemies", "name":"wrong", "signature":"typo"
+            })
+            .as_object()
+            .unwrap(),
+        );
+        assert_eq!(target.name, "update_enemies");
+        assert_eq!(
+            target.signature.as_deref(),
+            Some("update_enemies(speed: f32): void")
+        );
+        tools.register_indexed_symbols(&json!({"items":[]}));
+        assert_eq!(
+            tools
+                .symbol_target(
+                    json!({"symbol_id":"prefetched-enemies"})
+                        .as_object()
+                        .unwrap()
+                )
+                .name,
+            "update_enemies"
+        );
     }
 
     #[test]
@@ -6794,6 +6847,52 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("batch failed")));
+    }
+
+    #[test]
+    fn add_symbol_shares_the_atomic_tested_write_batch() {
+        let (client, server) = stasis_runner::live::live_session(1);
+        let responder = thread::spawn(move || loop {
+            if let Some(request) = server.drain(1).into_iter().next() {
+                let LiveCommand::EditBatch {
+                    edits,
+                    preview,
+                    run_tests,
+                } = &request.command
+                else {
+                    panic!("edit batch")
+                };
+                assert!(!preview && *run_tests);
+                assert_eq!(edits.len(), 2);
+                assert_eq!(edits[0].operation, LiveEditOperation::Add);
+                assert_eq!(edits[0].target.name, "helper");
+                assert_eq!(edits[1].operation, LiveEditOperation::Update);
+                assert_eq!(edits[1].target.name, "tick");
+                server
+                    .respond(LiveResponse::success(
+                        request.request_id,
+                        1,
+                        "edit_applied",
+                        json!({"tests":"passed", "receipt":"add.json"}),
+                    ))
+                    .unwrap();
+                break;
+            }
+            thread::yield_now();
+        });
+        let mut tools = LiveAiTools::new(client);
+        tools.reference_search_ready = true;
+        tools.register_symbol(&json!({"symbol_id":"tick-id", "file":"src/main.stasis", "kind":"function", "name":"tick"}));
+        let observations = tools.execute(&[
+            ToolCall {tool:"add_symbol".into(), args:json!({"file":"src/main.stasis", "name":"helper", "kind":"function", "new_source":"function helper(): i32 { return 1; }"})},
+            ToolCall {tool:"write_symbol".into(), args:json!({"symbol_id":"tick-id", "new_source":"function tick(): i32 { return helper(); }"})},
+            ToolCall {tool:"finish_task".into(), args:json!({})},
+        ], &AtomicBool::new(false));
+        responder.join().unwrap();
+        assert!(observations
+            .iter()
+            .all(|observation| observation.error.is_none()));
+        tools.validate_completion().unwrap();
     }
 
     #[test]
