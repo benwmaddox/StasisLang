@@ -3665,6 +3665,54 @@ function main(): i32 {
     }
 
     #[test]
+    fn network_client_send_uses_explicit_bounded_length() {
+        let source = include_str!("../../../../src/stdlib/network_client.stasis");
+        assert_eq!(
+            crate::frontend::formatter::format_source(source).expect("format network client"),
+            source
+        );
+        // Record the host boundary without opening a network connection.
+        let source = source.replace(
+            "function @internal @extern(\"stasis_web_network_send\") network_client_send_raw(payload: u8[], length: i32): i32;",
+            "global send_calls: i32; function network_client_send_raw(payload: u8[], length: i32): i32 { send_calls += 1; return length; }",
+        );
+        let mut process = JitProcess::new();
+        process
+            .set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)
+            .expect("configure inert network imports");
+        process.upsert_file("network_client.stasis", &source);
+        process.upsert_file(
+            "main.stasis",
+            r#"
+import "network_client.stasis";
+global payload: u8[4];
+global large: u8[65537];
+function main(): i32 {
+    if (network_client_send(payload, -1) != -1) { return 1; }
+    if (network_client_send(payload, 5) != -1) { return 2; }
+    if (network_client_send(large, 65537) != -1) { return 3; }
+    if (send_calls != 0) { return 4; }
+    if (network_client_send(payload, 0) != 0) { return 5; }
+    if (network_client_send(payload, 2) != 2) { return 6; }
+    if (network_client_send(payload, 4) != 4) { return 7; }
+    if (network_client_send(large, 65536) != 65536) { return 8; }
+    if (send_calls != 4) { return 9; }
+    return 0;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("compile explicit network send lengths");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute bounded sends"),
+            0
+        );
+    }
+
+    #[test]
     fn offline_web_network_profile_is_copied_to_staged_candidates() {
         let mut active = JitProcess::new();
         active

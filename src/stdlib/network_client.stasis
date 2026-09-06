@@ -45,9 +45,10 @@ function network_client_poll(out: u8[]): i32 {
     return network_client_poll_raw(out, out.max_length);
 }
 
-function network_client_send(payload: u8[]): i32 {
-    if (payload.length < 0 || payload.length > NETWORK_CLIENT_MAX_MESSAGE_BYTES) {
+// Send the caller-maintained used prefix, bounded by the payload capacity.
+function network_client_send(payload: u8[], length: i32): i32 {
+    if (length < 0 || length > payload.max_length || length > NETWORK_CLIENT_MAX_MESSAGE_BYTES) {
         return -1;
     }
-    return network_client_send_raw(payload, payload.length);
+    return network_client_send_raw(payload, length);
 }
