@@ -1715,6 +1715,102 @@ Archived priority override (2026-02-13, historical):
   - Bad: local screenshot capture initially looked like a sample presentation failure, but the unchanged render-parity sample reproduced the same missing-capture behavior in this environment.
   - Adjustment: distinguish renderer startup/command submission evidence from screenshot-hook evidence by immediately running the known-good parity scene when capture infrastructure fails, and iterate all reported pointer slots because desktop touch transitions do not occupy the mouse slot.
 
+## Integration seam testing rollout
+
+This checklist owns IT-001 through IT-032 rollout ordering, priorities, and
+implementation tracking. The [integration seam testing strategy](integration_seam_testing_strategy.md)
+owns seam design, oracles, CI lanes, fixture details, and the
+[per-task definition of done](integration_seam_testing_strategy.md#definition-of-done-for-each-task).
+Its acceptance-run ordering describes test mechanics, not implementation priority.
+Change rollout decisions here and update the linked design only when acceptance
+criteria change. GitHub issues and reviews remain the source of work selection.
+
+### Integration seam rollout order
+
+1. Implement IT-001 first. It turns silent constant drift into a cheap failure
+   and gives later harnesses a descriptor to record.
+2. Add the shared probe and evidence writer while implementing IT-002 and
+   IT-003. Keep the writer language-neutral JSON; do not build a new test
+   framework.
+3. Complete desktop and linked-native tests IT-004 through IT-016. These provide fast
+   feedback for most failures before Android is involved.
+4. Add one reusable Android driver that can install a supplied APK, wait on
+   structured markers, inject events/lifecycle transitions, collect evidence,
+   and always restore device state and force-stop the app.
+5. Implement release-shell tests IT-017 through IT-024 before Workshop tests. The release shell has a
+   smaller path and establishes whether a defect belongs to common runtime or
+   Workshop-specific JNI/GLES code.
+6. Add Workshop cases IT-025 through IT-032 using the same fixtures and evidence fields. Keep Java
+   assertions focused on JNI and preview boundaries rather than duplicating
+   compiler unit tests.
+
+### Integration seam task tracking
+
+The priority is the suggested implementation priority within each rollout stage
+below; table IDs identify tasks, not a strict numeric execution sequence. This
+program does not preempt selected product work. Maddox Tasks parent #209 tracks
+the program; IT-001 through IT-032 map to children #210 through #241 respectively.
+The original backlog registration is historical, not a claim about current task
+status. Record implementation progress and evidence here when a selected item
+changes; do not maintain a second rollout/status list in the strategy.
+
+#### Contract, Stasis, and host memory
+
+| ID | Pri | Test | Primary oracle | Lane |
+|---|---:|---|---|---|
+| IT-001 | 1 | Compare the authoritative ABI descriptor with Stasis constants, Rust allocations, AOT bindings, JNI buffers, and Java capacities. | Exact descriptor equality | Fast |
+| IT-002 | 1 | Populate every meaningful HostFrame lane in the desktop host, execute compiled Stasis accessors through JIT, and read a checksum back. | Expected checksum and bounds diagnostics | Fast |
+| IT-003 | 1 | Emit each gfx command category to capacity and one beyond in Stasis, then consume it with the native trace interpreter. | Counts, dropped counters, order, and trace | Fast |
+| IT-004 | 1 | Compile and call startup asset externs through JIT and linked AOT against one recording host implementation. | Symbol/signature calls and string/receiver values | Native |
+| IT-005 | 1 | Have Stasis `main` and a later tick publish window requests and prove the host applies each sequence once. | Ordered request/application log | Native |
+
+#### Desktop runtime seams
+
+| ID | Pri | Test | Primary oracle | Lane |
+|---|---:|---|---|---|
+| IT-006 | 1 | Inject keyboard and pointer events through the desktop graphics host, run one tick, and verify changed Stasis state and frame trace. | State checksum plus command trace | Native |
+| IT-007 | 2 | Resize across odd, fractional, minimized, and restored drawable sizes and round-trip metrics through HostFrame and gfx metadata. | Dimensions, generations, pointer transform | Native |
+| IT-008 | 1 | Load a manifest sprite, font, and cached text from Stasis and render them through the real desktop runtime. | Asset identities, handles, trace, named pixel regions | Native |
+| IT-009 | 2 | Submit bad magic/version/count/text/order frames between valid frames and prove rejection does not poison the next frame. | Structured rejection followed by valid trace | Native |
+| IT-010 | 1 | Compile a live tick/render edit while frames run and prove one frame window never mixes entry-table generations. | Per-frame generation and trace pairs | Native |
+| IT-011 | 1 | Replay identical host snapshots through JIT and linked AOT and compare state checksum, entry results, and command trace at every tick. | Per-tick parity record | Native |
+
+#### Generated AOT and shared mobile runtime
+
+| ID | Pri | Test | Primary oracle | Lane |
+|---|---:|---|---|---|
+| IT-012 | 1 | Link compiler-generated AOT objects and `published_aot_bindings.c` into the C mobile runtime test harness instead of fake entries. | Successful symbol binding and first frame trace | Native |
+| IT-013 | 1 | Run real AOT `main`, `tick`, and `render` entries through initialize/step/pause/shutdown, including deliberate non-zero results. | Ordered lifecycle and exact stop result | Native |
+| IT-014 | 1 | Prove the mobile runtime snapshots host input before tick and submits the command buffer only after a successful render. | Guest-observed input and call-order log | Native |
+| IT-015 | 2 | Resolve packaged sprite, font, text, and audio assets through the shared mobile asset root with a real AOT fixture. | Manifest hashes, handles, render trace, mixed audio samples | Native |
+| IT-016 | 1 | Package Android, compile/link the generated Gradle/CMake project, and audit the final native library for required entries, bindings, and forbidden desktop dependencies. | Link map/symbol/dependency audit | Native |
+
+#### Generated Android release shell
+
+| ID | Pri | Test | Primary oracle | Lane |
+|---|---:|---|---|---|
+| IT-017 | 1 | Package, install, and launch the generated AOT Android release shell and prove a non-empty game reaches stable frames. | Lifecycle markers, state checksum, trace, capture | Emulator |
+| IT-018 | 1 | Send touch down/move/up through Android/SDL and prove HostFrame-to-Stasis state-to-frame behavior. | Pointer fields, state transition, frame trace | Emulator |
+| IT-019 | 1 | Rotate and resize the release shell and prove native/drawable/logical metrics and generations reach Stasis before the restored frame. | Metric/generation record and named pixel regions | Emulator |
+| IT-020 | 1 | Background/resume and recreate the release Activity after resources load; verify the first accepted frame restores sprite, fallback, and cached text. | Restore events, same-process counter advance, per-epoch generations, Android compositor capture | Emulator |
+| IT-021 | 2 | Package and load real sprite/font/text/audio assets in the release shell. | Manifest identity, render regions, offline/queued audio evidence | Emulator |
+| IT-022 | 2 | Build controlled packages with missing, tampered, traversal, duplicate, oversized, and malformed-manifest assets; reject before game initialization and prove a valid package recovers afterward. | Stable code/path agreement between Java/native diagnostics, no partial staging, bounded process | Emulator |
+| IT-023 | 2 | Write a Stasis preference through the Android platform store, kill/relaunch the process, and read it through AOT. | Persisted value and scoped storage path | Emulator |
+| IT-024 | 2 | Return distinct non-zero codes from generated-AOT main, tick, and render variants; verify exact entry/code propagation and stop ordering. | Native log plus Java accessibility overlay, exact call counts, zero submit/present, stable PID, no fatal evidence | Emulator |
+
+#### Android Workshop JNI/JIT preview
+
+| ID | Pri | Test | Primary oracle | Lane |
+|---|---:|---|---|---|
+| IT-025 | 1 | From Java, load the C JNI shim and Rust bridge, compile a real project, run a JIT frame into direct buffers, and render it with GLES. | Compile marker, trace, state checksum, capture | Emulator |
+| IT-026 | 1 | Call the JNI frame bridge with exact, short, oversized, wrong-order, and non-direct buffers and verify bounded failure without writes past capacity. | Status, canaries, structured last-frame error | Emulator |
+| IT-027 | 1 | Send Workshop touch input through Java/JNI to JIT HostFrame, then inspect state and the resulting command frame. | Input/state/frame correlation | Emulator |
+| IT-028 | 1 | Apply a valid hot edit and an invalid edit while the preview runs; prove valid publication is atomic and failure preserves old state/code/frame. | Generation, state checksum, trace, diagnostic | Emulator |
+| IT-029 | 2 | Switch between two projects with colliding resource handles, then recreate the surface and verify resources remain project- and generation-scoped. | Resource identities, generations, captures | Emulator |
+| IT-030 | 2 | Run a real `.test.stasis` file through Java -> JNI -> Rust test runner after a source edit and verify pass/fail details and rollback behavior. | Structured test result and source checksum | Emulator |
+| IT-031 | 1 | Trigger parse, extern-resolution, runtime, render-schema, and resource errors and verify each crosses Rust/C/JNI/Java without losing its stage and detail. | UI diagnostic equal to structured native cause | Emulator |
+| IT-032 | 1 | Run exactly 300 JNI/JIT/GLES frames while publishing same-shape edits and recreating EGL at fixed boundaries. | Ordered frame/runtime/source/trace generations, direct-buffer and resource peaks, cleanup receipt | Scheduled emulator |
+
 ## PR Sequence
 
 1. PR-A: S0-S2
