@@ -39,9 +39,10 @@ prompt dropped from 5489 to 4814 tokens, but smaller input alone was insufficien
 
 - `cost-a` failed after a test rejection, a malformed repair batch, and finally
   truncated provider JSON. Rollback preserved the baseline source. The final
-  malformed response's usage was not recorded: the existing transport publishes
-  usage only after decoding succeeds. Do not treat this run's logged cost as its
-  complete bill.
+  malformed response's usage was not recorded: that revision published usage
+  only after decoding succeeded. The follow-up now records reported usage for
+  completed streams even when decoding fails; it cannot recover this historical
+  missing record. Do not treat this run's logged cost as its complete bill.
 - `cost-b` passed tests but omitted a requested center-coordinate assertion.
 - `cost-c` passed tests but assigned velocities without asserting preservation.
 

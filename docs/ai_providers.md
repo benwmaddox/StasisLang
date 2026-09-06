@@ -124,7 +124,7 @@ the oldest remaining client.
 
 ## Live edit round trips
 
-Live edit requests provide current source, selectors, and reference results in
+Live edit requests provide current source, symbol identity, and reference results in
 `resolved_targets`. The adjacent `edit_execution` guidance tells the model to
 reuse that context, use supported arithmetic syntax, and set `complete: true`
 on its final write response. Missing dependencies still allow additional reads.
@@ -136,6 +136,9 @@ The structured response exposes one completion flag rather than a repeatable
 finish action. The provider decoder maps it to the existing host `finish_task`
 gate after all calls; it cannot bypass receipt, tests, or task-contract validation.
 Legacy finish calls remain compatible internally.
+`mode: "done", complete: true` also requests this gate, allowing a separate
+completion turn after inspecting a successful write receipt. It does not turn a
+rejected write into a successful task.
 
 Live replacements require ID and new source; deletes require ID alone.
 Name/file selectors remain available for read discovery; `add_symbol` creates
@@ -153,6 +156,18 @@ the instructions alone are not an independent semantic oracle.
 Writes validate automatically. A following `run_tests` in the same response
 reuses a passing receipt, or is skipped when the preceding write failed, so
 tests of unchanged code cannot be mistaken for validation of a rejected edit.
+
+Resolved targets carry identity once in their definition; matching task requirements
+retain the symbol ID, name, and behavioral constraints without repeating file,
+kind, owner, and signature. Unresolved targets retain their discovery selectors.
+Repeated identical repair errors in a turn's model-facing observations may use
+`error_from_observation`, a zero-based index of an earlier full error in that same
+array. Short errors remain inline when a reference would cost more bytes. Tool
+order, results, and the full audit events are unchanged.
+
+Completed OpenRouter streams retain reported usage even when structured-response
+decoding fails, and the agent emits that usage before returning the error. Missing
+usage and incomplete transport failures cannot be reconstructed from these records.
 
 ## Security
 

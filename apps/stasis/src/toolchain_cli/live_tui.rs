@@ -392,7 +392,7 @@ fn load_ai_initial_context(
         context.as_object_mut().unwrap().remove("start");
         context.as_object_mut().unwrap().remove("options");
         context["edit_execution"] = serde_json::json!({
-            "provided": "resolved_targets contains current compiler-read source, exact selectors, and reference results. These reads have already executed; reuse them directly.",
+            "provided": "resolved_targets contains current compiler-read source, symbol identity, and reference results. These reads have already executed; reuse them directly.",
             "next_action": "If the supplied targets cover the request, write the related source and tests together now. Read only missing dependencies.",
             "completion": "Set complete=true when this response completes the request. The executor checks the receipt and contract after executing all calls; no confirmation turn is needed.",
             "tests": "Writes already compile and run tests. Do not append run_tests; it is only useful for an explicitly needed baseline before edits.",
@@ -414,7 +414,46 @@ fn load_ai_initial_context(
         }
         context["task_contract"] = contract.context;
     }
+    compact_resolved_context(&mut context);
     Ok(context)
+}
+
+fn compact_resolved_context(context: &mut Value) {
+    let Some(bundles) = context
+        .get_mut("resolved_targets")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let mut defined_ids = BTreeSet::new();
+    for bundle in bundles {
+        let Some(id) = bundle
+            .pointer("/definition/symbol_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        defined_ids.insert(id.to_string());
+        // The complete identity and source remain in definition.
+        bundle.as_object_mut().unwrap().remove("selector");
+    }
+    if let Some(requirements) = context
+        .pointer_mut("/task_contract/required_changes")
+        .and_then(Value::as_array_mut)
+    {
+        for requirement in requirements {
+            if requirement
+                .get("symbol_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| defined_ids.contains(id))
+            {
+                for key in ["file", "kind", "owner", "signature"] {
+                    requirement.as_object_mut().unwrap().remove(key);
+                }
+            }
+        }
+    }
 }
 
 fn positive_intent_prompt(user_prompt: &str) -> &str {
@@ -5997,6 +6036,44 @@ mod tests {
                 .name,
             "update_enemies"
         );
+    }
+
+    #[test]
+    fn resolved_context_stores_identity_once_without_dropping_source_or_requirements() {
+        let identity = json!({"symbol_id":"tick-id", "name":"tick", "file":"src/main.stasis", "kind":"function", "signature":"tick(): void"});
+        let mut definition = identity.clone();
+        definition["source"] = json!("function tick(): void {}");
+        let mut requirement = identity.clone();
+        requirement["purpose"] = json!("Preserve state.");
+        requirement["source_require"] = json!(["tick"]);
+        let mut context = json!({
+            "resolved_targets":[{"selector":identity, "definition":definition, "references":{"symbols":[]}}, {"selector":{"name":"unresolved"}, "definition":null}],
+            "task_contract":{"required_changes":[requirement, {"name":"missing", "symbol_id":"missing-id", "file":"src/other.stasis"}]}
+        });
+        let before = context.clone();
+        compact_resolved_context(&mut context);
+        assert_eq!(
+            context["resolved_targets"][0]["definition"],
+            before["resolved_targets"][0]["definition"]
+        );
+        assert_eq!(
+            context["resolved_targets"][0]["references"],
+            before["resolved_targets"][0]["references"]
+        );
+        assert!(context["resolved_targets"][0].get("selector").is_none());
+        assert_eq!(
+            context["task_contract"]["required_changes"][0],
+            json!({"symbol_id":"tick-id", "name":"tick", "purpose":"Preserve state.", "source_require":["tick"]})
+        );
+        assert_eq!(
+            context["resolved_targets"][1],
+            before["resolved_targets"][1]
+        );
+        assert_eq!(
+            context["task_contract"]["required_changes"][1],
+            before["task_contract"]["required_changes"][1]
+        );
+        assert!(context.to_string().len() < before.to_string().len());
     }
 
     #[test]

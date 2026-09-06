@@ -1,7 +1,7 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -333,10 +333,11 @@ where
             maximum: profile.max_turns,
         });
         let request = transcript.render()?;
-        let response = provider.respond(&request, canceled)?;
+        let response = provider.respond(&request, canceled);
         if let Some(usage) = provider.take_usage() {
             emit(AgentEvent::ProviderUsage(usage));
         }
+        let response = response?;
         validate_working_notes(response.working_notes())?;
         emit(AgentEvent::WorkingNotes(
             response.working_notes().to_string(),
@@ -497,7 +498,7 @@ impl AgentTranscript {
         let encoded = serde_json::to_string(&json!({
             "record": "turn_result",
             "response": response,
-            "observations": observations,
+            "observations": compact_repair_observations(observations),
         }))
         .map_err(|error| format!("failed encoding append-only AI transcript entry: {error}"))?;
         self.entries.push(TranscriptEntry {
@@ -603,6 +604,31 @@ impl AgentTranscript {
             }),
         )
     }
+}
+
+fn compact_repair_observations(observations: &[ToolObservation]) -> Vec<Value> {
+    let mut first_errors = BTreeMap::new();
+    observations
+        .iter()
+        .enumerate()
+        .map(|(index, observation)| {
+            let mut value =
+                serde_json::to_value(observation).expect("serializable tool observation");
+            if let Some(error) = observation.error.as_deref() {
+                if let Some(first) = first_errors.get(error) {
+                    let mut compact = value.clone();
+                    compact.as_object_mut().unwrap().remove("error");
+                    compact["error_from_observation"] = json!(first);
+                    if compact.to_string().len() < value.to_string().len() {
+                        value = compact;
+                    }
+                } else {
+                    first_errors.insert(error, index);
+                }
+            }
+            value
+        })
+        .collect()
 }
 
 fn compact_transcript<E: FnMut(AgentEvent)>(
@@ -1836,6 +1862,17 @@ fn decode_model_response(source: &str, provider: &str) -> Result<ModelResponse, 
     let mut response: ModelResponse = serde_json::from_value(value)
         .map_err(|error| format!("{provider} returned invalid agent response: {error}"))?;
     if complete {
+        if let ModelResponse::Done {
+            working_notes,
+            summary,
+        } = response
+        {
+            response = ModelResponse::ToolCalls {
+                working_notes,
+                summary,
+                tool_calls: Vec::new(),
+            };
+        }
         if let ModelResponse::ToolCalls { tool_calls, .. } = &mut response {
             // Reuse the existing executor gate, including rejected-write protection.
             let finish_id = action_id_for_tool("finish_task");
@@ -2233,6 +2270,64 @@ mod tests {
             .as_deref()
             .is_some_and(|error| error.contains("omitted")));
         assert_eq!(bounded[2].result.as_ref().unwrap()["value"], 7);
+    }
+
+    #[test]
+    fn repeated_repair_errors_keep_one_full_copy_and_preserve_results() {
+        let error = "The atomic batch was rejected; repair the missing target before retrying.";
+        let observations = vec![
+            ToolObservation::error("replace_symbol", error),
+            ToolObservation::error("add_symbol", error),
+            ToolObservation::error("read_symbol", "different"),
+            ToolObservation::result("list_symbols", json!({"ids": [1, 2]})),
+            ToolObservation::error("a", "x"),
+            ToolObservation::error("b", "x"),
+        ];
+        let original = serde_json::to_value(&observations).unwrap();
+        let compact = compact_repair_observations(&observations);
+        assert_eq!(compact[0], original[0]);
+        assert_eq!(compact[1]["error_from_observation"], 0);
+        assert!(compact[1].get("error").is_none());
+        assert_eq!(compact[1]["tool"], "add_symbol");
+        for index in 2..observations.len() {
+            assert_eq!(compact[index], original[index]);
+        }
+        assert_eq!(serde_json::to_value(&observations).unwrap(), original);
+        assert!(serde_json::to_string(&compact).unwrap().len() < original.to_string().len());
+        let mut transcript = AgentTranscript::new("{}".into());
+        transcript.append(&json!({}), &observations).unwrap();
+        let rendered = transcript.render().unwrap();
+        let entry: Value = serde_json::from_str(rendered.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(entry["observations"], json!(compact));
+    }
+
+    #[test]
+    fn failed_provider_response_emits_available_usage() {
+        struct FailedProvider;
+        impl ModelProvider for FailedProvider {
+            fn respond(&mut self, _: &str, _: &AtomicBool) -> Result<ModelResponse, String> {
+                Err("invalid structured response".into())
+            }
+            fn take_usage(&mut self) -> Option<Value> {
+                Some(json!({"cost": 0.001}))
+            }
+        }
+        let mut usage = None;
+        let result = run_agent(
+            &mut FailedProvider,
+            &mut Tools::default(),
+            "inspect",
+            json!({}),
+            workshop_tool_specs(),
+            &AtomicBool::new(false),
+            |event| {
+                if let AgentEvent::ProviderUsage(value) = event {
+                    usage = Some(value);
+                }
+            },
+        );
+        assert_eq!(result.unwrap_err(), "invalid structured response");
+        assert_eq!(usage.unwrap()["cost"], 0.001);
     }
 
     #[test]
@@ -3281,6 +3376,75 @@ mod tests {
             .is_err());
         }
         validate_tool_call(&ToolCall {tool:"add_symbol".into(), args:json!({"file":"src/main.stasis", "name":"helper", "new_source":"function helper(): i32 { return 1; }"})}, &specs, &known, false).unwrap();
+    }
+
+    #[test]
+    fn done_completion_flag_finishes_a_prior_write_only_when_host_accepts() {
+        struct Provider(Vec<ModelResponse>);
+        impl ModelProvider for Provider {
+            fn respond(&mut self, _: &str, _: &AtomicBool) -> Result<ModelResponse, String> {
+                if self.0.is_empty() {
+                    return Err("no more responses".into());
+                }
+                Ok(self.0.remove(0))
+            }
+        }
+        struct Gate {
+            accept: bool,
+            wrote: bool,
+            finished: bool,
+        }
+        impl ToolExecutor for Gate {
+            fn execute(&mut self, calls: &[ToolCall], _: &AtomicBool) -> Vec<ToolObservation> {
+                calls
+                    .iter()
+                    .map(|call| {
+                        match call.tool.as_str() {
+                            "write_symbol" => self.wrote = true,
+                            "finish_task" => self.finished = true,
+                            other => panic!("unexpected tool: {other}"),
+                        }
+                        ToolObservation::result(&call.tool, json!({"accepted": self.accept}))
+                    })
+                    .collect()
+            }
+            fn terminal_success(&self) -> Option<String> {
+                (self.accept && self.wrote && self.finished).then(|| "accepted".into())
+            }
+        }
+        for accept in [false, true] {
+            let mut provider = Provider(vec![
+                decode_model_response(&json!({"mode":"tool_calls", "working_notes":"Apply the edit.", "complete":false, "tool_calls":[{"action_id":action_id_for_tool("write_symbol"), "args":{"symbol_id":"id", "new_source":"source"}}]}).to_string(), "fixture").unwrap(),
+                decode_model_response(&json!({"mode":"done", "working_notes":"The receipt is ready.", "summary":"Finished.", "complete":true, "tool_calls":[]}).to_string(), "fixture").unwrap(),
+            ]);
+            let mut gate = Gate {
+                accept,
+                wrote: false,
+                finished: false,
+            };
+            let result = run_agent(
+                &mut provider,
+                &mut gate,
+                "update",
+                json!({}),
+                live_tool_specs(),
+                &AtomicBool::new(false),
+                |_| {},
+            );
+            assert_eq!(result.is_ok(), accept);
+            assert!(gate.wrote && gate.finished);
+            assert!(provider.0.is_empty());
+        }
+        for complete in [json!(false), Value::Null] {
+            let mut value = json!({"mode":"done", "working_notes":"Legacy completion."});
+            if !complete.is_null() {
+                value["complete"] = complete;
+            }
+            assert!(matches!(
+                decode_model_response(&value.to_string(), "fixture").unwrap(),
+                ModelResponse::Done { .. }
+            ));
+        }
     }
 
     #[test]

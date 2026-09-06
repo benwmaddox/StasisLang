@@ -8966,6 +8966,8 @@ mod tests {
             ("read_symbol", "stasis symbol read / :read"),
             ("read_imports", "stasis symbol read imports / :read imports"),
             ("write_symbol", "stasis symbol update / :update"),
+            ("add_symbol", "stasis symbol add"),
+            ("finish_task", "host completion gate / desktop Mark Done"),
             (
                 "write_imports",
                 "stasis symbol update imports / :update imports",
