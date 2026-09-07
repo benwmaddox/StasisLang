@@ -2726,7 +2726,7 @@ impl DesktopEditor {
             let stage = provider_timeline_stage(task, &request);
             egui::Frame::none()
                 .fill(Color32::from_rgb(28, 33, 41))
-                .stroke(egui::Stroke::new(1.0, border()))
+                .stroke(egui::Stroke::new(1.0_f32, border()))
                 .rounding(8.0)
                 .inner_margin(13.0)
                 .show(ui, |ui| {
@@ -2773,7 +2773,7 @@ impl DesktopEditor {
                 .last()
                 .map(|event| event.0)
                 .unwrap_or(ProgressStage::Queued);
-            egui::Frame::none().fill(Color32::from_rgb(28, 33, 41)).stroke(egui::Stroke::new(1.0, border())).rounding(8.0).inner_margin(13.0).show(ui, |ui| {
+            egui::Frame::none().fill(Color32::from_rgb(28, 33, 41)).stroke(egui::Stroke::new(1.0_f32, border())).rounding(8.0).inner_margin(13.0).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(RichText::new(format!("Host request {}: {}", host.request_id, stage.label())).strong());
                 if host.cancel_requested {

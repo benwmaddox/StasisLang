@@ -761,7 +761,7 @@ impl OpenRouterProvider {
                         progress(crate::ProviderProgress::FirstResponse { elapsed_ms });
                     }
                     content.push_str(value);
-                    if first_action_ms.is_none() && has_top_level_json_key(&content, "tool_calls") {
+                    if first_action_ms.is_none() && has_started_tool_call(&content) {
                         let elapsed_ms = duration_ms(request_started.elapsed());
                         first_action_ms = Some(elapsed_ms);
                         progress(crate::ProviderProgress::FirstAction { elapsed_ms });
@@ -963,7 +963,7 @@ fn env_u64(name: &str) -> Result<Option<u64>, String> {
 fn duration_ms(value: Duration) -> u64 {
     u64::try_from(value.as_millis()).unwrap_or(u64::MAX)
 }
-fn has_top_level_json_key(content: &str, expected: &str) -> bool {
+fn has_started_tool_call(content: &str) -> bool {
     let bytes = content.as_bytes();
     let mut index = 0;
     let mut depth = 0_u32;
@@ -996,15 +996,27 @@ fn has_top_level_json_key(content: &str, expected: &str) -> bool {
                 }
                 let end = index;
                 index += 1;
-                if depth != 1 || escaped || &bytes[start..end] != expected.as_bytes() {
+                if depth != 1 || escaped || &bytes[start..end] != b"tool_calls" {
                     continue;
                 }
                 while index < bytes.len() && bytes[index].is_ascii_whitespace() {
                     index += 1;
                 }
-                if bytes.get(index) == Some(&b':') {
-                    return true;
+                if bytes.get(index) != Some(&b':') {
+                    continue;
                 }
+                index += 1;
+                // A required but empty tool_calls array is not an action.
+                for delimiter in [b'[', b'{'] {
+                    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                        index += 1;
+                    }
+                    if bytes.get(index) != Some(&delimiter) {
+                        return false;
+                    }
+                    index += 1;
+                }
+                return true;
             }
             _ => index += 1,
         }
@@ -1047,27 +1059,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn action_progress_requires_a_complete_top_level_tool_calls_key() {
-        assert!(!has_top_level_json_key(
+    fn action_progress_requires_a_nonempty_top_level_tool_calls_array() {
+        for content in [
             r#"{"mode":"tool_calls"}"#,
-            "tool_calls"
-        ));
-        assert!(!has_top_level_json_key(
             r#"{"working_notes":"say \"tool_calls\": [] and {ignored}"}"#,
-            "tool_calls"
-        ));
-        assert!(!has_top_level_json_key(
-            r#"{"working_notes":"ok","tool_calls""#,
-            "tool_calls"
-        ));
-        assert!(has_top_level_json_key(
-            r#"{"working_notes":"ok","tool_calls" :"#,
-            "tool_calls"
-        ));
-        assert!(!has_top_level_json_key(
-            r#"{"nested":{"tool_calls":[]}}"#,
-            "tool_calls"
-        ));
+            r#"{"nested":{"tool_calls":[{}]}}"#,
+            r#"{"mode":"done","tool_calls":[]}"#,
+            r#"{"tool_calls": [  ]}"#,
+            r#"{"tool_calls": null}"#,
+        ] {
+            assert!(!has_started_tool_call(content), "{content}");
+        }
+        let partial = r#"{"working_notes":"ok","tool_calls" : [  {"#;
+        for end in 0..partial.len() {
+            assert!(!has_started_tool_call(&partial[..end]));
+        }
+        assert!(has_started_tool_call(partial));
+    }
+
+    #[test]
+    fn streamed_done_reply_never_reports_first_action() {
+        let fragments = [
+            r#"{"mode":"done","working_notes":"","summary":"Done","tool_calls" :"#,
+            " [ ",
+            "]}",
+        ];
+        let mut body = String::new();
+        for content in fragments {
+            let chunk = json!({"choices":[{"delta":{"content":content}}]});
+            body.push_str(&format!("data: {chunk}\n\n"));
+        }
+        body.push_str("data: [DONE]\n\n");
+        let (base_url, _requests, worker) =
+            mock_server(vec![http_response("text/event-stream", &body)]);
+        let mut provider = OpenRouterProvider::new(test_config(base_url)).unwrap();
+        let mut progress = Vec::new();
+        let response = provider
+            .respond_with_progress(&test_request(), &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
+            .unwrap();
+        assert!(matches!(response, ModelResponse::Done { .. }));
+        assert!(!progress
+            .iter()
+            .any(|event| matches!(event, crate::ProviderProgress::FirstAction { .. })));
+        assert!(provider.take_usage().unwrap()["timing_ms"]["first_action"].is_null());
+        worker.join().unwrap();
     }
 
     #[test]

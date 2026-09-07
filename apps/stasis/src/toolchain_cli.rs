@@ -7239,6 +7239,7 @@ fn desktop_preview_semantic_batch(
     })
 }
 
+#[cfg(test)]
 fn desktop_apply_semantic_preview(
     root: &Path,
     preview: &DesktopSemanticPreview,
@@ -7295,6 +7296,7 @@ fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, 
     desktop_apply_semantic_preview(root, &preview)
 }
 
+#[cfg(test)]
 fn desktop_run_focused_tests(
     root: &Path,
     relevant_tests: &[String],

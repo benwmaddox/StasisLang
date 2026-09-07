@@ -150,8 +150,11 @@ provider reasoning, response fragments, or transport errors.
 The timeline shows the latest provider and host request for the selected task.
 Provider first-response and first-action milestones are request-wide, while
 contacting-provider can recur across turns. OpenRouter records first nonempty
-content and the first root `tool_calls` key at the same millisecond used in its
-usage audit. These latencies start at the inference POST, excluding queue,
+content and the start of the first object in the root `tool_calls` array at
+the same millisecond used in its
+usage audit. The required empty `tool_calls: []` field in a done response does
+not count as an action; its first-action latency remains unmeasured. These
+latencies start at the inference POST, excluding queue,
 source inspection, metadata lookup, and approval wait. Providers without streaming
 hooks report response completion as first response and leave first action
 unmeasured. Unknown route metadata never claims fallback.
@@ -225,3 +228,17 @@ queued, applying, compiling, running-tests, and completed ordering. The sibling
 `phase0.json` through `phase4.json` audits match these five synthetic states and
 the displayed 145 ms first-action value. This is fixture evidence only; the live
 OpenRouter trace remains outstanding.
+
+CI follow-up: stroke widths now use explicit `f32` literals, and the two
+non-progress convenience wrappers are test-only. Rust 1.97.1 compiled the exact
+workspace/all-targets command successfully; its execution stopped with 277
+library tests passed and 13 unrelated signing, path, and source-text failures.
+The exact Windows `network` filter passed 7 tests, the AI library passed 88, and
+the desktop filter passed 76. Formatting and diff checks passed.
+
+Visual evidence: no new media was captured for this correction. Layout is
+unchanged; a deterministic SSE test verifies that a done reply with a split,
+empty tool-call array emits no first-action event and leaves its audit latency
+null. The existing nonempty-action test still checks event/audit timing equality.
+Theory gained: a schema-required array key is not an action; the first contained
+object is the observable streaming boundary.
