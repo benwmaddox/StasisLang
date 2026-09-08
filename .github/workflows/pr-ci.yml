@@ -78,7 +78,7 @@ jobs:
         run: python -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 
       - name: Test release provenance
-        run: python -m unittest tools.ci.test_release_provenance
+        run: python -m unittest tools.ci.test_release_provenance tools.ci.test_audio_stream_native_acceptance
 
       - name: Test Android verified asset cache
         run: python tools/ci/test_android_asset_cache.py

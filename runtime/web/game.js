@@ -247,6 +247,9 @@
   let audioChannels = 2;
   let audioNextStart = 0;
   let audioUnderruns = 0;
+  const audioStreamSources = new Set();
+  let audioStreamActive = false;
+  let audioStreamCapacity = 8192;
   let audioSuspendedByLifecycle = false;
   let pendingAudioFrames = 0;
   let nextAudioVoiceHandle = 1;
@@ -1735,9 +1738,14 @@
     audioContext ||= new AudioContext();
     return audioContext;
   };
-  const scheduledAudioFrames = () => audioContext
-    ? Math.max(0, Math.round((audioNextStart - audioContext.currentTime) * audioSampleRate))
-    : 0;
+  const scheduledAudioFrames = () => {
+    if (!audioContext) return 0;
+    let frames = 0;
+    for (const entry of audioStreamSources) {
+      frames += Math.max(0, Math.round((entry.end - Math.max(entry.start, audioContext.currentTime)) * audioSampleRate));
+    }
+    return frames;
+  };
   const queuedAudioFrames = () => scheduledAudioFrames() + pendingAudioFrames;
   const pendingAudioFrameLimit = () => Math.max(1, Math.round(audioSampleRate * PENDING_AUDIO_SECONDS));
   const queuePendingAudio = (start, frames = 0) => {
@@ -1750,7 +1758,9 @@
     if (!audioContext || audioContext.state !== "running") return;
     const ready = pendingAudio.splice(0);
     pendingAudioFrames = 0;
-    for (const entry of ready) void entry.start();
+    for (const entry of ready) {
+      if (entry.start() === false) break;
+    }
   };
   const loadAudio = pathId => {
     const handle = nextHandle++;
@@ -1920,7 +1930,9 @@
     document.body.dataset.audioState = audioContext?.state || "closed";
   };
   const enableWebAudio = () => {
-    const audio = ensureAudio();
+    let audio;
+    try { audio = ensureAudio(); }
+    catch { updateAudioState(); return Promise.resolve(false); }
     if (audio.state === "running") {
       flushPendingAudio();
       updateAudioState();
@@ -1967,6 +1979,12 @@
     });
   };
   const shutdownWebAudio = () => {
+    audioStreamActive = false;
+    for (const entry of audioStreamSources) {
+      try { entry.source.stop(); } catch {}
+      entry.source.disconnect();
+    }
+    audioStreamSources.clear();
     audioSuspendedByLifecycle = false;
     pendingAudio.length = 0;
     pendingAudioFrames = 0;
@@ -1975,41 +1993,69 @@
     audioContext = undefined;
     audioEnablePromise = undefined;
     audioNextStart = 0;
-    if (closingContext && closingContext.state !== "closed") void closingContext.close();
+    audioUnderruns = 0;
+    if (closingContext && closingContext.state !== "closed") void closingContext.close().catch(() => {});
     updateAudioState();
   };
   const pushAudio = (byteOffset, frameCount) => {
-    if (!instance?.exports.memory || frameCount <= 0) return 0;
+    if (!audioStreamAvailable() || !instance?.exports.memory || frameCount <= 0 || byteOffset % 4 !== 0) return 0;
     const suspended = !audioContext || audioContext.state !== "running";
     const acceptedFrames = suspended
-      ? Math.min(frameCount, Math.max(0, pendingAudioFrameLimit() - queuedAudioFrames()))
-      : frameCount;
+      ? Math.min(frameCount, Math.max(0, Math.min(audioStreamCapacity, pendingAudioFrameLimit()) - queuedAudioFrames()))
+      : Math.min(frameCount, Math.max(0, audioStreamCapacity - queuedAudioFrames()));
     if (acceptedFrames <= 0 || (suspended && pendingAudio.length >= PENDING_AUDIO_ENTRY_LIMIT)) return 0;
     const sampleCount = acceptedFrames * audioChannels;
     if (byteOffset < 0 || byteOffset + sampleCount * 4 > instance.exports.memory.buffer.byteLength) return 0;
     const samples = new Float32Array(instance.exports.memory.buffer, byteOffset, sampleCount).slice();
-    const start = async () => {
-      const audio = ensureAudio();
-      const buffer = audio.createBuffer(audioChannels, acceptedFrames, audioSampleRate);
-      for (let channel = 0; channel < audioChannels; channel += 1) {
-        const output = buffer.getChannelData(channel);
-        for (let frame = 0; frame < acceptedFrames; frame += 1) output[frame] = samples[frame * audioChannels + channel];
+    const start = () => {
+      try {
+        const audio = ensureAudio();
+        const buffer = audio.createBuffer(audioChannels, acceptedFrames, audioSampleRate);
+        for (let channel = 0; channel < audioChannels; channel += 1) {
+          const output = buffer.getChannelData(channel);
+          for (let frame = 0; frame < acceptedFrames; frame += 1) output[frame] = samples[frame * audioChannels + channel];
+        }
+        const source = audio.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audio.destination);
+        const earliest = audio.currentTime + 0.005;
+        if (audioNextStart > 0 && audioNextStart < audio.currentTime) audioUnderruns += 1;
+        const startAt = Math.max(earliest, audioNextStart);
+        source.start(startAt);
+        audioNextStart = startAt + acceptedFrames / audioSampleRate;
+        const entry = { source, start: startAt, end: audioNextStart };
+        audioStreamSources.add(entry);
+        source.onended = () => {
+          audioStreamSources.delete(entry);
+          source.disconnect();
+        };
+        audioEvents += 1;
+        document.body.dataset.audioEvents = String(audioEvents);
+        document.body.dataset.audioMode = "stream";
+        return true;
+      } catch {
+        shutdownWebAudio();
+        return false;
       }
-      const source = audio.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audio.destination);
-      const earliest = audio.currentTime + 0.005;
-      if (audioNextStart > 0 && audioNextStart < audio.currentTime) audioUnderruns += 1;
-      const startAt = Math.max(earliest, audioNextStart);
-      source.start(startAt);
-      audioNextStart = startAt + acceptedFrames / audioSampleRate;
-      audioEvents += 1;
-      document.body.dataset.audioEvents = String(audioEvents);
-      document.body.dataset.audioMode = "stream";
     };
     if (suspended) queuePendingAudio(start, acceptedFrames);
-    else void start();
+    else if (!start()) return 0;
     return acceptedFrames;
+  };
+  const audioStreamAvailable = () => audioStreamActive && audioContext && audioContext.state !== "closed" ? 1 : 0;
+  const initAudioStream = (sampleRate, channels, targetLatencyFrames = 2048) => {
+    if ((channels !== 0 && channels !== 2) || targetLatencyFrames > (1 << 20)) return 0;
+    shutdownWebAudio();
+    audioSampleRate = Math.max(8000, Math.min(sampleRate || 48000, 192000));
+    audioChannels = 2;
+    audioStreamCapacity = Math.max(8192, Math.max(512, targetLatencyFrames > 0 ? targetLatencyFrames : 2048) * 4);
+    try {
+      ensureAudio();
+      audioStreamActive = true;
+      return audioStreamAvailable();
+    } catch {
+      return 0;
+    }
   };
   // @stasis-feature audio end
   const cancelAssetTask = task => {
@@ -2197,21 +2243,22 @@
       return 1;
     },
     // @stasis-feature audio begin
-    audio_init: (sampleRate, channels) => {
-      audioSampleRate = Math.max(8000, Math.min(sampleRate || 48000, 192000));
-      audioChannels = Math.max(1, Math.min(channels || 2, 2));
-      ensureAudio();
-      return 1;
-    },
-    audio_shutdown: () => {
-      shutdownWebAudio();
-    },
-    audio_is_available: () => 1,
+    audio_init: initAudioStream,
+    audio_shutdown: shutdownWebAudio,
+    audio_is_available: audioStreamAvailable,
     audio_get_sample_rate: () => audioSampleRate,
     audio_get_channels: () => audioChannels,
     audio_get_queued_frames: () => queuedAudioFrames(),
     audio_get_underruns: () => audioUnderruns,
-    audio_push_f32_interleaved: (byteOffset, frameCount) => pushAudio(byteOffset, frameCount),
+    audio_push_f32_interleaved: pushAudio,
+    stasis_jit_audio_init: initAudioStream,
+    stasis_jit_audio_shutdown: shutdownWebAudio,
+    stasis_jit_audio_is_available: audioStreamAvailable,
+    stasis_jit_audio_get_sample_rate: () => audioSampleRate,
+    stasis_jit_audio_get_channels: () => audioChannels,
+    stasis_jit_audio_get_queued_frames: () => queuedAudioFrames(),
+    stasis_jit_audio_get_underruns: () => audioUnderruns,
+    stasis_jit_audio_push_f32_interleaved: pushAudio,
     audio_load_wav: pathId => loadAudio(pathId),
     audio_release: handle => { audioAssets.delete(handle); stopAudioAsset(handle); },
     audio_play: (handle, loop, volume, pan) => startAudio(handle, loop, volume, pan),
@@ -2219,6 +2266,11 @@
     audio_voice_is_playing: handle => audioVoices.has(handle) ? 1 : 0,
     audio_voice_set_paused: (handle, paused) => setAudioVoicePaused(handle, paused),
     audio_voice_set_volume_pan: (handle, volume, pan) => setAudioVoiceVolumePan(handle, volume, pan),
+    stasis_jit_audio_play: (handle, loop, volume, pan) => startAudio(handle, loop, volume, pan),
+    stasis_jit_audio_stop: handle => stopAudio(handle),
+    stasis_jit_audio_voice_is_playing: handle => audioVoices.has(handle) ? 1 : 0,
+    stasis_jit_audio_voice_set_paused: (handle, paused) => setAudioVoicePaused(handle, paused),
+    stasis_jit_audio_voice_set_volume_pan: (handle, volume, pan) => setAudioVoiceVolumePan(handle, volume, pan),
     stasis_jit_audio_load_music: pathId => loadAudio(pathId),
     stasis_jit_audio_load_effect: pathId => loadAudio(pathId),
     stasis_jit_audio_play_music: (handle, loop, volume) => {
