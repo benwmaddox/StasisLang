@@ -246,6 +246,22 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     )
 endif()
 
+if(STASIS_GRAPHICS_BUILD_TESTS AND (TARGET stasis_graphics_static OR TARGET stasis_graphics))
+    add_executable(stasis_sprite_atlas_reservation_test tests/stasis_sprite_atlas_reservation_test.c)
+    if(TARGET stasis_graphics_static)
+        target_link_libraries(stasis_sprite_atlas_reservation_test PRIVATE stasis_graphics_static)
+    else()
+        target_link_libraries(stasis_sprite_atlas_reservation_test PRIVATE stasis_graphics)
+        set_target_properties(stasis_sprite_atlas_reservation_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    endif()
+    target_compile_definitions(stasis_sprite_atlas_reservation_test PRIVATE
+        STASIS_TEST_SPRITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/sprite_sheet_animation/assets/sprite_sheet_2x2.png")
+    add_test(NAME stasis_sprite_atlas_reservation_test COMMAND stasis_sprite_atlas_reservation_test)
+    set_tests_properties(stasis_sprite_atlas_reservation_test PROPERTIES
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy")
+endif()
+
 if(STASIS_BUILD_MONOLITH)
     if(NOT WIN32)
         message(FATAL_ERROR "The desktop production monolith currently targets Windows")

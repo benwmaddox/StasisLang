@@ -150,9 +150,11 @@ jobs:
           $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
           if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
           $env:STASIS_CMAKE_GENERATOR = $generator
-          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
+          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_BUILD_TESTS=ON -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/render-parity-runtime --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir target/render-parity-runtime -C Release -R '^stasis_sprite_atlas_reservation_test$' --output-on-failure --no-tests=error
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $runner = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe").Path
           $runnerManifest = Join-Path $PWD "target/render-parity-runtime/stasis_runner.embedded.manifest"
