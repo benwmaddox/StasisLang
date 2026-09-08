@@ -7,6 +7,7 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
     WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,7 +35,7 @@ function score(): i32 { return 3; }\n";
 
 struct EvidenceApp {
     plan: WorkshopSemanticEditPlan,
-    expanded: bool,
+    expanded: BTreeSet<String>,
     output: PathBuf,
     screenshot_requested: bool,
     settle_frames: u8,
@@ -48,10 +49,13 @@ impl eframe::App for EvidenceApp {
             ui.heading("Stasis AI editor - semantic diff evidence");
             ui.label("Compiler-owned plan preview: update, add, delete across two files");
             egui::ScrollArea::vertical().show(ui, |ui| {
-                if self.expanded {
-                    force_expanded(ui, &self.plan);
-                }
-                semantic_diff::render(ui, &self.plan, "evidence-diff");
+                semantic_diff::render(
+                    ui,
+                    &self.plan,
+                    "evidence-diff",
+                    "evidence-diff",
+                    &mut self.expanded,
+                );
             });
         });
 
@@ -73,17 +77,6 @@ impl eframe::App for EvidenceApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-    }
-}
-
-fn force_expanded(ui: &egui::Ui, plan: &WorkshopSemanticEditPlan) {
-    let base_id = ui.make_persistent_id("evidence-diff");
-    for (index, change) in plan.changed_files.iter().enumerate() {
-        let id = base_id.with(("semantic-file", index, change.file.as_str()));
-        let mut state =
-            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
-        state.set_open(true);
-        state.store(ui.ctx());
     }
 }
 
@@ -219,8 +212,17 @@ fn main() -> eframe::Result<()> {
         "Stasis semantic diff evidence",
         options,
         Box::new(move |_creation_context| {
+            let plan = evidence_plan();
+            let expanded = if expanded {
+                plan.changed_files
+                    .iter()
+                    .map(|change| format!("evidence-diff/{}", change.file))
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
             Box::new(EvidenceApp {
-                plan: evidence_plan(),
+                plan,
                 expanded,
                 output,
                 screenshot_requested: false,
