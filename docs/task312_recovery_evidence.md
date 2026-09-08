@@ -1,5 +1,25 @@
 # Task 312 recovery evidence (2026-09-08)
 
+## PR 702 merge repair
+
+Resolved the worker-prepared merge of `cd4d3d4a4604303885e3bc3412566395988d8bc0`
+in the report, Android manifest/Activity, and desktop runtime. Retained URL query
+declarations, browser dispatch, and activation cleanup alongside network lifecycle
+hooks. All four resolutions are recorded in the index; no unmerged paths remain.
+The incoming mobile AOT regression tests are preserved. No commit or push was made.
+
+Validation: rebuilt shared Android/iOS package test passed; 38 host/runtime contract
+tests, seven Java network admission scenarios, and five web URL tests passed.
+Cached and working-tree diff checks passed. Optional signing warned about a missing
+certificate, but the package test executable ran and passed.
+
+Visual evidence: not applicable to conflict resolution; no UI behavior changed.
+Theory gained: the conflicting sections were additive host capability hooks; keeping
+both preserves URL authority expiration and network suspension at the same boundary.
+Good: package validation checks the combined platform source closure.
+Bad: repeated reconciliation left additive sections conflicted again.
+Adjustment: record resolutions in the prepared merge index before publication.
+
 Implementation revision: `096f67fc891d0bbda88a57ca2ba380497b51927f`. Reconciled file contents with available
 `origin/main` revision `cd4d3d4a4604303885e3bc3412566395988d8bc0` using a three-way merge against `01c63d3f`.
 Git merge metadata could not be written outside the supplied worktree. The result is

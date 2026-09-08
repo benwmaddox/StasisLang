@@ -135,6 +135,85 @@ void stasis_network_client_destroy(stasis_network_client *client) {
 }
 #endif
 
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+struct stasis_network_client {
+    int32_t connected;
+    int32_t background;
+    int32_t seat;
+    int32_t sequence;
+    unsigned char queued[16];
+    size_t queued_length;
+    unsigned char sent[16];
+    size_t sent_length;
+};
+static int client_destroy_count;
+
+uint32_t stasis_network_client_abi_version(void) { return 1; }
+stasis_network_client *stasis_network_client_create(const char *url, size_t length) {
+    stasis_network_client *client;
+    if (url == NULL || length < 8 || memcmp(url, "http://", 7) != 0) return NULL;
+    client = (stasis_network_client *)calloc(1, sizeof(*client));
+    if (client != NULL) client->seat = -1;
+    return client;
+}
+int32_t stasis_network_client_connect(stasis_network_client *client) {
+    if (client == NULL) return -1;
+    client->connected = 1;
+    return 0;
+}
+int32_t stasis_network_client_disconnect(stasis_network_client *client) {
+    if (client == NULL) return -1;
+    client->connected = 0;
+    return 0;
+}
+int32_t stasis_network_client_set_background(stasis_network_client *client, int32_t value) {
+    if (client == NULL) return -1;
+    client->background = value != 0;
+    return 0;
+}
+int32_t stasis_network_client_status(stasis_network_client *client) {
+    return client != NULL && client->connected && !client->background
+        ? STASIS_NETWORK_CLIENT_STATUS_CONNECTED
+        : STASIS_NETWORK_CLIENT_STATUS_DISCONNECTED;
+}
+int32_t stasis_network_client_poll(stasis_network_client *client, unsigned char *out,
+        size_t capacity) {
+    if (client == NULL || out == NULL) return -1;
+    if (client->queued_length == 0) return 0;
+    if (capacity < client->queued_length) return -1;
+    memcpy(out, client->queued, client->queued_length);
+    int32_t length = (int32_t)client->queued_length;
+    client->queued_length = 0;
+    return length;
+}
+int32_t stasis_network_client_send(stasis_network_client *client,
+        const unsigned char *payload, size_t length) {
+    if (client == NULL || payload == NULL || length > sizeof(client->sent)) return -1;
+    memcpy(client->sent, payload, length);
+    client->sent_length = length;
+    memcpy(client->queued, payload, length);
+    client->queued_length = length;
+    return 0;
+}
+int32_t stasis_network_client_checkpoint(stasis_network_client *client, int32_t seat,
+        int32_t sequence) {
+    if (client == NULL) return -1;
+    client->seat = seat;
+    client->sequence = sequence;
+    return 0;
+}
+int32_t stasis_network_client_resume_seat(stasis_network_client *client) {
+    return client == NULL ? -1 : client->seat;
+}
+int32_t stasis_network_client_last_sequence(stasis_network_client *client) {
+    return client == NULL ? 0 : client->sequence;
+}
+void stasis_network_client_destroy(stasis_network_client *client) {
+    if (client != NULL) client_destroy_count += 1;
+    free(client);
+}
+#endif
+
 void stasis_host_log_message(const char *message) {
     if (message == NULL) return;
     if (strncmp(message, "STASIS_PROFILE_START|", 21) == 0) profile_start_logs += 1;
