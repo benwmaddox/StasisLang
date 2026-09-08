@@ -11,8 +11,18 @@
         exit(1); \
     } \
 } while (0)
+#define URL_VALID(value) stasis_external_url_validate((value), (int32_t)sizeof(value) - 1)
 
 static StasisPlatformServiceRequest deferred_request;
+static int external_url_open_count;
+
+static int count_external_url(const char *url, int32_t length, void *user_data) {
+    int *result = (int *)user_data;
+    CHECK(length == 27);
+    CHECK(memcmp(url, "https://www.maddoxlabs.com/", 27) == 0);
+    external_url_open_count += 1;
+    return *result;
+}
 
 static int publish_price(
     const StasisPlatformServiceRequest *request,
@@ -46,6 +56,60 @@ int main(void) {
     StasisPlatformServiceRequest stale_request;
     StasisPlatformServiceResponse response;
     int index;
+    StasisExternalUrlActionState url_action = {0};
+    int opener_result = 1;
+    char oversized_url[STASIS_EXTERNAL_URL_MAX_BYTES + 2];
+    char maximum_url[STASIS_EXTERNAL_URL_MAX_BYTES];
+    const char malformed_utf8_url[] = "https://example.com/\xc3\x28";
+    const char c1_url[] = "https://example.com/\xc2\x80";
+
+    CHECK(URL_VALID("https://www.maddoxlabs.com/") == 1);
+    CHECK(URL_VALID("http://localhost:8080/path?q=one%20two") == 1);
+    CHECK(URL_VALID("https://[2001:db8::1]/") == 1);
+    CHECK(URL_VALID("https://example.com/\xe2\x9c\x93") == 1);
+    CHECK(URL_VALID("ftp://example.com") == 0);
+    CHECK(URL_VALID("https://example.com/\nnext") == 0);
+    CHECK(URL_VALID("https://example.com\\next") == 0);
+    CHECK(URL_VALID("https://user@example.com") == 0);
+    CHECK(URL_VALID("https://:443/") == 0);
+    CHECK(URL_VALID("https://example.com:0/") == 0);
+    CHECK(URL_VALID("https://999.1.1.1/") == 0);
+    CHECK(URL_VALID("https://[:::]/") == 0);
+    CHECK(URL_VALID("https://example.com/%zz") == 0);
+    CHECK(stasis_external_url_validate(
+        malformed_utf8_url, (int32_t)sizeof(malformed_utf8_url) - 1) == 0);
+    CHECK(stasis_external_url_validate(c1_url, (int32_t)sizeof(c1_url) - 1) == 0);
+    memset(maximum_url, 'a', sizeof(maximum_url));
+    memcpy(maximum_url, "https://example.com/", sizeof("https://example.com/") - 1);
+    CHECK(stasis_external_url_validate(maximum_url, sizeof(maximum_url)) == 1);
+    memset(oversized_url, 'a', sizeof(oversized_url));
+    memcpy(oversized_url, "https://", 8);
+    CHECK(stasis_external_url_validate(
+        oversized_url, STASIS_EXTERNAL_URL_MAX_BYTES + 1) == 0);
+
+    stasis_external_url_action_begin_frame(&url_action, 1, 0);
+    CHECK(stasis_external_url_action_request(
+        &url_action, "javascript:alert(1)", 19,
+        count_external_url, &opener_result) == -1);
+    CHECK(stasis_external_url_action_request(
+        &url_action, "https://www.maddoxlabs.com/", 27,
+        count_external_url, &opener_result) == 1);
+    CHECK(external_url_open_count == 1);
+    CHECK(stasis_external_url_action_request(
+        &url_action, "https://www.maddoxlabs.com/", 27,
+        count_external_url, &opener_result) == 0);
+    CHECK(external_url_open_count == 1);
+    stasis_external_url_action_begin_frame(&url_action, 1, 0);
+    CHECK(stasis_external_url_action_request(
+        &url_action, "https://www.maddoxlabs.com/", 27, NULL, NULL) == 0);
+    CHECK(stasis_external_url_action_request(
+        &url_action, "https://www.maddoxlabs.com/", 27,
+        count_external_url, &opener_result) == 0);
+    stasis_external_url_action_begin_frame(&url_action, 1, 1);
+    CHECK(stasis_external_url_action_request(
+        &url_action, "https://www.maddoxlabs.com/", 27,
+        count_external_url, &opener_result) == 0);
+    CHECK(external_url_open_count == 1);
 
     stasis_platform_service_set_handler(NULL, NULL);
     stasis_platform_service_reset();

@@ -160,7 +160,7 @@ if(STASIS_GRAPHICS_BUILD_TESTS)
 endif()
 
 function(configure_stasis_target target is_static)
-    target_sources(${target} PRIVATE stasis_graphics.c stasis_image_writer.c stasis_audio_assets.c stasis_svg.cpp)
+    target_sources(${target} PRIVATE stasis_graphics.c stasis_image_writer.c stasis_audio_assets.c stasis_platform_services.c stasis_svg.cpp)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     target_compile_definitions(${target} PRIVATE STASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}")
     target_link_libraries(${target} PRIVATE
@@ -225,7 +225,6 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_runtime STATIC
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
-        stasis_platform_services.c
     )
     configure_stasis_target(stasis_mobile_runtime ON)
     set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD 11)
@@ -244,6 +243,22 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
               stasis_network_join_card.h stasis_performance_metrics.h stasis_platform_services.h
         DESTINATION include
     )
+endif()
+
+if(STASIS_GRAPHICS_BUILD_TESTS AND (TARGET stasis_graphics_static OR TARGET stasis_graphics))
+    add_executable(stasis_sprite_atlas_reservation_test tests/stasis_sprite_atlas_reservation_test.c)
+    if(TARGET stasis_graphics_static)
+        target_link_libraries(stasis_sprite_atlas_reservation_test PRIVATE stasis_graphics_static)
+    else()
+        target_link_libraries(stasis_sprite_atlas_reservation_test PRIVATE stasis_graphics)
+        set_target_properties(stasis_sprite_atlas_reservation_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    endif()
+    target_compile_definitions(stasis_sprite_atlas_reservation_test PRIVATE
+        STASIS_TEST_SPRITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/sprite_sheet_animation/assets/sprite_sheet_2x2.png")
+    add_test(NAME stasis_sprite_atlas_reservation_test COMMAND stasis_sprite_atlas_reservation_test)
+    set_tests_properties(stasis_sprite_atlas_reservation_test PROPERTIES
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy")
 endif()
 
 if(STASIS_BUILD_MONOLITH)

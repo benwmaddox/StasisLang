@@ -167,6 +167,16 @@
 - Bad: the initial runtime fixture omitted the required `on_code_swap` entrypoint and failed before capture.
 - Adjustment: live runtime fixtures must include all required lifecycle entrypoints before testing a new host interaction.
 
+## 2026-09-06 - Task 312: safe external URL host action
+
+- Added `open_external_url(string): i32` with a 2048-byte UTF-8 bound, strict HTTP(S) validation, one-attempt input authority, and invalid/ignored/accepted results. Desktop SDL, Android release/Workshop, iOS, and web adapters use platform browser APIs; headless/recording execution cannot launch a browser. JIT swap hooks suppress the action before dispatch.
+- Preserved the existing string-handle ABI, AOT runtime export, wasm import, and release-package dynamic text metadata. The Stasis pointer fixture requests one Maddox Labs link on a down edge and does not repeat while held. No consumer UI was added in this task.
+- Verification: all seven focused compiler/dynload/Android bridge tests pass, including actual linked AOT execution and JIT edge/swap assertions. The 118 web runtime tests, web metadata and mobile-shell package tests, 44 enabled dynload tests, two fresh native C executables, and 38 Python host/runtime ABI tests pass. Full validation stops at existing `stasis_network` unsafe-boundary findings; the broader compiler run also encounters missing optional signing certificates and a shared-cache access denial. Task builds use the required Cargo wrapper with an explicit worktree-local target because the shared cache is outside the allowed worktree.
+- Visual evidence: browser/device media was not captured. There is no new in-canvas UI; real popup behavior remains a validation limit. The local web package harness rejected an unverified CLI build fingerprint and the Playwright wrapper did not become available. Android Java compilation could not resolve Android Gradle Plugin 8.7.3 from configured repositories. Android/iOS browser dispatch requires device validation; Xcode was unavailable on this Windows host.
+- Theory gained: guest input values are data, not proof of a user gesture. The native/Workshop/web tests show that host-owned authority must be transferred to one tick/frame and consumed once, while swap execution suppresses dispatch. Adjacent privileged host actions should reuse that explicit authority boundary rather than infer permission from simulated input.
+- Good: the edge fixture and host injection exercise real guest compilation without launching external applications.
+- Bad: an initial AOT check skipped execution because the optional signer lacked a certificate; initial Workshop authority also incorrectly relied on simulated touch state.
+- Adjustment: verify executable checks actually run, preserve required-signing policy, and supply trusted platform activation separately from guest-visible input.
 ## 2026-09-06 - Task 354: native guest transport ABI
 
 - Added an optional Windows/Android native client using the existing browser WebSocket protocol, bounded mailbox, private pairing/resume identity, reconnect backoff, and shell background lifecycle. Client-only packages link transport support without host bundles or listeners.
@@ -205,3 +215,20 @@
 - Bad: inherited runtime and signing environment settings initially selected an unrelated binary or unavailable optional signer.
 - Adjustment: validate with explicit matching local compiler/runtime paths and distinguish development evidence from official release provenance.
 - Standalone native AOT: fresh desktop development packaging succeeded with optional signing unconfigured. `build/audio-aot/receipt.json` records 192,512 output frames, 190,656 nonzero frames, peak 0.5, zero stereo ratio error, and 479.98 Hz through the SDL disk driver; executable SHA-256 is `04345638e6907eaed7d4b15e81cdc583adb74d696acd22a93a4ea6eeabb0d0d4`. The bounded four-second probe is preserved in `build/probe_audio_aot.py`.
+
+## 2026-09-08 - Task 312 recovery
+
+- Reconciled the existing URL action with available main, preserving Android permissions and both URL/network lifecycle hooks. Updated the source-closure assertion to accept the added platform service source.
+- Fresh CLI/runtime artifacts, SHA-256 values, focused validation, and baseline limits are recorded in `docs/task312_recovery_evidence.md`. The headless consumer probe returned 312 as expected. Publication remains worker-owned.
+- Visual evidence: not applicable; no consumer UI was added and no device/browser media is claimed.
+- Theory gained: independent host capabilities require additive lifecycle cleanup; the merged hooks preserve one-shot URL authority alongside network suspension.
+- Good: fresh builds exposed the stale source adjacency assertion.
+- Bad: optional signing initially skipped AOT execution.
+- Adjustment: verify that executable checks actually execute, and check source sets rather than ordering.
+
+### Task 529 merge repair
+
+- Preserved both AudioStream and task 312 recovery reports when resolving the prepared main merge.
+- Updated the audio test event mock to retain all listeners, preserving audio visibility checks alongside the new external URL listener. All 124 Web runtime tests pass.
+- Visual evidence: not applicable; this repair changes report text and test infrastructure only.
+- Theory gained: independent browser features share event types; test dispatch must retain every listener just as the DOM does.

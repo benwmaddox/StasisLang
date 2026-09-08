@@ -130,8 +130,14 @@ class ReleaseProvenanceTests(unittest.TestCase):
             self.assertTrue((thorvg / source).is_file(), source)
 
         runtime_cmake = (ROOT / "runtime/CMakeLists.txt").read_text(encoding="utf-8")
-        self.assertIn("stasis_graphics.c stasis_image_writer.c", runtime_cmake)
-        self.assertIn("stasis_audio_assets.c stasis_svg.cpp", runtime_cmake)
+        graphics_sources = re.search(
+            r"target_sources\(\$\{target\}\s+PRIVATE\s+([^)]*)\)", runtime_cmake
+        )
+        self.assertIsNotNone(graphics_sources)
+        self.assertTrue({
+            "stasis_graphics.c", "stasis_image_writer.c", "stasis_audio_assets.c",
+            "stasis_platform_services.c", "stasis_svg.cpp",
+        }.issubset(set(graphics_sources.group(1).split())))
         self.assertIn("stasis_thorvg", runtime_cmake)
 
         android_cmake = (

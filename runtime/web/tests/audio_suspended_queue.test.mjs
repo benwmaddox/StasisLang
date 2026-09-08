@@ -9,6 +9,13 @@ const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 async function createRuntime({ deviceFailure = false } = {}) {
   const windowEvents = new Map();
   const documentEvents = new Map();
+  const addListener = (events, type, listener) => {
+    if (!events.has(type)) events.set(type, []);
+    events.get(type).push(listener);
+  };
+  const dispatch = (events, type, event = {}) => {
+    for (const listener of events.get(type) || []) listener(event);
+  };
   const memory = new WebAssembly.Memory({ initial: 2 });
   const starts = [];
   const buffers = [];
@@ -85,7 +92,7 @@ async function createRuntime({ deviceFailure = false } = {}) {
       if (id === "stasis-error") return errorBox;
       return null;
     },
-    addEventListener(type, listener) { documentEvents.set(type, listener); },
+    addEventListener(type, listener) { addListener(documentEvents, type, listener); },
   };
   const game = { memory: {}, strings: {}, assets: {} };
   const instance = { exports: { memory, main: () => 0, tick() {}, render() {} } };
@@ -102,7 +109,7 @@ async function createRuntime({ deviceFailure = false } = {}) {
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
     requestAnimationFrame() {},
     cancelAnimationFrame() {},
-    addEventListener(type, listener) { windowEvents.set(type, listener); },
+    addEventListener(type, listener) { addListener(windowEvents, type, listener); },
     console,
     Image: class {},
     FontFace: class { load() { return Promise.resolve(this); } },
@@ -127,13 +134,13 @@ async function createRuntime({ deviceFailure = false } = {}) {
     failScheduling: () => { failScheduling = true; },
     visibility: async hidden => {
       document.hidden = hidden;
-      documentEvents.get("visibilitychange")();
+      dispatch(documentEvents, "visibilitychange");
       await new Promise(resolve => setImmediate(resolve));
     },
-    pagehide: () => windowEvents.get("pagehide")({ persisted: false }),
+    pagehide: () => dispatch(windowEvents, "pagehide", { persisted: false }),
     resume: async () => {
       allowResume = true;
-      windowEvents.get("pointerdown")({});
+      dispatch(windowEvents, "pointerdown");
       await new Promise(resolve => setImmediate(resolve));
       await new Promise(resolve => setImmediate(resolve));
     },
