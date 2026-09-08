@@ -1,4 +1,5 @@
 mod image_attachments;
+mod persistence;
 #[cfg(test)]
 mod request_image_tests;
 mod semantic_diff;
@@ -10,6 +11,7 @@ use semantic_revisions::proposal_revisions;
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use stasis_ai::session_store::{SessionSnapshot, SessionStore, WindowPreferences};
 use stasis_ai::task_session::{
     ActionState, ActivityKind, ConnectionState, FallbackState, ImageHandoffState, ImageReviewState,
     Key, KeyChord, Modifiers, ProviderSelection, ProviderState, RoutingState,
@@ -676,6 +678,18 @@ struct DesktopEditor {
     capability_result_tx: mpsc::Sender<CapabilityResult>,
     semantic_job: Option<SemanticPreviewJob>,
     next_semantic_check: Instant,
+    store: Option<SessionStore>,
+    persisted_snapshot: Option<SessionSnapshot>,
+    autosave: Option<thread::JoinHandle<Result<SessionSnapshot, String>>>,
+    next_autosave: Instant,
+    uncertain_calls: BTreeSet<String>,
+    expanded: BTreeSet<String>,
+    window_preferences: Option<WindowPreferences>,
+    media_hashes: BTreeMap<String, String>,
+    unavailable_media: BTreeSet<String>,
+    erase_confirmation: bool,
+    recovery_error: bool,
+    recovered_previews: BTreeMap<SemanticPreviewKey, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -763,8 +777,8 @@ impl DesktopEditor {
                         proposal.revision,
                         payload,
                     );
-                    let can_plan =
-                        proposal.current && matches!(proposal.state, ActionState::Proposed);
+                    let can_plan = self.recovered_previews.contains_key(&key)
+                        || (proposal.current && matches!(proposal.state, ActionState::Proposed));
                     self.state.semantic_previews.entry(key.clone()).or_insert_with(|| SemanticPreviewRecord {
                         result: if can_plan { None } else {
                             Some(Err("No retained preview for this proposal; it will not be regenerated".into()))
@@ -787,9 +801,17 @@ impl DesktopEditor {
         if self.semantic_job.is_none() {
             if let Some((key, payload)) = queued.into_iter().next() {
                 let root = self.project_root.clone();
+                let expected = self.recovered_previews.get(&key).cloned();
                 let (tx, result) = mpsc::channel();
                 let worker = thread::spawn(move || {
-                    let _ = tx.send(super::desktop_preview_semantic_batch(&root, payload));
+                    let result = super::desktop_preview_semantic_batch(&root, payload).and_then(|preview| {
+                        if expected.as_ref().is_some_and(|expected| *expected != preview.source_fingerprint) {
+                            Err("Saved preview became stale during recovery; request a revised proposal.".into())
+                        } else {
+                            Ok(preview)
+                        }
+                    });
+                    let _ = tx.send(result);
                 });
                 self.semantic_job = Some(SemanticPreviewJob {
                     key,
@@ -1047,7 +1069,175 @@ impl DesktopEditor {
             capability_result_tx,
             semantic_job: None,
             next_semantic_check: Instant::now(),
+            store: None,
+            persisted_snapshot: None,
+            autosave: None,
+            next_autosave: Instant::now() + Duration::from_millis(500),
+            uncertain_calls: BTreeSet::new(),
+            expanded: BTreeSet::new(),
+            window_preferences: None,
+            media_hashes: BTreeMap::new(),
+            unavailable_media: BTreeSet::new(),
+            erase_confirmation: false,
+            recovery_error: false,
+            recovered_previews: BTreeMap::new(),
         }
+    }
+
+    fn with_persistence(mut self) -> Self {
+        self.attachment_store = SessionAttachmentStore::persistent(&self.project_root);
+        match SessionStore::open(&self.project_root) {
+            Ok(store) => match store.load() {
+                Ok(loaded) => {
+                    self.store = Some(store);
+                    persistence::restore(&mut self, loaded);
+                }
+                Err(error) => {
+                    self.state.notice = Some(format!(
+                        "Could not recover saved editor state: {error}. Saved history is preserved; erase it explicitly to start over."
+                    ));
+                    self.recovery_error = true;
+                    self.store = Some(store);
+                }
+            },
+            Err(error) => {
+                self.state.notice = Some(format!("Editor persistence is unavailable: {error}"));
+                self.recovery_error = true;
+            }
+        }
+        self
+    }
+
+    fn save_snapshot(&mut self, mut snapshot: SessionSnapshot) -> Result<(), String> {
+        self.finish_autosave();
+        if self.recovery_error {
+            return Err("Saved history needs recovery or explicit erasure before saving.".into());
+        }
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        store
+            .prepare_snapshot(&mut snapshot)
+            .map_err(|error| error.to_string())?;
+        store.save(&snapshot).map_err(|error| error.to_string())?;
+        self.media_hashes = snapshot.media_hashes.clone();
+        self.persisted_snapshot = Some(snapshot);
+        Ok(())
+    }
+
+    fn finish_autosave(&mut self) {
+        let Some(worker) = self.autosave.take() else {
+            return;
+        };
+        match worker
+            .join()
+            .unwrap_or_else(|_| Err("session writer panicked".into()))
+        {
+            Ok(snapshot) => {
+                self.media_hashes = snapshot.media_hashes.clone();
+                self.persisted_snapshot = Some(snapshot);
+            }
+            Err(error) => {
+                self.state.notice = Some(format!("Could not save editor session: {error}"))
+            }
+        }
+    }
+
+    fn poll_autosave(&mut self, now: Instant) {
+        if self
+            .autosave
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            self.finish_autosave();
+        }
+        if self.autosave.is_some() || now < self.next_autosave {
+            return;
+        }
+        self.next_autosave = now + Duration::from_millis(500);
+        if self.recovery_error {
+            return;
+        }
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let mut snapshot = persistence::snapshot(self);
+        if self.persisted_snapshot.as_ref() == Some(&snapshot) {
+            return;
+        }
+        self.autosave = Some(thread::spawn(move || {
+            store
+                .prepare_snapshot(&mut snapshot)
+                .map_err(|error| error.to_string())?;
+            store.save(&snapshot).map_err(|error| error.to_string())?;
+            Ok(snapshot)
+        }));
+    }
+
+    fn persist_if_changed(&mut self) {
+        self.finish_autosave();
+        if self.store.is_none() || self.recovery_error {
+            return;
+        }
+        let snapshot = persistence::snapshot(self);
+        if self.persisted_snapshot.as_ref() == Some(&snapshot) {
+            return;
+        }
+        if let Err(error) = self.save_snapshot(snapshot) {
+            self.state.notice = Some(format!("Could not save editor session: {error}"));
+        }
+    }
+
+    fn erase_history(&mut self) -> Result<(), String> {
+        self.finish_autosave();
+        if self.state.session.tasks().any(|task| self.ui_busy(task)) {
+            return Err("Wait for running work to finish before erasing history.".into());
+        }
+        if let Some(store) = &self.store {
+            store.erase().map_err(|error| error.to_string())?;
+        }
+        self.state = EditorState {
+            project_root: Some(self.project_root.clone()),
+            ..EditorState::default()
+        };
+        self.execution_receipts.clear();
+        self.validation_receipts.clear();
+        self.validation_fingerprints.clear();
+        self.uncertain_calls.clear();
+        self.expanded.clear();
+        self.media_hashes.clear();
+        self.unavailable_media.clear();
+        self.asset_textures.clear();
+        self.attachment_textures.clear();
+        self.attachment_preview = None;
+        self.attachment_store = SessionAttachmentStore::persistent(&self.project_root);
+        self.preview_texture = None;
+        self.recovered_previews.clear();
+        if let Some(job) = self.semantic_job.take() {
+            let _ = job.worker.join();
+        }
+        let provider_root = self.project_root.clone();
+        self.controller = TaskController::new(move |request, canceled| {
+            run_reply_provider(request, canceled, provider_root.clone())
+        });
+        self.window_preferences = None;
+        self.recovery_error = false;
+        self.persisted_snapshot = Some(persistence::snapshot(self));
+        Ok(())
+    }
+
+    fn persist_provider_intent(
+        &mut self,
+        task: &TaskId,
+        candidate: &TaskSession,
+    ) -> Result<(), String> {
+        self.finish_autosave();
+        let mut snapshot = persistence::snapshot(self);
+        snapshot.session = candidate.clone();
+        snapshot.uncertain_calls.insert(task.to_string());
+        self.save_snapshot(snapshot)?;
+        self.uncertain_calls.insert(task.to_string());
+        Ok(())
     }
 
     fn process_shortcuts(&mut self, context: &egui::Context) {
@@ -1093,8 +1283,9 @@ impl DesktopEditor {
             match intent {
                 EditorIntent::SendReply(task, text) => {
                     let task = TaskId::new(task);
+                    let was_uncertain = self.uncertain_calls.contains(task.as_str());
                     let mut candidate = self.state.session.clone();
-                    let accepted = candidate
+                    let prepared = candidate
                         .task_mut(&task)
                         .and_then(|task| task.append_user_message(&text))
                         .map_err(|error| error.to_string())
@@ -1116,7 +1307,9 @@ impl DesktopEditor {
                                 }
                             }
                             Ok(())
-                        })
+                        });
+                    let accepted = prepared
+                        .and_then(|()| self.persist_provider_intent(&task, &candidate))
                         .and_then(|()| {
                             self.controller
                                 .send(&mut candidate, &task)
@@ -1125,6 +1318,9 @@ impl DesktopEditor {
                     match accepted {
                         Ok(_) => self.state.session = candidate,
                         Err(error) => {
+                            if !was_uncertain {
+                                self.uncertain_calls.remove(task.as_str());
+                            }
                             if self.state.session.active_task_id() == Some(&task)
                                 && self.state.reply.is_empty()
                             {
@@ -1136,8 +1332,22 @@ impl DesktopEditor {
                 }
                 EditorIntent::Retry(task) => {
                     let task = TaskId::new(task);
-                    if let Err(error) = self.controller.retry(&mut self.state.session, &task) {
-                        self.state.notice = Some(error.to_string());
+                    let was_uncertain = self.uncertain_calls.contains(task.as_str());
+                    let candidate = self.state.session.clone();
+                    match self
+                        .persist_provider_intent(&task, &candidate)
+                        .and_then(|()| {
+                            self.controller
+                                .retry(&mut self.state.session, &task)
+                                .map_err(|error| error.to_string())
+                        }) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            if !was_uncertain {
+                                self.uncertain_calls.remove(task.as_str());
+                            }
+                            self.state.notice = Some(error);
+                        }
                     }
                 }
                 EditorIntent::Cancel(task) => {
@@ -1153,8 +1363,27 @@ impl DesktopEditor {
                 EditorIntent::Reconnect(task) => {
                     let task = TaskId::new(task);
                     self.cancel_capture_for(&task);
-                    if let Err(error) = self.controller.reconnect(&mut self.state.session, &task) {
-                        self.state.notice = Some(error.to_string());
+                    if self.store.is_some() && self.controller.snapshot(&task).is_none() {
+                        self.state.notice = match self.state.session.task_mut(&task).and_then(|task| task.reconnect()) {
+                            Ok(()) => Some("Task reconnected. Send a new message to continue; no previous request was replayed.".into()),
+                            Err(error) => Some(error.to_string()),
+                        };
+                    } else {
+                        let was_uncertain = self.uncertain_calls.contains(task.as_str());
+                        let candidate = self.state.session.clone();
+                        if let Err(error) = self
+                            .persist_provider_intent(&task, &candidate)
+                            .and_then(|()| {
+                                self.controller
+                                    .reconnect(&mut self.state.session, &task)
+                                    .map_err(|error| error.to_string())
+                            })
+                        {
+                            if !was_uncertain {
+                                self.uncertain_calls.remove(task.as_str());
+                            }
+                            self.state.notice = Some(error);
+                        }
                     }
                 }
                 EditorIntent::Apply(task, action) => {
@@ -1690,6 +1919,13 @@ impl DesktopEditor {
 
     fn poll_controller(&mut self) {
         for event in self.controller.poll(&mut self.state.session) {
+            let completed_task = match &event {
+                TaskControllerEvent::Completed { task_id, .. }
+                | TaskControllerEvent::Failed { task_id, .. }
+                | TaskControllerEvent::Canceled { task_id, .. }
+                | TaskControllerEvent::Stale { task_id, .. } => task_id.to_string(),
+            };
+            self.uncertain_calls.remove(&completed_task);
             self.state.notice = match event {
                 TaskControllerEvent::Completed {
                     task_id, proposals, ..
@@ -2778,6 +3014,9 @@ impl DesktopEditor {
     }
 
     fn task_header(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        if self.uncertain_calls.contains(task.id.as_str()) && !self.ui_busy(task) {
+            ui.colored_label(warning(), "Previous AI request outcome is uncertain. It may already have incurred a charge; review before sending again.");
+        }
         let mut provider_choice = None;
         let openrouter = stasis_ai::OpenRouterConfig::from_env().ok();
         egui::Frame::none()
@@ -3245,7 +3484,7 @@ impl DesktopEditor {
                                             match &record.result {
                                                 None => { ui.spinner(); ui.label("Planning semantic changes..."); }
                                                 Some(Err(error)) => { ui.colored_label(failure(), format!("Preview unavailable: {error}")); }
-                                                Some(Ok(preview)) => { semantic_diff::render(ui, &preview.plan, "semantic-files"); }
+                                                Some(Ok(preview)) => { semantic_diff::render(ui, &preview.plan, "semantic-files", &format!("{}/{}/{}/{}", key.task, key.action, key.revision, key.payload_hash), &mut self.expanded); }
                                             }
                                         } else {
                                             ui.label("Planning semantic changes...");
@@ -3341,6 +3580,7 @@ impl DesktopEditor {
                                 && matches!(review, ImageReviewState::Pending)
                                 && current.is_some_and(|image| {
                                     matches!(image.review, ImageReviewState::Pending)
+                                        && !self.unavailable_media.contains(&image.source)
                                 })
                             {
                                 if ui.button("Approve").clicked() {
@@ -3418,6 +3658,19 @@ impl DesktopEditor {
     }
 
     fn inline_screenshot(&mut self, ui: &mut egui::Ui, screenshot_id: &str) {
+        if let Some(source) = self.state.session.active_task().ok().and_then(|task| {
+            task.screenshots
+                .get(screenshot_id)
+                .map(|image| image.source.clone())
+        }) {
+            if self.unavailable_media.contains(&source) {
+                ui.colored_label(
+                    warning(),
+                    "Attachment unavailable: missing, changed, or unverified after restart.",
+                );
+                return;
+            }
+        }
         let active = self.state.session.active_task_id().cloned();
         if let Some(task_id) = active.as_ref() {
             let key = (task_id.to_string(), screenshot_id.to_string());
@@ -3443,6 +3696,21 @@ impl DesktopEditor {
                     .min(160.0 / original.y)
                     .min(1.0);
                 ui.image((texture.id(), original * scale));
+                return;
+            }
+        }
+        if let Some((task_id, source)) = self.state.session.active_task().ok().and_then(|task| {
+            task.screenshots
+                .get(screenshot_id)
+                .map(|image| (task.id.to_string(), image.source.clone()))
+        }) {
+            if self
+                .state
+                .preview
+                .as_ref()
+                .map_or(true, |preview| preview.screenshot_id != screenshot_id)
+            {
+                self.inline_generated_asset(ui, &task_id, screenshot_id, &source);
                 return;
             }
         }
@@ -3503,6 +3771,13 @@ impl DesktopEditor {
         image_id: &str,
         source: &str,
     ) {
+        if self.unavailable_media.contains(source) {
+            ui.colored_label(
+                warning(),
+                "Media unavailable: missing, changed, or unverified after restart.",
+            );
+            return;
+        }
         let key = (task_id.to_string(), image_id.to_string());
         if !self.asset_textures.contains_key(&key) {
             let source_path = PathBuf::from(source);
@@ -3827,6 +4102,9 @@ impl DesktopEditor {
                     if let Some(notice) = &self.state.notice {
                         ui.colored_label(warning(), notice);
                     }
+                    if self.store.is_some() && ui.button("Erase saved history...").clicked() {
+                        self.erase_confirmation = true;
+                    }
                 });
             });
         let width = context.screen_rect().width();
@@ -3868,6 +4146,19 @@ impl DesktopEditor {
             }
         }
         self.cancel_confirmation(context);
+        if self.erase_confirmation {
+            egui::Window::new("Erase saved history?").collapsible(false).resizable(false)
+                .show(context, |ui| {
+                    ui.label("Remove this project's tasks, drafts, and receipts. Source and media files are retained.");
+                    if ui.button("Keep history").clicked() {
+                        self.erase_confirmation = false;
+                    }
+                    if ui.button("Erase history").clicked() {
+                        self.state.notice = self.erase_history().err();
+                        self.erase_confirmation = false;
+                    }
+                });
+        }
         self.attachment_preview_window(context);
         self.flush_intents();
     }
@@ -3938,10 +4229,20 @@ impl DesktopEditor {
 impl eframe::App for DesktopEditor {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui(context);
+        if let Some(rect) = context.input(|input| input.viewport().inner_rect) {
+            self.window_preferences =
+                Some(persistence::bounded_window([rect.width(), rect.height()]));
+        }
+        self.poll_autosave(Instant::now());
+        context.request_repaint_after(Duration::from_millis(500));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_if_changed();
         self.host.shutdown_and_join();
+        // Work already executing may have committed after the initial exit snapshot.
+        self.poll_host();
+        self.persist_if_changed();
         if let Some(job) = self.semantic_job.take() {
             let _ = job.worker.join();
         }
@@ -3959,10 +4260,15 @@ pub(super) fn run(
     project_root: PathBuf,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let editor = DesktopEditor::new(client.clone(), project_root, shutdown).with_persistence();
+    let size = editor
+        .window_preferences
+        .map(|preferences| preferences.size)
+        .unwrap_or([1440.0, 900.0]);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Stasis Editor")
-            .with_inner_size([1440.0, 900.0])
+            .with_inner_size(size)
             .with_min_inner_size([520.0, 600.0]),
         ..Default::default()
     };
@@ -3970,7 +4276,7 @@ pub(super) fn run(
     let result = eframe::run_native(
         "Stasis Editor",
         options,
-        Box::new(move |_context| Box::new(DesktopEditor::new(client, project_root, shutdown))),
+        Box::new(move |_context| Box::new(editor)),
     );
     let _ = quit_client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
     result.map_err(|error| format!("desktop editor failed: {error}"))

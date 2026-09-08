@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod openrouter;
+pub mod session_store;
 pub mod task_controller;
 pub mod task_session;
 
@@ -17,6 +18,11 @@ pub use openrouter::{
     ConfiguredProvider, ImageInputCapability, OpenRouterConfig, OpenRouterImageInput,
     OpenRouterProvider, PreferredThroughputPolicy, ProviderConfig, ProviderKind, RoutingConfig,
     RoutingSort, MAX_OPENROUTER_IMAGES, MAX_OPENROUTER_IMAGE_BYTES,
+};
+
+pub use session_store::{
+    ExecutionReceipt, LoadOutcome, RecoveryDiagnostic, SessionSnapshot, SessionStore, StoreError,
+    WindowPreferences,
 };
 
 pub use task_controller::{

@@ -3895,6 +3895,7 @@ dependencies = [
 name = "stasis_ai"
 version = "0.1.0"
 dependencies = [
+ "atomic-write-file",
  "base64",
  "image 0.25.10",
  "reqwest",

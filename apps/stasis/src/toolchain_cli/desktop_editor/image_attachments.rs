@@ -51,18 +51,38 @@ pub(super) struct OwnedImageAttachment {
 pub(super) struct SessionAttachmentStore {
     root: PathBuf,
     owns_root: bool,
+    cleanup_on_drop: bool,
     init_error: Option<String>,
     entries: BTreeMap<(TaskId, String), OwnedImageAttachment>,
 }
 
 impl SessionAttachmentStore {
     pub(super) fn new() -> Self {
+        Self::new_in(std::env::temp_dir(), true)
+    }
+
+    pub(super) fn persistent(project: &Path) -> Self {
+        let parent = project.join(".stasis/editor/media");
+        if let Err(error) = std::fs::create_dir_all(&parent) {
+            return Self {
+                root: parent,
+                owns_root: false,
+                cleanup_on_drop: false,
+                init_error: Some(format!(
+                    "could not create persistent attachment storage: {error}"
+                )),
+                entries: BTreeMap::new(),
+            };
+        }
+        Self::new_in(parent, false)
+    }
+
+    fn new_in(parent: PathBuf, cleanup_on_drop: bool) -> Self {
         let process = std::process::id();
         let mut sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let mut attempts = 0_u16;
         let (root, owns_root, init_error) = loop {
-            let candidate =
-                std::env::temp_dir().join(format!("stasis-editor-{process}-{sequence}"));
+            let candidate = parent.join(format!("stasis-editor-{process}-{sequence}"));
             match create_private_directory(&candidate) {
                 Ok(()) => break (candidate, true, None),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -90,6 +110,7 @@ impl SessionAttachmentStore {
         Self {
             root,
             owns_root,
+            cleanup_on_drop,
             init_error,
             entries: BTreeMap::new(),
         }
@@ -236,7 +257,8 @@ impl SessionAttachmentStore {
 
 impl Drop for SessionAttachmentStore {
     fn drop(&mut self) {
-        if self.owns_root
+        if self.cleanup_on_drop
+            && self.owns_root
             && self.root.parent() == Some(std::env::temp_dir().as_path())
             && self
                 .root
@@ -593,6 +615,7 @@ mod tests {
         let mut store = SessionAttachmentStore {
             root: root.clone(),
             owns_root: false,
+            cleanup_on_drop: true,
             init_error: Some("private storage unavailable".into()),
             entries: BTreeMap::new(),
         };
