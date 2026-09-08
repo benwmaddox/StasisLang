@@ -268,7 +268,7 @@ fn provider_request_disables_new_work_only_on_its_own_task() {
     });
     editor
         .controller
-        .send(&editor.state.session, &TaskId::new("task-1"))
+        .send(&mut editor.state.session, &TaskId::new("task-1"))
         .unwrap();
     assert!(editor.ui_busy(editor.state.session.active_task().unwrap()));
     let context = egui::Context::default();

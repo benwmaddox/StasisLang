@@ -83,3 +83,9 @@ and `STASIS_EDITOR_EVIDENCE_PNG` to an output PNG path, then run the editor test
 command above with the filter `capture_native_task_timeline` and
 `-- --test-threads=1`. This fixture saves and reopens history before rendering
 the restored draft, semantic proposal, and uncertain-call warning.
+
+The desktop attachment importer uses `.stasis/editor/media/` for persistent
+sessions. Closing the editor retains those owned copies so saved hashes and
+references remain valid. Explicit attachment removal can delete a copy created
+in the current session; history erasure retains media. Temporary editor fixtures
+continue to clean their temporary attachment storage on drop.

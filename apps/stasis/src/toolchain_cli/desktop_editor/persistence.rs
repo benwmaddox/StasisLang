@@ -216,6 +216,42 @@ mod tests {
     }
 
     #[test]
+    fn owned_attachment_survives_restart_and_history_erasure() {
+        let (editor, root, _) = super::super::tests::review_fixture("owned_media_restart");
+        let mut editor = editor.with_persistence();
+        let task_id = editor.state.session.active_task_id().unwrap().clone();
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        editor
+            .attach_encoded_image(
+                &task_id,
+                "owned".into(),
+                "reference.png".into(),
+                AttachmentOrigin::Clipboard,
+                encoded.get_ref(),
+            )
+            .unwrap();
+        let source = editor.state.session.task(&task_id).unwrap().screenshots["owned"]
+            .source
+            .clone();
+        editor.persist_if_changed();
+        drop(editor);
+        assert!(std::path::Path::new(&source).is_file());
+        let mut recovered = reopen(&root);
+        assert!(!recovered.unavailable_media.contains(&source));
+        assert_eq!(
+            recovered.state.session.task(&task_id).unwrap().screenshots["owned"].source,
+            source
+        );
+        recovered.erase_history().unwrap();
+        drop(recovered);
+        assert!(std::path::Path::new(&source).is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn restart_preserves_revision_drafts_and_rebuilds_previews() {
         let (mut editor, root, payload) = super::super::tests::review_fixture("session_restart");
         editor.store = Some(SessionStore::open(&root).unwrap());

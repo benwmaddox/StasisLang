@@ -1035,6 +1035,9 @@ mod tests {
         task.screenshots.insert(
             ScreenshotId::new("capture-1"),
             crate::ScreenshotAttachment {
+                request_id: None,
+                selected_for_request: false,
+                consent_to_send: false,
                 id: ScreenshotId::new("capture-1"),
                 source: "capture.png".into(),
                 content_sha256: Some(hash),
@@ -1085,6 +1088,9 @@ mod tests {
         task.screenshots.insert(
             ScreenshotId::new("capture-1"),
             crate::ScreenshotAttachment {
+                request_id: None,
+                selected_for_request: false,
+                consent_to_send: false,
                 id: ScreenshotId::new("capture-1"),
                 source: "never-created.png".into(),
                 content_sha256: None,
@@ -1126,6 +1132,9 @@ mod tests {
         task.screenshots.insert(
             ScreenshotId::new("capture-1"),
             crate::ScreenshotAttachment {
+                request_id: None,
+                selected_for_request: false,
+                consent_to_send: false,
                 id: ScreenshotId::new("capture-1"),
                 source: "legacy.png".into(),
                 content_sha256: None,
@@ -1179,6 +1188,9 @@ mod tests {
         task.screenshots.insert(
             ScreenshotId::new("capture-1"),
             crate::ScreenshotAttachment {
+                request_id: None,
+                selected_for_request: false,
+                consent_to_send: false,
                 id: ScreenshotId::new("capture-1"),
                 source: "capture.png".into(),
                 content_sha256: None,
@@ -1223,6 +1235,9 @@ mod tests {
         task.screenshots.insert(
             ScreenshotId::new("capture-1"),
             crate::ScreenshotAttachment {
+                request_id: None,
+                selected_for_request: false,
+                consent_to_send: false,
                 id: ScreenshotId::new("capture-1"),
                 source: "capture.png".into(),
                 content_sha256: Some(captured_hash.clone()),
