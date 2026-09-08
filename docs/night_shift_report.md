@@ -232,3 +232,11 @@
 - Updated the audio test event mock to retain all listeners, preserving audio visibility checks alongside the new external URL listener. All 124 Web runtime tests pass.
 - Visual evidence: not applicable; this repair changes report text and test infrastructure only.
 - Theory gained: independent browser features share event types; test dispatch must retain every listener just as the DOM does.
+
+### Task 529 runtime-selection review repair
+
+- Require the selected native runtime to be the compiler's canonical sibling, then verify both binary paths and SHA-256 values through editor-info before recording. Reject changed binaries before publishing a receipt.
+- Added six runtime-selection regressions to PR CI and repository validation. All 26 combined provenance and selection tests passed; diff checks passed.
+- The retained target/debug compiler lacks a verified build fingerprint. The live probe correctly rejected it before creating an evidence directory; no new native audio capture is claimed for this review repair.
+- Visual evidence: not applicable; this change validates evidence provenance, not graphical behavior.
+- Theory gained: environment overrides cannot prove runtime selection when bundle siblings take precedence; evidence must verify the loader-selected pair.

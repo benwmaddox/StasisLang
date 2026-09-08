@@ -10,6 +10,38 @@ import subprocess
 import sys
 
 
+def sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_runtime_pair(compiler, runtime, env):
+    runtime_name = (
+        "stasis_graphics.dll" if sys.platform == "win32" else
+        "libstasis_graphics.dylib" if sys.platform == "darwin" else
+        "libstasis_graphics.so"
+    )
+    sibling = compiler.parent / runtime_name
+    if not sibling.is_file() or not sibling.samefile(runtime):
+        raise ValueError(
+            f"selected runtime must be the compiler's bundled sibling: {sibling}; "
+            "stage the requested compiler/runtime pair together before recording"
+        )
+    hashes = {"compiler": sha256(compiler), "runtime": sha256(runtime)}
+    result = subprocess.run(
+        [str(compiler), "editor-info", "--json"], env=env,
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    identity = json.loads(result.stdout)
+    if identity.get("ok") is not True:
+        raise ValueError("compiler did not verify the selected runtime")
+    for key, field, path in [("compiler", "executable", compiler),
+                             ("runtime", "graphics_runtime", runtime)]:
+        verified = identity["result"][field]
+        if not Path(verified["path"]).samefile(path) or verified["sha256"] != hashes[key]:
+            raise ValueError(f"verified {key} does not match the selected binary")
+    return hashes
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stasis", required=True, type=Path)
@@ -18,11 +50,12 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     compiler, runtime, output = args.stasis.resolve(), args.runtime.resolve(), args.output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
     recording = output / "audio.mp3"
     pcm_path = output / "audio.f32le"
     env = dict(os.environ, STASIS_RUNTIME_LIBRARY_PATH=str(runtime),
                STASIS_RUNTIME_DLL_PATH="", SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
+    pair_hashes = verify_runtime_pair(compiler, runtime, env)
+    output.mkdir(parents=True, exist_ok=True)
     subprocess.run([
         str(compiler), "record", "--workspace", str(root / "samples/audio_stream_pcm"),
         "--output", str(recording), "--width", "320", "--height", "180",
@@ -49,11 +82,13 @@ def main():
         "compiler": compiler, "runtime": runtime, "recording": recording, "pcm": pcm_path,
         "fixture": root / "samples/audio_stream_pcm/main.stasis",
     }
+    if {"compiler": sha256(compiler), "runtime": sha256(runtime)} != pair_hashes:
+        raise ValueError("compiler/runtime changed during recording; refusing receipt")
     receipt = {
         "frames": 96000, "sample_rate": 48000, "channels": 2, "rms": rms,
         "stereo_ratio_rms_error": ratio_error, "frequency_hz": frequency,
         "capture": "Native deterministic recording, MP3 decoded to f32le; no physical output",
-        "sha256": {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in inputs.items()},
+        "sha256": {name: sha256(path) for name, path in inputs.items()},
     }
     (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(receipt, indent=2))

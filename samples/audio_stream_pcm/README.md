@@ -36,7 +36,12 @@ python tools/run_audio_stream_native_acceptance.py --stasis path/to/stasis.exe -
 This runs the fixture through native JIT and the runtime's deterministic recording
 path using SDL dummy drivers. It requires FFmpeg, asserts two seconds of 48 kHz
 stereo PCM, checks 480 Hz and the 2:1 channel ratio after MP3 decoding, and records
-compiler/runtime/fixture/capture checksums. Use a fresh `--output` directory for
+compiler/runtime/fixture/capture checksums. The selected runtime must be the
+compiler's canonical sibling library (for example, `stasis_graphics.dll` beside
+`stasis.exe`); stage the intended pair together first. The harness verifies the
+pair with `editor-info` before recording and refuses a receipt if either binary
+changes during capture. An environment override cannot substitute another runtime.
+Use a fresh `--output` directory for
 each run. This does not test physical output or claim an official release.
 
 The compiler, Web runtime, and stdlib must ship together through the official

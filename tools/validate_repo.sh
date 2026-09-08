@@ -36,6 +36,7 @@ python3 -m unittest tools.ci.test_desktop_network_diagnostics
 python3 -m unittest tools.ci.test_nightly_network_support
 python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance
+python3 -m unittest tools.ci.test_audio_stream_native_acceptance
 python3 -m unittest tools.ci.test_local_toolchain_install
 python3 -m unittest tools.ci.test_sdl3_migration
 python3 -m unittest tools.ci.test_windows_sign_runner
