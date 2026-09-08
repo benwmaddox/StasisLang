@@ -74,7 +74,10 @@ fn capture_native_task_timeline() {
             ))
             .unwrap();
         }
-    } else if attachment_mode.as_deref() != Some("reference") {
+    } else if !matches!(
+        attachment_mode.as_deref(),
+        Some("reference" | "multimodal" | "limit")
+    ) {
         task.add_generated_image(
             "arena-asset",
             asset.display().to_string(),
@@ -91,7 +94,6 @@ fn capture_native_task_timeline() {
     editor.state.preview = Some(ScreenshotPreview {
         task_id,
         screenshot_id: "arena-reference".into(),
-        path: asset,
         width: pixels.width() as usize,
         height: pixels.height() as usize,
         rgba: pixels.into_raw(),
@@ -106,7 +108,63 @@ fn capture_native_task_timeline() {
             complete: true,
         },
     });
-    let semantic_root = if std::env::var_os("STASIS_EDITOR_EVIDENCE_SEMANTIC").is_some() {
+    if attachment_mode.as_deref() == Some("multimodal") {
+        let task_id = editor.state.session.active_task_id().unwrap().clone();
+        editor
+            .attach_encoded_image(
+                &task_id,
+                "selected-reference".into(),
+                "arena_background.png".into(),
+                AttachmentOrigin::FilePicker,
+                &bytes,
+            )
+            .unwrap();
+    }
+    if attachment_mode.as_deref() == Some("limit") {
+        let task_id = editor.state.session.active_task_id().unwrap().clone();
+        for index in 0..9 {
+            let id = format!("reference-{index}");
+            editor
+                .attach_encoded_image(
+                    &task_id,
+                    id.clone(),
+                    format!("reference-{}.png", index + 1),
+                    AttachmentOrigin::FilePicker,
+                    &bytes,
+                )
+                .unwrap();
+            if index < 8 {
+                editor
+                    .state
+                    .session
+                    .task_mut(&task_id)
+                    .unwrap()
+                    .select_screenshot_for_request(id)
+                    .unwrap();
+            }
+        }
+    }
+    let semantic_root = if std::env::var_os("STASIS_EDITOR_EVIDENCE_RECOVERY").is_some() {
+        let (mut saved, root, _) = super::tests::review_fixture("session_recovery_native");
+        saved.store = Some(SessionStore::open(&root).unwrap());
+        saved.state.reply = "Keep the value change small and rerun focused tests.".into();
+        saved
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .append_reply("I prepared the value change for review.")
+            .unwrap();
+        let task = saved.state.session.active_task_id().unwrap().to_string();
+        saved.uncertain_calls.insert(task);
+        saved.persist_if_changed();
+        drop(saved);
+        let (client, _server) = stasis_runner::live::live_session(1);
+        editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)))
+            .with_persistence();
+        super::tests::finish_preview(&mut editor);
+        Some(root)
+    } else if std::env::var_os("STASIS_EDITOR_EVIDENCE_SEMANTIC").is_some() {
         let (mut preview_editor, root, _) = super::tests::review_fixture("merged_timeline_native");
         super::tests::finish_preview(&mut preview_editor);
         editor = preview_editor;
@@ -139,7 +197,7 @@ fn capture_native_task_timeline() {
         });
         editor
             .controller
-            .send_active(&editor.state.session)
+            .send_active(&mut editor.state.session)
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while editor

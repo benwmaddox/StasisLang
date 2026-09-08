@@ -242,3 +242,41 @@ empty tool-call array emits no first-action event and leaves its audit latency
 null. The existing nonempty-action test still checks event/audit timing equality.
 Theory gained: a schema-required array key is not an action; the first contained
 object is the observable streaming boundary.
+
+Retained merge validation (2026-09-07): `MERGE_HEAD` and `origin/main` both
+resolve to `538c19ffc59d95a155dc2896a1c372e76d4debd5`; no unresolved paths
+remain. The combined source passes 102 AI library tests and 86 desktop-filtered
+binary tests through the Cargo wrapper, formatting, unsafe-boundary, and diff
+checks. No test processes remained. The full repository shell gate could not
+launch because Bash is unavailable. The opt-in OpenRouter example built and ran,
+but rejected execution because `OPENROUTER_API_KEY` is absent. The live trace
+acceptance criterion therefore remains unverified; deterministic provider and
+host timing tests passed. The prepared merge is preserved for worker publication.
+
+Visual evidence: no new media captured for merge validation; existing synthetic
+captures do not satisfy the outstanding live OpenRouter/UI trace requirement.
+
+Exact-base merge repair (2026-09-08): resolved against
+`cd4d3d4a4604303885e3bc3412566395988d8bc0`, preserving progress callbacks,
+image preflight and one-shot image consumption, provider failure usage audits,
+and persistence. History erasure recreates a progress-enabled controller.
+Updated progress tests for mutable session admission and persistence fixtures
+for bounded host channels and request IDs. No unresolved paths remain.
+
+Validation: 123 AI library tests and 95 desktop tests passed through
+`tools/cargo_cache.py`, with a fresh worktree-local build. Native evidence capture
+passed. Formatting, unsafe-boundary, and diff checks passed; no lingering test
+processes were found. Bash is unavailable, so the full shell gate could not
+launch. The opt-in OpenRouter example built but failed explicitly because
+`OPENROUTER_API_KEY` is absent; process, user, and machine probes also found no
+key. Deterministic tests are the available fallback, not live acceptance evidence.
+
+Visual evidence: `artifacts/task522-merged-progress.png` was captured and
+inspected: the focused-tests phase, separate 145 ms provider first-action label,
+and image-enabled composer remain readable. Its sibling JSON agrees with those
+synthetic values. No new MP4 or live OpenRouter/UI trace was captured.
+
+Theory gained: provider progress and image consumption must share the same
+request entry point, including controller recreation after history erasure.
+The combined AI, image, and persistence tests support retaining both contracts
+when adding another controller lifecycle path.

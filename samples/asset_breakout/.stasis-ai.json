@@ -33,13 +33,13 @@
           "name": "brick layout is deterministic",
           "kind": "test",
           "file": "tests/asset_breakout.test.stasis",
-          "purpose": "Prove representative edge and center coordinates, horizontal placement, and the complete brick count."
+          "purpose": "ASSERT all three coordinates: brick 0=(25,60), brick 3=(271,36), brick 34=(517,172), plus bricks_left=35. Do not omit the center check."
         },
         {
           "name": "hot swap preserves active round",
           "kind": "test",
           "file": "tests/asset_breakout.test.stasis",
-          "purpose": "Prove brick repopulation and preservation of active gameplay state, including velocity."
+          "purpose": "Before swap: set ball_vx=1.25, ball_vy=-2.5, bricks[0].alive=false and reduce bricks_left. After swap: ASSERT both velocities unchanged, brick 0 alive, count=35, ball position/active state preserved, and presentation_variant toggled. Assigning velocities alone is not a test."
         }
       ],
       "invariants": [
