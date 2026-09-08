@@ -240,3 +240,17 @@
 - The retained target/debug compiler lacks a verified build fingerprint. The live probe correctly rejected it before creating an evidence directory; no new native audio capture is claimed for this review repair.
 - Visual evidence: not applicable; this change validates evidence provenance, not graphical behavior.
 - Theory gained: environment overrides cannot prove runtime selection when bundle siblings take precedence; evidence must verify the loader-selected pair.
+
+### Task 532 receiver-owned named-struct arrays
+
+- Route indexed receiver field reads and writes through the existing typed collection helpers using the receiver's storage handle. Fixed-capacity bounds traps remain ahead of access; unsupported whole-element and non-scalar operations fail deterministically.
+- Cover Bone[24] scalar lanes, dynamic boundary reads/writes, nested calls, two independent owners, data-flow summaries, state layout, capacity invalidation, and hot-swap preservation/rejection. Wasm validates each owner candidate's scalar lane layout.
+- Focused validation: 7 native seam/state tests and 29 receiver-related compiler tests passed, including linked native AOT and Node/Wasm execution. Fresh stasis_dynload artifacts were built. Formatting and source-layout checks passed.
+- Downstream integration: temporarily tested the four rig2d seam/source files from b44dd6c0 in this worktree. Both rig2d_jit_aot_seam tests passed, including linked AOT result parity and all 11 Stasis cases; temporary source files were removed.
+- Visual evidence: not applicable; this change has no graphical behavior.
+- Theory gained: a receiver carries a stable owner path hash; appending the collection field selects the same flattened scalar lanes as concrete global access. The two-owner tests support this mapping, and capacity-only edits must re-emit unchanged accessors because their bounds are compiled constants.
+- Good: shared typed helpers preserve scalar behavior without another parser path.
+- Bad: inherited optional signer configuration failed despite unsigned local execution being supported; overlapping validation also exposed a Windows DLL lock.
+- Adjustment: run validation serially with only applicable optional tool settings, and require actual linked executable results.
+- Repository validation coverage passed in bounded runs: tools/validate_repo.sh preflight and all application targets, then `cargo test -p stasis_compiler --all-targets` (including 618 unit tests), then `cargo test --workspace --exclude stasis --exclude stasis_compiler --all-targets`, each Cargo invocation through tools/cargo_cache.py. Final Rust formatting, Stasis source-layout, and diff checks passed; no lingering test processes remained.
+- Validation setup: fresh source-fingerprinted CLI/SDL runtime, MSVC environment and explicit linker, absolute worktree Cargo target, and checksum-verified local SDL archives for release builds. Optional unavailable signing settings were isolated in the test process. The real Git index retained an older unformatted probe; the compiler formatter gate passed against an isolated candidate index/object directory containing the corrected working copy. The worker's real index was preserved.

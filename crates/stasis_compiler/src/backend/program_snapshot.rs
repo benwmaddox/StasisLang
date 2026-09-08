@@ -831,7 +831,6 @@ function render(): void {{ {draws} }}
     }
 
     #[test]
-    #[ignore = "representative timing report; run explicitly with --ignored"]
     fn hot_render_compiler_microbenchmark() {
         use std::time::Instant;
 
