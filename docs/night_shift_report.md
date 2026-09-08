@@ -254,3 +254,11 @@
 - Adjustment: run validation serially with only applicable optional tool settings, and require actual linked executable results.
 - Repository validation coverage passed in bounded runs: tools/validate_repo.sh preflight and all application targets, then `cargo test -p stasis_compiler --all-targets` (including 618 unit tests), then `cargo test --workspace --exclude stasis --exclude stasis_compiler --all-targets`, each Cargo invocation through tools/cargo_cache.py. Final Rust formatting, Stasis source-layout, and diff checks passed; no lingering test processes remained.
 - Validation setup: fresh source-fingerprinted CLI/SDL runtime, MSVC environment and explicit linker, absolute worktree Cargo target, and checksum-verified local SDL archives for release builds. Optional unavailable signing settings were isolated in the test process. The real Git index retained an older unformatted probe; the compiler formatter gate passed against an isolated candidate index/object directory containing the corrected working copy. The worker's real index was preserved.
+
+### Task 532 compiler benchmark review repair
+
+- Restored the reporting-only compiler microbenchmark's original ignored attribute. Added a narrow validator exception for that named benchmark and documented its explicit `--ignored` invocation; ordinary correctness tests remain mandatory.
+- Validation: exact default selection reports one ignored test; explicit `--ignored` execution passes. Repository ignore audit and rejection probes, shell syntax, Rust formatting, and diff checks pass.
+- Visual evidence: not applicable; test scheduling only.
+- Theory gained: correctness gates and timing reports have different execution contracts; the default skip and explicit successful run verify that separation.
+- Good: the benchmark remains available without ordinary CI cost. Bad: the blanket ignore audit conflicted with its intended opt-in status. Adjustment: keep the exception restricted to this named reporting benchmark.
