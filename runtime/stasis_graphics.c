@@ -4710,15 +4710,17 @@ static int stasis_sprite_atlas_reserve_on_page(
     }
     int x = page->cursor_x;
     int y = page->cursor_y;
+    int row_h = page->row_h;
     if (x + alloc_w > page->width) {
         x = 1;
-        y += page->row_h;
-        page->row_h = 0;
+        y += row_h;
+        row_h = 0;
     }
+    /* Failed probes must preserve the occupied shelf for later allocations. */
     if (y + alloc_h > page->height) return 0;
     page->cursor_x = x + alloc_w;
     page->cursor_y = y;
-    if (alloc_h > page->row_h) page->row_h = alloc_h;
+    page->row_h = alloc_h > row_h ? alloc_h : row_h;
     page->live_allocations++;
     *out_x = x + STASIS_SDL_ATLAS_PADDING;
     *out_y = y + STASIS_SDL_ATLAS_PADDING;
