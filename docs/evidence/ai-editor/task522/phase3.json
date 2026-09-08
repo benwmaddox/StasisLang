@@ -1,0 +1,69 @@
+{
+  "fixture": true,
+  "host_events": [
+    {
+      "elapsed_ms": 0,
+      "stage": "Queued"
+    },
+    {
+      "elapsed_ms": 200,
+      "stage": "Applying atomically"
+    },
+    {
+      "elapsed_ms": 400,
+      "stage": "Compiling"
+    },
+    {
+      "elapsed_ms": 600,
+      "stage": "Running focused tests"
+    }
+  ],
+  "host_request_id": 1,
+  "provider_events": [
+    {
+      "elapsed_ms": 0,
+      "provider_elapsed_ms": null,
+      "sequence": 0,
+      "stage": "Queued"
+    },
+    {
+      "elapsed_ms": 0,
+      "provider_elapsed_ms": null,
+      "sequence": 1,
+      "stage": "Inspecting symbols"
+    },
+    {
+      "elapsed_ms": 0,
+      "provider_elapsed_ms": null,
+      "sequence": 2,
+      "stage": "Contacting provider"
+    },
+    {
+      "elapsed_ms": 0,
+      "provider_elapsed_ms": 120,
+      "sequence": 3,
+      "stage": "First response received"
+    },
+    {
+      "elapsed_ms": 0,
+      "provider_elapsed_ms": 145,
+      "sequence": 4,
+      "stage": "First action received"
+    },
+    {
+      "elapsed_ms": 0,
+      "provider_elapsed_ms": null,
+      "sequence": 5,
+      "stage": "Preparing proposal"
+    },
+    {
+      "elapsed_ms": 0,
+      "provider_elapsed_ms": null,
+      "sequence": 6,
+      "stage": "Completed"
+    }
+  ],
+  "provider_first_action_ms": 145,
+  "provider_request_id": 1,
+  "task_id": "task-1"
+}

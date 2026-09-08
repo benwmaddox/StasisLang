@@ -442,6 +442,19 @@ impl ModelProvider for ConfiguredProvider {
             Self::OpenRouter(provider) => provider.respond(request, canceled),
         }
     }
+    fn respond_with_progress(
+        &mut self,
+        request: &str,
+        canceled: &AtomicBool,
+        progress: &mut dyn FnMut(crate::ProviderProgress),
+    ) -> Result<ModelResponse, String> {
+        match self {
+            Self::Codex(provider) => provider.respond_with_progress(request, canceled, progress),
+            Self::OpenRouter(provider) => {
+                provider.respond_with_progress(request, canceled, progress)
+            }
+        }
+    }
     fn take_usage(&mut self) -> Option<Value> {
         match self {
             Self::Codex(provider) => provider.take_usage().map(|usage| {
@@ -769,6 +782,15 @@ impl OpenRouterProvider {
 
 impl ModelProvider for OpenRouterProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String> {
+        self.respond_with_progress(request, canceled, &mut |_| {})
+    }
+
+    fn respond_with_progress(
+        &mut self,
+        request: &str,
+        canceled: &AtomicBool,
+        progress: &mut dyn FnMut(crate::ProviderProgress),
+    ) -> Result<ModelResponse, String> {
         let turn_started = Instant::now();
         let deadline = turn_started + self.config.timeout;
         self.call_count = self.call_count.saturating_add(1);
@@ -779,7 +801,14 @@ impl ModelProvider for OpenRouterProvider {
             .build()
             .map_err(|error| format!("failed configuring OpenRouter async runtime: {error}"))?;
         let images = std::mem::take(&mut self.images);
-        runtime.block_on(self.respond_async(request, &images, canceled, turn_started, deadline))
+        runtime.block_on(self.respond_async(
+            request,
+            &images,
+            canceled,
+            turn_started,
+            deadline,
+            progress,
+        ))
     }
 
     fn take_usage(&mut self) -> Option<Value> {
@@ -799,10 +828,12 @@ impl OpenRouterProvider {
         canceled: &AtomicBool,
         turn_started: Instant,
         deadline: Instant,
+        progress: &mut dyn FnMut(crate::ProviderProgress),
     ) -> Result<ModelResponse, String> {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
         }
+        progress(crate::ProviderProgress::ContactingProvider);
         if !images.is_empty() {
             let capability = self
                 .image_input_capability_async(deadline, canceled)
@@ -812,6 +843,7 @@ impl OpenRouterProvider {
                 return Err(capability.reason);
             }
         }
+
         let (hard_only, metadata_time) = match self.config.routing.hard_min_throughput {
             Some(minimum) => {
                 let (tags, elapsed) = self
@@ -835,6 +867,7 @@ impl OpenRouterProvider {
                         turn_started,
                         deadline,
                         canceled,
+                        progress,
                     )
                     .await;
             }
@@ -847,6 +880,7 @@ impl OpenRouterProvider {
             turn_started,
             deadline,
             canceled,
+            progress,
         )
         .await
     }
@@ -860,6 +894,7 @@ impl OpenRouterProvider {
         turn_started: Instant,
         deadline: Instant,
         canceled: &AtomicBool,
+        progress: &mut dyn FnMut(crate::ProviderProgress),
     ) -> Result<ModelResponse, String> {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
@@ -988,13 +1023,15 @@ impl OpenRouterProvider {
                     .and_then(Value::as_str)
                 {
                     if !value.is_empty() && first_content_ms.is_none() {
-                        first_content_ms = Some(duration_ms(request_started.elapsed()));
+                        let elapsed_ms = duration_ms(request_started.elapsed());
+                        first_content_ms = Some(elapsed_ms);
+                        progress(crate::ProviderProgress::FirstResponse { elapsed_ms });
                     }
                     content.push_str(value);
-                    if first_action_ms.is_none()
-                        && (content.contains("\"action_id\"") || content.contains("\"tool_calls\""))
-                    {
-                        first_action_ms = Some(duration_ms(request_started.elapsed()));
+                    if first_action_ms.is_none() && has_started_tool_call(&content) {
+                        let elapsed_ms = duration_ms(request_started.elapsed());
+                        first_action_ms = Some(elapsed_ms);
+                        progress(crate::ProviderProgress::FirstAction { elapsed_ms });
                     }
                 }
                 if let Some(value) = chunk.get("usage") {
@@ -1017,17 +1054,21 @@ impl OpenRouterProvider {
             .as_deref()
             .map(sanitize_label)
             .unwrap_or_else(|| sanitize_label(&self.config.model));
-        let resolved_provider = resolved_provider
+        let resolved_provider_evidence = resolved_provider
             .as_deref()
-            .and_then(normalize_provider_slug)
-            .unwrap_or_else(|| "unknown".to_string());
-        let fallback = self
-            .config
-            .routing
-            .order
-            .first()
-            .and_then(|value| normalize_provider_slug(value))
-            .is_some_and(|first| first != resolved_provider);
+            .and_then(normalize_provider_slug);
+        let fallback = resolved_provider_evidence.as_ref().is_some_and(|resolved| {
+            self.config
+                .routing
+                .order
+                .first()
+                .and_then(|value| normalize_provider_slug(value))
+                .is_some_and(|first| first != *resolved)
+        });
+        let resolved_provider = resolved_provider_evidence.unwrap_or_else(|| "unknown".to_string());
+        if fallback {
+            progress(crate::ProviderProgress::Fallback);
+        }
         let prompt_tokens = metric_number(usage.get("prompt_tokens"));
         let completion_tokens = metric_number(usage.get("completion_tokens"));
         let reasoning_tokens =
@@ -1189,6 +1230,66 @@ fn env_u64(name: &str) -> Result<Option<u64>, String> {
 fn duration_ms(value: Duration) -> u64 {
     u64::try_from(value.as_millis()).unwrap_or(u64::MAX)
 }
+fn has_started_tool_call(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let mut index = 0;
+    let mut depth = 0_u32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b'"' => {
+                let start = index + 1;
+                index = start;
+                let mut escaped = false;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => {
+                            escaped = true;
+                            index = index.saturating_add(2);
+                        }
+                        b'"' => break,
+                        _ => index += 1,
+                    }
+                }
+                if index >= bytes.len() {
+                    return false;
+                }
+                let end = index;
+                index += 1;
+                if depth != 1 || escaped || &bytes[start..end] != b"tool_calls" {
+                    continue;
+                }
+                while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                if bytes.get(index) != Some(&b':') {
+                    continue;
+                }
+                index += 1;
+                // A required but empty tool_calls array is not an action.
+                for delimiter in [b'[', b'{'] {
+                    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                        index += 1;
+                    }
+                    if bytes.get(index) != Some(&delimiter) {
+                        return false;
+                    }
+                    index += 1;
+                }
+                return true;
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
 fn throughput(usage: &Value, elapsed: Duration) -> Value {
     usage
         .get("completion_tokens")
@@ -1223,6 +1324,55 @@ fn api_error(context: &str, status: u16, value: &Value, secret: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_progress_requires_a_nonempty_top_level_tool_calls_array() {
+        for content in [
+            r#"{"mode":"tool_calls"}"#,
+            r#"{"working_notes":"say \"tool_calls\": [] and {ignored}"}"#,
+            r#"{"nested":{"tool_calls":[{}]}}"#,
+            r#"{"mode":"done","tool_calls":[]}"#,
+            r#"{"tool_calls": [  ]}"#,
+            r#"{"tool_calls": null}"#,
+        ] {
+            assert!(!has_started_tool_call(content), "{content}");
+        }
+        let partial = r#"{"working_notes":"ok","tool_calls" : [  {"#;
+        for end in 0..partial.len() {
+            assert!(!has_started_tool_call(&partial[..end]));
+        }
+        assert!(has_started_tool_call(partial));
+    }
+
+    #[test]
+    fn streamed_done_reply_never_reports_first_action() {
+        let fragments = [
+            r#"{"mode":"done","working_notes":"","summary":"Done","tool_calls" :"#,
+            " [ ",
+            "]}",
+        ];
+        let mut body = String::new();
+        for content in fragments {
+            let chunk = json!({"choices":[{"delta":{"content":content}}]});
+            body.push_str(&format!("data: {chunk}\n\n"));
+        }
+        body.push_str("data: [DONE]\n\n");
+        let (base_url, _requests, worker) =
+            mock_server(vec![http_response("text/event-stream", &body)]);
+        let mut provider = OpenRouterProvider::new(test_config(base_url)).unwrap();
+        let mut progress = Vec::new();
+        let response = provider
+            .respond_with_progress(&test_request(), &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
+            .unwrap();
+        assert!(matches!(response, ModelResponse::Done { .. }));
+        assert!(!progress
+            .iter()
+            .any(|event| matches!(event, crate::ProviderProgress::FirstAction { .. })));
+        assert!(provider.take_usage().unwrap()["timing_ms"]["first_action"].is_null());
+        worker.join().unwrap();
+    }
 
     #[test]
     fn routing_serializes_all_knobs() {
@@ -1569,11 +1719,16 @@ mod tests {
         let body = format!("data: {}\n\ndata: [DONE]\n\n", chunk);
         let (base_url, requests, worker) =
             mock_server(vec![http_response("text/event-stream", &body)]);
-        let mut provider = OpenRouterProvider::new(test_config(base_url)).expect("provider");
+        let mut config = test_config(base_url);
+        config.routing.order = vec!["openai".to_string(), "cerebras".to_string()];
+        let mut provider = OpenRouterProvider::new(config).expect("provider");
         provider.reasoning_effort = Some("low".to_string());
         provider.session_id = Some("stasis-test-session".to_string());
+        let mut progress = Vec::new();
         let openrouter = provider
-            .respond(&test_request(), &AtomicBool::new(false))
+            .respond_with_progress(&test_request(), &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
             .expect("stream response");
         let codex = crate::decode_codex_response(&fixture.to_string()).expect("Codex fixture");
         assert_eq!(openrouter, codex);
@@ -1613,11 +1768,63 @@ mod tests {
         );
         let usage = provider.take_usage().expect("usage");
         assert_eq!(usage["resolved_provider"], "cerebras");
+        assert_eq!(usage["fallback"], true);
         assert_eq!(usage["tokens"]["cache"], 2);
         assert!(usage["timing_ms"]["first_action"].is_number());
         assert!(usage["timing_ms"]["inference_total"].is_number());
         assert!(usage["timing_ms"]["turn_total"].is_number());
         assert!(usage["timing_ms"].get("total").is_none());
+        assert_eq!(
+            progress,
+            vec![
+                crate::ProviderProgress::ContactingProvider,
+                crate::ProviderProgress::FirstResponse {
+                    elapsed_ms: usage["timing_ms"]["first_content"]
+                        .as_u64()
+                        .expect("first content timing"),
+                },
+                crate::ProviderProgress::FirstAction {
+                    elapsed_ms: usage["timing_ms"]["first_action"]
+                        .as_u64()
+                        .expect("first action timing"),
+                },
+                crate::ProviderProgress::Fallback,
+            ]
+        );
+        worker.join().expect("mock worker");
+    }
+
+    #[test]
+    fn missing_resolved_provider_does_not_claim_fallback() {
+        let fixture = json!({
+            "mode": "done",
+            "working_notes": "Request complete.",
+            "summary": "complete"
+        });
+        let chunk = json!({
+            "model": DEFAULT_OPENROUTER_MODEL,
+            "choices": [{"delta": {"content": fixture.to_string()}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 3}
+        });
+        let body = format!("data: {}\n\ndata: [DONE]\n\n", chunk);
+        let (base_url, _requests, worker) =
+            mock_server(vec![http_response("text/event-stream", &body)]);
+        let mut config = test_config(base_url);
+        config.routing.order = vec!["cerebras".to_string(), "openai".to_string()];
+        let mut provider = OpenRouterProvider::new(config).expect("provider");
+        let mut progress = Vec::new();
+        provider
+            .respond_with_progress(&test_request(), &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
+            .expect("stream response");
+
+        let usage = provider.take_usage().expect("usage");
+        assert_eq!(usage["resolved_provider"], "unknown");
+        assert_eq!(usage["fallback"], false);
+        assert!(!progress
+            .iter()
+            .any(|event| matches!(event, crate::ProviderProgress::Fallback)));
         worker.join().expect("mock worker");
     }
 
@@ -1749,10 +1956,14 @@ mod tests {
     fn canceled_request_never_starts_transport() {
         let mut provider =
             OpenRouterProvider::new(test_config("http://127.0.0.1:9".into())).expect("provider");
+        let mut progress = Vec::new();
         let error = provider
-            .respond("request", &AtomicBool::new(true))
+            .respond_with_progress("request", &AtomicBool::new(true), &mut |event| {
+                progress.push(event)
+            })
             .expect_err("canceled");
         assert_eq!(error, "AI request canceled");
+        assert!(progress.is_empty());
     }
 
     #[test]

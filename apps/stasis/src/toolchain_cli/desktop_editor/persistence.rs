@@ -535,7 +535,7 @@ mod tests {
             .clone();
         editor.busy_tasks.insert("task-1".into());
 
-        let (request_tx, _request_rx) = mpsc::channel();
+        let (request_tx, _request_rx) = mpsc::sync_channel(8);
         let (result_tx, result_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
@@ -557,6 +557,7 @@ mod tests {
                     });
             result_tx
                 .send(HostResult {
+                    request_id: 1,
                     task_id: "task-1".into(),
                     operation: HostOperation::Apply {
                         action_id: "value".into(),
@@ -569,6 +570,7 @@ mod tests {
         editor.host = HostExecutor {
             requests: Some(request_tx),
             results: result_rx,
+            progress: Arc::new(Mutex::new(HostProgressState::default())),
             canceled: Arc::new(Mutex::new(BTreeSet::new())),
             shutdown,
             worker: Some(worker),

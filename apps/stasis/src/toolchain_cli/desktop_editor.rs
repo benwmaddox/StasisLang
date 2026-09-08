@@ -1,8 +1,12 @@
+mod host_progress;
 mod image_attachments;
 mod persistence;
 #[cfg(test)]
 mod request_image_tests;
 mod semantic_diff;
+
+use host_progress::{HostProgress, HostProgressState};
+use stasis_ai::task_controller::{ProgressReporter, ProgressStage};
 mod semantic_revisions;
 
 use image_attachments::{AttachmentOrigin, SessionAttachmentStore};
@@ -313,6 +317,7 @@ fn run_reply_provider(
     request: ProviderRequest,
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
+    progress: ProgressReporter,
 ) -> Result<ProviderReply, String> {
     let config = selected_provider_config(request.selected_provider)?;
     let effective_reasoning_effort = (config.provider_name() == "openrouter").then_some("low");
@@ -357,6 +362,7 @@ fn run_reply_provider(
         .filter(|text| !text.is_empty())
         .unwrap_or(request.objective.as_str())
         .to_string();
+    progress.report(ProgressStage::InspectingSymbols);
     let source_context = super::desktop_source_context(&project_root)?;
     let initial_context = json!({
         "task_id": request.task_id,
@@ -386,10 +392,29 @@ fn run_reply_provider(
         initial_context,
         proposal_tool_specs(),
         &canceled,
-        |event| {
-            if let AgentEvent::ProviderUsage(value) = event {
-                usage = Some(value);
+        |event| match event {
+            AgentEvent::ProviderUsage(value) => usage = Some(value),
+            AgentEvent::ProviderProgress(event) => {
+                use stasis_ai::ProviderProgress;
+                match event {
+                    ProviderProgress::ContactingProvider => {
+                        progress.report(ProgressStage::ContactingProvider);
+                    }
+                    ProviderProgress::FirstResponse { elapsed_ms } => {
+                        progress.report_provider(ProgressStage::FirstResponse, elapsed_ms);
+                    }
+                    ProviderProgress::FirstAction { elapsed_ms } => {
+                        progress.report_provider(ProgressStage::FirstAction, elapsed_ms);
+                    }
+                    ProviderProgress::Fallback => {
+                        progress.report(ProgressStage::Fallback);
+                    }
+                }
             }
+            AgentEvent::ToolBatch(_) => {
+                progress.report(ProgressStage::PreparingProposal);
+            }
+            _ => {}
         },
     )?;
     let mut reply = ProviderReply::new(text);
@@ -491,8 +516,37 @@ struct HostRequest {
 #[derive(Debug)]
 struct HostResult {
     task_id: String,
+    request_id: u64,
     operation: HostOperation,
     result: Result<(String, Value, String), String>,
+}
+
+fn provider_timeline_stage(
+    task: &stasis_ai::Task,
+    request: &stasis_ai::TaskRequestSnapshot,
+) -> ProgressStage {
+    if task.lifecycle == TaskLifecycle::Canceled {
+        return ProgressStage::Canceled;
+    }
+    if request.state == stasis_ai::TaskRequestState::Completed
+        && task
+            .actions
+            .values()
+            .any(|action| matches!(action.state, ActionState::Proposed))
+    {
+        return ProgressStage::WaitingForApproval;
+    }
+    request
+        .progress
+        .last()
+        .map(|event| event.stage)
+        .unwrap_or(ProgressStage::Queued)
+}
+
+fn measured_ms(value: Option<u64>) -> String {
+    value
+        .map(|value| format!("{value} ms"))
+        .unwrap_or_else(|| "not measured".into())
 }
 
 fn receipt_has_test_evidence(receipt: &Value) -> bool {
@@ -541,8 +595,9 @@ fn record_focused_test_failure(
 }
 
 struct HostExecutor {
-    requests: Option<mpsc::Sender<HostRequest>>,
+    requests: Option<mpsc::SyncSender<(u64, HostRequest)>>,
     results: mpsc::Receiver<HostResult>,
+    progress: Arc<Mutex<HostProgressState>>,
     canceled: Arc<Mutex<BTreeSet<String>>>,
     shutdown: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
@@ -550,14 +605,22 @@ struct HostExecutor {
 
 impl HostExecutor {
     fn new(project_root: PathBuf) -> Self {
-        let (request_tx, request_rx) = mpsc::channel::<HostRequest>();
+        let (request_tx, request_rx) = mpsc::sync_channel::<(u64, HostRequest)>(8);
         let (result_tx, result_rx) = mpsc::channel::<HostResult>();
         let canceled = Arc::new(Mutex::new(BTreeSet::<String>::new()));
         let worker_canceled = Arc::clone(&canceled);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
+        let progress = Arc::new(Mutex::new(HostProgressState::default()));
+        let worker_progress = Arc::clone(&progress);
         let worker = thread::spawn(move || {
-            while let Ok(request) = request_rx.recv() {
+            while let Ok((request_id, request)) = request_rx.recv() {
+                let mut emit = |stage| {
+                    worker_progress
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .report(&request.task_id, request_id, stage);
+                };
                 let skip = worker_shutdown.load(Ordering::Acquire)
                     || worker_canceled
                         .lock()
@@ -568,10 +631,18 @@ impl HostExecutor {
                 } else {
                     let operation_result = match &request.operation {
                         HostOperation::Apply { preview, .. } => {
-                            super::desktop_apply_semantic_preview(&project_root, preview)
+                            super::desktop_apply_semantic_preview_with_progress(
+                                &project_root,
+                                preview,
+                                &mut emit,
+                            )
                         }
                         HostOperation::Test { paths, .. } => {
-                            super::desktop_run_focused_tests(&project_root, paths)
+                            super::desktop_run_focused_tests_with_progress(
+                                &project_root,
+                                paths,
+                                &mut emit,
+                            )
                         }
                     };
                     operation_result.and_then(|(summary, receipt)| match &request.operation {
@@ -595,8 +666,22 @@ impl HostExecutor {
                         }
                     })
                 };
+                if result.as_ref().is_ok_and(|(_, receipt, _)| {
+                    matches!(request.operation, HostOperation::Test { .. })
+                        || receipt_has_test_evidence(receipt)
+                }) {
+                    emit(ProgressStage::FocusedTestsPassed);
+                }
+                emit(if skip {
+                    ProgressStage::Canceled
+                } else if result.is_ok() {
+                    ProgressStage::Completed
+                } else {
+                    ProgressStage::Failed
+                });
                 if result_tx
                     .send(HostResult {
+                        request_id,
                         task_id: request.task_id,
                         operation: request.operation,
                         result,
@@ -610,6 +695,7 @@ impl HostExecutor {
         Self {
             requests: Some(request_tx),
             results: result_rx,
+            progress,
             canceled,
             shutdown,
             worker: Some(worker),
@@ -617,14 +703,36 @@ impl HostExecutor {
     }
 
     fn submit(&self, request: HostRequest) -> Result<(), String> {
-        self.requests
+        let sender = self
+            .requests
             .as_ref()
-            .ok_or_else(|| "desktop host executor is shut down".to_string())?
-            .send(request)
-            .map_err(|_| "desktop host executor is unavailable".to_string())
+            .ok_or_else(|| "desktop host executor is shut down".to_string())?;
+        let mut progress = self.progress.lock().unwrap_or_else(|p| p.into_inner());
+        let id = progress.admit(&request.task_id)?;
+        let task_id = request.task_id.clone();
+        let result = sender
+            .try_send((id, request))
+            .map_err(|_| "desktop host executor is at capacity or unavailable".to_string());
+        if result.is_err() {
+            progress.discard(&task_id, id);
+        }
+        result
+    }
+
+    fn snapshot(&self, task_id: &str) -> Option<HostProgress> {
+        self.progress
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .snapshots
+            .get(task_id)
+            .cloned()
     }
 
     fn cancel(&self, task_id: &str) {
+        self.progress
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .cancel(task_id);
         self.canceled
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -632,7 +740,12 @@ impl HostExecutor {
     }
 
     fn poll(&self) -> Vec<HostResult> {
-        self.results.try_iter().collect()
+        let results: Vec<_> = self.results.try_iter().collect();
+        let mut progress = self.progress.lock().unwrap_or_else(|p| p.into_inner());
+        for result in &results {
+            progress.release(&result.task_id, result.request_id);
+        }
+        results
     }
 
     fn shutdown_and_join(&mut self) {
@@ -660,6 +773,8 @@ struct DesktopEditor {
     host: HostExecutor,
     validation_fingerprints: BTreeMap<String, (String, Vec<String>)>,
     busy_tasks: BTreeSet<String>,
+    task_started: BTreeMap<String, Instant>,
+    task_tests_passed_ms: BTreeMap<String, u64>,
     execution_receipts: BTreeMap<(String, String), Value>,
     validation_receipts: BTreeMap<String, Value>,
     capture: Option<PendingCapture>,
@@ -1042,8 +1157,8 @@ impl DesktopEditor {
                 project_root: Some(project_root.clone()),
                 ..EditorState::default()
             },
-            controller: TaskController::new(move |request, canceled| {
-                run_reply_provider(request, canceled, provider_root.clone())
+            controller: TaskController::new_with_progress(move |request, canceled, progress| {
+                run_reply_provider(request, canceled, provider_root.clone(), progress)
             }),
             client,
             project_root,
@@ -1051,6 +1166,8 @@ impl DesktopEditor {
             host,
             validation_fingerprints: BTreeMap::new(),
             busy_tasks: BTreeSet::new(),
+            task_started: BTreeMap::new(),
+            task_tests_passed_ms: BTreeMap::new(),
             execution_receipts: BTreeMap::new(),
             validation_receipts: BTreeMap::new(),
             capture: None,
@@ -1217,8 +1334,8 @@ impl DesktopEditor {
             let _ = job.worker.join();
         }
         let provider_root = self.project_root.clone();
-        self.controller = TaskController::new(move |request, canceled| {
-            run_reply_provider(request, canceled, provider_root.clone())
+        self.controller = TaskController::new_with_progress(move |request, canceled, progress| {
+            run_reply_provider(request, canceled, provider_root.clone(), progress)
         });
         self.window_preferences = None;
         self.recovery_error = false;
@@ -1282,6 +1399,7 @@ impl DesktopEditor {
         for intent in intents {
             match intent {
                 EditorIntent::SendReply(task, text) => {
+                    let started = Instant::now();
                     let task = TaskId::new(task);
                     let was_uncertain = self.uncertain_calls.contains(task.as_str());
                     let mut candidate = self.state.session.clone();
@@ -1316,7 +1434,11 @@ impl DesktopEditor {
                                 .map_err(|error| error.to_string())
                         });
                     match accepted {
-                        Ok(_) => self.state.session = candidate,
+                        Ok(_) => {
+                            self.task_started.entry(task.to_string()).or_insert(started);
+                            self.task_tests_passed_ms.remove(task.as_str());
+                            self.state.session = candidate;
+                        }
                         Err(error) => {
                             if !was_uncertain {
                                 self.uncertain_calls.remove(task.as_str());
@@ -1331,6 +1453,7 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::Retry(task) => {
+                    self.task_tests_passed_ms.remove(&task);
                     let task = TaskId::new(task);
                     let was_uncertain = self.uncertain_calls.contains(task.as_str());
                     let candidate = self.state.session.clone();
@@ -1387,6 +1510,7 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::Apply(task, action) => {
+                    self.task_tests_passed_ms.remove(&task);
                     let accepted = self
                         .state
                         .session
@@ -1433,6 +1557,7 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::Test(task, run_id) => {
+                    self.task_tests_passed_ms.remove(&task);
                     if !self.busy_tasks.insert(task.clone()) {
                         let message = format!(
                             "An apply or focused-test operation is already running for {task}."
@@ -1949,6 +2074,17 @@ impl DesktopEditor {
     fn poll_host(&mut self) {
         for completed in self.host.poll() {
             let task_id = completed.task_id;
+            if self
+                .host
+                .snapshot(&task_id)
+                .is_some_and(|record| record.request_id != completed.request_id)
+            {
+                continue;
+            }
+            let task_elapsed = self
+                .task_started
+                .get(&task_id)
+                .and_then(|started| self.host.snapshot(&task_id)?.task_to_tests_ms(*started));
             self.busy_tasks.remove(&task_id);
             let task = self.state.session.task_mut(task_id.as_str());
             match (completed.operation, completed.result, task) {
@@ -1983,6 +2119,9 @@ impl DesktopEditor {
                             continue;
                         }
                         if validated {
+                            if let Some(elapsed) = task_elapsed {
+                                self.task_tests_passed_ms.insert(task_id.clone(), elapsed);
+                            }
                             self.validation_fingerprints
                                 .insert(task_id.clone(), (fingerprint, Vec::new()));
                         }
@@ -2023,6 +2162,9 @@ impl DesktopEditor {
                     if let Err(error) = result {
                         self.state.notice = Some(error.to_string());
                         continue;
+                    }
+                    if let Some(elapsed) = task_elapsed {
+                        self.task_tests_passed_ms.insert(task_id.clone(), elapsed);
                     }
                     self.validation_receipts.insert(task_id.clone(), receipt);
                     self.validation_fingerprints
@@ -3020,7 +3162,7 @@ impl DesktopEditor {
         let mut provider_choice = None;
         let openrouter = stasis_ai::OpenRouterConfig::from_env().ok();
         egui::Frame::none()
-            .fill(panel_fill())
+            .fill(Color32::from_rgb(28, 33, 41))
             .stroke(egui::Stroke::new(1.0_f32, border()))
             .rounding(8.0)
             .inner_margin(egui::Margin::same(14.0))
@@ -3117,38 +3259,15 @@ impl DesktopEditor {
                     .on_hover_text("Retained conversation characters; excludes source, tools, images, and the model token window.");
                 });
                 ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    let total = task
-                        .metrics
-                        .input_tokens
-                        .saturating_add(task.metrics.output_tokens);
-                    ui.label(RichText::new(format!("Usage  {total} tokens")).size(12.0));
-                    ui.label(
-                        RichText::new(format!(
-                            "{} in / {} out",
-                            task.metrics.input_tokens, task.metrics.output_tokens
-                        ))
-                        .size(11.0)
-                        .color(muted_text()),
-                    );
-                    if task.metrics.estimated_cost_micros > 0 {
-                        ui.label(
-                            RichText::new(format!(
-                                "${:.4}",
-                                task.metrics.estimated_cost_micros as f64 / 1_000_000.0
-                            ))
-                            .size(11.0)
-                            .color(muted_text()),
-                        );
-                    }
-                    if task.metrics.elapsed_ms > 0 {
-                        ui.label(
-                            RichText::new(format!("{} ms", task.metrics.elapsed_ms))
-                                .size(11.0)
-                                .color(muted_text()),
-                        );
-                    }
-                });
+                let total = task.metrics.input_tokens.saturating_add(task.metrics.output_tokens);
+                egui::CollapsingHeader::new(format!("Usage  {total} tokens"))
+                    .id_source(("usage-details", task.id.as_str()))
+                    .show(ui, |ui| {
+                        ui.label(format!("{} in / {} out / ${:.4}", task.metrics.input_tokens,
+                            task.metrics.output_tokens, task.metrics.estimated_cost_micros as f64 / 1_000_000.0));
+                        ui.label(format!("Route: {:?}", task.provider.routing));
+                        ui.label(format!("Fallback: {:?}", task.provider.fallback));
+                    });
                 if let Some(request) = self.controller.snapshot(&task.id) {
                     ui.add_space(6.0);
                     ui.label(
@@ -3175,6 +3294,83 @@ impl DesktopEditor {
                 })
                 .err()
                 .map(|error| error.to_string());
+        }
+    }
+
+    fn progress_timeline(&self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        if let Some(request) = self.controller.snapshot(&task.id) {
+            let stage = provider_timeline_stage(task, &request);
+            egui::Frame::none()
+                .fill(Color32::from_rgb(28, 33, 41))
+                .stroke(egui::Stroke::new(1.0_f32, border()))
+                .rounding(8.0)
+                .inner_margin(13.0)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(format!(
+                            "AI request {}: {}",
+                            request.request_id.get(),
+                            stage.label()
+                        ))
+                        .strong(),
+                    );
+                    ui.label(format!(
+                        "Provider first action: {}",
+                        measured_ms(request.provider_first_action_ms)
+                    ));
+                    egui::CollapsingHeader::new("Provider timing and events")
+                        .id_source((
+                            "provider-progress",
+                            task.id.as_str(),
+                            request.request_id.get(),
+                        ))
+                        .show(ui, |ui| {
+                            ui.label(format!(
+                                "First response: {} / Request total: {} ms / Retry {}",
+                                measured_ms(request.provider_first_response_ms),
+                                request.elapsed_ms,
+                                request.retry_count
+                            ));
+                            for event in &request.progress {
+                                ui.label(format!(
+                                    "{} ms  {}",
+                                    event.elapsed_ms,
+                                    event.stage.label()
+                                ));
+                            }
+                        });
+                });
+            ui.add_space(9.0);
+        }
+        if let Some(host) = self.host.snapshot(task.id.as_str()) {
+            let stage = host
+                .events
+                .last()
+                .map(|event| event.0)
+                .unwrap_or(ProgressStage::Queued);
+            egui::Frame::none().fill(Color32::from_rgb(28, 33, 41)).stroke(egui::Stroke::new(1.0_f32, border())).rounding(8.0).inner_margin(13.0).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new(format!("Host request {}: {}", host.request_id, stage.label())).strong());
+                if host.cancel_requested {
+                    ui.label("Cancellation requested; any in-flight atomic operation settles before shutdown.");
+                }
+                if let Some(elapsed) = self.task_tests_passed_ms.get(task.id.as_str()) {
+                    ui.label(format!("Task to tests passed: {elapsed} ms"))
+                        .on_hover_text("From the first admitted task message in this editor session, including provider, approval wait, and host work.");
+                }
+                egui::CollapsingHeader::new("Host timing and events")
+                    .id_source(("host-progress", host.task_id.as_str(), host.request_id))
+                    .show(ui, |ui| {
+                        ui.label(format!("Apply: {}", measured_ms(host.phase_ms(ProgressStage::ApplyingAtomically))));
+                        let compile_test = host.phase_ms(ProgressStage::Compiling).map(|compile| compile.saturating_add(host.phase_ms(ProgressStage::RunningFocusedTests).unwrap_or(0)));
+                        ui.label(format!("Compile/test: {}", measured_ms(compile_test)));
+                        ui.label("Hot swap: not measured (no runtime commit acknowledgment)");
+                        for (phase, elapsed) in &host.events {
+                            ui.label(format!("{elapsed} ms  {}", phase.label()));
+                        }
+                    });
+            });
         }
     }
 
@@ -3234,6 +3430,7 @@ impl DesktopEditor {
                     }
                     ui.add_space(9.0);
                 }
+                self.progress_timeline(ui, task);
             });
         if let Some(command) = command {
             let result = match command {
@@ -3336,7 +3533,7 @@ impl DesktopEditor {
         };
         let mut command = None;
         egui::Frame::none()
-            .fill(panel_fill())
+            .fill(Color32::from_rgb(28, 33, 41))
             .stroke(egui::Stroke::new(1.0_f32, border()))
             .rounding(8.0)
             .inner_margin(egui::Margin::same(13.0))
@@ -3830,7 +4027,7 @@ impl DesktopEditor {
     }
 
     fn composer(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
-        egui::Frame::none().fill(panel_fill()).stroke(egui::Stroke::new(1.0_f32, border())).rounding(9.0).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
+        egui::Frame::none().fill(Color32::from_rgb(28, 33, 41)).stroke(egui::Stroke::new(1.0_f32, border())).rounding(9.0).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
             let reply = ui.add_sized([ui.available_width(), 58.0], egui::TextEdit::multiline(&mut self.state.reply).hint_text("Reply to Stasis AI..."));
             if self.state.focus == FocusArea::Reply && self.state.focus_pending {
                 reply.request_focus();
@@ -5621,11 +5818,12 @@ mod tests {
         editor.state.objective = "Second task".into();
         editor.state.create_task().unwrap();
 
-        let (request_tx, _request_rx) = mpsc::channel();
+        let (request_tx, _request_rx) = mpsc::sync_channel(8);
         let (result_tx, result_rx) = mpsc::channel();
         editor.host = HostExecutor {
             requests: Some(request_tx),
             results: result_rx,
+            progress: Arc::new(Mutex::new(HostProgressState::default())),
             canceled: Arc::new(Mutex::new(BTreeSet::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
             worker: None,
@@ -5633,6 +5831,7 @@ mod tests {
         editor.busy_tasks.insert("task-1".to_string());
         result_tx
             .send(HostResult {
+                request_id: 0,
                 task_id: "task-1".to_string(),
                 operation: HostOperation::Test {
                     paths: Vec::new(),
@@ -5657,7 +5856,7 @@ mod tests {
 
     #[test]
     fn host_shutdown_waits_for_in_flight_work() {
-        let (request_tx, _request_rx) = mpsc::channel();
+        let (request_tx, _request_rx) = mpsc::sync_channel(8);
         let (_result_tx, result_rx) = mpsc::channel();
         let (started_tx, started_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
@@ -5682,6 +5881,7 @@ mod tests {
         let host = HostExecutor {
             requests: Some(request_tx),
             results: result_rx,
+            progress: Arc::new(Mutex::new(HostProgressState::default())),
             canceled: Arc::new(Mutex::new(BTreeSet::new())),
             shutdown,
             worker: Some(worker),
@@ -5699,6 +5899,45 @@ mod tests {
         release_tx.send(()).unwrap();
         assert!(dropped_rx.recv_timeout(Duration::from_secs(5)).unwrap());
         dropper.join().unwrap();
+    }
+
+    #[test]
+    fn provider_progress_label_tracks_approval_and_cancellation() {
+        let controller = TaskController::new(|_, _| Ok(ProviderReply::new("done")));
+        let mut session = TaskSession::new();
+        session.new_task("one", "Edit", "Project").unwrap();
+        controller.send_active(&mut session).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while controller.snapshot(&TaskId::new("one")).unwrap().state
+            == stasis_ai::TaskRequestState::Running
+        {
+            controller.poll(&mut session);
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        let snapshot = controller.snapshot(&TaskId::new("one")).unwrap();
+        let task = session.task_mut("one").unwrap();
+        assert_eq!(
+            provider_timeline_stage(task, &snapshot),
+            ProgressStage::Completed
+        );
+        task.propose_action("edit", "Edit value").unwrap();
+        assert_eq!(
+            provider_timeline_stage(task, &snapshot),
+            ProgressStage::WaitingForApproval
+        );
+        task.accept_action("edit").unwrap();
+        assert_eq!(
+            provider_timeline_stage(task, &snapshot),
+            ProgressStage::Completed
+        );
+        task.cancel().unwrap();
+        assert_eq!(
+            provider_timeline_stage(task, &snapshot),
+            ProgressStage::Canceled
+        );
+        assert_eq!(measured_ms(None), "not measured");
+        assert_eq!(measured_ms(Some(0)), "0 ms");
     }
 
     #[test]
@@ -5757,17 +5996,19 @@ mod tests {
                 task.begin_focused_tests().unwrap();
             }
             let before = task.clone();
-            let (request_tx, _request_rx) = mpsc::channel();
+            let (request_tx, _request_rx) = mpsc::sync_channel(8);
             let (result_tx, result_rx) = mpsc::channel();
             editor.host = HostExecutor {
                 requests: Some(request_tx),
                 results: result_rx,
+                progress: Arc::new(Mutex::new(HostProgressState::default())),
                 canceled: Arc::new(Mutex::new(BTreeSet::new())),
                 shutdown: Arc::new(AtomicBool::new(false)),
                 worker: None,
             };
             result_tx
                 .send(HostResult {
+                    request_id: 0,
                     task_id: "task-1".into(),
                     operation: HostOperation::Test {
                         paths: Vec::new(),
