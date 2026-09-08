@@ -680,6 +680,8 @@ struct DesktopEditor {
     next_semantic_check: Instant,
     store: Option<SessionStore>,
     persisted_snapshot: Option<SessionSnapshot>,
+    autosave: Option<thread::JoinHandle<Result<SessionSnapshot, String>>>,
+    next_autosave: Instant,
     uncertain_calls: BTreeSet<String>,
     expanded: BTreeSet<String>,
     window_preferences: Option<WindowPreferences>,
@@ -1069,6 +1071,8 @@ impl DesktopEditor {
             next_semantic_check: Instant::now(),
             store: None,
             persisted_snapshot: None,
+            autosave: None,
+            next_autosave: Instant::now() + Duration::from_millis(500),
             uncertain_calls: BTreeSet::new(),
             expanded: BTreeSet::new(),
             window_preferences: None,
@@ -1105,6 +1109,7 @@ impl DesktopEditor {
     }
 
     fn save_snapshot(&mut self, mut snapshot: SessionSnapshot) -> Result<(), String> {
+        self.finish_autosave();
         if self.recovery_error {
             return Err("Saved history needs recovery or explicit erasure before saving.".into());
         }
@@ -1120,7 +1125,57 @@ impl DesktopEditor {
         Ok(())
     }
 
+    fn finish_autosave(&mut self) {
+        let Some(worker) = self.autosave.take() else {
+            return;
+        };
+        match worker
+            .join()
+            .unwrap_or_else(|_| Err("session writer panicked".into()))
+        {
+            Ok(snapshot) => {
+                self.media_hashes = snapshot.media_hashes.clone();
+                self.persisted_snapshot = Some(snapshot);
+            }
+            Err(error) => {
+                self.state.notice = Some(format!("Could not save editor session: {error}"))
+            }
+        }
+    }
+
+    fn poll_autosave(&mut self, now: Instant) {
+        if self
+            .autosave
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            self.finish_autosave();
+        }
+        if self.autosave.is_some() || now < self.next_autosave {
+            return;
+        }
+        self.next_autosave = now + Duration::from_millis(500);
+        if self.recovery_error {
+            return;
+        }
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let mut snapshot = persistence::snapshot(self);
+        if self.persisted_snapshot.as_ref() == Some(&snapshot) {
+            return;
+        }
+        self.autosave = Some(thread::spawn(move || {
+            store
+                .prepare_snapshot(&mut snapshot)
+                .map_err(|error| error.to_string())?;
+            store.save(&snapshot).map_err(|error| error.to_string())?;
+            Ok(snapshot)
+        }));
+    }
+
     fn persist_if_changed(&mut self) {
+        self.finish_autosave();
         if self.store.is_none() || self.recovery_error {
             return;
         }
@@ -1134,6 +1189,7 @@ impl DesktopEditor {
     }
 
     fn erase_history(&mut self) -> Result<(), String> {
+        self.finish_autosave();
         if self.state.session.tasks().any(|task| self.ui_busy(task)) {
             return Err("Wait for running work to finish before erasing history.".into());
         }
@@ -1175,6 +1231,7 @@ impl DesktopEditor {
         task: &TaskId,
         candidate: &TaskSession,
     ) -> Result<(), String> {
+        self.finish_autosave();
         let mut snapshot = persistence::snapshot(self);
         snapshot.session = candidate.clone();
         snapshot.uncertain_calls.insert(task.to_string());
@@ -4176,7 +4233,8 @@ impl eframe::App for DesktopEditor {
             self.window_preferences =
                 Some(persistence::bounded_window([rect.width(), rect.height()]));
         }
-        self.persist_if_changed();
+        self.poll_autosave(Instant::now());
+        context.request_repaint_after(Duration::from_millis(500));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

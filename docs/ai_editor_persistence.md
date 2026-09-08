@@ -89,3 +89,11 @@ sessions. Closing the editor retains those owned copies so saved hashes and
 references remain valid. Explicit attachment removal can delete a copy created
 in the current session; history erasure retains media. Temporary editor fixtures
 continue to clean their temporary attachment storage on drop.
+
+Ordinary autosave compares snapshots at most twice per second and performs media
+hashing, serialization, atomic replacement, and durable synchronization on one
+background writer. Rendering never waits for that writer. Provider admission,
+explicit history erasure, and shutdown drain pending writes before proceeding so
+an older snapshot cannot overwrite a newer intent or resurrect erased history.
+Privacy validation checks receipt fields; action IDs and semantic payload keys
+are user data and may contain security-related names such as `password-reset`.

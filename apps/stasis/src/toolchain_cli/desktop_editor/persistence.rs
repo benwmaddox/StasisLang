@@ -216,6 +216,82 @@ mod tests {
     }
 
     #[test]
+    fn autosave_coalesces_edits_and_does_not_wait_for_busy_writer() {
+        let (mut editor, root, _) = super::super::tests::review_fixture("autosave_coalescing");
+        editor.store = Some(SessionStore::open(&root).unwrap());
+        editor.persist_if_changed();
+        let now = Instant::now();
+        editor.next_autosave = now + Duration::from_millis(500);
+        for index in 0..100 {
+            editor.state.reply = format!("draft {index}");
+            editor.poll_autosave(now);
+            assert!(editor.autosave.is_none());
+        }
+        assert_ne!(
+            editor.persisted_snapshot.as_ref().unwrap().reply,
+            "draft 99"
+        );
+        editor.poll_autosave(now + Duration::from_millis(500));
+        assert!(editor.autosave.is_some());
+        editor.finish_autosave();
+        assert_eq!(
+            editor
+                .store
+                .as_ref()
+                .unwrap()
+                .load()
+                .unwrap()
+                .snapshot
+                .unwrap()
+                .reply,
+            "draft 99"
+        );
+
+        let (release, wait) = mpsc::channel();
+        let saved = snapshot(&editor);
+        editor.autosave = Some(thread::spawn(move || {
+            wait.recv_timeout(Duration::from_secs(2)).unwrap();
+            Ok(saved)
+        }));
+        editor.state.reply = "draft written during save".into();
+        editor.poll_autosave(now + Duration::from_secs(1));
+        assert!(editor.autosave.is_some());
+        release.send(()).unwrap();
+        editor.finish_autosave();
+        editor.poll_autosave(now + Duration::from_secs(2));
+        editor.finish_autosave();
+        assert_eq!(
+            editor
+                .store
+                .as_ref()
+                .unwrap()
+                .load()
+                .unwrap()
+                .snapshot
+                .unwrap()
+                .reply,
+            "draft written during save"
+        );
+        editor.poll_autosave(now + Duration::from_secs(3));
+        assert!(editor.autosave.is_none());
+        // Erasure drains the writer before removing state, so it cannot resurrect history.
+        editor.state.reply = "erase pending draft".into();
+        editor.poll_autosave(now + Duration::from_secs(4));
+        assert!(editor.autosave.is_some());
+        editor.erase_history().unwrap();
+        assert!(editor
+            .store
+            .as_ref()
+            .unwrap()
+            .load()
+            .unwrap()
+            .snapshot
+            .is_none());
+        drop(editor);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn owned_attachment_survives_restart_and_history_erasure() {
         let (editor, root, _) = super::super::tests::review_fixture("owned_media_restart");
         let mut editor = editor.with_persistence();

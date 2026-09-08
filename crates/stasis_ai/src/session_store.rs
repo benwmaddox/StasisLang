@@ -270,7 +270,6 @@ impl SessionStore {
                 found: document.project,
             });
         }
-        reject_private_fields(&document.snapshot)?;
 
         let mut diagnostics = Vec::new();
         if interrupted {
@@ -292,6 +291,7 @@ impl SessionStore {
             message: error.to_string(),
         })?;
         validate_snapshot(&snapshot)?;
+        validate_privacy(&snapshot)?;
 
         for task_id in std::mem::take(&mut snapshot.in_flight) {
             snapshot.uncertain_calls.insert(task_id.clone());
@@ -317,7 +317,7 @@ impl SessionStore {
             path: self.state_dir.join(STATE_FILE),
             message: error.to_string(),
         })?;
-        reject_private_fields(&value)?;
+        validate_privacy(&persisted)?;
         let mut bytes = serde_json::to_vec_pretty(&value).map_err(|error| StoreError::Corrupt {
             path: self.state_dir.join(STATE_FILE),
             message: error.to_string(),
@@ -657,48 +657,51 @@ fn hash_media(path: &Path) -> io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn reject_private_fields(value: &Value) -> Result<(), StoreError> {
-    match value {
-        Value::Object(object) => {
-            for (key, value) in object {
-                let normalized = key
-                    .chars()
-                    .filter(|character| character.is_ascii_alphanumeric())
-                    .flat_map(char::to_lowercase)
-                    .collect::<String>();
-                if is_private_field(&normalized) {
-                    return Err(StoreError::PrivacyViolation { field: key.clone() });
-                }
-                reject_private_fields(value)?;
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                reject_private_fields(value)?;
-            }
-        }
-        _ => {}
+fn validate_privacy(snapshot: &SessionSnapshot) -> Result<(), StoreError> {
+    // IDs and semantic payloads are user data, not provider envelope field names.
+    for receipt in &snapshot.execution_receipts {
+        reject_private_fields(&receipt.receipt)?;
+    }
+    for receipt in snapshot.validation_receipts.values() {
+        reject_private_fields(receipt)?;
     }
     Ok(())
 }
 
-fn is_private_field(normalized: &str) -> bool {
-    [
-        "authorization",
-        "apikey",
-        "accesstoken",
-        "refreshtoken",
-        "clientsecret",
-        "password",
-        "credential",
-        "rawproviderenvelope",
-        "rawenvelope",
-        "hiddenreasoning",
-        "chainofthought",
-        "workingnotes",
-    ]
-    .iter()
-    .any(|private| normalized.contains(private))
+fn reject_private_fields(value: &Value) -> Result<(), StoreError> {
+    if let Value::Object(object) = value {
+        for key in object.keys() {
+            let normalized = key
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            if matches!(
+                normalized.as_str(),
+                "authorization"
+                    | "authorizationheaders"
+                    | "apikey"
+                    | "accesstoken"
+                    | "refreshtoken"
+                    | "clientsecret"
+                    | "password"
+                    | "credential"
+                    | "credentials"
+                    | "storedcredentials"
+                    | "rawproviderenvelope"
+                    | "rawenvelope"
+                    | "providerrawenvelope"
+                    | "providerrawenvelopes"
+                    | "hiddenreasoning"
+                    | "modelhiddenreasoning"
+                    | "chainofthought"
+                    | "workingnotes"
+            ) {
+                return Err(StoreError::PrivacyViolation { field: key.clone() });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_pending_marker(path: &Path) -> io::Result<()> {
@@ -1273,6 +1276,33 @@ mod tests {
         let snapshot = loaded.snapshot.unwrap();
         assert!(snapshot.in_flight.is_empty());
         assert!(snapshot.uncertain_calls.contains("task-paid"));
+    }
+
+    #[test]
+    fn security_related_ids_and_payload_keys_round_trip() {
+        let project = TestProject::new("security-identifiers");
+        let store = project.store();
+        let mut snapshot = SessionSnapshot::default();
+        snapshot
+            .session
+            .new_task("credential-migration", "Reset password", "Sample")
+            .unwrap();
+        snapshot
+            .session
+            .active_task_mut()
+            .unwrap()
+            .propose_action_with_payload(
+                "password-reset",
+                crate::task_session::ActionKind::Edit,
+                "Update credential handling",
+                serde_json::json!({"password": "source symbol", "credential-migration": true}),
+            )
+            .unwrap();
+        snapshot
+            .validation_receipts
+            .insert("password".into(), serde_json::json!({"passed": true}));
+        store.save(&snapshot).unwrap();
+        assert_eq!(store.load().unwrap().snapshot.unwrap(), snapshot);
     }
 
     #[test]
