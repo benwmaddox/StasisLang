@@ -807,6 +807,7 @@ extern "C" fn stasis_jit_host_render_trampoline() -> i32 {
 }
 
 extern "C" fn stasis_jit_host_on_code_swap_trampoline() {
+    let _external_urls = ExternalUrlSuppression::enter();
     if let Some(target) = jit_host_entry_targets().and_then(|targets| targets.on_code_swap) {
         call_jit_host_void_target(target);
     }
@@ -901,6 +902,7 @@ thread_local! {
 }
 
 pub fn invoke_code_swap_hook(address: usize) -> Result<(), String> {
+    let _external_urls = ExternalUrlSuppression::enter();
     let _ = CODE_SWAP_REJECTION.with(|rejection| rejection.borrow_mut().take());
     invoke_noarg_void(address)?;
     CODE_SWAP_REJECTION.with(|rejection| rejection.borrow_mut().take().map_or(Ok(()), Err))
@@ -1690,6 +1692,7 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_measure_text_cached_height: usize,
     stasis_clipboard_load_ascii: Option<usize>,
     stasis_clipboard_save_ascii: Option<usize>,
+    stasis_open_external_url: Option<usize>,
     stasis_audio_init: Option<usize>,
     stasis_audio_shutdown: Option<usize>,
     stasis_audio_is_available: Option<usize>,
@@ -1775,6 +1778,7 @@ impl StasisGraphicsAssetsApi {
                 .symbol_address("stasis_gfx_measure_text_cached_height")?,
             stasis_clipboard_load_ascii: lib.symbol_address("stasis_clipboard_load_ascii").ok(),
             stasis_clipboard_save_ascii: lib.symbol_address("stasis_clipboard_save_ascii").ok(),
+            stasis_open_external_url: lib.symbol_address("stasis_open_external_url").ok(),
             stasis_audio_init: lib.symbol_address("stasis_audio_init").ok(),
             stasis_audio_shutdown: lib.symbol_address("stasis_audio_shutdown").ok(),
             stasis_audio_is_available: lib.symbol_address("stasis_audio_is_available").ok(),
@@ -3888,6 +3892,7 @@ pub fn copy_jit_render_active(
 }
 
 unsafe extern "C" {
+    fn stasis_external_url_validate(value: *const c_char, length: i32) -> i32;
     fn stasis_render_trace_native(
         cmd_i32: *const i32,
         cmd_f32: *const f32,
@@ -4811,6 +4816,82 @@ fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
         .lock()
         .expect("jit string literal table mutex poisoned");
     guard.get(&value_id).map(|text| text.as_bytes().to_vec())
+}
+
+// Check the guest length before allocating or copying any text.
+fn bounded_jit_text_arg_bytes(value_id: i32, limit: usize) -> Option<Vec<u8>> {
+    if jit_text_buffer_is_registered(value_id) {
+        let length = usize::try_from(stasis_jit_collection_i32_load(value_id, 1)).ok()?;
+        if length > limit {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(length);
+        for index in 0..length {
+            bytes.push(
+                u8::try_from(stasis_jit_global_i32_array_load(value_id, 0, index as i32)).ok()?,
+            );
+        }
+        return Some(bytes);
+    }
+    let guard = jit_string_literal_table()
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    let text = guard.get(&value_id)?;
+    (text.len() <= limit).then(|| text.as_bytes().to_vec())
+}
+
+thread_local! {
+    static EXTERNAL_URL_HOST: std::cell::Cell<Option<fn(&[u8]) -> i32>> =
+        const { std::cell::Cell::new(None) };
+    static EXTERNAL_URL_SUPPRESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ExternalUrlSuppression(bool);
+
+impl ExternalUrlSuppression {
+    fn enter() -> Self {
+        Self(EXTERNAL_URL_SUPPRESSED.with(|slot| slot.replace(true)))
+    }
+}
+
+impl Drop for ExternalUrlSuppression {
+    fn drop(&mut self) {
+        EXTERNAL_URL_SUPPRESSED.with(|slot| slot.set(self.0));
+    }
+}
+
+/// Embedded adapters must enforce a real input edge and deterministic-run suppression.
+pub fn set_external_url_host(host: Option<fn(&[u8]) -> i32>) {
+    EXTERNAL_URL_HOST.with(|slot| slot.set(host));
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_open_external_url(value_id: i32) -> i32 {
+    let Some(value) = bounded_jit_text_arg_bytes(value_id, 2048) else {
+        return -1;
+    };
+    if unsafe { stasis_external_url_validate(value.as_ptr().cast(), value.len() as i32) } == 0 {
+        return -1;
+    }
+    if EXTERNAL_URL_SUPPRESSED.with(|slot| slot.get()) {
+        return 0;
+    }
+    if let Some(host) = EXTERNAL_URL_HOST.with(|slot| slot.get()) {
+        return host(&value);
+    }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_open_external_url else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    callback(value.as_ptr().cast(), value.len() as i32)
 }
 
 fn validated_jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
@@ -8415,6 +8496,39 @@ mod tests {
         assert_eq!(stasis_jit_collection_i32_load(1234, 1), 5);
         assert_eq!(stasis_jit_collection_i32_load(1234, 2), 5);
         assert_eq!(stasis_jit_collection_i32_load(1234, 3), 5);
+    }
+
+    #[test]
+    fn external_url_validates_before_host_dispatch_and_bounds_guest_copy() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+        // A deterministic embedded host never launches a browser.
+        set_external_url_host(Some(|url| {
+            assert_eq!(url, b"https://www.maddoxlabs.com/");
+            0
+        }));
+        upsert_jit_string_literal(1234, "https://www.maddoxlabs.com/");
+        assert_eq!(stasis_jit_open_external_url(1234), 0);
+        for invalid in [
+            "javascript:alert(1)",
+            "https://example.com/\n",
+            "https://",
+            "https://user@example.com/",
+        ] {
+            upsert_jit_string_literal(1234, invalid);
+            assert_eq!(stasis_jit_open_external_url(1234), -1, "{invalid:?}");
+        }
+        upsert_jit_string_literal(1234, &format!("https://example.com/{}", "a".repeat(2048)));
+        assert!(bounded_jit_text_arg_bytes(1234, 2048).is_none());
+        assert_eq!(stasis_jit_open_external_url(1234), -1);
+        assert_eq!(stasis_jit_open_external_url(1235), -1);
+        stasis_jit_collection_i32_store(1236, 1, i32::MAX);
+        assert!(bounded_jit_text_arg_bytes(1236, 2048).is_none());
+        assert_eq!(stasis_jit_open_external_url(1236), -1);
+        set_external_url_host(None);
     }
 
     #[test]

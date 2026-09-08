@@ -4138,6 +4138,25 @@ function render(): i32 { return 0; }
     }
 
     #[test]
+    fn web_module_preserves_external_url_import_and_literal() {
+        let mut process = WasmProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        process.compile().expect("compile web external URL fixture");
+
+        assert_eq!(
+            process.imported_symbols(),
+            &BTreeSet::from(["stasis_jit_open_external_url".to_string()])
+        );
+        assert!(process
+            .string_literals()
+            .values()
+            .any(|literal| literal == "https://www.maddoxlabs.com/"));
+    }
+
+    #[test]
     fn release_wasm_keeps_internal_global_names_private() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
