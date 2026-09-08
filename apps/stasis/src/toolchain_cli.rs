@@ -12,8 +12,9 @@ use stasis::{
     load_and_apply_play_data_bindings_for_test, provision_local_certificate,
     resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
     run_play_in_process_with_replay, run_play_in_process_with_window_title,
-    run_self_host_aot_cli_with_options, sign_artifacts, signing_status, verify_artifacts,
-    LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
+    run_self_host_aot_cli_with_desktop_network, run_self_host_aot_cli_with_options, sign_artifacts,
+    signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
+    SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
@@ -67,6 +68,10 @@ const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const GFX_CMD_NAME: &str = "gfx_cmd";
 const GFX_CMD_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
+const DESKTOP_NETWORK_ARTIFACTS: &[&str] = &[
+    "desktop/network/windows-x86_64/stasis_network.lib",
+    "desktop/network/include/stasis_network.h",
+];
 const MOBILE_RUNTIME_FILES: &[&str] = &[
     "CMakeLists.txt",
     "MINIMP3-LICENSE.txt",
@@ -92,6 +97,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_mobile_aot_runtime.h",
     "stasis_mobile_runtime.c",
     "stasis_mobile_runtime.h",
+    "stasis_network_join_card.h",
     "stasis_platform_storage.c",
     "stasis_platform_storage.h",
     "stasis_platform_services.c",
@@ -198,19 +204,14 @@ if ! command -v stasis >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Stasis pre-commit: checking canonical source format"
-if ! stasis format --check; then
-    echo "Stasis pre-commit: formatting source before blocking this commit"
-    if ! stasis format; then
-        echo "Commit blocked: 'stasis format' failed." >&2
-        exit 1
-    fi
-    echo "Commit blocked: review and stage the formatting changes, then commit again." >&2
+echo "Stasis pre-commit: enforcing canonical source format"
+if ! stasis format; then
+    echo "Commit blocked: 'stasis format' failed." >&2
     exit 1
 fi
 
 if ! git diff --quiet -- ':(glob)**/*.stasis'; then
-    echo "Commit blocked: stage the formatted Stasis changes, then commit again." >&2
+    echo "Commit blocked: review and stage the enforced formatting changes, then commit again." >&2
     exit 1
 fi
 "#;
@@ -813,6 +814,8 @@ struct ProjectManifest {
 struct ProjectCapabilities {
     #[serde(default)]
     network: bool,
+    #[serde(default)]
+    network_client: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -892,6 +895,16 @@ impl ProjectManifest {
             if !web.entry.is_empty() {
                 validate_relative_path("web.entry", Path::new(&web.entry))?;
             }
+        }
+        if self
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.network && capabilities.network_client)
+        {
+            return Err(
+                "capabilities.network and capabilities.network_client are mutually exclusive"
+                    .to_string(),
+            );
         }
         if self
             .stdlib
@@ -2927,6 +2940,9 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
     if prompt.trim().is_empty() {
         return Err("AI prompt must not be empty".to_string());
     }
+    let configured_provider = stasis_ai::ProviderConfig::from_env()?
+        .provider_name()
+        .to_string();
     let entry = workspace.root.join(&workspace.manifest.entry);
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
     let ai_root = workspace.root.clone();
@@ -2963,7 +2979,7 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
         ),
         json!({
             "backend": "jit",
-            "provider": "installed_codex_subscription",
+            "provider": configured_provider,
             "summary": summary,
             "trace": trace,
             "usage_trace": usage_trace,
@@ -4045,6 +4061,21 @@ fn build_workspace(
     mode: BuildMode,
     output: Option<&Path>,
 ) -> Result<CommandResult, String> {
+    build_workspace_with_desktop_network(workspace, mode, output, None)
+}
+
+struct DesktopNetworkBuild<'a> {
+    library: &'a Path,
+    include_dir: &'a Path,
+    mode: DesktopNetworkMode,
+}
+
+fn build_workspace_with_desktop_network(
+    workspace: &Workspace,
+    mode: BuildMode,
+    output: Option<&Path>,
+    desktop_network: Option<DesktopNetworkBuild<'_>>,
+) -> Result<CommandResult, String> {
     match mode {
         BuildMode::Dev => {
             let jit = compile_workspace_jit(workspace)?;
@@ -4099,12 +4130,19 @@ fn build_workspace(
                 fs::create_dir_all(parent)
                     .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
             }
-            let summary = run_self_host_aot_cli_with_options(
-                &workspace.root,
-                &output,
-                None,
-                Some(Path::new(&workspace.manifest.entry)),
-            )?;
+            let entry = Path::new(&workspace.manifest.entry);
+            let summary = if let Some(network) = desktop_network {
+                run_self_host_aot_cli_with_desktop_network(
+                    &workspace.root,
+                    &output,
+                    entry,
+                    network.library,
+                    network.include_dir,
+                    network.mode,
+                )?
+            } else {
+                run_self_host_aot_cli_with_options(&workspace.root, &output, None, Some(entry))?
+            };
             let build_snapshot = summary.program_snapshot.as_ref().ok_or_else(|| {
                 "release build did not publish its authoritative ProgramSnapshot".to_string()
             })?;
@@ -4194,12 +4232,161 @@ fn preflight_release_asset_preparation(
     cleanup
 }
 
+fn build_desktop_network_library(
+    staging_root: &Path,
+    development_build: bool,
+) -> Result<(PathBuf, PathBuf), String> {
+    if !cfg!(windows) {
+        return Err(
+            "network-enabled desktop production packaging currently requires Windows".to_string(),
+        );
+    }
+    if let Some((library, header)) = bundled_network_artifacts_for_executable(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+        PackageTarget::Desktop,
+    )? {
+        authenticate_bundled_desktop_network_artifacts(&library, &header, development_build)?;
+        return Ok((
+            library,
+            header
+                .parent()
+                .ok_or_else(|| "bundled desktop network header has no parent".to_string())?
+                .to_path_buf(),
+        ));
+    }
+    if release_provenance_path()?.is_some() {
+        return Err(
+            "installed toolchain release provenance requires its prebuilt desktop/network library and header"
+                .to_string(),
+        );
+    }
+    let source_root = source_network_workspace().ok_or_else(|| {
+        "installed toolchain is missing its prebuilt desktop/network library; reinstall the complete release archive"
+            .to_string()
+    })?;
+    let target_dir = staging_root.join(".network-rust-target");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str("-C target-feature=+crt-static");
+    let output = Command::new(cargo)
+        .current_dir(&source_root)
+        .args(["build", "-p", "stasis_network", "--release", "--target-dir"])
+        .arg(&target_dir)
+        .env("RUSTFLAGS", rustflags)
+        .output()
+        .map_err(|error| format!("failed to build stasis_network for desktop: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "desktop stasis_network build failed with exit code {}: stdout={} stderr={}",
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let library = target_dir.join("release").join(if cfg!(windows) {
+        "stasis_network.lib"
+    } else {
+        "libstasis_network.a"
+    });
+    if !library.is_file() {
+        return Err(format!(
+            "desktop stasis_network build did not produce {}",
+            library.display()
+        ));
+    }
+    let include_dir = source_root.join("crates/stasis_network/include");
+    if !include_dir.join("stasis_network.h").is_file() {
+        return Err(format!(
+            "desktop stasis_network headers are missing from {}",
+            include_dir.display()
+        ));
+    }
+    Ok((library, include_dir))
+}
+
+fn stage_desktop_network_guest(
+    workspace: &Workspace,
+    staging_root: &Path,
+    development_build: bool,
+) -> Result<(), String> {
+    let web_root = staging_root.join(".network-web");
+    package_web_workspace(workspace, &web_root, development_build)?;
+    for name in ["network_guest.bundle", "network_guest.bundle.json"] {
+        let source = web_root.join(name);
+        if !source.is_file() {
+            return Err(format!(
+                "network-enabled web packaging did not produce {}",
+                source.display()
+            ));
+        }
+        copy_file(&source, &staging_root.join(name))?;
+    }
+    fs::remove_dir_all(&web_root).map_err(|error| {
+        format!(
+            "failed to remove temporary web guest package {}: {error}",
+            web_root.display()
+        )
+    })
+}
+
+fn validate_desktop_network_guest_contract(manifest: &ProjectManifest) -> Result<(), String> {
+    if manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network)
+        && manifest
+            .web
+            .as_ref()
+            .map_or(true, |web| web.entry.is_empty())
+    {
+        return Err(
+            "network-enabled desktop projects must declare web.entry for the guest bundle"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_network_client_target(
+    manifest: &ProjectManifest,
+    target: PackageTarget,
+) -> Result<(), String> {
+    let Some(capabilities) = manifest.capabilities.as_ref() else {
+        return Ok(());
+    };
+    if capabilities.network && capabilities.network_client {
+        return Err(
+            "capabilities.network and capabilities.network_client are mutually exclusive"
+                .to_string(),
+        );
+    }
+    if !capabilities.network_client {
+        return Ok(());
+    }
+    if matches!(
+        target,
+        PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64
+    ) || (matches!(target, PackageTarget::Desktop) && cfg!(windows))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "capabilities.network_client is not supported for {} packages",
+        target.as_str()
+    ))
+}
+
 fn package_workspace(
     workspace: &Workspace,
     target: PackageTarget,
     output: Option<&Path>,
     development_build: bool,
 ) -> Result<CommandResult, String> {
+    validate_network_client_target(&workspace.manifest, target)?;
     let package_root = output
         .map(|path| workspace.root.join(path))
         .unwrap_or_else(|| {
@@ -4231,6 +4418,7 @@ fn package_workspace(
             0,
         );
     }
+    validate_desktop_network_guest_contract(&workspace.manifest)?;
     let staging_name = format!(
         ".{}.staging",
         package_root
@@ -4246,12 +4434,54 @@ fn package_workspace(
         ));
     }
     let provenance = resolve_package_provenance(development_build)?;
+    let network_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network);
+    let network_client_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network_client);
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let executable_file_name = executable_name(&workspace.manifest.name);
     let assembled = (|| -> Result<(), String> {
+        let network_build = if network_enabled || network_client_enabled {
+            if network_enabled {
+                stage_desktop_network_guest(workspace, &staging_root, development_build)?;
+            }
+            Some(build_desktop_network_library(
+                &staging_root,
+                development_build,
+            )?)
+        } else {
+            None
+        };
         let executable = staging_root.join(&executable_file_name);
-        build_workspace(workspace, BuildMode::Release, Some(&executable))?;
+        build_workspace_with_desktop_network(
+            workspace,
+            BuildMode::Release,
+            Some(&executable),
+            network_build
+                .as_ref()
+                .map(|(library, include_dir)| DesktopNetworkBuild {
+                    library,
+                    include_dir,
+                    mode: if network_enabled {
+                        DesktopNetworkMode::Host
+                    } else {
+                        DesktopNetworkMode::Client
+                    },
+                }),
+        )?;
+        let network_target = staging_root.join(".network-rust-target");
+        if network_target.exists() {
+            fs::remove_dir_all(&network_target).map_err(|error| {
+                format!("failed to remove temporary desktop network build: {error}")
+            })?;
+        }
         let summary = executable.with_file_name(format!(
             "{}.summary.json",
             executable.file_name().unwrap_or_default().to_string_lossy()
@@ -4308,6 +4538,12 @@ fn package_workspace(
                 PACKAGE_PROVENANCE_NAME.to_string()
             },
             "development_build": provenance["development_build"],
+            "network_guest_bundle": network_enabled.then_some(if cfg!(windows) {
+                format!("{WINDOWS_DESKTOP_PAYLOAD_DIR}/network_guest.bundle")
+            } else {
+                "network_guest.bundle".to_string()
+            }),
+            "network_client": network_client_enabled,
         }),
     ))
 }
@@ -5320,6 +5556,7 @@ fn package_mobile_workspace(
     profile_warmup_frames: u32,
     profile_sample_frames: u32,
 ) -> Result<CommandResult, String> {
+    validate_network_client_target(&workspace.manifest, target)?;
     validate_mobile_network_guest_contract(&workspace.manifest, target)?;
     if matches!(target, PackageTarget::IosArm64)
         && workspace
@@ -5426,7 +5663,7 @@ fn package_mobile_workspace(
             .manifest
             .capabilities
             .as_ref()
-            .is_some_and(|capabilities| capabilities.network)
+            .is_some_and(|capabilities| capabilities.network || capabilities.network_client)
         {
             stage_mobile_network_library(&staging_root, target)?;
         }
@@ -5485,7 +5722,10 @@ fn network_support_target(target: PackageTarget) -> Option<&'static str> {
         PackageTarget::AndroidArm64 => Some("android-arm64"),
         PackageTarget::AndroidX86_64 => Some("android-x86_64"),
         PackageTarget::IosArm64 => Some("ios-arm64"),
-        PackageTarget::Desktop | PackageTarget::Web => None,
+        PackageTarget::Desktop if cfg!(windows) => Some("windows-x86_64"),
+        PackageTarget::Desktop if cfg!(target_os = "macos") => Some("macos-x86_64"),
+        PackageTarget::Desktop => Some("linux-x86_64"),
+        PackageTarget::Web => None,
     }
 }
 
@@ -5494,13 +5734,21 @@ fn bundled_network_artifacts_for_executable(
     target: PackageTarget,
 ) -> Result<Option<(PathBuf, PathBuf)>, String> {
     let target_name = network_support_target(target)
-        .ok_or_else(|| "network static library requires a mobile target".to_string())?;
+        .ok_or_else(|| "network static library is unavailable for this target".to_string())?;
     let executable_dir = executable.parent().unwrap_or(Path::new("."));
     for support_root in [
+        executable_dir.join("desktop/network"),
+        executable_dir.join("../desktop/network"),
         executable_dir.join("mobile/network"),
         executable_dir.join("../mobile/network"),
     ] {
-        let library = support_root.join(target_name).join("libstasis_network.a");
+        let library = support_root.join(target_name).join(
+            if matches!(target, PackageTarget::Desktop) && cfg!(windows) {
+                "stasis_network.lib"
+            } else {
+                "libstasis_network.a"
+            },
+        );
         let header = support_root.join("include/stasis_network.h");
         if library.is_file() && header.is_file() {
             return Ok(Some((library, header)));
@@ -5796,10 +6044,30 @@ fn assemble_mobile_shell(
         .capabilities
         .as_ref()
         .is_some_and(|capabilities| capabilities.network);
+    let network_client_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network_client);
+    let native_network_enabled = network_enabled || network_client_enabled;
     let local_network_usage = if network_enabled && matches!(target, PackageTarget::IosArm64) {
         format!(
             "    <key>NSLocalNetworkUsageDescription</key><string>{} uses your local network so nearby friends can join games hosted on this device.</string>\n",
             app_name
+        )
+    } else {
+        String::new()
+    };
+    let client_permission = if network_client_enabled {
+        format!(
+            "    <permission android:name=\"{package_id}.permission.PROVISION_NETWORK_CLIENT\" android:protectionLevel=\"signature\" />"
+        )
+    } else {
+        String::new()
+    };
+    let client_alias = if network_client_enabled {
+        format!(
+            "        <activity-alias android:name=\".NetworkJoin\" android:targetActivity=\".MainActivity\" android:exported=\"true\" android:permission=\"{package_id}.permission.PROVISION_NETWORK_CLIENT\" />"
         )
     } else {
         String::new()
@@ -5821,8 +6089,17 @@ fn assemble_mobile_shell(
             if network_enabled { "1" } else { "0" },
         ),
         (
+            "@STASIS_NETWORK_CLIENT_ENABLED@",
+            if network_client_enabled { "1" } else { "0" },
+        ),
+        (
+            "@STASIS_NETWORK_CLIENT_PERMISSION@",
+            client_permission.as_str(),
+        ),
+        ("@STASIS_NETWORK_CLIENT_ALIAS@", client_alias.as_str()),
+        (
             "@STASIS_NETWORK_PERMISSION@",
-            if network_enabled {
+            if native_network_enabled {
                 "    <uses-permission android:name=\"android.permission.INTERNET\" />\n"
             } else {
                 ""
@@ -5862,7 +6139,7 @@ fn assemble_mobile_shell(
             network_enabled,
         )?;
     }
-    let network_library = if network_enabled {
+    let network_library = if native_network_enabled {
         Some(match target {
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
                 "android/app/src/main/cpp/network/libstasis_network.a"
@@ -5873,7 +6150,7 @@ fn assemble_mobile_shell(
     } else {
         None
     };
-    let network_header = if network_enabled {
+    let network_header = if native_network_enabled {
         Some(match target {
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
                 "android/app/src/main/cpp/network/include/stasis_network.h"
@@ -5917,6 +6194,7 @@ fn assemble_mobile_shell(
                 PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
             "network": network_enabled,
+            "network_client": network_client_enabled,
             "network_library": network_library,
             "network_header": network_header,
             "network_guest_bundle": network_guest_bundle,
@@ -6062,19 +6340,76 @@ fn provenance_string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| format!("release provenance is missing {field}"))
 }
 
-fn verify_release_provenance(path: &Path) -> Result<Value, String> {
+fn read_release_provenance(path: &Path) -> Result<Value, String> {
     let bytes = fs::read(path).map_err(|error| {
         format!(
             "failed to read release provenance {}: {error}",
             path.display()
         )
     })?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+    serde_json::from_slice(&bytes).map_err(|error| {
         format!(
             "failed to parse release provenance {}: {error}",
             path.display()
         )
+    })
+}
+
+fn verify_release_compiler(value: &Value, path: &Path) -> Result<(), String> {
+    let root = path.parent().unwrap_or(Path::new("."));
+    let compiler = &value["compiler"];
+    let compiler_path = provenance_relative_path(root, provenance_string_field(compiler, "path")?)?;
+    let expected_compiler = provenance_string_field(compiler, "sha256")?;
+    let actual_compiler = sha256_file(&compiler_path)?;
+    let running_compiler = sha256_file(
+        &env::current_exe()
+            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
+    )?;
+    if actual_compiler != expected_compiler || running_compiler != expected_compiler {
+        return Err(format!(
+            "release compiler hash mismatch for {}: expected {expected_compiler}, packaged {actual_compiler}, running {running_compiler}",
+            compiler_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn verify_desktop_network_artifact_hashes(value: &Value, root: &Path) -> Result<(), String> {
+    let Some(artifacts) = value.get("desktop_network_artifacts") else {
+        return Ok(());
+    };
+    let artifacts = artifacts.as_object().ok_or_else(|| {
+        "release provenance desktop_network_artifacts must be an object".to_string()
     })?;
+    if artifacts.is_empty() {
+        return Ok(());
+    }
+    let expected_keys = DESKTOP_NETWORK_ARTIFACTS
+        .iter()
+        .map(|path| path.to_string())
+        .collect::<BTreeSet<_>>();
+    let actual_keys = artifacts.keys().cloned().collect::<BTreeSet<_>>();
+    if actual_keys != expected_keys {
+        return Err(format!(
+            "release provenance desktop network artifact set mismatch: expected {expected_keys:?}, found {actual_keys:?}"
+        ));
+    }
+    for relative in DESKTOP_NETWORK_ARTIFACTS {
+        let expected = artifacts[*relative].as_str().ok_or_else(|| {
+            format!("release provenance has an invalid desktop network hash for {relative}")
+        })?;
+        let actual = sha256_file(&provenance_relative_path(root, relative)?)?;
+        if actual != expected {
+            return Err(format!(
+                "release desktop network artifact hash mismatch for {relative}: expected {expected}, found {actual}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_release_provenance(path: &Path) -> Result<Value, String> {
+    let value = read_release_provenance(path)?;
     let command_buffer = &value["command_buffer"];
     let command_buffer_version = command_buffer["version"].as_i64();
     let current_command_buffer = command_buffer_version == Some(GFX_CMD_VERSION);
@@ -6119,20 +6454,7 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
         );
     }
     let root = path.parent().unwrap_or(Path::new("."));
-    let compiler = &value["compiler"];
-    let compiler_path = provenance_relative_path(root, provenance_string_field(compiler, "path")?)?;
-    let expected_compiler = provenance_string_field(compiler, "sha256")?;
-    let actual_compiler = sha256_file(&compiler_path)?;
-    let running_compiler = sha256_file(
-        &env::current_exe()
-            .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
-    )?;
-    if actual_compiler != expected_compiler || running_compiler != expected_compiler {
-        return Err(format!(
-            "release compiler hash mismatch for {}: expected {expected_compiler}, packaged {actual_compiler}, running {running_compiler}",
-            compiler_path.display()
-        ));
-    }
+    verify_release_compiler(&value, path)?;
     let sources = value["runtime_sources"]
         .as_object()
         .ok_or_else(|| "release provenance is missing runtime_sources".to_string())?;
@@ -6174,7 +6496,90 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
             "release mobile shell source hashes do not match the installed templates".to_string(),
         );
     }
+    verify_desktop_network_artifact_hashes(&value, root)?;
     Ok(value)
+}
+
+fn authenticate_bundled_desktop_network_artifacts(
+    library: &Path,
+    header: &Path,
+    development_build: bool,
+) -> Result<(), String> {
+    let provenance_path = release_provenance_path()?.ok_or_else(|| {
+        "prebuilt desktop network artifacts require release provenance".to_string()
+    })?;
+    authenticate_bundled_desktop_network_artifacts_with_provenance(
+        library,
+        header,
+        &provenance_path,
+        development_build,
+    )
+}
+
+fn authenticate_bundled_desktop_network_artifacts_with_provenance(
+    library: &Path,
+    header: &Path,
+    provenance_path: &Path,
+    development_build: bool,
+) -> Result<(), String> {
+    let provenance = if development_build {
+        let provenance = read_release_provenance(provenance_path)?;
+        if provenance["development_build"] == false {
+            verify_release_provenance(provenance_path)?
+        } else {
+            if provenance["schema"] != "stasis.release_provenance.v1"
+                || provenance["development_build"] != true
+                || provenance["dirty_state"] != true
+            {
+                return Err(
+                    "development package requires valid development release provenance".to_string(),
+                );
+            }
+            verify_release_compiler(&provenance, provenance_path)?;
+            verify_desktop_network_artifact_hashes(
+                &provenance,
+                provenance_path.parent().unwrap_or(Path::new(".")),
+            )?;
+            provenance
+        }
+    } else {
+        verify_release_provenance(provenance_path)?
+    };
+    let artifacts = provenance["desktop_network_artifacts"]
+        .as_object()
+        .filter(|artifacts| !artifacts.is_empty())
+        .ok_or_else(|| {
+            "release provenance does not authenticate prebuilt desktop network artifacts"
+                .to_string()
+        })?;
+    let root = provenance_path.parent().unwrap_or(Path::new("."));
+    for (selected, relative) in [
+        (library, DESKTOP_NETWORK_ARTIFACTS[0]),
+        (header, DESKTOP_NETWORK_ARTIFACTS[1]),
+    ] {
+        if !artifacts.contains_key(relative) {
+            return Err(format!(
+                "release provenance does not authenticate desktop network artifact {relative}"
+            ));
+        }
+        let expected =
+            fs::canonicalize(provenance_relative_path(root, relative)?).map_err(|error| {
+                format!("failed to resolve authenticated artifact {relative}: {error}")
+            })?;
+        let selected = fs::canonicalize(selected).map_err(|error| {
+            format!(
+                "failed to resolve selected desktop network artifact {}: {error}",
+                selected.display()
+            )
+        })?;
+        if selected != expected {
+            return Err(format!(
+                "selected desktop network artifact {} is not the provenance-authenticated {relative}",
+                selected.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn git_text(args: &[&str]) -> Option<String> {
@@ -6230,6 +6635,7 @@ fn local_provenance(development_build: bool) -> Result<Value, String> {
         },
         "runtime_sources": sources,
         "mobile_shell_sources": content_hashes(&mobile_shells, "mobile/shells")?,
+        "desktop_network_artifacts": {},
         "command_buffer": {"name": GFX_CMD_NAME, "version": GFX_CMD_VERSION},
         "backends": ["sdl3"],
         "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
@@ -6645,14 +7051,32 @@ fn apply_symbol_batch(
     workspace: &Workspace,
     editable_files: &[WorkshopSourceFile],
     query_files: &[WorkshopSourceFile],
-    mut batch: WorkshopSemanticEditBatch,
+    batch: WorkshopSemanticEditBatch,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
+    let plan = plan_symbol_batch(workspace, editable_files, query_files, batch)?;
+    apply_symbol_plan(workspace, plan, options)
+}
+
+fn plan_symbol_batch(
+    workspace: &Workspace,
+    editable_files: &[WorkshopSourceFile],
+    query_files: &[WorkshopSourceFile],
+    mut batch: WorkshopSemanticEditBatch,
+) -> Result<WorkshopSemanticEditPlan, String> {
     normalize_cli_semantic_batch(editable_files, &mut batch)?;
     let (after, plan) = plan_workshop_semantic_edits(editable_files, &batch)?;
     ensure_editable_semantic_plan(&plan)?;
     let validation_files = overlay_workshop_files(query_files, &after);
     validate_semantic_files(workspace, &validation_files)?;
+    Ok(plan)
+}
+
+fn apply_symbol_plan(
+    workspace: &Workspace,
+    plan: WorkshopSemanticEditPlan,
+    options: SymbolEditOptions,
+) -> Result<CommandResult, String> {
     if options.dry_run {
         return Ok(CommandResult::success(
             format!(
@@ -6724,6 +7148,209 @@ fn apply_symbol_batch(
             "receipt": relative_display(&workspace.root, &receipt),
         }),
     ))
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct DesktopSemanticPreview {
+    pub(super) payload: Value,
+    pub(super) source_fingerprint: String,
+    pub(super) plan: WorkshopSemanticEditPlan,
+}
+
+fn desktop_preview_semantic_batch(
+    root: &Path,
+    payload: Value,
+) -> Result<DesktopSemanticPreview, String> {
+    let workspace = load_workspace(Some(root))?;
+    let source_fingerprint = desktop_source_fingerprint(root, &[])?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let editable_files = files
+        .iter()
+        .filter(|file| is_editable_workshop_path(&file.path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let batch = serde_json::from_value::<WorkshopSemanticEditBatch>(payload.clone())
+        .map_err(|error| format!("invalid proposed semantic edit: {error}"))?;
+    let plan = plan_symbol_batch(&workspace, &editable_files, &files, batch)?;
+    if desktop_source_fingerprint(root, &[])? != source_fingerprint {
+        return Err(
+            "stale semantic preview: project sources changed while generating the preview".into(),
+        );
+    }
+    Ok(DesktopSemanticPreview {
+        payload,
+        source_fingerprint,
+        plan,
+    })
+}
+
+fn desktop_apply_semantic_preview(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+) -> Result<(String, Value), String> {
+    let current_fingerprint = desktop_source_fingerprint(root, &[])?;
+    if current_fingerprint != preview.source_fingerprint {
+        return Err("stale semantic preview: project sources changed; generate a new preview before applying".into());
+    }
+
+    let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
+    if replanned.source_fingerprint != preview.source_fingerprint || replanned.plan != preview.plan
+    {
+        return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+    }
+
+    let workspace = load_workspace(Some(root))?;
+    let mut validated_inputs = desktop_validation_inputs(root, &[])?;
+    if desktop_inputs_fingerprint(&validated_inputs) != preview.source_fingerprint {
+        return Err("stale semantic preview: project sources changed before apply".into());
+    }
+    for change in &preview.plan.changed_files {
+        validated_inputs.insert(change.file.clone(), change.after_hash.clone());
+    }
+    // Bind the receipt to the validated inputs overlaid with the exact reviewed plan.
+    let committed_fingerprint = desktop_inputs_fingerprint(&validated_inputs);
+    let mut result = apply_symbol_plan(
+        &workspace,
+        preview.plan.clone(),
+        SymbolEditOptions {
+            dry_run: false,
+            no_tests: false,
+        },
+    )?;
+    result.data["source_fingerprint"] = json!(committed_fingerprint);
+    Ok((result.human, result.data))
+}
+
+#[cfg(test)]
+fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, Value), String> {
+    let preview = desktop_preview_semantic_batch(root, payload)?;
+    desktop_apply_semantic_preview(root, &preview)
+}
+
+fn desktop_run_focused_tests(
+    root: &Path,
+    relevant_tests: &[String],
+) -> Result<(String, Value), String> {
+    let workspace = load_workspace(Some(root))?;
+    if relevant_tests.is_empty() {
+        let result = test_workspace(&workspace, None)?;
+        desktop_require_executed_tests(&result.data)?;
+        return Ok((result.human, result.data));
+    }
+    let mut receipts = Vec::with_capacity(relevant_tests.len());
+    for relative in relevant_tests {
+        let result = test_workspace(&workspace, Some(Path::new(relative)))?;
+        desktop_require_executed_tests(&result.data)?;
+        receipts.push(result.data);
+    }
+    Ok((
+        format!("{} focused test path(s) passed", relevant_tests.len()),
+        json!({"focused_paths": relevant_tests, "receipts": receipts}),
+    ))
+}
+
+fn desktop_source_fingerprint(root: &Path, relevant_tests: &[String]) -> Result<String, String> {
+    Ok(desktop_inputs_fingerprint(&desktop_validation_inputs(
+        root,
+        relevant_tests,
+    )?))
+}
+
+fn desktop_require_executed_tests(receipt: &Value) -> Result<(), String> {
+    let count = receipt["tests_run"].as_u64().unwrap_or(0)
+        + receipt["scenario_cases_run"].as_u64().unwrap_or(0);
+    if count == 0 {
+        return Err(
+            "No focused tests matched; select a test file or add a test before marking Done."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn desktop_inputs_fingerprint(inputs: &BTreeMap<String, String>) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(inputs).expect("string map serializes"))
+    )
+}
+
+fn desktop_validation_inputs(
+    root: &Path,
+    relevant_tests: &[String],
+) -> Result<BTreeMap<String, String>, String> {
+    let workspace = load_workspace(Some(root))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let mut mapped = files
+        .iter()
+        .map(|file| (PathBuf::from(&file.path), workspace.root.join(&file.path)))
+        .collect::<Vec<_>>();
+    mapped.push((
+        PathBuf::from(MANIFEST_NAME),
+        workspace.root.join(MANIFEST_NAME),
+    ));
+    let mut test_roots = if relevant_tests.is_empty() {
+        vec![workspace.root.join(&workspace.manifest.tests)]
+    } else {
+        relevant_tests
+            .iter()
+            .map(|path| workspace.root.join(path))
+            .collect()
+    };
+    for path in test_roots.drain(..) {
+        validate_workspace_destination(&workspace, "focused test path", &path)?;
+        if path.is_dir() {
+            collect_mapped_files(&workspace.root, &path, Path::new(""), &mut mapped)?;
+        } else if path.is_file() {
+            let relative = path
+                .strip_prefix(&workspace.root)
+                .map_err(|_| format!("test path escaped workspace: {}", path.display()))?;
+            mapped.push((relative.to_path_buf(), path));
+        }
+    }
+    mapped.sort_by(|left, right| left.0.cmp(&right.0));
+    mapped.dedup_by(|left, right| left.0 == right.0);
+    mapped
+        .into_iter()
+        .map(|(relative, physical)| {
+            Ok((
+                relative.to_string_lossy().replace('\\', "/"),
+                sha256_file(&physical)?,
+            ))
+        })
+        .collect()
+}
+
+fn desktop_source_context(root: &Path) -> Result<Vec<Value>, String> {
+    let workspace = load_workspace(Some(root))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let items = workshop_source_items(&files)?;
+    let context = items
+        .into_iter()
+        .filter(|item| is_editable_workshop_path(&item.file))
+        .map(|item| {
+            json!({
+                "target": {"file": item.file, "kind": item.kind, "name": item.name,
+                    "owner": item.owner, "signature": item.signature,
+                    "symbol_id": item.symbol_id},
+                "source": item.source,
+            })
+        })
+        .collect::<Vec<_>>();
+    if serde_json::to_vec(&context)
+        .map_err(|error| error.to_string())?
+        .len()
+        > 256 * 1024
+    {
+        return Err(
+            "Project source context exceeds 256 KiB; narrow the project before requesting edits."
+                .into(),
+        );
+    }
+    Ok(context)
 }
 
 fn overlay_workshop_files(
@@ -7749,6 +8376,52 @@ mod tests {
     }
 
     #[test]
+    fn desktop_network_guest_staging_reuses_the_declared_web_entry_bundle() {
+        let root = temp_dir("desktop_network_guest");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        // Match load_workspace: Windows temp paths can use a different spelling
+        // than the canonical source paths passed to the compiler.
+        let root = canonical_workspace_root(&root).expect("canonical workspace root");
+        fs::write(
+            root.join("src/guest.stasis"),
+            concat!(
+                "function main(): i32 { return 0; }\n",
+                "function tick(): i32 { return 0; }\n",
+                "function render(): i32 { return 0; }\n"
+            ),
+        )
+        .expect("guest entry source");
+        let mut manifest = ProjectManifest::new("network_guest".to_string());
+        manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/guest.stasis".to_string(),
+            loading_font: None,
+            viewport: None,
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+        };
+        let staging = root.join("desktop-stage");
+        fs::create_dir_all(&staging).expect("desktop staging directory");
+
+        stage_desktop_network_guest(&workspace, &staging, true)
+            .expect("stage desktop browser guest");
+
+        let encoded = fs::read(staging.join("network_guest.bundle")).expect("guest bundle");
+        let bundle = stasis_network::StaticBundle::decode(&encoded).expect("decode guest bundle");
+        for path in ["index.html", "game.js", "game.wasm"] {
+            assert!(bundle.get(path).is_some(), "missing bundled {path}");
+        }
+        assert!(staging.join("network_guest.bundle.json").is_file());
+        assert!(!staging.join(".network-web").exists());
+        remove_temp(&root);
+    }
+
+    #[test]
     fn configured_web_loading_font_is_preloaded_and_used_by_shell() {
         let html = web_index_html("font-game", false, Some("assets/fonts/ui.ttf"), None);
         assert!(html.contains(
@@ -8317,6 +8990,8 @@ mod tests {
             ("read_symbol", "stasis symbol read / :read"),
             ("read_imports", "stasis symbol read imports / :read imports"),
             ("write_symbol", "stasis symbol update / :update"),
+            ("add_symbol", "stasis symbol add"),
+            ("finish_task", "host completion gate / desktop Mark Done"),
             (
                 "write_imports",
                 "stasis symbol update imports / :update imports",
@@ -8484,8 +9159,303 @@ mod tests {
         ))
     }
 
-    fn remove_temp(path: &Path) {
+    pub(super) fn remove_temp(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    pub(super) fn desktop_editor_fixture(name: &str) -> PathBuf {
+        let root = temp_dir(name);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(root.join(MANIFEST_NAME), r#"{"manifest_version":1,"name":"editor_fixture","entry":"src/main.stasis","tests":"tests","output":"build"}"#).unwrap();
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 { return 0; }\nfunction value(): i32 { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "import \"../src/main.stasis\";\ntest `positive`(): bool { return value() > 0; }\n",
+        )
+        .unwrap();
+        root
+    }
+
+    fn desktop_semantic_update(root: &Path, name: &str, new_source: &str) -> Value {
+        let item = desktop_source_context(root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == name)
+            .unwrap();
+        json!({"schema_version": 1, "edits": [{
+            "operation": "update",
+            "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+            "new_source": new_source,
+        }]})
+    }
+
+    fn desktop_semantic_delete(root: &Path, name: &str) -> Value {
+        let item = desktop_source_context(root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == name)
+            .unwrap();
+        json!({"schema_version": 1, "edits": [{
+            "operation": "delete",
+            "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+        }]})
+    }
+
+    #[test]
+    fn desktop_semantic_preview_plans_add_update_delete_and_multifile_deterministically() {
+        let root = desktop_editor_fixture("semantic_preview_operations");
+        let update = desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }");
+        let first = desktop_preview_semantic_batch(&root, update.clone()).unwrap();
+        let second = desktop_preview_semantic_batch(&root, update).unwrap();
+        assert_eq!(first.source_fingerprint, second.source_fingerprint);
+        assert_eq!(first.plan, second.plan);
+        assert_eq!(first.plan.changed_files.len(), 1);
+        assert!(first.plan.changed_files[0]
+            .after_source
+            .contains("return 2"));
+
+        let add = json!({"schema_version": 1, "edits": [{
+            "operation": "add",
+            "target": {"file": "src/main.stasis", "kind": "function", "name": "added"},
+            "new_source": "function added(): i32 { return 3; }",
+        }]});
+        let added = desktop_preview_semantic_batch(&root, add).unwrap();
+        assert_eq!(added.plan.changed_files.len(), 1);
+        assert!(added.plan.changed_files[0]
+            .after_source
+            .contains("function added"));
+
+        let deleted =
+            desktop_preview_semantic_batch(&root, desktop_semantic_delete(&root, "value")).unwrap();
+        assert_eq!(deleted.plan.changed_files.len(), 1);
+        assert!(!deleted.plan.changed_files[0]
+            .after_source
+            .contains("function value"));
+
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"values.stasis\";\nfunction main(): i32 { return value(); }\nfunction local(): i32 { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/values.stasis"),
+            "function value(): i32 { return 1; }\n",
+        )
+        .unwrap();
+        let local = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "local")
+            .unwrap();
+        let value = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let multifile = json!({"schema_version": 1, "edits": [
+            {"operation": "update", "target": local["target"],
+             "expected_source_hash": local["expected_source_hash"],
+             "new_source": "function local(): i32 { return 2; }"},
+            {"operation": "update", "target": value["target"],
+             "expected_source_hash": value["expected_source_hash"],
+             "new_source": "function value(): i32 { return 3; }"},
+        ]});
+        let multifile = desktop_preview_semantic_batch(&root, multifile).unwrap();
+        assert_eq!(
+            multifile
+                .plan
+                .changed_files
+                .iter()
+                .map(|change| change.file.as_str())
+                .collect::<Vec<_>>(),
+            ["src/main.stasis", "src/values.stasis"]
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_semantic_preview_rejects_noop_conflict_stale_and_identity_mismatch() {
+        let root = desktop_editor_fixture("semantic_preview_rejections");
+        let unchanged = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let noop = json!({"schema_version": 1, "edits": [{
+            "operation": "update", "target": unchanged["target"],
+            "expected_source_hash": unchanged["expected_source_hash"],
+            "new_source": unchanged["source"],
+        }]});
+        assert!(desktop_preview_semantic_batch(&root, noop)
+            .unwrap_err()
+            .contains("made no changes"));
+
+        let conflict = json!({"schema_version": 1, "edits": [{
+            "operation": "update", "target": unchanged["target"],
+            "expected_source_hash": "wrong-hash",
+            "new_source": "function value(): i32 { return 2; }",
+        }]});
+        assert!(desktop_preview_semantic_batch(&root, conflict)
+            .unwrap_err()
+            .contains("stale semantic"));
+
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }");
+        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
+        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "import \"../src/main.stasis\";\n// changed after preview\ntest `positive`(): bool { return value() > 0; }\n",
+        )
+        .unwrap();
+        assert!(desktop_apply_semantic_preview(&root, &preview)
+            .unwrap_err()
+            .contains("stale semantic preview"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+
+        let mut mismatched = desktop_preview_semantic_batch(
+            &root,
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 4; }"),
+        )
+        .unwrap();
+        mismatched.plan.changed_files[0]
+            .after_source
+            .push_str("// tampered\n");
+        assert!(desktop_apply_semantic_preview(&root, &mismatched)
+            .unwrap_err()
+            .contains("identity mismatch"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_semantic_preview_applies_the_exact_reviewed_plan() {
+        let root = desktop_editor_fixture("semantic_preview_identity");
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 7; }");
+        let preview = desktop_preview_semantic_batch(&root, payload.clone()).unwrap();
+        assert_eq!(preview.payload, payload);
+        let reviewed_plan = preview.plan.clone();
+        let (_, receipt) = desktop_apply_semantic_preview(&root, &preview).unwrap();
+        assert_eq!(receipt["plan"], json!(reviewed_plan));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            preview.plan.changed_files[0].after_source
+        );
+        assert_eq!(
+            receipt["source_fingerprint"],
+            desktop_source_fingerprint(&root, &[]).unwrap()
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_editor_context_drives_apply_without_model_hash_and_receipt() {
+        let root = desktop_editor_fixture("editor_receipt");
+        let item = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        assert!(item["target"]["symbol_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()));
+        let batch = json!({"schema_version": 2, "edits": [{
+            "operation": "update", "target": item["target"],
+            "new_source": "function value(): i32 { return 2; }"
+        }]});
+        let (_, receipt) = desktop_apply_semantic_batch(&root, batch).unwrap();
+        assert_eq!(
+            receipt["source_fingerprint"],
+            desktop_source_fingerprint(&root, &[]).unwrap()
+        );
+        assert!(root.join(receipt["receipt"].as_str().unwrap()).is_file());
+        assert_eq!(receipt["validation"]["test_result"]["tests_passed"], 1);
+        let committed = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        assert!(item.get("expected_source_hash").is_none());
+        assert!(committed.contains("function value(): i32 { return 2; }"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_editor_fingerprints_selected_tests_and_rejects_empty_selection() {
+        let root = desktop_editor_fixture("editor_fingerprint");
+        fs::create_dir_all(root.join("checks")).unwrap();
+        fs::write(
+            root.join("checks/selected.stasis"),
+            "function helper(): i32 { return 1; }",
+        )
+        .unwrap();
+        let paths = vec!["checks/selected.stasis".into()];
+        let before = desktop_source_fingerprint(&root, &paths).unwrap();
+        fs::write(
+            root.join("checks/selected.stasis"),
+            "function helper(): i32 { return 2; }",
+        )
+        .unwrap();
+        assert_ne!(before, desktop_source_fingerprint(&root, &paths).unwrap());
+        assert!(desktop_run_focused_tests(&root, &paths)
+            .unwrap_err()
+            .contains("No focused tests matched"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_editor_apply_rejects_invalid_delete_without_model_hash() {
+        let root = desktop_editor_fixture("editor_missing_hash");
+        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let error = desktop_apply_semantic_batch(&root, json!({"schema_version": 1, "edits": [{
+            "operation": "delete", "target": {"file": "src/main.stasis", "kind": "function", "name": "value"}
+        }]})).unwrap_err();
+        assert!(!error.contains("expected_source_hash"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_editor_failed_apply_rolls_back_and_keeps_prior_accepted_work() {
+        let root = desktop_editor_fixture("editor_rollback");
+        let propose = |value: i32| {
+            let item = desktop_source_context(&root)
+                .unwrap()
+                .into_iter()
+                .find(|item| item["target"]["name"] == "value")
+                .unwrap();
+            json!({"schema_version": 1, "edits": [{
+                "operation": "update", "target": item["target"],
+                "expected_source_hash": item["expected_source_hash"],
+                "new_source": format!("function value(): i32 {{ return {value}; }}")
+            }]})
+        };
+        let (_, accepted_receipt) = desktop_apply_semantic_batch(&root, propose(2)).unwrap();
+        let accepted_source = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let error = desktop_apply_semantic_batch(&root, propose(-1)).unwrap_err();
+        assert!(error.contains("rolled back"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            accepted_source
+        );
+        assert!(root
+            .join(accepted_receipt["receipt"].as_str().unwrap())
+            .is_file());
+        desktop_apply_semantic_batch(&root, propose(3)).unwrap();
+        remove_temp(&root);
     }
 
     #[test]
@@ -9302,6 +10272,7 @@ mod tests {
             },
             "runtime_sources": runtime_sources,
             "mobile_shell_sources": mobile_shell_sources,
+            "desktop_network_artifacts": {},
             "command_buffer": {"name": "gfx_cmd", "version": GFX_CMD_VERSION},
             "backends": ["sdl3"],
             "features": ["aot", "jit", "mobile-aot", "shared-renderer"],
@@ -9315,6 +10286,139 @@ mod tests {
         let manifest_path = root.join(RELEASE_PROVENANCE_NAME);
         write_json_file(&manifest_path, &manifest).expect("write provenance fixture");
         verify_release_provenance(&manifest_path).expect("accept matching release");
+
+        let desktop_network = root.join("desktop/network");
+        let library = desktop_network.join("windows-x86_64/stasis_network.lib");
+        let header = desktop_network.join("include/stasis_network.h");
+        fs::create_dir_all(library.parent().expect("library parent"))
+            .expect("create desktop network library directory");
+        fs::create_dir_all(header.parent().expect("header parent"))
+            .expect("create desktop network include directory");
+        fs::write(&library, b"official desktop network library")
+            .expect("write desktop network library");
+        fs::write(&header, b"official desktop network header")
+            .expect("write desktop network header");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect_err("reject empty desktop network provenance");
+        assert!(error.contains("does not authenticate prebuilt"));
+        let mut absent_manifest = manifest.clone();
+        absent_manifest
+            .as_object_mut()
+            .expect("provenance object")
+            .remove("desktop_network_artifacts");
+        write_json_file(&manifest_path, &absent_manifest)
+            .expect("write provenance without desktop network map");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect_err("reject absent desktop network provenance");
+        assert!(error.contains("does not authenticate prebuilt"));
+        let mut network_manifest = manifest.clone();
+        network_manifest["desktop_network_artifacts"] = json!({
+            (DESKTOP_NETWORK_ARTIFACTS[0]): sha256_file(&library).expect("hash network library"),
+            (DESKTOP_NETWORK_ARTIFACTS[1]): sha256_file(&header).expect("hash network header"),
+        });
+        write_json_file(&manifest_path, &network_manifest)
+            .expect("write desktop network provenance fixture");
+        authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect("authenticate desktop network artifacts");
+        let substituted_path = root.join("substituted/stasis_network.lib");
+        fs::create_dir_all(substituted_path.parent().expect("substitute parent"))
+            .expect("create substitute directory");
+        fs::copy(&library, &substituted_path).expect("copy substituted selected library");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &substituted_path,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect_err("reject selected artifact outside authenticated path");
+        assert!(error.contains("is not the provenance-authenticated"));
+        authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            true,
+        )
+        .expect("authenticate official artifacts for a development package");
+
+        let mut development_manifest = network_manifest.clone();
+        development_manifest["release_tag"] = json!("development-bootstrap-42");
+        development_manifest["development_build"] = json!(true);
+        development_manifest["dirty_state"] = json!(true);
+        write_json_file(&manifest_path, &development_manifest)
+            .expect("write development bootstrap provenance fixture");
+        authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            true,
+        )
+        .expect("authenticate development bootstrap artifacts");
+        fs::write(&header, b"substituted development network header")
+            .expect("substitute development network header");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            true,
+        )
+        .expect_err("reject substituted development bootstrap artifact");
+        assert!(error.contains("desktop network artifact hash mismatch"));
+        fs::write(&header, b"official desktop network header")
+            .expect("restore development network header");
+        let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
+            &library,
+            &header,
+            &manifest_path,
+            false,
+        )
+        .expect_err("reject development provenance for release package");
+        assert!(error.contains("clean official"));
+        write_json_file(&manifest_path, &network_manifest)
+            .expect("restore official desktop network provenance fixture");
+
+        fs::write(&library, b"substituted desktop network library")
+            .expect("substitute desktop network library");
+        let error = verify_release_provenance(&manifest_path)
+            .expect_err("reject substituted desktop network library");
+        assert!(error.contains("desktop network artifact hash mismatch"));
+        fs::write(&library, b"official desktop network library")
+            .expect("restore desktop network library");
+
+        let mut unrecorded_manifest = network_manifest.clone();
+        unrecorded_manifest["desktop_network_artifacts"]
+            .as_object_mut()
+            .expect("artifact map")
+            .remove(DESKTOP_NETWORK_ARTIFACTS[1]);
+        write_json_file(&manifest_path, &unrecorded_manifest)
+            .expect("write incomplete desktop network provenance fixture");
+        let error = verify_release_provenance(&manifest_path)
+            .expect_err("reject incomplete desktop network provenance");
+        assert!(error.contains("artifact set mismatch"));
+
+        write_json_file(&manifest_path, &network_manifest)
+            .expect("restore desktop network provenance fixture");
+        fs::remove_file(&header).expect("remove desktop network header");
+        let error = verify_release_provenance(&manifest_path)
+            .expect_err("reject missing desktop network header");
+        assert!(error.contains("failed to read provenance input"));
+        fs::write(&header, b"official desktop network header")
+            .expect("restore desktop network header");
+        write_json_file(&manifest_path, &manifest).expect("restore legacy provenance fixture");
 
         let mut legacy_manifest = manifest.clone();
         legacy_manifest["command_buffer"]["version"] = json!(4);
@@ -9381,6 +10485,45 @@ mod tests {
                 .is_some_and(|value| value.is_ascii_alphabetic()));
             assert!(component.chars().all(|value| value.is_ascii_alphanumeric()));
         }
+    }
+
+    #[test]
+    fn native_network_client_package_targets_are_explicit() {
+        let mut manifest = ProjectManifest::new("network_client".to_string());
+        manifest.capabilities = Some(ProjectCapabilities {
+            network_client: true,
+            ..ProjectCapabilities::default()
+        });
+
+        if cfg!(windows) {
+            assert!(validate_network_client_target(&manifest, PackageTarget::Desktop).is_ok());
+        } else {
+            assert!(validate_network_client_target(&manifest, PackageTarget::Desktop).is_err());
+        }
+        assert!(validate_network_client_target(&manifest, PackageTarget::AndroidArm64).is_ok());
+        assert!(validate_desktop_network_guest_contract(&manifest).is_ok());
+        assert!(
+            validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_ok()
+        );
+        for target in [PackageTarget::Web, PackageTarget::IosArm64] {
+            let error = validate_network_client_target(&manifest, target)
+                .expect_err("reject unsupported native client package target");
+            assert!(error.contains("capabilities.network_client is not supported"));
+            assert!(error.contains(target.as_str()));
+        }
+
+        manifest
+            .capabilities
+            .as_mut()
+            .expect("capabilities")
+            .network = true;
+        let error = manifest
+            .validate()
+            .expect_err("reject simultaneous network host and client capabilities");
+        assert_eq!(
+            error,
+            "capabilities.network and capabilities.network_client are mutually exclusive"
+        );
     }
 
     #[test]
@@ -9459,6 +10602,8 @@ mod tests {
         assert!(android_cmake.contains("-Wl,--gc-sections"));
         assert!(android_cmake.contains("-flto"));
         assert!(!android_cmake.contains("stasis_dynload"));
+        assert!(android_cmake.contains("STASIS_NETWORK_ENABLED 0"));
+        assert!(android_cmake.contains("STASIS_NETWORK_CLIENT_ENABLED 0"));
         let android_gradle = fs::read_to_string(android.join("android/app/build.gradle"))
             .expect("read Android Gradle");
         assert!(android_gradle.contains("applicationId 'com.example.mobile'"));
@@ -9477,6 +10622,9 @@ mod tests {
         assert!(android_manifest.matches("android:value=\"false\"").count() >= 2);
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
         assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
+        assert!(!android_manifest.contains("android.permission.INTERNET"));
+        assert!(!android_manifest.contains("PROVISION_NETWORK_CLIENT"));
+        assert!(!android_manifest.contains("<activity-alias"));
         let mobile_main = fs::read_to_string(android.join("common/stasis_mobile_main.c"))
             .expect("read shared mobile main")
             .replace("\r\n", "\n");
@@ -9490,8 +10638,9 @@ mod tests {
         assert!(mobile_main.contains("restore_failures"));
         assert!(mobile_main.contains("frame == 1"));
         assert!(mobile_main.contains("frame % 30 == 0"));
+        assert!(mobile_main.contains("stasis_desktop_network_present_join_card();"));
         assert!(mobile_main.contains(
-            "} else {\n#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)"
+            "#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)"
         ));
         assert!(mobile_main.contains("stasis_mobile_network_present_join_url();"));
         assert!(mobile_main.contains("if (seam_test_id != NULL && seam_test_id[0] != '\\0')"));
@@ -9704,7 +10853,10 @@ mod tests {
         assert!(!project.contains("@STASIS_"));
 
         let mut network_workspace = workspace.clone();
-        network_workspace.manifest.capabilities = Some(ProjectCapabilities { network: true });
+        network_workspace.manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
         network_workspace.manifest.web = Some(WebProjectManifest {
             entry: "src/main.stasis".to_string(),
             loading_font: None,
@@ -9840,6 +10992,7 @@ mod tests {
             fs::read_to_string(android_network.join("android/app/src/main/AndroidManifest.xml"))
                 .expect("read network Android manifest");
         assert!(android_network_manifest.contains("android.permission.INTERNET"));
+        assert!(!android_network_manifest.contains("PROVISION_NETWORK_CLIENT"));
         let android_network_receipt: Value = serde_json::from_str(
             &fs::read_to_string(android_network.join("stasis_mobile_package.json"))
                 .expect("read network Android package receipt"),
@@ -9860,6 +11013,84 @@ mod tests {
         assert!(android_network
             .join("android/app/src/main/assets/stasis_game/network_guest.bundle")
             .is_file());
+
+        let mut client_workspace = workspace.clone();
+        client_workspace.manifest.capabilities = Some(ProjectCapabilities {
+            network_client: true,
+            ..ProjectCapabilities::default()
+        });
+        let android_client = root.join("android-client-package");
+        fs::create_dir_all(android_client.join("android/app/src/main/cpp/network/include"))
+            .expect("create Android client network staging fixture");
+        fs::write(
+            android_client.join("android/app/src/main/cpp/network/libstasis_network.a"),
+            b"fixture Android client static library",
+        )
+        .expect("write Android client network library fixture");
+        fs::write(
+            android_client.join("android/app/src/main/cpp/network/include/stasis_network.h"),
+            b"/* fixture Android client network header */\n",
+        )
+        .expect("write Android client network header fixture");
+        assemble_mobile_shell(
+            &client_workspace,
+            PackageTarget::AndroidArm64,
+            &aot,
+            &android_client,
+            &provenance,
+            None,
+        )
+        .expect("assemble network-client Android shell");
+        let client_cmake =
+            fs::read_to_string(android_client.join("android/app/src/main/cpp/CMakeLists.txt"))
+                .expect("read client Android CMake");
+        assert!(client_cmake.contains("STASIS_NETWORK_CLIENT_ENABLED 1"));
+        assert!(client_cmake.contains("STASIS_NETWORK_ENABLED 0"));
+        assert!(client_cmake.contains("network/include"));
+        let client_manifest =
+            fs::read_to_string(android_client.join("android/app/src/main/AndroidManifest.xml"))
+                .expect("read client Android manifest");
+        assert!(client_manifest.contains("android.permission.INTERNET"));
+        assert!(client_manifest.contains(
+            "<permission android:name=\"com.example.mobile.permission.PROVISION_NETWORK_CLIENT\" android:protectionLevel=\"signature\""
+        ));
+        assert!(client_manifest.contains("<activity-alias android:name=\".NetworkJoin\""));
+        assert!(client_manifest.contains("android:targetActivity=\".MainActivity\""));
+        assert!(client_manifest.contains(
+            "android:permission=\"com.example.mobile.permission.PROVISION_NETWORK_CLIENT\""
+        ));
+        let client_activity = fs::read_to_string(
+            android_client.join("android/app/src/main/java/com/stasislang/game/MainActivity.java"),
+        )
+        .expect("read client Android activity");
+        assert!(client_activity.contains("stasis.network_join_url"));
+        assert!(client_activity.contains("intent.removeExtra"));
+        assert!(client_activity.contains("NetworkJoinPolicy.acceptsComponent"));
+        assert!(client_activity.contains("trusted ? intent.getStringExtra"));
+        assert!(client_activity.contains("nativeProvisionNetworkClient"));
+        assert!(client_activity.contains("nativeSetNetworkClientBackground(false)"));
+        assert!(client_activity.contains("nativeSetNetworkClientBackground(true)"));
+        assert!(client_activity.contains("nativeShutdownNetworkClient"));
+        assert!(!client_activity.contains("@STASIS_NETWORK_CLIENT_ENABLED@"));
+        let client_receipt: Value = serde_json::from_str(
+            &fs::read_to_string(android_client.join("stasis_mobile_package.json"))
+                .expect("read client Android package receipt"),
+        )
+        .expect("parse client Android package receipt");
+        assert_eq!(client_receipt["network"], false);
+        assert_eq!(client_receipt["network_client"], true);
+        assert_eq!(
+            client_receipt["network_library"],
+            "android/app/src/main/cpp/network/libstasis_network.a"
+        );
+        assert_eq!(
+            client_receipt["network_header"],
+            "android/app/src/main/cpp/network/include/stasis_network.h"
+        );
+        assert!(client_receipt["network_guest_bundle"].is_null());
+        assert!(!android_client
+            .join("android/app/src/main/assets/stasis_game/network_guest.bundle")
+            .exists());
 
         remove_temp(&root);
     }
@@ -9900,6 +11131,35 @@ mod tests {
             fs::canonicalize(support.join("include/stasis_network.h"))
                 .expect("canonicalize expected header")
         );
+        remove_temp(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_desktop_network_artifacts_resolve_beside_the_cli() {
+        let root = temp_dir("relocated_desktop_network");
+        let executable = root.join("bin/stasis.exe");
+        let support = root.join("bin/desktop/network");
+        fs::create_dir_all(support.join("windows-x86_64")).expect("create library directory");
+        fs::create_dir_all(support.join("include")).expect("create include directory");
+        fs::write(&executable, b"relocated stasis executable").expect("write executable fixture");
+        fs::write(
+            support.join("windows-x86_64/stasis_network.lib"),
+            b"relocated desktop network library",
+        )
+        .expect("write relocated network library");
+        fs::write(
+            support.join("include/stasis_network.h"),
+            b"/* relocated network header */\n",
+        )
+        .expect("write relocated network header");
+
+        let (library, header) =
+            bundled_network_artifacts_for_executable(&executable, PackageTarget::Desktop)
+                .expect("resolve desktop support")
+                .expect("desktop support artifacts");
+        assert_eq!(library, support.join("windows-x86_64/stasis_network.lib"));
+        assert_eq!(header, support.join("include/stasis_network.h"));
         remove_temp(&root);
     }
 
@@ -10060,8 +11320,12 @@ mod tests {
     #[test]
     fn manifest_validates_network_guest_entry_contract() {
         let mut manifest = ProjectManifest::new("network_game".to_string());
-        manifest.capabilities = Some(ProjectCapabilities { network: true });
+        manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
         assert!(manifest.validate().is_ok());
+        assert!(validate_desktop_network_guest_contract(&manifest).is_err());
         assert!(
             validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_err()
         );
@@ -10075,11 +11339,31 @@ mod tests {
             viewport: None,
         });
         assert!(manifest.validate().is_ok());
+        assert!(validate_desktop_network_guest_contract(&manifest).is_ok());
         assert!(
             validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_ok()
         );
         manifest.web.as_mut().unwrap().entry = "../guest.stasis".to_string();
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn desktop_monolith_cmake_links_network_only_when_configured() {
+        let cmake = include_str!("../../../runtime/CMakeLists.txt");
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_LIBRARY"));
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_INCLUDE_DIR"));
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_MODE"));
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_MODE STREQUAL \"host\""));
+        assert!(cmake.contains("STASIS_MONOLITH_NETWORK_MODE STREQUAL \"client\""));
+        assert!(cmake.contains(
+            "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_ENABLED=1)"
+        ));
+        assert!(cmake.contains(
+            "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)"
+        ));
+        assert!(cmake.contains(
+            "target_link_libraries(stasis_monolith PRIVATE \"${STASIS_MONOLITH_NETWORK_LIBRARY}\")"
+        ));
     }
 
     #[test]
@@ -10482,6 +11766,8 @@ mod tests {
         fs::write(root.join("demo.exe.launch"), "dll=demo.dll").expect("write launch config");
         fs::write(root.join("demo.dll"), "game").expect("write game library");
         fs::write(root.join("stasis_graphics.dll"), "graphics").expect("write graphics runtime");
+        fs::write(root.join("network_guest.bundle"), "guest").expect("write guest bundle");
+        fs::write(root.join("network_guest.bundle.json"), "{}").expect("write bundle metadata");
 
         nest_windows_desktop_payload(&root, &executable).expect("nest package payload");
 
@@ -10499,6 +11785,8 @@ mod tests {
             "assets",
             "demo.dll",
             "demo.exe.launch",
+            "network_guest.bundle",
+            "network_guest.bundle.json",
             "stasis_graphics.dll",
         ] {
             assert!(root

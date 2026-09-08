@@ -2,6 +2,8 @@ package com.stasislang.workshop;
 
 import android.opengl.GLES20;
 
+import static com.stasislang.workshop.StasisPreviewRenderer.*;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -209,7 +211,7 @@ public final class StasisPreviewRendererSchemaTest {
         assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
         frame.put(StasisPreviewRenderer.I_FLAGS, StasisPreviewRenderer.FLAG_PRESENT);
         assertTrue(StasisPreviewRenderer.shouldPresent(frame, floats));
-        for (int version = 2; version <= 5; version += 1) {
+        for (int version = 2; version < RENDER_VERSION; version += 1) {
             frame.put(1, version);
             assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
             assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
@@ -220,6 +222,135 @@ public final class StasisPreviewRendererSchemaTest {
         assertFalse(StasisPreviewRenderer.isValidFrame(IntBuffer.allocate(10), floats));
         assertFalse(StasisPreviewRenderer.isValidFrame(frame, FloatBuffer.allocate(10)));
         assertFalse(StasisPreviewRenderer.isValidFrame(frame, null));
+    }
+
+    @Test
+    public void malformedCountsSpansAndOrderRejectAndRecover() {
+        IntBuffer frame = validSpriteFrame();
+        FloatBuffer floats = validSpriteFloats();
+        frame.put(StasisPreviewRenderer.I_FLAGS, StasisPreviewRenderer.FLAG_PRESENT);
+        int[] counts = {I_LINE_COUNT, I_SPRITE_COUNT, I_TEXT_COUNT, I_TEXT_BYTES_USED,
+                I_RECT_COUNT, I_ORDER_COUNT, I_CLIP_COUNT, I_SPRITE_RUN_COUNT};
+        int[] maxima = {MAX_LINES, MAX_SPRITES, MAX_TEXT, TEXT_U8_CAPACITY,
+                MAX_GEOMETRY, MAX_ORDER, MAX_CLIPS, MAX_SPRITE_RUNS};
+        for (int i = 0; i < counts.length; i++) {
+            rejectAndRecover(frame, floats, counts[i], -1);
+            rejectAndRecover(frame, floats, counts[i], maxima[i] + 1);
+            rejectAndRecover(frame, floats, counts[i], Integer.MAX_VALUE);
+        }
+        rejectAndRecover(frame, floats, I_MAGIC, 0);
+        rejectAndRecover(frame, floats, I_VERSION, 99);
+        frame.put(I_LINE_COUNT, 1);
+        rejectAndRecover(frame, floats, I_RECT_COUNT, MAX_GEOMETRY);
+        frame.put(I_TEXT_COUNT, 1);
+        frame.put(I_TEXT_BYTES_USED, 2);
+        int text = StasisPreviewRenderer.I_TEXT_BASE;
+        frame.put(text + 1, 1);
+        rejectAndRecover(frame, floats, text + 2, 1);
+        rejectAndRecover(frame, floats, text + 2, Integer.MAX_VALUE);
+        rejectAndRecover(frame, floats, text + 2, -1);
+        rejectAndRecover(frame, floats, text + 1, 2);
+        rejectAndRecover(frame, floats, text + 1, Integer.MIN_VALUE);
+        frame.put(text + 1, -9);
+        assertTrue(StasisPreviewRenderer.shouldPresent(frame, floats));
+        rejectAndRecover(frame, floats, text + 2, 1);
+        frame.put(I_ORDER_COUNT, 1);
+        int order = StasisPreviewRenderer.I_ORDER_BASE;
+        frame.put(order, StasisPreviewRenderer.ORDER_LINE * ORDER_KIND_SCALE);
+        for (int entry : new int[] {-1, 0, 7 * ORDER_KIND_SCALE, ORDER_KIND_SCALE + 1,
+                2 * ORDER_KIND_SCALE + 1, 3 * ORDER_KIND_SCALE + 1, 4 * ORDER_KIND_SCALE,
+                5 * ORDER_KIND_SCALE, 6 * ORDER_KIND_SCALE, 6 * ORDER_KIND_SCALE + 1}) {
+            rejectAndRecover(frame, floats, order, entry);
+        }
+        frame.put(I_CLIP_COUNT, 1);
+        frame.put(I_ORDER_COUNT, 2);
+        frame.put(order, 5 * ORDER_KIND_SCALE);
+        frame.put(order + 1, 6 * ORDER_KIND_SCALE);
+        assertTrue(StasisPreviewRenderer.shouldPresent(frame, floats));
+        rejectAndRecover(frame, floats, I_ORDER_COUNT, 1);
+        rejectAndRecover(frame, floats, order, 6 * ORDER_KIND_SCALE);
+        frame.put(I_ORDER_COUNT, 514);
+        for (int i = 0; i < 257; i++) {
+            frame.put(order + i, 5 * ORDER_KIND_SCALE);
+            frame.put(order + 257 + i, 6 * ORDER_KIND_SCALE);
+        }
+        assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
+        frame.put(I_ORDER_COUNT, 0);
+        assertTrue(StasisPreviewRenderer.shouldPresent(frame, floats));
+        int run = I_SPRITE_RUN_BASE;
+        frame.put(I_SPRITE_RUN_COUNT, 1);
+        frame.put(run + 1, 1);
+        frame.put(run + 2, -1);
+        rejectAndRecover(frame, floats, run, -1);
+        rejectAndRecover(frame, floats, run, Integer.MAX_VALUE);
+        rejectAndRecover(frame, floats, run + 1, 0);
+        rejectAndRecover(frame, floats, run + 1, Integer.MAX_VALUE);
+        rejectAndRecover(frame, floats, run + 2, -2);
+        rejectAndRecover(frame, floats, run + 2, 1);
+        for (int field = 3; field < SPRITE_RUN_I32_STRIDE; field++) {
+            rejectAndRecover(frame, floats, run + field, 1);
+        }
+        rejectAndRecover(frame, floats, I_SPRITE_BASE, 0);
+        rejectAndRecover(frame, floats, I_SPRITE_BASE + 2, 1);
+        assertFalse(isValidFrame(null, floats));
+        frame.limit(FRAME_I32_CAPACITY - 1);
+        assertFalse(isValidFrame(frame, floats));
+        frame.clear();
+        floats.limit(FRAME_F32_CAPACITY - 1);
+        assertFalse(isValidFrame(frame, floats));
+        floats.clear();
+        assertTrue(shouldPresent(frame, floats));
+    }
+
+    @Test
+    public void rejectedDrawDoesNotPrepareResourcesOrConsumeCapture() {
+        int[] timings = {0};
+        StasisPreviewRenderer renderer = new StasisPreviewRenderer(
+                new StasisPreviewRenderer.TextureProvider() {
+                    @Override public void onResourceGenerationChanged(int surface, int generation,
+                            boolean discard, String reason) { throw new AssertionError(); }
+                    @Override public int textureFor(int handle) { throw new AssertionError(); }
+                    @Override public void beginRestoreAttempt() { throw new AssertionError(); }
+                }, ignored -> timings[0]++);
+        int[] captures = {0};
+        renderer.requestCapture((bitmap, error, snapshot) -> captures[0]++);
+        IntBuffer frame = renderer.frameI32Bytes().asIntBuffer();
+        frame.put(I_MAGIC, RENDER_MAGIC);
+        frame.put(I_VERSION, RENDER_VERSION);
+        frame.put(I_FLAGS, FLAG_CLEAR | FLAG_PRESENT);
+        // Each IT-009 malformed category must exit before calling GLES, whose
+        // host-test methods throw, even when clear and present are requested.
+        int[][] malformed = {{I_MAGIC, 0}, {I_VERSION, 99},
+                {I_LINE_COUNT, -1}, {I_LINE_COUNT, MAX_LINES + 1},
+                {I_TEXT_COUNT, 1}, {I_ORDER_COUNT, 1}};
+        for (int[] mutation : malformed) {
+            int saved = frame.get(mutation[0]);
+            frame.put(mutation[0], mutation[1]);
+            renderer.onDrawFrame(null);
+            frame.put(mutation[0], saved);
+            assertTrue(shouldPresent(frame, renderer.frameF32Bytes().asFloatBuffer()));
+        }
+        assertEquals(malformed.length, timings[0]);
+        assertEquals(0, captures[0]);
+        assertEquals(0, renderer.rendererGeneration());
+        assertTrue(renderer.awaitPresentedFrameToken(-1, 0));
+        assertFalse(renderer.awaitPresentedFrameToken(0, 0));
+        frame.put(I_LINE_COUNT, 0);
+        assertTrue(shouldPresent(frame, renderer.frameF32Bytes().asFloatBuffer()));
+        // Replacing the request proves rejection retained the pending callback.
+        renderer.requestCapture((bitmap, error, snapshot) -> {});
+        assertEquals(1, captures[0]);
+    }
+
+    private static void rejectAndRecover(IntBuffer frame, FloatBuffer floats,
+            int index, int badValue) {
+        assertTrue(StasisPreviewRenderer.shouldPresent(frame, floats));
+        int saved = frame.get(index);
+        frame.put(index, badValue);
+        assertFalse("must reject slot " + index + " value " + badValue,
+                StasisPreviewRenderer.shouldPresent(frame, floats));
+        frame.put(index, saved);
+        assertTrue(StasisPreviewRenderer.shouldPresent(frame, floats));
     }
 
     @Test

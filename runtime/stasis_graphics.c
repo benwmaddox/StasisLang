@@ -29,6 +29,9 @@
 #include "stasis_platform_services.h"
 #include "stasis_image_writer.h"
 #include "stasis_sprite_atlas_policy.h"
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+#include "stasis_mobile_aot_runtime.h"
+#endif
 #include "stasis_mixed_quad_planner.h"
 #if defined(_WIN32)
 #include <sys/types.h>
@@ -1140,10 +1143,16 @@ static void stasis_pump_events(void) {
             case SDL_EVENT_WILL_ENTER_BACKGROUND:
                 external_url_input_edge = 0;
                 stasis_external_url_action_clear(&g_external_url_action);
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+                (void)stasis_mobile_network_client_set_background(1);
+#endif
                 stasis_renderer_lifecycle_pause(&g_resource_lifecycle);
                 g_resource_frame_ready = false;
                 break;
             case SDL_EVENT_DID_ENTER_FOREGROUND:
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+                (void)stasis_mobile_network_client_set_background(0);
+#endif
                 if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {
                     stasis_renderer_lifecycle_resume(&g_resource_lifecycle);
                 }
@@ -4760,15 +4769,17 @@ static int stasis_sprite_atlas_reserve_on_page(
     }
     int x = page->cursor_x;
     int y = page->cursor_y;
+    int row_h = page->row_h;
     if (x + alloc_w > page->width) {
         x = 1;
-        y += page->row_h;
-        page->row_h = 0;
+        y += row_h;
+        row_h = 0;
     }
+    /* Failed probes must preserve the occupied shelf for later allocations. */
     if (y + alloc_h > page->height) return 0;
     page->cursor_x = x + alloc_w;
     page->cursor_y = y;
-    if (alloc_h > page->row_h) page->row_h = alloc_h;
+    page->row_h = alloc_h > row_h ? alloc_h : row_h;
     page->live_allocations++;
     *out_x = x + STASIS_SDL_ATLAS_PADDING;
     *out_y = y + STASIS_SDL_ATLAS_PADDING;

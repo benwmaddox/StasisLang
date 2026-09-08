@@ -44,6 +44,7 @@ RUNTIME_FILES = (
     "stasis_mobile_aot_runtime.h",
     "stasis_mobile_runtime.c",
     "stasis_mobile_runtime.h",
+    "stasis_network_join_card.h",
     "stasis_platform_storage.c",
     "stasis_platform_storage.h",
     "stasis_platform_services.c",
@@ -51,6 +52,10 @@ RUNTIME_FILES = (
     "stb_truetype.h",
 )
 RUNTIME_DIRS = ("third_party/thorvg",)
+DESKTOP_NETWORK_ARTIFACTS = (
+    "desktop/network/windows-x86_64/stasis_network.lib",
+    "desktop/network/include/stasis_network.h",
+)
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -59,6 +64,28 @@ def sha256(path: pathlib.Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def desktop_network_artifact_hashes(root: pathlib.Path) -> dict[str, str]:
+    paths = [
+        root / pathlib.Path(*pathlib.PurePosixPath(name).parts)
+        for name in DESKTOP_NETWORK_ARTIFACTS
+    ]
+    present = [path.is_file() for path in paths]
+    if not any(present):
+        return {}
+    if not all(present):
+        missing = [
+            name
+            for name, exists in zip(DESKTOP_NETWORK_ARTIFACTS, present)
+            if not exists
+        ]
+        raise ValueError(
+            f"desktop network release artifacts are incomplete: missing {missing}"
+        )
+    return {
+        name: sha256(path) for name, path in zip(DESKTOP_NETWORK_ARTIFACTS, paths)
+    }
 
 
 def render_contract_version(root: pathlib.Path) -> int:
@@ -152,6 +179,10 @@ def main() -> int:
     }
     if not mobile_shell_sources:
         parser.error("release mobile shell templates are missing")
+    try:
+        desktop_network_artifacts = desktop_network_artifact_hashes(root)
+    except ValueError as error:
+        parser.error(str(error))
 
     rustc = subprocess.run(
         ["rustc", "--version"], check=True, capture_output=True, text=True
@@ -189,6 +220,7 @@ def main() -> int:
         },
         "runtime_sources": runtime_sources,
         "mobile_shell_sources": mobile_shell_sources,
+        "desktop_network_artifacts": desktop_network_artifacts,
         "command_buffer": {
             "name": COMMAND_BUFFER_NAME,
             "version": command_buffer_version,

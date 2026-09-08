@@ -86,6 +86,12 @@ String-like storage is fixed-layout and deterministic.
 - header `max_length: i32`
 - payload `elements[N]`
 
+Ordinary arrays expose `.max_length` as their declared capacity. `.length` reads and
+writes are rejected for both fixed arrays and array views: logical array lengths
+are not supported yet. Programs that track a used prefix must maintain a separate
+count explicitly and use `.max_length` for capacity loops. String logical-length
+properties remain supported.
+
 Header access:
 - Header fields are accessed via built-in properties (e.g. `.max_length`, `.length`, `.char_length`), not by indexing into the header.
 - Negative indices are not allowed in source-level collection indexing.
@@ -480,7 +486,7 @@ Interpretation:
 - SoA-backed array element view (for example `enemies[i]` passed as `damage(enemies[i], 5)`):
 - `base = hash_global_path("enemies")` (the collection hash)
 - `index = i`
-- `len = enemies.length` (the array extent)
+- `len = enemies.max_length` (the array extent)
 
 Field access on a struct view:
 - If `index < 0` (AoS): compute `field_path_hash = hash_combine(base, "." + field_suffix)` and load/store the scalar field at that global path.
