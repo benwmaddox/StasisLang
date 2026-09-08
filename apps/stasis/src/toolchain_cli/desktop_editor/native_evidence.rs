@@ -106,7 +106,27 @@ fn capture_native_task_timeline() {
             complete: true,
         },
     });
-    let semantic_root = if std::env::var_os("STASIS_EDITOR_EVIDENCE_SEMANTIC").is_some() {
+    let semantic_root = if std::env::var_os("STASIS_EDITOR_EVIDENCE_RECOVERY").is_some() {
+        let (mut saved, root, _) = super::tests::review_fixture("session_recovery_native");
+        saved.store = Some(SessionStore::open(&root).unwrap());
+        saved.state.reply = "Keep the value change small and rerun focused tests.".into();
+        saved
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .append_reply("I prepared the value change for review.")
+            .unwrap();
+        let task = saved.state.session.active_task_id().unwrap().to_string();
+        saved.uncertain_calls.insert(task);
+        saved.persist_if_changed();
+        drop(saved);
+        let (client, _server) = stasis_runner::live::live_session(1);
+        editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)))
+            .with_persistence();
+        super::tests::finish_preview(&mut editor);
+        Some(root)
+    } else if std::env::var_os("STASIS_EDITOR_EVIDENCE_SEMANTIC").is_some() {
         let (mut preview_editor, root, _) = super::tests::review_fixture("merged_timeline_native");
         super::tests::finish_preview(&mut preview_editor);
         editor = preview_editor;

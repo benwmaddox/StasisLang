@@ -3462,9 +3462,11 @@ dependencies = [
 name = "stasis_ai"
 version = "0.1.0"
 dependencies = [
+ "atomic-write-file",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "windows-sys 0.61.2",
 ]
