@@ -3,7 +3,8 @@
 Official Stasis archives contain `stasis_release_provenance.json`. The schema-v1
 manifest identifies the release tag and source commit, records the clean build
 state, hashes the exact compiler executable, every packaged renderer/mobile
-runtime source, and every mobile shell/template file, identifies the stable
+runtime source, every mobile shell/template file, and any shipped desktop
+network static library and public header, identifies the stable
 `gfx_cmd` command-buffer family with current schema v7 and enabled
 backends/features, and records the full Cargo package/version/source
 set, `Cargo.lock` SHA-256, Rust compiler version, and resolved SDL versions when
@@ -13,6 +14,11 @@ SDL is linked into the release.
 or copying anything. A missing manifest or a compiler/runtime mismatch stops the
 package with the expected and actual SHA-256 values. This prevents a release
 binary from silently packaging renderer sources copied from another checkout.
+Network-enabled desktop packaging additionally requires the selected prebuilt
+library and header to be the exact archive-relative artifacts authenticated by
+`desktop_network_artifacts`. Missing, substituted, partially recorded, or
+unrecorded network artifacts stop packaging, including when
+`--development-build` selects development package behavior.
 
 Every generated desktop, Android, and iOS package contains
 `stasis_provenance.json`; Windows desktop packages keep it in the relative

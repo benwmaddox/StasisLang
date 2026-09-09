@@ -3100,6 +3100,57 @@ mod tests {
     }
 
     #[test]
+    fn aot_emits_external_url_call_and_retains_its_string_literal() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        let clif = capture_aot_clif_by_function(&mut process);
+
+        assert!(
+            clif.get("open_external_url")
+                .expect("external URL wrapper CLIF")
+                .contains("call"),
+            "AOT wrapper must emit the host call"
+        );
+        assert!(process
+            .string_literals()
+            .values()
+            .any(|literal| literal == "https://www.maddoxlabs.com/"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_links_and_executes_external_url_headless_contract() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let deps_dir = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("Cargo deps directory")
+            .to_path_buf();
+        let (_, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
+        if !optional_signer_is_usable(&runtime_dll) {
+            return;
+        }
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return 10 + open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        process.compile().expect("compile external URL AOT fixture");
+
+        let Some(result) =
+            run_linked_i32_noarg_fixture(&process, "main", "external_url_headless", &link_config)
+        else {
+            return;
+        };
+        assert_eq!(result, 10, "headless AOT execution must ignore the request");
+    }
+
+    #[test]
     fn aot_process_accepts_known_runtime_shim_families() {
         let mut process = AotProcess::new();
         process.upsert_file(
@@ -3945,6 +3996,53 @@ function on_code_swap(): void { return; }
             run_linked_i32_noarg_fixture(&process, "main", "max_length", &link_config)
         {
             assert_eq!(exit_code, 44);
+        }
+    }
+
+    #[test]
+    fn aot_rejects_fixed_array_and_view_length_access() {
+        let cases = [
+            (
+                "global read",
+                "global values: i32[4]; function main(): i32 { return values.length; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "conversion write",
+                "global values: i32[4]; function main(): i32 { values.length.from_f32(2.0); return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view compound write",
+                "global storage: i32[4]; function update(values: i32[]): i32 { values.length += 1; return 0; } function main(): i32 { return update(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view read",
+                "global storage: i32[4]; function size(values: i32[]): i32 { return values.length; } function main(): i32 { return size(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "fixed parameter read",
+                "global storage: i32[4]; function size(values: i32[4]): i32 { return values.length; } function main(): i32 { return size(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "nested global write",
+                "struct State { values: i32[4]; } global state: State; function main(): i32 { state.values.length = 2; return 0; }",
+                "array property 'state.values.length' is unavailable; use 'state.values.max_length' for declared capacity",
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            let mut process = AotProcess::new();
+            process.upsert_file("array_length.stasis", source);
+            let error = process.compile().expect_err(name);
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains(expected),
+                "unexpected {name} diagnostic: {error:?}"
+            );
         }
     }
 

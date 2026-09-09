@@ -1,4 +1,5 @@
 #include "stasis_mobile_runtime.h"
+#include "stasis_mobile_aot_runtime.h"
 #include "stasis_render_contract.h"
 
 #include <assert.h>
@@ -55,6 +56,109 @@ static int32_t game_host_req_flags;
 static int32_t game_host_req_window_w_px;
 static int32_t game_host_req_window_h_px;
 static char game_string_literals[640][32];
+
+#if defined(STASIS_NETWORK_ENABLED)
+typedef struct StasisNetworkHost {
+    int active;
+} StasisNetworkHost;
+typedef struct StasisNetworkEvent {
+    uint32_t kind;
+    uint32_t connection;
+    uint32_t length;
+    unsigned char payload[64u * 1024u];
+} StasisNetworkEvent;
+
+static StasisNetworkHost network_host;
+static int network_start_result = 1;
+static int network_start_calls;
+static int network_stop_calls;
+
+int32_t stasis_network_supported(void) { return 1; }
+int32_t stasis_network_random_seed(void) { return 1234; }
+StasisNetworkHost *stasis_network_host_start_bind(
+    uint16_t port,
+    uint32_t bind_ipv4,
+    const unsigned char *bundle,
+    size_t bundle_length,
+    uint16_t *out_port
+) {
+    static const unsigned char fixture[] = "network lifecycle fixture";
+    assert(port == 0);
+    assert(bind_ipv4 == 0);
+    assert(bundle != NULL && bundle_length == sizeof(fixture) - 1);
+    assert(memcmp(bundle, fixture, sizeof(fixture) - 1) == 0);
+    assert(out_port != NULL);
+    network_start_calls += 1;
+    if (!network_start_result) return NULL;
+    *out_port = 4312;
+    network_host.active = 1;
+    return &network_host;
+}
+int32_t stasis_network_host_poll(StasisNetworkHost *host, StasisNetworkEvent *event) {
+    (void)host; (void)event; return 0;
+}
+int32_t stasis_network_host_send(
+    StasisNetworkHost *host,
+    uint32_t connection,
+    const unsigned char *payload,
+    size_t length
+) {
+    (void)host; (void)connection; (void)payload; (void)length; return 0;
+}
+int32_t stasis_network_host_status(StasisNetworkHost *host) {
+    return host != NULL && host->active;
+}
+uint32_t stasis_network_host_overflow_count(StasisNetworkHost *host) {
+    (void)host; return 0;
+}
+uint16_t stasis_network_host_port(StasisNetworkHost *host) {
+    return host != NULL && host->active ? 4312 : 0;
+}
+int32_t stasis_network_host_copy_join_card(
+    StasisNetworkHost *host,
+    char *out,
+    size_t capacity,
+    size_t *out_length
+) {
+    const char *card = "http://192.0.2.20:4312/";
+    size_t length = strlen(card);
+    if (host == NULL || !host->active || capacity <= length || out_length == NULL) return -1;
+    memcpy(out, card, length + 1);
+    *out_length = length;
+    return 0;
+}
+int32_t stasis_network_host_copy_join_url(
+    StasisNetworkHost *host,
+    char *out,
+    size_t capacity,
+    size_t *out_length
+) {
+    const char *url = "http://192.0.2.20:4312/session?pair=private";
+    size_t length = strlen(url);
+    if (host == NULL || !host->active || capacity <= length || out_length == NULL) return -1;
+    memcpy(out, url, length + 1);
+    *out_length = length;
+    return 0;
+}
+void stasis_network_host_stop(StasisNetworkHost *host) {
+    assert(host == &network_host && host->active);
+    network_stop_calls += 1;
+    host->active = 0;
+}
+
+static void configure_network_fixture(void) {
+    static const unsigned char fixture[] = "network lifecycle fixture";
+    FILE *file = fopen("network_guest.bundle", "wb");
+    assert(file != NULL);
+    assert(fwrite(fixture, 1, sizeof(fixture) - 1, file) == sizeof(fixture) - 1);
+    assert(fclose(file) == 0);
+#if defined(_WIN32)
+    assert(_putenv_s("STASIS_ASSET_ROOT", ".") == 0);
+#else
+    assert(setenv("STASIS_ASSET_ROOT", ".", 1) == 0);
+#endif
+}
+#endif
 
 int stasis_init_window(int width, int height, const char *title) {
     assert(width == 1280);
@@ -230,6 +334,9 @@ int stasis_clipboard_save_ascii(const char *value, int length) {
 static int32_t hash_path(const char *path);
 
 static int32_t game_main(void) {
+#if defined(STASIS_NETWORK_ENABLED)
+    assert(network_host.active == 1);
+#endif
     main_calls += 1;
     assert(stasis_jit_load_font(1639, 19) == 19);
     game_host_req_seq = 1;
@@ -339,6 +446,12 @@ static void reset_fakes(void) {
     game_host_req_flags = 0;
     game_host_req_window_w_px = 0;
     game_host_req_window_h_px = 0;
+#if defined(STASIS_NETWORK_ENABLED)
+    assert(network_host.active == 0);
+    network_start_result = 1;
+    network_start_calls = 0;
+    network_stop_calls = 0;
+#endif
 }
 
 static void test_rejects_invalid_configuration(void) {
@@ -362,6 +475,18 @@ static void test_runs_mobile_lifecycle(void) {
     assert(stasis_mobile_runtime_is_initialized() == 1);
     assert(init_window_calls == 1);
     assert(bind_runtime_calls == 1);
+#if defined(STASIS_NETWORK_ENABLED)
+    assert(network_start_calls == 1);
+    assert(network_host.active == 1);
+    char join_card[128] = {0};
+    char private_join_url[128] = {0};
+    assert(stasis_mobile_network_copy_join_card(join_card, sizeof(join_card)) > 0);
+    assert(strcmp(join_card, "http://192.0.2.20:4312/") == 0);
+    assert(strstr(join_card, "session") == NULL && strstr(join_card, "pair") == NULL);
+    assert(stasis_mobile_network_copy_join_url(
+        private_join_url, sizeof(private_join_url)) > 0);
+    assert(strstr(private_join_url, "/session?pair=") != NULL);
+#endif
     assert(main_calls == 1);
     assert(host_request_calls == 2);
     assert(host_request_sequences[0] == 0);
@@ -400,9 +525,38 @@ static void test_runs_mobile_lifecycle(void) {
     stasis_mobile_runtime_shutdown();
     stasis_mobile_runtime_shutdown();
     assert(shutdown_calls == 1);
+#if defined(STASIS_NETWORK_ENABLED)
+    assert(network_stop_calls == 1);
+    assert(network_host.active == 0);
+#endif
     assert(stasis_mobile_runtime_is_initialized() == 0);
     assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_NOT_INITIALIZED);
 }
+
+#if defined(STASIS_NETWORK_ENABLED)
+static void test_network_start_failure_cleans_up_runtime(void) {
+    StasisMobileRuntimeConfig valid_config = config();
+    StasisMobileGameEntries valid_entries = entries();
+
+    network_start_result = 0;
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
+        STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT);
+    assert(network_start_calls == 1);
+    assert(network_stop_calls == 0);
+    assert(network_host.active == 0);
+    assert(shutdown_calls == 1);
+    assert(stasis_mobile_runtime_is_initialized() == 0);
+
+    network_start_result = 1;
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
+        STASIS_MOBILE_RUNTIME_OK);
+    assert(network_start_calls == 2);
+    assert(network_host.active == 1);
+    stasis_mobile_runtime_shutdown();
+    assert(network_stop_calls == 1);
+    assert(network_host.active == 0);
+}
+#endif
 
 static void test_skips_hidden_performance_hud_measurement(void) {
     StasisMobileRuntimeConfig valid_config = config();
@@ -503,6 +657,9 @@ static void test_stops_on_nonzero_game_entry_results(void) {
 }
 
 int main(void) {
+#if defined(STASIS_NETWORK_ENABLED)
+    configure_network_fixture();
+#endif
     reset_fakes();
     test_rejects_invalid_configuration();
     test_runs_mobile_lifecycle();
@@ -516,6 +673,11 @@ int main(void) {
     test_reports_graphics_initialization_failure();
     reset_fakes();
     test_stops_on_nonzero_game_entry_results();
+#if defined(STASIS_NETWORK_ENABLED)
+    reset_fakes();
+    test_network_start_failure_cleans_up_runtime();
+    assert(remove("network_guest.bundle") == 0);
+#endif
     puts("stasis_mobile_runtime_test: ok");
     return 0;
 }

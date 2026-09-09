@@ -176,3 +176,105 @@
 - Good: hashing recovered sources removed the previous missing-corpus blocker without rerunning vectorization.
 - Bad: MSBuild initially misreported missing compilers because the inherited environment contained both Path and PATH.
 - Adjustment: the standalone build helper normalizes Windows environment keys before invoking CMake/MSBuild.
+
+### Task 338 render acceptance review repair
+
+- Enforced the reviewed per-candidate, target, and background outcome matrix. Unexpected passes, failures, missing/extra comparisons, and inconsistent aggregate results now fail validation, including under `python -O`. Timing noise and nonzero delta magnitudes remain diagnostic.
+- Preserved both branches' report entries while resolving the prepared merge conflict. Validation: eight Python tests, fresh native build and two CTest tests, and the complete 420-comparison render matrix.
+- Visual evidence: not applicable; this repair changes validation and documentation only, preserving the existing SVG and visual evidence.
+
+## 2026-09-06 - Task 312: safe external URL host action
+
+- Added `open_external_url(string): i32` with a 2048-byte UTF-8 bound, strict HTTP(S) validation, one-attempt input authority, and invalid/ignored/accepted results. Desktop SDL, Android release/Workshop, iOS, and web adapters use platform browser APIs; headless/recording execution cannot launch a browser. JIT swap hooks suppress the action before dispatch.
+- Preserved the existing string-handle ABI, AOT runtime export, wasm import, and release-package dynamic text metadata. The Stasis pointer fixture requests one Maddox Labs link on a down edge and does not repeat while held. No consumer UI was added in this task.
+- Verification: all seven focused compiler/dynload/Android bridge tests pass, including actual linked AOT execution and JIT edge/swap assertions. The 118 web runtime tests, web metadata and mobile-shell package tests, 44 enabled dynload tests, two fresh native C executables, and 38 Python host/runtime ABI tests pass. Full validation stops at existing `stasis_network` unsafe-boundary findings; the broader compiler run also encounters missing optional signing certificates and a shared-cache access denial. Task builds use the required Cargo wrapper with an explicit worktree-local target because the shared cache is outside the allowed worktree.
+- Visual evidence: browser/device media was not captured. There is no new in-canvas UI; real popup behavior remains a validation limit. The local web package harness rejected an unverified CLI build fingerprint and the Playwright wrapper did not become available. Android Java compilation could not resolve Android Gradle Plugin 8.7.3 from configured repositories. Android/iOS browser dispatch requires device validation; Xcode was unavailable on this Windows host.
+- Theory gained: guest input values are data, not proof of a user gesture. The native/Workshop/web tests show that host-owned authority must be transferred to one tick/frame and consumed once, while swap execution suppresses dispatch. Adjacent privileged host actions should reuse that explicit authority boundary rather than infer permission from simulated input.
+- Good: the edge fixture and host injection exercise real guest compilation without launching external applications.
+- Bad: an initial AOT check skipped execution because the optional signer lacked a certificate; initial Workshop authority also incorrectly relied on simulated touch state.
+- Adjustment: verify executable checks actually run, preserve required-signing policy, and supply trusted platform activation separately from guest-visible input.
+## 2026-09-06 - Task 354: native guest transport ABI
+
+- Added an optional Windows/Android native client using the existing browser WebSocket protocol, bounded mailbox, private pairing/resume identity, reconnect backoff, and shell background lifecycle. Client-only packages link transport support without host bundles or listeners.
+- Verification: 33 network tests, seven network package tests, focused package/runtime configuration tests, Windows static-link probe, Android x86_64 static-link and AOT bridge probes, and real Chrome guest acceptance passed. Release provenance, ABI contracts, formatting, and diff checks passed.
+- Validation limit: `tools/validate_repo.sh` reaches its existing ignored-test audit and fails on unchanged timing tests in `stasis_dynload/src/lib.rs` and `stasis_compiler/src/backend/program_snapshot.rs`; the workspace-wide Cargo phase therefore did not run. The optional Android Workshop source check also fails an unchanged `allowAiImageGeneration.setChecked(false)` assertion. No packaged graphical client or multi-device LAN run is claimed.
+- Visual evidence: inspected `target/network-browser-acceptance/browser.png` and all five one-second samples of `browser.mp4`; they show browser join, snapshot, bidirectional command, and resumed-session stages without credentials. Native probe results are in `target/native-client-windows/result.txt` and `target/android-network-client/result.txt`.
+- Theory gained: a connection generation owns socket work and queued messages. Lifecycle and slow-frame tests show obsolete work is discarded; another provisioning surface can reuse this boundary without adding sockets or credentials to deterministic state.
+- Good: independent review exposed lifecycle races before the final platform probes.
+- Bad: the first bridge include incorrectly treated the separately packaged network header as a runtime-local file.
+- Adjustment: validate optional external header provenance alongside ABI and package capability tests.
+
+### Task 354 review follow-up
+
+- Gate the Windows CMake mode helper with its caller's platform condition. Protect Android join provisioning with an app-namespaced signature permission on the explicit NetworkJoin alias; direct launcher intents discard join extras.
+- Replace blocking TCP establishment with a single cancellable nonblocking attempt, and replace 2 ms idle socket polling with a 25 ms command-interruptible wait. Regression coverage includes shutdown, background, generation cancellation, and component policy rejection cases.
+- Validation: the exact architecture characterization fast lane passed on Windows; a non-Windows warnings-as-errors probe passed after reproducing the CI failure. All 35 network tests, package generation, seven Java admission policy scenarios, fresh Windows static-link probes, Android target compilation, ABI audits, formatting, and diff checks passed.
+- Theory gained: the public launcher and private provisioning route need distinct component permissions even when they share an activity; lifecycle cancellation must also cover TCP establishment before a WebSocket exists.
+- Good: a non-Windows compile probe reproduced the CI warning without suppressing warnings.
+- Bad: the previous shutdown tests started after TCP establishment and missed dropped SYNs.
+- Adjustment: test each transport phase's cancellation authority, including an indefinitely pending TCP readiness probe.
+- Visual evidence: not applicable; this follow-up changes transport and component admission, with no graphical UI change.
+
+- Android admission evidence: API 35 fixture using the exact production policy and provisioning method admitted the same-signer alias caller, denied the differently signed caller with SecurityException before dispatch, and rejected direct MainActivity provisioning in onCreate and onNewIntent. Inspected target/android_admission_evidence/evidence.txt; this is a minimal admission fixture, not the packaged SDL game.
+
+### 2026-09-08 - Task 529: packaged Web AudioStream bindings
+
+- Restore the eight public streaming imports and five AudioVoice imports, including the `stasis_jit_audio_play` failure reported by Gambit Guard. Stream pushes own copied stereo PCM, report bounded partial acceptance, and reject unavailable devices. Existing effect voice behavior is shared by the public aliases.
+- Validation: all 119 Web runtime tests, all 15 Web packaging tests, 31 provenance/installer tests, native C11 ring tests, 797 runtime ABI comparisons, 953 host/runtime comparisons, Cargo formatting, and diff checks passed. The repository-wide Bash entrypoint could not start in this Windows shell (`dirname` and `python3` missing); the applicable checks were run directly.
+- Chrome 152 acceptance: `build/audio-browser/receipt.json` binds seven rendered-PCM captures covering gesture, volume, mute, swap/reopen, lifecycle resume, device recovery, and reload. Stereo ratio error was zero, peaks were 0.5/0.25/0 as expected, and the signal was 480 Hz. The optimized package also passed startup and reload in `build/audio-browser-release/receipt.json`, retaining all thirteen imports.
+- Native JIT evidence: `build/audio-native/receipt.json` records 96,000 stereo frames at 48 kHz, 479.72 Hz measured frequency, RMS 0.4731, and stereo ratio RMS error below 3e-8, with compiler/runtime/fixture/capture SHA-256 values.
+- Provenance: local packages truthfully identify development/local_release and dirty source; these are not official release artifacts. SDL 3.4.10 and SDL_image 3.4.4 archives matched the repository's pinned SHA-256 before fresh native builds. Worker publication must ship the matching compiler/runtime/stdlib through the normal release workflow, then consumers can repin with official checksum provenance. No consumer snapshot was patched.
+- Follow-ups: platform conformance can reuse the fixture and receipts; Android physical listening is separate. Marble Run and Gambit Guard still need their normal rebuild/deployment acceptance after the official release.
+- Visual evidence: not applicable to this audio-only repair; rendered PCM and receipts provide the behavioral evidence. No physical listening is claimed.
+- Theory gained: public extern names must survive both Wasm reachability and JavaScript feature pruning. Real optimized-package instantiation and PCM capture demonstrate this boundary; adjacent public audio APIs should extend the same import fixture rather than add consumer aliases.
+- Good: real browser PCM capture caught the complete import-to-output path, including optimized packaging.
+- Bad: inherited runtime and signing environment settings initially selected an unrelated binary or unavailable optional signer.
+- Adjustment: validate with explicit matching local compiler/runtime paths and distinguish development evidence from official release provenance.
+- Standalone native AOT: fresh desktop development packaging succeeded with optional signing unconfigured. `build/audio-aot/receipt.json` records 192,512 output frames, 190,656 nonzero frames, peak 0.5, zero stereo ratio error, and 479.98 Hz through the SDL disk driver; executable SHA-256 is `04345638e6907eaed7d4b15e81cdc583adb74d696acd22a93a4ea6eeabb0d0d4`. The bounded four-second probe is preserved in `build/probe_audio_aot.py`.
+
+## 2026-09-08 - Task 312 recovery
+
+- Reconciled the existing URL action with available main, preserving Android permissions and both URL/network lifecycle hooks. Updated the source-closure assertion to accept the added platform service source.
+- Fresh CLI/runtime artifacts, SHA-256 values, focused validation, and baseline limits are recorded in `docs/task312_recovery_evidence.md`. The headless consumer probe returned 312 as expected. Publication remains worker-owned.
+- Visual evidence: not applicable; no consumer UI was added and no device/browser media is claimed.
+- Theory gained: independent host capabilities require additive lifecycle cleanup; the merged hooks preserve one-shot URL authority alongside network suspension.
+- Good: fresh builds exposed the stale source adjacency assertion.
+- Bad: optional signing initially skipped AOT execution.
+- Adjustment: verify that executable checks actually execute, and check source sets rather than ordering.
+
+### Task 529 merge repair
+
+- Preserved both AudioStream and task 312 recovery reports when resolving the prepared main merge.
+- Updated the audio test event mock to retain all listeners, preserving audio visibility checks alongside the new external URL listener. All 124 Web runtime tests pass.
+- Visual evidence: not applicable; this repair changes report text and test infrastructure only.
+- Theory gained: independent browser features share event types; test dispatch must retain every listener just as the DOM does.
+
+### Task 529 runtime-selection review repair
+
+- Require the selected native runtime to be the compiler's canonical sibling, then verify both binary paths and SHA-256 values through editor-info before recording. Reject changed binaries before publishing a receipt.
+- Added six runtime-selection regressions to PR CI and repository validation. All 26 combined provenance and selection tests passed; diff checks passed.
+- The retained target/debug compiler lacks a verified build fingerprint. The live probe correctly rejected it before creating an evidence directory; no new native audio capture is claimed for this review repair.
+- Visual evidence: not applicable; this change validates evidence provenance, not graphical behavior.
+- Theory gained: environment overrides cannot prove runtime selection when bundle siblings take precedence; evidence must verify the loader-selected pair.
+
+### Task 532 receiver-owned named-struct arrays
+
+- Route indexed receiver field reads and writes through the existing typed collection helpers using the receiver's storage handle. Fixed-capacity bounds traps remain ahead of access; unsupported whole-element and non-scalar operations fail deterministically.
+- Cover Bone[24] scalar lanes, dynamic boundary reads/writes, nested calls, two independent owners, data-flow summaries, state layout, capacity invalidation, and hot-swap preservation/rejection. Wasm validates each owner candidate's scalar lane layout.
+- Focused validation: 7 native seam/state tests and 29 receiver-related compiler tests passed, including linked native AOT and Node/Wasm execution. Fresh stasis_dynload artifacts were built. Formatting and source-layout checks passed.
+- Downstream integration: temporarily tested the four rig2d seam/source files from b44dd6c0 in this worktree. Both rig2d_jit_aot_seam tests passed, including linked AOT result parity and all 11 Stasis cases; temporary source files were removed.
+- Visual evidence: not applicable; this change has no graphical behavior.
+- Theory gained: a receiver carries a stable owner path hash; appending the collection field selects the same flattened scalar lanes as concrete global access. The two-owner tests support this mapping, and capacity-only edits must re-emit unchanged accessors because their bounds are compiled constants.
+- Good: shared typed helpers preserve scalar behavior without another parser path.
+- Bad: inherited optional signer configuration failed despite unsigned local execution being supported; overlapping validation also exposed a Windows DLL lock.
+- Adjustment: run validation serially with only applicable optional tool settings, and require actual linked executable results.
+- Repository validation coverage passed in bounded runs: tools/validate_repo.sh preflight and all application targets, then `cargo test -p stasis_compiler --all-targets` (including 618 unit tests), then `cargo test --workspace --exclude stasis --exclude stasis_compiler --all-targets`, each Cargo invocation through tools/cargo_cache.py. Final Rust formatting, Stasis source-layout, and diff checks passed; no lingering test processes remained.
+- Validation setup: fresh source-fingerprinted CLI/SDL runtime, MSVC environment and explicit linker, absolute worktree Cargo target, and checksum-verified local SDL archives for release builds. Optional unavailable signing settings were isolated in the test process. The real Git index retained an older unformatted probe; the compiler formatter gate passed against an isolated candidate index/object directory containing the corrected working copy. The worker's real index was preserved.
+
+### Task 532 compiler benchmark review repair
+
+- Restored the reporting-only compiler microbenchmark's original ignored attribute. Added a narrow validator exception for that named benchmark and documented its explicit `--ignored` invocation; ordinary correctness tests remain mandatory.
+- Validation: exact default selection reports one ignored test; explicit `--ignored` execution passes. Repository ignore audit and rejection probes, shell syntax, Rust formatting, and diff checks pass.
+- Visual evidence: not applicable; test scheduling only.
+- Theory gained: correctness gates and timing reports have different execution contracts; the default skip and explicit successful run verify that separation.
+- Good: the benchmark remains available without ordinary CI cost. Bad: the blanket ignore audit conflicted with its intended opt-in status. Adjustment: keep the exception restricted to this named reporting benchmark.

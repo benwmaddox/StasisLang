@@ -3030,6 +3030,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         | "stasis_jit_clipboard_save_ascii" => {
             function_address(stasis_dynload::stasis_jit_clipboard_save_ascii as *const ())
         }
+        "open_external_url" | "stasis_open_external_url" | "stasis_jit_open_external_url" => {
+            function_address(stasis_dynload::stasis_jit_open_external_url as *const ())
+        }
         "storage_load_ascii" | "stasis_storage_load_ascii" | "stasis_jit_storage_load_ascii" => {
             function_address(stasis_dynload::stasis_jit_storage_load_ascii as *const ())
         }
@@ -3660,6 +3663,54 @@ function main(): i32 {
             process
                 .execute_i32_noarg_by_name("main")
                 .expect("execute offline network extern fixture"),
+            0
+        );
+    }
+
+    #[test]
+    fn network_client_send_uses_explicit_bounded_length() {
+        let source = include_str!("../../../../src/stdlib/network_client.stasis");
+        assert_eq!(
+            crate::frontend::formatter::format_source(source).expect("format network client"),
+            source
+        );
+        // Record the host boundary without opening a network connection.
+        let source = source.replace(
+            "function @internal @extern(\"stasis_web_network_send\") network_client_send_raw(payload: u8[], length: i32): i32;",
+            "global send_calls: i32; function network_client_send_raw(payload: u8[], length: i32): i32 { send_calls += 1; return length; }",
+        );
+        let mut process = JitProcess::new();
+        process
+            .set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)
+            .expect("configure inert network imports");
+        process.upsert_file("network_client.stasis", &source);
+        process.upsert_file(
+            "main.stasis",
+            r#"
+import "network_client.stasis";
+global payload: u8[4];
+global large: u8[65537];
+function main(): i32 {
+    if (network_client_send(payload, -1) != -1) { return 1; }
+    if (network_client_send(payload, 5) != -1) { return 2; }
+    if (network_client_send(large, 65537) != -1) { return 3; }
+    if (send_calls != 0) { return 4; }
+    if (network_client_send(payload, 0) != 0) { return 5; }
+    if (network_client_send(payload, 2) != 2) { return 6; }
+    if (network_client_send(payload, 4) != 4) { return 7; }
+    if (network_client_send(large, 65536) != 65536) { return 8; }
+    if (send_calls != 4) { return 9; }
+    return 0;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("compile explicit network send lengths");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute bounded sends"),
             0
         );
     }
@@ -4992,6 +5043,54 @@ function main(): i32 {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_rejects_fixed_array_and_view_length_access() {
+        let cases = [
+            (
+                "global read",
+                "global values: i32[4]; function main(): i32 { return values.length; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "conversion write",
+                "global values: i32[4]; function main(): i32 { values.length.from_f32(2.0); return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view compound write",
+                "global storage: i32[4]; function update(values: i32[]): i32 { values.length += 1; return 0; } function main(): i32 { return update(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view read",
+                "global storage: i32[4]; function size(values: i32[]): i32 { return values.length; } function main(): i32 { return size(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "fixed parameter read",
+                "global storage: i32[4]; function size(values: i32[4]): i32 { return values.length; } function main(): i32 { return size(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "nested global write",
+                "struct State { values: i32[4]; } global state: State; function main(): i32 { state.values.length = 2; return 0; }",
+                "array property 'state.values.length' is unavailable; use 'state.values.max_length' for declared capacity",
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            let mut process = JitProcess::new();
+            process.upsert_file("array_length.stasis", source);
+            let error = process.compile().expect_err(name);
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains(expected),
+                "unexpected {name} diagnostic: {error:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_stdlib_ascii_copy_truncates_to_destination_capacity() {
         let mut process = JitProcess::new();
         process
@@ -5040,6 +5139,74 @@ function main(): i32 {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 4);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_executes_external_url_edge_fixture_once_while_pointer_is_held() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static REQUESTS: AtomicUsize = AtomicUsize::new(0);
+        static LAST_URL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+
+        fn capture_url(url: &[u8]) -> i32 {
+            REQUESTS.fetch_add(1, Ordering::SeqCst);
+            *LAST_URL
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = url.to_vec();
+            1
+        }
+
+        REQUESTS.store(0, Ordering::SeqCst);
+        LAST_URL
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        stasis_dynload::set_external_url_host(Some(capture_url));
+
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture_path =
+            repository.join("tests/stasis/seams/external_url_edge_probe.test.stasis");
+        let mut process = JitProcess::new();
+        process
+            .set_project_root(repository.to_string_lossy())
+            .expect("set repository root");
+        process.set_required_emit_roots(&["run_edge_probe".to_string()]);
+        process.upsert_file(
+            fixture_path.to_string_lossy().into_owned(),
+            include_str!("../../../../tests/stasis/seams/external_url_edge_probe.test.stasis"),
+        );
+        process
+            .compile()
+            .expect("compile external URL edge fixture");
+
+        process
+            .execute_optional_on_code_swap()
+            .expect("execute swap hook with host actions suppressed");
+        assert_eq!(REQUESTS.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            process.read_i32_global_path("external_url_last_result"),
+            0,
+            "swap-time URL request should report ignored"
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("run_edge_probe"),
+            Ok(11),
+            "one activation and an accepted host request should be observable"
+        );
+        assert_eq!(REQUESTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            &*LAST_URL
+                .get()
+                .expect("URL capture")
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            b"https://www.maddoxlabs.com/"
+        );
+        stasis_dynload::set_external_url_host(None);
     }
 
     #[cfg(windows)]

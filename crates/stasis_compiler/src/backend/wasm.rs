@@ -2183,7 +2183,7 @@ fn receiver_array_binding<'a>(
         .copied()
         .ok_or_else(|| {
             format!(
-                "unknown web struct array field '{}.{field_name}'",
+                "web receiver array field '{}.{field_name}' has no supported layout",
                 receiver.type_id
             )
         })?;
@@ -2196,6 +2196,21 @@ fn receiver_array_binding<'a>(
                 receiver.type_id
             )
         })?;
+    let declared_len = context
+        .types
+        .fixed_collection_len(field_type)
+        .ok_or_else(|| {
+            format!(
+                "web receiver array field '{}.{field_name}' requires a fixed layout",
+                receiver.type_id
+            )
+        })?;
+    if suffix.is_empty() && context.named_structs.contains_key(&collection_element_type) {
+        return Err(format!(
+            "web receiver struct array '{}.{field_name}' does not support whole-element access; access a named scalar field",
+            receiver.type_id
+        ));
+    }
     let element_type = if suffix.is_empty() {
         collection_element_type
     } else {
@@ -2221,12 +2236,18 @@ fn receiver_array_binding<'a>(
         } else {
             format!("{instance_path}.{field_name}.{suffix}")
         };
-        let Some(memory) = context.memory.get(&memory_path) else {
-            continue;
-        };
-        if memory.scalar || memory.type_id != element_type {
+        let memory = context.memory.get(&memory_path).ok_or_else(|| {
+            format!(
+                "web receiver array storage '{memory_path}' is missing for owner '{instance_path}'"
+            )
+        })?;
+        if memory.scalar
+            || memory.type_id != element_type
+            || memory.len != declared_len
+            || memory.width != memory.stride
+        {
             return Err(format!(
-                "web struct array storage '{memory_path}' does not match field type {field_type}"
+                "web receiver array storage '{memory_path}' has incompatible layout for element type {element_type} and length {declared_len}"
             ));
         }
         let base = hash_global_path(instance_path);
@@ -2567,6 +2588,7 @@ fn encode_struct_view_expr(
             index,
             suffix,
         } if suffix.is_empty() => {
+            let _ = receiver_array_binding(context, collection_path, suffix)?;
             let collection = context
                 .struct_collections
                 .get(collection_path)
@@ -3628,6 +3650,7 @@ fn encode_expr_as(
                 && expected
                     .is_some_and(|type_id| is_struct_view_type(type_id, context.named_structs))
             {
+                let _ = receiver_array_binding(context, collection_path, suffix)?;
                 return Err(format!(
                     "web struct collection element '{collection_path}' requires view context"
                 ));
@@ -4138,6 +4161,25 @@ function render(): i32 { return 0; }
     }
 
     #[test]
+    fn web_module_preserves_external_url_import_and_literal() {
+        let mut process = WasmProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        process.compile().expect("compile web external URL fixture");
+
+        assert_eq!(
+            process.imported_symbols(),
+            &BTreeSet::from(["stasis_jit_open_external_url".to_string()])
+        );
+        assert!(process
+            .string_literals()
+            .values()
+            .any(|literal| literal == "https://www.maddoxlabs.com/"));
+    }
+
+    #[test]
     fn release_wasm_keeps_internal_global_names_private() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
@@ -4202,6 +4244,54 @@ function render(): i32 { return 0; }
         process
             .compile()
             .expect("compile mutable UTF-8 view metadata");
+    }
+
+    #[test]
+    fn rejects_fixed_array_and_view_length_access() {
+        let cases = [
+            (
+                "global read",
+                "global values: i32[4]; function main(): i32 { return values.length; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "conversion write",
+                "global values: i32[4]; function main(): i32 { values.length.from_f32(2.0); return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view compound write",
+                "global storage: i32[4]; function update(values: i32[]): i32 { values.length += 1; return 0; } function main(): i32 { return update(storage); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view read",
+                "global storage: i32[4]; function size(values: i32[]): i32 { return values.length; } function main(): i32 { return size(storage); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "fixed parameter read",
+                "global storage: i32[4]; function size(values: i32[4]): i32 { return values.length; } function main(): i32 { return size(storage); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "nested global write",
+                "struct State { values: i32[4]; } global state: State; function main(): i32 { state.values.length = 2; return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "array property 'state.values.length' is unavailable; use 'state.values.max_length' for declared capacity",
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            let mut process = WasmProcess::new();
+            process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+            process.upsert_file("array_length.stasis", source);
+            let error = process.compile().expect_err(name);
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains(expected),
+                "unexpected {name} diagnostic: {error:?}"
+            );
+        }
     }
 
     #[test]
@@ -4359,6 +4449,110 @@ function render(): i32 { return 0; }
     }
 
     #[test]
+    fn executes_receiver_owned_named_struct_arrays_with_bounds_traps() {
+        const FIXTURE_PATH: &str = "tests/stasis/seams/receiver_struct_array_probe.stasis";
+        const FIXTURE: &str =
+            include_str!("../../../../tests/stasis/seams/receiver_struct_array_probe.stasis");
+
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            FIXTURE_PATH,
+            format!(
+                "{FIXTURE}\nglobal receiver_web_index: i32;\nfunction main(): i32 {{ return receiver_struct_array_probe(); }}\nfunction tick(): i32 {{ return receiver_dynamic_parent(receiver_web_index); }}\nfunction render(): i32 {{ return receiver_dynamic_set(receiver_web_index); }}\n"
+            ),
+        );
+        process
+            .compile()
+            .expect("compile receiver-owned named struct arrays for web");
+
+        for field in [
+            "parent",
+            "local_x",
+            "world_angle",
+            "precise",
+            "byte_lane",
+            "short_lane",
+            "wide_lane",
+            "active",
+        ] {
+            let left = &process.memory_layout()[&format!("receiver_left.bones.{field}")];
+            let right = &process.memory_layout()[&format!("receiver_right.bones.{field}")];
+            assert_eq!(left.length, 24);
+            assert_eq!(right.length, 24);
+            assert_ne!(left.offset, right.offset, "owners aliased field '{field}'");
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let artifact_dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target")
+            });
+        fs::create_dir_all(&artifact_dir).expect("create receiver array artifact directory");
+        let wasm_path = artifact_dir.join(format!(
+            "stasis_wasm_receiver_named_struct_array_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write receiver array wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => { const e=instance.exports; const hash=Number(process.argv[2]); const at=(index,operation)=>{e.__stasis_global_set_i32(hash,index);return operation();}; const read=(index)=>at(index,e.tick); const write=(index)=>at(index,e.render); const trapped=(operation,index)=>{try{operation(index);return false;}catch(error){return error instanceof WebAssembly.RuntimeError;}}; process.stdout.write([e.main(),read(0),write(0),read(0),read(23),write(23),read(23),trapped(read,-1),trapped(read,24),trapped(write,-1),trapped(write,24)].join(',')); }).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .arg(wasm_global_hash("receiver_web_index").to_string())
+            .output()
+            .expect("run receiver array wasm in Node");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "0,-1,0,3,22,0,3,true,true,true,true"
+        );
+    }
+
+    #[test]
+    fn rejects_whole_receiver_struct_array_elements_with_stable_error() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into()]);
+        process.upsert_file(
+            "whole_receiver_element.stasis",
+            "struct Bone { parent: i32; } struct Rig { bones: Bone[2]; } global rig: Rig; function read(value: Bone): i32 { return value.parent; } function inspect(self: Rig): i32 { return read(self.bones[0]); } function main(): i32 { return rig.inspect(); }",
+        );
+        let error = process
+            .compile()
+            .expect_err("whole receiver struct-array elements must stay unsupported");
+        assert!(
+            format!("{error:?}")
+                .contains("does not support whole-element access; access a named scalar field"),
+            "unexpected whole-element diagnostic: {error:?}"
+        );
+
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into()]);
+        process.upsert_file(
+            "receiver_view_layout.stasis",
+            "struct Bone { parent: i32; } struct Rig { bones: Bone[]; } global rig: Rig; function inspect(self: Rig, index: i32): i32 { return self.bones[index].parent; } function main(): i32 { return rig.inspect(0); }",
+        );
+        let error = process
+            .compile()
+            .expect_err("receiver struct-array views must stay unsupported");
+        assert!(
+            format!("{error:?}").contains("has no supported layout"),
+            "unexpected receiver array layout diagnostic: {error:?}"
+        );
+    }
+
+    #[test]
     fn evaluates_receiver_array_compound_index_once() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
@@ -4466,7 +4660,7 @@ function render(): i32 { return 0; }
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
         process.upsert_file(
             "linear_state.stasis",
-            "struct Inner { value: i32; } struct State { inner: Inner; enabled: bool; values: i32[4]; } global state: State; global standalone: i32; function main(): i32 { state.inner.value = 7; state.enabled = true; state.values.length = 2; standalone = 9; return state.inner.value + state.values.length + standalone; } function tick(): i32 { return state.values.max_length; } function render(): i32 { return 0; }",
+            "struct Inner { value: i32; } struct State { inner: Inner; enabled: bool; values: i32[4]; } global state: State; global standalone: i32; function main(): i32 { state.inner.value = 7; state.enabled = true; standalone = 9; return state.inner.value + state.values.max_length + standalone; } function tick(): i32 { return state.values.max_length; } function render(): i32 { return 0; }",
         );
         process
             .compile()

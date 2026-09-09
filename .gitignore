@@ -83,6 +83,8 @@ android/build/
 android/**/app/build/
 *.apk
 .env
+# Project-local AI editor history and recovery files contain private task content.
+**/.stasis/editor/
 __pycache__/
 /output/svg-evaluation*/
 

@@ -104,6 +104,13 @@ Every candidate is compared over every output pixel against the precision-2
 baseline: straight RGBA (including alpha), then composites over black and white.
 The gate is exact equality, intentionally stricter than a perceptual threshold.
 Any failing candidate is rejected regardless of aggregate similarity or savings.
+The command also enforces the reviewed candidate/target/background acceptance
+matrix in `evidence/renders.json`. Unexpected passes (including the precision-1
+negative control), unexpected failures, missing or extra comparisons, and
+inconsistent aggregate results exit nonzero after writing diagnostic artifacts.
+Timings and the magnitudes of nonzero differences are not fixed oracles. A
+deliberate change to the expected matrix requires review of the recorded evidence;
+rerunning the evaluator does not overwrite that checked-in oracle.
 Repeated native renders must also be byte-identical. Byte-identical SVG
 candidates share their render/timing observations, explicitly keyed by SHA-256.
 

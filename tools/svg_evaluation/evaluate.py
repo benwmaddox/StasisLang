@@ -57,6 +57,33 @@ def compare(a, b):
     return results
 
 
+def validate_acceptance(report):
+    """Enforce the reviewed matrix, ignoring timing and nonzero delta magnitudes."""
+    expected = json.loads((Path(__file__).parent / "evidence" / "renders.json").read_text())
+
+    def outcomes(data):
+        matrix = {}
+        for asset, asset_data in data["assets"].items():
+            for target, candidates in asset_data["targets"].items():
+                for candidate, result in candidates.items():
+                    comparisons = result["comparison"]
+                    passed = all(v["changed_pixels"] == 0 for v in comparisons.values())
+                    if result["pass"] is not passed:
+                        raise ValueError(f"Inconsistent render result: {asset}/{target}/{candidate}")
+                    for background, metrics in comparisons.items():
+                        matrix[(asset, target, candidate, background)] = metrics["changed_pixels"] == 0
+        return matrix
+
+    actual_matrix, expected_matrix = outcomes(report), outcomes(expected)
+    deviations = []
+    for key in sorted(actual_matrix.keys() | expected_matrix.keys()):
+        actual, wanted = actual_matrix.get(key), expected_matrix.get(key)
+        if actual != wanted:
+            deviations.append(f"{'/'.join(key)}: expected {wanted}, got {actual}")
+    if deviations:
+        raise ValueError("Render acceptance matrix changed:\n" + "\n".join(deviations))
+
+
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--probe", type=Path, required=True)
@@ -116,6 +143,8 @@ def main():
         sheet.paste(image, (x, y + 25), image)
         draw.text((x + 5, y + 5), title, fill="black")
     sheet.save(out / "review.png")
+    validate_acceptance(report)
+    print("Render acceptance matrix matches checked-in evidence", flush=True)
 
 
 if __name__ == "__main__":

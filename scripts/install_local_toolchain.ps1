@@ -42,6 +42,9 @@ $runtimeSourceFiles = @(
   "stasis_mobile_aot_runtime.h",
   "stasis_mobile_runtime.c",
   "stasis_mobile_runtime.h",
+  "stasis_network_join_card.h",
+  "stasis_platform_services.c",
+  "stasis_platform_services.h",
   "stasis_platform_storage.c",
   "stasis_platform_storage.h",
   "stb_truetype.h"

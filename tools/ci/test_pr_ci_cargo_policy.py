@@ -33,6 +33,19 @@ def raw_cargo_lines(source):
 
 
 class PrCiCargoPolicyTests(unittest.TestCase):
+    def test_network_automation_uses_wrapper_owned_target(self):
+        workflow = (ROOT / ".github/workflows/network-browser-acceptance.yml").read_text(encoding="utf-8")
+        self.assertEqual(raw_cargo_lines(workflow), [])
+        self.assertNotIn("--target-dir", workflow)
+        self.assertIn("build/codex-cargo-target/debug/examples/browser_acceptance_host.exe", workflow.replace("\\", "/"))
+        native = (ROOT / "tools/ci/test_desktop_network_link.ps1").read_text(encoding="utf-8")
+        self.assertNotIn("--target-dir", native)
+        self.assertIn("run -- cargo metadata --no-deps --format-version 1", native)
+        self.assertIn("$metadata.target_directory", native)
+        nightly = (ROOT / ".github/workflows/nightly-release.yml").read_text(encoding="utf-8")
+        self.assertNotIn("--target-dir", nightly)
+        self.assertIn("build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.lib", nightly)
+
     def test_pr_ci_routes_all_cargo_through_cache(self):
         source = (ROOT / ".github/workflows/pr-ci.yml").read_text(encoding="utf-8")
         self.assertEqual(raw_cargo_lines(source), [], "raw Cargo run lines")

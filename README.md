@@ -213,6 +213,9 @@ stasis test --dir tests/stasis
 
 Tests use the same compiler and JIT path as programs, so they exercise language behavior rather than a separate test interpreter.
 
+The optional [`rig2d` standard-library module](docs/rig2d.md) provides bounded,
+renderer-independent forward kinematics for rigid cutout characters and articulated props.
+
 ## The Everyday Workflow
 
 Create a project and enter it:
@@ -299,7 +302,7 @@ stasis package --target desktop
 stasis package-mobile --target android-arm64
 ```
 
-The integrated CLI, workspace manifest, JSON output, offline guarantees, and installation layout are specified in [docs/toolchain_cli.md](docs/toolchain_cli.md). Mobile packaging is documented in [docs/mobile_packaging.md](docs/mobile_packaging.md), and optional asynchronous host capabilities use the [platform service bridge](docs/platform_services.md).
+The integrated CLI, workspace manifest, JSON output, offline guarantees, and installation layout are specified in [docs/toolchain_cli.md](docs/toolchain_cli.md). Mobile packaging is documented in [docs/mobile_packaging.md](docs/mobile_packaging.md), Windows browser-guest hosting in [docs/desktop_network_packaging.md](docs/desktop_network_packaging.md), and optional asynchronous host capabilities use the [platform service bridge](docs/platform_services.md).
 
 ## Visual Studio Code Extension
 

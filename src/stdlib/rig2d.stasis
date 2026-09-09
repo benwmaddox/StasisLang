@@ -1,0 +1,175 @@
+// Renderer-independent rigid 2D hierarchy. Angles are clockwise screen degrees.
+// Callers author finite coordinates and angles within +/-360000 degrees, mutate poses
+// during deterministic ticks, and render only after a successful solve.
+
+const RIG2D_BONE_CAPACITY: i32 = 24;
+
+struct RigBone2D {
+    parent: i32;
+    rest_x: f32;
+    rest_y: f32;
+    rest_angle: f32;
+    local_x: f32;
+    local_y: f32;
+    local_angle: f32;
+    world_x: f32;
+    world_y: f32;
+    world_angle: f32;
+}
+
+struct Rig2D {
+    count: i32;
+    bones: RigBone2D[RIG2D_BONE_CAPACITY];
+}
+
+function rig2d_wrap(angle: f32): f32 {
+    let turns: i32 = 0;
+    turns.from_f32(angle / 360.0);
+    let result: f32 = 0.0;
+    result.from_i32(turns);
+    result = angle - result * 360.0;
+    if (result >= 180.0) {
+        result = result - 360.0;
+    }
+    if (result < -180.0) {
+        result = result + 360.0;
+    }
+    return result;
+}
+
+function rig2d_sin(angle: f32): f32 {
+    let degrees: f32 = rig2d_wrap(angle);
+    if (degrees > 90.0) {
+        degrees = 180.0 - degrees;
+    }
+    if (degrees < -90.0) {
+        degrees = -180.0 - degrees;
+    }
+    let x: f32 = degrees * 0.01745329252;
+    let square: f32 = x * x;
+    return x *(
+        1.0 + square *(-0.1666666667 + square *(0.0083333333 + square *(-0.0001984127 + square *(0.0000027557 - square * 0.00000002505))))
+    );
+}
+
+function rig2d_cos(angle: f32): f32 {
+    return rig2d_sin(rig2d_wrap(angle) + 90.0);
+}
+
+function clear(self: Rig2D): void {
+    self.count = 0;
+}
+
+function add_bone(self: Rig2D, parent: i32, x: f32, y: f32, angle: f32): i32 {
+    if (self.count < 0 || self.count >= RIG2D_BONE_CAPACITY || parent < -1 || parent >= self.count) {
+        return -1;
+    }
+    let index: i32 = self.count;
+    self.bones[index].parent = parent;
+    self.bones[index].rest_x = x;
+    self.bones[index].rest_y = y;
+    self.bones[index].rest_angle = rig2d_wrap(angle);
+    self.bones[index].local_x = x;
+    self.bones[index].local_y = y;
+    self.bones[index].local_angle = rig2d_wrap(angle);
+    self.bones[index].world_x = 0.0;
+    self.bones[index].world_y = 0.0;
+    self.bones[index].world_angle = 0.0;
+    self.count = self.count + 1;
+    return index;
+}
+
+function set_local(self: Rig2D, index: i32, x: f32, y: f32, angle: f32): bool {
+    if (index < 0 || index >= self.count || index >= RIG2D_BONE_CAPACITY) {
+        return false;
+    }
+    self.bones[index].local_x = x;
+    self.bones[index].local_y = y;
+    self.bones[index].local_angle = rig2d_wrap(angle);
+    return true;
+}
+
+function blend_local(self: Rig2D, index: i32, x: f32, y: f32, angle: f32, weight: f32): bool {
+    if (index < 0 || index >= self.count || index >= RIG2D_BONE_CAPACITY) {
+        return false;
+    }
+    let blend: f32 = weight;
+    if (blend < 0.0) {
+        blend = 0.0;
+    }
+    if (blend > 1.0) {
+        blend = 1.0;
+    }
+    let next_x: f32 = self.bones[index].local_x +(x - self.bones[index].local_x) * blend;
+    let next_y: f32 = self.bones[index].local_y +(y - self.bones[index].local_y) * blend;
+    // At a 180-degree tie choose the negative arc consistently.
+    let delta: f32 = rig2d_wrap(rig2d_wrap(angle) - self.bones[index].local_angle);
+    return self.set_local(index, next_x, next_y, self.bones[index].local_angle + delta * blend);
+}
+
+function reset_pose(self: Rig2D): void {
+    let i: i32 = 0;
+    for (i = 0; i < self.count && i < RIG2D_BONE_CAPACITY; i = i + 1) {
+        self.bones[i].local_x = self.bones[i].rest_x;
+        self.bones[i].local_y = self.bones[i].rest_y;
+        self.bones[i].local_angle = self.bones[i].rest_angle;
+    }
+}
+
+function solve(self: Rig2D, root_x: f32, root_y: f32, root_angle: f32): bool {
+    if (self.count < 0 || self.count > RIG2D_BONE_CAPACITY) {
+        return false;
+    }
+    let i: i32 = 0;
+    // Validate before writing worlds so corrupt topology never leaves a partial pose.
+    for (i = 0; i < self.count; i = i + 1) {
+        if (self.bones[i].parent < -1 || self.bones[i].parent >= i) {
+            return false;
+        }
+    }
+    for (i = 0; i < self.count; i = i + 1) {
+        let parent_index: i32 = self.bones[i].parent;
+        let parent_x: f32 = root_x;
+        let parent_y: f32 = root_y;
+        let parent_angle: f32 = rig2d_wrap(root_angle);
+        if (parent_index >= 0) {
+            parent_x = self.bones[parent_index].world_x;
+            parent_y = self.bones[parent_index].world_y;
+            parent_angle = self.bones[parent_index].world_angle;
+        }
+        let sine: f32 = rig2d_sin(parent_angle);
+        let cosine: f32 = rig2d_cos(parent_angle);
+        self.bones[i].world_x = parent_x + self.bones[i].local_x * cosine - self.bones[i].local_y * sine;
+        self.bones[i].world_y = parent_y + self.bones[i].local_x * sine + self.bones[i].local_y * cosine;
+        self.bones[i].world_angle = rig2d_wrap(parent_angle + self.bones[i].local_angle);
+    }
+    return true;
+}
+
+function parent(self: Rig2D, index: i32): i32 {
+    if (index < 0 || index >= self.count || index >= RIG2D_BONE_CAPACITY) {
+        return -1;
+    }
+    return self.bones[index].parent;
+}
+
+function world_x(self: Rig2D, index: i32): f32 {
+    if (index < 0 || index >= self.count || index >= RIG2D_BONE_CAPACITY) {
+        return 0.0;
+    }
+    return self.bones[index].world_x;
+}
+
+function world_y(self: Rig2D, index: i32): f32 {
+    if (index < 0 || index >= self.count || index >= RIG2D_BONE_CAPACITY) {
+        return 0.0;
+    }
+    return self.bones[index].world_y;
+}
+
+function world_angle(self: Rig2D, index: i32): f32 {
+    if (index < 0 || index >= self.count || index >= RIG2D_BONE_CAPACITY) {
+        return 0.0;
+    }
+    return self.bones[index].world_angle;
+}
