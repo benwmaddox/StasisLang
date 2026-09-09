@@ -2288,6 +2288,26 @@ pub(crate) fn emit_simple_statements(
                                 type_table,
                                 named_struct_field_types,
                             )?)
+                        } else if let Some((base, field)) = collection_path.split_once('.') {
+                            let collection_type = values_by_name
+                                .get(base)
+                                .and_then(|local| named_struct_field_types.get(&local.type_id))
+                                .and_then(|fields| fields.get(field))
+                                .copied();
+                            if let Some(collection_type) = collection_type {
+                                Some(resolve_local_collection_value_type(
+                                    collection_type,
+                                    suffix,
+                                    type_table,
+                                    named_struct_field_types,
+                                )?)
+                            } else if let Some(collection_info) =
+                                collection_infos.get(collection_path)
+                            {
+                                Some(resolve_collection_value_type(collection_info, suffix)?)
+                            } else {
+                                None
+                            }
                         } else if let Some(collection_info) = collection_infos.get(collection_path)
                         {
                             Some(resolve_collection_value_type(collection_info, suffix)?)
@@ -2801,28 +2821,12 @@ pub(crate) fn emit_simple_statements(
                                     if let Some(element_type) =
                                         type_table.indexed_element_type_id(collection_type)
                                     {
-                                        let path_type = resolve_local_collection_value_type(
-                                            collection_type,
-                                            suffix,
-                                            type_table,
-                                            named_struct_field_types,
-                                        )?;
                                         if suffix.is_empty()
-                                            && element_type != TYPE_ID_F32
-                                            && !is_i32_scalar_lane_type(element_type, type_table)
+                                            && element_type == TYPE_ID_F32
+                                            && *op == AssignOp::Mod
                                         {
                                             return Err(format!(
-                                                "unsupported indexed receiver field '{}[...].{}'",
-                                                collection_path, suffix
-                                            ));
-                                        }
-                                        if !are_assignment_types_compatible(
-                                            path_type,
-                                            rhs.type_id,
-                                            type_table,
-                                        ) {
-                                            return Err(format!(
-                                                "unsupported indexed receiver assignment for '{}'",
+                                                "'%=' is unsupported for f32 indexed receiver assignment '{}[...]'",
                                                 collection_path
                                             ));
                                         }
@@ -2855,109 +2859,19 @@ pub(crate) fn emit_simple_statements(
                                             field,
                                             builder,
                                         );
-                                        if !suffix.is_empty() {
-                                            if *op != AssignOp::Set {
-                                                return Err(format!(
-                                                    "compound indexed receiver field assignment is unsupported for '{}[...].{}'",
-                                                    collection_path, suffix
-                                                ));
-                                            }
-                                            let field_hash = builder.ins().iconst(
-                                                types::I32,
-                                                i64::from(hash_foreach_field_suffix(suffix)),
-                                            );
-                                            let store = if is_i32_scalar_lane_type(
-                                                path_type, type_table,
-                                            ) || path_type == TYPE_ID_BOOL
-                                            {
-                                                runtime_call_refs.global_i32_array_store
-                                            } else if path_type == TYPE_ID_F32 {
-                                                runtime_call_refs.global_f32_array_store
-                                            } else {
-                                                return Err(format!(
-                                                    "unsupported indexed receiver field type {} for '{}[...].{}'",
-                                                    path_type, collection_path, suffix
-                                                ));
-                                            };
-                                            builder.ins().call(
-                                                store,
-                                                &[
-                                                    collection_hash,
-                                                    field_hash,
-                                                    index_binding.value,
-                                                    rhs.value,
-                                                ],
-                                            );
-                                            continue;
-                                        }
-                                        let no_field = builder.ins().iconst(types::I32, 0);
-                                        if is_i32_scalar_lane_type(path_type, type_table) {
-                                            if *op != AssignOp::Set {
-                                                return Err(format!(
-                                                    "compound indexed receiver assignment is unsupported for '{}'",
-                                                    collection_path
-                                                ));
-                                            }
-                                            builder.ins().call(
-                                                runtime_call_refs.global_i32_array_store,
-                                                &[
-                                                    collection_hash,
-                                                    no_field,
-                                                    index_binding.value,
-                                                    rhs.value,
-                                                ],
-                                            );
-                                            continue;
-                                        }
-                                        let lhs = match op {
-                                            AssignOp::Set => None,
-                                            AssignOp::Mod => {
-                                                return Err(format!(
-                                                    "'%=' is unsupported for f32 indexed receiver assignment '{}[...]'",
-                                                    collection_path
-                                                ));
-                                            }
-                                            _ => {
-                                                let call = builder.ins().call(
-                                                    runtime_call_refs.global_f32_array_load,
-                                                    &[
-                                                        collection_hash,
-                                                        no_field,
-                                                        index_binding.value,
-                                                    ],
-                                                );
-                                                Some(builder.inst_results(call)[0])
-                                            }
-                                        };
-                                        let value = match op {
-                                            AssignOp::Set => rhs.value,
-                                            AssignOp::Add => builder.ins().fadd(
-                                                lhs.expect("compound assignment lhs"),
-                                                rhs.value,
-                                            ),
-                                            AssignOp::Sub => builder.ins().fsub(
-                                                lhs.expect("compound assignment lhs"),
-                                                rhs.value,
-                                            ),
-                                            AssignOp::Mul => builder.ins().fmul(
-                                                lhs.expect("compound assignment lhs"),
-                                                rhs.value,
-                                            ),
-                                            AssignOp::Div => builder.ins().fdiv(
-                                                lhs.expect("compound assignment lhs"),
-                                                rhs.value,
-                                            ),
-                                            AssignOp::Mod => unreachable!(),
-                                        };
-                                        builder.ins().call(
-                                            runtime_call_refs.global_f32_array_store,
-                                            &[
-                                                collection_hash,
-                                                no_field,
-                                                index_binding.value,
-                                                value,
-                                            ],
-                                        );
+                                        emit_local_indexed_collection_assignment_for_handle(
+                                            builder,
+                                            runtime_call_refs,
+                                            type_table,
+                                            named_struct_field_types,
+                                            collection_path,
+                                            collection_type,
+                                            collection_hash,
+                                            suffix,
+                                            index_binding,
+                                            *op,
+                                            rhs,
+                                        )?;
                                         continue;
                                     }
                                 }
@@ -4553,13 +4467,9 @@ pub(crate) fn emit_simple_expression(
                         .and_then(|fields| fields.get(field))
                         .copied()
                     {
-                        if let Some(element_type) = type_table
+                        if type_table
                             .indexed_element_type_id(collection_type)
-                            .filter(|_| suffix.is_empty())
-                            .filter(|element_type| {
-                                *element_type == TYPE_ID_F32
-                                    || is_i32_abi_compatible_type(*element_type, type_table)
-                            })
+                            .is_some()
                         {
                             let index_binding = emit_simple_expression(
                                 builder,
@@ -4589,19 +4499,17 @@ pub(crate) fn emit_simple_expression(
                                 field,
                                 builder,
                             );
-                            let no_field = builder.ins().iconst(types::I32, 0);
-                            let load = if element_type == TYPE_ID_F32 {
-                                runtime_call_refs.global_f32_array_load
-                            } else {
-                                runtime_call_refs.global_i32_array_load
-                            };
-                            let call = builder
-                                .ins()
-                                .call(load, &[collection_hash, no_field, index_binding.value]);
-                            return Ok(ValueBinding {
-                                value: builder.inst_results(call)[0],
-                                type_id: element_type,
-                            });
+                            return emit_local_indexed_collection_load_for_handle(
+                                builder,
+                                runtime_call_refs,
+                                type_table,
+                                named_struct_field_types,
+                                collection_path,
+                                collection_type,
+                                collection_hash,
+                                suffix,
+                                index_binding,
+                            );
                         }
                     }
                 }
@@ -6163,10 +6071,19 @@ pub(crate) fn resolve_local_collection_value_type(
             suffix
         ));
     };
-    field_types
+    let field_type = field_types
         .get(suffix)
         .copied()
-        .ok_or_else(|| format!("unknown local indexed collection field path '{}'", suffix))
+        .ok_or_else(|| format!("unknown local indexed collection field path '{}'", suffix))?;
+    if named_struct_field_types.contains_key(&field_type)
+        || type_table.indexed_element_type_id(field_type).is_some()
+    {
+        return Err(format!(
+            "local indexed collection field path '{}' resolves to unsupported non-scalar type {}",
+            suffix, field_type
+        ));
+    }
+    Ok(field_type)
 }
 
 pub(crate) fn emit_local_indexed_collection_load(
@@ -6179,14 +6096,39 @@ pub(crate) fn emit_local_indexed_collection_load(
     suffix: &str,
     index_binding: ValueBinding,
 ) -> Result<ValueBinding, String> {
-    let resolved = resolve_local_collection_value_type(
+    let collection_handle = builder.use_var(collection_binding.var);
+    emit_local_indexed_collection_load_for_handle(
+        builder,
+        runtime_call_refs,
+        type_table,
+        named_struct_field_types,
+        collection_name,
         collection_binding.type_id,
+        collection_handle,
+        suffix,
+        index_binding,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_local_indexed_collection_load_for_handle(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    collection_name: &str,
+    collection_type: TypeId,
+    collection_handle: Value,
+    suffix: &str,
+    index_binding: ValueBinding,
+) -> Result<ValueBinding, String> {
+    let resolved = resolve_local_collection_value_type(
+        collection_type,
         suffix,
         type_table,
         named_struct_field_types,
     )?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
-    let collection_handle = builder.use_var(collection_binding.var);
     let field_hash = builder
         .ins()
         .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)));
@@ -6238,8 +6180,38 @@ pub(crate) fn emit_local_indexed_collection_assignment(
     op: AssignOp,
     rhs: ValueBinding,
 ) -> Result<(), String> {
-    let path_type = resolve_local_collection_value_type(
+    let collection_handle = builder.use_var(collection_binding.var);
+    emit_local_indexed_collection_assignment_for_handle(
+        builder,
+        runtime_call_refs,
+        type_table,
+        named_struct_field_types,
+        collection_name,
         collection_binding.type_id,
+        collection_handle,
+        suffix,
+        index_binding,
+        op,
+        rhs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_local_indexed_collection_assignment_for_handle(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    collection_name: &str,
+    collection_type: TypeId,
+    collection_handle: Value,
+    suffix: &str,
+    index_binding: ValueBinding,
+    op: AssignOp,
+    rhs: ValueBinding,
+) -> Result<(), String> {
+    let path_type = resolve_local_collection_value_type(
+        collection_type,
         suffix,
         type_table,
         named_struct_field_types,
@@ -6251,7 +6223,6 @@ pub(crate) fn emit_local_indexed_collection_assignment(
             collection_name, suffix, path_type, rhs.type_id
         ));
     }
-    let collection_handle = builder.use_var(collection_binding.var);
     let field_hash = builder
         .ins()
         .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)));
@@ -6261,13 +6232,14 @@ pub(crate) fn emit_local_indexed_collection_assignment(
             None
         } else {
             Some(
-                emit_local_indexed_collection_load(
+                emit_local_indexed_collection_load_for_handle(
                     builder,
                     runtime_call_refs,
                     type_table,
                     named_struct_field_types,
                     collection_name,
-                    collection_binding,
+                    collection_type,
+                    collection_handle,
                     suffix,
                     index_binding,
                 )?
@@ -6304,13 +6276,14 @@ pub(crate) fn emit_local_indexed_collection_assignment(
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add => {
-                let lhs = emit_local_indexed_collection_load(
+                let lhs = emit_local_indexed_collection_load_for_handle(
                     builder,
                     runtime_call_refs,
                     type_table,
                     named_struct_field_types,
                     collection_name,
-                    collection_binding,
+                    collection_type,
+                    collection_handle,
                     suffix,
                     index_binding,
                 )?
@@ -6318,13 +6291,14 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 builder.ins().fadd(lhs, rhs.value)
             }
             AssignOp::Sub => {
-                let lhs = emit_local_indexed_collection_load(
+                let lhs = emit_local_indexed_collection_load_for_handle(
                     builder,
                     runtime_call_refs,
                     type_table,
                     named_struct_field_types,
                     collection_name,
-                    collection_binding,
+                    collection_type,
+                    collection_handle,
                     suffix,
                     index_binding,
                 )?
@@ -6332,13 +6306,14 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 builder.ins().fsub(lhs, rhs.value)
             }
             AssignOp::Mul => {
-                let lhs = emit_local_indexed_collection_load(
+                let lhs = emit_local_indexed_collection_load_for_handle(
                     builder,
                     runtime_call_refs,
                     type_table,
                     named_struct_field_types,
                     collection_name,
-                    collection_binding,
+                    collection_type,
+                    collection_handle,
                     suffix,
                     index_binding,
                 )?
@@ -6346,13 +6321,14 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 builder.ins().fmul(lhs, rhs.value)
             }
             AssignOp::Div => {
-                let lhs = emit_local_indexed_collection_load(
+                let lhs = emit_local_indexed_collection_load_for_handle(
                     builder,
                     runtime_call_refs,
                     type_table,
                     named_struct_field_types,
                     collection_name,
-                    collection_binding,
+                    collection_type,
+                    collection_handle,
                     suffix,
                     index_binding,
                 )?
@@ -6376,13 +6352,14 @@ pub(crate) fn emit_local_indexed_collection_assignment(
         let value = match op {
             AssignOp::Set => rhs.value,
             AssignOp::Add => {
-                let lhs = emit_local_indexed_collection_load(
+                let lhs = emit_local_indexed_collection_load_for_handle(
                     builder,
                     runtime_call_refs,
                     type_table,
                     named_struct_field_types,
                     collection_name,
-                    collection_binding,
+                    collection_type,
+                    collection_handle,
                     suffix,
                     index_binding,
                 )?
@@ -6390,13 +6367,14 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 builder.ins().fadd(lhs, rhs.value)
             }
             AssignOp::Sub => {
-                let lhs = emit_local_indexed_collection_load(
+                let lhs = emit_local_indexed_collection_load_for_handle(
                     builder,
                     runtime_call_refs,
                     type_table,
                     named_struct_field_types,
                     collection_name,
-                    collection_binding,
+                    collection_type,
+                    collection_handle,
                     suffix,
                     index_binding,
                 )?
@@ -6404,13 +6382,14 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 builder.ins().fsub(lhs, rhs.value)
             }
             AssignOp::Mul => {
-                let lhs = emit_local_indexed_collection_load(
+                let lhs = emit_local_indexed_collection_load_for_handle(
                     builder,
                     runtime_call_refs,
                     type_table,
                     named_struct_field_types,
                     collection_name,
-                    collection_binding,
+                    collection_type,
+                    collection_handle,
                     suffix,
                     index_binding,
                 )?
@@ -6418,13 +6397,14 @@ pub(crate) fn emit_local_indexed_collection_assignment(
                 builder.ins().fmul(lhs, rhs.value)
             }
             AssignOp::Div => {
-                let lhs = emit_local_indexed_collection_load(
+                let lhs = emit_local_indexed_collection_load_for_handle(
                     builder,
                     runtime_call_refs,
                     type_table,
                     named_struct_field_types,
                     collection_name,
-                    collection_binding,
+                    collection_type,
+                    collection_handle,
                     suffix,
                     index_binding,
                 )?

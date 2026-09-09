@@ -1,0 +1,53 @@
+import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
+
+global stream: AudioStream;
+global samples: f32[1600];
+global muted: bool;
+global volume: f32;
+global voice: AudioVoice;
+global effect: AudioAsset;
+
+function main(): i32 {
+    volume = 0.5;
+    // Exercise public effect bindings even when no asset has been loaded.
+    voice.play(effect, false, 1.0, 0.0);
+    voice.playing();
+    voice.set_paused(false);
+    voice.set_volume_pan(0.5, 0.0);
+    voice.stop();
+    if (!stream.open(48000, 2, 1024)) {
+        return 1;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    audio.refresh(stream);
+    if (stream.available && stream.queued_frames < 1600) {
+        let index: i32 = 0;
+        for (index = 0; index < 800; index += 1) {
+            let value: f32 = volume;
+            if (index % 100 >= 50) {
+                value = 0.0 - value;
+            }
+            if (muted) {
+                value = 0.0;
+            }
+            samples[index * 2] = value;
+            samples[index * 2 + 1] = value * 0.5;
+        }
+        stream.push(samples, 800);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    begin_frame();
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    stream.close();
+    stream.open(48000, 2, 1024);
+}

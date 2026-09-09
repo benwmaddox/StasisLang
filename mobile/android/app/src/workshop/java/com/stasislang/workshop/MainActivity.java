@@ -6,6 +6,7 @@ import android.Manifest;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.BroadcastReceiver;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
@@ -346,6 +347,7 @@ public final class MainActivity extends Activity {
     private String lastPersistedAiPhase = "";
     private String aiVerificationSummary = "verify --";
     private SymbolEntry selectedSymbol;
+    private static volatile MainActivity externalUrlActivity;
 
     static {
         System.loadLibrary("stasis_mobile_smoke");
@@ -363,6 +365,8 @@ public final class MainActivity extends Activity {
     private static native String nativeSemanticEdit(String projectRoot, String requestJson,
                                                     boolean dryRun, boolean validate, boolean runTests);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
+    private static native void nativeArmExternalUrlAction();
+    private static native void nativeClearExternalUrlAction();
     static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
@@ -484,6 +488,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        externalUrlActivity = this;
         nativeAudioSetPaused(false);
         if (gamePreview != null) gamePreview.onHostResume();
         codexLoginLifecycle.onResume();
@@ -496,6 +501,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (externalUrlActivity == this) externalUrlActivity = null;
+        nativeClearExternalUrlAction();
         if (audioFocus != null) audioFocus.pause();
         nativeAudioSetPaused(true);
         if (gamePreview != null) gamePreview.onHostPause();
@@ -508,6 +515,12 @@ public final class MainActivity extends Activity {
         stopAudioPreview();
         cancelAudioRecording(false);
         super.onPause();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus) nativeClearExternalUrlAction();
     }
 
     @Override
@@ -551,6 +564,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (externalUrlActivity == this) externalUrlActivity = null;
+        nativeClearExternalUrlAction();
         activityDestroyed = true;
         shutdownGameAudio();
         stopVoiceRecognition();
@@ -12366,6 +12381,7 @@ public final class MainActivity extends Activity {
         private int touchX;
         private int touchY;
         private boolean touchActive;
+        private boolean acceptanceTouchDispatch;
         private long lastNativeFrameDurationNanos;
         private long lastRendererSyncWaitNanos;
 
@@ -12398,8 +12414,10 @@ public final class MainActivity extends Activity {
             long now = SystemClock.uptimeMillis();
             MotionEvent event = MotionEvent.obtain(now, now, action, x, y, 0);
             try {
+                acceptanceTouchDispatch = true;
                 onTouchEvent(event);
             } finally {
+                acceptanceTouchDispatch = false;
                 event.recycle();
             }
         }
@@ -12594,12 +12612,41 @@ public final class MainActivity extends Activity {
             touchX = Math.round(event.getX());
             touchY = Math.round(event.getY());
             int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN && !acceptanceTouchDispatch) {
+                nativeArmExternalUrlAction();
+            }
+            if (action == MotionEvent.ACTION_CANCEL) nativeClearExternalUrlAction();
             if (action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() >= 3) {
                 activity.toggleBenchmarkHudFromPreview();
             }
             touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;
             return true;
         }
+    }
+
+    public static boolean openExternalUrlFromNative(byte[] utf8Url) {
+        MainActivity activity = externalUrlActivity;
+        if (activity == null || utf8Url == null || utf8Url.length == 0
+                || utf8Url.length > 2048 || activity.activityDestroyed
+                || activity.isFinishing()) return false;
+        final String url = new String(utf8Url, StandardCharsets.UTF_8);
+        final Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        intent.addCategory(Intent.CATEGORY_BROWSABLE);
+        try {
+            if (intent.resolveActivity(activity.getPackageManager()) == null) return false;
+        } catch (RuntimeException error) {
+            return false;
+        }
+        activity.runOnUiThread(() -> {
+            MainActivity current = externalUrlActivity;
+            if (current != activity || activity.activityDestroyed || activity.isFinishing()) return;
+            try {
+                activity.startActivity(intent);
+            } catch (ActivityNotFoundException | SecurityException error) {
+                android.util.Log.w("StasisWorkshop", "External URL request was blocked", error);
+            }
+        });
+        return true;
     }
 
     private static final class AiCancelledException extends Exception {

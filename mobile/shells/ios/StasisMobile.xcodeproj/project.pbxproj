@@ -7,6 +7,7 @@
 
 		100000000000000000000001 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* main.m */; };
 		100000000000000000000009 /* stasis_ios_network.m in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* stasis_ios_network.m */; };
+		100000000000000000000014 /* stasis_ios_external_url.m in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* stasis_ios_external_url.m */; };
 		100000000000000000000002 /* stasis_mobile_main.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* stasis_mobile_main.c */; };
 		100000000000000000000003 /* stasis_mobile_runtime.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* stasis_mobile_runtime.c */; };
 		100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* stasis_mobile_aot_runtime.c */; };
@@ -60,6 +61,7 @@
 			files = (
 				100000000000000000000001 /* main.m in Sources */,
 				100000000000000000000009 /* stasis_ios_network.m in Sources */,
+				100000000000000000000014 /* stasis_ios_external_url.m in Sources */,
 				100000000000000000000002 /* stasis_mobile_main.c in Sources */,
 				100000000000000000000003 /* stasis_mobile_runtime.c in Sources */,
 				100000000000000000000004 /* stasis_mobile_aot_runtime.c in Sources */,
@@ -139,6 +141,7 @@
 		200000000000000000000010 /* stasis_audio_assets.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_audio_assets.c; sourceTree = "<group>"; };
 		200000000000000000000013 /* stasis_platform_services.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_platform_services.c; sourceTree = "<group>"; };
 		200000000000000000000011 /* stasis_ios_network.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_network.m; sourceTree = "<group>"; };
+		200000000000000000000014 /* stasis_ios_external_url.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_external_url.m; sourceTree = "<group>"; };
 		210000000000000000000001 /* stasis_svg.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/stasis_svg.cpp; sourceTree = "<group>"; };
 		210000000000000000000002 /* tvgCompressor.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/common/tvgCompressor.cpp; sourceTree = "<group>"; };
 		210000000000000000000003 /* tvgMath.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/third_party/thorvg/src/common/tvgMath.cpp; sourceTree = "<group>"; };
@@ -182,6 +185,7 @@
 			children = (
 				200000000000000000000001 /* main.m */,
 				200000000000000000000011 /* stasis_ios_network.m */,
+				200000000000000000000014 /* stasis_ios_external_url.m */,
 				200000000000000000000002 /* stasis_mobile_main.c */,
 				200000000000000000000003 /* stasis_mobile_runtime.c */,
 				200000000000000000000004 /* stasis_mobile_aot_runtime.c */,

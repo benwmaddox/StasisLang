@@ -3100,6 +3100,57 @@ mod tests {
     }
 
     #[test]
+    fn aot_emits_external_url_call_and_retains_its_string_literal() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        let clif = capture_aot_clif_by_function(&mut process);
+
+        assert!(
+            clif.get("open_external_url")
+                .expect("external URL wrapper CLIF")
+                .contains("call"),
+            "AOT wrapper must emit the host call"
+        );
+        assert!(process
+            .string_literals()
+            .values()
+            .any(|literal| literal == "https://www.maddoxlabs.com/"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_links_and_executes_external_url_headless_contract() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let deps_dir = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("Cargo deps directory")
+            .to_path_buf();
+        let (_, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
+        if !optional_signer_is_usable(&runtime_dll) {
+            return;
+        }
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return 10 + open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        process.compile().expect("compile external URL AOT fixture");
+
+        let Some(result) =
+            run_linked_i32_noarg_fixture(&process, "main", "external_url_headless", &link_config)
+        else {
+            return;
+        };
+        assert_eq!(result, 10, "headless AOT execution must ignore the request");
+    }
+
+    #[test]
     fn aot_process_accepts_known_runtime_shim_families() {
         let mut process = AotProcess::new();
         process.upsert_file(

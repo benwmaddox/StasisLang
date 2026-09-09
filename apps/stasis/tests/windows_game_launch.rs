@@ -1151,7 +1151,7 @@ function before_record(frame: i32): i32 {
     if (network_client_connect() != -4) { return 92; }
     if (network_client_status() != -4) { return 93; }
     if (network_client_poll(network_probe) != -4) { return 94; }
-    if (network_client_send(network_probe) != -4) { return 95; }
+    if (network_client_send(network_probe, 4) != -4) { return 95; }
     if (network_client_resume_seat() != -1) { return 96; }
     if (network_client_last_sequence() != 0) { return 97; }
     if (network_client_checkpoint(-1, 0) != -4) { return 98; }
