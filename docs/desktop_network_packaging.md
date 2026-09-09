@@ -3,6 +3,9 @@
 For optional Windows and Android native guests, see
 [Native guest transport](native_network_client.md).
 
+For bounded external-peer automation using the packaged authority and a
+private invite handoff, see [Native authority supervision](network_supervision.md).
+
 Windows production packages can host browser guests when the project manifest
 declares both the network capability and a web entry point:
 

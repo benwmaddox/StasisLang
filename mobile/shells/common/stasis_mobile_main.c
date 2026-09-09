@@ -27,6 +27,7 @@
 #else
 #include "stasis_package_provenance.h"
 #endif
+int stasis_open_external_url(const char *url, int length);
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 int stasis_set_recording_audio_config(int enabled);
 int stasis_audio_get_queued_frames(void);
@@ -452,6 +453,7 @@ static int configure_asset_root(void) {
 }
 
 int SDL_main(int argc, char **argv) {
+    stasis_mobile_set_external_url_opener(stasis_open_external_url);
     (void)argc;
     (void)argv;
     stasis_network_client_provision_from_shell();
@@ -510,7 +512,13 @@ int SDL_main(int argc, char **argv) {
         }
 #endif
 #if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
-        stasis_desktop_network_present_join_card();
+        int32_t supervision = stasis_mobile_network_publish_supervision_join_url();
+        if (supervision < 0) {
+            SDL_Log("Stasis network supervision readiness failed");
+            status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+        } else if (supervision == 0) {
+            stasis_desktop_network_present_join_card();
+        }
 #endif
 #if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
         stasis_mobile_network_present_join_url();

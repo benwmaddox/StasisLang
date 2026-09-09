@@ -36,6 +36,7 @@ python3 -m unittest tools.ci.test_desktop_network_diagnostics
 python3 -m unittest tools.ci.test_nightly_network_support
 python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance
+python3 -m unittest tools.ci.test_audio_stream_native_acceptance
 python3 -m unittest tools.ci.test_local_toolchain_install
 python3 -m unittest tools.ci.test_sdl3_migration
 python3 -m unittest tools.ci.test_windows_sign_runner
@@ -53,7 +54,8 @@ node --test runtime/web/tests/audio_suspended_queue.test.mjs
 node --test runtime/web/tests/network_mailbox_contract.test.mjs
 
 set +e
-ignored_tests="$(rg -n -U --pcre2 '#\s*\[\s*(?:ignore\b|cfg_attr\s*\([^\]]*\bignore\b)' apps crates mobile tests -g '*.rs' 2>&1)"
+# Keep the reporting-only compiler microbenchmark opt-in; correctness tests must run.
+ignored_tests="$(rg -n -U --pcre2 '#\s*\[\s*(?!ignore\s*=\s*"representative timing report; run explicitly with --ignored"\s*\]\s*fn\s+hot_render_compiler_microbenchmark\s*\()(?:ignore\b|cfg_attr\s*\([^\]]*\bignore\b)' apps crates mobile tests -g '*.rs' 2>&1)"
 ignored_status=$?
 set -e
 if [[ $ignored_status -eq 0 ]]; then

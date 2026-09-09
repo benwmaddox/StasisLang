@@ -1,0 +1,3 @@
+# Preserve source evidence byte-for-byte across core.autocrlf settings.
+corpus/** -text
+evidence/**/*.svg -text
