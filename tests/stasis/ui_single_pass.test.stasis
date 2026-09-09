@@ -168,16 +168,20 @@ test `scroll render clip emits an ordered push and pop`(): bool {
 }
 
 test `input snapshot drives current tap across press and release`(): bool {
-    ui_input_begin(4, 20.0, 20.0, true, true, false);
+    ui_modal_set(0);
+    ui_input_begin(4, 20.0, 19.0, true, true, false);
     ui_layout_begin(0.0, 0.0, 100.0, 100.0);
     ui_anchor_current(30.0, 20.0, UiHorizontal.Left, UiVertical.Top);
+    if (!ui_current_contains(20.0, 19.0) || ui_current_contains(20.0, 20.0) || ui_current_contains(20.0, 21.0)) {
+        return false;
+    }
     if (ui_tap_current(1, 77)) {
         return false;
     }
     if (!ui_tap_active(1, 77)) {
         return false;
     }
-    ui_input_begin(4, 20.0, 20.0, false, false, true);
+    ui_input_begin(4, 20.0, 19.0, false, false, true);
     ui_layout_begin(0.0, 0.0, 100.0, 100.0);
     ui_anchor_current(30.0, 20.0, UiHorizontal.Left, UiVertical.Top);
     return ui_tap_current(1, 77) && !ui_pointer_capture_active();

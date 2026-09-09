@@ -19,3 +19,26 @@
 - Keep simulation state explicit and render as a projection of current state.
 - Trace feature changes through state definition, initialization/reset, tick/update, render, and tests.
 - Prefer representative `.test.stasis` behavior tests and keep failure paths explicit.
+
+## Container-derived UI geometry
+
+- Derive draw, hit, and content geometry from the real safe/current container using
+  `ui_single_pass`. For screens and nested rows/columns, prefer `ui_begin_frame`,
+  stack scopes (`ui_vstack_begin`/`ui_hstack_begin` with matching ends), fixed/rest children
+  (at most one rest child, last), `ui_inset`, `ui_anchor`/`ui_anchor_current`, and
+  `ui_current_x`, `ui_current_y`, `ui_current_width`, and `ui_current_height`.
+- Use the same resolved rectangle for drawing and hit testing. Recompute ephemeral rectangles each frame
+  and retain only semantic interaction state; do not add a measurement pass or retained widget tree.
+- Use `ui_place_x`/`ui_place_y` with `UiHorizontal`/`UiVertical` for isolated known-size placement.
+  Do not replace a suitable container recipe with repeated hand-derived offsets.
+- Size and place button labels from measured or intentionally cached text width and the
+  actual inner content box after icon/padding allocation. Keep expensive measurement outside render hot paths
+  when required; text metrics must be known when the layout recipe encounters the child.
+- Place icons, thumbnails, badges, sprites, and status art from
+  nominal display bounds with aspect/alpha-safe padding and container-derived origins,
+  not source bitmap dimensions or opaque-trim guesses.
+- Allow direct offsets only for deliberate local decoration, fixed spacing inside an
+  already-derived rectangle, authored world coordinates, or a tested pixel adjustment.
+- When affected UI changes, require deterministic geometry/hit tests and
+  inspected desktop and phone evidence. Check container boundaries and draw/hit agreement;
+  inspect PNG stills and MP4 for motion or interaction before reporting visual validation.
