@@ -72,7 +72,8 @@ try {
     "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
   ], { stdio: ["ignore", "pipe", "pipe"] });
   browser.stderr.on("data", chunk => { browserStderr += chunk; });
-  const { port: debugPort, version } = await waitForBrowserEndpoint(browser, profile, 15_000);
+  // Cold browser initialization on hosted Windows runners can exceed 15 seconds.
+  const { port: debugPort, version } = await waitForBrowserEndpoint(browser, profile, 60_000);
   const pageInfo = await fetch(`http://127.0.0.1:${debugPort}/json/new?about%3Ablank`, { method: "PUT" }).then(checkResponse).then(r => r.json());
   cdp = new Cdp(pageInfo.webSocketDebuggerUrl);
   await cdp.ready;
