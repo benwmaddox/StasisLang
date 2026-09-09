@@ -34,6 +34,7 @@ python3 -m unittest tools.ci.test_pr_ci_cargo_policy
 python3 -m unittest tools.ci.test_unsafe_boundaries
 python3 -m unittest tools.ci.test_desktop_network_diagnostics
 python3 -m unittest tools.ci.test_nightly_network_support
+python3 -m unittest tools.ci.test_nightly_freshness
 python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
 python3 -m unittest tools.ci.test_release_provenance
 python3 -m unittest tools.ci.test_audio_stream_native_acceptance

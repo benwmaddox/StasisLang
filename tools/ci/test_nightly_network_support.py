@@ -19,7 +19,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             self.assertIn("--features supervision-cli", workflow)
         manifest = (ROOT / "crates/stasis_network/Cargo.toml").read_text(encoding="utf-8")
         self.assertIn('required-features = ["supervision-cli"]', manifest)
-        self.assertIn("name: Verify packaged authority supervision (windows)", self.workflow)
+        self.assertIn("name: Verify extracted Windows editor toolchain", self.workflow)
         self.assertIn("-InstalledToolchain", self.workflow)
         self.assertIn("-File tools/ci/test_network_supervision.ps1", self.workflow)
         self.assertIn('Expand-Archive -LiteralPath "dist/${{ matrix.archive }}.${{ matrix.ext }}"', self.workflow)
@@ -57,7 +57,10 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
 
     def test_support_job_is_fail_closed_and_uses_pinned_targets(self):
         self.assertIn("mobile_network_support:", self.workflow)
-        self.assertIn("needs: [detect, mobile_network_support]", self.workflow)
+        self.assertIn(
+            "needs: [detect, mobile_network_support, release_preconditions]",
+            self.workflow,
+        )
         self.assertIn("os: ubuntu-latest", self.workflow)
         self.assertIn("os: macos-15", self.workflow)
         self.assertIn('ndk;27.0.12077973', self.workflow)

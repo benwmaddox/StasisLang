@@ -72,6 +72,7 @@ jobs:
           python -m unittest tools.ci.test_windows_vs_generator
           python -m unittest tools.ci.test_windows_signing_policy
           python -m unittest tools.ci.test_nightly_network_support
+          python -m unittest tools.ci.test_nightly_freshness
           python -m unittest tools.ci.test_pr_ci_seam_placement
 
       - name: Test AI efficiency matrix
