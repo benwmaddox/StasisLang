@@ -24,14 +24,13 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
         assertTrue(render.indexOf("return 0;") < render.indexOf("pong_game_render();"));
         assertFalse(render.contains("gfx_cmd_"));
         assertFalse(render.contains("/internal/gfx_cmd.stasis"));
-        String resource = WorkshopDiagnosticSeamAcceptance.insertAfterInFunction(source,
-                "function on_code_swap(): void {", "function on_code_swap(): void {",
-                "\n  gfx_load_sprite(\"assets/IT031_missing.svg\", 32, 32);");
-        String withExtern = WorkshopDiagnosticSeamAcceptance.ensureGfxLoadSpriteExtern(resource);
-        assertTrue(withExtern.startsWith("extern function gfx_load_sprite(path: string, "
-                + "max_w: i32, max_h: i32): i32;\n"));
-        assertTrue(withExtern.contains("function on_code_swap(): void {\n"
-                + "  gfx_load_sprite(\"assets/IT031_missing.svg\", 32, 32);"));
+        String resource = WorkshopDiagnosticSeamAcceptance.missingResourceSource(source);
+        assertTrue(resource.contains("function on_code_swap(): void {\n"
+                + "    let missing: Sprite;\n"
+                + "    missing.load_sprite_from(\"assets/IT031_missing.svg\", 32, 32);\n"));
+        assertFalse(resource.contains("extern"));
+        assertFalse(resource.contains("gfx_load_sprite"));
+
     }
 
     @Test public void renderSchemaMutationUsesOnlyPublicSource() {
@@ -40,40 +39,6 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
         assertTrue(mutated.startsWith("function render(): i32 {\n    return 0;\n"));
         assertFalse(mutated.contains("import"));
         assertFalse(mutated.contains("gfx_cmd_"));
-    }
-
-    @Test public void resourceExternIsNotDuplicatedWhenAlreadyPresent() {
-        String declaration = "extern function gfx_load_sprite(path: string, max_w: i32, "
-                + "max_h: i32): i32;";
-        String source = declaration + "\nfunction on_code_swap(): void {}\n";
-        String ensured = WorkshopDiagnosticSeamAcceptance.ensureGfxLoadSpriteExtern(source);
-        assertEquals(source, ensured);
-        assertEquals(ensured.indexOf(declaration), ensured.lastIndexOf(declaration));
-    }
-
-    @Test public void resourceExternRecognizesFormattedRenamedDeclaration() {
-        String source = "function @extern(\"host_gfx_load\") gfx_load_sprite(\r\n"
-                + "  asset_path: string, width: i32, height: i32\r\n"
-                + "): i32;\r\nfunction on_code_swap(): void {}\r\n";
-        assertEquals(source, WorkshopDiagnosticSeamAcceptance.ensureGfxLoadSpriteExtern(source));
-    }
-
-    @Test public void resourceExternIgnoresCommentAndStringMentions() {
-        String source = "// function gfx_load_sprite(path: string, w: i32, h: i32): i32;\n"
-                + "const note: string = \"function gfx_load_sprite(path: string, w: i32, h: i32): i32;\";\n"
-                + "function on_code_swap(): void {}\n";
-        String ensured = WorkshopDiagnosticSeamAcceptance.ensureGfxLoadSpriteExtern(source);
-        assertTrue(ensured.startsWith("extern function gfx_load_sprite(path: string, "
-                + "max_w: i32, max_h: i32): i32;\n"));
-    }
-
-    @Test public void resourceExternIgnoresMultilineAndUnterminatedBlockComments() {
-        String source = "/* function gfx_load_sprite(path: string, w: i32, h: i32): i32;\n"
-                + "   still commented */\n"
-                + "/* unterminated function gfx_load_sprite(path: string, w: i32, h: i32): i32;";
-        String ensured = WorkshopDiagnosticSeamAcceptance.ensureGfxLoadSpriteExtern(source);
-        assertTrue(ensured.startsWith("extern function gfx_load_sprite(path: string, "
-                + "max_w: i32, max_h: i32): i32;\n"));
     }
 
     @Test public void renderMutationHandlesCrLfAndInlineBodies() {
