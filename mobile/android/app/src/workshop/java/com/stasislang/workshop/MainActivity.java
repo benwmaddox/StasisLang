@@ -371,6 +371,7 @@ public final class MainActivity extends Activity {
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
     static native String nativeFrameAbiDescriptor();
+    static native boolean nativeCorruptRenderSchemaForAcceptance();
     static native int nativeFrameTrace(ByteBuffer frameI32, ByteBuffer frameF32, ByteBuffer frameU8);
     private static native String nativeDrainSpriteReleases();
     private static native String nativePollSpriteReleaseCancellations();

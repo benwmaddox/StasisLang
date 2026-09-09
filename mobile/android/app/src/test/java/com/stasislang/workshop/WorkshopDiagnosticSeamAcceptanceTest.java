@@ -6,17 +6,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
 
 public class WorkshopDiagnosticSeamAcceptanceTest {
-    @Rule public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     @Test public void casesAreTheSingleOrderedNativeSequence() {
         assertArrayEquals(new String[] {"parse", "extern_resolution", "runtime_entry",
@@ -29,8 +21,7 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
                 + "  pong_game_render();\n  return 0;\n}\n\n"
                 + "function on_code_swap(): void {\n  pong_game_on_code_swap();\n}\n";
         String render = WorkshopDiagnosticSeamAcceptance.renderSchemaSource(source);
-        assertTrue(render.indexOf("IT031_corrupt_render_schema();")
-                < render.indexOf("return 0;"));
+        assertTrue(render.indexOf("return 0;") < render.indexOf("pong_game_render();"));
         assertFalse(render.contains("gfx_cmd_"));
         assertFalse(render.contains("/internal/gfx_cmd.stasis"));
         String resource = WorkshopDiagnosticSeamAcceptance.insertAfterInFunction(source,
@@ -43,38 +34,12 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
                 + "  gfx_load_sprite(\"assets/IT031_missing.svg\", 32, 32);"));
     }
 
-    @Test public void renderSchemaPrivateAccessIsConfinedToFixedTestSeam() {
-        assertEquals("tests/stasis/seams/it031_render_schema.stasis",
-                WorkshopDiagnosticSeamAcceptance.RENDER_SCHEMA_HELPER_PATH);
-        String helper = WorkshopDiagnosticSeamAcceptance.RENDER_SCHEMA_HELPER_SOURCE;
-        assertTrue(helper.startsWith("import \"/.stasis_cache/toolchain/src/stdlib/internal/"
-                + "gfx_cmd.stasis\";\n"));
-        assertTrue(helper.contains("function IT031_corrupt_render_schema(): void {"));
-        assertTrue(helper.contains("gfx_cmd_i32[1] = 99;"));
-
-        String publicMutation = WorkshopDiagnosticSeamAcceptance.renderSchemaSource(
-                "function render(): i32 { return 0; }\n");
-        assertTrue(publicMutation.startsWith(
-                "import \"/tests/stasis/seams/it031_render_schema.stasis\";\n"));
-        assertFalse(publicMutation.contains("gfx_cmd_"));
-        assertFalse(publicMutation.contains("/internal/gfx_cmd.stasis"));
-    }
-
-    @Test public void renderSchemaHelperRefusesOverwriteAndCleansUp() throws Exception {
-        File project = temporaryFolder.newFolder("it031-project");
-        WorkshopDiagnosticSeamAcceptance.createRenderSchemaHelper(project.getPath());
-        File helper = new File(project,
-                WorkshopDiagnosticSeamAcceptance.RENDER_SCHEMA_HELPER_PATH);
-        assertEquals(WorkshopDiagnosticSeamAcceptance.RENDER_SCHEMA_HELPER_SOURCE,
-                new String(Files.readAllBytes(helper.toPath()), StandardCharsets.UTF_8));
-        assertThrows(IOException.class, () ->
-                WorkshopDiagnosticSeamAcceptance.createRenderSchemaHelper(project.getPath()));
-        assertEquals(WorkshopDiagnosticSeamAcceptance.RENDER_SCHEMA_HELPER_SOURCE,
-                new String(Files.readAllBytes(helper.toPath()), StandardCharsets.UTF_8));
-
-        WorkshopDiagnosticSeamAcceptance.deleteRenderSchemaHelper(project.getPath());
-        assertFalse(helper.exists());
-        WorkshopDiagnosticSeamAcceptance.deleteRenderSchemaHelper(project.getPath());
+    @Test public void renderSchemaMutationUsesOnlyPublicSource() {
+        String mutated = WorkshopDiagnosticSeamAcceptance.renderSchemaSource(
+                "function render(): i32 { pong_game_render(); return 0; }\n");
+        assertTrue(mutated.startsWith("function render(): i32 {\n    return 0;\n"));
+        assertFalse(mutated.contains("import"));
+        assertFalse(mutated.contains("gfx_cmd_"));
     }
 
     @Test public void resourceExternIsNotDuplicatedWhenAlreadyPresent() {
@@ -115,9 +80,7 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
         String source = "function render(): i32 { return 0; }\r\n"
                 + "function later(): i32 { return 1; }\r\n";
         String mutated = WorkshopDiagnosticSeamAcceptance.renderSchemaSource(source);
-        assertEquals("import \"/tests/stasis/seams/it031_render_schema.stasis\";\n"
-                + "function render(): i32 { \n    IT031_corrupt_render_schema();\n"
-                + "return 0; }\r\n"
+        assertEquals("function render(): i32 {\n    return 0;\n return 0; }\r\n"
                 + "function later(): i32 { return 1; }\r\n", mutated);
     }
 

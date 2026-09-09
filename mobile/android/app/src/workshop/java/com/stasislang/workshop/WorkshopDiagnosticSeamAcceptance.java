@@ -2,14 +2,8 @@ package com.stasislang.workshop;
 
 import android.util.Log;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
-
 
 /** Acceptance-only Rust/C/JNI/Java diagnostic round trip. */
 final class WorkshopDiagnosticSeamAcceptance {
@@ -17,16 +11,6 @@ final class WorkshopDiagnosticSeamAcceptance {
     private static final String MISSING_EXTERN = "extern function IT031_missing_extern(): void;";
     private static final String RESOURCE_EXTERN =
             "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;";
-    static final String RENDER_SCHEMA_HELPER_PATH =
-            "tests/stasis/seams/it031_render_schema.stasis";
-    static final String RENDER_SCHEMA_HELPER_SOURCE =
-            "import \"/.stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis\";\n\n"
-                    + "function IT031_corrupt_render_schema(): void {\n"
-                    + "    gfx_cmd_i32[1] = 99;\n"
-                    + "}\n";
-    private static final String RENDER_SCHEMA_IMPORT =
-            "import \"/tests/stasis/seams/it031_render_schema.stasis\";";
-    private static final String RENDER_SCHEMA_CALL = "IT031_corrupt_render_schema();";
 
     private WorkshopDiagnosticSeamAcceptance() {}
 
@@ -39,7 +23,6 @@ final class WorkshopDiagnosticSeamAcceptance {
         String original = null;
         JSONArray cases = new JSONArray();
         JSONObject baselineRuntime = null;
-        boolean renderSchemaHelperOwned = false;
         try {
             original = activity.acceptanceReadSource(projectRoot);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "baseline compile");
@@ -65,11 +48,12 @@ final class WorkshopDiagnosticSeamAcceptance {
             activity.acceptanceReplaceSource(projectRoot, original);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "render-schema baseline");
             requireEquals("passed", activity.runIt031Frame(projectRoot), "render-schema baseline frame");
-            createRenderSchemaHelper(projectRoot);
-            renderSchemaHelperOwned = true;
             String renderSchemaSource = renderSchemaSource(original);
             activity.acceptanceReplaceSource(projectRoot, renderSchemaSource);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "render-schema setup");
+            if (!MainActivity.nativeCorruptRenderSchemaForAcceptance()) {
+                throw new IllegalStateException("render-schema header injection failed");
+            }
             String renderMessage = activity.runIt031Frame(projectRoot);
             WorkshopNativeDiagnostic render = activity.acceptanceNativeDiagnostic(renderMessage);
             requireCode(render, "render_schema", "stasis.renderSchema");
@@ -88,9 +72,7 @@ final class WorkshopDiagnosticSeamAcceptance {
             requireContext(resource, null, null, "assets/IT031_missing.svg");
             cases.put(caseEvidence(activity, "missing_resource", resource, nativeResource, null));
 
-            JSONObject cleanup = restore(activity, projectRoot, original, baselineRuntime,
-                    renderSchemaHelperOwned);
-            renderSchemaHelperOwned = false;
+            JSONObject cleanup = restore(activity, projectRoot, original, baselineRuntime);
             JSONObject result = new JSONObject().put("schema", "stasis.workshop_diagnostic_seam.v1")
                     .put("test_id", "IT-031").put("event", "diagnostic_seam")
                     .put("status", "passed").put("ordered", true).put("cases", cases)
@@ -106,10 +88,7 @@ final class WorkshopDiagnosticSeamAcceptance {
             JSONObject cleanup = new JSONObject();
             try {
                 if (original != null) {
-                    cleanup = restore(activity, projectRoot, original, baselineRuntime,
-                            renderSchemaHelperOwned);
-                } else if (renderSchemaHelperOwned) {
-                    deleteRenderSchemaHelper(projectRoot);
+                    cleanup = restore(activity, projectRoot, original, baselineRuntime);
                 }
             } catch (Exception cleanupError) {
                 try { cleanup.put("status", "failed").put("error", cleanupError.toString()); }
@@ -331,46 +310,9 @@ final class WorkshopDiagnosticSeamAcceptance {
     }
 
     static String renderSchemaSource(String source) {
-        String imported = RENDER_SCHEMA_IMPORT + "\n" + source;
-        return insertBeforeFunctionAnchor(imported, "function render(): i32 {", "return 0;",
-                "\n    " + RENDER_SCHEMA_CALL + "\n");
-    }
-
-    static void createRenderSchemaHelper(String projectRoot) throws IOException {
-        File helper = renderSchemaHelperFile(projectRoot);
-        File parent = helper.getParentFile();
-        if (!parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
-            throw new IOException("could not create IT-031 render-schema helper directory");
-        }
-        if (!helper.createNewFile()) {
-            throw new IOException("refusing to overwrite IT-031 render-schema helper: "
-                    + RENDER_SCHEMA_HELPER_PATH);
-        }
-        try (FileOutputStream output = new FileOutputStream(helper, false)) {
-            output.write(RENDER_SCHEMA_HELPER_SOURCE.getBytes(StandardCharsets.UTF_8));
-        } catch (IOException | RuntimeException error) {
-            if (helper.exists() && !helper.delete()) {
-                error.addSuppressed(new IOException(
-                        "could not remove incomplete IT-031 render-schema helper"));
-            }
-            throw error;
-        }
-    }
-
-    static void deleteRenderSchemaHelper(String projectRoot) throws IOException {
-        File helper = renderSchemaHelperFile(projectRoot);
-        if (helper.exists() && !helper.delete()) {
-            throw new IOException("could not remove IT-031 render-schema helper");
-        }
-    }
-
-    private static File renderSchemaHelperFile(String projectRoot) throws IOException {
-        File root = new File(projectRoot).getCanonicalFile();
-        File helper = new File(root, RENDER_SCHEMA_HELPER_PATH).getCanonicalFile();
-        if (!helper.getPath().startsWith(root.getPath() + File.separator)) {
-            throw new IOException("IT-031 render-schema helper escaped project root");
-        }
-        return helper;
+        // Keep the real command storage, but leave the injected header untouched.
+        return insertAfterInFunction(source, "function render(): i32 {",
+                "function render(): i32 {", "\n    return 0;\n");
     }
 
     private static boolean startsFunctionDeclaration(String source, int index) {
@@ -473,23 +415,9 @@ final class WorkshopDiagnosticSeamAcceptance {
     }
 
     private static JSONObject restore(MainActivity activity, String projectRoot, String original,
-            JSONObject baselineRuntime, boolean renderSchemaHelperOwned)
+            JSONObject baselineRuntime)
             throws Exception {
-        Exception restoreFailure = null;
-        try {
-            activity.acceptanceReplaceSource(projectRoot, original);
-        } catch (Exception error) {
-            restoreFailure = error;
-        }
-        if (renderSchemaHelperOwned) {
-            try {
-                deleteRenderSchemaHelper(projectRoot);
-            } catch (Exception error) {
-                if (restoreFailure == null) restoreFailure = error;
-                else restoreFailure.addSuppressed(error);
-            }
-        }
-        if (restoreFailure != null) throw restoreFailure;
+        activity.acceptanceReplaceSource(projectRoot, original);
         String compile = activity.acceptanceCompile(projectRoot);
         requireCompileReady(compile, "final cleanup compile");
         requireEquals("passed", activity.runIt031Frame(projectRoot), "final cleanup frame");
