@@ -103,6 +103,31 @@ static int run_conpty_child(void) {
     return 0;
 }
 
+static int drain_conpty_output(HANDLE output_read, size_t* iconify_match, int* saw_iconify) {
+    static const char iconify[] = "\x1b[2t";
+    DWORD available = 0;
+    if (!PeekNamedPipe(output_read, NULL, 0, NULL, &available, NULL)) return 0;
+    while (available > 0) {
+        char output[4096];
+        DWORD requested = available < sizeof(output) ? available : sizeof(output);
+        DWORD read = 0;
+        if (!ReadFile(output_read, output, requested, &read, NULL)) return 0;
+        for (DWORD i = 0; i < read; ++i) {
+            if (output[i] == iconify[*iconify_match]) {
+                *iconify_match += 1;
+                if (*iconify_match == sizeof(iconify) - 1) {
+                    *saw_iconify = 1;
+                    *iconify_match = 0;
+                }
+            } else {
+                *iconify_match = output[i] == iconify[0] ? 1 : 0;
+            }
+        }
+        if (!PeekNamedPipe(output_read, NULL, 0, NULL, &available, NULL)) return 0;
+    }
+    return 1;
+}
+
 static int run_conpty_parent(const wchar_t* executable) {
     HANDLE input_read = NULL;
     HANDLE input_write = NULL;
@@ -141,31 +166,20 @@ static int run_conpty_parent(const wchar_t* executable) {
     if (!CreateProcessW(executable, command, NULL, NULL, FALSE,
             EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &startup.StartupInfo, &process)) goto cleanup;
 
-    static const char iconify[] = "\x1b[2t";
     size_t iconify_match = 0;
     int saw_iconify = 0;
     ULONGLONG deadline = GetTickCount64() + 8000;
     for (;;) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(output_read, NULL, 0, NULL, &available, NULL)) break;
-        if (available > 0) {
-            char output[4096];
-            DWORD requested = available < sizeof(output) ? available : sizeof(output);
-            DWORD read = 0;
-            if (!ReadFile(output_read, output, requested, &read, NULL)) break;
-            for (DWORD i = 0; i < read; ++i) {
-                if (output[i] == iconify[iconify_match]) {
-                    iconify_match += 1;
-                    if (iconify_match == sizeof(iconify) - 1) {
-                        saw_iconify = 1;
-                        iconify_match = 0;
-                    }
-                } else {
-                    iconify_match = output[i] == iconify[0] ? 1 : 0;
-                }
+        if (!drain_conpty_output(output_read, &iconify_match, &saw_iconify)) break;
+        if (WaitForSingleObject(process.hProcess, 10) == WAIT_OBJECT_0) {
+            ULONGLONG drain_deadline = GetTickCount64() + 250;
+            while (GetTickCount64() < drain_deadline) {
+                if (!drain_conpty_output(
+                    output_read, &iconify_match, &saw_iconify)) goto cleanup;
+                Sleep(10);
             }
+            break;
         }
-        if (WaitForSingleObject(process.hProcess, 10) == WAIT_OBJECT_0) break;
         if (GetTickCount64() >= deadline) break;
     }
     DWORD child_result = 1;
