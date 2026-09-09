@@ -442,6 +442,25 @@ PNG, SVG, font, tick, and framebuffer assertions.
 
 ### AI desktop editor keyboard commands
 
+Creating a task sends its objective as the first message. The editor starts with a bounded
+symbol catalog and reads exact source symbols as needed, so a project does not have to fit
+all its source into the initial AI prompt. Proposed changes still require acceptance.
+
+The desktop editor reads AI settings from the selected project's `.env` (not the launcher's
+working directory). Process environment values take precedence. An `OPENROUTER_API_KEY`
+selects OpenRouter when `STASIS_AI_PROVIDER` is unset; an explicit provider selection wins.
+Keep `.env` ignored by Git. The key is not included in task history or AI context.
+
+OpenRouter defaults to a hard 400 tokens/second endpoint minimum, without a throughput
+override. Routing fails if no healthy endpoint qualifies; it does not fall back to a slower
+endpoint. This uses endpoint throughput metadata, not a guarantee of each request's measured
+speed. Explicit `STASIS_AI_HARD_MIN_THROUGHPUT` or preferred-throughput settings override
+the default. `STASIS_AI_MODEL` selects the model.
+
+Failed requests show a credential-safe diagnostic in the task. Reconnect retries the saved
+request without duplicating its message during the current editor session. Reopening an
+editor never automatically replays an unfinished request.
+
 In the AI desktop editor, Ctrl+K or Ctrl+F opens the command palette. Type to
 filter commands, use Up/Down to select, Enter to invoke, and Escape to dismiss
 and restore the previous focus. Selection stays within the filtered results;

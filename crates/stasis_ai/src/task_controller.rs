@@ -14,6 +14,28 @@ use std::time::Instant;
 
 const SAFE_PROVIDER_ERROR: &str = "AI provider request failed";
 const SAFE_SESSION_ERROR: &str = "AI response could not be added to the task";
+/// Return an actionable category without exposing provider output or credentials.
+pub fn safe_provider_error(error: &str) -> &'static str {
+    let error = error.to_ascii_lowercase();
+    if error.contains("routing failed closed") {
+        "OpenRouter found no healthy endpoint meeting the configured throughput requirement. Check the model and routing settings in the project .env; slower fallback was not used."
+    } else if error.contains("workspace .env") || error.contains("openrouter_api_key") {
+        "AI provider configuration failed. Check the project .env syntax and OPENROUTER_API_KEY."
+    } else if error.contains("401")
+        || error.contains("not logged in")
+        || error.contains("unauthorized")
+    {
+        "AI provider authentication failed. Check the selected provider's credentials."
+    } else if error.contains("429") {
+        "AI provider rate limit reached. Wait briefly before reconnecting."
+    } else if error.contains("timed out") || error.contains("timeout") {
+        "AI provider request timed out. Check connectivity and provider availability before reconnecting."
+    } else if error.contains("source context exceeds") || error.contains("symbol catalog exceeds") {
+        "The project's source catalog exceeds the editor context limit. No AI request was sent."
+    } else {
+        SAFE_PROVIDER_ERROR
+    }
+}
 const MAX_WORKERS: usize = 8;
 const MAX_PROGRESS_EVENTS: usize = 32;
 
@@ -262,7 +284,7 @@ struct Completion {
     request_id: RequestId,
     task_id: TaskId,
     elapsed_ms: u64,
-    result: Result<ProviderReply, ()>,
+    result: Result<ProviderReply, &'static str>,
     admitted: Arc<AtomicBool>,
 }
 
@@ -954,9 +976,9 @@ impl TaskController {
                     proposals,
                 }
             }
-            Err(()) => {
+            Err(message) => {
                 record.snapshot.state = TaskRequestState::Failed;
-                record.snapshot.error = Some(SAFE_PROVIDER_ERROR.to_string());
+                record.snapshot.error = Some(message.to_string());
                 push_progress(
                     &mut record.snapshot,
                     ProgressStage::Failed,
@@ -967,7 +989,7 @@ impl TaskController {
                     update_screenshots(
                         task,
                         &record.request.screenshots,
-                        ScreenshotOutcome::Failed(SAFE_PROVIDER_ERROR),
+                        ScreenshotOutcome::Failed(message),
                     );
                     if task.connection == ConnectionState::Connected
                         && task.lifecycle == TaskLifecycle::Active
@@ -978,7 +1000,7 @@ impl TaskController {
                 TaskControllerEvent::Failed {
                     request_id: completion.request_id,
                     task_id: completion.task_id,
-                    message: SAFE_PROVIDER_ERROR.to_string(),
+                    message: message.to_string(),
                 }
             }
         }
@@ -1065,7 +1087,7 @@ fn worker_loop(
                 request_id: job.request.request_id,
                 task_id: job.request.task_id,
                 elapsed_ms,
-                result: Err(()),
+                result: Err(SAFE_PROVIDER_ERROR),
                 admitted: job.admitted,
             });
             continue;
@@ -1085,9 +1107,8 @@ fn worker_loop(
                 reporter.clone(),
             )
         }))
-        .ok()
-        .and_then(Result::ok)
-        .ok_or(());
+        .unwrap_or_else(|_| Err(SAFE_PROVIDER_ERROR.to_string()))
+        .map_err(|error| safe_provider_error(&error));
         reporter.closed.store(true, Ordering::Release);
         let elapsed_ms = u64::try_from(job.enqueued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut state = lock(&state);
@@ -1284,6 +1305,25 @@ fn release_admission(count: &mut usize, admitted: &AtomicBool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_diagnostics_keep_actionable_categories_without_secrets() {
+        for (error, expected) in [
+            (
+                "OpenRouter routing failed closed: private-model secret-key",
+                "throughput requirement",
+            ),
+            ("OPENROUTER_API_KEY secret-key", "project .env"),
+            ("HTTP 401 secret-key", "authentication failed"),
+            ("request timed out secret-key", "timed out"),
+            ("private unknown secret-key", "AI provider request failed"),
+        ] {
+            let diagnostic = super::safe_provider_error(error);
+            assert!(diagnostic.contains(expected));
+            assert!(!diagnostic.contains("secret-key"));
+            assert!(!diagnostic.contains("private-model"));
+        }
+    }
+
     use super::*;
     use crate::{FallbackState, RoutingState};
     use std::sync::Barrier;

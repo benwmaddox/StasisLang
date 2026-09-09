@@ -7419,16 +7419,6 @@ fn desktop_source_context(root: &Path) -> Result<Vec<Value>, String> {
             })
         })
         .collect::<Vec<_>>();
-    if serde_json::to_vec(&context)
-        .map_err(|error| error.to_string())?
-        .len()
-        > 256 * 1024
-    {
-        return Err(
-            "Project source context exceeds 256 KiB; narrow the project before requesting edits."
-                .into(),
-        );
-    }
     Ok(context)
 }
 

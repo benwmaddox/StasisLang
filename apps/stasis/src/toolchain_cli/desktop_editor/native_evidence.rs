@@ -245,6 +245,34 @@ fn capture_native_task_timeline() {
         .unwrap();
     }
 
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_FAILURE").is_some() {
+        let (client, _server) = stasis_runner::live::live_session(16);
+        editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.controller = TaskController::new(|_, _| {
+            Err("OpenRouter routing failed closed: fixture endpoint".into())
+        });
+        editor.state.objective = "Make the background a neutral brown".into();
+        editor.state.create_and_send_task().unwrap();
+        editor.flush_intents();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.state.session.active_task().unwrap().connection == ConnectionState::Connected {
+            editor.poll_controller();
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .set_provider_state(stasis_ai::ProviderState {
+                provider: Some("openrouter".into()),
+                model: Some("openai/gpt-oss-120b".into()),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+
     struct CaptureApp {
         editor: DesktopEditor,
         output: PathBuf,

@@ -4,6 +4,8 @@ mod persistence;
 #[cfg(test)]
 mod request_image_tests;
 mod semantic_diff;
+#[cfg(test)]
+mod source_context_tests;
 
 use host_progress::{HostProgress, HostProgressState};
 use stasis_ai::task_controller::{ProgressReporter, ProgressStage};
@@ -93,6 +95,50 @@ enum TimelineAction {
 #[derive(Default)]
 struct ProposalTools {
     proposals: Vec<ProviderActionProposal>,
+    sources: Vec<Value>,
+}
+
+const MAX_SOURCE_CONTEXT_BYTES: usize = 256 * 1024;
+
+impl ProposalTools {
+    fn source_catalog(&self) -> Result<Value, String> {
+        let catalog = Value::Array(
+            self.sources
+                .iter()
+                .map(|item| item["target"].clone())
+                .collect(),
+        );
+        if serde_json::to_vec(&catalog)
+            .map_err(|error| error.to_string())?
+            .len()
+            > MAX_SOURCE_CONTEXT_BYTES
+        {
+            return Err("Project symbol catalog exceeds 256 KiB; narrow the project before requesting edits.".into());
+        }
+        Ok(catalog)
+    }
+
+    fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
+        let symbol_id = args
+            .get("symbol_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "symbol_id must be a string".to_string())?;
+        let item = self
+            .sources
+            .iter()
+            .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id))
+            .ok_or_else(|| format!("Unknown source symbol: {symbol_id}"))?;
+        if serde_json::to_vec(item)
+            .map_err(|error| error.to_string())?
+            .len()
+            > MAX_SOURCE_CONTEXT_BYTES
+        {
+            return Err(format!(
+                "Source symbol {symbol_id} exceeds the 256 KiB read limit."
+            ));
+        }
+        Ok(item.clone())
+    }
 }
 
 impl ToolExecutor for ProposalTools {
@@ -105,6 +151,11 @@ impl ToolExecutor for ProposalTools {
                 }
                 let repair = call.tool == "repair_semantic_edit";
                 let result: Result<Value, String> = (|| {
+                    match call.tool.as_str() {
+                        "read_source_symbol" => return self.read_source_symbol(&call.args),
+                        "propose_semantic_edit" | "repair_semantic_edit" => {}
+                        _ => return Err(format!("Unknown desktop editor tool: {}", call.tool)),
+                    }
                     let id = call
                         .args
                         .get("proposal_id")
@@ -143,7 +194,7 @@ impl ToolExecutor for ProposalTools {
 }
 
 fn proposal_tool_specs() -> Vec<ToolSpec> {
-    [
+    let mut specs: Vec<ToolSpec> = [
         (
             "propose_semantic_edit",
             "Propose an atomic semantic edit for explicit user acceptance.",
@@ -165,7 +216,15 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
         ],
         optional_args: Vec::new(),
     })
-    .collect()
+    .collect();
+    specs.push(ToolSpec {
+        tool: "read_source_symbol".to_string(),
+        action_id: action_id_for_tool("read_source_symbol"),
+        purpose: "Read exact source and target metadata from the request's immutable source snapshot before proposing edits. Calls for multiple symbols can be batched.".to_string(),
+        required_args: vec!["symbol_id".to_string()],
+        optional_args: Vec::new(),
+    });
+    specs
 }
 
 fn bounded_provider_label(value: Option<&str>, fallback: &str) -> String {
@@ -303,13 +362,14 @@ fn provider_reply_usage(usage: Option<&Value>) -> ProviderUsage {
 
 fn selected_provider_config(
     selection: Option<ProviderSelection>,
+    project_root: &std::path::Path,
 ) -> Result<ProviderConfig, String> {
     match selection {
         Some(ProviderSelection::Codex) => Ok(ProviderConfig::Codex),
         Some(ProviderSelection::OpenRouter) => Ok(ProviderConfig::OpenRouter(
-            stasis_ai::OpenRouterConfig::from_env()?,
+            stasis_ai::OpenRouterConfig::from_workspace(project_root)?,
         )),
-        None => ProviderConfig::from_env(),
+        None => ProviderConfig::from_workspace(project_root),
     }
 }
 
@@ -319,7 +379,7 @@ fn run_reply_provider(
     project_root: PathBuf,
     progress: ProgressReporter,
 ) -> Result<ProviderReply, String> {
-    let config = selected_provider_config(request.selected_provider)?;
+    let config = selected_provider_config(request.selected_provider, &project_root)?;
     let effective_reasoning_effort = (config.provider_name() == "openrouter").then_some("low");
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
     if canceled.load(Ordering::Acquire) {
@@ -364,6 +424,11 @@ fn run_reply_provider(
         .to_string();
     progress.report(ProgressStage::InspectingSymbols);
     let source_context = super::desktop_source_context(&project_root)?;
+    let mut tools = ProposalTools {
+        sources: source_context,
+        ..ProposalTools::default()
+    };
+    let source_catalog = tools.source_catalog()?;
     let initial_context = json!({
         "task_id": request.task_id,
         "objective": request.objective,
@@ -374,16 +439,15 @@ fn run_reply_provider(
         "screenshots": request.screenshots,
         "thread": request.context,
         "actions": request.actions,
-        "editable_sources": source_context,
+        "editable_symbols": source_catalog,
     });
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
-        max_turns: 3,
+        instruction: "Answer the user's task-scoped message. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Propose related source and behavioral tests together in one atomic batch. The editable_symbols catalog identifies project source. Use read_source_symbol to inspect exact source before proposing changes; batch independent symbol reads. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
+        max_turns: 4,
         ..AgentProfile::default()
     };
     let mut usage = None;
-    let mut tools = ProposalTools::default();
     let text = run_agent_with_profile(
         &mut provider,
         &mut tools,
@@ -1408,21 +1472,19 @@ impl DesktopEditor {
                         .and_then(|task| task.append_user_message(&text))
                         .map_err(|error| error.to_string())
                         .and_then(|()| {
-                            let needs_provider = candidate
-                                .task(&task)
-                                .map(|task| task.provider.provider.is_none())
-                                .unwrap_or(false);
-                            if needs_provider {
-                                if let Ok(config) = ProviderConfig::from_env() {
-                                    candidate
-                                        .task_mut(&task)
-                                        .and_then(|task| {
-                                            task.set_provider_state(configured_provider_state(
-                                                &config,
-                                            ))
-                                        })
-                                        .map_err(|error| error.to_string())?;
-                                }
+                            if let Ok(config) = selected_provider_config(
+                                candidate
+                                    .task(&task)
+                                    .ok()
+                                    .and_then(|task| task.selected_provider),
+                                &self.project_root,
+                            ) {
+                                candidate
+                                    .task_mut(&task)
+                                    .and_then(|task| {
+                                        task.set_provider_state(configured_provider_state(&config))
+                                    })
+                                    .map_err(|error| error.to_string())?;
                             }
                             Ok(())
                         });
@@ -1639,7 +1701,7 @@ impl DesktopEditor {
             .session
             .task(task_id)
             .map_err(|error| error.to_string())?;
-        let config = selected_provider_config(task.selected_provider)?;
+        let config = selected_provider_config(task.selected_provider, &self.project_root)?;
         match &config {
             ProviderConfig::Codex if config.supports_image_input() => Ok(()),
             ProviderConfig::Codex => Err(format!(
@@ -1679,7 +1741,7 @@ impl DesktopEditor {
             return;
         };
         let Ok(ProviderConfig::OpenRouter(mut config)) =
-            selected_provider_config(task.selected_provider)
+            selected_provider_config(task.selected_provider, &self.project_root)
         else {
             return;
         };
@@ -1717,7 +1779,7 @@ impl DesktopEditor {
             return;
         };
         let Ok(ProviderConfig::OpenRouter(config)) =
-            selected_provider_config(task.selected_provider)
+            selected_provider_config(task.selected_provider, &self.project_root)
         else {
             return;
         };
@@ -2228,7 +2290,7 @@ impl DesktopEditor {
             egui::Button::new(RichText::new("+  Create task").strong()),
         );
         if create.clicked() || submitted {
-            self.state.notice = self.state.create_task().err();
+            self.state.notice = self.state.create_and_send_task().err();
         }
         ui.add_space(18.0);
         let active = self.state.session.active_task_id().map(|id| id.to_string());
@@ -2824,6 +2886,19 @@ impl EditorState {
             .ok_or_else(|| format!("{EMPTY_TASK} first (Ctrl+N)."))
     }
 
+    fn create_and_send_task(&mut self) -> Result<(), String> {
+        self.create_task()?;
+        let task = self
+            .session
+            .active_task()
+            .map_err(|error| error.to_string())?;
+        self.intents.push(EditorIntent::SendReply(
+            task.id.to_string(),
+            task.objective.clone(),
+        ));
+        Ok(())
+    }
+
     fn create_task(&mut self) -> Result<(), String> {
         let objective = self.objective.trim().to_string();
         if objective.is_empty() {
@@ -2923,7 +2998,7 @@ impl EditorState {
                 if self.objective.trim().is_empty() {
                     Ok(())
                 } else {
-                    self.create_task()
+                    self.create_and_send_task()
                 }
             }
             TaskSessionCommand::SwitchNextTask => self.switch_relative(1),
@@ -3160,7 +3235,7 @@ impl DesktopEditor {
             ui.colored_label(warning(), "Previous AI request outcome is uncertain. It may already have incurred a charge; review before sending again.");
         }
         let mut provider_choice = None;
-        let openrouter = stasis_ai::OpenRouterConfig::from_env().ok();
+        let openrouter = stasis_ai::OpenRouterConfig::from_workspace(&self.project_root).ok();
         egui::Frame::none()
             .fill(Color32::from_rgb(28, 33, 41))
             .stroke(egui::Stroke::new(1.0_f32, border()))
@@ -3315,6 +3390,10 @@ impl DesktopEditor {
                         ))
                         .strong(),
                     );
+                    if let Some(error) = &request.error {
+                        ui.add(egui::Label::new(RichText::new(error).color(failure())).wrap(true));
+                        ui.label("Your message is saved. Reconnect to retry it without sending it twice.");
+                    }
                     ui.label(format!(
                         "Provider first action: {}",
                         measured_ms(request.provider_first_action_ms)
@@ -3623,7 +3702,7 @@ impl DesktopEditor {
                                 );
                             }
                             ui.horizontal_wrapped(|ui| {
-                                let destination = selected_provider_config(task.selected_provider)
+                                let destination = selected_provider_config(task.selected_provider, &self.project_root)
                                     .map(|config| (config.provider_name().to_string(), config.model()))
                                     .unwrap_or_else(|_| ("unavailable provider".into(), "unconfigured model".into()));
                                 let (provider, model) = destination;
@@ -4053,7 +4132,7 @@ impl DesktopEditor {
                 if ui.add_enabled(can_attach, egui::Button::new("Paste image")).on_hover_text("Copy clipboard image pixels into this task's session-only attachment storage").on_disabled_hover_text(disabled_reason).clicked() {
                     self.paste_clipboard_image(&task.id);
                 }
-                if matches!(selected_provider_config(task.selected_provider), Ok(ProviderConfig::OpenRouter(_)))
+                if matches!(selected_provider_config(task.selected_provider, &self.project_root), Ok(ProviderConfig::OpenRouter(_)))
                     && ui.small_button("Refresh image support").clicked()
                 {
                     self.refresh_active_image_capability();
@@ -4236,7 +4315,7 @@ impl DesktopEditor {
             let submitted =
                 input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
             if ui.button("+ Task").clicked() || submitted {
-                self.state.notice = self.state.create_task().err();
+                self.state.notice = self.state.create_and_send_task().err();
             }
         });
         let active = self.state.session.active_task_id().map(ToString::to_string);
@@ -5200,6 +5279,39 @@ mod tests {
         state.handle(TaskSessionCommand::NewTask).unwrap();
         assert_eq!(state.session.task_count(), 2);
         assert!(state.session.active_task().unwrap().thread.is_empty());
+        assert!(
+            matches!(state.intents.as_slice(), [EditorIntent::SendReply(task, text)]
+            if task == "task-2" && text == "Independent objective")
+        );
+    }
+
+    #[test]
+    fn new_task_submits_objective_once_and_retry_keeps_one_message() {
+        let root = super::super::tests::desktop_editor_fixture("first_message_send");
+        let (client, _server) = live_session(4);
+        let mut editor = DesktopEditor::new(client, root, Arc::new(AtomicBool::new(false)));
+        let (tx, rx) = mpsc::channel();
+        editor.controller = TaskController::new(move |request, _| {
+            tx.send(request).unwrap();
+            Err("OpenRouter routing failed closed: private model".into())
+        });
+        editor.state.objective = "Make the background brown".into();
+        editor.state.create_and_send_task().unwrap();
+        editor.flush_intents();
+        let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(first.context.len(), 1);
+        assert_eq!(first.context[0].text, first.objective);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.state.session.active_task().unwrap().connection == ConnectionState::Connected {
+            editor.poll_controller();
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        editor.state.handle(TaskSessionCommand::Reconnect).unwrap();
+        editor.flush_intents();
+        let retry = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(retry.context, first.context);
+        assert_eq!(editor.state.session.active_task().unwrap().thread.len(), 1);
     }
 
     #[test]
