@@ -15,12 +15,15 @@ scratch values and are never game state.
   `UiVertical` enums. Use `ui_inset` first for safe-area padding.
 - `ui_scroll_begin` stores only a keyed offset and drag pointer. Rows can use
   `ui_scroll_item_y` and `ui_scroll_item_visible` without retaining rectangles.
+  `ui_scroll_drag_current(layer_id)` routes the snapshotted pointer through the
+  same modal layer policy as taps and cancels a drag when its layer is blocked.
   In the render pass, pair `ui_scroll_clip_begin` with `ui_scroll_end` so the
   same viewport becomes an ordered renderer clip.
 - `ui_viewport_fit` derives `Stretch`, `Contain`, `Cover`, or `IntegerScale`
   geometry. `ui_viewport_map_x/y` convert screen coordinates to content space.
-- `ui_input_begin_primary` snapshots the primary logical pointer and resets
-  interaction routing once per tick. `ui_input_begin` supports tests and custom
+- `ui_input_begin_primary(frame)` snapshots the primary logical pointer from a
+  refreshed `HostFrame` and resets interaction routing once per tick.
+  `ui_input_begin` supports tests and custom
   one-pointer routing policies. A missing pointer cancels any outstanding
   capture. `ui_tap` and `ui_tap_current` return true when a captured press releases
   inside the same stable ID. Active ID, pointer capture, hot ID, and modal layer

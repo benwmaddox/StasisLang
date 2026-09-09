@@ -5,9 +5,10 @@ the layout recipe next to the result so the code and the interaction remain
 easy to inspect.
 
 The same `gallery_layout` recipe is replayed with `UiPass.Input` during the
-tick and `UiPass.Paint` during rendering. Primary pointer data is snapshotted once
-with `ui_input_begin_primary`; widgets use the current rectangle rather than repeating
-six input fields and four geometry fields at every call site.
+tick and `UiPass.Paint` during rendering. Primary pointer data is snapshotted
+once with `ui_input_begin_primary(ui_gallery_host_frame)`; widgets use the
+current rectangle rather than repeating six input fields and four geometry
+fields at every call site.
 
 Run from the repository root:
 
@@ -25,8 +26,8 @@ The tabs demonstrate:
 - **Anchors** — all nine combinations of the typed horizontal and vertical
   anchor enums, with safe-area inset.
 - **Scroll** — a fixed-row list drawn between `ui_scroll_clip_begin` and
-  `ui_scroll_end`. Press and drag inside it, then release outside the list; the
-  captured pointer still completes the drag.
+  `ui_scroll_end`. `ui_scroll_drag_current` uses the screen layer, so a modal
+  cancels its capture. Otherwise, release outside still completes the drag.
 - **Viewport** — a live moving world, viewport-local HUD, and a button cycling
   Stretch, Contain, Cover, and IntegerScale. Press inside the fitted viewport
   to map the pointer to 320x180 world coordinates and move the marker.

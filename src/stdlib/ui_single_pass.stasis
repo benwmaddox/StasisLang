@@ -734,9 +734,13 @@ function ui_scroll_end(): void {
     ui_scroll_clip_active = 0;
 }
 
-function ui_scroll_drag_current(): void {
+function ui_scroll_drag_current(layer_id: i32): void {
     let slot: i32 = ui_scroll_current_slot;
     if (slot < 0) {
+        return;
+    }
+    if (!ui_input_allowed(layer_id)) {
+        ui_scroll_drag_pointer[slot] = -1;
         return;
     }
     let inside: bool = ui_contains(

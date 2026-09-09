@@ -122,22 +122,23 @@ test `modal layer blocks lower layer and accepts its own button`(): bool {
 }
 
 test `scroll drag clamps and exposes translated rows`(): bool {
+    ui_modal_set(0);
     ui_input_begin(2, 50.0, 20.0, true, true, false);
     ui_layout_begin(0.0, 0.0, 120.0, 60.0);
     ui_scroll_begin(900, 10.0, 5.0, 100.0, 50.0, 200.0);
     if (ui_scroll_max_offset() != 150.0 || ui_scroll_offset() != 0.0) {
         return false;
     }
-    ui_scroll_drag_current();
+    ui_scroll_drag_current(1);
     ui_input_begin(2, 50.0, -200.0, true, false, false);
     ui_layout_begin(0.0, 0.0, 120.0, 60.0);
     ui_scroll_begin(900, 10.0, 5.0, 100.0, 50.0, 200.0);
-    ui_scroll_drag_current();
+    ui_scroll_drag_current(1);
     if (ui_scroll_offset() != 150.0 || ui_scroll_item_y(3, 20.0, 5.0) != -70.0) {
         return false;
     }
     ui_input_begin(2, 50.0, -200.0, false, false, true);
-    ui_scroll_drag_current();
+    ui_scroll_drag_current(1);
     return !ui_scroll_is_dragging();
 }
 
@@ -209,10 +210,11 @@ test `missing primary pointer cancels capture`(): bool {
 }
 
 test `missing primary pointer cancels scroll drag`(): bool {
+    ui_modal_set(0);
     ui_input_begin(9, 20.0, 20.0, true, true, false);
     ui_layout_begin(0.0, 0.0, 100.0, 60.0);
     ui_scroll_begin(902, 0.0, 0.0, 100.0, 50.0, 200.0);
-    ui_scroll_drag_current();
+    ui_scroll_drag_current(1);
     if (!ui_scroll_is_dragging()) {
         return false;
     }
@@ -224,4 +226,18 @@ test `zero tap id reports bad argument`(): bool {
     ui_input_begin(3, 20.0, 20.0, true, true, false);
     ui_layout_begin(0.0, 0.0, 100.0, 100.0);
     return !ui_tap(1, 0, 10.0, 10.0, 30.0, 20.0) && ui_status() == UI_STATUS_BAD_ARGUMENT;
+}
+
+test `modal layer cancels a lower layer scroll drag`(): bool {
+    ui_modal_set(0);
+    ui_input_begin(9, 20.0, 20.0, true, true, false);
+    ui_layout_begin(0.0, 0.0, 100.0, 60.0);
+    ui_scroll_begin(903, 0.0, 0.0, 100.0, 50.0, 200.0);
+    ui_scroll_drag_current(1);
+    if (!ui_scroll_is_dragging()) {
+        return false;
+    }
+    ui_modal_set(9);
+    ui_scroll_drag_current(1);
+    return !ui_scroll_is_dragging() && ui_scroll_offset() == 0.0;
 }

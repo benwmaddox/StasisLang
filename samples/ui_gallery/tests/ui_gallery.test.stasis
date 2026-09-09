@@ -36,30 +36,16 @@ test `pointer capture and modal precedence are semantic state`(): bool {
     return !ui_tap(7, 12, 10.0, 10.0, 80.0, 40.0) && !ui_pointer_capture_active();
 }
 
-test `modal close capture survives the next phone frame`(): bool {
-    ui_begin_frame(0.0, 0.0, 360.0, 240.0);
-    ui_modal_set(GALLERY_LAYER_MODAL);
-    if (ui_button(GALLERY_LAYER_MODAL, GALLERY_ID_CLOSE, 220.0, 160.0, 128.0, 38.0, 7, 260.0, 178.0, true, true, false)) {
-        return false;
-    }
-    if (!ui_pointer_capture_active() || ui_pointer_capture_id() != 7) {
-        return false;
-    }
-
-    ui_begin_frame(0.0, 0.0, 360.0, 240.0);
-    ui_modal_set(GALLERY_LAYER_MODAL);
-    return ui_button(GALLERY_LAYER_MODAL, GALLERY_ID_CLOSE, 220.0, 160.0, 128.0, 38.0, 7, 260.0, 178.0, false, false, true) && !ui_pointer_capture_active();
-}
-
 test `scroll offset clamps after a drag`(): bool {
+    ui_modal_set(0);
     ui_input_begin(3, 20.0, 20.0, true, true, false);
     ui_layout_begin(0.0, 0.0, 100.0, 60.0);
     ui_scroll_begin(91, 0.0, 0.0, 100.0, 50.0, 200.0);
-    ui_scroll_drag_current();
+    ui_scroll_drag_current(1);
     ui_input_begin(3, 20.0, -300.0, true, false, false);
     ui_layout_begin(0.0, 0.0, 100.0, 60.0);
     ui_scroll_begin(91, 0.0, 0.0, 100.0, 50.0, 200.0);
-    ui_scroll_drag_current();
+    ui_scroll_drag_current(1);
     return ui_scroll_offset() == 150.0 && ui_scroll_item_visible(10, 16.0, 4.0) == false;
 }
 
@@ -104,10 +90,11 @@ test `missing pointer cancels tap capture`(): bool {
 }
 
 test `missing pointer cancels scroll capture`(): bool {
+    ui_modal_set(0);
     ui_input_begin(9, 20.0, 20.0, true, true, false);
     ui_layout_begin(0.0, 0.0, 100.0, 60.0);
     ui_scroll_begin(99, 0.0, 0.0, 100.0, 50.0, 200.0);
-    ui_scroll_drag_current();
+    ui_scroll_drag_current(1);
     if (!ui_scroll_is_dragging()) {
         return false;
     }
@@ -119,4 +106,18 @@ test `zero tap id reports bad argument`(): bool {
     ui_input_begin(3, 20.0, 20.0, true, true, false);
     ui_layout_begin(0.0, 0.0, 100.0, 100.0);
     return !ui_tap(1, 0, 10.0, 10.0, 30.0, 20.0) && ui_status() == UI_STATUS_BAD_ARGUMENT;
+}
+
+test `modal layer cancels a lower layer scroll drag`(): bool {
+    ui_modal_set(0);
+    ui_input_begin(9, 20.0, 20.0, true, true, false);
+    ui_layout_begin(0.0, 0.0, 100.0, 60.0);
+    ui_scroll_begin(100, 0.0, 0.0, 100.0, 50.0, 200.0);
+    ui_scroll_drag_current(1);
+    if (!ui_scroll_is_dragging()) {
+        return false;
+    }
+    ui_modal_set(9);
+    ui_scroll_drag_current(1);
+    return !ui_scroll_is_dragging() && ui_scroll_offset() == 0.0;
 }

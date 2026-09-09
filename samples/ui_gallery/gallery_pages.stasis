@@ -108,7 +108,7 @@ function gallery_scroll(pass: UiPass): void {
     let list_h: f32 = ui_current_height() - 96.0;
     ui_scroll_begin(GALLERY_ID_SCROLL_LIST, list_x, list_y, list_w, list_h, 16.0 * 48.0 + 15.0 * 6.0);
     if (pass == UiPass.Input) {
-        ui_scroll_drag_current();
+        ui_scroll_drag_current(GALLERY_LAYER_SCREEN);
     } else {
         fill_rect(list_x, list_y, list_w, list_h, 0.03, 0.08, 0.12, 1.0);
         ui_scroll_clip_begin();

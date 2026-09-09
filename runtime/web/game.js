@@ -3209,7 +3209,10 @@
     const pushClip = index => {
       if (index < 0 || index >= clipCount) return;
       const base = GFX_F_CLIP_BASE + index * GFX_CLIP_STRIDE_F32;
-      let clip = { x: f32[base], y: f32[base + 1], width: f32[base + 2], height: f32[base + 3] };
+      let clip = {
+        x: f32[base], y: f32[base + 1],
+        width: Math.max(0, f32[base + 2]), height: Math.max(0, f32[base + 3])
+      };
       const parent = clipStack[clipStack.length - 1];
       if (parent) {
         const x = Math.max(parent.x, clip.x);
