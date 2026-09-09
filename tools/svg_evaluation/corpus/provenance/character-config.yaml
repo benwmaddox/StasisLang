@@ -1,0 +1,52 @@
+config: D:\code\external\LIVE-Layerwise-Image-Vectorization\LIVE\config\puddle-path-sweep.yaml
+coord_init:
+  type: sparse
+debug: false
+exid: 178758545903
+experiment: path_sweep_500
+experiment_dir: D:\code\external\LIVE-Layerwise-Image-Vectorization\local_output\live-runs\178758545903_puddle-500path-sweep
+initial: random
+log_dir: D:\code\external\LIVE-Layerwise-Image-Vectorization\local_output\live-runs
+loss:
+  bis_loss_weight: null
+  use_distance_weighted_loss: true
+  use_l1_loss: false
+  xing_loss_weight: 0.01
+lr_base:
+  bg: 0.01
+  color: 0.01
+  point: 1
+  stroke_color: null
+  stroke_width: null
+num_iter: 100
+num_segments: 4
+path_schedule:
+  schedule:
+  - 1
+  - 4
+  - 10
+  - 15
+  - 20
+  - 50
+  - 100
+  - 100
+  - 200
+  type: list
+save:
+  image: true
+  init: false
+  loss: false
+  output: true
+  video: false
+seed: null
+seginit:
+  radius: 4
+  type: circle
+signature:
+- puddle-500path-sweep
+target: D:\code\external\LIVE-Layerwise-Image-Vectorization\local_input\puddle-pop-white-128.png
+trainable:
+  bg: false
+  record: true
+  stroke: false
+use_ycrcb: false

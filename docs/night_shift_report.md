@@ -167,6 +167,22 @@
 - Bad: the initial runtime fixture omitted the required `on_code_swap` entrypoint and failed before capture.
 - Adjustment: live runtime fixtures must include all required lifecycle entrypoints before testing a new host interaction.
 
+## 2026-09-09 - Task 338: post-SVGO game SVG evaluation
+
+- Preserved the recovered 300/1500-path LIVE masters and provenance. Added reproducible precision-2 baselines, isolated optimization experiments, structural audits and a native probe using the existing ThorVG bridge. No production optimization or renderer change: other passes provide no gain, increase compressed size, or alter rendered coverage.
+- Verification: fresh MSVC/ThorVG Release build; 2/2 CTest and 4/4 Python tests; 420 full-image candidate/target/background comparisons; three identical native renders per unique SVG/target; independent regeneration reproduced all hashes and raw/gzip/Brotli sizes; diff checks passed. Commands and measurements are in `tools/svg_evaluation/README.md` and `evidence/`.
+- Visual evidence: inspected `tools/svg_evaluation/evidence/review.png` for candidate comparisons and `tools/svg_evaluation/evidence/screen/baseline-1080x2400.png` for the full screen/contain behavior. Enlarged and background gates compare all pixels automatically.
+- Theory gained: unchanged decimal precision does not guarantee unchanged raster coverage after another path normalization; the enlarged-size failures predict that future numeric passes need the same complete render matrix.
+- Good: hashing recovered sources removed the previous missing-corpus blocker without rerunning vectorization.
+- Bad: MSBuild initially misreported missing compilers because the inherited environment contained both Path and PATH.
+- Adjustment: the standalone build helper normalizes Windows environment keys before invoking CMake/MSBuild.
+
+### Task 338 render acceptance review repair
+
+- Enforced the reviewed per-candidate, target, and background outcome matrix. Unexpected passes, failures, missing/extra comparisons, and inconsistent aggregate results now fail validation, including under `python -O`. Timing noise and nonzero delta magnitudes remain diagnostic.
+- Preserved both branches' report entries while resolving the prepared merge conflict. Validation: eight Python tests, fresh native build and two CTest tests, and the complete 420-comparison render matrix.
+- Visual evidence: not applicable; this repair changes validation and documentation only, preserving the existing SVG and visual evidence.
+
 ## 2026-09-06 - Task 312: safe external URL host action
 
 - Added `open_external_url(string): i32` with a 2048-byte UTF-8 bound, strict HTTP(S) validation, one-attempt input authority, and invalid/ignored/accepted results. Desktop SDL, Android release/Workshop, iOS, and web adapters use platform browser APIs; headless/recording execution cannot launch a browser. JIT swap hooks suppress the action before dispatch.
