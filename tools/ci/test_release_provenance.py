@@ -505,6 +505,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             'gh release create "${NIGHTLY_TAG}" "${release_assets[@]}"',
             release_block,
         )
+        self.assertIn('--target "${GITHUB_SHA}"', release_block)
         self.assertNotRegex(
             release_block,
             r'gh release create .*dist/\*',
