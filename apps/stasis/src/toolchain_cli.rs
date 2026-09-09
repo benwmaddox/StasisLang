@@ -9940,6 +9940,10 @@ mod tests {
         assert!(error.contains("incomplete stdlib or documentation"));
         let (stdlib, docs) = resolve_vendor_directories(&[fallback]).unwrap();
         copy_dir_if_exists(&stdlib, &installed.join("src/stdlib")).unwrap();
+        assert_eq!(
+            fs::read(installed.join("src/stdlib/rig2d.stasis")).unwrap(),
+            fs::read(stdlib.join("rig2d.stasis")).unwrap()
+        );
         assert!(resolve_vendor_directories(&[installed.clone()]).is_err());
         copy_dir_if_exists(&docs, &installed.join("docs/knowledge")).unwrap();
         assert_eq!(
@@ -11382,6 +11386,15 @@ mod tests {
         assert!(root
             .join(".stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis")
             .is_file());
+        assert_eq!(
+            fs::read(root.join(".stasis_cache/toolchain/src/stdlib/rig2d.stasis")).unwrap(),
+            fs::read(
+                bundled_stdlib_dir()
+                    .expect("bundled stdlib")
+                    .join("rig2d.stasis")
+            )
+            .expect("read bundled rig2d stdlib")
+        );
 
         remove_temp(&root);
     }

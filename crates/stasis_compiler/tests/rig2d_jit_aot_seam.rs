@@ -2,6 +2,7 @@
 
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 use stasis_jit::{AotLinkConfig, AotTarget};
 use std::fs;
@@ -76,7 +77,7 @@ fn dynload_artifacts() -> (PathBuf, PathBuf) {
 }
 
 #[test]
-fn rig2d_owned_bone_arrays_match_jit_and_linked_aot() {
+fn rig2d_owned_bone_arrays_match_jit_linked_aot_and_compile_for_web() {
     let root = repository_root();
     let mut jit = JitProcess::new();
     jit.set_project_root(root.to_string_lossy())
@@ -87,6 +88,17 @@ fn rig2d_owned_bone_arrays_match_jit_and_linked_aot() {
     let jit_result = jit
         .execute_i32_noarg_by_name(ROOT)
         .expect("execute rig2d JIT fixture");
+
+    let mut wasm = WasmProcess::new();
+    wasm.set_project_root(root.to_string_lossy())
+        .expect("set Web project root");
+    wasm.set_required_emit_roots(&[ROOT.to_string()]);
+    wasm.upsert_file(FIXTURE_PATH, FIXTURE);
+    wasm.compile().expect("compile rig2d Web fixture");
+    assert!(
+        wasm.module_bytes().starts_with(b"\0asm\x01\0\0\0"),
+        "rig2d Web fixture must produce a valid WebAssembly module"
+    );
 
     let mut aot = AotProcess::new();
     aot.set_project_root(root.to_string_lossy())
