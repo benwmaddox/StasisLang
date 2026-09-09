@@ -142,10 +142,10 @@ final class WorkshopDiagnosticSeamAcceptance {
     }
 
     static String missingResourceSource(String source) {
+        // The fixed parity fixture owns this Sprite; failed loads preserve its state.
         return insertAfterInFunction(source, "function on_code_swap(): void {",
                 "function on_code_swap(): void {",
-                "\n    let missing: Sprite;\n"
-                        + "    missing.load_sprite_from(\"assets/IT031_missing.svg\", 32, 32);\n");
+                "\n    state.opaque.load_sprite_from(\"assets/IT031_missing.svg\", 32, 32);\n");
     }
 
     static String renderSchemaSource(String source) {
