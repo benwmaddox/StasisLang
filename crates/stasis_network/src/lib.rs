@@ -1,12 +1,13 @@
 #![deny(warnings)]
 
 pub mod client;
+pub mod lan;
 pub mod realtime;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::raw::{c_char, c_uchar};
 use std::str;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -534,17 +535,31 @@ fn resolve_advertised_ipv4(
     options: &HostOptions,
     advertise_ipv4: Option<Ipv4Addr>,
 ) -> Result<Option<Ipv4Addr>, NetworkError> {
-    if !options.bind_addr.is_unspecified() {
+    resolve_advertised_ipv4_with(
+        options.bind_addr,
+        advertise_ipv4,
+        || std::env::var_os(ADVERTISE_IPV4_ENV),
+        lan::native_lan_ipv4,
+    )
+}
+
+fn resolve_advertised_ipv4_with(
+    bind_addr: IpAddr,
+    advertise_ipv4: Option<Ipv4Addr>,
+    environment: impl FnOnce() -> Option<std::ffi::OsString>,
+    enumerate: impl FnOnce() -> Result<Ipv4Addr, lan::LanAddressError>,
+) -> Result<Option<Ipv4Addr>, NetworkError> {
+    if !bind_addr.is_unspecified() {
         return Ok(None);
     }
     if let Some(ip) = advertise_ipv4 {
         return Ok(Some(ip));
     }
-    if let Some(value) = std::env::var_os(ADVERTISE_IPV4_ENV) {
+    if let Some(value) = environment() {
         let value = value.to_str().ok_or(NetworkError::InvalidArgument)?;
         return parse_advertise_ipv4(value).map(Some);
     }
-    Ok(Some(route_advertised_ipv4()))
+    enumerate().map(Some).map_err(|_| NetworkError::Io)
 }
 
 fn parse_advertise_ipv4(value: &str) -> Result<Ipv4Addr, NetworkError> {
@@ -562,35 +577,6 @@ fn is_advertisable(ip: Ipv4Addr) -> bool {
     !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast()
 }
 
-fn route_advertised_ipv4() -> Ipv4Addr {
-    // UDP connect consults the routing table without sending a packet. The
-    // documentation-only destinations avoid a dependency on a public service.
-    let candidates = [
-        Ipv4Addr::new(192, 0, 2, 1),
-        Ipv4Addr::new(198, 51, 100, 1),
-        Ipv4Addr::new(203, 0, 113, 1),
-    ]
-    .into_iter()
-    .filter_map(|destination| {
-        let Ok(probe) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
-            return None;
-        };
-        if probe.connect((destination, 9)).is_ok() {
-            if let Ok(SocketAddr::V4(address)) = probe.local_addr() {
-                return Some(*address.ip());
-            }
-        }
-        None
-    });
-    select_advertised_ipv4(candidates)
-}
-
-fn select_advertised_ipv4(candidates: impl IntoIterator<Item = Ipv4Addr>) -> Ipv4Addr {
-    candidates
-        .into_iter()
-        .find(|ip| is_advertisable(*ip))
-        .unwrap_or(Ipv4Addr::LOCALHOST)
-}
 fn reserve(shared: &Shared, amount: usize) -> Result<(), NetworkError> {
     loop {
         let current = shared.buffered_bytes.load(Ordering::Acquire);
@@ -2098,19 +2084,62 @@ mod tests {
                 "accepted invalid override {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn address_resolution_precedence_and_failure_policy() {
+        let wildcard = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let chosen = Ipv4Addr::new(192, 168, 4, 10);
         assert_eq!(
-            select_advertised_ipv4([
-                Ipv4Addr::UNSPECIFIED,
-                Ipv4Addr::new(224, 0, 0, 1),
-                Ipv4Addr::new(10, 2, 3, 4),
-                Ipv4Addr::new(192, 168, 1, 8),
-            ]),
-            Ipv4Addr::new(10, 2, 3, 4)
+            resolve_advertised_ipv4_with(
+                wildcard,
+                Some(chosen),
+                || panic!("explicit override must bypass environment"),
+                || panic!("explicit override must bypass enumeration")
+            ),
+            Ok(Some(chosen))
         );
         assert_eq!(
-            select_advertised_ipv4([Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST]),
-            Ipv4Addr::LOCALHOST
+            resolve_advertised_ipv4_with(
+                wildcard,
+                None,
+                || Some("192.168.4.10".into()),
+                || panic!("environment override must bypass enumeration")
+            ),
+            Ok(Some(chosen))
         );
+        assert_eq!(
+            resolve_advertised_ipv4_with(
+                wildcard,
+                None,
+                || Some("secret-invalid-value".into()),
+                || panic!("invalid override must not fall back")
+            ),
+            Err(NetworkError::InvalidArgument)
+        );
+        assert_eq!(
+            resolve_advertised_ipv4_with(
+                IpAddr::V4(chosen),
+                None,
+                || panic!("concrete bind must bypass environment"),
+                || panic!("concrete bind must bypass enumeration")
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_advertised_ipv4_with(wildcard, None, || None, || Ok(chosen)),
+            Ok(Some(chosen))
+        );
+        for error in [
+            lan::LanAddressError::EnumerationFailed,
+            lan::LanAddressError::NoUsableAddress,
+            lan::LanAddressError::MultipleUsableAddresses,
+        ] {
+            assert_eq!(
+                resolve_advertised_ipv4_with(wildcard, None, || None, || Err(error)),
+                Err(NetworkError::Io)
+            );
+        }
     }
 
     #[test]

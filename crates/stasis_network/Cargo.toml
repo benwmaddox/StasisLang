@@ -13,3 +13,4 @@ socket2.workspace = true
 thiserror.workspace = true
 tungstenite.workspace = true
 getrandom.workspace = true
+if-addrs = "0.13"
