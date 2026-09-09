@@ -1,0 +1,53 @@
+name: Nightly Freshness
+
+on:
+  schedule:
+    - cron: "15 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Fail when changed main is missing a recent nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          last_tag="$(git tag --merged HEAD --list 'nightly-*' --sort=-creatordate | head -n1 || true)"
+          if [[ -z "${last_tag}" ]]; then
+            echo "::error::No nightly release tag is reachable from main."
+            exit 1
+          fi
+          release_json="$(gh release view "${last_tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft,isPrerelease,assets)"
+          if ! jq -e '.isDraft == false and .isPrerelease == true' <<<"${release_json}" >/dev/null; then
+            echo "::error::${last_tag} is not a published nightly prerelease."
+            exit 1
+          fi
+          for required_asset in stasis-nightly-win-x64.zip stasis-editor-release-win32-x64.zip; do
+            if ! jq -e --arg name "${required_asset}" '.assets | any(.name == $name)' <<<"${release_json}" >/dev/null; then
+              echo "::error::${last_tag} is missing required release asset ${required_asset}."
+              exit 1
+            fi
+          done
+          if [[ "$(git rev-list "${last_tag}..HEAD" --count)" == "0" ]]; then
+            echo "main is fully represented by ${last_tag}"
+            exit 0
+          fi
+
+          oldest_unreleased_timestamp="$(git log --reverse --format='%ct' "${last_tag}..HEAD" | head -n1)"
+          unreleased_age_seconds="$(( $(date -u +%s) - oldest_unreleased_timestamp ))"
+          maximum_age_seconds="$(( 36 * 60 * 60 ))"
+          if (( unreleased_age_seconds > maximum_age_seconds )); then
+            echo "::error::main has remained ahead of ${last_tag} for more than 36 hours. Inspect the Nightly Release workflow."
+            exit 1
+          fi
+          echo "main is ahead of ${last_tag}, but the oldest unreleased change is within the 36-hour publication window"

@@ -437,7 +437,11 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 b"@STASIS_APP_NAME@ @STASIS_PACKAGE_ID@ "
                 b"@STASIS_JNI_PACKAGE@ @STASIS_ANDROID_ORIENTATION@ "
                 b"@STASIS_ANDROID_VERSION_CODE@ @STASIS_ANDROID_VERSION_NAME@\n"
-                b"@STASIS_ANDROID_ABI@\n"
+                b"@STASIS_ANDROID_ABI@ @STASIS_NETWORK_ENABLED@ "
+                b"@STASIS_NETWORK_CLIENT_ENABLED@\n"
+                b"@STASIS_NETWORK_PERMISSION@"
+                b"@STASIS_NETWORK_CLIENT_PERMISSION@\n"
+                b"@STASIS_NETWORK_CLIENT_ALIAS@\n"
             )
             manifest = {
                 "schema": "stasis.release_provenance.v1",
@@ -464,7 +468,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             (package / "common/main.c").write_bytes(common_shell)
             (package / "android/main.c").write_bytes(
                 b"Demo App com.example.demo com_example_demo sensorPortrait 7 2.1.0\n"
-                b"arm64-v8a\n"
+                b"arm64-v8a 0 0\n\n\n"
             )
             (package / "stasis_mobile_package.json").write_text(
                 json.dumps(
@@ -499,6 +503,40 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "--expect-runtime-sources",
             ]
             self.assertEqual(subprocess.run(command, check=False).returncode, 0)
+            network_client_receipt = {
+                "target": "android-arm64",
+                "name": "demo",
+                "app_name": "Demo App",
+                "package_id": "com.example.demo",
+                "android_orientation": "sensorPortrait",
+                "android_version_code": "7",
+                "android_version_name": "2.1.0",
+                "network_client": True,
+            }
+            (package / "stasis_mobile_package.json").write_text(
+                json.dumps(network_client_receipt), encoding="utf-8"
+            )
+            (package / "android/main.c").write_bytes(
+                b"Demo App com.example.demo com_example_demo sensorPortrait 7 2.1.0\n"
+                b"arm64-v8a 0 1\n"
+                b'    <uses-permission android:name="android.permission.INTERNET" />\n'
+                b'    <permission android:name="com.example.demo.permission.PROVISION_NETWORK_CLIENT" android:protectionLevel="signature" />\n'
+                b'        <activity-alias android:name=".NetworkJoin" android:targetActivity=".MainActivity" android:exported="true" android:permission="com.example.demo.permission.PROVISION_NETWORK_CLIENT" />\n'
+            )
+            self.assertEqual(subprocess.run(command, check=False).returncode, 0)
+            network_client_receipt["network_client"] = False
+            (package / "stasis_mobile_package.json").write_text(
+                json.dumps(network_client_receipt), encoding="utf-8"
+            )
+            client_mismatch = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(client_mismatch.returncode, 0)
+            self.assertIn("release transform", client_mismatch.stderr)
+            (package / "stasis_mobile_package.json").write_text(
+                json.dumps(network_client_receipt | {"network_client": True}),
+                encoding="utf-8",
+            )
             legacy = dict(manifest)
             legacy["command_buffer"] = {"name": "gfx_cmd", "version": 4}
             (release / "stasis_release_provenance.json").write_text(

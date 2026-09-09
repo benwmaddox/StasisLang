@@ -1325,6 +1325,65 @@ fn api_error(context: &str, status: u16, value: &Value, secret: &str) -> String 
 mod tests {
     use super::*;
 
+    static ENVIRONMENT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvironmentRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl Drop for EnvironmentRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn openrouter_environment_configuration_is_accepted_without_serializing_key() {
+        let _lock = ENVIRONMENT_TEST_LOCK.lock().unwrap();
+        let names = [
+            "STASIS_AI_PROVIDER",
+            "OPENROUTER_API_KEY",
+            "STASIS_AI_MODEL",
+            "STASIS_AI_ROUTE_ONLY",
+            "STASIS_AI_ALLOW_FALLBACKS",
+            "STASIS_AI_ROUTE_SORT",
+            "STASIS_AI_TIMEOUT_SECONDS",
+        ];
+        let _restore = EnvironmentRestore(
+            names
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        let secret = "environment-test-key-not-a-real-credential";
+        for (name, value) in [
+            ("STASIS_AI_PROVIDER", "openrouter"),
+            ("OPENROUTER_API_KEY", secret),
+            ("STASIS_AI_MODEL", "openai/gpt-oss-120b"),
+            ("STASIS_AI_ROUTE_ONLY", "cerebras,openai"),
+            ("STASIS_AI_ALLOW_FALLBACKS", "false"),
+            ("STASIS_AI_ROUTE_SORT", "latency"),
+            ("STASIS_AI_TIMEOUT_SECONDS", "45"),
+        ] {
+            std::env::set_var(name, value);
+        }
+
+        let ProviderConfig::OpenRouter(config) = ProviderConfig::from_env().unwrap() else {
+            panic!("OpenRouter environment selected a different provider");
+        };
+        assert_eq!(config.api_key, secret);
+        assert_eq!(config.model, "openai/gpt-oss-120b");
+        assert_eq!(config.routing.only, ["cerebras", "openai"]);
+        assert!(!config.routing.allow_fallbacks);
+        assert!(matches!(config.routing.sort, RoutingSort::Latency));
+        assert_eq!(config.timeout, Duration::from_secs(45));
+        let route = OpenRouterProvider::new(config).unwrap().route_json(None);
+        assert!(!route.to_string().contains(secret));
+    }
+
     #[test]
     fn action_progress_requires_a_nonempty_top_level_tool_calls_array() {
         for content in [
