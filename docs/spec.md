@@ -543,6 +543,12 @@ state.ui.aura.draw(24.0, 36.0, 255, 0);
 state.enemies[i].damage(5);
 ```
 
+Receiver-owned fixed arrays of named structs support scalar field reads and
+writes, such as `self.bones[index].parent` and `self.bones[index].local_x`.
+The receiver retains its owner's storage identity through nested calls. Indexed
+access retains the fixed-array bounds contract in section 4.2.1; selecting a whole
+struct element as a scalar value is rejected.
+
 Entry files should normally group application-owned mutable state beneath one
 root global. Fixed host ABI globals are an explicit exception.
 

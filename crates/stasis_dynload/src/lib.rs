@@ -7506,7 +7506,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "representative timing report; run explicitly with --ignored"]
     fn hot_render_planner_microbenchmark() {
         let realized = (0..8)
             .map(|index| RealizedHotRenderImage {

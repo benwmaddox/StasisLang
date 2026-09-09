@@ -285,11 +285,9 @@ fn native_host_frame(pointer_count: i32, mutate_writer: bool) -> (Vec<i32>, Vec<
         .target(&target)
         .get_compiler();
     let mut command = compiler.to_command();
-    command.current_dir(&dir).arg(&source);
+    command.current_dir(&dir).arg("fixture.c");
     if compiler.is_like_msvc() {
-        command
-            .arg("/std:c11")
-            .arg(format!("/Fe{}", executable.display()));
+        command.arg("/std:c11").arg("/Fefixture.exe");
     } else {
         command.args(["-std=c11", "-o"]).arg(&executable);
     }

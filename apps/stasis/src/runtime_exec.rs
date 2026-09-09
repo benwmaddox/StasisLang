@@ -139,10 +139,7 @@ mod tests {
         let launcher = RuntimeLauncher::new(PathBuf::from(
             "samples/brickout_revenge/brickout_revenge_v1.stasis",
         ));
-        assert!(launcher
-            .repo_root
-            .to_string_lossy()
-            .replace('\\', "/")
-            .contains("/StasisLang"));
+        assert!(launcher.repo_root.join("Cargo.toml").is_file());
+        assert!(launcher.repo_root.join("apps/stasis/Cargo.toml").is_file());
     }
 }
