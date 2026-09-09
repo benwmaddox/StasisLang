@@ -295,6 +295,10 @@ jobs:
           python tools/cargo_cache.py run -- cargo build -p stasis
           mkdir -p target/vscode-e2e-toolchain/bin
           cp build/codex-cargo-target/debug/stasis target/vscode-e2e-toolchain/bin/
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            # DWARF pushes the debug executable beyond Node's string limit in the VSIX secret scanner.
+            strip --strip-debug target/vscode-e2e-toolchain/bin/stasis
+          fi
           cp "$STASIS_RUNTIME_LIBRARY_PATH" target/vscode-e2e-toolchain/bin/
           cp -R src target/vscode-e2e-toolchain/
           "$STASIS_E2E_EXECUTABLE" --json editor-info
