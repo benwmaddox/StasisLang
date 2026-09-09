@@ -25,6 +25,7 @@ socket2.workspace = true
 thiserror.workspace = true
 tungstenite.workspace = true
 getrandom.workspace = true
+if-addrs = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

@@ -42,9 +42,9 @@ its fragment; share it only with intended players. The browser adapter owns
 pairing and resume credentials, while Stasis receives only bounded semantic
 mailbox data. Do not paste private links into logs, bug reports or screenshots.
 
-Automatic IPv4 selection consults the host routing table. On machines with
-multiple adapters, VPNs, or no default route, set the advertised address before
-launching the package:
+Automatic IPv4 selection enumerates native interfaces without requiring an
+Internet connection or default route. If multiple usable addresses are present
+(including VPNs), select the intended LAN explicitly before launching:
 
 ```powershell
 $env:STASIS_NETWORK_ADVERTISE_IPV4 = '192.168.1.25'
@@ -54,9 +54,13 @@ $env:STASIS_NETWORK_ADVERTISE_IPV4 = '192.168.1.25'
 Use the host's address on the same LAN as the browser device. The override
 changes the advertised address, not the listening interface. Invalid address
 syntax, unspecified, multicast and broadcast addresses fail startup. A
-loopback fallback is useful only for a browser on the host itself. Restart the
+loopback override is useful only for a browser on the host itself; automatic
+selection never silently falls back to loopback. Restart the
 application after changing adapters or the override; existing private links
 belong to the old host session.
+
+See [portable LAN policy and platform acceptance](portable_lan.md) for selection
+failure policy, optional discovery, and platform permission onboarding.
 
 ## Windows diagnostics
 

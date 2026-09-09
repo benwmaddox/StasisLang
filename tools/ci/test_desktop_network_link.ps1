@@ -33,7 +33,7 @@ try {
     }
 
     $object = Join-Path $probeDir "stasis_network_link_test.obj"
-    $compile = 'call "{0}" >nul && cl /nologo /W4 /WX /MT /I"{1}" "{2}" /Fo:"{3}" /Fe:"{4}" "{5}" ws2_32.lib bcrypt.lib userenv.lib ntdll.lib' -f `
+    $compile = 'call "{0}" >nul && cl /nologo /W4 /WX /MT /I"{1}" "{2}" /Fo:"{3}" /Fe:"{4}" "{5}" ws2_32.lib iphlpapi.lib bcrypt.lib userenv.lib ntdll.lib' -f `
         $vcvars, $include, $source, $object, $executable, $library
     & cmd.exe /d /c $compile
     if ($LASTEXITCODE -ne 0) { throw "native stasis_network link probe failed to compile" }
@@ -43,7 +43,7 @@ try {
     $clientSource = Join-Path $repoRoot "runtime/tests/stasis_network_client_link_test.c"
     $clientObject = Join-Path $probeDir "stasis_network_client_link_test.obj"
     $clientExecutable = Join-Path $probeDir "stasis_network_client_link_test.exe"
-    $clientCompile = 'call "{0}" >nul && cl /nologo /W4 /WX /MT /I"{1}" "{2}" /Fo:"{3}" /Fe:"{4}" "{5}" ws2_32.lib bcrypt.lib userenv.lib ntdll.lib' -f `
+    $clientCompile = 'call "{0}" >nul && cl /nologo /W4 /WX /MT /I"{1}" "{2}" /Fo:"{3}" /Fe:"{4}" "{5}" ws2_32.lib iphlpapi.lib bcrypt.lib userenv.lib ntdll.lib' -f `
         $vcvars, $include, $clientSource, $clientObject, $clientExecutable, $library
     & cmd.exe /d /c $clientCompile
     if ($LASTEXITCODE -ne 0) { throw "native client link probe failed to compile" }
