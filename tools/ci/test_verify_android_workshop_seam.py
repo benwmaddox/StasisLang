@@ -753,6 +753,17 @@ class WorkshopSeamTests(unittest.TestCase):
             with self.subTest(new=new), self.assertRaisesRegex(SeamError, error):
                 verify_log(GOOD.replace(old, new, 1), MANIFEST)
 
+    def test_rejects_it029_non_integer_lifecycle_epochs(self):
+        for field, value in (("lifecycle_surface_generation", 2),
+                             ("lifecycle_renderer_generation", 1)):
+            for invalid in (True, False, float(value)):
+                with self.subTest(field=field, invalid=invalid):
+                    old = f'"{field}":{value}'
+                    mutated = GOOD.replace(old, f'"{field}":{json.dumps(invalid)}')
+                    self.assertNotEqual(GOOD, mutated)
+                    with self.assertRaisesRegex(SeamError, "stale generation"):
+                        verify_log(mutated, MANIFEST)
+
     def test_rejects_it029_stale_generation_or_duplicate_restore(self):
         stale = GOOD.replace('"stale_generation_rejections":6',
                              '"stale_generation_rejections":0')

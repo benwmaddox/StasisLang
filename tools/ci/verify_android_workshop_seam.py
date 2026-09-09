@@ -292,10 +292,13 @@ def verify_it028(log: str, after_position: int) -> dict:
 def stable_resource_identities(resources: dict) -> list[str]:
     surface = resources.get("surface_generation")
     renderer = resources.get("renderer_generation")
+    lifecycle_surface = resources.get("lifecycle_surface_generation")
+    lifecycle_renderer = resources.get("lifecycle_renderer_generation")
     if type(surface) is not int or type(renderer) is not int \
+            or type(lifecycle_surface) is not int or type(lifecycle_renderer) is not int \
             or surface <= 0 or renderer <= 0 \
-            or surface + 1 != resources.get("lifecycle_surface_generation") \
-            or renderer != resources.get("lifecycle_renderer_generation"):
+            or surface + 1 != lifecycle_surface \
+            or renderer != lifecycle_renderer:
         raise SeamError("IT-029 resource snapshot has a stale generation")
     epoch = f":surface={surface}:renderer={renderer}"
     stable = []
