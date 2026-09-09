@@ -205,7 +205,7 @@ if ! command -v stasis >/dev/null 2>&1; then
 fi
 
 echo "Stasis pre-commit: enforcing canonical source format"
-if ! stasis format; then
+if ! stasis format src tests; then
     echo "Commit blocked: 'stasis format' failed." >&2
     exit 1
 fi
@@ -1362,6 +1362,7 @@ fn execute(
                 _ => None,
             });
             let vendor_gate = match &other {
+                ToolchainCommand::Fmt { .. } => VendorGate::Inspect,
                 ToolchainCommand::Vendor { .. } => VendorGate::Inspect,
                 ToolchainCommand::Prepare => VendorGate::Inspect,
                 ToolchainCommand::Symbol { command } if command.is_read_only() => {
@@ -10019,6 +10020,49 @@ mod tests {
         assert!(vendor_root.join("stdlib/stdlib.stasis").is_file());
         assert!(vendor_root.join("docs/README.md").is_file());
         assert!(!vendor_root.join("src").exists());
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn formatting_preserves_mismatched_vendor_and_manifest() {
+        let root = temp_dir("format_preserves_vendor");
+        create_project(root.clone(), "format_preserves_vendor".into()).unwrap();
+        let manifest_path = root.join(MANIFEST_NAME);
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["vendor"]["stasis"]["release_id"] = json!("newer-than-this-toolchain");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("vendor/stasis/local-marker.txt"), "preserve me").unwrap();
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 {return 0;}\n",
+        )
+        .unwrap();
+        let original_manifest = fs::read(&manifest_path).unwrap();
+        let original_vendor = directory_sha256(&root.join("vendor/stasis")).unwrap();
+        for check in [false, true] {
+            execute(
+                ToolchainCommand::Fmt {
+                    check,
+                    stdin: false,
+                    paths: Vec::new(),
+                },
+                Some(root.clone()),
+                false,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&manifest_path).unwrap(), original_manifest);
+            assert_eq!(
+                directory_sha256(&root.join("vendor/stasis")).unwrap(),
+                original_vendor
+            );
+        }
+        assert!(PROJECT_PRE_COMMIT_HOOK.contains("stasis format src tests"));
+        assert!(!PROJECT_PRE_COMMIT_HOOK.contains("if ! stasis format;"));
         remove_temp(&root);
     }
 
