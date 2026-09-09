@@ -283,6 +283,11 @@ restore release assets.
 `verify` remains reserved for a future non-presenting batch verifier. `replay` performs verification
 while presenting every reconstructed tick.
 
+Formatting checks and formatting writes leave `stasis.json` and `vendor/stasis` unchanged,
+even when the selected toolchain differs from the project's vendor pin. Generated commit hooks
+format explicit `src` and `tests` paths so older formatters also avoid workspace synchronization.
+Release changes remain separate from formatting.
+
 ### Headless scenarios
 
 Scenario files live under the manifest's test directory and end in `.scenario.json`. They are
