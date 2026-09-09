@@ -1,6 +1,6 @@
 // Small, single-pass UI layout and interaction helpers.
 //
-// Geometry is deliberately ephemeral: `ui_begin_frame` resets the current
+// Geometry is deliberately ephemeral: `ui_layout_begin` resets the current
 // rectangle and scope stack and every following operation derives a fresh
 // rectangle from the current parent.  The only globals that survive a frame
 // are semantic interaction state (button capture and scroll offsets).
@@ -23,6 +23,13 @@ enum UiViewportFit {
     Contain,
     Cover,
     IntegerScale,
+}
+
+// A layout recipe can be replayed for interaction and paint without retaining
+// its resolved geometry.
+enum UiPass {
+    Input,
+    Paint,
 }
 
 const UI_MAX_STACK_DEPTH: i32 = 32;
@@ -69,6 +76,13 @@ global ui_active_pointer: i32;
 global ui_pointer_consumed: i32;
 global ui_modal_layer: i32;
 global ui_hot_id: i32;
+global ui_hot_layer: i32;
+global ui_input_pointer_id: i32;
+global ui_input_pointer_x: f32;
+global ui_input_pointer_y: f32;
+global ui_input_pointer_down: bool;
+global ui_input_went_down: bool;
+global ui_input_went_up: bool;
 global ui_scroll_ids: i32[32];
 global ui_scroll_used: i32[32];
 global ui_scroll_offsets: f32[32];
@@ -140,13 +154,53 @@ function @inline ui_stack_level(): i32 {
     return ui_stack_depth;
 }
 
-function ui_begin_frame(x: f32, y: f32, w: f32, h: f32): void {
+// Reset interaction routing once before an input recipe. Layout may then be
+// replayed for paint without discarding the completed hot state.
+function ui_input_begin(pointer_id: i32, pointer_x: f32, pointer_y: f32, pointer_down: bool, went_down: bool, went_up: bool): void {
+    ui_input_pointer_id = pointer_id;
+    ui_input_pointer_x = pointer_x;
+    ui_input_pointer_y = pointer_y;
+    ui_input_pointer_down = pointer_down;
+    ui_input_went_down = went_down;
+    ui_input_went_up = went_up;
+    ui_hot_id = 0;
+    ui_hot_layer = 0;
+    ui_pointer_consumed = 0;
+    if (pointer_id < 0) {
+        ui_active_id = 0;
+        ui_active_layer = 0;
+        ui_active_pointer = -1;
+        let i: i32 = 0;
+        for (i = 0; i < UI_MAX_SCROLL_STATES; i = i + 1) {
+            ui_scroll_drag_pointer[i] = -1;
+        }
+    }
+}
+
+// Snapshot the primary logical pointer. The interaction recipe deliberately
+// routes one pointer; callers needing another policy can use ui_input_begin.
+function ui_input_begin_primary(frame: HostFrame): void {
+    if (frame.pointer_count <= 0) {
+        ui_input_begin(-1, 0.0, 0.0, false, false, false);
+        return;
+    }
+    ui_input_begin(
+        frame.pointers[0].id,
+        frame.pointers[0].x_logical,
+        frame.pointers[0].y_logical,
+        frame.pointers[0].is_down,
+        frame.pointers[0].went_down,
+        frame.pointers[0].went_up
+    );
+}
+
+// Reset only ephemeral geometry. This is safe to call once for input and again
+// for paint during the same tick/render cycle.
+function ui_layout_begin(x: f32, y: f32, w: f32, h: f32): void {
     ui_set_rect(x, y, w, h);
     ui_status_value = 0;
     ui_stack_depth = 0;
     ui_scope_overflow_count = 0;
-    ui_hot_id = 0;
-    ui_pointer_consumed = 0;
     ui_scroll_current_slot = -1;
     ui_scroll_current_x = 0.0;
     ui_scroll_current_y = 0.0;
@@ -155,6 +209,18 @@ function ui_begin_frame(x: f32, y: f32, w: f32, h: f32): void {
     ui_scroll_current_content_h = 0.0;
     ui_scroll_current_max_offset = 0.0;
     ui_scroll_clip_active = 0;
+}
+
+function @inline ui_input_x(): f32 {
+    return ui_input_pointer_x;
+}
+
+function @inline ui_input_y(): f32 {
+    return ui_input_pointer_y;
+}
+
+function @inline ui_input_pressed(): bool {
+    return ui_input_went_down;
 }
 
 function ui_scope_begin(kind: UiScopeKind, direction: UiStackDirection, x: f32, y: f32, w: f32, h: f32, spacing: f32): void {
@@ -208,6 +274,14 @@ function ui_vstack_begin(x: f32, y: f32, w: f32, h: f32, spacing: f32, direction
 
 function ui_hstack_begin(x: f32, y: f32, w: f32, h: f32, spacing: f32, direction: UiStackDirection): void {
     ui_scope_begin(UiScopeKind.Horizontal, direction, x, y, w, h, spacing);
+}
+
+function ui_vstack_begin_current(spacing: f32, direction: UiStackDirection): void {
+    ui_vstack_begin(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), spacing, direction);
+}
+
+function ui_hstack_begin_current(spacing: f32, direction: UiStackDirection): void {
+    ui_hstack_begin(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), spacing, direction);
 }
 
 function ui_scope_next_fixed(extent: f32): void {
@@ -375,6 +449,10 @@ function ui_inset(x: f32, y: f32, w: f32, h: f32, pad_left: f32, pad_top: f32, p
     ui_set_rect(next_x, next_y, next_w, next_h);
 }
 
+function ui_inset_current(pad_left: f32, pad_top: f32, pad_right: f32, pad_bottom: f32): void {
+    ui_inset(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), pad_left, pad_top, pad_right, pad_bottom);
+}
+
 function ui_anchor(x: f32, y: f32, w: f32, h: f32, child_w: f32, child_h: f32, horizontal: UiHorizontal, vertical: UiVertical): void {
     let safe_w: f32 = child_w;
     let safe_h: f32 = child_h;
@@ -493,23 +571,20 @@ function @inline ui_input_allowed(layer_id: i32): bool {
     return ui_modal_layer == 0 || ui_modal_layer == layer_id;
 }
 
-function ui_button(
-    layer_id: i32,
-    id: i32,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    pointer_id: i32,
-    pointer_x: f32,
-    pointer_y: f32,
-    pointer_down: bool,
-    went_down: bool,
-    went_up: bool
-): bool {
-    let inside: bool = ui_contains(x, y, w, h, pointer_x, pointer_y);
+// Interaction-only tap helper. It returns true on release inside the captured
+// rectangle; drawing remains the caller's responsibility.
+function ui_tap(layer_id: i32, id: i32, x: f32, y: f32, w: f32, h: f32): bool {
+    if (id <= 0) {
+        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        return false;
+    }
+    if (ui_input_pointer_id < 0) {
+        return false;
+    }
+    let inside: bool = ui_contains(x, y, w, h, ui_input_pointer_x, ui_input_pointer_y);
     if (ui_input_allowed(layer_id) && ui_pointer_consumed == 0 && inside) {
         ui_hot_id = id;
+        ui_hot_layer = layer_id;
     }
     if (!ui_input_allowed(layer_id)) {
         return false;
@@ -518,21 +593,21 @@ function ui_button(
     if (ui_pointer_consumed != 0 && ui_active_id != id) {
         return false;
     }
-    if (went_down && inside && ui_pointer_consumed == 0) {
+    if (ui_input_went_down && inside && ui_pointer_consumed == 0) {
         ui_active_id = id;
         ui_active_layer = layer_id;
-        ui_active_pointer = pointer_id;
+        ui_active_pointer = ui_input_pointer_id;
         ui_pointer_consumed = 1;
     }
 
-    if (ui_active_id != id || ui_active_layer != layer_id || ui_active_pointer != pointer_id) {
+    if (ui_active_id != id || ui_active_layer != layer_id || ui_active_pointer != ui_input_pointer_id) {
         return false;
     }
 
-    if (!pointer_down && !went_up) {
+    if (!ui_input_pointer_down && !ui_input_went_up) {
         return false;
     }
-    if (went_up) {
+    if (ui_input_went_up) {
         let clicked: bool = inside;
         ui_active_id = 0;
         ui_active_layer = 0;
@@ -542,12 +617,16 @@ function ui_button(
     return false;
 }
 
-function @inline ui_button_hot(id: i32): bool {
-    return ui_hot_id == id;
+function ui_tap_current(layer_id: i32, id: i32): bool {
+    return ui_tap(layer_id, id, ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height());
 }
 
-function @inline ui_button_active(id: i32): bool {
-    return ui_active_id == id;
+function @inline ui_tap_hot(layer_id: i32, id: i32): bool {
+    return ui_hot_layer == layer_id && ui_hot_id == id;
+}
+
+function @inline ui_tap_active(layer_id: i32, id: i32): bool {
+    return ui_active_layer == layer_id && ui_active_id == id;
 }
 
 function @inline ui_pointer_capture_active(): bool {
@@ -655,26 +734,33 @@ function ui_scroll_end(): void {
     ui_scroll_clip_active = 0;
 }
 
-function ui_scroll_drag(pointer_id: i32, pointer_x: f32, pointer_y: f32, went_down: bool, pointer_down: bool, went_up: bool): void {
+function ui_scroll_drag_current(): void {
     let slot: i32 = ui_scroll_current_slot;
     if (slot < 0) {
         return;
     }
-    let inside: bool = ui_contains(ui_scroll_current_x, ui_scroll_current_y, ui_scroll_current_w, ui_scroll_current_h, pointer_x, pointer_y);
-    if (went_down && inside && ui_pointer_consumed == 0 && ui_scroll_current_max_offset > 0.0) {
-        ui_scroll_drag_pointer[slot] = pointer_id;
-        ui_scroll_drag_start_pointer_y[slot] = pointer_y;
+    let inside: bool = ui_contains(
+        ui_scroll_current_x,
+        ui_scroll_current_y,
+        ui_scroll_current_w,
+        ui_scroll_current_h,
+        ui_input_pointer_x,
+        ui_input_pointer_y
+    );
+    if (ui_input_went_down && inside && ui_pointer_consumed == 0 && ui_scroll_current_max_offset > 0.0) {
+        ui_scroll_drag_pointer[slot] = ui_input_pointer_id;
+        ui_scroll_drag_start_pointer_y[slot] = ui_input_pointer_y;
         ui_scroll_drag_start_offset[slot] = ui_scroll_offsets[slot];
         ui_pointer_consumed = 1;
     }
-    if (ui_scroll_drag_pointer[slot] != pointer_id) {
+    if (ui_scroll_drag_pointer[slot] != ui_input_pointer_id) {
         return;
     }
-    if (pointer_down || went_up) {
-        ui_scroll_offsets[slot] = ui_scroll_drag_start_offset[slot] + ui_scroll_drag_start_pointer_y[slot] - pointer_y;
+    if (ui_input_pointer_down || ui_input_went_up) {
+        ui_scroll_offsets[slot] = ui_scroll_drag_start_offset[slot] + ui_scroll_drag_start_pointer_y[slot] - ui_input_pointer_y;
         ui_scroll_clamp_slot(slot, ui_scroll_current_content_h, ui_scroll_current_h);
     }
-    if (went_up) {
+    if (ui_input_went_up) {
         ui_scroll_drag_pointer[slot] = -1;
     }
 }
