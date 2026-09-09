@@ -84,6 +84,7 @@ android/**/app/build/
 *.apk
 .env
 __pycache__/
+/output/svg-evaluation*/
 
 # Debug/temp files
 nul

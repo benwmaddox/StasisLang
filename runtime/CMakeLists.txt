@@ -47,7 +47,7 @@ option(
     ${STASIS_MOBILE_PLATFORM}
 )
 option(STASIS_MOBILE_RUNTIME_BUILD_TESTS "Build mobile runtime lifecycle tests" OFF)
-option(STASIS_SVG_BUILD_TESTS "Build the ThorVG SVG bridge smoke tests" OFF)
+option(STASIS_SVG_BUILD_TESTS "Build the ThorVG SVG bridge smoke and evaluation tests" OFF)
 option(STASIS_GRAPHICS_BUILD_TESTS "Build native renderer contract tests" OFF)
 
 if(STASIS_BUILD_MONOLITH)
@@ -71,6 +71,15 @@ if(STASIS_SVG_BUILD_TESTS)
     add_test(
         NAME stasis_svg_smoke
         COMMAND stasis_svg_smoke "${CMAKE_CURRENT_LIST_DIR}/tests/fixtures/viewport-clip.svg"
+    )
+    add_executable(stasis_svg_bench tests/stasis_svg_bench.cpp stasis_svg.cpp)
+    target_compile_features(stasis_svg_bench PRIVATE cxx_std_14)
+    target_link_libraries(stasis_svg_bench PRIVATE stasis_thorvg)
+    add_test(
+        NAME stasis_svg_bench
+        COMMAND stasis_svg_bench
+            "${CMAKE_CURRENT_LIST_DIR}/tests/fixtures/viewport-clip.svg"
+            40 20 "${CMAKE_CURRENT_BINARY_DIR}/stasis_svg_bench.rgba" 2
     )
 endif()
 
