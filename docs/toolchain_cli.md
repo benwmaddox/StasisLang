@@ -58,6 +58,16 @@ Commands discover
 `stasis.json` by walking from the selected path toward the filesystem root, so they work from the
 project root and nested directories. `--workspace PATH` selects a project explicitly.
 
+On Windows, opening a visible game window minimizes the attached console once by default.
+This applies to development/editor sessions and packaged release games. The game and editor
+remain visible; restore the console from the taskbar whenever you need its output. Resizing or
+reopening the game window does not minimize a console you restored. Windows Terminal may
+share one host window across tabs, so minimizing that host also minimizes its other tabs.
+Set `STASIS_CONSOLE_START_MINIMIZED=0` before launching to keep the console visible, including
+when using a console-based frontend. Headless recording and commands that do not open a visible
+game window leave the console alone. `STASIS_WINDOW_START_MINIMIZED` separately controls the
+game window.
+
 ## Workspace contract
 
 `stasis.json` is versioned and deterministic:

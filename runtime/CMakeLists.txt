@@ -268,6 +268,18 @@ if(STASIS_GRAPHICS_BUILD_TESTS AND (TARGET stasis_graphics_static OR TARGET stas
     add_test(NAME stasis_sprite_atlas_reservation_test COMMAND stasis_sprite_atlas_reservation_test)
     set_tests_properties(stasis_sprite_atlas_reservation_test PROPERTIES
         ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy")
+    if(WIN32)
+        add_executable(stasis_console_launch_test tests/stasis_console_launch_test.c)
+        if(TARGET stasis_graphics_static)
+            target_link_libraries(stasis_console_launch_test PRIVATE stasis_graphics_static user32)
+        else()
+            target_link_libraries(stasis_console_launch_test PRIVATE stasis_graphics user32)
+            set_target_properties(stasis_console_launch_test PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        endif()
+        add_test(NAME stasis_console_launch_contract COMMAND stasis_console_launch_test)
+        set_tests_properties(stasis_console_launch_contract PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+    endif()
 endif()
 
 if(STASIS_BUILD_MONOLITH)
