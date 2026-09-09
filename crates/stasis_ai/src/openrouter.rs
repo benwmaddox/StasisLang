@@ -6,7 +6,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::future::Future;
+use std::io::Read;
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -155,33 +158,68 @@ pub struct OpenRouterConfig {
 
 impl OpenRouterConfig {
     pub fn from_env() -> Result<Self, String> {
-        let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
+        Self::from_lookup(&|name| std::env::var(name).ok())
+    }
+
+    /// Read only this workspace's .env; process environment takes precedence.
+    pub fn from_workspace(root: &Path) -> Result<Self, String> {
+        let settings = WorkspaceSettings::read(root)?;
+        Self::from_lookup(&|name| settings.get(name, &|key| std::env::var(key).ok()))
+    }
+
+    fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let preferred_min_throughput = setting_f64(lookup, "STASIS_AI_PREFERRED_MIN_THROUGHPUT")?;
+        let hard_min_throughput = setting_f64(lookup, "STASIS_AI_HARD_MIN_THROUGHPUT")?
+            .or_else(|| preferred_min_throughput.is_none().then_some(400.0));
+        let api_key = lookup("OPENROUTER_API_KEY").ok_or_else(|| {
             "OPENROUTER_API_KEY is required when STASIS_AI_PROVIDER=openrouter".to_string()
         })?;
         let config = Self {
             api_key,
-            base_url: env_nonempty("STASIS_OPENROUTER_URL").unwrap_or_else(|| DEFAULT_OPENROUTER_URL.to_string()),
-            model: env_nonempty("STASIS_AI_MODEL").unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string()),
+            base_url: setting_nonempty(lookup, "STASIS_OPENROUTER_URL")
+                .unwrap_or_else(|| DEFAULT_OPENROUTER_URL.to_string()),
+            model: setting_nonempty(lookup, "STASIS_AI_MODEL")
+                .unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string()),
             routing: RoutingConfig {
-                only: env_list("STASIS_AI_ROUTE_ONLY"),
-                order: env_list("STASIS_AI_ROUTE_ORDER"),
-                allow_fallbacks: env_bool("STASIS_AI_ALLOW_FALLBACKS", true)?,
-                sort: match env_nonempty("STASIS_AI_ROUTE_SORT").as_deref().unwrap_or("throughput") {
+                only: setting_list(lookup, "STASIS_AI_ROUTE_ONLY"),
+                order: setting_list(lookup, "STASIS_AI_ROUTE_ORDER"),
+                allow_fallbacks: setting_bool(lookup, "STASIS_AI_ALLOW_FALLBACKS", true)?,
+                sort: match setting_nonempty(lookup, "STASIS_AI_ROUTE_SORT")
+                    .as_deref()
+                    .unwrap_or("throughput")
+                {
                     "price" => RoutingSort::Price,
                     "throughput" => RoutingSort::Throughput,
                     "latency" => RoutingSort::Latency,
-                    value => return Err(format!("STASIS_AI_ROUTE_SORT must be price, throughput, or latency; got {value}")),
+                    _ => {
+                        return Err(
+                            "STASIS_AI_ROUTE_SORT must be price, throughput, or latency".into()
+                        )
+                    }
                 },
-                preferred_min_throughput: env_f64("STASIS_AI_PREFERRED_MIN_THROUGHPUT")?,
-                preferred_throughput_policy: match env_nonempty("STASIS_AI_PREFERRED_THROUGHPUT_POLICY").as_deref().unwrap_or("allow_below") {
+                preferred_min_throughput,
+                preferred_throughput_policy: match setting_nonempty(
+                    lookup,
+                    "STASIS_AI_PREFERRED_THROUGHPUT_POLICY",
+                )
+                .as_deref()
+                .unwrap_or("allow_below")
+                {
                     "allow_below" => PreferredThroughputPolicy::AllowBelow,
                     "fail" => PreferredThroughputPolicy::Fail,
-                    value => return Err(format!("STASIS_AI_PREFERRED_THROUGHPUT_POLICY must be allow_below or fail; got {value}")),
+                    _ => {
+                        return Err(
+                            "STASIS_AI_PREFERRED_THROUGHPUT_POLICY must be allow_below or fail"
+                                .into(),
+                        )
+                    }
                 },
-                hard_min_throughput: env_f64("STASIS_AI_HARD_MIN_THROUGHPUT")?,
-                max_price: env_f64("STASIS_AI_MAX_PRICE")?,
+                hard_min_throughput,
+                max_price: setting_f64(lookup, "STASIS_AI_MAX_PRICE")?,
             },
-            timeout: Duration::from_secs(env_u64("STASIS_AI_TIMEOUT_SECONDS")?.unwrap_or(120)),
+            timeout: Duration::from_secs(
+                setting_u64(lookup, "STASIS_AI_TIMEOUT_SECONDS")?.unwrap_or(120),
+            ),
         };
         config.validate()?;
         Ok(config)
@@ -252,6 +290,30 @@ impl ProviderConfig {
             value => Err(format!(
                 "STASIS_AI_PROVIDER must be codex or openrouter; got {value}"
             )),
+        }
+    }
+
+    /// Resolve this workspace's provider without changing global environment.
+    pub fn from_workspace(root: &Path) -> Result<Self, String> {
+        Self::from_workspace_lookup(root, &|name| std::env::var(name).ok())
+    }
+
+    fn from_workspace_lookup(
+        root: &Path,
+        environment: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        let settings = WorkspaceSettings::read(root)?;
+        let lookup = |name: &str| settings.get(name, environment);
+        let selected = setting_nonempty(&lookup, "STASIS_AI_PROVIDER");
+        let default = if setting_nonempty(&lookup, "OPENROUTER_API_KEY").is_some() {
+            "openrouter"
+        } else {
+            "codex"
+        };
+        match selected.as_deref().unwrap_or(default) {
+            "codex" => Ok(Self::Codex),
+            "openrouter" => Ok(Self::OpenRouter(OpenRouterConfig::from_lookup(&lookup)?)),
+            _ => Err("STASIS_AI_PROVIDER must be codex or openrouter".into()),
         }
     }
 
@@ -698,9 +760,9 @@ impl OpenRouterProvider {
             };
             if healthy && throughput.is_some_and(|value| value >= minimum) {
                 if let Some(tag) = endpoint
-                    .get("provider")
+                    .get("tag")
                     .or_else(|| endpoint.get("provider_slug"))
-                    .or_else(|| endpoint.get("tag"))
+                    .or_else(|| endpoint.get("provider"))
                     .and_then(Value::as_str)
                     .and_then(normalize_provider_slug)
                 {
@@ -717,7 +779,10 @@ impl OpenRouterProvider {
                     .only
                     .iter()
                     .filter_map(|only| normalize_provider_slug(only))
-                    .any(|only| only == *tag)
+                    .any(|only| {
+                        only == *tag
+                            || (!only.contains('/') && tag.starts_with(&format!("{only}/")))
+                    })
             });
         }
         if tags.is_empty() {
@@ -1178,10 +1243,13 @@ fn metric_number(value: Option<&Value>) -> Value {
 }
 fn normalize_provider_slug(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
-    (!normalized.is_empty()
-        && normalized
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    (normalized.len() <= 256
+        && normalized.split('/').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        }))
     .then_some(normalized)
 }
 fn env_nonempty(name: &str) -> Option<String> {
@@ -1189,8 +1257,46 @@ fn env_nonempty(name: &str) -> Option<String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
 }
-fn env_list(name: &str) -> Vec<String> {
-    env_nonempty(name)
+fn setting_nonempty(lookup: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    lookup(name).filter(|value| !value.trim().is_empty())
+}
+
+struct WorkspaceSettings(BTreeMap<String, String>);
+
+impl WorkspaceSettings {
+    fn read(root: &Path) -> Result<Self, String> {
+        const MAX_BYTES: u64 = 64 * 1024;
+        let file = match std::fs::File::open(root.join(".env")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self(BTreeMap::new()));
+            }
+            Err(_) => return Err("Cannot read workspace .env settings".into()),
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot read workspace .env settings".to_string())?;
+        if bytes.len() > MAX_BYTES as usize {
+            return Err("Workspace .env exceeds 64 KiB".into());
+        }
+        // Windows editors commonly write a UTF-8 byte-order mark.
+        let source = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+        let mut settings = BTreeMap::new();
+        for item in dotenvy::from_read_iter(source) {
+            let (key, value) = item.map_err(|_| "Invalid workspace .env syntax".to_string())?;
+            settings.entry(key).or_insert(value);
+        }
+        Ok(Self(settings))
+    }
+
+    fn get(&self, name: &str, environment: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        environment(name).or_else(|| self.0.get(name).cloned())
+    }
+}
+
+fn setting_list(lookup: &dyn Fn(&str) -> Option<String>, name: &str) -> Vec<String> {
+    setting_nonempty(lookup, name)
         .map(|value| {
             value
                 .split(',')
@@ -1201,16 +1307,20 @@ fn env_list(name: &str) -> Vec<String> {
         })
         .unwrap_or_default()
 }
-fn env_bool(name: &str, default: bool) -> Result<bool, String> {
-    match env_nonempty(name).as_deref() {
+fn setting_bool(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    default: bool,
+) -> Result<bool, String> {
+    match setting_nonempty(lookup, name).as_deref() {
         None => Ok(default),
         Some("1" | "true") => Ok(true),
         Some("0" | "false") => Ok(false),
-        Some(value) => Err(format!("{name} must be true or false; got {value}")),
+        Some(_) => Err(format!("{name} must be true or false")),
     }
 }
-fn env_f64(name: &str) -> Result<Option<f64>, String> {
-    env_nonempty(name)
+fn setting_f64(lookup: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<Option<f64>, String> {
+    setting_nonempty(lookup, name)
         .map(|value| {
             value
                 .parse::<f64>()
@@ -1218,8 +1328,8 @@ fn env_f64(name: &str) -> Result<Option<f64>, String> {
         })
         .transpose()
 }
-fn env_u64(name: &str) -> Result<Option<u64>, String> {
-    env_nonempty(name)
+fn setting_u64(lookup: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<Option<u64>, String> {
+    setting_nonempty(lookup, name)
         .map(|value| {
             value
                 .parse::<u64>()
@@ -1323,6 +1433,119 @@ fn api_error(context: &str, status: u16, value: &Value, secret: &str) -> String 
 }
 #[cfg(test)]
 mod tests {
+    struct WorkspaceFixture(std::path::PathBuf);
+
+    impl WorkspaceFixture {
+        fn new(source: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "stasis-provider-settings-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join(".env"), source).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for WorkspaceFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn workspace_throughput_defaults_to_hard_400_unless_explicitly_configured() {
+        let fixture = WorkspaceFixture::new("OPENROUTER_API_KEY=test-key\n");
+        let ProviderConfig::OpenRouter(config) =
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap()
+        else {
+            panic!("expected OpenRouter");
+        };
+        assert_eq!(config.routing.hard_min_throughput, Some(400.0));
+        let config = OpenRouterConfig::from_lookup(&|name| match name {
+            "OPENROUTER_API_KEY" => Some("test-key".into()),
+            "STASIS_AI_PREFERRED_MIN_THROUGHPUT" => Some("250".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(config.routing.hard_min_throughput, None);
+        assert_eq!(config.routing.preferred_min_throughput, Some(250.0));
+    }
+
+    #[test]
+    fn workspace_key_selects_openrouter_with_model_and_hard_throughput() {
+        let fixture = WorkspaceFixture::new("\u{feff}# project only\nexport OPENROUTER_API_KEY='test-key'\nSTASIS_AI_MODEL=\"openai/gpt-oss-120b\" # model\nSTASIS_AI_HARD_MIN_THROUGHPUT=400\nSTASIS_AI_ROUTE_ONLY=cerebras,groq\nSTASIS_AI_ROUTE_ORDER=groq,cerebras\nSTASIS_AI_ALLOW_FALLBACKS=false\nSTASIS_AI_ROUTE_SORT=throughput\nSTASIS_AI_MAX_PRICE=2\nSTASIS_AI_TIMEOUT_SECONDS=45\n");
+        let ProviderConfig::OpenRouter(config) =
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap()
+        else {
+            panic!("expected OpenRouter");
+        };
+        assert_eq!(config.api_key, "test-key");
+        assert_eq!(config.model, "openai/gpt-oss-120b");
+        assert_eq!(config.routing.hard_min_throughput, Some(400.0));
+        assert_eq!(config.routing.only, ["cerebras", "groq"]);
+        assert_eq!(config.routing.order, ["groq", "cerebras"]);
+        assert!(!config.routing.allow_fallbacks);
+        assert_eq!(config.routing.max_price, Some(2.0));
+        assert_eq!(config.timeout, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn workspace_environment_overrides_file_and_explicit_codex_wins() {
+        let fixture = WorkspaceFixture::new("OPENROUTER_API_KEY=file-key\nSTASIS_AI_PROVIDER=openrouter\nSTASIS_AI_MODEL=openai/gpt-oss-120b\n");
+        assert!(matches!(
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|name| (name
+                == "STASIS_AI_PROVIDER")
+                .then(|| "codex".into()))
+            .unwrap(),
+            ProviderConfig::Codex
+        ));
+        let ProviderConfig::OpenRouter(config) =
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|name| match name {
+                "OPENROUTER_API_KEY" => Some("environment-key".into()),
+                "STASIS_AI_MODEL" => Some("other/model".into()),
+                _ => None,
+            })
+            .unwrap()
+        else {
+            panic!("expected OpenRouter");
+        };
+        assert_eq!(config.api_key, "environment-key");
+        assert_eq!(config.model, "other/model");
+        let fixture =
+            WorkspaceFixture::new("STASIS_AI_PROVIDER=codex\nOPENROUTER_API_KEY=file-key\n");
+        assert!(matches!(
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap(),
+            ProviderConfig::Codex
+        ));
+    }
+
+    #[test]
+    fn workspace_settings_do_not_search_parents_or_expose_parse_secrets() {
+        let fixture = WorkspaceFixture::new("OPENROUTER_API_KEY=parent-key\n");
+        let child = fixture.0.join("child");
+        std::fs::create_dir(&child).unwrap();
+        assert!(matches!(
+            ProviderConfig::from_workspace_lookup(&child, &|_| None).unwrap(),
+            ProviderConfig::Codex
+        ));
+        std::fs::write(
+            child.join(".env"),
+            "OPENROUTER_API_KEY=\"private-credential\n",
+        )
+        .unwrap();
+        let error = ProviderConfig::from_workspace_lookup(&child, &|_| None)
+            .err()
+            .unwrap();
+        assert_eq!(error, "Invalid workspace .env syntax");
+        assert!(!error.contains("private-credential"));
+    }
     use super::*;
 
     static ENVIRONMENT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1926,6 +2149,37 @@ mod tests {
         assert_eq!(qualifying, vec!["cerebras"]);
         worker.join().expect("mock worker");
     }
+    #[test]
+    fn hard_throughput_preserves_qualified_endpoint_variants() {
+        // Real endpoint metadata uses variant tags, not display provider names.
+        let metadata = json!({"data":{"endpoints":[
+            {"provider_name":"Cerebras","provider":"cerebras","tag":"cerebras/fp16","status":0,"throughput_last_30m":{"p50":673,"p75":1044}},
+            {"provider_name":"Cerebras","tag":"cerebras/slow","status":0,"throughput_last_30m":{"p50":100}},
+            {"provider_name":"Groq","tag":"groq","status":0,"throughput_last_30m":{"p50":245}},
+            {"tag":"cerebras//invalid","status":0,"throughput_last_30m":{"p50":900}}
+        ]}}).to_string();
+        let (base_url, _requests, worker) =
+            mock_server(vec![http_response("application/json", &metadata)]);
+        let mut config = test_config(base_url);
+        config.routing.only = vec!["cerebras".into()];
+        let provider = OpenRouterProvider::new(config).unwrap();
+        let (qualified, _) = provider
+            .qualifying_endpoints(400.0, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(qualified, ["cerebras/fp16"]);
+        assert_eq!(
+            provider.route_json(Some(qualified))["only"],
+            json!(["cerebras/fp16"])
+        );
+        worker.join().unwrap();
+        assert_eq!(
+            normalize_provider_slug("Google-Vertex/us-east5"),
+            Some("google-vertex/us-east5".into())
+        );
+        assert!(normalize_provider_slug("/cerebras").is_none());
+        assert!(normalize_provider_slug("cerebras/").is_none());
+    }
+
     #[test]
     fn hard_throughput_preflight_fails_closed_without_chat_request() {
         let metadata = json!({"data":{"endpoints":[{"tag":"cerebras","status":"healthy","throughput":900.0}]}}).to_string();
