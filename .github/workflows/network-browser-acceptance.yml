@@ -106,6 +106,9 @@ jobs:
       - name: Test browser video encoding dimensions
         shell: pwsh
         run: node --test tools/ci/network_browser_video.test.mjs
+      - name: Test bounded browser startup
+        shell: pwsh
+        run: node --test tools/ci/network_browser_startup.test.mjs
       - name: Run real browser protocol acceptance
         shell: pwsh
         env:
