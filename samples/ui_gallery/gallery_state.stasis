@@ -1,4 +1,4 @@
-import "ui_single_pass.stasis";
+import "/vendor/stasis/stdlib/ui_single_pass.stasis";
 
 enum GalleryPage {
     Stacks,

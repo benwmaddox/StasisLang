@@ -33,10 +33,10 @@ The tabs demonstrate:
 - **Combined** — a playable viewport beside an overlay panel. Open the modal to
   see a higher input layer capture the pointer while the world remains visible.
 
-The layout module is copied into the project root so this sample remains
-self-contained for the regular Stasis project runner. The canonical module is
-[`src/stdlib/ui_single_pass.stasis`](../../src/stdlib/ui_single_pass.stasis);
-the sample copy is intentionally kept readable and in sync for teaching.
+The layout module is included in `vendor/stasis/stdlib` so the sample remains
+self-contained and version-pinned like a generated Stasis project. Its source
+is synchronized with the canonical
+[`src/stdlib/ui_single_pass.stasis`](../../src/stdlib/ui_single_pass.stasis).
 
 The bundled Press Start 2P font is distributed under the SIL Open Font License;
 see [`assets/OFL.txt`](assets/OFL.txt).

@@ -1,5 +1,5 @@
 import "/vendor/stasis/stdlib/graphics.stasis";
-import "ui_single_pass.stasis";
+import "/vendor/stasis/stdlib/ui_single_pass.stasis";
 import "gallery_state.stasis";
 
 function gallery_label(text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
