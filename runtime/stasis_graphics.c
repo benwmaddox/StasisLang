@@ -2989,6 +2989,25 @@ STASIS_EXPORT int stasis_set_recording_config(int width, int height, uint32_t fp
     return 1;
 }
 
+#if defined(_WIN32)
+static void stasis_minimize_launch_console(void) {
+    static bool applied = false;
+    if (applied) return;
+    applied = true;
+
+    const char* enabled = SDL_getenv("STASIS_CONSOLE_START_MINIMIZED");
+    if (enabled && strcmp(enabled, "0") == 0) return;
+
+    HWND console = GetConsoleWindow();
+    if (!console) return;
+    /* ConPTY's message-only console can be owned by its visible terminal. */
+    HWND terminal = GetAncestor(console, GA_ROOTOWNER);
+    if (!terminal) terminal = console;
+    if (terminal != console && !IsWindowVisible(terminal)) return;
+    ShowWindowAsync(terminal, SW_MINIMIZE);
+}
+#endif
+
 /*
  * Initialize graphics window
  * Returns 1 on success, 0 on failure
@@ -3139,6 +3158,11 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         SDL_Quit();
         return 0;
     }
+#if defined(_WIN32)
+    if (!(window_flags & SDL_WINDOW_HIDDEN)) {
+        stasis_minimize_launch_console();
+    }
+#endif
     if (!g_recording_presentation) {
         SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }

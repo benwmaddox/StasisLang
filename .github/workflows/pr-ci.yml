@@ -155,7 +155,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/render-parity-runtime --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --test-dir target/render-parity-runtime -C Release -R '^stasis_sprite_atlas_reservation_test$' --output-on-failure --no-tests=error
+          ctest --test-dir target/render-parity-runtime -C Release -R '^stasis_(sprite_atlas_reservation_test|console_launch_contract)$' --output-on-failure --no-tests=error
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $runner = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe").Path
           $runnerManifest = Join-Path $PWD "target/render-parity-runtime/stasis_runner.embedded.manifest"
