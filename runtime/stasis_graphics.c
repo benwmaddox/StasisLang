@@ -2990,6 +2990,30 @@ STASIS_EXPORT int stasis_set_recording_config(int width, int height, uint32_t fp
 }
 
 #if defined(_WIN32)
+static void stasis_request_terminal_minimize(void) {
+    HANDLE output = CreateFileW(
+        L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_EXISTING, 0, NULL);
+    if (output == INVALID_HANDLE_VALUE) return;
+
+    DWORD mode = 0;
+    if (!GetConsoleMode(output, &mode)) {
+        CloseHandle(output);
+        return;
+    }
+
+    const DWORD vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    if (!SetConsoleMode(output, vt_mode)) {
+        CloseHandle(output);
+        return;
+    }
+    static const char iconify[] = "\x1b[2t";
+    DWORD written = 0;
+    WriteConsoleA(output, iconify, (DWORD)(sizeof(iconify) - 1), &written, NULL);
+    SetConsoleMode(output, mode);
+    CloseHandle(output);
+}
+
 static void stasis_minimize_launch_console(void) {
     static bool applied = false;
     if (applied) return;
@@ -3000,11 +3024,13 @@ static void stasis_minimize_launch_console(void) {
 
     HWND console = GetConsoleWindow();
     if (!console) return;
-    /* ConPTY's message-only console can be owned by its visible terminal. */
     HWND terminal = GetAncestor(console, GA_ROOTOWNER);
-    if (!terminal) terminal = console;
-    if (terminal != console && !IsWindowVisible(terminal)) return;
-    ShowWindowAsync(terminal, SW_MINIMIZE);
+    if (terminal && IsWindowVisible(terminal)) {
+        ShowWindowAsync(terminal, SW_MINIMIZE);
+    } else {
+        /* ConPTY exposes only a message window; ask its frontend to iconify. */
+        stasis_request_terminal_minimize();
+    }
 }
 #endif
 

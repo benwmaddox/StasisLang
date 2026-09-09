@@ -4,6 +4,10 @@
 #include <string.h>
 #include <wchar.h>
 
+#ifndef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+#define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 0x00020016
+#endif
+
 int stasis_init_window(int width, int height, const char* title);
 int stasis_set_recording_config(int width, int height, uint32_t fps);
 void stasis_set_window_size(int width, int height);
@@ -35,6 +39,15 @@ static int game_visible(const char* title) {
     return process_id == GetCurrentProcessId() && IsWindowVisible(game) && !IsIconic(game);
 }
 
+static int configure_child_environment(void) {
+    return SetEnvironmentVariableA("STASIS_WINDOW_HIDDEN", "0") &&
+        SetEnvironmentVariableA("STASIS_WINDOW_START_MINIMIZED", "0") &&
+        SetEnvironmentVariableA("STASIS_RECORDING_PRESENTATION", "0") &&
+        SetEnvironmentVariableA("SDL_VIDEODRIVER", "windows") &&
+        SetEnvironmentVariableA("SDL_RENDER_DRIVER", "software") &&
+        SetEnvironmentVariableA("SDL_AUDIODRIVER", "dummy");
+}
+
 static int run_child(const char* mode) {
     HWND console = GetConsoleWindow();
     HWND terminal = console ? GetAncestor(console, GA_ROOTOWNER) : NULL;
@@ -51,12 +64,7 @@ static int run_child(const char* mode) {
     char title[128];
     snprintf(title, sizeof(title), "Stasis console test %lu %s", GetCurrentProcessId(), mode);
     if (!SetEnvironmentVariableA("STASIS_CONSOLE_START_MINIMIZED", opt_out ? "0" : NULL) ||
-        !SetEnvironmentVariableA("STASIS_WINDOW_HIDDEN", "0") ||
-        !SetEnvironmentVariableA("STASIS_WINDOW_START_MINIMIZED", "0") ||
-        !SetEnvironmentVariableA("STASIS_RECORDING_PRESENTATION", "0") ||
-        !SetEnvironmentVariableA("SDL_VIDEODRIVER", "windows") ||
-        !SetEnvironmentVariableA("SDL_RENDER_DRIVER", "software") ||
-        !SetEnvironmentVariableA("SDL_AUDIODRIVER", "dummy")) return 14;
+        !configure_child_environment()) return 14;
     if (hidden && !stasis_set_recording_config(320, 240, 60)) return 15;
     if (!stasis_init_window(320, 240, title)) return 2;
     if (hidden || opt_out) {
@@ -85,7 +93,108 @@ static int run_child(const char* mode) {
     return 0;
 }
 
+static int run_conpty_child(void) {
+    if (!SetEnvironmentVariableA("STASIS_CONSOLE_START_MINIMIZED", NULL) ||
+        !configure_child_environment()) return 20;
+    const char* title = "Stasis ConPTY console test";
+    if (!stasis_init_window(320, 240, title)) return 21;
+    if (!game_visible(title)) return 22;
+    stasis_shutdown();
+    return 0;
+}
+
+static int run_conpty_parent(const wchar_t* executable) {
+    HANDLE input_read = NULL;
+    HANDLE input_write = NULL;
+    HANDLE output_read = NULL;
+    HANDLE output_write = NULL;
+    HPCON pseudoconsole = NULL;
+    PPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
+    int attributes_initialized = 0;
+    PROCESS_INFORMATION process = {0};
+    int result = 1;
+
+    if (!CreatePipe(&input_read, &input_write, NULL, 0) ||
+        !CreatePipe(&output_read, &output_write, NULL, 0)) goto cleanup;
+    COORD size = {80, 25};
+    if (FAILED(CreatePseudoConsole(size, input_read, output_write, 0, &pseudoconsole))) goto cleanup;
+    CloseHandle(input_read);
+    input_read = NULL;
+    CloseHandle(output_write);
+    output_write = NULL;
+
+    SIZE_T attribute_size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
+    attributes = (PPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(
+        GetProcessHeap(), 0, attribute_size);
+    if (!attributes ||
+        !InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_size)) goto cleanup;
+    attributes_initialized = 1;
+    if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+        pseudoconsole, sizeof(pseudoconsole), NULL, NULL)) goto cleanup;
+
+    wchar_t command[32800];
+    if (swprintf(command, 32800, L"\"%ls\" conpty", executable) < 0) goto cleanup;
+    STARTUPINFOEXW startup = {0};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = attributes;
+    if (!CreateProcessW(executable, command, NULL, NULL, FALSE,
+            EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &startup.StartupInfo, &process)) goto cleanup;
+
+    static const char iconify[] = "\x1b[2t";
+    size_t iconify_match = 0;
+    int saw_iconify = 0;
+    ULONGLONG deadline = GetTickCount64() + 8000;
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(output_read, NULL, 0, NULL, &available, NULL)) break;
+        if (available > 0) {
+            char output[4096];
+            DWORD requested = available < sizeof(output) ? available : sizeof(output);
+            DWORD read = 0;
+            if (!ReadFile(output_read, output, requested, &read, NULL)) break;
+            for (DWORD i = 0; i < read; ++i) {
+                if (output[i] == iconify[iconify_match]) {
+                    iconify_match += 1;
+                    if (iconify_match == sizeof(iconify) - 1) {
+                        saw_iconify = 1;
+                        iconify_match = 0;
+                    }
+                } else {
+                    iconify_match = output[i] == iconify[0] ? 1 : 0;
+                }
+            }
+        }
+        if (WaitForSingleObject(process.hProcess, 10) == WAIT_OBJECT_0) break;
+        if (GetTickCount64() >= deadline) break;
+    }
+    DWORD child_result = 1;
+    GetExitCodeProcess(process.hProcess, &child_result);
+    result = child_result == 0 && saw_iconify ? 0 : 1;
+
+cleanup:
+    if (process.hProcess) {
+        if (WaitForSingleObject(process.hProcess, 0) != WAIT_OBJECT_0) {
+            TerminateProcess(process.hProcess, 1);
+            WaitForSingleObject(process.hProcess, 1000);
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    if (attributes) {
+        if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
+        HeapFree(GetProcessHeap(), 0, attributes);
+    }
+    if (input_read) CloseHandle(input_read);
+    if (input_write) CloseHandle(input_write);
+    if (output_read) CloseHandle(output_read);
+    if (output_write) CloseHandle(output_write);
+    if (pseudoconsole) ClosePseudoConsole(pseudoconsole);
+    return result;
+}
+
 int main(int argc, char** argv) {
+    if (argc == 2 && strcmp(argv[1], "conpty") == 0) return run_conpty_child();
     if (argc == 2) return run_child(argv[1]);
     wchar_t executable[32768];
     DWORD length = GetModuleFileNameW(NULL, executable, 32768);
@@ -125,5 +234,10 @@ int main(int argc, char** argv) {
             fprintf(stdout, "PASS %ls\n", modes[i]);
         }
     }
+    if (run_conpty_parent(executable) != 0) {
+        fprintf(stderr, "ConPTY console test did not receive the iconify request\n");
+        return 1;
+    }
+    fprintf(stdout, "PASS conpty\n");
     return skipped ? 77 : 0;
 }
