@@ -5,8 +5,8 @@
 // rectangle from the current parent.  The only globals that survive a frame
 // are semantic interaction state (button capture and scroll offsets).
 
-import "/vendor/stasis/stdlib/ui_axis_layout.stasis";
-import "/vendor/stasis/stdlib/graphics.stasis";
+import "ui_axis_layout.stasis";
+import "graphics.stasis";
 
 enum UiStackDirection {
     Forward,
