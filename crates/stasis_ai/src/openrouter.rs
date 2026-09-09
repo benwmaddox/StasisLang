@@ -2,7 +2,7 @@ use crate::{
     decode_model_response, model_response_schema_for_request, ModelProvider, ModelResponse,
 };
 use base64::Engine as _;
-use reqwest::Client;
+use reqwest::{header::RETRY_AFTER, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -20,6 +20,9 @@ pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-oss-120b";
 const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 pub const MAX_OPENROUTER_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_OPENROUTER_IMAGES: usize = crate::task_session::MAX_SCREENSHOTS_PER_REQUEST;
+const MAX_OPENROUTER_RATE_LIMIT_RETRIES: u32 = 2;
+const DEFAULT_OPENROUTER_RETRY_DELAY: Duration = Duration::from_millis(250);
+const MAX_OPENROUTER_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenRouterImageInput {
@@ -964,7 +967,6 @@ impl OpenRouterProvider {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
         }
-        let timeout = remaining_timeout(deadline, "OpenRouter chat request")?;
         let route = self.route_json(only);
         let schema = model_response_schema_for_request(request)?;
         let content =
@@ -993,21 +995,40 @@ impl OpenRouterProvider {
             body_object.insert("session_id".to_string(), json!(session_id));
         }
         let request_started = Instant::now();
-        let mut response = await_cancelable(
-            self.client
-                .post(format!(
-                    "{}/chat/completions",
-                    self.config.base_url.trim_end_matches('/')
-                ))
-                .bearer_auth(&self.config.api_key)
-                .json(&body)
-                .timeout(timeout)
-                .send(),
-            canceled,
-            deadline,
-            "OpenRouter request",
-        )
-        .await?;
+        let mut transport_attempts = 0_u32;
+        let mut response = loop {
+            transport_attempts = transport_attempts.saturating_add(1);
+            let timeout = remaining_timeout(deadline, "OpenRouter chat request")?;
+            let response = await_cancelable(
+                self.client
+                    .post(format!(
+                        "{}/chat/completions",
+                        self.config.base_url.trim_end_matches('/')
+                    ))
+                    .bearer_auth(&self.config.api_key)
+                    .json(&body)
+                    .timeout(timeout)
+                    .send(),
+                canceled,
+                deadline,
+                "OpenRouter request",
+            )
+            .await?;
+            if response.status() != StatusCode::TOO_MANY_REQUESTS
+                || transport_attempts > MAX_OPENROUTER_RATE_LIMIT_RETRIES
+            {
+                break response;
+            }
+            let delay = openrouter_retry_delay(
+                response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                transport_attempts,
+            );
+            sleep_cancelable(delay, canceled, deadline, "OpenRouter rate-limit retry").await?;
+            progress(crate::ProviderProgress::ContactingProvider);
+        };
         let header_time = request_started.elapsed();
         let status = response.status();
         if !status.is_success() {
@@ -1025,8 +1046,13 @@ impl OpenRouterProvider {
                 }
                 Err(_) => Value::Null,
             };
+            let context = if status == StatusCode::TOO_MANY_REQUESTS && transport_attempts > 1 {
+                "OpenRouter request after bounded retries"
+            } else {
+                "OpenRouter request"
+            };
             return Err(api_error(
-                "OpenRouter request",
+                context,
                 status.as_u16(),
                 &value,
                 &self.config.api_key,
@@ -1144,6 +1170,7 @@ impl OpenRouterProvider {
             "resolved_provider": resolved_provider, "resolved_model": resolved_model,
             "route": route, "fallback": fallback,
             "timing_ms": {"metadata": duration_ms(metadata_time), "headers": duration_ms(header_time), "first_reasoning": first_reasoning_ms, "first_content": first_content_ms, "first_action": first_action_ms, "inference_total": duration_ms(request_started.elapsed()), "turn_total": duration_ms(turn_started.elapsed())},
+            "transport_attempts": transport_attempts,
             "tokens": {"prompt": prompt_tokens, "completion": completion_tokens, "reasoning": reasoning_tokens, "cache": cache_tokens},
             "cost": metric_number(usage.get("cost")),
             "throughput_tokens_per_second": throughput(&usage, request_started.elapsed()),
@@ -1224,6 +1251,38 @@ where
             }
             _ = tokio::time::sleep(poll_interval) => {}
         }
+    }
+}
+
+fn openrouter_retry_delay(retry_after: Option<&str>, retry_number: u32) -> Duration {
+    let server_delay = retry_after
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    server_delay
+        .unwrap_or_else(|| {
+            DEFAULT_OPENROUTER_RETRY_DELAY
+                .saturating_mul(1_u32 << retry_number.saturating_sub(1).min(3))
+        })
+        .min(MAX_OPENROUTER_RETRY_DELAY)
+}
+
+async fn sleep_cancelable(
+    delay: Duration,
+    canceled: &AtomicBool,
+    deadline: Instant,
+    context: &str,
+) -> Result<(), String> {
+    let wake = Instant::now() + delay;
+    loop {
+        if canceled.load(Ordering::Acquire) {
+            return Err("AI request canceled".to_string());
+        }
+        let remaining = remaining_timeout(deadline, context)?;
+        let until_wake = wake.saturating_duration_since(Instant::now());
+        if until_wake.is_zero() {
+            return Ok(());
+        }
+        tokio::time::sleep(remaining.min(until_wake).min(Duration::from_millis(10))).await;
     }
 }
 
@@ -1809,6 +1868,16 @@ mod tests {
         format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
     }
 
+    fn http_error_response(status: &str, retry_after: Option<&str>, body: &str) -> String {
+        let retry_after = retry_after
+            .map(|value| format!("Retry-After: {value}\r\n"))
+            .unwrap_or_default();
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{retry_after}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
     fn test_config(base_url: String) -> OpenRouterConfig {
         OpenRouterConfig {
             api_key: "unit-secret".into(),
@@ -1843,6 +1912,68 @@ mod tests {
             "choices":[{"delta":{"content":fixture.to_string()}}]
         });
         format!("data: {chunk}\n\ndata: [DONE]\n\n")
+    }
+
+    #[test]
+    fn rate_limit_retries_preserve_qualified_route_and_then_succeed() {
+        let metadata = json!({"data":{"endpoints":[{
+            "tag":"cerebras/fp16", "status":"healthy",
+            "throughput_last_30m":{"p50":673.0}
+        }]}})
+        .to_string();
+        let limited = json!({"error":{"message":"temporarily rate limited"}}).to_string();
+        let stream = done_stream("completed after retry");
+        let (base_url, requests, worker) = mock_server(vec![
+            http_response("application/json", &metadata),
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+            http_response("text/event-stream", &stream),
+        ]);
+        let mut config = test_config(base_url);
+        config.routing.hard_min_throughput = Some(400.0);
+        let mut provider = OpenRouterProvider::new(config).expect("provider");
+        let reply = provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect("bounded retry succeeds");
+        assert!(matches!(
+            reply,
+            ModelResponse::Done { summary, .. } if summary == "completed after retry"
+        ));
+        assert!(requests
+            .recv()
+            .expect("metadata request")
+            .starts_with("GET "));
+        for _ in 0..3 {
+            let request = requests.recv().expect("chat request");
+            let json_start = request.find("\r\n\r\n").expect("headers") + 4;
+            let body: Value = serde_json::from_str(&request[json_start..]).expect("body");
+            assert_eq!(
+                body.pointer("/provider/only"),
+                Some(&json!(["cerebras/fp16"]))
+            );
+        }
+        assert_eq!(provider.take_usage().unwrap()["transport_attempts"], 3);
+        worker.join().expect("server");
+    }
+
+    #[test]
+    fn persistent_rate_limit_stops_after_bounded_retries() {
+        let limited = json!({"error":{"message":"temporarily rate limited"}}).to_string();
+        let (base_url, requests, worker) = mock_server(vec![
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+        ]);
+        let mut provider = OpenRouterProvider::new(test_config(base_url)).expect("provider");
+        let error = provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect_err("persistent rate limit");
+        assert!(error.contains("HTTP 429"));
+        assert!(error.contains("after bounded retries"));
+        for _ in 0..3 {
+            assert!(requests.recv().expect("chat request").starts_with("POST "));
+        }
+        worker.join().expect("server");
     }
 
     #[test]

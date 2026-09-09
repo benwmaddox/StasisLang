@@ -464,7 +464,10 @@ the default. `STASIS_AI_MODEL` selects the model.
 
 Failed requests show a credential-safe diagnostic in the task. Reconnect retries the saved
 request without duplicating its message during the current editor session. Reopening an
-editor never automatically replays an unfinished request.
+editor never automatically replays an unfinished request. OpenRouter chat calls retry an
+HTTP 429 response up to two times before requiring a manual reconnect. Each retry remains
+inside the original request deadline and the same qualified endpoint set; a provider delay
+is capped at two seconds to keep the editor responsive.
 
 In the AI desktop editor, Ctrl+K or Ctrl+F opens the command palette. Type to
 filter commands, use Up/Down to select, Enter to invoke, and Escape to dismiss

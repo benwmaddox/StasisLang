@@ -26,6 +26,8 @@ pub fn safe_provider_error(error: &str) -> &'static str {
         || error.contains("unauthorized")
     {
         "AI provider authentication failed. Check the selected provider's credentials."
+    } else if error.contains("429") && error.contains("bounded retries") {
+        "OpenRouter remained rate limited after two automatic retries. Wait briefly before reconnecting."
     } else if error.contains("429") {
         "AI provider rate limit reached. Wait briefly before reconnecting."
     } else if error.contains("timed out") || error.contains("timeout") {
@@ -1314,6 +1316,10 @@ mod tests {
             ),
             ("OPENROUTER_API_KEY secret-key", "project .env"),
             ("HTTP 401 secret-key", "authentication failed"),
+            (
+                "OpenRouter request after bounded retries failed with HTTP 429 secret-key",
+                "two automatic retries",
+            ),
             ("request timed out secret-key", "timed out"),
             ("private unknown secret-key", "AI provider request failed"),
         ] {
