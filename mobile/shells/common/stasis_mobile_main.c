@@ -512,7 +512,13 @@ int SDL_main(int argc, char **argv) {
         }
 #endif
 #if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
-        stasis_desktop_network_present_join_card();
+        int32_t supervision = stasis_mobile_network_publish_supervision_join_url();
+        if (supervision < 0) {
+            SDL_Log("Stasis network supervision readiness failed");
+            status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+        } else if (supervision == 0) {
+            stasis_desktop_network_present_join_card();
+        }
 #endif
 #if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
         stasis_mobile_network_present_join_url();
