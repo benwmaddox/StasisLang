@@ -17,6 +17,26 @@
   const pointer = { id: 0, x: 0, y: 0, dx: 0, dy: 0, hover: false, down: false, wentDown: false, wentUp: false };
   const commands = [];
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
+  const positiveNumber = value => Number.isFinite(Number(value)) && Number(value) > 0
+    ? Number(value) : 0;
+  const boundedDimension = (value, maximum) => Math.max(1, Math.min(
+    maximum, Math.round(positiveNumber(value) || 1)
+  ));
+  const MAX_LOGICAL_EXTENT = 8192;
+  const MAX_DRAWABLE_EXTENT = 16384;
+  // Canvas attributes and the inline shell fitter describe logical game
+  // coordinates. The intrinsic canvas size is replaced below with drawable
+  // pixels derived from its current CSS presentation and browser DPR.
+  let logicalWidth = boundedDimension(
+    window.STASIS_LOGICAL_WIDTH || canvas.getAttribute?.("width") || canvas.width,
+    MAX_LOGICAL_EXTENT
+  );
+  let logicalHeight = boundedDimension(
+    window.STASIS_LOGICAL_HEIGHT || canvas.getAttribute?.("height") || canvas.height,
+    MAX_LOGICAL_EXTENT
+  );
+  let drawableWidth = boundedDimension(canvas.width, MAX_DRAWABLE_EXTENT);
+  let drawableHeight = boundedDimension(canvas.height, MAX_DRAWABLE_EXTENT);
   const sprites = new Map();
   const fonts = new Map();
   const fontLoads = new Map();
@@ -200,6 +220,14 @@
   let displayGeneration = 1;
   let resizeGenerationPending = true;
   let densityGeneration = 1;
+  let presentationWidth = logicalWidth;
+  let presentationHeight = logicalHeight;
+  let nativeWidth = logicalWidth;
+  let nativeHeight = logicalHeight;
+  let contentScale = 1;
+  let rasterScale = 1;
+  let displayState;
+  let lastRasterScale;
   let lastWindowRequest = -1;
   let pendingFullscreen;
   let worstTick = 0;

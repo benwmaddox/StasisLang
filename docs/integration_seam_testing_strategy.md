@@ -283,9 +283,7 @@ A task is complete only when:
 - failure output names the test ID, seam, expected/actual values, and evidence
   artifact;
 - owned processes/apps are stopped and device settings restored;
-- the touched test code receives a simplicity/cruft review;
-- the work summary records Good, Bad, Adjustment, and `Theory gained:` per the
-  repository process.
+- the touched test code receives a simplicity/cruft review.
 
 ## Theory gained
 

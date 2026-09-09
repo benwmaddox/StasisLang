@@ -1,164 +1,45 @@
-﻿# Repository Guidelines
+# Repository Guidelines
 
-## Project Structure & Module Organization
-- `docs/spec.md` is the canonical language spec.
-- `docs/live-compilation-prd.md` is the canonical product/architecture requirements document.
-- `docs/build_checklist.md` is the execution plan; keep slice ordering and temporary migration details there.
-- `crates/stasis_compiler` hosts Rust compiler substrate/bindings called by Stasis orchestration.
-- `crates/stasis_jit` hosts Cranelift integration for JIT (dev) and AOT (prod), function pointer table integration, and code generation memory management.
-- `crates/stasis_runner` hosts tick loop, swap sequencing, and commit orchestration.
-- `apps/stasis` is the single in-process graphical runner app.
-- `src/stdlib/` contains Stasis standard library modules.
-- `samples/brickout_revenge/` is the primary end-to-end sample target.
-- `tests/rust/` contains host-side Rust tests. Add deterministic `.stasis` fixtures under `tests/` when needed.
+## Project map
 
-## Build, Test, and Development Commands
-- Primary implementation toolchain is Rust/Cargo.
-- Use:
-- `cargo build`
-- `cargo test`
-- `cargo run -p stasis --release -- --ticks 300 --watch-dir samples/brickout_revenge`
-- Codex and automation Cargo commands must run through `python tools/cargo_cache.py run -- cargo ...` so linked worktrees share one repository-owned target and disable Rust incremental artifacts. Human interactive Cargo commands keep their normal target and incremental settings.
-- Inspect cache ownership with `python tools/cargo_cache.py measure`; cleanup is dry-run unless `--apply` is explicit.
-- Use `rg` for search (`rg pattern path`, `rg --files`).
-- Keep commands deterministic and scriptable.
-- Validation entrypoint:
-- `tools/validate_repo.sh`
-- Android Workshop emulator testing uses the `Stasis_API_35` AVD. From the repository root, run the full headless build/install/acceptance flow with:
-- `powershell -NoProfile -ExecutionPolicy Bypass -File mobile/android/test_emulator.ps1 -Headless`
-- Reuse an already installed Workshop build with `-Headless -SkipBuild`. The `-Headless` option only affects a newly started emulator; when a truly headless run is required, stop an existing GUI AVD with `C:\Android\Sdk\platform-tools\adb.exe -s emulator-5554 emu kill` and wait until it disappears from `adb devices` before starting the headless run.
-- `mobile/android/validate_device.ps1` prefers an emulator for Workshop checks; pass `-Serial emulator-5554` to select it explicitly.
+- `docs/spec.md` is the language specification; `docs/live-compilation-prd.md` is the product and architecture contract; `docs/build_checklist.md` is execution context.
+- `crates/stasis_compiler` owns Rust source indexing, parsing into structured artifacts, semantic checks, and HIR construction/lowering.
+- `crates/stasis_jit` owns Cranelift JIT/AOT integration, function pointer tables, and executable memory management.
+- `crates/stasis_runner` owns the tick loop, swap sequencing, and commit orchestration. `apps/stasis` is the in process graphical runner.
+- `.stasis` files own user code, the standard library, and samples. Rust owns compiler, host, runtime, and platform boundaries; use C only when a platform binding requires it.
 
-## Coding Style & Naming Conventions
-- Keep files ASCII unless a file already uses non-ASCII and there is a clear reason.
-- Prefer short, lowercase, snake_case file/module names.
-- Keep comments brief and only for non-obvious behavior.
-- Follow spec syntax and semantics:
-- Arithmetic/comparison are infix only (`+ - * / %`, `< <= > >= == !=`).
-- Assignment is infix (`=`, `+=`, `-=`, `*=`, `/=`, `%=`).
-- Method-style arithmetic/comparison forms are removed.
-- Receiver-form call style is preferred (`enemy.damage(5)`), function-form remains supported (`damage(enemy, 5)`).
-- Conversion helpers:
-- `from_*` are mutating target operations (statement-style side effects).
-- `to_*` are pure conversions (expression-safe).
+## Commands
 
-## Testing Guidelines
-- Ship work in feature slices from `docs/build_checklist.md` and include tests in the same PR.
-- For Night Shift or inbox-driven work, only implement changes that map to the selected GitHub issue, PR, review, or review comments. Use repo docs and plans as context, not as a competing source of task selection.
-- Prefer deterministic, isolated tests with explicit expected output/state.
-- If test can reasonably be written in stasis for stasis code, do so. It can be in a .test.stasis file next to the .stasis file.
-- Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
-- Keep each test command bounded to 15 minutes max (900 seconds); split/shard runs when needed, and treat overruns as stability regressions.
-- After each edit/test step, check for lingering test processes (for example `target/debug/deps/*.exe`) and clean them up before the next step.
-- Validate user-visible graphical work with reviewable media in addition to automated assertions: use PNG for a representative still state and MP4 when motion, timing, input, animation, or a multi-step interaction matters. Inspect the captured artifact itself; a successful capture command is not proof that the pixels or sequence are correct. These artifacts are especially useful for independent AI review.
-- Every AI-authored work summary must include a `Visual evidence:` line. List the inspected PNG and/or MP4 paths and what each proves, or state `not applicable` for work with no user-visible behavior. If relevant media could not be captured, state that limitation rather than implying visual validation passed.
-- For incremental compilation:
-- Validate file-level invalidation correctness.
-- Validate per-function gating behavior.
-- Validate unchanged-function cache reuse.
-- For hot swap:
-- Validate all-or-nothing commit.
-- Validate rejection paths preserve old code/data.
-- Validate `on_code_swap` failure abort behavior.
+- Use Rust/Cargo for implementation. Common checks are `cargo build`, `cargo test`, and `cargo run -p stasis --release -- --ticks 300 --watch-dir samples/brickout_revenge`.
+- Codex and automation must run Cargo through `python tools/cargo_cache.py run -- cargo ...`; human interactive Cargo commands may use their normal target and incremental settings. Use `python tools/cargo_cache.py measure` to inspect cache ownership; cleanup is dry run unless `--apply` is explicit.
+- Use `rg` for search and keep commands deterministic and scriptable. The repository validation entrypoint is `tools/validate_repo.sh`.
+- Android Workshop uses the `Stasis_API_35` AVD. From the repository root, run `powershell -NoProfile -ExecutionPolicy Bypass -File mobile/android/test_emulator.ps1 -Headless`; reuse an installed build with `-Headless -SkipBuild`. For a truly headless run, stop an existing GUI AVD with `C:\Android\Sdk\platform-tools\adb.exe -s emulator-5554 emu kill` and wait for it to disappear from `adb devices`. `mobile/android/validate_device.ps1 -Serial emulator-5554` selects that emulator explicitly.
 
-## Commit & Pull Request Guidelines
-- Use short imperative subjects; Conventional Commits are preferred (`feat:`, `fix:`, `docs:`, `test:`).
-- Reference affected spec/PRD/checklist sections when relevant.
-- Keep PRs scoped to one slice group where possible (exact grouping/sequencing lives in `docs/build_checklist.md`).
-- Each PR should include:
-- behavioral summary
-- tests added/updated
-- docs updates
-- explicit removal of obsolete paths introduced during the slice
+## Source and validation rules
 
-## Architecture & Design Notes
-- Single OS process runtime with in-process compiler and Cranelift JIT for development.
-- Production build target uses Cranelift AOT output.
-- File-level correctness is primary; semantic analysis runs for full changed file.
-- Per-function semantic hashes gate backend work only.
-- Hot swap is a two-phase model:
-- background compilation to produce pending patch
-- commit between ticks on main thread
-- Dispatch boundary is stable indirection: `FnId -> code_ptr`.
-- Swap safety rules:
-- reject on layout/signature incompatibility
-- reject on `on_code_swap` failure
-- no partial commits
-- preserve deterministic tick-based semantics; avoid `dt`-driven gameplay progression in Stasis logic.
+- Keep touched files ASCII where practical, use short snake case names, and keep comments brief. Arithmetic, comparison, and assignment are infix; receiver form is preferred for calls. `from_*` helpers mutate a target, while `to_*` helpers are pure conversions.
+- Keep Rust tests runnable by default; `tools/validate_repo.sh` rejects `#[ignore]` under product and test roots. Put checks requiring credentials or unavailable tools in explicit examples.
+- Ship behavior changes with deterministic tests and cover the relevant parser, semantic, lowering, JIT, AOT, or hot swap boundary. A focused Cargo test must name its owning target (`--lib`, `--bin`, or `--test`); `running 0 tests` means the selection is wrong.
+- Keep every command within 900 seconds. Check for lingering test or compiler processes only after a timeout, cancellation, or suspected leak, and inspect or clean only processes attributable to this task. Keep unsafe Rust in audited platform boundary crates; repository validation rejects unsafe blocks in orchestration and product crates.
+- For graphical behavior, inspect a PNG for a representative still state and an MP4 when the claim depends on motion, timing, input, animation, or a multi step interaction. Every AI work summary includes `Visual evidence:` with the inspected paths or `not applicable`; if relevant media cannot be captured, state the limitation and record the validation gap.
+- Incremental compilation checks must cover file invalidation, per function gating, and unchanged function cache reuse. Hot swap checks must cover all or nothing commit, rejection preserving old code and data, and `on_code_swap` failure aborting the commit.
 
-## Language Ownership Rules
-- Rust owns compiler implementation, host/runtime boundary, platform integration, Cranelift embedding, pointer-table commit mechanics, and process/watch plumbing.
-- `.stasis` owns user code, stdlib, and samples.
-- Use C only when unavoidable for platform-level bindings.
+## Runtime invariants
 
-## Compiler Slice Process (Active)
-- Keep the frontend parser hardcoded with explicit precedence handling and shared matcher helpers; avoid adding new ad-hoc token offset chains.
-- Prefer one-pass compiler flow by default (`parse/check/lower` in one forward path per function); only allow explicit exceptions for required pre-scan metadata and jump backpatch resolution.
-- Treat function/struct reachability pruning as the primary dead-code mechanism for this phase.
-- Reachability roots are `main`, `tick`, and `on_code_swap` when present, plus host-required exported entry symbols.
-- Build and maintain a simple call graph and type-reference graph; lower only reachable functions and reachable struct metadata.
-- Do not add new parser-shape fallback detectors; replace/delete detector-driven paths instead of expanding them.
-- Do not add temporary compiler fallbacks that fake behavior (for example hash-stub returns, hardcoded placeholder values, or "temporary" alternate compile paths).
-- If a path is not yet truly implemented, fail with a deterministic diagnostic instead of emitting fake semantics.
-- Size compiler slices small enough that every newly claimed feature path is real, end-to-end testable, and verified in JIT/AOT as applicable.
-- Keep lowering state compact and validated: assert invariants at statement/function boundaries (`value stack`, `block depth`, `pending jumps`) and fail deterministically on violations.
-- Use explicit jump-list backpatching with bounded limits and overflow diagnostics for control-flow emission.
-- Add only a tiny local post-emit cleanup pass before Cranelift handoff (no broad optimizer track in this phase).
-- Deduplicate constants with a simple semantic cache and keep scoped symbol lookup in hashed stacks; do not introduce packed type/state encodings at this stage.
-- Keep diagnostic/instrumented behavior on the same pipeline (extra checks/tracing only), not a second compilation path.
-- Keep commits narrow and slice-scoped: avoid mixing reachability/lowering changes with unrelated backend/runtime work in the same commit.
-- End each slice with a cruft pass on touched files and aggressively remove code paths that no longer conform to the active reachability-first approach.
-- Keep test runs bounded and deterministic: each command must stay within 15 minutes (900 seconds), and lingering test/compiler processes must be checked/cleaned after each step.
-- Compiler feature-slice completion gate: each slice must include at least one representative sample program that goes end-to-end through the compiler pipeline to Cranelift IR, is built into an executable, is run, and has its behavior verified by test assertions.
-- If a slice cannot yet pass that end-to-end executable verification path, the slice is not complete.
-- After each code change, run a quick simplicity review on the touched code and simplify again if a more direct version is possible.
+- The runtime is one OS process with in process compilation. File level semantic analysis is authoritative; per function semantic hashes gate backend work only.
+- Compilation produces a pending patch in the background and commits it between ticks through stable `FnId -> code_ptr` indirection. Reject layout or signature incompatibility, `on_code_swap` failure, and any partial commit. Preserve deterministic tick based semantics; Stasis gameplay must not use `dt` to advance progression.
 
-## Contributor Workflow
-- Workflow contract: `docs/contributor_workflow.md`
-- Reviewer personas: `docs/review_personas.md`
-- Validation entrypoint: `tools/validate_repo.sh`
-- Android Workshop PRD task loop: `docs/android_workshop_tasks.md` (Maddox Tasks parent #116).
-- GitHub issues, PR comments, and PR reviews are the only source of work selection for Night Shift runs.
-- Repo docs such as `docs/build_checklist.md` and `docs/bugs.md` are context only; they explain constraints, history, and validation, but they do not override the selected GitHub item.
-- Branch setup, fetch/fast-forward, and executor launch are owned by the central Ned inbox runner rather than a repo-local wrapper script.
-- If a repo does not yet have a strict validation entrypoint, create or tighten one before relying on automation there. Prefer one deterministic script that runs the strongest real bounded checks already supported by the repo.
-- If the task came from PR review feedback, reply on GitHub when appropriate after fixing or clarifying the issue.
+## Compiler implementation
 
-## Theory-Building Practice
-- Treat programming as building and maintaining an explainable theory of how real-world behavior maps through Stasis source, compiler, JIT/AOT, runtime, and user experience. Code, tests, and documentation are evidence and memory cues; they are not substitutes for understanding.
-- Before a nontrivial change, observe one representative path end to end and be able to explain:
-- Mapping: what real-world behavior is represented, where it is represented, and what is deliberately outside the model.
-- Rationale: why the present structure and invariants were chosen, including the nearest tempting alternative that would violate them.
-- Extension: where one plausible adjacent requirement should fit naturally.
-- Predict the result of a focused test, trace, or sample before running it. Treat a different result as evidence that the working theory is incomplete.
-- When a change creates pressure for a detector, fake fallback, duplicated path, or special case, pause and determine whether the requirement fits the existing theory or requires an explicit theory revision.
-- For surprising or consequential work, use a critical-incident review: reconstruct the decision, cues noticed, alternatives considered, observed result, and a counterfactual that would have changed the decision.
-- A handoff is complete when the next contributor can teach back the mapping, rationale, and extension point and can diagnose or implement one representative case.
-- End each slice with `Theory gained:` stating the learned invariant or mapping, the observation supporting it, and one adjacent prediction it makes. Promote repeated durable lessons into the relevant canonical document; leave isolated hypotheses in the work summary.
+- Keep explicit precedence handling and shared parser matchers. The current flow indexes files, parses function bodies into stored statement artifacts, and then `Compiler::lower_function_to_hir` consumes those artifacts to build HIR. Extend that handoff instead of adding ad hoc token offsets, parser shape detectors, or duplicate parser pipelines.
+- Reachability pruning is the primary dead code mechanism. Roots are `main`, `tick`, `on_code_swap` when present, and host required exported entries; maintain simple call and type reference graphs and lower only reachable functions and struct metadata.
+- Do not emit fake semantics or temporary fallback paths. If a feature is not implemented, return a deterministic diagnostic. Keep lowering state compact and validate value stack, block depth, and pending jump invariants at statement and function boundaries; use bounded jump list backpatching with deterministic overflow diagnostics.
+- Keep diagnostic and instrumented behavior on the same pipeline. Keep compiler slices narrow and prove compiler behavior changes with at least one representative program that reaches Cranelift IR, builds an executable, runs, and has asserted behavior in the applicable JIT/AOT path. A slice without that executable proof is incomplete.
+- Earlier compiler lessons are archived in [`docs/compiler_process_history.md`](docs/compiler_process_history.md) for context only; they are not active requirements.
 
-## Self-Reflection Loop (Required)
-- At the end of each compiler slice, record one `Good`, one `Bad`, and one `Adjustment` entry in the work summary, then update this file if a process rule should change.
-- Current reflection (2026-02-23):
-- Good: narrow slice commits plus bounded targeted tests kept changes stable and debuggable.
-- Bad: detector-heavy metadata extraction grew faster than its maintainability payoff and slowed direct progress to simple Cranelift lowering.
-- Adjustment: prioritize reachability-first pruning and delete detector/fallback branches as soon as equivalent lowered behavior is covered.
-- Current reflection (2026-02-23, cleanup slice):
-- Good: deleting detector blocks immediately reduced compiler complexity and made ownership boundaries clearer.
-- Bad: temporary compatibility channels (`simple_*` metrics) still exist and can hide stale host expectations.
-- Adjustment: remove compatibility metric channels quickly after reachability contracts are wired to avoid long-lived dead interfaces.
-- Current reflection (2026-02-23, simple-pass restart slice):
-- Good: replacing the copied orchestration file with a fresh single-pass parser immediately clarified scope and ownership.
-- Bad: initial rewrite used unsupported control-flow keywords (`break`/`continue`), causing avoidable early fixture failures.
-- Adjustment: after the first parser chunk, run one small representative fixture immediately to validate language-surface assumptions before adding more code.
-- Current reflection (2026-02-23, struct-layout reachability slice):
-- Good: wiring struct/global pruning directly in `.stasis` kept the change small and testable while preserving host-glue boundaries.
-- Bad: large end-to-end fixture execution exceeded the 5-minute command budget and is too slow for routine slice verification.
-- Adjustment: default slice verification to bounded Rust-side harness tests for fast feedback, and run larger end-to-end fixture commands only as explicitly budgeted checks.
-- Current reflection (2026-02-24, host-required root wiring slice):
-- Good: adding host-required roots as explicit hashes injected into `.stasis` kept ownership clear and avoided parser/keyword surface expansion.
-- Bad: host compiler API had no compile-options channel, so root wiring currently rides through harness generation rather than a structured config object.
-- Adjustment: introduce a small explicit compile-config object in Rust host next, so required roots and future compile flags are passed through one typed path.
-- Current reflection (2026-07-16, semantic-edit protocol slice):
-- Good: one Rust parser-owned edit plan gave CLI and Android identical identity, import, validation, hash, and rollback behavior without duplicating scanners.
-- Bad: the first pass missed same-line declaration boundaries, import-only lifecycle roots, and the mismatch between Android display owners and Rust semantic owners.
-- Adjustment: semantic-edit slices must test non-textual reachability roots, multiple declarations on one line, cross-surface identity translation, and every failure point after source mutation but before receipt publication.
+## Work selection and review
+
+- For ordinary work, the user's request defines the scope. Repository plans and bug lists provide context only.
+- For Night Shift or inbox automation, the selected GitHub issue, PR, review, or review comment is the sole work source. The central runner owns branch setup, fetch or fast forward, and executor launch.
+- Before a nontrivial edit, inspect status and relevant code, resolve architectural questions, and state a concise plan. Select review personas from `docs/review_personas.md` by risk; they are optional, not a fixed gate.
+- Review the final diff, remove incidental changes, simplify touched code, and run applicable final checks once. Update durable docs when a discovery changes an invariant. Commit, append a Night Shift report, or reply on GitHub only when the user or the authorized automation task explicitly includes that action.

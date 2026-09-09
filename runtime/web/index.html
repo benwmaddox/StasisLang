@@ -28,7 +28,7 @@
       background: #081613;
       color: #f3eee1;
     }
-    main { position: relative; width: min(960px, 100%); max-width: 100%; aspect-ratio: 16 / 9; }
+    main { position: relative; width: 100%; max-width: 100%; aspect-ratio: 16 / 9; }
     canvas { display: block; width: 100%; height: 100%; aspect-ratio: 16 / 9; background: #091b2d; touch-action: none; }
     __STASIS_PERFORMANCE_HUD_STYLE__
     #stasis-loading { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: calc(env(safe-area-inset-top, 0px) + clamp(1.5rem, 7vw, 5rem)) calc(env(safe-area-inset-right, 0px) + clamp(1.5rem, 7vw, 5rem)) calc(env(safe-area-inset-bottom, 0px) + clamp(1.5rem, 7vw, 5rem)) calc(env(safe-area-inset-left, 0px) + clamp(1.5rem, 7vw, 5rem)); box-sizing: border-box; overflow: hidden; isolation: isolate; background: linear-gradient(145deg, #102a24 0%, #0b1d1a 48%, #07131d 100%); color: #f3eee1; text-align: center; }
@@ -68,6 +68,12 @@
       if (!canvas || !shell) return;
 
       const finite = value => Number.isFinite(value) && value > 0 ? value : 0;
+      const dimension = value => Math.max(1, finite(value));
+      // The canvas attributes select the guest's logical coordinate space.
+      // The runtime may later change the intrinsic backing store for DPR, but
+      // that must never change the aspect ratio or logical units used here.
+      let logicalWidth = dimension(canvas.getAttribute?.("width") || canvas.width) || 16;
+      let logicalHeight = dimension(canvas.getAttribute?.("height") || canvas.height) || 9;
       const safeInset = side => {
         const styles = typeof getComputedStyle === "function" ? getComputedStyle(document.body) : null;
         const value = styles && parseFloat(styles.getPropertyValue(`padding-${side}`));
@@ -91,16 +97,18 @@
 
       let lastExtent = "";
       let lastPosition = "";
-      const fit = () => {
+      const fit = (nextLogicalWidth, nextLogicalHeight) => {
+        if (finite(nextLogicalWidth) && finite(nextLogicalHeight)) {
+          logicalWidth = dimension(nextLogicalWidth);
+          logicalHeight = dimension(nextLogicalHeight);
+        }
         const viewport = visibleViewport();
         const availableWidth = Math.max(1, viewport.width - viewport.left - viewport.right);
         const availableHeight = Math.max(1, viewport.height - viewport.top - viewport.bottom);
-        const backingWidth = finite(canvas.width) || 16;
-        const backingHeight = finite(canvas.height) || 9;
-        const ratio = backingWidth / backingHeight;
-        const width = Math.max(1, Math.min(960, availableWidth, availableHeight * ratio));
+        const ratio = logicalWidth / logicalHeight;
+        const width = Math.max(1, Math.min(availableWidth, availableHeight * ratio));
         const height = width / ratio;
-        const extentKey = [viewport.width, viewport.height, viewport.left, viewport.right, viewport.top, viewport.bottom, backingWidth, backingHeight].join(":");
+        const extentKey = [viewport.width, viewport.height, viewport.left, viewport.right, viewport.top, viewport.bottom, logicalWidth, logicalHeight].join(":");
         const positionKey = `${viewport.offsetLeft}:${viewport.offsetTop}`;
         const extentChanged = extentKey !== lastExtent;
         const positionChanged = positionKey !== lastPosition;
@@ -114,13 +122,23 @@
         document.documentElement.style.setProperty("--stasis-visible-height", `${viewport.height}px`);
         shell.style.width = `${width}px`;
         shell.style.height = `${height}px`;
-        shell.style.aspectRatio = `${backingWidth} / ${backingHeight}`;
+        shell.style.aspectRatio = `${logicalWidth} / ${logicalHeight}`;
         if (typeof window.dispatchEvent === "function" && typeof Event === "function") {
           window.dispatchEvent(new Event("stasis-viewport-extent"));
         }
       };
 
-      window.STASIS_REFIT_VIEWPORT = fit;
+      window.STASIS_LOGICAL_WIDTH = logicalWidth;
+      window.STASIS_LOGICAL_HEIGHT = logicalHeight;
+      window.STASIS_REFIT_VIEWPORT = (nextLogicalWidth, nextLogicalHeight) => {
+        if (finite(nextLogicalWidth) && finite(nextLogicalHeight)) {
+          logicalWidth = dimension(nextLogicalWidth);
+          logicalHeight = dimension(nextLogicalHeight);
+          window.STASIS_LOGICAL_WIDTH = logicalWidth;
+          window.STASIS_LOGICAL_HEIGHT = logicalHeight;
+        }
+        fit();
+      };
       fit();
       addEventListener("resize", fit);
       addEventListener("orientationchange", fit);

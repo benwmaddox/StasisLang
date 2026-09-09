@@ -6,18 +6,12 @@ for normal project work.
 Read `PROJECT_ARCHITECTURE.md` before structuring game code. Use its input, tick, state, and
 rendering boundaries as the default unless the project documents a concrete reason to differ.
 
-## Theory-building practice
+## Understand and record
 
-- Treat programming as building and maintaining an explainable theory of how real-world behavior maps through Stasis source, explicit state, deterministic tick systems, rendering, tests, and the packaged user experience. Code, tests, and documentation are evidence and memory cues; they are not substitutes for understanding.
-- Before a nontrivial change, observe one representative path end to end and explain:
-  - Mapping: what user or world behavior is represented, where it is represented, and what is deliberately outside the model.
-  - Rationale: why the present structure and invariants were chosen, including the nearest tempting alternative that would violate them.
-  - Extension: where one plausible adjacent requirement should fit naturally.
-- Predict the result of a focused test, trace, simulation, or capture before running it. Treat a different result as evidence that the working theory is incomplete.
-- When a change creates pressure for a detector, fake fallback, duplicated path, or special case, pause and determine whether the requirement fits the existing theory or requires an explicit theory revision.
-- For surprising or consequential work, use a critical-incident review: reconstruct the decision, cues noticed, alternatives considered, observed result, and a counterfactual that would have changed the decision.
-- A handoff is complete when the next contributor can teach back the mapping, rationale, and extension point and can diagnose or implement one representative case.
-- End substantial work with `Theory gained:` stating the learned invariant or mapping, the observation supporting it, and one adjacent prediction it makes. Promote repeated durable lessons into this file or the relevant canonical document; leave isolated hypotheses in the work summary.
+- Before a nontrivial change, trace one representative path through Stasis source, state, runtime, tests, and the user visible result. Note the mapping and invariant that guide the edit.
+- Predict the focused test, trace, simulation, or capture result before running it. Treat an unexpected result as evidence that the working understanding needs revision.
+- Prefer existing semantic and compiler paths. If a detector, fake fallback, duplicate parser, or special case seems necessary, determine whether the current contract needs a documented change before adding it.
+- Record durable discoveries in the relevant canonical document and keep task specific observations in the work record. No fixed teachback or reflection format is required.
 
 ## Inspect narrowly
 

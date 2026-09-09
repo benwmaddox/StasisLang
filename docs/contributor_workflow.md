@@ -1,68 +1,28 @@
 # Contributor Workflow
 
-## Goal
+## Scope and work selection
 
-Make the next useful change, verify it, and leave the repository in a reviewable state.
+For ordinary work, follow the user's requested task. `docs/bugs.md`, `docs/build_checklist.md`, and other plans provide context; they do not select work.
 
-## Preparation
+For Night Shift or inbox automation, implement only the selected GitHub issue, pull request, review, or review comment. The central runner owns branch setup, fetch or fast forward, and executor launch. Commit, report, or GitHub reply actions belong only to an explicitly authorized task workflow.
 
-1. Inspect `git status --short`.
-2. If the tree is dirty because a cross-repo inbox synced tracked docs, either commit that sync first or stop if the state is unsafe to modify.
-3. Run the baseline validation command: `tools/validate_repo.sh`.
-4. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
-5. Run `tools/install_git_hooks.ps1` once per clone. This repository's pre-commit hook blocks noncanonical staged Stasis source. Run the Android Workshop JIT render-parity emulator gate explicitly for rendering changes; the arm64 release shell has its own package-content and device gates.
-6. Codex and other automation must invoke Cargo through `python tools/cargo_cache.py run -- cargo ...`. This shares one repository-owned cache across linked worktrees and disables incremental artifacts only for the child Cargo process. See `docs/cargo_cache_policy.md` for measurement and safe cleanup.
+## Before editing
 
-## Choose work
+1. Inspect `git status --short` and read only the relevant docs and source.
+2. For nontrivial work, resolve the affected symbols and architecture, state a concise implementation and validation plan, then edit.
+3. Use the repository Cargo cache command for Codex and automation: `python tools/cargo_cache.py run -- cargo ...`.
 
-1. Read `docs/bugs.md`; choose the highest-severity item in `READY`.
-2. If no bug is ready, choose the highest-priority active item from `docs/build_checklist.md`.
-3. If no implementation task is available, improve docs, validation, or task hygiene.
+## Implement and validate
 
-## Understand the task
+- Make the smallest change that satisfies the task. Add a deterministic regression test when behavior warrants one; when practical, observe the focused test fail before implementation.
+- Run focused checks while developing. Give Cargo tests an owning target (`--lib`, `--bin <name>`, or `--test <name>`); an unexpected `running 0 tests` result is a failed selection.
+- Keep Rust tests runnable by default; `tools/validate_repo.sh` rejects `#[ignore]` under product and test roots.
+- Keep unsafe Rust inside audited platform boundary crates and follow `docs/unsafe_rust.md`. Do not leave test or compiler processes running after a timeout, cancellation, or suspected leak; inspect and clean only processes started by this task.
+- For graphical behavior, capture and inspect a representative PNG, and an MP4 when the claim depends on motion, timing, input, animation, or a multi step interaction. If relevant media cannot be captured, state the limitation and record the validation gap.
 
-- Read the chosen checklist or bug entry.
-- If the task came from PR review feedback, use the included GitHub links and thread context to understand what needs a reply.
-- Load only the docs needed for that task.
-- Read the relevant Rust and `.stasis` code before proposing changes.
+## Review and wrap up
 
-## Tests-First Workflow
-
-1. Write a brief testing plan in working notes or commit history, not for human review.
-2. Add or expand automated checks to capture the desired behavior.
-3. Run the checks and confirm they fail for the expected reason before implementation.
-4. Keep Rust tests runnable by default; `tools/validate_repo.sh` rejects `#[ignore]` under product and test source roots. Put checks that require external credentials or installed tools in explicit examples instead.
-5. Keep unsafe Rust inside the audited platform-boundary crates and follow `docs/unsafe_rust.md`; repository validation rejects unsafe blocks in orchestration and product crates.
-6. Give focused Cargo test commands an owning target (`--lib`, `--bin <name>`, or `--test <name>`). An unexpected `running 0 tests` is a failed test selection, not a successful check; correct the package, target, or full test path before continuing.
-
-To smoke-test the installed Codex provider and shared response schema, run `cargo run -p stasis_ai --example codex_provider_smoke` from a signed-in Codex environment.
-
-## Reviewer Gate Before Implementation
-
-- Run the personas in `docs/review_personas.md`.
-- If any persona is `BLOCKED`, update docs, tests, or plan before changing code.
-
-## Implement
-
-- Make the smallest change that satisfies the failing checks.
-- Run the full quality gates after each meaningful change.
-
-## Reviewer Gate After Implementation
-
-- Re-run the personas against the diff.
-- Iterate until all personas are `GREEN` or the task is explicitly blocked by missing user input.
-
-## Wrap-Up
-
-1. Update any docs that would prevent repeating the same mistake.
-2. If the task came from PR review feedback, reply on GitHub when appropriate with the fix, clarification, or follow-up question.
-3. For user-visible graphical work, capture and inspect reviewable evidence in addition to automated checks. Use PNG for a representative still state; use MP4 for motion, timing, animation, input, or multi-step interaction. Keep captures focused on the behavior under review and exclude unrelated windows, notifications, secrets, and personal data.
-4. Every AI-authored work summary must include `Visual evidence:` followed by the inspected PNG/MP4 paths and what they prove. Use `Visual evidence: not applicable` when the change has no user-visible behavior. If capture was relevant but unavailable, say so explicitly and record the remaining validation gap.
-5. Commit with a message that explains what changed, why, how it was verified, and any residual risks.
-6. Append a concise entry to `docs/night_shift_report.md`.
-
-## Stop Conditions
-
-- No `READY` bugs remain and no runnable checklist work remains.
-- The task requires a product, design, or business decision from the user.
-- Validation cannot be restored safely within the current run.
+- Select only the risk relevant reviewers from `docs/review_personas.md`. Review the diff and run applicable final validation once, including `tools/validate_repo.sh` when the change warrants the full repository gate. Do not repeat unrelated full gates after each edit.
+- Remove incidental changes and simplify the touched code. Update a canonical doc when the work establishes a durable invariant; keep isolated observations in the work record when useful.
+- If a review task explicitly authorizes a GitHub response, reply after validation. Otherwise leave external communication, commits, and Night Shift reports to the authorized workflow.
+- Every AI authored work summary includes `Visual evidence:` with inspected PNG or MP4 paths and what they prove, or `Visual evidence: not applicable`.
