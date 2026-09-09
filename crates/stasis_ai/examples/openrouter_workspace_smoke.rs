@@ -37,6 +37,7 @@ fn main() {
                 "resolved_provider": usage["resolved_provider"],
                 "qualified_endpoint_minimum_tokens_per_second": hard_minimum,
                 "route": usage["route"],
+                "transport_attempts": usage["transport_attempts"],
                 "timing_ms": usage["timing_ms"],
                 "tokens": usage["tokens"],
                 "observed_completion_tokens_per_second": usage["throughput_tokens_per_second"],
