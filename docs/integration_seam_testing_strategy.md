@@ -215,6 +215,11 @@ project A after switching back. `stasis.workshop_resource_scope.v1` binds each P
 hash to the native frame handles, exact resolver identities, renderer generation,
 stale-generation rejection count, restore uploads, and bounded atlas/text caches.
 Numeric GLES texture names are deliberately excluded because drivers may reuse them.
+Compare stable project/content/raster identities across restoration, after checking
+each sprite identity's surface/renderer suffix against its own provider snapshot.
+In this fixed-size scenario, the one size callback after context creation puts the
+provider surface generation one below the lifecycle surface generation. Renderer
+generations must match; recreation changes epochs, not asset identity.
 
 IT-032 runs after IT-031 on the scheduled device lane. It publishes same-layout
 constant revisions before frames 75, 150, 225, and 300, recreates the real EGL

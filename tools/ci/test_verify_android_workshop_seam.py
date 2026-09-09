@@ -138,14 +138,15 @@ def _it029_case(phase, sequence, root, text_hash, capture_hash, command_trace,
                 generation, stale_rejections, uploads):
     resources = {
         "project_root": root,
-        "surface_generation": generation,
+        "surface_generation": generation * 2 - 1,
         "renderer_generation": generation,
-        "lifecycle_surface_generation": generation + 1,
+        "lifecycle_surface_generation": generation * 2,
         "lifecycle_renderer_generation": generation,
         "resources_ready": True,
         "sprite_handles": [101, 102, 103],
         "identities": [
-            "sprite:101:" + root + ":sprite-hash",
+            "sprite:101:" + root + ":sprite-hash:640x360:density=1065353216"
+            + f":surface={generation * 2 - 1}:renderer={generation}",
             "font:201:" + root + ":font-hash:24",
             "cached_text:301:" + root + ":" + text_hash,
             "text:201:" + root + ":" + text_hash,
@@ -732,6 +733,25 @@ class WorkshopSeamTests(unittest.TestCase):
         with self.assertRaisesRegex(SeamError, "identity was reused"):
             verify_log(GOOD.replace('"capture_sha256":"b' + 'b' * 63 + '"',
                                     '"capture_sha256":"a' + 'a' * 63 + '"'), MANIFEST)
+
+    def test_rejects_it029_stale_identity_epoch_or_changed_content(self):
+        for old, new, error in (
+            (":surface=3:renderer=2", ":surface=1:renderer=1", "stale generation"),
+            (":surface=3:renderer=2", "", "stale generation"),
+            ("sprite-hash:640x360", "wrong-hash:640x360", "identities crossed"),
+            ("sprite-hash:640x360", "sprite-hash:320x180", "identities crossed"),
+            (":font-hash:24", ":wrong-font:24", "identities crossed"),
+            (f"cached_text:301:{_alpha_root}:" + "1" * 64,
+             f"cached_text:301:{_alpha_root}:" + "2" * 64, "identities crossed"),
+            (f"text:201:{_alpha_root}:" + "1" * 64,
+             f"text:201:{_alpha_root}:" + "2" * 64, "identities crossed"),
+            ('"lifecycle_surface_generation":4',
+             '"lifecycle_surface_generation":3', "stale generation"),
+            ('"lifecycle_renderer_generation":2',
+             '"lifecycle_renderer_generation":1', "stale generation"),
+        ):
+            with self.subTest(new=new), self.assertRaisesRegex(SeamError, error):
+                verify_log(GOOD.replace(old, new, 1), MANIFEST)
 
     def test_rejects_it029_stale_generation_or_duplicate_restore(self):
         stale = GOOD.replace('"stale_generation_rejections":6',

@@ -289,6 +289,25 @@ def verify_it028(log: str, after_position: int) -> dict:
     }
 
 
+def stable_resource_identities(resources: dict) -> list[str]:
+    surface = resources.get("surface_generation")
+    renderer = resources.get("renderer_generation")
+    if type(surface) is not int or type(renderer) is not int \
+            or surface <= 0 or renderer <= 0 \
+            or surface + 1 != resources.get("lifecycle_surface_generation") \
+            or renderer != resources.get("lifecycle_renderer_generation"):
+        raise SeamError("IT-029 resource snapshot has a stale generation")
+    epoch = f":surface={surface}:renderer={renderer}"
+    stable = []
+    for identity in resources["identities"]:
+        if identity.startswith("sprite:"):
+            if not identity.endswith(epoch):
+                raise SeamError("IT-029 sprite identity has a stale generation")
+            identity = identity[:-len(epoch)]
+        stable.append(identity)
+    return stable
+
+
 def verify_it029(log: str, after_position: int) -> dict:
     summaries = _json_markers(
         RESOURCE_SCOPE_MARKER, log, "IT-029 marker", "IT-029"
@@ -412,11 +431,11 @@ def verify_it029(log: str, after_position: int) -> dict:
             or beta_before["command_trace"] != beta_after["command_trace"] \
             or alpha["command_trace"] != alpha_return["command_trace"]:
         raise SeamError("IT-029 recreated or returned project restored the wrong identity")
-    alpha_identities = alpha["resources"]["identities"]
-    beta_identities = beta_before["resources"]["identities"]
+    alpha_identities = stable_resource_identities(alpha["resources"])
+    beta_identities = stable_resource_identities(beta_before["resources"])
     if alpha_identities == beta_identities \
-            or alpha_identities != alpha_return["resources"]["identities"] \
-            or beta_identities != beta_after["resources"]["identities"]:
+            or alpha_identities != stable_resource_identities(alpha_return["resources"]) \
+            or beta_identities != stable_resource_identities(beta_after["resources"]):
         raise SeamError("IT-029 exact resource identities crossed a project or surface epoch")
     before_resources = beta_before["resources"]
     after_resources = beta_after["resources"]
