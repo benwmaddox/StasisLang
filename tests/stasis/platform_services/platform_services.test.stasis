@@ -1,0 +1,28 @@
+import "../../../src/stdlib/platform_services.stasis";
+
+global platform_test_key: ascii[16];
+global platform_test_fields: i32[PLATFORM_SERVICE_RESPONSE_FIELD_COUNT];
+global platform_test_text: utf8[32];
+
+test `platform service mailbox has explicit unsupported fallback`(): bool {
+    if (platform_service_submit(1, 2, 90, platform_test_key) != PLATFORM_SERVICE_SUBMIT_INVALID) {
+        return false;
+    }
+
+    platform_test_key[0] = 112;
+    platform_test_key[1] = 111;
+    platform_test_key[2] = 119;
+    platform_test_key[3] = 101;
+    platform_test_key[4] = 114;
+    platform_test_key[5] = 95;
+    platform_test_key[6] = 117;
+    platform_test_key[7] = 112;
+    platform_test_key.length = 8;
+    if (platform_service_submit(1, 2, 91, platform_test_key) != PLATFORM_SERVICE_SUBMIT_ACCEPTED) {
+        return false;
+    }
+    if (platform_service_poll(platform_test_fields, platform_test_text) != 1) {
+        return false;
+    }
+    return platform_test_fields[PLATFORM_SERVICE_RESPONSE_SERVICE] == 1 && platform_test_fields[PLATFORM_SERVICE_RESPONSE_ACTION] == 2 && platform_test_fields[PLATFORM_SERVICE_RESPONSE_REQUEST_ID] == 91 && platform_test_fields[PLATFORM_SERVICE_RESPONSE_STATUS] == PLATFORM_SERVICE_RESPONSE_UNSUPPORTED && platform_test_fields[PLATFORM_SERVICE_RESPONSE_VALUE] == 0 && platform_test_text.length == 0 && platform_test_text.char_length == 0;
+}

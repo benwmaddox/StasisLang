@@ -369,6 +369,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int lastHotEditGlesEvidenceToken = -1;
     private int acceptanceTrace = -1;
     private int acceptanceTraceToken = -1;
+    private boolean workshopSoakAcceptanceActive;
+    private final AcceptancePresentationCounter workshopSoakPresentations =
+            new AcceptancePresentationCounter();
     private int frameDrawCalls;
     private int frameTextureBinds;
     private int frameMixedRuns;
@@ -473,6 +476,37 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return frameI32.get(I_RECT_COUNT);
     }
 
+    synchronized JSONObject acceptanceBufferSnapshot() throws Exception {
+        int lines = frameI32.get(I_LINE_COUNT);
+        int sprites = frameI32.get(I_SPRITE_COUNT);
+        int text = frameI32.get(I_TEXT_COUNT);
+        int textBytes = frameI32.get(I_TEXT_BYTES_USED);
+        int order = frameI32.get(I_ORDER_COUNT);
+        int rects = frameI32.get(I_RECT_COUNT);
+        int clips = frameI32.get(I_CLIP_COUNT);
+        int spriteRuns = frameI32.get(I_SPRITE_RUN_COUNT);
+        return new JSONObject()
+                .put("i32_identity", System.identityHashCode(frameI32Bytes))
+                .put("f32_identity", System.identityHashCode(frameF32Bytes))
+                .put("u8_identity", System.identityHashCode(frameU8Bytes))
+                .put("direct", frameI32Bytes.isDirect() && frameF32Bytes.isDirect()
+                        && frameU8Bytes.isDirect())
+                .put("i32_capacity", frameI32.capacity())
+                .put("f32_capacity", frameF32.capacity())
+                .put("u8_capacity", frameU8Bytes.capacity())
+                .put("line_count", lines).put("rect_count", rects)
+                .put("sprite_count", sprites).put("text_count", text)
+                .put("text_bytes_used", textBytes).put("order_count", order)
+                .put("clip_count", clips).put("sprite_run_count", spriteRuns)
+                .put("dropped_lines", frameI32.get(I_DROPPED_LINES))
+                .put("dropped_rects", frameI32.get(I_DROPPED_RECTS))
+                .put("dropped_sprites", frameI32.get(I_DROPPED_SPRITES))
+                .put("dropped_text", frameI32.get(I_DROPPED_TEXT))
+                .put("dropped_order", frameI32.get(I_DROPPED_ORDER))
+                .put("dropped_clips", frameI32.get(I_DROPPED_CLIPS))
+                .put("dropped_sprite_runs", frameI32.get(I_DROPPED_SPRITE_RUNS));
+    }
+
     synchronized void copyFrameHeaderInto(int[] destination) {
         if (destination.length < HOST_HEADER_I32S) {
             throw new IllegalArgumentException("render header destination is too small");
@@ -553,6 +587,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int orderCount = 0;
         boolean presented = false;
         synchronized (this) {
+            // Rejection must not clear the prior frame, prepare resources, or consume
+            // its presentation token/capture. The next valid frame can recover normally.
+            if (!isValidFrame(frameI32, frameF32)) {
+                timing.onRendered(System.nanoTime() - started);
+                return;
+            }
             if (restorePlaceholderPending
                     && System.nanoTime() < restorePlaceholderUntilNanos) {
                 drawRestorePlaceholder();
@@ -566,7 +606,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (restoring) {
                 while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
             }
-            boolean hasFrame = shouldPresent(frameI32, frameF32);
+            boolean hasFrame = (frameI32.get(I_FLAGS) & FLAG_PRESENT) != 0;
             if (hasFrame) prepareFrameResources();
             String resourceFailure = textures.consumeFailure();
             int glError = restoring ? GLES20.glGetError() : GLES20.GL_NO_ERROR;
@@ -621,10 +661,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 presented = true;
                 int frameToken = frameI32.get(I_FRAME_TOKEN);
                 lastPresentedFrameToken = frameToken;
+                if (workshopSoakAcceptanceActive) workshopSoakPresentations.observe(frameToken);
                 notifyAll();
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
                     int markerBase = F_RECT_REVERSE_BASE - GEOMETRY_F32_STRIDE;
-                    if (rectCount >= 2 && isHotEditMarker(markerBase)
+                    if (!workshopSoakAcceptanceActive
+                            && rectCount >= 2 && isHotEditMarker(markerBase)
                             && frameToken != lastHotEditGlesEvidenceToken) {
                         lastHotEditGlesEvidenceToken = frameToken;
                         Log.i(LOG_TAG, "Stasis Workshop IT-028 GLES: {\"schema\":\"stasis.workshop_hot_edit.v1\","
@@ -718,6 +760,42 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     synchronized void setAcceptanceTrace(int token, int trace) {
         acceptanceTraceToken = token;
         acceptanceTrace = trace;
+    }
+
+    synchronized void setWorkshopSoakAcceptanceActive(boolean active) {
+        if (active && !workshopSoakAcceptanceActive) workshopSoakPresentations.reset();
+        workshopSoakAcceptanceActive = active;
+    }
+
+    synchronized JSONObject workshopSoakPresentationSnapshot() throws Exception {
+        return new JSONObject().put("presented_count", workshopSoakPresentations.count())
+                .put("last_frame_token", workshopSoakPresentations.lastToken())
+                .put("tokens_ordered_unique", workshopSoakPresentations.ordered());
+    }
+
+    static final class AcceptancePresentationCounter {
+        private int count;
+        private int lastToken = -1;
+        private boolean ordered = true;
+
+        void reset() {
+            count = 0;
+            lastToken = -1;
+            ordered = true;
+        }
+
+        void observe(int token) {
+            if (token > lastToken) {
+                count += 1;
+                lastToken = token;
+            } else if (token < lastToken) {
+                ordered = false;
+            }
+        }
+
+        int count() { return count; }
+        int lastToken() { return lastToken; }
+        boolean ordered() { return ordered; }
     }
 
     synchronized int acceptanceTrace() {
@@ -1491,10 +1569,22 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     static boolean isValidFrame(IntBuffer values, FloatBuffer floats) {
         if (values == null || floats == null
-                || values.capacity() < FRAME_I32_CAPACITY
-                || floats.capacity() < FRAME_F32_CAPACITY
+                || values.limit() < FRAME_I32_CAPACITY
+                || floats.limit() < FRAME_F32_CAPACITY
                 || values.get(I_MAGIC) != RENDER_MAGIC
                 || values.get(I_VERSION) != RENDER_VERSION) return false;
+        // Mirror stasis_render_validate in runtime/stasis_render_contract.h.
+        // Validate the complete frame before resource preparation or any GLES writes.
+        int lineCount = values.get(I_LINE_COUNT);
+        int rectCount = values.get(I_RECT_COUNT);
+        int textCount = values.get(I_TEXT_COUNT);
+        int bytesUsed = values.get(I_TEXT_BYTES_USED);
+        int orderCount = values.get(I_ORDER_COUNT);
+        if (lineCount < 0 || lineCount > MAX_LINES
+                || rectCount < 0 || rectCount > MAX_GEOMETRY - lineCount
+                || textCount < 0 || textCount > MAX_TEXT
+                || bytesUsed < 0 || bytesUsed > TEXT_U8_CAPACITY
+                || orderCount < 0 || orderCount > MAX_ORDER) return false;
         int spriteCount = values.get(I_SPRITE_COUNT);
         int runCount = values.get(I_SPRITE_RUN_COUNT);
         int clipCount = values.get(I_CLIP_COUNT);
@@ -1519,7 +1609,36 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (values.get(baseI32) == 0 || values.get(baseI32 + 2) != 0
                     || !isValidSpriteGeometry(floats, baseF32)) return false;
         }
-        return true;
+        for (int text = 0; text < textCount; text += 1) {
+            int base = I_TEXT_BASE + text * TEXT_I32_STRIDE;
+            int offset = values.get(base + 1);
+            int length = values.get(base + 2);
+            if (offset < 0) {
+                if (offset == Integer.MIN_VALUE || length != 0) return false;
+            } else if (!isValidTextSpan(offset, length, bytesUsed)) return false;
+        }
+        int depth = 0;
+        for (int order = 0; order < orderCount; order += 1) {
+            int entry = values.get(I_ORDER_BASE + order);
+            if (entry < 0) return false;
+            int kind = orderKind(entry);
+            int index = orderIndex(entry);
+            switch (kind) {
+                case ORDER_LINE: if (index >= lineCount) return false; break;
+                case ORDER_RECT: if (index >= rectCount) return false; break;
+                case ORDER_SPRITE: if (index >= runCount) return false; break;
+                case ORDER_TEXT: if (index >= textCount) return false; break;
+                case ORDER_CLIP_PUSH:
+                    if (index >= clipCount || ++depth > MAX_CLIPS) return false;
+                    break;
+                case ORDER_CLIP_POP:
+                    if (index != 0 || depth <= 0) return false;
+                    depth -= 1;
+                    break;
+                default: return false;
+            }
+        }
+        return depth == 0;
     }
 
     static boolean isValidSpriteGeometry(FloatBuffer values, int base) {

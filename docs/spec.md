@@ -86,6 +86,12 @@ String-like storage is fixed-layout and deterministic.
 - header `max_length: i32`
 - payload `elements[N]`
 
+Ordinary arrays expose `.max_length` as their declared capacity. `.length` reads and
+writes are rejected for both fixed arrays and array views: logical array lengths
+are not supported yet. Programs that track a used prefix must maintain a separate
+count explicitly and use `.max_length` for capacity loops. String logical-length
+properties remain supported.
+
 Header access:
 - Header fields are accessed via built-in properties (e.g. `.max_length`, `.length`, `.char_length`), not by indexing into the header.
 - Negative indices are not allowed in source-level collection indexing.
@@ -480,7 +486,7 @@ Interpretation:
 - SoA-backed array element view (for example `enemies[i]` passed as `damage(enemies[i], 5)`):
 - `base = hash_global_path("enemies")` (the collection hash)
 - `index = i`
-- `len = enemies.length` (the array extent)
+- `len = enemies.max_length` (the array extent)
 
 Field access on a struct view:
 - If `index < 0` (AoS): compute `field_path_hash = hash_combine(base, "." + field_suffix)` and load/store the scalar field at that global path.
@@ -536,6 +542,12 @@ indexed elements:
 state.ui.aura.draw(24.0, 36.0, 255, 0);
 state.enemies[i].damage(5);
 ```
+
+Receiver-owned fixed arrays of named structs support scalar field reads and
+writes, such as `self.bones[index].parent` and `self.bones[index].local_x`.
+The receiver retains its owner's storage identity through nested calls. Indexed
+access retains the fixed-array bounds contract in section 4.2.1; selecting a whole
+struct element as a scalar value is rejected.
 
 Entry files should normally group application-owned mutable state beneath one
 root global. Fixed host ABI globals are an explicit exception.
@@ -1111,6 +1123,23 @@ epoch domains stop at `i32::MAX` without partial mutation; the Rust-only contrac
 retains its wider internal tick domain. RTC1 buffers and snapshot arrays are
 capacity-checked at the JIT boundary, and authoritative hashes use two unsigned
 32-bit lanes so the guest ABI retains the complete 64-bit value.
+
+### External URL host action
+
+`src/stdlib/external_url.stasis` exposes `open_external_url(url: string): i32`
+with the `platform` effect. The host accepts bounded HTTP(S) URLs from an
+explicit pointer or keyboard activation. Results are `EXTERNAL_URL_INVALID`
+(-1), `EXTERNAL_URL_IGNORED` (0), and `EXTERNAL_URL_OPENED` (1). The last result
+means the platform accepted the dispatch, not that a page finished loading.
+Headless execution and recordings return ignored for valid requests and never
+launch a browser. Guests must not make gameplay state depend on browser success.
+
+The UTF-8 payload is limited to 2048 bytes before copying. Unsupported schemes,
+control characters, malformed URLs, and credentials are rejected. One input
+edge authorizes at most one valid attempt; holding input does not reauthorize
+it. Games should call only from an edge-triggered UI action and consume that
+action before gameplay input handling. Platform behavior and validation are
+specified in [external_url.md](external_url.md).
 
 ## 18. Status Note
 

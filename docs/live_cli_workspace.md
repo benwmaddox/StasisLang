@@ -464,8 +464,14 @@ Gauntlet adds two schema-v1 JSON commands without changing the human TUI:
 `set_input_state` accepts at most eight logical pointers and overrides physical
 pointer data until replaced (an empty array clears the simulated pointers).
 Edge flags clear after one deterministic tick. `capture_frame` accepts only a
-bounded artifact identity and schedules a PNG for the next presented frame;
-the runtime chooses the path under the configured project output. Gauntlet
+bounded artifact identity and captures a PNG from the next presented frame;
+the runtime chooses the path under the configured project output. Its final
+`capture_completed` response is deferred until the PNG decodes successfully,
+with path, dimensions, byte length, SHA-256, scheduling/completion ticks, and
+runtime identity. A scheduled capture alone is not success. Verification has a
+five-second deadline, supports cancellation, and abandons disconnected callers.
+Rendering continues while paused, so capture does not require a gameplay step.
+Gauntlet
 combines these commands with pause, step, validation snapshot/restore, and
 state inspection to run repeatable scenarios. Callers cannot supply a capture
 filesystem path.

@@ -854,6 +854,7 @@ mod tests {
 
     #[test]
     fn recorded_session_rebuilds_state_and_detects_divergence() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")

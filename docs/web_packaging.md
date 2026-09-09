@@ -1,5 +1,8 @@
 # Web packaging
 
+For a packaged native application serving this bundle to nearby browsers, see
+[Desktop LAN host packages](desktop_network_packaging.md).
+
 Stasis packages a browser game with the same `package` command used for desktop and mobile:
 
 ```text
@@ -84,6 +87,30 @@ host request contract.
 Web packages do not render an audio-enable control. The runtime requests audio immediately and
 automatically retries on the first pointer or keyboard gesture when browser autoplay policy starts
 the audio context suspended.
+
+The public `AudioStream` API uses the same eight `stasis_jit_audio_*` imports as
+native builds. The Web adapters copy interleaved stereo f32 PCM before returning
+the accepted frame count; callers may immediately reuse their sample buffer.
+The running queue is bounded by `max(8192, target_latency_frames * 4)` frames.
+While suspended it is additionally capped at 100 ms and 32 pending pushes, so
+callers must honor partial acceptance. Queued frames count remaining PCM, excluding
+the scheduling lead-in. Mute and volume are authored PCM values, as on native.
+Web underruns count refills that arrive after the previous scheduled PCM drained.
+Closing drops queued PCM and stops its sources; reopening creates a new stream.
+Device initialization or scheduling failure reports failure rather than accepting
+inaudible work. Browser autoplay suspension is an available but paused device;
+pointer/keyboard gestures resume it, and page lifecycle events suspend/resume it.
+Public `AudioVoice` play, stop, playing, pause, and volume/pan bindings also use
+their `stasis_jit_audio_*` names and share the existing effect voice implementation.
+The PCM fixture retains all thirteen stream/voice imports to catch the missing
+bindings reported by both Marble Run and Gambit Guard during real Wasm startup.
+
+`samples/audio_stream_pcm` and `tools/run_audio_stream_browser_acceptance.mjs`
+provide deterministic package and rendered-audio conformance evidence. The runtime
+JavaScript is embedded in the compiler, so its official release checksum covers
+these adapters. Ship the compiler, native runtime and stdlib together using the
+release provenance workflow, then regenerate consumer vendor/package output from
+that release. Local source proofs do not authorize a consumer release repin.
 
 ## Loading shell font
 

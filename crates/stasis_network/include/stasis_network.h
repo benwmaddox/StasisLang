@@ -5,9 +5,12 @@
 #include <stdint.h>
 
 #define STASIS_NETWORK_ABI_VERSION 1u
+#define STASIS_NETWORK_CLIENT_ABI_VERSION 1u
 #define STASIS_NETWORK_MAX_MESSAGE_BYTES (64u * 1024u)
+#define STASIS_NETWORK_ADVERTISE_IPV4_ENV "STASIS_NETWORK_ADVERTISE_IPV4"
 
 typedef struct stasis_network_host stasis_network_host;
+typedef struct stasis_network_client stasis_network_client;
 typedef struct stasis_network_event {
     uint32_t kind;
     uint32_t connection;
@@ -54,6 +57,38 @@ uint32_t stasis_network_host_overflow_count(stasis_network_host *host);
 uint16_t stasis_network_host_port(stasis_network_host *host);
 int32_t stasis_network_host_copy_join_url(stasis_network_host *host, char *out,
     size_t capacity, size_t *out_length);
+/* Display-safe URL without pairing or resume credentials. */
+int32_t stasis_network_host_copy_join_card(stasis_network_host *host, char *out,
+    size_t capacity, size_t *out_length);
 void stasis_network_host_stop(stasis_network_host *host);
+
+#define STASIS_NETWORK_CLIENT_STATUS_DISCONNECTED 0
+#define STASIS_NETWORK_CLIENT_STATUS_CONNECTED 1
+#define STASIS_NETWORK_CLIENT_STATUS_CONNECTING 2
+
+uint32_t stasis_network_client_abi_version(void);
+/* Client calls are thread-safe. The owner must serialize destroy against all
+ * other calls and keep each caller buffer valid for its declared length.
+ * Create returns NULL on failure. Integer results use -1 invalid argument,
+ * -2 transport/disconnected, -3 bounded queue
+ * full, and -4 invalid credentials or protocol. A -4 status is terminal until
+ * an explicit connect call. */
+stasis_network_client *stasis_network_client_create(const char *join_url, size_t length);
+int32_t stasis_network_client_connect(stasis_network_client *client);
+int32_t stasis_network_client_disconnect(stasis_network_client *client);
+int32_t stasis_network_client_set_background(stasis_network_client *client, int32_t background);
+/* Retry backoff reports CONNECTING; background suspension reports DISCONNECTED. */
+int32_t stasis_network_client_status(stasis_network_client *client);
+/* Returns bytes copied, zero when idle, or a negative error. An undersized output
+ * returns -1 and preserves the queued message for a later poll. */
+int32_t stasis_network_client_poll(stasis_network_client *client, unsigned char *out,
+    size_t capacity);
+int32_t stasis_network_client_send(stasis_network_client *client,
+    const unsigned char *payload, size_t length);
+int32_t stasis_network_client_checkpoint(stasis_network_client *client, int32_t seat,
+    int32_t sequence);
+int32_t stasis_network_client_resume_seat(stasis_network_client *client);
+int32_t stasis_network_client_last_sequence(stasis_network_client *client);
+void stasis_network_client_destroy(stasis_network_client *client);
 
 #endif

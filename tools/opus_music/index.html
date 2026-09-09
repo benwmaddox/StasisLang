@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Opus music lab</title>
+<style>
+body{font:17px system-ui;background:#111b25;color:#edf3f6;max-width:960px;margin:40px auto;padding:0 24px}h1{margin-bottom:8px}p{color:#b9ccd7}button,select,input{font:inherit;padding:8px;border-radius:6px;margin:4px}button{cursor:pointer;background:#b6f1da;color:#142b25;border:0}audio{width:100%;margin:18px 0}fieldset{border:1px solid #466071;border-radius:10px;margin:14px 0;padding:16px}label{display:inline-block;margin:5px}input[type=number]{width:72px}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:10px;border-bottom:1px solid #466071}#status{color:#ffd58a}a{color:#b6f1da}
+</style>
+<h1>Opus music lab</h1>
+<p>Listen blind. Switch at the same moment. Judge whether you would use it in a game.</p>
+<p id="status" role="status">Loading masters...</p>
+<label>Track <select id="track"></select></label>
+<label>Listening mode <select id="mode"><option value="isolated">Isolated</option><option value="gameplay">Gameplay background (-15 dB)</option></select></label>
+<p>Gameplay mode attenuates music; no foreground effects are simulated. Use consistent device volume.</p>
+<div id="versions"></div>
+<audio id="player" controls preload="auto"></audio>
+<button id="restart">Restart</button>
+<form id="ratings"><div id="fields"></div><button>Save ratings for this mode</button></form>
+<h2>Results</h2><p id="recommendation">Complete gameplay ratings across at least three tracks to evaluate a default.</p>
+<div id="report"></div><button id="export">Download ratings.json and summary.html</button>
+<script type="module" src="app.js"></script>
+</html>

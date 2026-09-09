@@ -425,6 +425,7 @@ mod tests {
 
     #[test]
     fn run_jit_tests_in_directory_skips_target_git_and_stasis_cache_dirs() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -472,6 +473,7 @@ mod tests {
 
     #[test]
     fn run_jit_tests_in_directory_executes_nested_stasis_tests() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -500,6 +502,7 @@ mod tests {
 
     #[test]
     fn run_jit_tests_in_directory_accepts_test_keyword_without_test_extension() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -524,6 +527,7 @@ mod tests {
 
     #[test]
     fn public_session_api_accepts_relative_test_directory_with_imports() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -556,6 +560,7 @@ mod tests {
 
     #[test]
     fn run_jit_tests_in_directory_isolates_each_file_compile() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -588,6 +593,7 @@ mod tests {
 
     #[test]
     fn run_jit_tests_in_directory_resolves_imported_helper_functions() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -615,6 +621,7 @@ mod tests {
 
     #[test]
     fn run_jit_tests_in_directory_resolves_import_from_utf8_bom_source() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -642,6 +649,7 @@ mod tests {
 
     #[test]
     fn session_skips_compile_for_unchanged_files() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -664,6 +672,7 @@ mod tests {
 
     #[test]
     fn session_restores_dispatch_table_for_cached_process_before_execute() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -704,6 +713,7 @@ mod tests {
 
     #[test]
     fn session_recompiles_when_imported_dependency_changes() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -732,5 +742,24 @@ mod tests {
         assert_eq!(second.tests_failed, 1, "{second:?}");
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn repository_platform_service_fixture_runs_end_to_end() {
+        let _global_guard = crate::jit_test_support::lock();
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture_root = repository_root.join("tests/stasis/platform_services");
+        let mut session = StasisTestRunSession::new();
+        let summary = run_jit_tests_in_directory_with_project_root_and_session(
+            &fixture_root,
+            &repository_root,
+            &mut session,
+        )
+        .expect("run platform service fixture");
+
+        assert_eq!(summary.tests_discovered, 1, "{summary:?}");
+        assert_eq!(summary.tests_run, 1, "{summary:?}");
+        assert_eq!(summary.tests_passed, 1, "{summary:?}");
+        assert_eq!(summary.tests_failed, 0, "{summary:?}");
     }
 }

@@ -26,8 +26,12 @@
 #include "stasis_display_scale.h"
 #include "stasis_renderer_lifecycle.h"
 #include "stasis_performance_metrics.h"
+#include "stasis_platform_services.h"
 #include "stasis_image_writer.h"
 #include "stasis_sprite_atlas_policy.h"
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+#include "stasis_mobile_aot_runtime.h"
+#endif
 #include "stasis_mixed_quad_planner.h"
 #if defined(_WIN32)
 #include <sys/types.h>
@@ -161,6 +165,7 @@ static int g_recording_width = 0;
 static int g_recording_height = 0;
 static uint32_t g_recording_fps = 0;
 static bool g_recording_config_pending = false;
+static StasisExternalUrlActionState g_external_url_action;
 static StasisDisplayMetrics g_display_metrics;
 static int g_display_generation = 0;
 static int g_density_generation = 0;
@@ -322,6 +327,37 @@ static int stasis_draw_mixed_order_span(
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter);
+
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+int stasis_platform_open_external_url(const char *url, int32_t length);
+#else
+static int stasis_platform_open_external_url(const char *url, int32_t length) {
+    char copy[STASIS_EXTERNAL_URL_MAX_BYTES + 1];
+    if (length <= 0 || length > STASIS_EXTERNAL_URL_MAX_BYTES) return 0;
+    memcpy(copy, url, (size_t)length);
+    copy[length] = '\0';
+    return SDL_OpenURL(copy) ? 1 : 0;
+}
+#endif
+
+static int stasis_external_url_open_adapter(
+    const char *url,
+    int32_t length,
+    void *user_data
+) {
+    (void)user_data;
+    return stasis_platform_open_external_url(url, length);
+}
+
+STASIS_EXPORT int stasis_open_external_url(const char *url, int length) {
+    return stasis_external_url_action_request(
+        &g_external_url_action,
+        url,
+        (int32_t)length,
+        stasis_external_url_open_adapter,
+        NULL
+    );
+}
 
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
 #define SPRITE_TABLE_INITIAL_CAPACITY 256
@@ -1004,6 +1040,7 @@ static int stasis_ios_active_finger_count(void) {
 #endif
 
 static void stasis_pump_events(void) {
+    int external_url_input_edge = 0;
     if (!g_window) return;
     stasis_sync_display_metrics();
 
@@ -1037,6 +1074,7 @@ static void stasis_pump_events(void) {
                 if (event.key.scancode >= 0 && event.key.scancode < SDL_SCANCODE_COUNT) {
                     g_keyboard_event_state[event.key.scancode] = 1;
                 }
+                if (!event.key.repeat) external_url_input_edge = 1;
                 if (event.key.key == SDLK_ESCAPE) {
                     SDL_Log("Stasis quit requested: Escape key");
                     g_should_quit = true;
@@ -1075,6 +1113,10 @@ static void stasis_pump_events(void) {
             case SDL_EVENT_WINDOW_MINIMIZED:
                 g_window_minimized = true;
                 break;
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                external_url_input_edge = 0;
+                stasis_external_url_action_clear(&g_external_url_action);
+                break;
             case SDL_EVENT_WINDOW_RESTORED:
                 g_window_minimized = false;
                 stasis_sync_display_metrics();
@@ -1099,10 +1141,18 @@ static void stasis_pump_events(void) {
                     g_resource_lifecycle.renderer_generation);
                 break;
             case SDL_EVENT_WILL_ENTER_BACKGROUND:
+                external_url_input_edge = 0;
+                stasis_external_url_action_clear(&g_external_url_action);
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+                (void)stasis_mobile_network_client_set_background(1);
+#endif
                 stasis_renderer_lifecycle_pause(&g_resource_lifecycle);
                 g_resource_frame_ready = false;
                 break;
             case SDL_EVENT_DID_ENTER_FOREGROUND:
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+                (void)stasis_mobile_network_client_set_background(0);
+#endif
                 if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {
                     stasis_renderer_lifecycle_resume(&g_resource_lifecycle);
                 }
@@ -1110,6 +1160,7 @@ static void stasis_pump_events(void) {
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
                 if (event.button.button == SDL_BUTTON_LEFT) {
                     g_input_frame.pointers[0].went_down = 1;
+                    external_url_input_edge = 1;
                 }
                 break;
             case SDL_EVENT_MOUSE_BUTTON_UP:
@@ -1127,6 +1178,7 @@ static void stasis_pump_events(void) {
                     int idx = slot + 1;
                     g_input_frame.pointers[idx].is_down = 1;
                     g_input_frame.pointers[idx].went_down = 1;
+                    external_url_input_edge = 1;
                     float logical_x = 0.0f;
                     float logical_y = 0.0f;
                     stasis_window_to_logical(
@@ -1211,6 +1263,11 @@ static void stasis_pump_events(void) {
         }
     }
     g_input_frame.pointer_count = max_idx + 1;
+    stasis_external_url_action_begin_frame(
+        &g_external_url_action,
+        external_url_input_edge,
+        g_recording_presentation || g_window == NULL
+    );
 }
 
 STASIS_EXPORT int stasis_input_pointer_count(void) {
@@ -3604,6 +3661,7 @@ static void stasis_perf_draw_overlay(void) {
  */
 STASIS_EXPORT void stasis_end_frame(void) {
     if (!g_resource_frame_ready) {
+        stasis_external_url_action_clear(&g_external_url_action);
         g_perf_render_started_counter = 0;
         g_line_count = 0;
         g_events_pumped_this_frame = 0;
@@ -3640,6 +3698,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
     }
 
     g_debug_frame_counter++;
+    stasis_external_url_action_clear(&g_external_url_action);
     g_events_pumped_this_frame = 0;
 }
 
@@ -4710,15 +4769,17 @@ static int stasis_sprite_atlas_reserve_on_page(
     }
     int x = page->cursor_x;
     int y = page->cursor_y;
+    int row_h = page->row_h;
     if (x + alloc_w > page->width) {
         x = 1;
-        y += page->row_h;
-        page->row_h = 0;
+        y += row_h;
+        row_h = 0;
     }
+    /* Failed probes must preserve the occupied shelf for later allocations. */
     if (y + alloc_h > page->height) return 0;
     page->cursor_x = x + alloc_w;
     page->cursor_y = y;
-    if (alloc_h > page->row_h) page->row_h = alloc_h;
+    page->row_h = alloc_h > row_h ? alloc_h : row_h;
     page->live_allocations++;
     *out_x = x + STASIS_SDL_ATLAS_PADDING;
     *out_y = y + STASIS_SDL_ATLAS_PADDING;
@@ -6098,6 +6159,7 @@ STASIS_EXPORT void stasis_mobile_set_paused(int paused) {
         }
     }
     if (paused) {
+        stasis_external_url_action_clear(&g_external_url_action);
         stasis_renderer_lifecycle_pause(&g_resource_lifecycle);
         g_resource_frame_ready = false;
     } else if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {
