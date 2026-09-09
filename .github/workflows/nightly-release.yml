@@ -772,6 +772,7 @@ jobs:
           fi
           gh release create "${NIGHTLY_TAG}" "${release_assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
             --title "Nightly ${NIGHTLY_TAG}" \
             --notes "${notes}" \
             --prerelease

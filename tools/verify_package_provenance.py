@@ -113,17 +113,6 @@ def verify_mobile_shells(
     package_id = receipt.get("package_id") or mobile_package_id(receipt["name"])
     network_enabled = receipt.get("network") is True
     network_client_enabled = receipt.get("network_client") is True
-    native_network_enabled = network_enabled or network_client_enabled
-    client_permission = (
-        f'    <permission android:name="{package_id}.permission.PROVISION_NETWORK_CLIENT" android:protectionLevel="signature" />'
-        if network_client_enabled
-        else ""
-    )
-    client_alias = (
-        f'        <activity-alias android:name=".NetworkJoin" android:targetActivity=".MainActivity" android:exported="true" android:permission="{package_id}.permission.PROVISION_NETWORK_CLIENT" />'
-        if network_client_enabled
-        else ""
-    )
     replacements = {
         "@STASIS_APP_NAME@": receipt.get("app_name") or receipt["name"],
         "@STASIS_PACKAGE_ID@": package_id,
@@ -137,14 +126,23 @@ def verify_mobile_shells(
         "@STASIS_ANDROID_VERSION_NAME@": receipt.get("android_version_name") or "1.0",
         "@STASIS_ANDROID_ABI@": "arm64-v8a" if target == "android-arm64" else "",
         "@STASIS_NETWORK_ENABLED@": "1" if network_enabled else "0",
-        "@STASIS_NETWORK_CLIENT_ENABLED@": (
-            "1" if network_client_enabled else "0"
+        "@STASIS_NETWORK_CLIENT_ENABLED@": "1" if network_client_enabled else "0",
+        "@STASIS_NETWORK_CLIENT_PERMISSION@": (
+            f'    <permission android:name="{package_id}.permission.PROVISION_NETWORK_CLIENT" '
+            'android:protectionLevel="signature" />'
+            if network_client_enabled
+            else ""
         ),
-        "@STASIS_NETWORK_CLIENT_PERMISSION@": client_permission,
-        "@STASIS_NETWORK_CLIENT_ALIAS@": client_alias,
+        "@STASIS_NETWORK_CLIENT_ALIAS@": (
+            '        <activity-alias android:name=".NetworkJoin" '
+            'android:targetActivity=".MainActivity" android:exported="true" '
+            f'android:permission="{package_id}.permission.PROVISION_NETWORK_CLIENT" />'
+            if network_client_enabled
+            else ""
+        ),
         "@STASIS_NETWORK_PERMISSION@": (
             '    <uses-permission android:name="android.permission.INTERNET" />\n'
-            if native_network_enabled and platform == "android"
+            if network_enabled or network_client_enabled
             else ""
         ),
         "@STASIS_LOCAL_NETWORK_USAGE@": (
@@ -177,7 +175,7 @@ def verify_mobile_shells(
     expected_paths.add(("common", "stasis_package_provenance.h"))
     if target == "ios-arm64":
         expected_paths.add(("ios", "StasisMobile.xcconfig"))
-    if network_enabled:
+    if network_enabled or network_client_enabled:
         if target == "ios-arm64":
             expected_paths.update(
                 {

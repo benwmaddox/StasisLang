@@ -2,31 +2,13 @@ package com.stasislang.workshop;
 
 import android.util.Log;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
-
 
 /** Acceptance-only Rust/C/JNI/Java diagnostic round trip. */
 final class WorkshopDiagnosticSeamAcceptance {
     private static final String LOG_TAG = "StasisWorkshop";
     private static final String MISSING_EXTERN = "extern function IT031_missing_extern(): void;";
-    private static final String RESOURCE_EXTERN =
-            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;";
-    static final String RENDER_SCHEMA_HELPER_PATH =
-            "tests/stasis/seams/it031_render_schema.stasis";
-    static final String RENDER_SCHEMA_HELPER_SOURCE =
-            "import \"/.stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis\";\n\n"
-                    + "function IT031_corrupt_render_schema(): void {\n"
-                    + "    gfx_cmd_i32[1] = 99;\n"
-                    + "}\n";
-    private static final String RENDER_SCHEMA_IMPORT =
-            "import \"/tests/stasis/seams/it031_render_schema.stasis\";";
-    private static final String RENDER_SCHEMA_CALL = "IT031_corrupt_render_schema();";
 
     private WorkshopDiagnosticSeamAcceptance() {}
 
@@ -39,7 +21,6 @@ final class WorkshopDiagnosticSeamAcceptance {
         String original = null;
         JSONArray cases = new JSONArray();
         JSONObject baselineRuntime = null;
-        boolean renderSchemaHelperOwned = false;
         try {
             original = activity.acceptanceReadSource(projectRoot);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "baseline compile");
@@ -65,21 +46,20 @@ final class WorkshopDiagnosticSeamAcceptance {
             activity.acceptanceReplaceSource(projectRoot, original);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "render-schema baseline");
             requireEquals("passed", activity.runIt031Frame(projectRoot), "render-schema baseline frame");
-            createRenderSchemaHelper(projectRoot);
-            renderSchemaHelperOwned = true;
             String renderSchemaSource = renderSchemaSource(original);
             activity.acceptanceReplaceSource(projectRoot, renderSchemaSource);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "render-schema setup");
+            requireEquals("passed", activity.runIt031Frame(projectRoot), "render-schema activation");
+            if (!MainActivity.nativeCorruptRenderSchemaForAcceptance()) {
+                throw new IllegalStateException("render-schema header injection failed");
+            }
             String renderMessage = activity.runIt031Frame(projectRoot);
             WorkshopNativeDiagnostic render = activity.acceptanceNativeDiagnostic(renderMessage);
             requireCode(render, "render_schema", "stasis.renderSchema");
             requireContext(render, null, "render", null);
             cases.put(caseEvidence(activity, "render_schema", render, renderMessage, null));
 
-            String resourceSource = ensureGfxLoadSpriteExtern(original);
-            String missingResource = insertAfterInFunction(resourceSource,
-                    "function on_code_swap(): void {", "function on_code_swap(): void {",
-                    "\n    gfx_load_sprite(\"assets/IT031_missing.svg\", 32, 32);");
+            String missingResource = missingResourceSource(original);
             activity.acceptanceReplaceSource(projectRoot, missingResource);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "resource setup");
             String nativeResource = activity.runIt031Frame(projectRoot);
@@ -88,9 +68,7 @@ final class WorkshopDiagnosticSeamAcceptance {
             requireContext(resource, null, null, "assets/IT031_missing.svg");
             cases.put(caseEvidence(activity, "missing_resource", resource, nativeResource, null));
 
-            JSONObject cleanup = restore(activity, projectRoot, original, baselineRuntime,
-                    renderSchemaHelperOwned);
-            renderSchemaHelperOwned = false;
+            JSONObject cleanup = restore(activity, projectRoot, original, baselineRuntime);
             JSONObject result = new JSONObject().put("schema", "stasis.workshop_diagnostic_seam.v1")
                     .put("test_id", "IT-031").put("event", "diagnostic_seam")
                     .put("status", "passed").put("ordered", true).put("cases", cases)
@@ -106,10 +84,7 @@ final class WorkshopDiagnosticSeamAcceptance {
             JSONObject cleanup = new JSONObject();
             try {
                 if (original != null) {
-                    cleanup = restore(activity, projectRoot, original, baselineRuntime,
-                            renderSchemaHelperOwned);
-                } else if (renderSchemaHelperOwned) {
-                    deleteRenderSchemaHelper(projectRoot);
+                    cleanup = restore(activity, projectRoot, original, baselineRuntime);
                 }
             } catch (Exception cleanupError) {
                 try { cleanup.put("status", "failed").put("error", cleanupError.toString()); }
@@ -166,220 +141,17 @@ final class WorkshopDiagnosticSeamAcceptance {
         return source.substring(0, insertionPoint) + insertion + source.substring(insertionPoint);
     }
 
-    static String ensureGfxLoadSpriteExtern(String source) {
-        if (hasTopLevelGfxLoadSpriteDeclaration(source)) return source;
-        return RESOURCE_EXTERN + "\n" + source;
-    }
-
-    private static boolean hasTopLevelGfxLoadSpriteDeclaration(String source) {
-        String code = maskStringsAndComments(source);
-        int depth = 0;
-        boolean functionDeclaration = false;
-        int index = 0;
-        while (index < code.length()) {
-            char current = code.charAt(index);
-            if (current == '{') {
-                depth++;
-                functionDeclaration = false;
-                index++;
-                continue;
-            }
-            if (current == '}') {
-                depth = Math.max(0, depth - 1);
-                functionDeclaration = false;
-                index++;
-                continue;
-            }
-            if (current == ';') {
-                functionDeclaration = false;
-                index++;
-                continue;
-            }
-            if (!Character.isJavaIdentifierStart(current)) {
-                index++;
-                continue;
-            }
-            int end = index + 1;
-            while (end < code.length() && Character.isJavaIdentifierPart(code.charAt(end))) {
-                end++;
-            }
-            String token = code.substring(index, end);
-            if (depth == 0 && "function".equals(token)) {
-                functionDeclaration = true;
-            } else if (depth == 0 && functionDeclaration
-                    && "gfx_load_sprite".equals(token)) {
-                int after = end;
-                while (after < code.length() && Character.isWhitespace(code.charAt(after))) {
-                    after++;
-                }
-                if (after < code.length() && code.charAt(after) == '(') return true;
-            }
-            index = end;
-        }
-        return false;
-    }
-
-    private static String maskStringsAndComments(String source) {
-        char[] masked = source.toCharArray();
-        boolean inString = false;
-        boolean escaped = false;
-        boolean inLineComment = false;
-        boolean inBlockComment = false;
-        for (int index = 0; index < masked.length; index++) {
-            char current = masked[index];
-            if (inLineComment) {
-                if (current == '\n') inLineComment = false;
-                else masked[index] = ' ';
-                continue;
-            }
-            if (inBlockComment) {
-                if (current == '*' && index + 1 < masked.length && masked[index + 1] == '/') {
-                    masked[index] = ' ';
-                    masked[++index] = ' ';
-                    inBlockComment = false;
-                } else if (current != '\n') {
-                    masked[index] = ' ';
-                }
-                continue;
-            }
-            if (inString) {
-                if (escaped) escaped = false;
-                else if (current == '\\') escaped = true;
-                else if (current == '"') inString = false;
-                if (current != '\n') masked[index] = ' ';
-                continue;
-            }
-            if (current == '/' && index + 1 < masked.length && masked[index + 1] == '/') {
-                masked[index] = ' ';
-                masked[++index] = ' ';
-                inLineComment = true;
-            } else if (current == '/' && index + 1 < masked.length && masked[index + 1] == '*') {
-                masked[index] = ' ';
-                masked[++index] = ' ';
-                inBlockComment = true;
-            } else if (current == '"') {
-                masked[index] = ' ';
-                inString = true;
-            }
-        }
-        return new String(masked);
-    }
-
-    static String insertBeforeFunctionAnchor(String source, String declaration, String anchor,
-            String insertion) {
-        int functionStart = source.lastIndexOf(declaration);
-        if (functionStart < 0) {
-            throw new IllegalStateException("function declaration was not found in " + declaration);
-        }
-        int bodyStart = functionStart + declaration.length() - 1;
-        if (bodyStart < functionStart || bodyStart >= source.length()
-                || source.charAt(bodyStart) != '{') {
-            throw new IllegalStateException("function body was not found in " + declaration);
-        }
-        int depth = 0;
-        int anchorStart = -1;
-        boolean inString = false;
-        boolean escaped = false;
-        boolean inLineComment = false;
-        for (int index = bodyStart; index < source.length(); index++) {
-            char current = source.charAt(index);
-            if (inLineComment) {
-                if (current == '\n') inLineComment = false;
-                continue;
-            }
-            if (inString) {
-                if (escaped) escaped = false;
-                else if (current == '\\') escaped = true;
-                else if (current == '"') inString = false;
-                continue;
-            }
-            if (current == '/' && index + 1 < source.length()
-                    && source.charAt(index + 1) == '/') {
-                inLineComment = true;
-                index++;
-                continue;
-            }
-            if (current == '"') {
-                inString = true;
-                continue;
-            }
-            if (current == '{') {
-                depth++;
-                continue;
-            }
-            if (current == '}') {
-                depth--;
-                if (depth == 0) break;
-                continue;
-            }
-            if (depth == 1 && startsFunctionDeclaration(source, index)) {
-                throw new IllegalStateException("function body crossed next top-level function in "
-                        + declaration);
-            }
-            if (source.startsWith(anchor, index)) {
-                anchorStart = index;
-                index += anchor.length() - 1;
-            }
-        }
-        if (depth != 0) {
-            throw new IllegalStateException("function closing brace was not found in " + declaration);
-        }
-        if (anchorStart < 0) {
-            throw new IllegalStateException("function anchor was not found in " + declaration);
-        }
-        return source.substring(0, anchorStart) + insertion + source.substring(anchorStart);
+    static String missingResourceSource(String source) {
+        // The fixed parity fixture owns this Sprite; failed loads preserve its state.
+        return insertAfterInFunction(source, "function on_code_swap(): void {",
+                "function on_code_swap(): void {",
+                "\n    state.opaque.load_sprite_from(\"assets/IT031_missing.svg\", 32, 32);\n");
     }
 
     static String renderSchemaSource(String source) {
-        String imported = RENDER_SCHEMA_IMPORT + "\n" + source;
-        return insertBeforeFunctionAnchor(imported, "function render(): i32 {", "return 0;",
-                "\n    " + RENDER_SCHEMA_CALL + "\n");
-    }
-
-    static void createRenderSchemaHelper(String projectRoot) throws IOException {
-        File helper = renderSchemaHelperFile(projectRoot);
-        File parent = helper.getParentFile();
-        if (!parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
-            throw new IOException("could not create IT-031 render-schema helper directory");
-        }
-        if (!helper.createNewFile()) {
-            throw new IOException("refusing to overwrite IT-031 render-schema helper: "
-                    + RENDER_SCHEMA_HELPER_PATH);
-        }
-        try (FileOutputStream output = new FileOutputStream(helper, false)) {
-            output.write(RENDER_SCHEMA_HELPER_SOURCE.getBytes(StandardCharsets.UTF_8));
-        } catch (IOException | RuntimeException error) {
-            if (helper.exists() && !helper.delete()) {
-                error.addSuppressed(new IOException(
-                        "could not remove incomplete IT-031 render-schema helper"));
-            }
-            throw error;
-        }
-    }
-
-    static void deleteRenderSchemaHelper(String projectRoot) throws IOException {
-        File helper = renderSchemaHelperFile(projectRoot);
-        if (helper.exists() && !helper.delete()) {
-            throw new IOException("could not remove IT-031 render-schema helper");
-        }
-    }
-
-    private static File renderSchemaHelperFile(String projectRoot) throws IOException {
-        File root = new File(projectRoot).getCanonicalFile();
-        File helper = new File(root, RENDER_SCHEMA_HELPER_PATH).getCanonicalFile();
-        if (!helper.getPath().startsWith(root.getPath() + File.separator)) {
-            throw new IOException("IT-031 render-schema helper escaped project root");
-        }
-        return helper;
-    }
-
-    private static boolean startsFunctionDeclaration(String source, int index) {
-        if (index + "function".length() > source.length()
-                || !source.startsWith("function", index)) return false;
-        if (index > 0 && Character.isJavaIdentifierPart(source.charAt(index - 1))) return false;
-        int after = index + "function".length();
-        return after == source.length()
-                || !Character.isJavaIdentifierPart(source.charAt(after));
+        // Keep the real command storage, but leave the injected header untouched.
+        return insertAfterInFunction(source, "function render(): i32 {",
+                "function render(): i32 {", "\n    return 0;\n");
     }
 
     private static JSONObject caseEvidence(MainActivity activity, String name,
@@ -473,23 +245,9 @@ final class WorkshopDiagnosticSeamAcceptance {
     }
 
     private static JSONObject restore(MainActivity activity, String projectRoot, String original,
-            JSONObject baselineRuntime, boolean renderSchemaHelperOwned)
+            JSONObject baselineRuntime)
             throws Exception {
-        Exception restoreFailure = null;
-        try {
-            activity.acceptanceReplaceSource(projectRoot, original);
-        } catch (Exception error) {
-            restoreFailure = error;
-        }
-        if (renderSchemaHelperOwned) {
-            try {
-                deleteRenderSchemaHelper(projectRoot);
-            } catch (Exception error) {
-                if (restoreFailure == null) restoreFailure = error;
-                else restoreFailure.addSuppressed(error);
-            }
-        }
-        if (restoreFailure != null) throw restoreFailure;
+        activity.acceptanceReplaceSource(projectRoot, original);
         String compile = activity.acceptanceCompile(projectRoot);
         requireCompileReady(compile, "final cleanup compile");
         requireEquals("passed", activity.runIt031Frame(projectRoot), "final cleanup frame");
