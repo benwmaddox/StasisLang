@@ -122,8 +122,8 @@ archive into the project.
 The project `name` may contain internal ASCII spaces, so display names such as `Chess TD` are
 valid; leading or trailing spaces are rejected. Manifest paths must be project-relative and cannot
 contain `..`. Generated projects include a
-runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building and semantic-edit
-guide, a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
+runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building, semantic-edit, and container-derived UI geometry
+guide (sourced from `docs/agent_workflow.md`), a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
 `PROJECT_ARCHITECTURE.md` with practical input, tick, state, and rendering guidance.
 Both `new` and `init` also add language-scoped VS Code settings that recommend the Stasis extension
 and enable its canonical formatter on save without changing the formatter for other languages.

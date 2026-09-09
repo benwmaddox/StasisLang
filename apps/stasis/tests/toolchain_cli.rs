@@ -726,6 +726,53 @@ fn generated_knowledge_examples_compile_and_test() {
 }
 
 #[test]
+fn generated_project_contains_container_geometry_guidance() {
+    let parent = temp_dir("geometry_guidance");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let created = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(
+        created.status.code(),
+        Some(0),
+        "project creation failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let agent_guide = fs::read_to_string(parent.join("demo/AGENTS.md")).expect("read agent guide");
+    assert_eq!(agent_guide, include_str!("../../../docs/agent_workflow.md"));
+    for rule in [
+        "## Container-derived UI geometry",
+        "real safe/current container",
+        "`ui_begin_frame`",
+        "`ui_vstack_begin`/`ui_hstack_begin` with matching ends",
+        "fixed/rest children",
+        "`ui_inset`",
+        "`ui_anchor`/`ui_anchor_current`",
+        "`ui_current_x`, `ui_current_y`, `ui_current_width`, and `ui_current_height`",
+        "same resolved rectangle for drawing and hit testing",
+        "Recompute ephemeral rectangles each frame",
+        "retain only semantic interaction state",
+        "do not add a measurement pass or retained widget tree",
+        "`ui_place_x`/`ui_place_y` with `UiHorizontal`/`UiVertical`",
+        "repeated hand-derived offsets",
+        "measured or intentionally cached text width",
+        "actual inner content box after icon/padding allocation",
+        "expensive measurement outside render hot paths",
+        "nominal display bounds with aspect/alpha-safe padding",
+        "container-derived origins",
+        "source bitmap dimensions or opaque-trim guesses",
+        "Allow direct offsets only for deliberate local decoration, fixed spacing inside an",
+        "authored world coordinates, or a tested pixel adjustment",
+        "deterministic geometry/hit tests",
+        "inspected desktop and phone evidence",
+    ] {
+        assert!(
+            agent_guide.contains(rule),
+            "generated guidance missing: {rule}"
+        );
+    }
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
 fn project_commands_emit_stable_json_from_nested_directories() {
     let parent = temp_dir("success");
     fs::create_dir_all(&parent).expect("create temp parent");
