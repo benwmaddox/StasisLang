@@ -3994,6 +3994,7 @@ dependencies = [
  "socket2",
  "thiserror 2.0.20",
  "tungstenite",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

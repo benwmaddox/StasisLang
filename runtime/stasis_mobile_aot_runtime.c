@@ -1255,6 +1255,14 @@ int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity) {
 #endif
 }
 
+int32_t stasis_mobile_network_publish_supervision_join_url(void) {
+#if defined(_WIN32) && defined(STASIS_NETWORK_ENABLED)
+    return stasis_network_host_publish_supervision_join_url(stasis_network_handle);
+#else
+    return 0;
+#endif
+}
+
 int32_t stasis_mobile_network_copy_join_card(char *out, size_t capacity) {
     if (out == NULL || capacity == 0) return -1;
 #if defined(STASIS_NETWORK_ENABLED)

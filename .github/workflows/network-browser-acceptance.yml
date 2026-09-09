@@ -8,6 +8,7 @@ on:
       - "crates/stasis_network/**"
       - "mobile/shells/**"
       - "runtime/**"
+      - "tests/fixtures/network_supervision/**"
       - "tools/**"
   workflow_dispatch:
 
@@ -64,6 +65,19 @@ jobs:
       - name: Test release provenance rejects substituted artifacts
         run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis release_provenance_rejects_substituted_renderer_sources
 
+  windows-production-supervision:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Test supervisor command bounds
+        run: python tools/cargo_cache.py run -- cargo test -p stasis_network --test supervision
+      - name: Test packaged authority and external socket peer
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_network_supervision.ps1
+
   windows-browser-guest:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -92,6 +106,9 @@ jobs:
       - name: Test browser video encoding dimensions
         shell: pwsh
         run: node --test tools/ci/network_browser_video.test.mjs
+      - name: Test bounded browser startup
+        shell: pwsh
+        run: node --test tools/ci/network_browser_startup.test.mjs
       - name: Run real browser protocol acceptance
         shell: pwsh
         env:

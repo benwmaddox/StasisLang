@@ -218,7 +218,7 @@ jobs:
         if: runner.os == 'Windows'
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --release --target ${{ matrix.rust_target }}
+        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --release --target ${{ matrix.rust_target }} --features supervision-cli
 
       - name: Build stasis_graphics runtime (windows)
         if: runner.os == 'Windows'
@@ -269,6 +269,7 @@ jobs:
           $env:STASIS_SIGNING_TIMESTAMP_URL = "http://timestamp.digicert.com"
           @(
             "target/${{ matrix.rust_target }}/release/stasis.exe",
+            "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe",
             "target/${{ matrix.rust_target }}/release/stasis_dynload.dll",
             "runtime/build_ci/bin/Release/stasis_graphics.dll",
             "runtime/build_ci/bin/Release/stasis_runner.exe"
@@ -365,12 +366,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out/desktop/network/windows-x86_64", "$out/desktop/network/include" | Out-Null
           Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.lib" "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
           Copy-Item crates/stasis_network/include/stasis_network.h "$out/desktop/network/include/" -ErrorAction Stop
+          Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe" "$out/" -ErrorAction Stop
           Copy-Item tools/diagnose_desktop_network.ps1 "$out/tools/" -ErrorAction Stop
           New-Item -ItemType Directory -Force -Path "$out/runtime" | Out-Null
           @('CMakeLists.txt', 'MINIMP3-LICENSE.txt', 'minimp3.h', 'minimp3_ex.h', 'stasis_svg.cpp', 'stasis_svg.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_render_contract.h', 'stasis_renderer_lifecycle.h', 'stasis_performance_metrics.h', 'stasis_audio_assets.c', 'stasis_audio_assets.h', 'stasis_graphics.c', 'stasis_mixed_quad_planner.h', 'stasis_sprite_atlas_policy.h', 'stasis_image_writer.c', 'stasis_image_writer.h', 'stasis_runner.manifest', 'stasis_runner_macos.plist.in', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stasis_network_join_card.h', 'stasis_platform_storage.c', 'stasis_platform_storage.h', 'stasis_platform_services.c', 'stasis_platform_services.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
           Copy-Item "runtime/third_party" "$out/runtime/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
-          Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md "$out/docs/" -Force
+          Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md,docs/network_supervision.md "$out/docs/" -Force
           Copy-Item docs/knowledge "$out/docs/knowledge" -Recurse -Force
           python tools/generate_release_provenance.py `
             --archive-root "$out" `
@@ -380,6 +382,18 @@ jobs:
             --dependency "sdl3=3.4.10-static" `
             --dependency "sdl3_image=3.4.4-static"
           Compress-Archive -Path "$out/*" -DestinationPath "dist/${{ matrix.archive }}.${{ matrix.ext }}" -Force
+
+      - name: Verify packaged authority supervision (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $validationRoot = "build/network-supervision-release"
+          Expand-Archive -LiteralPath "dist/${{ matrix.archive }}.${{ matrix.ext }}" -DestinationPath $validationRoot -Force
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_network_supervision.ps1 `
+            -Toolchain "$validationRoot/stasis.exe" `
+            -Supervisor "$validationRoot/stasis-network-supervise.exe" `
+            -InstalledToolchain
 
       - name: Smoke test bundled graphics runtime (windows)
         if: runner.os == 'Windows'

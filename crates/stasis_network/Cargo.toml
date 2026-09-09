@@ -7,9 +7,31 @@ license.workspace = true
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[[example]]
+name = "supervision_peer"
+path = "../../tests/fixtures/network_supervision/peer/src/main.rs"
+
+[[bin]]
+name = "stasis-network-supervise"
+path = "src/supervise_main.rs"
+required-features = ["supervision-cli"]
+
+[features]
+supervision-cli = []
+
 [dependencies]
 sha2.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
 tungstenite.workspace = true
 getrandom.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }

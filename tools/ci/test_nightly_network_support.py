@@ -11,6 +11,21 @@ ANDROID_SHELL = (
 
 
 class NightlyNetworkSupportContractTests(unittest.TestCase):
+    def test_windows_supervisor_is_shipped_and_release_gated(self):
+        for name in ("nightly-release.yml", "bootstrap-artifacts.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            self.assertIn('/stasis-network-supervise.exe" "$out/" -ErrorAction Stop', workflow)
+            self.assertIn("docs/network_supervision.md", workflow)
+            self.assertIn("--features supervision-cli", workflow)
+        manifest = (ROOT / "crates/stasis_network/Cargo.toml").read_text(encoding="utf-8")
+        self.assertIn('required-features = ["supervision-cli"]', manifest)
+        self.assertIn("name: Verify packaged authority supervision (windows)", self.workflow)
+        self.assertIn("-InstalledToolchain", self.workflow)
+        self.assertIn("-File tools/ci/test_network_supervision.ps1", self.workflow)
+        self.assertIn('Expand-Archive -LiteralPath "dist/${{ matrix.archive }}.${{ matrix.ext }}"', self.workflow)
+        self.assertIn('-Toolchain "$validationRoot/stasis.exe"', self.workflow)
+        self.assertIn('-Supervisor "$validationRoot/stasis-network-supervise.exe"', self.workflow)
+
     def test_windows_archive_ships_matching_desktop_network_support(self):
         self.assertIn("name: Build desktop network support (windows)", self.workflow)
         self.assertIn("RUSTFLAGS: -C target-feature=+crt-static", self.workflow)
