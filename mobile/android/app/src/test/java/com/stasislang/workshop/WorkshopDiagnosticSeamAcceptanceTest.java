@@ -84,15 +84,9 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
                 + "function later(): i32 { return 1; }\r\n", mutated);
     }
 
-    @Test public void renderMutationRejectsMissingBodyBoundary() {
+    @Test public void renderMutationRejectsMissingDeclaration() {
         assertThrows(IllegalStateException.class, () ->
-                WorkshopDiagnosticSeamAcceptance.insertBeforeFunctionAnchor(
-                        "function render(): i32 { gfx_cmd_i32[0] = 1; }\n",
-                        "function render(): i32 {", "return 0;", " mutation; "));
-        String source = "function render(): i32 { return 0;\n"
-                + "function later(): i32 { return 1; }\n";
-        assertThrows(IllegalStateException.class, () ->
-                WorkshopDiagnosticSeamAcceptance.insertBeforeFunctionAnchor(source,
-                        "function render(): i32 {", "return 0;", " mutation; "));
+                WorkshopDiagnosticSeamAcceptance.renderSchemaSource(
+                        "function later(): i32 { return 1; }\n"));
     }
 }

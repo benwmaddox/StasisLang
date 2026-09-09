@@ -51,6 +51,7 @@ final class WorkshopDiagnosticSeamAcceptance {
             String renderSchemaSource = renderSchemaSource(original);
             activity.acceptanceReplaceSource(projectRoot, renderSchemaSource);
             requireCompileReady(activity.acceptanceCompile(projectRoot), "render-schema setup");
+            requireEquals("passed", activity.runIt031Frame(projectRoot), "render-schema activation");
             if (!MainActivity.nativeCorruptRenderSchemaForAcceptance()) {
                 throw new IllegalStateException("render-schema header injection failed");
             }
@@ -244,84 +245,10 @@ final class WorkshopDiagnosticSeamAcceptance {
         return new String(masked);
     }
 
-    static String insertBeforeFunctionAnchor(String source, String declaration, String anchor,
-            String insertion) {
-        int functionStart = source.lastIndexOf(declaration);
-        if (functionStart < 0) {
-            throw new IllegalStateException("function declaration was not found in " + declaration);
-        }
-        int bodyStart = functionStart + declaration.length() - 1;
-        if (bodyStart < functionStart || bodyStart >= source.length()
-                || source.charAt(bodyStart) != '{') {
-            throw new IllegalStateException("function body was not found in " + declaration);
-        }
-        int depth = 0;
-        int anchorStart = -1;
-        boolean inString = false;
-        boolean escaped = false;
-        boolean inLineComment = false;
-        for (int index = bodyStart; index < source.length(); index++) {
-            char current = source.charAt(index);
-            if (inLineComment) {
-                if (current == '\n') inLineComment = false;
-                continue;
-            }
-            if (inString) {
-                if (escaped) escaped = false;
-                else if (current == '\\') escaped = true;
-                else if (current == '"') inString = false;
-                continue;
-            }
-            if (current == '/' && index + 1 < source.length()
-                    && source.charAt(index + 1) == '/') {
-                inLineComment = true;
-                index++;
-                continue;
-            }
-            if (current == '"') {
-                inString = true;
-                continue;
-            }
-            if (current == '{') {
-                depth++;
-                continue;
-            }
-            if (current == '}') {
-                depth--;
-                if (depth == 0) break;
-                continue;
-            }
-            if (depth == 1 && startsFunctionDeclaration(source, index)) {
-                throw new IllegalStateException("function body crossed next top-level function in "
-                        + declaration);
-            }
-            if (source.startsWith(anchor, index)) {
-                anchorStart = index;
-                index += anchor.length() - 1;
-            }
-        }
-        if (depth != 0) {
-            throw new IllegalStateException("function closing brace was not found in " + declaration);
-        }
-        if (anchorStart < 0) {
-            throw new IllegalStateException("function anchor was not found in " + declaration);
-        }
-        return source.substring(0, anchorStart) + insertion + source.substring(anchorStart);
-    }
-
     static String renderSchemaSource(String source) {
         // Keep the real command storage, but leave the injected header untouched.
         return insertAfterInFunction(source, "function render(): i32 {",
                 "function render(): i32 {", "\n    return 0;\n");
-    }
-
-    private static boolean startsFunctionDeclaration(String source, int index) {
-        if (index + "function".length() > source.length()
-                || !source.startsWith("function", index)) return false;
-        if (index > 0 && Character.isJavaIdentifierPart(source.charAt(index - 1))) return false;
-        int after = index + "function".length();
-        return after == source.length()
-                || !Character.isJavaIdentifierPart(source.charAt(after));
     }
 
     private static JSONObject caseEvidence(MainActivity activity, String name,
