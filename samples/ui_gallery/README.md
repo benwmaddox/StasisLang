@@ -4,12 +4,17 @@ This sample is a small teaching game for the single-pass UI module. It draws
 the layout recipe next to the result so the code and the interaction remain
 easy to inspect.
 
+The same `gallery_layout` recipe is replayed with `UiPass.Input` during the
+tick and `UiPass.Paint` during rendering. Primary pointer data is snapshotted once
+with `ui_input_begin_primary`; widgets use the current rectangle rather than repeating
+six input fields and four geometry fields at every call site.
+
 Run from the repository root:
 
 ```powershell
 stasis --workspace samples/ui_gallery check
 stasis --workspace samples/ui_gallery test
-stasis --workspace samples/ui_gallery run main.stasis --ticks 600
+stasis --workspace samples/ui_gallery run --ticks 600
 stasis --workspace samples/ui_gallery record main.stasis --width 1100 --height 720 --fps 60 --frames 240 --input-script record_input.json --output artifacts/ui_gallery
 ```
 

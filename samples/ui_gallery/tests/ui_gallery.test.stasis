@@ -1,7 +1,8 @@
 import "../ui_single_pass.stasis";
+import "../gallery_state.stasis";
 
 test `single pass stack recipe is deterministic`(): bool {
-    ui_begin_frame(10.0, 20.0, 100.0, 100.0);
+    ui_layout_begin(10.0, 20.0, 100.0, 100.0);
     ui_vstack_begin(10.0, 20.0, 100.0, 100.0, 5.0, UiStackDirection.Forward);
     ui_vstack_next_fixed(20.0);
     ui_vstack_next_fixed(10.0);
@@ -10,7 +11,7 @@ test `single pass stack recipe is deterministic`(): bool {
 }
 
 test `anchors and viewport fit from current parent`(): bool {
-    ui_begin_frame(0.0, 0.0, 100.0, 100.0);
+    ui_layout_begin(0.0, 0.0, 100.0, 100.0);
     ui_anchor_current(20.0, 10.0, UiHorizontal.Right, UiVertical.Bottom);
     if (ui_current_x() != 80.0 || ui_current_y() != 90.0) {
         return false;
@@ -20,25 +21,87 @@ test `anchors and viewport fit from current parent`(): bool {
 }
 
 test `pointer capture and modal precedence are semantic state`(): bool {
-    ui_begin_frame(0.0, 0.0, 200.0, 100.0);
+    ui_input_begin(2, 20.0, 20.0, true, true, false);
+    ui_layout_begin(0.0, 0.0, 200.0, 100.0);
     ui_modal_set(7);
-    if (ui_button(1, 11, 10.0, 10.0, 80.0, 40.0, 2, 20.0, 20.0, true, true, false)) {
+    if (ui_tap(1, 11, 10.0, 10.0, 80.0, 40.0)) {
         return false;
     }
-    if (ui_button(7, 12, 10.0, 10.0, 80.0, 40.0, 2, 20.0, 20.0, true, true, false)) {
+    if (ui_tap(7, 12, 10.0, 10.0, 80.0, 40.0)) {
         return false;
     }
-    ui_begin_frame(0.0, 0.0, 200.0, 100.0);
+    ui_input_begin(2, 100.0, 80.0, false, false, true);
+    ui_layout_begin(0.0, 0.0, 200.0, 100.0);
     ui_modal_set(7);
-    return ui_button(7, 12, 10.0, 10.0, 80.0, 40.0, 2, 100.0, 80.0, false, false, true) == false && !ui_pointer_capture_active();
+    return !ui_tap(7, 12, 10.0, 10.0, 80.0, 40.0) && !ui_pointer_capture_active();
 }
 
 test `scroll offset clamps after a drag`(): bool {
-    ui_begin_frame(0.0, 0.0, 100.0, 60.0);
+    ui_input_begin(3, 20.0, 20.0, true, true, false);
+    ui_layout_begin(0.0, 0.0, 100.0, 60.0);
     ui_scroll_begin(91, 0.0, 0.0, 100.0, 50.0, 200.0);
-    ui_scroll_drag(3, 20.0, 20.0, true, true, false);
-    ui_begin_frame(0.0, 0.0, 100.0, 60.0);
+    ui_scroll_drag_current();
+    ui_input_begin(3, 20.0, -300.0, true, false, false);
+    ui_layout_begin(0.0, 0.0, 100.0, 60.0);
     ui_scroll_begin(91, 0.0, 0.0, 100.0, 50.0, 200.0);
-    ui_scroll_drag(3, 20.0, -300.0, false, true, false);
+    ui_scroll_drag_current();
     return ui_scroll_offset() == 150.0 && ui_scroll_item_visible(10, 16.0, 4.0) == false;
+}
+
+test `modal close tap survives layout replay and the next phone frame`(): bool {
+    ui_modal_set(GALLERY_LAYER_MODAL);
+    ui_input_begin(7, 260.0, 178.0, true, true, false);
+    ui_layout_begin(0.0, 0.0, 360.0, 240.0);
+    if (ui_tap(GALLERY_LAYER_MODAL, GALLERY_ID_CLOSE, 220.0, 160.0, 128.0, 38.0)) {
+        return false;
+    }
+    ui_layout_begin(0.0, 0.0, 360.0, 240.0);
+    if (!ui_tap_active(GALLERY_LAYER_MODAL, GALLERY_ID_CLOSE)) {
+        return false;
+    }
+    ui_modal_set(GALLERY_LAYER_MODAL);
+    ui_input_begin(7, 260.0, 178.0, false, false, true);
+    ui_layout_begin(0.0, 0.0, 360.0, 240.0);
+    return ui_tap(GALLERY_LAYER_MODAL, GALLERY_ID_CLOSE, 220.0, 160.0, 128.0, 38.0);
+}
+
+test `paint replay preserves hover identity`(): bool {
+    ui_modal_set(0);
+    ui_input_begin(2, 20.0, 20.0, false, false, false);
+    ui_layout_begin(0.0, 0.0, 100.0, 100.0);
+    if (ui_tap(3, 44, 10.0, 10.0, 30.0, 20.0)) {
+        return false;
+    }
+    ui_layout_begin(0.0, 0.0, 200.0, 200.0);
+    return ui_tap_hot(3, 44) && !ui_tap_hot(4, 44);
+}
+
+test `missing pointer cancels tap capture`(): bool {
+    ui_modal_set(0);
+    ui_input_begin(8, 20.0, 20.0, true, true, false);
+    ui_layout_begin(0.0, 0.0, 100.0, 100.0);
+    ui_tap(1, 55, 10.0, 10.0, 30.0, 20.0);
+    if (!ui_pointer_capture_active()) {
+        return false;
+    }
+    ui_input_begin(-1, 0.0, 0.0, false, false, false);
+    return !ui_pointer_capture_active();
+}
+
+test `missing pointer cancels scroll capture`(): bool {
+    ui_input_begin(9, 20.0, 20.0, true, true, false);
+    ui_layout_begin(0.0, 0.0, 100.0, 60.0);
+    ui_scroll_begin(99, 0.0, 0.0, 100.0, 50.0, 200.0);
+    ui_scroll_drag_current();
+    if (!ui_scroll_is_dragging()) {
+        return false;
+    }
+    ui_input_begin(-1, 0.0, 0.0, false, false, false);
+    return !ui_scroll_is_dragging();
+}
+
+test `zero tap id reports bad argument`(): bool {
+    ui_input_begin(3, 20.0, 20.0, true, true, false);
+    ui_layout_begin(0.0, 0.0, 100.0, 100.0);
+    return !ui_tap(1, 0, 10.0, 10.0, 30.0, 20.0) && ui_status() == UI_STATUS_BAD_ARGUMENT;
 }

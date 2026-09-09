@@ -225,6 +225,16 @@ function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): vo
     gfx_cmd_text_cached(self.font, self.handle, x, y, r, g, b, a);
 }
 
+// Public immediate-text command for dynamic or teaching UI. Prefer TextRun for
+// stable text so shaping can be cached, but keep callers out of internal command
+// buffer modules when the text genuinely changes at runtime.
+function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
+    if (font <= 0) {
+        return;
+    }
+    gfx_cmd_text(font, text, x, y, r, g, b, a);
+}
+
 function get_desktop_size(out_w: i32[], out_h: i32[]): void {
     out_w[0] = host_screen_w_px();
     out_h[0] = host_screen_h_px();

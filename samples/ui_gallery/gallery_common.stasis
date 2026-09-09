@@ -3,7 +3,7 @@ import "ui_single_pass.stasis";
 import "gallery_state.stasis";
 
 function gallery_label(text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
-    gfx_cmd_text(gallery.font, text, x, y, r, g, b, a);
+    draw_text(gallery.font, text, x, y, r, g, b, a);
 }
 
 function gallery_panel(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32): void {
@@ -14,7 +14,7 @@ function gallery_panel(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32): 
     draw_line(x, y + h, x, y, 0.24, 0.42, 0.54, 1.0);
 }
 
-function gallery_button(x: f32, y: f32, w: f32, h: f32, id: i32, label: string, selected: bool): void {
+function gallery_button(layer_id: i32, x: f32, y: f32, w: f32, h: f32, id: i32, label: string, selected: bool): void {
     let red: f32 = 0.10;
     let green: f32 = 0.20;
     let blue: f32 = 0.28;
@@ -23,12 +23,12 @@ function gallery_button(x: f32, y: f32, w: f32, h: f32, id: i32, label: string, 
         green = 0.48;
         blue = 0.60;
     }
-    if (ui_button_hot(id)) {
+    if (ui_tap_hot(layer_id, id)) {
         red = red + 0.10;
         green = green + 0.10;
         blue = blue + 0.10;
     }
-    if (ui_button_active(id)) {
+    if (ui_tap_active(layer_id, id)) {
         red = red + 0.08;
         green = green + 0.08;
     }
@@ -36,24 +36,12 @@ function gallery_button(x: f32, y: f32, w: f32, h: f32, id: i32, label: string, 
     gallery_label(label, x + 10.0, y + 12.0, 0.92, 0.96, 1.0, 1.0);
 }
 
-function gallery_button_current(id: i32, label: string, selected: bool): void {
-    gallery_button(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), id, label, selected);
-}
-
-function gallery_page_name(page: GalleryPage): string {
-    if (page == GalleryPage.Stacks) {
-        return "STACKS";
+function gallery_button_current(pass: UiPass, layer_id: i32, id: i32, label: string, selected: bool): bool {
+    if (pass == UiPass.Input) {
+        return ui_tap_current(layer_id, id);
     }
-    if (page == GalleryPage.Anchors) {
-        return "ANCHORS";
-    }
-    if (page == GalleryPage.Scroll) {
-        return "SCROLL";
-    }
-    if (page == GalleryPage.Viewport) {
-        return "VIEWPORT";
-    }
-    return "COMBINED";
+    gallery_button(layer_id, ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), id, label, selected);
+    return false;
 }
 
 function gallery_begin_screen(): void {
@@ -61,9 +49,9 @@ function gallery_begin_screen(): void {
     let y: f32 = gfx_safe_viewport_y();
     let w: f32 = gfx_safe_viewport_width();
     let h: f32 = gfx_safe_viewport_height();
-    ui_begin_frame(x, y, w, h);
-    ui_inset(x, y, w, h, 18.0, 14.0, 18.0, 14.0);
-    ui_vstack_begin(ui_current_x(), ui_current_y(), ui_current_width(), ui_current_height(), 12.0, UiStackDirection.Forward);
+    ui_layout_begin(x, y, w, h);
+    ui_inset_current(18.0, 14.0, 18.0, 14.0);
+    ui_vstack_begin_current(12.0, UiStackDirection.Forward);
     ui_vstack_next_fixed(58.0);
 }
 
@@ -74,52 +62,41 @@ function gallery_draw_header(): void {
     let h: f32 = ui_current_height();
     gallery_panel(x, y, w, h, 0.06, 0.13, 0.19);
     gallery_label("STASIS / SINGLE-PASS UI GALLERY", x + 14.0, y + 8.0, 0.86, 0.96, 1.0, 1.0);
-    gallery_label("The recipe runs once: stacks carve, anchors place, scroll translates, viewports fit.", x + 14.0, y + 31.0, 0.58, 0.75, 0.84, 1.0);
+    gallery_label("One recipe per pass: stacks carve, anchors place, scroll translates, viewports fit.", x + 14.0, y + 31.0, 0.58, 0.75, 0.84, 1.0);
 }
 
-function gallery_draw_navigation(): void {
-    let x: f32 = ui_current_x();
-    let y: f32 = ui_current_y();
-    let w: f32 = ui_current_width();
-    let h: f32 = ui_current_height();
-    ui_hstack_begin(x, y, w, h, 6.0, UiStackDirection.Forward);
+function gallery_navigation(pass: UiPass): void {
+    ui_hstack_begin_current(6.0, UiStackDirection.Forward);
     ui_hstack_next_fixed(116.0);
     let selected_stacks: bool = gallery.page == GalleryPage.Stacks;
-    gallery_button_current(GALLERY_ID_STACKS, "STACKS", selected_stacks);
+    if (gallery_button_current(pass, GALLERY_LAYER_SCREEN, GALLERY_ID_STACKS, "STACKS", selected_stacks)) {
+        gallery.page = GalleryPage.Stacks;
+    }
     ui_hstack_next_fixed(116.0);
     let selected_anchors: bool = gallery.page == GalleryPage.Anchors;
-    gallery_button_current(GALLERY_ID_ANCHORS, "ANCHORS", selected_anchors);
+    if (gallery_button_current(pass, GALLERY_LAYER_SCREEN, GALLERY_ID_ANCHORS, "ANCHORS", selected_anchors)) {
+        gallery.page = GalleryPage.Anchors;
+    }
     ui_hstack_next_fixed(116.0);
     let selected_scroll: bool = gallery.page == GalleryPage.Scroll;
-    gallery_button_current(GALLERY_ID_SCROLL, "SCROLL", selected_scroll);
+    if (gallery_button_current(pass, GALLERY_LAYER_SCREEN, GALLERY_ID_SCROLL, "SCROLL", selected_scroll)) {
+        gallery.page = GalleryPage.Scroll;
+    }
     ui_hstack_next_fixed(116.0);
     let selected_viewport: bool = gallery.page == GalleryPage.Viewport;
-    gallery_button_current(GALLERY_ID_VIEWPORT, "VIEWPORT", selected_viewport);
+    if (gallery_button_current(pass, GALLERY_LAYER_SCREEN, GALLERY_ID_VIEWPORT, "VIEWPORT", selected_viewport)) {
+        gallery.page = GalleryPage.Viewport;
+    }
     ui_hstack_next_rest();
     let selected_combined: bool = gallery.page == GalleryPage.Combined;
-    gallery_button_current(GALLERY_ID_COMBINED, "COMBINED", selected_combined);
+    if (gallery_button_current(pass, GALLERY_LAYER_SCREEN, GALLERY_ID_COMBINED, "COMBINED", selected_combined)) {
+        gallery.page = GalleryPage.Combined;
+    }
     ui_hstack_end();
 }
 
 function gallery_finish_screen(): void {
     ui_vstack_end();
-}
-
-function gallery_tick_button(
-    layer_id: i32,
-    id: i32,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    pointer_id: i32,
-    pointer_x: f32,
-    pointer_y: f32,
-    pointer_down: bool,
-    went_down: bool,
-    went_up: bool
-): bool {
-    return ui_button(layer_id, id, x, y, w, h, pointer_id, pointer_x, pointer_y, pointer_down, went_down, went_up);
 }
 
 function gallery_cycle_fit(): void {
