@@ -86,4 +86,6 @@ The command requires a clean Git revision, derives one fingerprint from that rev
 identity, builds the CLI and dynamic graphics DLL with the same values through the repository Cargo
 cache wrapper, stages a fresh complete directory, validates `editor-info`, and runs one bounded
 `windows_launch_smoke` record frame. Only after all checks pass does it promote the staged directory
-to `bin`. A failed promotion restores the prior `bin` directory.
+to `bin`. Mobile toolchain inputs are copied from the clean revision's tracked files rather than
+recursively copying ignored Android build caches. A failed promotion restores the prior `bin`
+directory.
