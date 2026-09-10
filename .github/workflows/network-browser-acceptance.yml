@@ -6,8 +6,11 @@ on:
       - ".github/workflows/network-browser-acceptance.yml"
       - "Cargo.lock"
       - "docs/portable_lan.md"
+      - ".github/workflows/nightly-release.yml"
+      - ".github/workflows/bootstrap-artifacts.yml"
       - "apps/stasis/**"
       - "crates/stasis_network/**"
+      - "crates/stasis_jit/**"
       - "mobile/shells/**"
       - "runtime/**"
       - "tests/fixtures/network_supervision/**"
@@ -63,6 +66,53 @@ jobs:
           if-no-files-found: error
           path: target/android-network-client/result.txt
 
+  unix-desktop-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux graphics and display dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y pkg-config xvfb libx11-dev
+          libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
+          libxss-dev libxtst-dev libxkbcommon-dev libegl1 libgl1-mesa-dri
+      - name: Test native library link and host/client lifecycle
+        timeout-minutes: 15
+        run: bash tools/ci/test_desktop_network_link.sh
+      - name: Test shared host lifecycle and join-card controls
+        timeout-minutes: 15
+        run: |
+          cmake -S runtime -B target/desktop-network-runtime -DSTASIS_GRAPHICS_BUILD_SHARED=OFF -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON
+          cmake --build target/desktop-network-runtime --config Release --target stasis_mobile_runtime_network_test stasis_network_join_card_test
+          ctest --test-dir target/desktop-network-runtime -C Release -R "stasis_(mobile_runtime_network_lifecycle|network_join_card_contract)" --output-on-failure --no-tests=error
+      - name: Test native client protocol and lifecycle
+        timeout-minutes: 15
+        run: python3 tools/cargo_cache.py run -- cargo test -p stasis_network --test native_client
+      - name: Test desktop network package and linker configuration
+        timeout-minutes: 15
+        run: |
+          python3 tools/cargo_cache.py run -- cargo test -p stasis --lib network
+          python3 tools/cargo_cache.py run -- cargo test -p stasis --lib macos_packaged_runner
+          python3 tools/cargo_cache.py run -- cargo test -p stasis --bin stasis network
+      - name: Test native release provenance
+        timeout-minutes: 15
+        run: python3 -m unittest tools.ci.test_release_provenance
+      - name: Build and audit native desktop host and browser guest package
+        timeout-minutes: 15
+        run: bash tools/ci/test_unix_desktop_network_package.sh
+      - name: Upload native package lifecycle evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-network-package-${{ matrix.os }}
+          if-no-files-found: error
+          path: target/desktop-network-package.*/result.json
+
   windows-desktop-package:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -72,7 +122,7 @@ jobs:
       - name: Test native client protocol and lifecycle
         run: python tools/cargo_cache.py run -- cargo test -p stasis_network --test native_client
       - name: Test optional desktop network configuration
-        run: python tools/cargo_cache.py run -- cargo test -p stasis --lib windows_monolith_network_configuration_is_explicit_and_optional
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --lib desktop_monolith_network_configuration_is_explicit_and_optional
       - name: Test desktop network package contents and support lookup
         run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis network
       - name: Test desktop package root layout

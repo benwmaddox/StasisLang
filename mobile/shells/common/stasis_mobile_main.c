@@ -56,7 +56,7 @@ static void stasis_pregraphics_info_log(const char *format, ...) {
 void stasis_mobile_network_present_join_url(void);
 #endif
 
-#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
+#if defined(STASIS_DESKTOP_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
 int32_t stasis_mobile_network_copy_join_card(char *out, size_t capacity);
 int32_t stasis_mobile_network_copy_join_url(char *out, size_t capacity);
 
@@ -311,8 +311,7 @@ static void report_runtime_status(const char *stage, int status) {
 }
 
 static void stasis_network_client_provision_from_shell(void) {
-#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && \
-        defined(STASIS_NETWORK_CLIENT_ENABLED)
+#if defined(STASIS_DESKTOP_MONOLITH) && defined(STASIS_NETWORK_CLIENT_ENABLED)
     const char *join_url = SDL_getenv("STASIS_NETWORK_JOIN_URL");
     if (join_url != NULL && join_url[0] != '\0') {
         size_t length = strlen(join_url);
@@ -419,7 +418,31 @@ static void log_entry_failure_marker(
 #endif
 
 static int configure_asset_root(void) {
-#if defined(__APPLE__) && !defined(__ANDROID__)
+#if defined(STASIS_DESKTOP_MONOLITH)
+    const char *base = SDL_GetBasePath();
+    char path[1024];
+    int written;
+    if (base == NULL) {
+        return -1;
+    }
+#if defined(_WIN32)
+    written = snprintf(path, sizeof(path), "%sapp", base);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        return -1;
+    }
+    return _putenv_s("STASIS_ASSET_ROOT", _access(path, 0) == 0 ? path : ".");
+#else
+#if defined(__APPLE__)
+    written = snprintf(path, sizeof(path), "%s../../../", base);
+#else
+    written = snprintf(path, sizeof(path), "%s", base);
+#endif
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        return -1;
+    }
+    return setenv("STASIS_ASSET_ROOT", path, 1);
+#endif
+#elif defined(__APPLE__) && !defined(__ANDROID__)
     const char *base = SDL_GetBasePath();
     if (base == NULL) {
         return -1;
@@ -435,18 +458,6 @@ static int configure_asset_root(void) {
         return -1;
     }
     return setenv("STASIS_ASSET_ROOT", path, 1);
-#elif defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH)
-    const char *base = SDL_GetBasePath();
-    char path[1024];
-    int written;
-    if (base == NULL) {
-        return -1;
-    }
-    written = snprintf(path, sizeof(path), "%sapp", base);
-    if (written < 0 || (size_t)written >= sizeof(path)) {
-        return -1;
-    }
-    return _putenv_s("STASIS_ASSET_ROOT", _access(path, 0) == 0 ? path : ".");
 #else
     return 0;
 #endif
@@ -511,7 +522,7 @@ int SDL_main(int argc, char **argv) {
             (void)stasis_mobile_network_client_connect();
         }
 #endif
-#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
+#if defined(STASIS_DESKTOP_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
         int32_t supervision = stasis_mobile_network_publish_supervision_join_url();
         if (supervision < 0) {
             SDL_Log("Stasis network supervision readiness failed");
@@ -519,8 +530,7 @@ int SDL_main(int argc, char **argv) {
         } else if (supervision == 0) {
             stasis_desktop_network_present_join_card();
         }
-#endif
-#if defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
+#elif defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
         stasis_mobile_network_present_join_url();
 #endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
@@ -530,7 +540,7 @@ int SDL_main(int argc, char **argv) {
 #endif
     }
     StasisMobileFramePacer frame_pacer;
-#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
+#if defined(STASIS_DESKTOP_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
     int network_join_shortcut_down = 0;
 #endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
@@ -542,7 +552,7 @@ int SDL_main(int argc, char **argv) {
     while (status == STASIS_MOBILE_RUNTIME_OK) {
         status = stasis_mobile_runtime_step();
         if (status == STASIS_MOBILE_RUNTIME_OK) {
-#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
+#if defined(STASIS_DESKTOP_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
             const bool *keys = SDL_GetKeyboardState(NULL);
             int shortcut_down = keys != NULL && keys[SDL_SCANCODE_F1];
             if (shortcut_down && !network_join_shortcut_down) {
@@ -626,8 +636,9 @@ int SDL_main(int argc, char **argv) {
     return status == STASIS_MOBILE_RUNTIME_STOP_REQUESTED ? 0 : status;
 }
 
-#if defined(_WIN32) && defined(STASIS_WINDOWS_MONOLITH)
+#if defined(STASIS_DESKTOP_MONOLITH)
 int main(int argc, char **argv) {
+    SDL_SetMainReady();
     return SDL_main(argc, argv);
 }
 #endif

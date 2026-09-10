@@ -53,6 +53,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo build -p stasis_dynload --release
 
+      - name: Build desktop network support (unix)
+        if: runner.os != 'Windows'
+        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --release
+
       - name: Build desktop network support (windows)
         if: runner.os == 'Windows'
         env:
@@ -135,6 +139,10 @@ jobs:
           cp -R samples "${out}/"
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
+          network_target="$(python3 tools/desktop_network_target.py "${RUNNER_OS}" "${RUNNER_ARCH}")"
+          mkdir -p "${out}/desktop/network/${network_target}" "${out}/desktop/network/include"
+          cp "build/codex-cargo-target/release/libstasis_network.a" "${out}/desktop/network/${network_target}/"
+          cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"
           mkdir -p "${out}/runtime"
           cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_network_join_card.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stasis_platform_services.c runtime/stasis_platform_services.h runtime/stb_truetype.h "${out}/runtime/"
           cp -R runtime/third_party "${out}/runtime/"
