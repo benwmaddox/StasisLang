@@ -1,4 +1,5 @@
 mod chat_export;
+mod git_completion;
 mod host_progress;
 mod image_attachments;
 mod persistence;
@@ -19,7 +20,10 @@ use semantic_revisions::proposal_revisions;
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use stasis_ai::session_store::{SessionSnapshot, SessionStore, WindowPreferences};
+use stasis_ai::session_store::{
+    CompletionPathProvenance, SessionSnapshot, SessionStore, TaskCompletionCommit, TaskGitBaseline,
+    WindowPreferences,
+};
 use stasis_ai::task_session::{
     ActionState, ActivityKind, ConnectionState, FallbackState, ImageHandoffState, ImageReviewState,
     Key, KeyChord, Modifiers, ProviderSelection, ProviderState, RoutingState,
@@ -1042,6 +1046,11 @@ struct DesktopEditor {
     window_preferences: Option<WindowPreferences>,
     media_hashes: BTreeMap<String, String>,
     unavailable_media: BTreeSet<String>,
+    task_git_baselines: BTreeMap<String, TaskGitBaseline>,
+    task_git_baseline_errors: BTreeMap<String, String>,
+    completion_commits: BTreeMap<String, TaskCompletionCommit>,
+    completion_confirmation: Option<git_completion::CompletionPlan>,
+    rollback_confirmation: Option<(String, String)>,
     erase_confirmation: bool,
     recovery_error: bool,
     recovered_previews: BTreeMap<SemanticPreviewKey, String>,
@@ -1461,6 +1470,11 @@ impl DesktopEditor {
             window_preferences: None,
             media_hashes: BTreeMap::new(),
             unavailable_media: BTreeSet::new(),
+            task_git_baselines: BTreeMap::new(),
+            task_git_baseline_errors: BTreeMap::new(),
+            completion_commits: BTreeMap::new(),
+            completion_confirmation: None,
+            rollback_confirmation: None,
             erase_confirmation: false,
             recovery_error: false,
             recovered_previews: BTreeMap::new(),
@@ -1706,6 +1720,11 @@ impl DesktopEditor {
         self.expanded.clear();
         self.media_hashes.clear();
         self.unavailable_media.clear();
+        self.task_git_baselines.clear();
+        self.task_git_baseline_errors.clear();
+        self.completion_commits.clear();
+        self.completion_confirmation = None;
+        self.rollback_confirmation = None;
         self.asset_textures.clear();
         self.attachment_textures.clear();
         self.attachment_preview = None;
@@ -1875,6 +1894,8 @@ impl DesktopEditor {
                             .map_err(|error| error.to_string())
                     };
                     if result.is_ok() {
+                        self.task_git_baselines.remove(task.as_str());
+                        self.task_git_baseline_errors.remove(task.as_str());
                         self.state.session.select_queue_gate_after(&task);
                     } else if let Err(error) = result {
                         if !canceled_capture {
@@ -2002,18 +2023,7 @@ impl DesktopEditor {
                         .map(|(fingerprint, _)| fingerprint);
                     match current {
                         Ok(current) if expected == Some(&current) => {
-                            let result = self
-                                .state
-                                .session
-                                .task_mut(task.as_str())
-                                .and_then(|task| task.mark_done());
-                            if result.is_ok() {
-                                self.state
-                                    .session
-                                    .select_queue_gate_after(&TaskId::new(&task));
-                            } else if let Err(error) = result {
-                                self.state.notice = Some(error.to_string());
-                            }
+                            self.prepare_completion(&task);
                         }
                         Ok(_) => {
                             self.state.notice = Some(
@@ -3003,6 +3013,32 @@ fn image_handoff_color(status: &ImageHandoffState) -> Color32 {
     }
 }
 
+fn short_commit(commit: &str) -> &str {
+    commit.get(..8).unwrap_or(commit)
+}
+
+fn completion_summary(receipt: &TaskCompletionCommit) -> String {
+    let paths = receipt
+        .paths
+        .iter()
+        .map(|path| {
+            let provenance = match path.provenance {
+                CompletionPathProvenance::StasisEdit => "Stasis edit",
+                CompletionPathProvenance::ExternalEdit => "external edit",
+            };
+            format!("- {} ({provenance})", path.path)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    bounded_failure(
+        &format!(
+            "Task completed and saved as Git commit {}.\nCommitted paths:\n{paths}",
+            receipt.commit
+        ),
+        15_000,
+    )
+}
+
 fn render_compiler_changes(ui: &mut egui::Ui, receipt: &Value) {
     let Some(changes) = receipt
         .pointer("/plan/changed_files")
@@ -3330,7 +3366,7 @@ impl EditorState {
             })
         {
             return PrimaryAction {
-                label: "Mark done",
+                label: "Complete... (Ctrl+Shift+D)",
                 command: TaskSessionCommand::MarkDone,
                 enabled: true,
                 disabled_reason: None,
@@ -3675,6 +3711,178 @@ impl EditorState {
 }
 
 impl DesktopEditor {
+    fn ensure_active_git_baseline(&mut self) {
+        let Some(task_id) = self
+            .state
+            .session
+            .running_task_id()
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+        if self.task_git_baselines.contains_key(&task_id) {
+            return;
+        }
+        if self.task_git_baseline_errors.contains_key(&task_id) {
+            return;
+        }
+        match git_completion::capture_baseline(&self.project_root) {
+            Ok(Some(baseline)) => {
+                self.task_git_baselines.insert(task_id, baseline);
+            }
+            Ok(None) => {
+                self.task_git_baseline_errors.insert(
+                    task_id,
+                    "Task completion commits require this workspace to be a Git repository.".into(),
+                );
+            }
+            Err(error) => {
+                self.task_git_baseline_errors.insert(task_id, error);
+            }
+        }
+    }
+
+    fn stasis_paths_for(&self, task_id: &str) -> BTreeSet<String> {
+        self.execution_receipts
+            .iter()
+            .filter(|((receipt_task, _), _)| receipt_task == task_id)
+            .flat_map(|(_, receipt)| git_completion::receipt_paths(receipt))
+            .collect()
+    }
+
+    fn prepare_completion(&mut self, task_id: &str) {
+        let can_complete = self
+            .state
+            .session
+            .task(task_id)
+            .cloned()
+            .and_then(|mut task| task.mark_done());
+        if let Err(error) = can_complete {
+            self.state.notice = Some(error.to_string());
+            return;
+        }
+        let Some(baseline) = self.task_git_baselines.get(task_id) else {
+            self.state.notice = Some(self.task_git_baseline_errors.get(task_id).cloned().unwrap_or_else(|| {
+                "No Git baseline is available for this task. Restart it from a clean task boundary before completing it."
+                    .into()
+            }));
+            return;
+        };
+        match git_completion::plan(
+            &self.project_root,
+            task_id,
+            baseline,
+            &self.stasis_paths_for(task_id),
+        ) {
+            Ok(plan) => self.completion_confirmation = Some(plan),
+            Err(error) => self.state.notice = Some(error),
+        }
+    }
+
+    fn confirm_completion(&mut self, plan: git_completion::CompletionPlan) {
+        let objective = match self.state.session.task(&plan.task_id) {
+            Ok(task) => {
+                let mut candidate = task.clone();
+                if let Err(error) = candidate
+                    .append_host_result("Task completion Git commit recorded.")
+                    .and_then(|()| candidate.mark_done())
+                {
+                    self.state.notice = Some(error.to_string());
+                    return;
+                }
+                task.objective.clone()
+            }
+            Err(error) => {
+                self.state.notice = Some(error.to_string());
+                return;
+            }
+        };
+        if plan.paths.is_empty() {
+            let result = self.state.session.task_mut(&plan.task_id).and_then(|task| {
+                task.append_host_result(
+                    "Task completed with no task-time project changes; no Git commit was created.",
+                )?;
+                task.mark_done()
+            });
+            match result {
+                Ok(()) => {
+                    self.task_git_baselines.remove(&plan.task_id);
+                    self.task_git_baseline_errors.remove(&plan.task_id);
+                    self.state
+                        .session
+                        .select_queue_gate_after(&TaskId::new(&plan.task_id));
+                    self.state.notice = Some("Task completed without project changes.".into());
+                }
+                Err(error) => self.state.notice = Some(error.to_string()),
+            }
+            return;
+        }
+        match git_completion::commit(&self.project_root, &plan, &objective) {
+            Ok(receipt) => {
+                let summary = completion_summary(&receipt);
+                let result = self
+                    .state
+                    .session
+                    .task_mut(&plan.task_id)
+                    .and_then(|task| task.append_host_result(summary))
+                    .and_then(|()| self.state.session.task_mut(&plan.task_id)?.mark_done());
+                if let Err(error) = result {
+                    self.state.notice = Some(format!(
+                        "Task commit {} was created, but the task could not be closed: {error}",
+                        short_commit(&receipt.commit)
+                    ));
+                    self.completion_commits.insert(plan.task_id, receipt);
+                    return;
+                }
+                self.completion_commits
+                    .insert(plan.task_id.clone(), receipt.clone());
+                self.task_git_baselines.remove(&plan.task_id);
+                self.task_git_baseline_errors.remove(&plan.task_id);
+                self.state
+                    .session
+                    .select_queue_gate_after(&TaskId::new(&plan.task_id));
+                self.state.notice = Some(format!(
+                    "Task completed in commit {}.",
+                    short_commit(&receipt.commit)
+                ));
+            }
+            Err(error) => self.state.notice = Some(error),
+        }
+    }
+
+    fn rollback_candidate(&self) -> Option<String> {
+        self.completion_commits
+            .iter()
+            .filter(|(_, commit)| commit.reverted_by.is_none())
+            .max_by_key(|(task_id, _)| {
+                task_id
+                    .strip_prefix("task-")
+                    .and_then(|number| number.parse::<u64>().ok())
+                    .unwrap_or(0)
+            })
+            .map(|(task_id, _)| task_id.clone())
+    }
+
+    fn confirm_rollback(&mut self, queued_task: String, completed_task: String) {
+        let Some(commit) = self.completion_commits.get(&completed_task).cloned() else {
+            self.state.notice = Some("The previous task has no completion commit.".into());
+            return;
+        };
+        match git_completion::revert(&self.project_root, &commit.commit) {
+            Ok(reverted_by) => {
+                if let Some(saved) = self.completion_commits.get_mut(&completed_task) {
+                    saved.reverted_by = Some(reverted_by.clone());
+                }
+                self.validation_fingerprints.clear();
+                self.state.notice = Some(format!(
+                    "Rolled back {completed_task} in commit {}. {queued_task} remains queued.",
+                    short_commit(&reverted_by)
+                ));
+            }
+            Err(error) => self.state.notice = Some(error),
+        }
+    }
+
     fn ui_busy(&self, task: &stasis_ai::Task) -> bool {
         self.busy_tasks.contains(task.id.as_str())
             || self
@@ -3731,6 +3939,9 @@ impl DesktopEditor {
             ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::B));
         let reject_shortcut =
             ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
+        let rollback_shortcut =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::R));
+        let rollback_task = self.rollback_candidate();
         egui::Frame::none().inner_margin(32.0).show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(72.0);
@@ -3758,6 +3969,12 @@ impl DesktopEditor {
                     }
                     if ui.button("Reject... (Del)").clicked() || reject_shortcut {
                         self.state.cancel_confirmation = Some(task.id.to_string());
+                    }
+                    if let Some(completed_task) = &rollback_task {
+                        if ui.button("Roll back previous... (R)").clicked() || rollback_shortcut {
+                            self.rollback_confirmation =
+                                Some((task.id.to_string(), completed_task.clone()));
+                        }
                     }
                 });
             });
@@ -4782,7 +4999,7 @@ impl DesktopEditor {
             ("Generate image", TaskSessionCommand::GenerateImage),
             ("Reconnect", TaskSessionCommand::Reconnect),
             ("Reject active task", TaskSessionCommand::Cancel),
-            ("Mark done", TaskSessionCommand::MarkDone),
+            ("Complete task and commit", TaskSessionCommand::MarkDone),
             ("Focus game", TaskSessionCommand::FocusGame),
             ("Export chat as HTML", TaskSessionCommand::ExportChat),
         ];
@@ -5089,6 +5306,9 @@ impl DesktopEditor {
                     });
             }
         }
+        self.ensure_active_git_baseline();
+        self.completion_confirmation(context);
+        self.rollback_confirmation(context);
         self.cancel_confirmation(context);
         if self.erase_confirmation {
             egui::Window::new("Erase saved history?").collapsible(false).resizable(false)
@@ -5142,6 +5362,86 @@ impl DesktopEditor {
         if !open {
             self.attachment_preview = None;
         }
+    }
+
+    fn completion_confirmation(&mut self, context: &egui::Context) {
+        let Some(plan) = self.completion_confirmation.clone() else {
+            return;
+        };
+        let confirm =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let keep =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        egui::Window::new("Complete task and commit?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                if plan.paths.is_empty() {
+                    ui.label("No project files changed during this task. Completing it will not create a Git commit.");
+                } else {
+                    ui.label("Only these task-time changes will be committed:");
+                    for path in &plan.paths {
+                        let provenance = match path.provenance {
+                            CompletionPathProvenance::StasisEdit => "Stasis edit",
+                            CompletionPathProvenance::ExternalEdit => "External edit",
+                        };
+                        ui.label(format!("- {} ({provenance})", path.path));
+                    }
+                    ui.label("Pre-existing project changes are excluded. The next queued task can roll this commit back before it starts.");
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Keep working (Esc)").clicked() || keep {
+                        self.completion_confirmation = None;
+                    }
+                    let complete_label = if plan.paths.is_empty() {
+                        "Complete task (Enter)"
+                    } else {
+                        "Commit and complete (Enter)"
+                    };
+                    if ui.button(complete_label).clicked() || confirm {
+                        self.completion_confirmation = None;
+                        self.confirm_completion(plan.clone());
+                    }
+                });
+            });
+    }
+
+    fn rollback_confirmation(&mut self, context: &egui::Context) {
+        let Some((queued_task, completed_task)) = self.rollback_confirmation.clone() else {
+            return;
+        };
+        let confirm =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let keep =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let commit = self
+            .completion_commits
+            .get(&completed_task)
+            .map(|value| short_commit(&value.commit))
+            .unwrap_or("unknown")
+            .to_string();
+        egui::Window::new("Roll back previous task?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                ui.label(format!(
+                    "Create a Git revert of {completed_task} commit {commit}?"
+                ));
+                ui.label(format!(
+                    "{queued_task} stays queued. Rollback is blocked if later commits or conflicting changes make it unsafe."
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Keep changes (Esc)").clicked() || keep {
+                        self.rollback_confirmation = None;
+                    }
+                    if ui.button("Roll back (Enter)").clicked() || confirm {
+                        self.rollback_confirmation = None;
+                        self.confirm_rollback(queued_task.clone(), completed_task.clone());
+                    }
+                });
+            });
     }
 
     fn cancel_confirmation(&mut self, context: &egui::Context) {
@@ -6952,6 +7252,21 @@ mod tests {
     #[test]
     fn accepted_action_executes_and_completes_its_originating_task() {
         let root = super::super::tests::desktop_editor_fixture("editor_host_execution");
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.name", "Stasis Test"][..],
+            &["config", "user.email", "stasis@example.invalid"][..],
+            &["config", "commit.gpgsign", "false"][..],
+            &["add", "."][..],
+            &["commit", "-q", "-m", "initial"][..],
+        ] {
+            assert!(std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
         let item = super::super::desktop_source_context(&root)
             .unwrap()
             .into_iter()
@@ -6966,6 +7281,7 @@ mod tests {
         let mut editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
         editor.state.objective = "Change value".into();
         editor.state.create_task().unwrap();
+        editor.ensure_active_git_baseline();
         editor
             .state
             .session
@@ -7051,6 +7367,8 @@ mod tests {
         assert!(editor.validation_receipts.contains_key("task-1"));
         editor.state.handle(TaskSessionCommand::MarkDone).unwrap();
         editor.flush_intents();
+        let completion = editor.completion_confirmation.take().unwrap();
+        editor.confirm_completion(completion);
         assert!(matches!(
             editor.state.session.task("task-1").unwrap().lifecycle,
             stasis_ai::TaskLifecycle::Completed

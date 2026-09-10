@@ -720,6 +720,44 @@ fn queue_reject_shortcut_still_requires_confirmation() {
 }
 
 #[test]
+fn queue_rollback_shortcut_requires_confirmation_and_keeps_task_queued() {
+    let mut editor = editor();
+    editor.state.objective = "Queued task".into();
+    editor.state.create_task().unwrap();
+    let completed = editor.state.session.task_mut("task-1").unwrap();
+    completed.cancel().unwrap();
+    completed.lifecycle = TaskLifecycle::Completed;
+    editor.completion_commits.insert(
+        "task-1".into(),
+        stasis_ai::session_store::TaskCompletionCommit {
+            commit: "0123456789012345678901234567890123456789".into(),
+            paths: Vec::new(),
+            reverted_by: None,
+        },
+    );
+    editor
+        .state
+        .session
+        .select_queue_gate_after(&TaskId::new("task-1"));
+
+    let context = egui::Context::default();
+    frame(
+        &mut editor,
+        &context,
+        egui::vec2(680.0, 900.0),
+        vec![key_event(egui::Key::R, egui::Modifiers::NONE)],
+    );
+    assert_eq!(
+        editor.rollback_confirmation,
+        Some(("task-2".into(), "task-1".into()))
+    );
+    assert_eq!(
+        editor.state.session.task("task-2").unwrap().lifecycle,
+        TaskLifecycle::Queued
+    );
+}
+
+#[test]
 fn unavailable_image_intents_settle_once_without_importing_assets() {
     let mut editor = editor();
     editor

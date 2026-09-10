@@ -64,6 +64,8 @@ pub(super) fn snapshot(editor: &DesktopEditor) -> SessionSnapshot {
         window_preferences: editor.window_preferences.clone(),
         media_hashes: editor.media_hashes.clone(),
         unavailable_media: editor.unavailable_media.clone(),
+        task_git_baselines: editor.task_git_baselines.clone(),
+        completion_commits: editor.completion_commits.clone(),
     }
 }
 
@@ -130,6 +132,8 @@ pub(super) fn restore(editor: &mut DesktopEditor, loaded: LoadOutcome) {
         .map(|value| bounded_window(value.size));
     editor.media_hashes = saved.media_hashes.clone();
     editor.unavailable_media = saved.unavailable_media.clone();
+    editor.task_git_baselines = saved.task_git_baselines.clone();
+    editor.completion_commits = saved.completion_commits.clone();
     // Previews include source-derived plans and are deliberately rebuilt after restart.
     editor.state.semantic_previews.clear();
     let current_source = super::super::desktop_source_fingerprint(&editor.project_root, &[]);
