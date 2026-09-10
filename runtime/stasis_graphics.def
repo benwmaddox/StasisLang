@@ -16,6 +16,10 @@ EXPORTS
     stasis_get_window_size
     stasis_get_display_metrics
     stasis_get_desktop_size
+    stasis_host_get_window_placement
+    stasis_host_apply_window_placement
+    stasis_host_focus_window
+    stasis_host_get_monitor_usable_bounds
     stasis_set_window_size
     stasis_set_maximized
     stasis_set_fullscreen

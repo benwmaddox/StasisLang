@@ -13,6 +13,23 @@ const ADDED_BACKGROUND: Color32 = Color32::from_rgb(22, 48, 33);
 const REMOVED_BACKGROUND: Color32 = Color32::from_rgb(45, 26, 30);
 const HUNK_TEXT: Color32 = Color32::from_rgb(135, 180, 230);
 
+#[cfg(test)]
+pub(super) fn expand_for_evidence(context: &egui::Context) {
+    context.data_mut(|data| data.insert_temp(egui::Id::new("expand-semantic-evidence"), true));
+}
+
+#[cfg(test)]
+pub(super) fn evidence_expanded(context: &egui::Context) -> bool {
+    context
+        .data(|data| data.get_temp::<bool>(egui::Id::new("expand-semantic-evidence")))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+pub(super) fn clear_evidence(context: &egui::Context) {
+    context.data_mut(|data| data.remove::<bool>(egui::Id::new("expand-semantic-evidence")));
+}
+
 /// Render the source changes held by one compiler-owned semantic edit plan.
 ///
 /// The plan is intentionally the only input to this module. In particular, no
@@ -37,7 +54,7 @@ pub(super) fn render(ui: &mut egui::Ui, plan: &WorkshopSemanticEditPlan, id: imp
         .map(|(_, diff, _)| diff.removed)
         .sum::<usize>();
 
-    ui.horizontal_wrapped(|ui| {
+    let header = ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Semantic source diff").strong());
         ui.label(format!(
             "{} changed file{}",
@@ -54,6 +71,24 @@ pub(super) fn render(ui: &mut egui::Ui, plan: &WorkshopSemanticEditPlan, id: imp
             ui.ctx().copy_text(unified_diff(plan));
         }
     });
+    #[cfg(test)]
+    if ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(egui::Id::new("expand-semantic-evidence")))
+        .unwrap_or(false)
+    {
+        let scroll_id = base_id.with("evidence-scrolled");
+        if !ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(scroll_id))
+            .unwrap_or(false)
+        {
+            header.response.scroll_to_me(Some(egui::Align::TOP));
+            ui.ctx().data_mut(|data| data.insert_temp(scroll_id, true));
+        }
+    }
+    #[cfg(not(test))]
+    let _ = header;
 
     if file_diffs.is_empty() {
         ui.label(RichText::new("No semantic source changes.").weak());
@@ -154,6 +189,18 @@ fn render_file(ui: &mut egui::Ui, file: &str, diff: &FileDiff, id: egui::Id) {
         .is_some_and(|(compact, full)| compact.end < full.end);
     let state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    #[cfg(test)]
+    let state = {
+        let mut state = state;
+        if ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(egui::Id::new("expand-semantic-evidence")))
+            .unwrap_or(false)
+        {
+            state.set_open(true);
+        }
+        state
+    };
     let show_compact = !state.is_open();
     let header = state.show_header(ui, |ui| {
         ui.vertical(|ui| {

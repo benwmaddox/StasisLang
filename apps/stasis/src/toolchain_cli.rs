@@ -12,7 +12,8 @@ use stasis::{
     load_and_apply_play_data_bindings_for_test, provision_local_certificate,
     resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
     run_play_in_process_with_replay, run_play_in_process_with_window_title,
-    run_self_host_aot_cli_with_desktop_network, run_self_host_aot_cli_with_options, sign_artifacts,
+    run_project_tests_bounded_with_receipt, run_self_host_aot_cli_with_desktop_network,
+    run_self_host_aot_cli_with_options, run_staged_project_tests_bounded, sign_artifacts,
     signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
     SigningOptions, StasisTestRunSession,
 };
@@ -7075,6 +7076,15 @@ fn apply_symbol_plan(
     plan: WorkshopSemanticEditPlan,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
+    apply_symbol_plan_with_validation(workspace, plan, options, None)
+}
+
+fn apply_symbol_plan_with_validation(
+    workspace: &Workspace,
+    plan: WorkshopSemanticEditPlan,
+    options: SymbolEditOptions,
+    prevalidated_test_result: Option<Value>,
+) -> Result<CommandResult, String> {
     if options.dry_run {
         return Ok(CommandResult::success(
             format!(
@@ -7092,7 +7102,9 @@ fn apply_symbol_plan(
     }
 
     write_workshop_semantic_plan(&workspace.root, &plan, false)?;
-    let validation = if options.no_tests {
+    let validation = if let Some(test_result) = prevalidated_test_result {
+        Ok(json!({"compiler": "passed", "tests": "passed", "test_result": test_result}))
+    } else if options.no_tests {
         Ok(json!({"compiler": "passed", "tests": "skipped"}))
     } else {
         test_workspace(workspace, None).map(
@@ -7199,6 +7211,18 @@ fn desktop_apply_semantic_preview(
     }
 
     let workspace = load_workspace(Some(root))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let edited_files = preview
+        .plan
+        .changed_files
+        .iter()
+        .map(|change| WorkshopSourceFile {
+            path: change.file.clone(),
+            source: change.after_source.clone(),
+        })
+        .collect::<Vec<_>>();
+    let candidate_files = overlay_workshop_files(&files, &edited_files);
     let mut validated_inputs = desktop_validation_inputs(root, &[])?;
     if desktop_inputs_fingerprint(&validated_inputs) != preview.source_fingerprint {
         return Err("stale semantic preview: project sources changed before apply".into());
@@ -7208,15 +7232,41 @@ fn desktop_apply_semantic_preview(
     }
     // Bind the receipt to the validated inputs overlaid with the exact reviewed plan.
     let committed_fingerprint = desktop_inputs_fingerprint(&validated_inputs);
-    let mut result = apply_symbol_plan(
+    let apply_started = Instant::now();
+    let test_started = Instant::now();
+    let test_result = run_staged_project_tests_bounded(
+        &workspace.root,
+        Path::new(&workspace.manifest.entry),
+        &candidate_files,
+        &AtomicBool::new(false),
+    )
+    .map_err(|error| {
+        format!(
+            "semantic edit validation failed; candidate was discarded and all source changes were rolled back before publication: {error}"
+        )
+    })?;
+    let compile_and_tests_micros = test_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+    desktop_require_executed_tests(&test_result)?;
+    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
+        return Err(
+            "stale semantic preview: project sources changed during validation; live sources remained unchanged"
+                .into(),
+        );
+    }
+    let mut result = apply_symbol_plan_with_validation(
         &workspace,
         preview.plan.clone(),
         SymbolEditOptions {
             dry_run: false,
             no_tests: false,
         },
+        Some(test_result),
     )?;
     result.data["source_fingerprint"] = json!(committed_fingerprint);
+    result.data["timing_micros"] = json!({
+        "compile_and_tests_child": compile_and_tests_micros,
+        "apply_total": apply_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+    });
     Ok((result.human, result.data))
 }
 
@@ -7230,17 +7280,20 @@ fn desktop_run_focused_tests(
     root: &Path,
     relevant_tests: &[String],
 ) -> Result<(String, Value), String> {
-    let workspace = load_workspace(Some(root))?;
     if relevant_tests.is_empty() {
-        let result = test_workspace(&workspace, None)?;
-        desktop_require_executed_tests(&result.data)?;
-        return Ok((result.human, result.data));
+        let receipt = run_project_tests_bounded_with_receipt(root, None, &AtomicBool::new(false))?;
+        desktop_require_executed_tests(&receipt)?;
+        return Ok(("focused tests passed".to_string(), receipt));
     }
     let mut receipts = Vec::with_capacity(relevant_tests.len());
     for relative in relevant_tests {
-        let result = test_workspace(&workspace, Some(Path::new(relative)))?;
-        desktop_require_executed_tests(&result.data)?;
-        receipts.push(result.data);
+        let receipt = run_project_tests_bounded_with_receipt(
+            root,
+            Some(Path::new(relative)),
+            &AtomicBool::new(false),
+        )?;
+        desktop_require_executed_tests(&receipt)?;
+        receipts.push(receipt);
     }
     Ok((
         format!("{} focused test path(s) passed", relevant_tests.len()),
@@ -7289,6 +7342,19 @@ fn desktop_validation_inputs(
         PathBuf::from(MANIFEST_NAME),
         workspace.root.join(MANIFEST_NAME),
     ));
+    for (data, metadata) in resolve_play_data_binding_paths(
+        &workspace.root.join(&workspace.manifest.entry),
+        &workspace.root,
+        None,
+        None,
+    )? {
+        for physical in [data, metadata] {
+            let relative = physical
+                .strip_prefix(&workspace.root)
+                .map_err(|_| format!("data binding escaped workspace: {}", physical.display()))?;
+            mapped.push((relative.to_path_buf(), physical));
+        }
+    }
     let mut test_roots = if relevant_tests.is_empty() {
         vec![workspace.root.join(&workspace.manifest.tests)]
     } else {
@@ -9338,6 +9404,90 @@ mod tests {
         remove_temp(&root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn desktop_apply_and_focused_tests_isolate_runtime_globals_and_stage_sidecars() {
+        fn global_hash(path: &str) -> i32 {
+            path.bytes().fold(2166136261u32, |hash, byte| {
+                (hash ^ u32::from(byte)).wrapping_mul(16777619)
+            }) as i32
+        }
+
+        let root = desktop_editor_fixture("editor_isolated_tests");
+        fs::write(
+            root.join("src/main.stasis"),
+            concat!(
+                "global desktop_isolation_probe: i32;\n",
+                "function main(): i32 { return 0; }\n",
+                "function tick(): void {}\n",
+                "function value(): i32 { return 1; }\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            concat!(
+                "import \"../src/main.stasis\";\n",
+                "test `overwrites isolation probe`(): bool {\n",
+                "    desktop_isolation_probe = 99;\n",
+                "    return value() > 0;\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/isolation.scenario.json"),
+            r#"{"schema_version":1,"name":"sidecar isolation","ticks":1,"state":{"desktop_isolation_probe":99},"invariants":[{"path":"desktop_isolation_probe","op":"eq","value":99}]}"#,
+        )
+        .unwrap();
+
+        let probe = global_hash("desktop_isolation_probe");
+        let prior = stasis_dynload::stasis_jit_global_i32_load(probe);
+        stasis_dynload::stasis_jit_global_i32_store(probe, 314_159);
+
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 7; }");
+        let (_, applied) = desktop_apply_semantic_batch(&root, payload).unwrap();
+        assert!(
+            applied["validation"]["test_result"]["tests_run"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(
+            applied["validation"]["test_result"]["scenario_cases_run"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(applied["timing_micros"]["compile_and_tests_child"]
+            .as_u64()
+            .is_some_and(|value| value > 0));
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(probe), 314_159);
+
+        let (_, focused) =
+            desktop_run_focused_tests(&root, &["tests/main.test.stasis".to_string()]).unwrap();
+        assert!(focused["receipts"][0]["tests_run"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(probe), 314_159);
+
+        let before_failure = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let failing = desktop_preview_semantic_batch(
+            &root,
+            desktop_semantic_update(&root, "value", "function value(): i32 { return -1; }"),
+        )
+        .unwrap();
+        let error = desktop_apply_semantic_preview(&root, &failing).unwrap_err();
+        assert!(error.contains("before publication"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before_failure
+        );
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(probe), 314_159);
+
+        stasis_dynload::stasis_jit_global_i32_store(probe, prior);
+        remove_temp(&root);
+    }
+
     #[test]
     fn desktop_editor_context_drives_apply_without_model_hash_and_receipt() {
         let root = desktop_editor_fixture("editor_receipt");
@@ -9616,6 +9766,37 @@ mod tests {
         );
         let workspace = load_workspace(Some(&root)).expect("workspace");
         test_workspace(&workspace, None).expect("bound test project");
+        remove_temp(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn desktop_focused_tests_stage_project_data_bindings() {
+        let root = temp_dir("desktop_test_data_binding");
+        write_data_binding_test_project(
+            &root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
+            Some(DATA_BINDING_META),
+        );
+        let fingerprint = desktop_source_fingerprint(&root, &[]).unwrap();
+        let candidate_files =
+            load_workshop_edit_workspace(&root, Path::new("src/main.stasis")).unwrap();
+        let receipt = run_staged_project_tests_bounded(
+            &root,
+            Path::new("src/main.stasis"),
+            &candidate_files,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(receipt["tests_run"].as_u64().unwrap_or(0) > 0);
+        assert!(receipt["tests_passed"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(receipt["tests_failed"], 0);
+        fs::write(
+            root.join("data/gameplay.json"),
+            r#"{"config":{"loaded":true,"scalar":18,"values":[4,9]}}"#,
+        )
+        .unwrap();
+        assert_ne!(fingerprint, desktop_source_fingerprint(&root, &[]).unwrap());
         remove_temp(&root);
     }
 

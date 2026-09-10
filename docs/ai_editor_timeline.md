@@ -8,6 +8,36 @@ Task navigation stays secondary to the current objective, chronological activity
 and persistent reply composer. The game continues in its independent native
 window. Interface sizes are expressed in egui points for display scaling.
 
+## Native window placement
+
+The top-bar **Tile Editor + Game** command restores both windows and places the
+editor on the left and the game on the right of the game's usable monitor area.
+First launch uses the same arrangement. Normal window rectangles are remembered
+per project in `.stasis_cache/editor-windows.json`; minimized and maximized
+rectangles do not overwrite normal placement. Saved windows retain their own
+connected monitors, and disconnected-monitor positions are clamped into a usable
+monitor area. Very small work areas take priority over the preferred editor
+minimum of 520 by 600 points.
+
+Third-party tiling window managers can override application window placement.
+Set the editor and game windows to floating in that manager before using Tile.
+
+Window operations use the live runtime queue between ticks, without pausing the
+game or replacing its input. **Focus game** in the command palette restores a
+minimized game and requests native focus, preserving maximized and fullscreen
+presentation. Clicking either native window transfers input through the OS.
+The renderer remains independent of the editor.
+
+SDL host rectangles include decorations and use platform-native desktop
+coordinates (physical pixels on Windows). The editor converts these to egui
+points and reapplies sizing after a monitor-scale change. Optional host exports
+extend runtime ABI 3; older runtimes report unsupported placement explicitly.
+The additive live commands do not change the live envelope schema version.
+
+The native editor enables AccessKit, names task navigation and editing controls,
+uses a visible focus outline, and disables transition animation for reduced
+motion. Compact layouts keep task creation and the reply composer reachable.
+
 Activity belongs to the task session, not to a rendered frame. Successful user,
 provider, attachment, semantic-action, generated-asset, host, and focused-test
 operations append typed entries with task-local sequence numbers. State changes
@@ -21,6 +51,15 @@ for a later request. The thread-context meter uses the controller's retained
 character budget, not an estimate of the model's token window.
 
 ## Validation
+
+Desktop Apply validates the reviewed candidate in a staged workspace using a
+bounded child process before publishing source changes. The staged workspace
+includes the project's test and data fixtures. Apply rechecks the original
+input fingerprint after validation and retains the child's test receipt.
+Focused tests also run in a child process: JIT test execution activates
+process-global runtime state, so running it inside the editor/game process
+would replace the live game's globals. The watcher compiles and commits the
+validated edit between ticks, preserving the active runtime state.
 
 Run focused checks through the repository Cargo wrapper:
 

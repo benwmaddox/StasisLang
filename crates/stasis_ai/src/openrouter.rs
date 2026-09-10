@@ -197,7 +197,7 @@ impl ProviderConfig {
     pub fn supports_image_input(&self) -> bool {
         match self {
             Self::Codex => codex_model_supports_image_input(&self.model()),
-            Self::OpenRouter(_) => false,
+            Self::OpenRouter(config) => openrouter_model_supports_image_input(&config.model),
         }
     }
 
@@ -215,6 +215,18 @@ pub(crate) fn codex_model_supports_image_input(model: &str) -> bool {
     // The Gauntlet visual and gameplay critics exercise image input with this
     // explicit model. Unknown aliases stay disabled so capture fails closed.
     matches!(model.trim(), "gpt-5.6-sol")
+}
+
+fn openrouter_model_supports_image_input(model: &str) -> bool {
+    // Keep this explicit: aliases and text-only routes must not turn an attached
+    // frame into a request whose image is silently ignored.
+    matches!(
+        model.trim(),
+        "google/gemini-2.5-flash"
+            | "google/gemini-2.5-flash-lite"
+            | "google/gemini-2.5-pro"
+            | "openai/gpt-5.6-luna"
+    )
 }
 
 pub enum ConfiguredProvider {
@@ -276,10 +288,16 @@ impl ConfiguredProvider {
                 ));
             }
             Self::Codex(provider) => provider.images = images,
-            Self::OpenRouter(_) if !images.is_empty() => {
-                return Err("OpenRouter transport does not support image attachments in this workspace flow".to_string());
+            Self::OpenRouter(provider)
+                if !images.is_empty()
+                    && !openrouter_model_supports_image_input(&provider.config.model) =>
+            {
+                return Err(format!(
+                    "OpenRouter model {} does not support image input",
+                    provider.config.model
+                ));
             }
-            Self::OpenRouter(_) => {}
+            Self::OpenRouter(provider) => provider.images = images,
         }
         Ok(self)
     }
@@ -347,6 +365,7 @@ pub struct OpenRouterProvider {
     call_count: u32,
     reasoning_effort: Option<String>,
     session_id: Option<String>,
+    images: Vec<std::path::PathBuf>,
 }
 
 impl OpenRouterProvider {
@@ -363,6 +382,7 @@ impl OpenRouterProvider {
             call_count: 0,
             reasoning_effort: None,
             session_id: None,
+            images: Vec::new(),
         })
     }
 
@@ -539,6 +559,12 @@ impl ModelProvider for OpenRouterProvider {
         self.call_count = self.call_count.saturating_add(1);
         self.last_usage = None;
         self.config.validate()?;
+        if !self.images.is_empty() && !openrouter_model_supports_image_input(&self.config.model) {
+            return Err(format!(
+                "OpenRouter model {} does not support image input",
+                self.config.model
+            ));
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -617,10 +643,15 @@ impl OpenRouterProvider {
         }
         let timeout = remaining_timeout(deadline, "OpenRouter chat request")?;
         let route = self.route_json(only);
-        let schema = model_response_schema_for_request(request)?;
+        let mut schema = model_response_schema_for_request(request)?;
+        // Gemini's structured-output compiler expands nested array bounds into
+        // an impractically large state machine. Local decoding and tool
+        // validation still enforce the repository's collection limits.
+        strip_array_max_items(&mut schema);
+        let content = openrouter_message_content(request, &self.images)?;
         let mut body = json!({
             "model": self.config.model,
-            "messages": [{"role": "user", "content": request}],
+            "messages": [{"role": "user", "content": content}],
             "stream": true,
             "stream_options": {"include_usage": true},
             "response_format": {"type": "json_schema", "json_schema": {"name": "stasis_model_response", "strict": true, "schema": schema}},
@@ -682,6 +713,7 @@ impl OpenRouterProvider {
         let mut first_reasoning_ms = None;
         let mut first_content_ms = None;
         let mut first_action_ms = None;
+        let mut finish_reason = None;
         let mut saw_done = false;
         loop {
             let Some(bytes) =
@@ -715,6 +747,11 @@ impl OpenRouterProvider {
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .or(resolved_provider);
+                finish_reason = chunk
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(Value::as_str)
+                    .map(sanitize_label)
+                    .or(finish_reason);
                 if let Some(value) = chunk
                     .pointer("/choices/0/delta/reasoning")
                     .and_then(Value::as_str)
@@ -753,7 +790,13 @@ impl OpenRouterProvider {
         if !saw_done {
             return Err("OpenRouter stream ended before the [DONE] marker".to_string());
         }
-        let parsed = decode_model_response(&content, "OpenRouter");
+        let parsed = decode_model_response(&content, "OpenRouter").map_err(|error| {
+            format!(
+                "{error} (finish_reason={}, response_bytes={})",
+                finish_reason.as_deref().unwrap_or("unknown"),
+                content.len()
+            )
+        });
         let resolved_model = resolved_model
             .as_deref()
             .map(sanitize_label)
@@ -786,6 +829,94 @@ impl OpenRouterProvider {
         }));
         parsed
     }
+}
+
+fn strip_array_max_items(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("maxItems");
+            for child in object.values_mut() {
+                strip_array_max_items(child);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                strip_array_max_items(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+const MAX_OPENROUTER_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+
+fn openrouter_message_content(
+    request: &str,
+    images: &[std::path::PathBuf],
+) -> Result<Value, String> {
+    if images.is_empty() {
+        return Ok(json!(request));
+    }
+    let mut content = vec![json!({"type": "text", "text": request})];
+    for path in images {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| format!("OpenRouter image could not be inspected: {error}"))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err("OpenRouter image must be a regular file".to_string());
+        }
+        if metadata.len() > MAX_OPENROUTER_IMAGE_BYTES as u64 {
+            return Err(format!(
+                "OpenRouter image exceeds {MAX_OPENROUTER_IMAGE_BYTES} bytes"
+            ));
+        }
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("OpenRouter image could not be read: {error}"))?;
+        let mime = image_mime(&bytes)
+            .ok_or_else(|| "OpenRouter image must be PNG, JPEG, GIF, or WebP".to_string())?;
+        let data_url = format!("data:{mime};base64,{}", encode_base64(&bytes));
+        content.push(json!({
+            "type": "image_url",
+            "image_url": {"url": data_url}
+        }));
+    }
+    Ok(Value::Array(content))
+}
+
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let value = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        encoded.push(TABLE[((value >> 18) & 63) as usize] as char);
+        encoded.push(TABLE[((value >> 12) & 63) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            TABLE[((value >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            TABLE[(value & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    encoded
 }
 
 #[derive(Default)]
@@ -948,11 +1079,22 @@ fn sanitized_transport_error(context: &str, error: &reqwest::Error) -> String {
     }
 }
 fn api_error(context: &str, status: u16, value: &Value, secret: &str) -> String {
-    let message = value
+    let primary = value
         .pointer("/error/message")
         .or_else(|| value.get("message"))
         .and_then(Value::as_str)
         .unwrap_or("request rejected");
+    let nested = value
+        .pointer("/error/metadata/raw")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|raw| {
+            raw.pointer("/error/message")
+                .or_else(|| raw.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let message = nested.as_deref().unwrap_or(primary);
     let bounded = message
         .chars()
         .filter(|ch| !ch.is_control())
@@ -1058,6 +1200,38 @@ mod tests {
             "OpenRouter request failed with HTTP 401: unauthorized [redacted]"
         );
         assert!(!error.contains("secret"));
+    }
+
+    #[test]
+    fn provider_error_surfaces_bounded_nested_message() {
+        let error = api_error(
+            "OpenRouter request",
+            400,
+            &json!({"error":{"message":"Provider returned error","metadata":{"raw":"{\"error\":{\"message\":\"response schema unsupported\"}}"}}}),
+            "unit-secret",
+        );
+        assert_eq!(
+            error,
+            "OpenRouter request failed with HTTP 400: response schema unsupported"
+        );
+    }
+
+    #[test]
+    fn openrouter_schema_removes_provider_state_exploding_array_maxima() {
+        let mut schema = json!({
+            "type": "array",
+            "maxItems": 50,
+            "items": {"type": "object", "properties": {"edits": {
+                "type": "array", "maxItems": 64, "items": {"type": "string"}
+            }}}
+        });
+        strip_array_max_items(&mut schema);
+        assert!(schema.pointer("/maxItems").is_none());
+        assert!(schema.pointer("/items/properties/edits/maxItems").is_none());
+        assert_eq!(
+            schema.pointer("/items/properties/edits/items/type"),
+            Some(&json!("string"))
+        );
     }
     fn mock_server(
         responses: Vec<String>,
@@ -1205,9 +1379,11 @@ mod tests {
         let (base_url, requests, worker) =
             mock_server(vec![http_response("text/event-stream", &body)]);
         let mut provider = OpenRouterProvider::new(test_config(base_url)).unwrap();
-        assert!(provider
+        let error = provider
             .respond(&test_request(), &AtomicBool::new(false))
-            .is_err());
+            .expect_err("malformed response");
+        assert!(error.contains("finish_reason=unknown"));
+        assert!(error.contains("response_bytes=8"));
         let usage = provider.take_usage().expect("failed response usage");
         assert_eq!(usage["cost"], 0.001);
         assert_eq!(usage["tokens"]["prompt"], 10);
@@ -1415,6 +1591,22 @@ mod tests {
             timeout: Duration::from_secs(1),
         });
         assert!(!openrouter.supports_image_input());
+        let vision_openrouter = ProviderConfig::OpenRouter(OpenRouterConfig {
+            api_key: "unit-secret".to_string(),
+            base_url: "http://127.0.0.1:9".to_string(),
+            model: "google/gemini-2.5-flash".to_string(),
+            routing: RoutingConfig::default(),
+            timeout: Duration::from_secs(1),
+        });
+        assert!(vision_openrouter.supports_image_input());
+
+        let unsupported_openrouter = openrouter
+            .build()
+            .expect("OpenRouter provider")
+            .with_images(vec![std::path::PathBuf::from("frame.png")]);
+        assert!(
+            matches!(unsupported_openrouter, Err(error) if error.contains("does not support image input"))
+        );
 
         let unsupported = ProviderConfig::Codex
             .build()
@@ -1436,5 +1628,26 @@ mod tests {
             .respond("request", &AtomicBool::new(false))
             .expect_err("dispatch must recheck image capability");
         assert!(error.contains("does not support image input"));
+    }
+
+    #[test]
+    fn openrouter_image_input_uses_multimodal_data_url_content() {
+        let path = std::env::temp_dir().join(format!(
+            "stasis-openrouter-image-{}-{}.png",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nfixture").expect("image fixture");
+        let content = openrouter_message_content("inspect frame", std::slice::from_ref(&path))
+            .expect("multimodal content");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(content.pointer("/0/type"), Some(&json!("text")));
+        assert_eq!(content.pointer("/0/text"), Some(&json!("inspect frame")));
+        assert_eq!(content.pointer("/1/type"), Some(&json!("image_url")));
+        assert_eq!(
+            content.pointer("/1/image_url/url"),
+            Some(&json!("data:image/png;base64,iVBORw0KGgpmaXh0dXJl"))
+        );
     }
 }

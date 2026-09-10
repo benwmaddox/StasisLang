@@ -1,0 +1,149 @@
+{
+  "error": "provider completed without a usable semantic preview: semantic edit source must define exactly one Function named `render`",
+  "execution_receipts": [],
+  "model": "google/gemini-2.5-flash",
+  "provider_turn_usage": [
+    {
+      "task_id": "task-1",
+      "usage": {
+        "configured_model": "google/gemini-2.5-flash",
+        "configured_provider": "openrouter",
+        "cost": 0.0043547,
+        "fallback": false,
+        "resolved_model": "google/gemini-2.5-flash",
+        "resolved_provider": "google",
+        "route": {
+          "allow_fallbacks": true,
+          "require_parameters": true,
+          "sort": "throughput"
+        },
+        "throughput_tokens_per_second": 183.8340311183517,
+        "timing_ms": {
+          "first_action": 3188,
+          "first_content": 3172,
+          "first_reasoning": 2274,
+          "headers": 2268,
+          "inference_total": 4547,
+          "metadata": 0,
+          "turn_total": 4548
+        },
+        "tokens": {
+          "cache": 0,
+          "completion": 836,
+          "prompt": 7549,
+          "reasoning": 314
+        },
+        "validation": {
+          "repair_count": 0,
+          "structured_schema": "accepted"
+        }
+      }
+    },
+    {
+      "task_id": "task-1",
+      "usage": {
+        "configured_model": "google/gemini-2.5-flash",
+        "configured_provider": "openrouter",
+        "cost": 0.0030677,
+        "fallback": false,
+        "resolved_model": "google/gemini-2.5-flash",
+        "resolved_provider": "google",
+        "route": {
+          "allow_fallbacks": true,
+          "require_parameters": true,
+          "sort": "throughput"
+        },
+        "throughput_tokens_per_second": 92.17877317607403,
+        "timing_ms": {
+          "first_action": 2858,
+          "first_content": 2809,
+          "first_reasoning": 2173,
+          "headers": 2171,
+          "inference_total": 2885,
+          "metadata": 0,
+          "turn_total": 2886
+        },
+        "tokens": {
+          "cache": 0,
+          "completion": 266,
+          "prompt": 8009,
+          "reasoning": 157
+        },
+        "validation": {
+          "repair_count": 0,
+          "structured_schema": "accepted"
+        }
+      }
+    }
+  ],
+  "result": "failed",
+  "runtime_probes": [
+    {
+      "assets_ready": true,
+      "bricks_left": 35,
+      "generation": 1,
+      "loader_failed": false,
+      "paddle_x": 0.0,
+      "session_id": "2504:560e456776677af34b23821efa19f1c3898b6f780faa162f700959e0c2e7ba68",
+      "tick": 19
+    }
+  ],
+  "tasks": [
+    {
+      "actions": {
+        "update_render_accent_rgb": {
+          "description": "Change the RGB values of the presentation_variant accent fill_rect in the render function to 0.35, 0.85, 1.0.",
+          "id": "update_render_accent_rgb",
+          "kind": "Edit",
+          "payload": {
+            "edits": [
+              {
+                "new_source": "        fill_rect(0.0, 0.0, SCREEN_W, 2.0, 0.35, 0.85, 1.0, 1.0);\r\n",
+                "operation": "update",
+                "target": {
+                  "file": "src/main.stasis",
+                  "kind": "function",
+                  "name": "render",
+                  "owner": null,
+                  "signature": "render(): i32",
+                  "symbol_id": "v1|function|src/main.stasis|render|()"
+                }
+              }
+            ],
+            "schema_version": 1
+          },
+          "revisions": [],
+          "state": "Proposed",
+          "thread_position": 2
+        }
+      },
+      "metrics": {
+        "elapsed_ms": 7888,
+        "estimated_cost_micros": 7423,
+        "input_tokens": 15558,
+        "output_tokens": 1102,
+        "retry_count": 0,
+        "turn_count": 1
+      },
+      "objective": "Polish the hot-swap accent",
+      "provider": {
+        "fallback": {
+          "Ready": {
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
+            "route": "openrouter:throughput"
+          }
+        },
+        "model": "google/gemini-2.5-flash",
+        "provider": "google",
+        "routing": {
+          "Assigned": {
+            "route": "openrouter:google"
+          }
+        }
+      },
+      "task_id": "task-1",
+      "validation": "NotRun"
+    }
+  ]
+}

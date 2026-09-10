@@ -1,5 +1,6 @@
 mod semantic_diff;
 mod semantic_revisions;
+mod window_layout;
 
 use semantic_revisions::proposal_revisions;
 
@@ -106,6 +107,13 @@ impl ToolExecutor for ProposalTools {
                         .get("batch")
                         .cloned()
                         .ok_or_else(|| "batch is required".to_string())?;
+                    if payload
+                        .get("edits")
+                        .and_then(Value::as_array)
+                        .is_some_and(|edits| edits.len() > stasis_ai::MAX_SEMANTIC_EDITS_PER_BATCH)
+                    {
+                        return Err("semantic proposal exceeds the 64-edit batch limit".into());
+                    }
                     serde_json::from_value::<
                         stasis_compiler::frontend::workshop::WorkshopSemanticEditBatch,
                     >(payload.clone())
@@ -299,10 +307,28 @@ fn selected_provider_config(
     }
 }
 
+fn accumulate_provider_usage(total: &mut ProviderUsage, value: &Value) {
+    let turn = provider_reply_usage(Some(value));
+    total.input_tokens = total.input_tokens.saturating_add(turn.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(turn.output_tokens);
+    total.estimated_cost_micros = total
+        .estimated_cost_micros
+        .saturating_add(turn.estimated_cost_micros);
+}
+
 fn run_reply_provider(
     request: ProviderRequest,
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
+) -> Result<ProviderReply, String> {
+    run_reply_provider_observed(request, canceled, project_root, |_| {})
+}
+
+fn run_reply_provider_observed(
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    project_root: PathBuf,
+    mut observe_usage: impl FnMut(&Value),
 ) -> Result<ProviderReply, String> {
     let config = selected_provider_config(request.selected_provider)?;
     let effective_reasoning_effort = (config.provider_name() == "openrouter").then_some("low");
@@ -338,11 +364,13 @@ fn run_reply_provider(
     });
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
+        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
         max_turns: 3,
         ..AgentProfile::default()
     };
     let mut usage = None;
+    let mut total_usage = ProviderUsage::default();
+    let mut last_tool_error = None;
     let mut tools = ProposalTools::default();
     let text = run_agent_with_profile(
         &mut provider,
@@ -353,15 +381,33 @@ fn run_reply_provider(
         proposal_tool_specs(),
         &canceled,
         |event| {
+            if let AgentEvent::Observations(observations) = &event {
+                last_tool_error = observations
+                    .iter()
+                    .rev()
+                    .find_map(|observation| {
+                        observation
+                            .error
+                            .as_ref()
+                            .map(|error| error.chars().take(500).collect::<String>())
+                    })
+                    .or(last_tool_error.take());
+            }
             if let AgentEvent::ProviderUsage(value) = event {
+                accumulate_provider_usage(&mut total_usage, &value);
+                observe_usage(&value);
                 usage = Some(value);
             }
         },
-    )?;
+    )
+    .map_err(|error| match last_tool_error {
+        Some(rejection) => format!("{error}; last action rejection: {rejection}"),
+        None => error,
+    })?;
     let mut reply = ProviderReply::new(text);
     reply.proposals = tools.proposals;
     reply.provider = provider_reply_state(&config, usage.as_ref());
-    reply.usage = provider_reply_usage(usage.as_ref());
+    reply.usage = total_usage;
     Ok(reply)
 }
 
@@ -602,6 +648,7 @@ impl Drop for HostExecutor {
 }
 
 struct DesktopEditor {
+    windows: Option<window_layout::WindowLayout>,
     state: EditorState,
     controller: TaskController,
     client: LiveSessionClient,
@@ -956,6 +1003,7 @@ impl DesktopEditor {
         let provider_root = project_root.clone();
         let (capture_result_tx, capture_results) = mpsc::channel();
         Self {
+            windows: None,
             state: EditorState {
                 project_root: Some(project_root.clone()),
                 ..EditorState::default()
@@ -1500,8 +1548,16 @@ impl DesktopEditor {
         );
         let objective = ui.add_sized(
             [ui.available_width(), 34.0],
-            egui::TextEdit::singleline(&mut self.state.objective).hint_text("What should change?"),
+            egui::TextEdit::singleline(&mut self.state.objective)
+                .id_source("task-objective-input")
+                .hint_text("What should change?"),
         );
+        objective.widget_info(|| {
+            let mut info =
+                egui::WidgetInfo::text_edit(&self.state.objective, &self.state.objective);
+            info.label = Some("New task objective".into());
+            info
+        });
         if self.state.focus == FocusArea::Tasks && self.state.focus_pending {
             objective.request_focus();
             self.state.focus_pending = false;
@@ -1579,7 +1635,7 @@ impl DesktopEditor {
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.label(RichText::new(&objective).size(13.0).strong());
-                    ui.label(RichText::new(state).size(11.0).color(if selected {
+                    ui.label(RichText::new(&state).size(11.0).color(if selected {
                         accent()
                     } else {
                         muted_text()
@@ -1587,6 +1643,13 @@ impl DesktopEditor {
                 })
                 .response
                 .interact(egui::Sense::click());
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::SelectableLabel,
+                    selected,
+                    format!("Task: {objective}. Status: {state}"),
+                )
+            });
             if response.clicked() {
                 self.state.notice = self.state.switch_task(&id).err().map(|e| e.to_string());
             }
@@ -1638,7 +1701,7 @@ fn selected_fill() -> Color32 {
     Color32::from_rgb(21, 38, 55)
 }
 fn border() -> Color32 {
-    Color32::from_rgb(38, 49, 63)
+    Color32::from_rgb(91, 105, 122)
 }
 fn muted_text() -> Color32 {
     Color32::from_rgb(146, 158, 174)
@@ -1655,6 +1718,7 @@ fn failure() -> Color32 {
 
 fn configure_visuals(context: &egui::Context) {
     let mut style = (*context.style()).clone();
+    style.animation_time = 0.0;
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
     style.spacing.interact_size.y = 30.0;
@@ -1666,6 +1730,9 @@ fn configure_visuals(context: &egui::Context) {
     style.visuals.widgets.inactive.bg_fill = raised_fill();
     style.visuals.widgets.inactive.weak_bg_fill = raised_fill();
     style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, border());
+    style.visuals.widgets.inactive.fg_stroke =
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(228, 233, 240));
+    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, muted_text());
     style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(29, 42, 56);
     style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(29, 42, 56);
     style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent());
@@ -2230,6 +2297,7 @@ impl EditorState {
             }
             TaskSessionCommand::FocusGame => {
                 self.focus = FocusArea::Game;
+                self.focus_pending = true;
                 Ok(())
             }
             TaskSessionCommand::SendReply => {
@@ -2452,14 +2520,14 @@ impl DesktopEditor {
                 ui.horizontal(|ui| {
                     let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                     ui.painter().circle_filled(dot.center(), 3.0, status_color(task));
-                    ui.label(RichText::new(&task.objective).size(20.0).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        status_chip(
-                            ui,
-                            task_header_status(task).0,
-                            status_color(task),
-                        );
-                    });
+                    let title_width = (ui.available_width() - 112.0).max(80.0);
+                    ui.add_sized(
+                        [title_width, 30.0],
+                        egui::Label::new(RichText::new(&task.objective).size(20.0).strong())
+                            .truncate(true),
+                    )
+                    .on_hover_text(&task.objective);
+                    status_chip(ui, task_header_status(task).0, status_color(task));
                 });
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
@@ -2477,53 +2545,70 @@ impl DesktopEditor {
                     let provider_mutable = task.lifecycle == TaskLifecycle::Active
                         && !self.ui_busy(task);
                     ui.add_enabled_ui(provider_mutable, |ui| {
-                        ui.menu_button(format!("Provider: {provider_label} / {model}  v"), |ui| {
-                        ui.label(RichText::new("Provider").strong());
-                        if ui
-                            .selectable_label(
-                                provider == "installed_codex_subscription",
-                                "Codex subscription",
+                        let provider_menu = ui.menu_button(
+                            format!("Provider: {provider_label} / {model}  v"),
+                            |ui| {
+                                ui.label(RichText::new("Provider").strong());
+                                if ui
+                                    .selectable_label(
+                                        provider == "installed_codex_subscription",
+                                        "Codex subscription",
+                                    )
+                                    .clicked()
+                                {
+                                    provider_choice =
+                                        Some((ProviderSelection::Codex, ProviderConfig::Codex));
+                                    ui.close_menu();
+                                }
+                                let available = openrouter.is_some();
+                                let response = ui.add_enabled(
+                                    available,
+                                    egui::SelectableLabel::new(
+                                        provider != "installed_codex_subscription",
+                                        "OpenRouter",
+                                    ),
+                                );
+                                let clicked = response.clicked();
+                                if !available {
+                                    response.on_hover_text(
+                                        "OpenRouter is not configured for this process.",
+                                    );
+                                }
+                                if clicked {
+                                    provider_choice = openrouter.clone().map(|config| {
+                                        (
+                                            ProviderSelection::OpenRouter,
+                                            ProviderConfig::OpenRouter(config),
+                                        )
+                                    });
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Route: {:?}",
+                                        task.provider.routing
+                                    ))
+                                    .small()
+                                    .color(muted_text()),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Fallback: {:?}",
+                                        task.provider.fallback
+                                    ))
+                                    .small()
+                                    .color(muted_text()),
+                                );
+                        });
+                        provider_menu.response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::ComboBox,
+                                format!(
+                                    "Provider and model. Current selection: {provider_label}, {model}"
+                                ),
                             )
-                            .clicked()
-                        {
-                            provider_choice =
-                                Some((ProviderSelection::Codex, ProviderConfig::Codex));
-                            ui.close_menu();
-                        }
-                        let available = openrouter.is_some();
-                        let response = ui.add_enabled(
-                            available,
-                            egui::SelectableLabel::new(
-                                provider != "installed_codex_subscription",
-                                "OpenRouter",
-                            ),
-                        );
-                        let clicked = response.clicked();
-                        if !available {
-                            response
-                                .on_hover_text("OpenRouter is not configured for this process.");
-                        }
-                        if clicked {
-                            provider_choice = openrouter.clone().map(|config| {
-                                (
-                                    ProviderSelection::OpenRouter,
-                                    ProviderConfig::OpenRouter(config),
-                                )
-                            });
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        ui.label(
-                            RichText::new(format!("Route: {:?}", task.provider.routing))
-                                .small()
-                                .color(muted_text()),
-                        );
-                        ui.label(
-                            RichText::new(format!("Fallback: {:?}", task.provider.fallback))
-                                .small()
-                                .color(muted_text()),
-                        );
-                    });
+                        });
                     });
                     ui.separator();
                     let (retained, budget) = self.controller.thread_context_usage(task);
@@ -2618,10 +2703,13 @@ impl DesktopEditor {
             }
         }
         let mut command = None;
+        let follow_latest = true;
+        #[cfg(test)]
+        let follow_latest = follow_latest && !semantic_diff::evidence_expanded(ui.ctx());
         egui::ScrollArea::vertical()
             .id_source(("task-timeline", task.id.as_str()))
             .auto_shrink([false, false])
-            .stick_to_bottom(true)
+            .stick_to_bottom(follow_latest)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if activity.is_empty() {
@@ -3110,7 +3198,24 @@ impl DesktopEditor {
 
     fn composer(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
         egui::Frame::none().fill(panel_fill()).stroke(egui::Stroke::new(1.0_f32, border())).rounding(9.0).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
-            let reply = ui.add_sized([ui.available_width(), 58.0], egui::TextEdit::multiline(&mut self.state.reply).hint_text("Reply to Stasis AI..."));
+            let reply = ui.add_sized(
+                [ui.available_width(), 58.0],
+                egui::TextEdit::multiline(&mut self.state.reply)
+                    .id_source(("task-reply-input", task.id.as_str()))
+                    .hint_text("Reply to Stasis AI..."),
+            );
+            reply.widget_info(|| {
+                let mut info = egui::WidgetInfo::text_edit(&self.state.reply, &self.state.reply);
+                info.label = Some(format!("Reply to Stasis AI about {}", task.objective));
+                info
+            });
+            let _ = reply.ctx.accesskit_node_builder(reply.id, |node| {
+                node.set_role(egui::accesskit::Role::MultilineTextInput);
+                node.set_name(format!("Reply to Stasis AI about {}", task.objective));
+            });
+            reply
+                .clone()
+                .on_hover_text("Reply to this task. Ctrl+Enter sends your reply.");
             if self.state.focus == FocusArea::Reply && self.state.focus_pending {
                 reply.request_focus();
                 self.state.focus_pending = false;
@@ -3118,6 +3223,7 @@ impl DesktopEditor {
             if reply.has_focus() {
                 self.state.focus = FocusArea::Reply;
             }
+            let show_shortcut_hint = ui.available_width() >= 620.0;
             ui.horizontal_wrapped(|ui| {
                 let busy = self.ui_busy(task);
                 let interactive = task.lifecycle == TaskLifecycle::Active
@@ -3129,7 +3235,13 @@ impl DesktopEditor {
                 if ui.add_enabled(false, egui::Button::new("Generate image")).on_disabled_hover_text("Image generation is unavailable in the desktop editor.").clicked() {
                     self.state.dispatch(TaskSessionCommand::GenerateImage);
                 }
-                ui.label(RichText::new("Ctrl+Enter sends").size(10.0).color(muted_text()));
+                if show_shortcut_hint {
+                    ui.label(
+                        RichText::new("Ctrl+Enter sends")
+                            .size(10.0)
+                            .color(muted_text()),
+                    );
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut primary = self.state.primary_action(busy);
                     if !self.state.review_command_enabled(&primary.command) {
@@ -3228,8 +3340,19 @@ impl DesktopEditor {
             .show(context, |ui| {
                 let query_id = ui.make_persistent_id("palette-query");
                 ui.memory_mut(|memory| memory.request_focus(query_id));
-                let response =
-                    ui.add(egui::TextEdit::singleline(&mut self.state.palette_query).id(query_id));
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.state.palette_query)
+                        .id(query_id)
+                        .hint_text("Search commands"),
+                );
+                response.widget_info(|| {
+                    let mut info = egui::WidgetInfo::text_edit(
+                        &self.state.palette_query,
+                        &self.state.palette_query,
+                    );
+                    info.label = Some("Search commands".into());
+                    info
+                });
                 if response.changed() {
                     self.state.palette_selected = 0;
                 }
@@ -3296,18 +3419,42 @@ impl DesktopEditor {
     fn compact_rail(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(project_name(&self.project_root)).strong());
+            let input_width =
+                (ui.available_width() - 72.0 - ui.spacing().item_spacing.x).clamp(100.0, 250.0);
             let input = ui.add_sized(
-                [ui.available_width().min(250.0), 30.0],
+                [input_width, 30.0],
                 egui::TextEdit::singleline(&mut self.state.objective)
+                    .id_source("task-objective-input")
                     .hint_text("New task objective"),
             );
+            input.widget_info(|| {
+                let mut info =
+                    egui::WidgetInfo::text_edit(&self.state.objective, &self.state.objective);
+                info.label = Some("New task objective".into());
+                info
+            });
+            if self.state.focus == FocusArea::Tasks && self.state.focus_pending {
+                input.request_focus();
+                self.state.focus_pending = false;
+            }
+            if input.has_focus() {
+                self.state.focus = FocusArea::Tasks;
+            }
             let submitted =
                 input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.button("+ Task").clicked() || submitted {
+            if ui
+                .add_sized([64.0, 30.0], egui::Button::new("+ Task"))
+                .clicked()
+                || submitted
+            {
                 self.state.notice = self.state.create_task().err();
             }
         });
         let active = self.state.session.active_task_id().map(ToString::to_string);
+        let active_memory_id = ui.make_persistent_id("compact-task-rail-active");
+        let active_changed = ui.data(|data| data.get_temp::<Option<String>>(active_memory_id))
+            != Some(active.clone());
+        ui.data_mut(|data| data.insert_temp(active_memory_id, active.clone()));
         let cards = self
             .state
             .session
@@ -3319,10 +3466,19 @@ impl DesktopEditor {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for (id, objective) in cards {
-                        if ui
-                            .selectable_label(active.as_deref() == Some(&id), objective)
-                            .clicked()
-                        {
+                        let selected = active.as_deref() == Some(&id);
+                        let response = ui.selectable_label(selected, &objective);
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::SelectableLabel,
+                                selected,
+                                format!("Task: {objective}"),
+                            )
+                        });
+                        if selected && active_changed {
+                            response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if response.clicked() {
                             self.state.notice = self.state.switch_task(&id).err();
                         }
                     }
@@ -3342,6 +3498,17 @@ impl DesktopEditor {
         self.poll_capture();
         self.poll_semantic_previews();
         self.process_shortcuts(context);
+        if let Some(windows) = self.windows.as_mut() {
+            if self.state.focus == FocusArea::Game && self.state.focus_pending {
+                self.state.focus_pending = false;
+                if let Err(error) = windows.focus_game() {
+                    self.state.notice = Some(error);
+                }
+            }
+            if let Err(error) = windows.update(context) {
+                self.state.notice = Some(error);
+            }
+        }
         let palette_frame = self.state.palette_open;
         self.palette(context);
         if palette_frame {
@@ -3354,17 +3521,30 @@ impl DesktopEditor {
                     .inner_margin(egui::Margin::symmetric(12.0, 7.0)),
             )
             .show(context, |ui| {
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
                     ui.label(RichText::new("Stasis AI Editor").size(13.0).strong());
-                    ui.label(
-                        RichText::new("Ctrl+K commands  |  Ctrl+N new task")
-                            .size(11.0)
-                            .color(muted_text()),
-                    );
-                    if let Some(notice) = &self.state.notice {
-                        ui.colored_label(warning(), notice);
+                    if ui
+                        .button("Tile Editor + Game")
+                        .on_hover_text(
+                            "Restore and arrange the editor on the left and game on the right",
+                        )
+                        .clicked()
+                    {
+                        if let Some(windows) = self.windows.as_mut() {
+                            windows.tile();
+                        }
+                    }
+                    if ui.available_width() >= 250.0 {
+                        ui.label(
+                            RichText::new("Ctrl+K commands  |  Ctrl+N new task")
+                                .size(11.0)
+                                .color(muted_text()),
+                        );
                     }
                 });
+                if let Some(notice) = &self.state.notice {
+                    ui.colored_label(warning(), notice);
+                }
             });
         let width = context.screen_rect().width();
         match EditorLayout::for_width(width) {
@@ -3469,7 +3649,12 @@ pub(super) fn run(
     let result = eframe::run_native(
         "Stasis Editor",
         options,
-        Box::new(move |_context| Box::new(DesktopEditor::new(client, project_root, shutdown))),
+        Box::new(move |_context| {
+            let windows = window_layout::WindowLayout::new(client.clone(), &project_root);
+            let mut editor = DesktopEditor::new(client, project_root, shutdown);
+            editor.windows = Some(windows);
+            Box::new(editor)
+        }),
     );
     let _ = quit_client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
     result.map_err(|error| format!("desktop editor failed: {error}"))
@@ -3480,6 +3665,11 @@ mod interaction_tests;
 
 #[cfg(test)]
 mod native_evidence;
+#[cfg(test)]
+mod review_evidence;
+
+#[cfg(test)]
+mod live_acceptance;
 
 #[cfg(test)]
 mod tests {
@@ -4589,6 +4779,27 @@ mod tests {
             .unwrap()
             .contains("no AI request"));
         assert!(server.drain(4).is_empty());
+    }
+
+    #[test]
+    fn provider_usage_includes_every_turn() {
+        let mut total = ProviderUsage::default();
+        accumulate_provider_usage(
+            &mut total,
+            &json!({"tokens":{"prompt":12,"completion":7},"cost":0.00125}),
+        );
+        accumulate_provider_usage(
+            &mut total,
+            &json!({"tokens":{"prompt":20,"completion":5},"cost":0.002}),
+        );
+        assert_eq!(
+            total,
+            ProviderUsage {
+                input_tokens: 32,
+                output_tokens: 12,
+                estimated_cost_micros: 3250
+            }
+        );
     }
 
     #[test]
