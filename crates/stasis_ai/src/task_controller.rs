@@ -997,6 +997,9 @@ impl TaskController {
                                 &record.request.screenshots,
                                 ScreenshotOutcome::Failed(message),
                             );
+                            let _ = task.append_host_result(format!(
+                                "AI reply discarded before task admission. Reason: {message}. No AI text or proposals were saved."
+                            ));
                         }
                         record.snapshot.state = TaskRequestState::Failed;
                         record.snapshot.error = Some(message.to_string());
@@ -2001,11 +2004,26 @@ mod tests {
             Ok(reply)
         });
         let mut session = session(&["one"]);
-        let before = session.task("one").unwrap().clone();
         controller.send(&mut session, &TaskId::new("one")).unwrap();
         let events = wait_for(&controller, &mut session);
-        assert!(matches!(&events[0], TaskControllerEvent::Failed { .. }));
-        assert_eq!(session.task("one").unwrap(), &before);
+        assert!(matches!(
+            &events[0],
+            TaskControllerEvent::Failed { message, .. }
+                if message == "AI routing metadata did not fit the task contract"
+        ));
+        let task = session.task("one").unwrap();
+        assert_eq!(task.metrics.estimated_cost_micros, 0);
+        assert!(task.actions.is_empty());
+        assert!(!task
+            .thread
+            .iter()
+            .any(|entry| entry.text.contains("must not be published")));
+        let diagnostic = task.thread.last().expect("discard diagnostic");
+        assert_eq!(diagnostic.kind, crate::ThreadEntryKind::HostResult);
+        assert!(diagnostic.text.contains("discarded before task admission"));
+        assert!(diagnostic
+            .text
+            .contains("routing metadata did not fit the task contract"));
     }
 
     #[test]

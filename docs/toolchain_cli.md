@@ -485,7 +485,9 @@ HTTP 429 response up to two times before requiring a manual reconnect. Each retr
 inside the original request deadline and use the same models, preferences, and session ID; a provider delay
 is capped at two seconds to keep the editor responsive. AI prose longer than the 16,384-character
 task-message limit is retained up to that boundary with an explicit truncation marker; malformed
-proposal or routing metadata continues to fail closed with a specific safe category.
+proposal or routing metadata continues to fail closed with a specific safe category. When a
+generated reply is discarded during admission, a host-authored timeline entry records that safe
+reason and confirms that no AI text or proposals were saved; the rejected provider text is not logged.
 
 In the AI desktop editor, Ctrl+K or Ctrl+F opens the command palette. Type to
 filter commands, use Up/Down to select, Enter to invoke, and Escape to dismiss
