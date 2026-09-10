@@ -48,11 +48,11 @@
   },
   "render_command": {
     "source": "runtime/stasis_render_contract.h",
-    "accepted_versions": [7],
+    "accepted_versions": [8],
     "constants": {
       "STASIS_RENDER_MAGIC": 1196967473,
       "STASIS_RENDER_VERSION": 8,
-      "STASIS_RENDER_TRACE_VERSION": 7,
+      "STASIS_RENDER_TRACE_VERSION": 8,
       "STASIS_GRAPHICS_RUNTIME_ABI_VERSION": 3,
       "STASIS_RENDER_I32_COUNT": 67888,
       "STASIS_RENDER_F32_COUNT": 146564,
