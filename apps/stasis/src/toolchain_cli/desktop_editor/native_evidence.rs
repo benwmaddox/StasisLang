@@ -190,6 +190,21 @@ fn capture_native_task_timeline() {
     if std::env::var_os("STASIS_EDITOR_EVIDENCE_CANCEL").is_some() {
         editor.state.handle(TaskSessionCommand::Cancel).unwrap();
     }
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_COMPLETION").is_some() {
+        let task_id = editor.state.session.running_task_id().unwrap().to_string();
+        editor.completion_confirmation = Some(git_completion::evidence_plan(&task_id));
+    }
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_ROLLBACK").is_some() {
+        let completed_task = "task-1".to_string();
+        editor.completion_commits.insert(
+            completed_task.clone(),
+            TaskCompletionCommit {
+                commit: "0123456789012345678901234567890123456789".into(),
+                paths: git_completion::evidence_plan(&completed_task).paths,
+                reverted_by: None,
+            },
+        );
+    }
 
     if let Ok(phase) = std::env::var("STASIS_EDITOR_EVIDENCE_PROGRESS") {
         let (client, _server) = stasis_runner::live::live_session(16);

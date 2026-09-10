@@ -43,15 +43,33 @@ motion. Compact layouts keep task creation and the reply composer reachable.
 The desktop editor runs one task at a time. Creating another task while work is
 active stores only its objective in a durable FIFO queue; it does not contact an
 AI provider or create conversation history. Provider completion never advances
-the queue. The active task remains open until the user explicitly marks it done
-after approval and validation, or confirms cancellation.
+the queue. The active task remains open until the user explicitly completes it
+after approval and validation, or confirms cancellation. Completion first shows
+the exact task-time paths that will be saved in a Git commit. Applied
+compiler-plan paths are labeled **Stasis edit**; other paths created or changed
+after the task started, such as an image written by an external generator, are
+labeled **External edit**. The user can **Keep working (Esc)** or **Commit and
+complete (Enter)**.
+
+A task with no project changes can still be explicitly completed; the review
+states that no commit will be created.
+
+Each active task records the starting Git `HEAD` and fingerprints every path
+that was already dirty. Unchanged pre-existing dirt is excluded. A pre-existing
+path changed again during the task is ambiguous and blocks completion, as does
+a changed `HEAD`. Stasis builds the task commit with an isolated Git index so
+unrelated staged changes are not swept in. The task history records the commit
+and path provenance.
 
 After that resolution, the next queued objective is shown at a queue gate. The
-user can **Start task (Enter)**, **Move to back (B)**, or **Reject (Del)** it;
-rejection requires confirmation. Starting is the point where a fresh conversation and first
-provider request are created. Queue order and lifecycle survive editor restart,
-and legacy sessions with multiple active tasks are normalized to one active task
-plus an ordered queue.
+user can **Start task (Enter)**, **Move to back (B)**, **Reject (Del)** it, or
+**Roll back previous (R)** when the preceding task has a completion commit.
+Rejection and rollback require confirmation. Rollback uses `git revert` and is
+allowed automatically only while that task commit is still `HEAD`; it never
+resets or discards later work. Starting is the point where a fresh conversation
+and first provider request are created. Queue order, Git baselines, completion
+receipts, and lifecycle survive editor restart, and legacy sessions with
+multiple active tasks are normalized to one active task plus an ordered queue.
 
 Activity belongs to the task session, not to a rendered frame. Successful user,
 provider, attachment, semantic-action, generated-asset, host, and focused-test
