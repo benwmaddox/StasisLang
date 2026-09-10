@@ -1,3 +1,4 @@
+use crate::task_session::MAX_THREAD_TEXT_CHARS;
 use crate::{
     ActionId, ActionKind, ActionState, ConnectionState, ProviderState, ScreenshotAnalysisState,
     ScreenshotAttachment, Task, TaskId, TaskLifecycle, TaskSession, TaskSessionError, ThreadEntry,
@@ -14,6 +15,18 @@ use std::time::Instant;
 
 const SAFE_PROVIDER_ERROR: &str = "AI provider request failed";
 const SAFE_SESSION_ERROR: &str = "AI response could not be added to the task";
+const TRUNCATED_REPLY_SUFFIX: &str = "\n\n[AI reply truncated to fit task history.]";
+
+fn bounded_reply_text(text: &str) -> String {
+    if text.chars().count() <= MAX_THREAD_TEXT_CHARS {
+        return text.to_string();
+    }
+    let retained = MAX_THREAD_TEXT_CHARS.saturating_sub(TRUNCATED_REPLY_SUFFIX.chars().count());
+    let mut bounded = text.chars().take(retained).collect::<String>();
+    bounded.push_str(TRUNCATED_REPLY_SUFFIX);
+    bounded
+}
+
 fn safe_session_error(error: &TaskSessionError) -> &'static str {
     match error {
         TaskSessionError::EmptyField {
@@ -34,6 +47,26 @@ fn safe_session_error(error: &TaskSessionError) -> &'static str {
         }
         TaskSessionError::ActionNotFound(_) | TaskSessionError::InvalidTransition { .. } => {
             "AI proposal no longer matched the task action state"
+        }
+        TaskSessionError::FieldTooLong {
+            field: "thread history",
+            ..
+        } => "Task history is full; reject this task and start a new one",
+        TaskSessionError::FieldTooLong {
+            field: "actions", ..
+        } => "AI response contained too many proposals for this task",
+        TaskSessionError::EmptyField { field } | TaskSessionError::FieldTooLong { field, .. }
+            if matches!(
+                *field,
+                "provider"
+                    | "model"
+                    | "route"
+                    | "fallback provider"
+                    | "fallback model"
+                    | "fallback route"
+            ) =>
+        {
+            "AI routing metadata did not fit the task contract"
         }
         _ => SAFE_SESSION_ERROR,
     }
@@ -902,7 +935,7 @@ impl TaskController {
                     .task(&completion.task_id)
                     .cloned()
                     .and_then(|mut task| {
-                        task.append_result(&reply.text)?;
+                        task.append_result(bounded_reply_text(&reply.text))?;
                         task.set_provider_state(reply.provider.clone())?;
                         task.record_turn(
                             completion.elapsed_ms,
@@ -1990,6 +2023,28 @@ mod tests {
                 "duplicate"
             ))),
             "AI response repeated a proposal ID"
+        );
+        assert_eq!(
+            safe_session_error(&TaskSessionError::FieldTooLong {
+                field: "route",
+                max: 96,
+                actual: 97,
+            }),
+            "AI routing metadata did not fit the task contract"
+        );
+    }
+
+    #[test]
+    fn oversized_ai_reply_is_truncated_before_task_admission() {
+        let reply = format!("{}tail", "x".repeat(MAX_THREAD_TEXT_CHARS));
+        let bounded = bounded_reply_text(&reply);
+        assert_eq!(bounded.chars().count(), MAX_THREAD_TEXT_CHARS);
+        assert!(bounded.ends_with(TRUNCATED_REPLY_SUFFIX));
+
+        let unicode = "\u{e9}".repeat(MAX_THREAD_TEXT_CHARS + 1);
+        assert_eq!(
+            bounded_reply_text(&unicode).chars().count(),
+            MAX_THREAD_TEXT_CHARS
         );
     }
 

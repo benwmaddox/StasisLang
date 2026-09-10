@@ -483,7 +483,9 @@ request without duplicating its message during the current editor session. Reope
 editor never automatically replays an unfinished request. OpenRouter chat calls retry an
 HTTP 429 response up to two times before requiring a manual reconnect. Each retry remains
 inside the original request deadline and use the same models, preferences, and session ID; a provider delay
-is capped at two seconds to keep the editor responsive.
+is capped at two seconds to keep the editor responsive. AI prose longer than the 16,384-character
+task-message limit is retained up to that boundary with an explicit truncation marker; malformed
+proposal or routing metadata continues to fail closed with a specific safe category.
 
 In the AI desktop editor, Ctrl+K or Ctrl+F opens the command palette. Type to
 filter commands, use Up/Down to select, Enter to invoke, and Escape to dismiss
@@ -493,7 +495,10 @@ underlying task fields and global shortcuts, including Ctrl+Enter and Escape.
 
 The palette exposes new task, next/previous task and individual task switching,
 focus reply/game, send reply, accept/reject/apply action, focused tests, retry,
-attach screenshot, generate/import image, reconnect, cancel, and mark done.
+attach screenshot, generate/import image, reconnect, active-task rejection, and mark done.
+Every active task also exposes `Reject... (Ctrl+Esc)`, including after a provider failure.
+The confirmation uses Enter to reject or Escape to keep the task. Rejecting permanently closes
+that conversation and advances to the queued-task gate when another task is waiting.
 It also exposes **Export chat as HTML**, which writes a user-selected, self-contained
 snapshot of the active task without contacting the configured AI provider.
 Set `ai.editor.auto_persist_html_transcripts` to `true` in `stasis.json` to

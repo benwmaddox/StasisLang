@@ -3256,7 +3256,7 @@ impl EditorState {
         }
         if busy {
             return PrimaryAction {
-                label: "Cancel task",
+                label: "Reject task (Ctrl+Esc)",
                 command: TaskSessionCommand::Cancel,
                 enabled: true,
                 disabled_reason: None,
@@ -4737,7 +4737,17 @@ impl DesktopEditor {
                     let clicked = response.clicked();
                     if let Some(reason) = primary.disabled_reason { response.on_hover_text(reason); }
                     let is_test = primary.command == TaskSessionCommand::RunFocusedTests;
+                    let is_reject = primary.command == TaskSessionCommand::Cancel;
                     if clicked { self.state.dispatch(primary.command); }
+                    if task.lifecycle == TaskLifecycle::Active
+                        && !is_reject
+                        && ui
+                            .button("Reject... (Ctrl+Esc)")
+                            .on_hover_text("Permanently close this task after confirmation")
+                            .clicked()
+                    {
+                        self.state.dispatch(TaskSessionCommand::Cancel);
+                    }
                     if task.lifecycle == TaskLifecycle::Active && task.validation.is_passing() && !is_test {
                         if ui.add_enabled(interactive, egui::Button::new("Run focused tests")).on_hover_text(if interactive { "Validate the current project sources" } else { "Tests are unavailable while disconnected or busy." }).clicked() { self.state.dispatch(TaskSessionCommand::RunFocusedTests); }
                     }
@@ -4771,7 +4781,7 @@ impl DesktopEditor {
             ),
             ("Generate image", TaskSessionCommand::GenerateImage),
             ("Reconnect", TaskSessionCommand::Reconnect),
-            ("Cancel task", TaskSessionCommand::Cancel),
+            ("Reject active task", TaskSessionCommand::Cancel),
             ("Mark done", TaskSessionCommand::MarkDone),
             ("Focus game", TaskSessionCommand::FocusGame),
             ("Export chat as HTML", TaskSessionCommand::ExportChat),
@@ -5138,29 +5148,33 @@ impl DesktopEditor {
         let Some(task_id) = self.state.cancel_confirmation.clone() else {
             return;
         };
+        let confirm =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let keep =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         let queued = self
             .state
             .session
             .task(task_id.as_str())
             .is_ok_and(|task| task.lifecycle == TaskLifecycle::Queued);
-        egui::Window::new(if queued { "Reject queued task?" } else { "Cancel task?" })
+        egui::Window::new(if queued { "Reject queued task?" } else { "Reject active task?" })
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(context, |ui| {
                 let objective = self.state.session.task(task_id.as_str())
                     .map(|task| task.objective.as_str()).unwrap_or(&task_id);
-                ui.label(format!("{} {objective}?", if queued { "Reject" } else { "Cancel" }));
+                ui.label(format!("Reject {objective}?"));
                 ui.label(if queued {
                     "This removes it from the queue. No AI conversation will be started."
                 } else {
-                    "This stops its work and permanently closes the task. You cannot continue it afterward."
+                    "This stops its work and permanently closes the task. Applied source changes stay in the project; you cannot continue the conversation afterward."
                 });
                 ui.horizontal(|ui| {
-                    if ui.button(if queued { "Keep queued" } else { "Keep task open" }).clicked() {
+                    if ui.button(if queued { "Keep queued (Esc)" } else { "Keep task (Esc)" }).clicked() || keep {
                         self.state.cancel_confirmation = None;
                     }
-                    if ui.button(if queued { "Reject task" } else { "Permanently cancel task" }).clicked() {
+                    if ui.button("Reject task (Enter)").clicked() || confirm {
                         self.state.intents.push(EditorIntent::Cancel(task_id.clone()));
                         self.state.cancel_confirmation = None;
                     }
@@ -6008,6 +6022,7 @@ mod tests {
             state.primary_action(true).command,
             TaskSessionCommand::Cancel
         );
+        assert_eq!(state.primary_action(true).label, "Reject task (Ctrl+Esc)");
     }
 
     #[test]
@@ -6140,6 +6155,9 @@ mod tests {
     fn reconnect_and_cancel_commands_target_the_active_task() {
         let mut state = task_state();
         state.session.disconnect().unwrap();
+        state.handle(TaskSessionCommand::Cancel).unwrap();
+        assert_eq!(state.cancel_confirmation.as_deref(), Some("task-1"));
+        state.cancel_confirmation = None;
         state.handle(TaskSessionCommand::Reconnect).unwrap();
         assert!(matches!(
             state.intents.last(),

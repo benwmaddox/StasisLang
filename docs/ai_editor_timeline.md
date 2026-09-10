@@ -173,10 +173,13 @@ distinction; the same rule applies to generated-asset review and future cards.
 
 ## Review corrections
 
-The busy primary action says `Cancel task` and opens a confirmation identifying
-its original task. `Keep task open` dismisses it without stopping work;
-`Permanently cancel task` uses the existing task cancellation path. Task switching
-does not redirect a pending confirmation.
+Every active task exposes `Reject... (Ctrl+Esc)`, including failed or disconnected tasks.
+While work is busy, rejection becomes the primary action. The confirmation identifies its
+original task; `Keep task (Esc)` dismisses it without stopping work and `Reject task (Enter)`
+uses the existing permanent cancellation path. Task switching does not redirect a pending
+confirmation. A successful rejection advances to the next queued-task gate, or leaves the
+editor ready for a new objective when the queue is empty. Rejection does not silently roll back
+source changes that the user already accepted and applied.
 
 Image generation and import are explicitly unavailable in this desktop shell.
 Their buttons are disabled with explanatory tooltips, and command-palette intents
