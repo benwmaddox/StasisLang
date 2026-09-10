@@ -14,7 +14,7 @@ const ADDED_BACKGROUND: Color32 = Color32::from_rgb(22, 48, 33);
 const REMOVED_BACKGROUND: Color32 = Color32::from_rgb(45, 26, 30);
 const HUNK_TEXT: Color32 = Color32::from_rgb(135, 180, 230);
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 pub(super) fn expand_for_evidence(context: &egui::Context) {
     context.data_mut(|data| data.insert_temp(egui::Id::new("expand-semantic-evidence"), true));
 }
@@ -26,7 +26,7 @@ pub(super) fn evidence_expanded(context: &egui::Context) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 pub(super) fn clear_evidence(context: &egui::Context) {
     context.data_mut(|data| data.remove::<bool>(egui::Id::new("expand-semantic-evidence")));
 }

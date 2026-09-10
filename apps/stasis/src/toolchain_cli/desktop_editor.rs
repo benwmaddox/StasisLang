@@ -405,7 +405,7 @@ fn run_reply_provider(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 fn run_reply_provider_observed(
     request: ProviderRequest,
     canceled: Arc<AtomicBool>,
