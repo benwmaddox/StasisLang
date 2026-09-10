@@ -50,6 +50,21 @@ pub fn lex_with_diagnostic(source: &str) -> Result<Vec<Token>, LexerDiagnostic> 
             }
             continue;
         }
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let start = i;
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            if i + 1 >= bytes.len() {
+                return Err(LexerDiagnostic {
+                    message: "unterminated block comment".to_string(),
+                    offset: start,
+                });
+            }
+            i += 2;
+            continue;
+        }
         if b == b'"' || b == b'`' {
             let start = i;
             i += 1;
@@ -158,14 +173,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn block_comments_are_skipped_before_quotes_and_keywords() {
+        for comment in [
+            "/* invokes `update */",
+            "/* \" global const struct enum function test import { //\n actual */",
+            "/**/",
+            "/* outer /* non-nesting */",
+        ] {
+            let source = format!("{comment}function actual(): i32 {{ return 1; }}");
+            let tokens = lex(&source).expect("comment must be opaque");
+            assert_eq!(tokens[0].kind, TokenKind::FunctionKw);
+            assert_eq!(tokens[0].start, comment.len());
+            assert_eq!(
+                tokens
+                    .iter()
+                    .filter(|token| token.kind == TokenKind::FunctionKw)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn unterminated_block_comments_report_the_opening_offset() {
+        for source in ["  /*", "  /**", "  /* ` \" function"] {
+            assert_eq!(
+                lex_with_diagnostic(source).unwrap_err(),
+                LexerDiagnostic {
+                    message: "unterminated block comment".to_string(),
+                    offset: 2,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn quoted_regions_are_opaque_and_preserve_byte_ranges() {
         for (source, kind) in [
             (
-                r#""global const struct enum function test import from as \" ` { } //""#,
+                r#""global const struct enum function test import from as \" ` { } // /*""#,
                 TokenKind::StringLiteral,
             ),
             (
-                r#"`global const struct enum function test import from as " \ { } // text`"#,
+                r#"`global const struct enum function test import from as " \ { } // /* text`"#,
                 TokenKind::BacktickLiteral,
             ),
         ] {

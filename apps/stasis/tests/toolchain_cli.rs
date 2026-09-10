@@ -1710,6 +1710,9 @@ fn semantic_symbol_queries_ignore_quoted_keywords() {
         .status
         .success());
     let source = r#"
+/* invokes `update */
+/* " global const struct enum function test import { //
+ actual */
 const words: string = "global const struct enum function test import from as { } ` actual";
 struct Real { value: i32; }
 enum Choice { One, Two }
@@ -1771,6 +1774,7 @@ test `const struct enum function test import from as " // { } actual`(): bool { 
     );
     assert_eq!(json_stdout(&executed)["result"]["tests_passed"], 2);
     for (invalid, message) in [
+        ("/* invokes `update", "unterminated block comment"),
         (
             "test `global const function",
             "unterminated test name (missing closing backtick)",

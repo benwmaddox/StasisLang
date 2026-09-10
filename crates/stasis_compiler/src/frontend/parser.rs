@@ -1858,6 +1858,9 @@ mod tests {
     #[test]
     fn quoted_keywords_do_not_declare_symbols() {
         let source = r#"
+/* invokes `update */
+/* " global const struct enum function test import { //
+ actual */
 const words: string = "global const struct enum function test import from as { } `";
 test `checkers mandatory capture is global and removes one piece`(): bool { return true; }
 test `const struct enum function test import from as " // { }`(): bool { return true; }
