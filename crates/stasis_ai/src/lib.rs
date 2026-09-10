@@ -10,18 +10,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod openrouter;
+pub mod session_store;
 pub mod task_controller;
 pub mod task_session;
 
 pub use openrouter::{
-    ConfiguredProvider, OpenRouterConfig, OpenRouterProvider, PreferredThroughputPolicy,
-    ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+    ConfiguredProvider, ImageInputCapability, OpenRouterConfig, OpenRouterImageInput,
+    OpenRouterProvider, PreferredThroughputPolicy, ProviderConfig, ProviderKind, RoutingConfig,
+    RoutingSort, MAX_OPENROUTER_IMAGES, MAX_OPENROUTER_IMAGE_BYTES,
+};
+
+pub use session_store::{
+    ExecutionReceipt, LoadOutcome, RecoveryDiagnostic, SessionSnapshot, SessionStore, StoreError,
+    WindowPreferences,
 };
 
 pub use task_controller::{
-    ProviderActionContext, ProviderActionProposal, ProviderReply, ProviderRequest, ProviderUsage,
-    RequestId, TaskController, TaskControllerConfig, TaskControllerError, TaskControllerEvent,
-    TaskRequestSnapshot, TaskRequestState,
+    ProgressEvent, ProgressReporter, ProgressStage, ProviderActionContext, ProviderActionProposal,
+    ProviderReply, ProviderRequest, ProviderUsage, RequestId, TaskController, TaskControllerConfig,
+    TaskControllerError, TaskControllerEvent, TaskRequestSnapshot, TaskRequestState,
 };
 
 pub use task_session::{
@@ -172,6 +179,7 @@ pub enum AgentEvent {
         current: usize,
         maximum: usize,
     },
+    ProviderProgress(ProviderProgress),
     ProviderUsage(Value),
     WorkingNotes(String),
     ToolBatch(Vec<ToolCall>),
@@ -182,6 +190,15 @@ pub enum AgentEvent {
         after_bytes: usize,
     },
     Completed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProviderProgress {
+    ContactingProvider,
+    FirstResponse { elapsed_ms: u64 },
+    FirstAction { elapsed_ms: u64 },
+    Fallback,
 }
 
 #[derive(Serialize)]
@@ -198,6 +215,21 @@ struct ModelRequestHeader<'a> {
 
 pub trait ModelProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String>;
+
+    fn respond_with_progress(
+        &mut self,
+        request: &str,
+        canceled: &AtomicBool,
+        progress: &mut dyn FnMut(ProviderProgress),
+    ) -> Result<ModelResponse, String> {
+        let started = std::time::Instant::now();
+        progress(ProviderProgress::ContactingProvider);
+        let response = self.respond(request, canceled)?;
+        progress(ProviderProgress::FirstResponse {
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
+        Ok(response)
+    }
 
     fn take_usage(&mut self) -> Option<Value> {
         None
@@ -336,7 +368,9 @@ where
             maximum: profile.max_turns,
         });
         let request = transcript.render()?;
-        let response = provider.respond(&request, canceled);
+        let response = provider.respond_with_progress(&request, canceled, &mut |progress| {
+            emit(AgentEvent::ProviderProgress(progress));
+        });
         if let Some(usage) = provider.take_usage() {
             emit(AgentEvent::ProviderUsage(usage));
         }
@@ -2058,6 +2092,31 @@ mod tests {
         ) -> Result<ModelResponse, String> {
             Ok(self.0.remove(0))
         }
+    }
+
+    #[test]
+    fn default_provider_progress_reports_only_observable_boundaries() {
+        let mut provider = Responses(vec![ModelResponse::Done {
+            working_notes: "done".to_string(),
+            summary: "done".to_string(),
+        }]);
+        let mut progress = Vec::new();
+        provider
+            .respond_with_progress("request", &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
+            .expect("response");
+
+        assert!(matches!(
+            progress.as_slice(),
+            [
+                ProviderProgress::ContactingProvider,
+                ProviderProgress::FirstResponse { .. }
+            ]
+        ));
+        assert!(!progress
+            .iter()
+            .any(|event| matches!(event, ProviderProgress::FirstAction { .. })));
     }
 
     #[derive(Default)]

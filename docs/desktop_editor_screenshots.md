@@ -5,14 +5,12 @@ game window, including its current rendered state while gameplay is paused.
 It waits for verified PNG completion and shows a preview. Capture does not
 send an AI request; the next task reply includes that task's attached images.
 
-The selected transport and model must explicitly support image input. The
-supported pairings are the installed Codex transport with `gpt-5.6-sol` and
-OpenRouter with an explicitly recognized vision model (`google/gemini-2.5-flash`,
-`google/gemini-2.5-flash-lite`, `google/gemini-2.5-pro`, or
-`openai/gpt-5.6-luna`). Unknown aliases and text-only models fail closed.
-OpenRouter sends verified local images as multimodal `image_url` data content.
-Capability is checked again when sending, so an attachment cannot silently
-become a text-only request.
+The selected transport and model must explicitly support image input. Codex
+uses the installed transport with `gpt-5.6-sol`. OpenRouter checks the selected
+model's image modality using provider metadata and fails closed when the model
+is absent or does not advertise image input. It sends immutable, hash-verified
+image snapshots as multimodal `image_url` data content. Capability is checked
+again when sending, so an attachment cannot silently become a text-only request.
 
 Each attachment retains its originating task, source, content SHA-256, upload
 state, and analysis state. The preview also shows the runtime identity and

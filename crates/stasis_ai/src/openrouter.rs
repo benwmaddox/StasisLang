@@ -1,15 +1,99 @@
 use crate::{
     decode_model_response, model_response_schema_for_request, ModelProvider, ModelResponse,
 };
-use reqwest::Client;
+use base64::Engine as _;
+use reqwest::{header::RETRY_AFTER, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::Read;
+use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-oss-120b";
 const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
+pub const MAX_OPENROUTER_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_OPENROUTER_IMAGES: usize = crate::task_session::MAX_SCREENSHOTS_PER_REQUEST;
+const MAX_OPENROUTER_RATE_LIMIT_RETRIES: u32 = 2;
+const DEFAULT_OPENROUTER_RETRY_DELAY: Duration = Duration::from_millis(250);
+const MAX_OPENROUTER_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenRouterImageInput {
+    mime_type: &'static str,
+    bytes: Arc<[u8]>,
+    sha256: String,
+}
+
+impl OpenRouterImageInput {
+    pub fn new(mime_type: &str, bytes: Vec<u8>, expected_sha256: &str) -> Result<Self, String> {
+        if bytes.is_empty() || bytes.len() > MAX_OPENROUTER_IMAGE_BYTES {
+            return Err(format!(
+                "image must contain between 1 and {MAX_OPENROUTER_IMAGE_BYTES} bytes"
+            ));
+        }
+        let mime_type = match mime_type.trim().to_ascii_lowercase().as_str() {
+            "image/png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => "image/png",
+            "image/jpeg" if bytes.starts_with(&[0xff, 0xd8, 0xff]) => "image/jpeg",
+            "image/png" => return Err("image bytes do not contain a PNG signature".to_string()),
+            "image/jpeg" => return Err("image bytes do not contain a JPEG signature".to_string()),
+            _ => return Err("image MIME type must be image/png or image/jpeg".to_string()),
+        };
+        let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        if expected_sha256.len() != 64
+            || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !actual_sha256.eq_ignore_ascii_case(expected_sha256)
+        {
+            return Err("image bytes changed after selection (SHA-256 mismatch)".to_string());
+        }
+        Ok(Self {
+            mime_type,
+            bytes: bytes.into(),
+            sha256: actual_sha256,
+        })
+    }
+
+    pub fn mime_type(&self) -> &'static str {
+        self.mime_type
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    fn data_url(&self) -> String {
+        format!(
+            "data:{};base64,{}",
+            self.mime_type,
+            base64::engine::general_purpose::STANDARD.encode(&self.bytes)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageInputCapability {
+    pub model: String,
+    pub supported: bool,
+    pub reason: String,
+}
+
+impl ImageInputCapability {
+    fn unknown(model: &str) -> Self {
+        Self {
+            model: model.to_string(),
+            supported: false,
+            reason: "image support has not been verified for the configured model".to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,33 +161,68 @@ pub struct OpenRouterConfig {
 
 impl OpenRouterConfig {
     pub fn from_env() -> Result<Self, String> {
-        let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
+        Self::from_lookup(&|name| std::env::var(name).ok())
+    }
+
+    /// Read only this workspace's .env; process environment takes precedence.
+    pub fn from_workspace(root: &Path) -> Result<Self, String> {
+        let settings = WorkspaceSettings::read(root)?;
+        Self::from_lookup(&|name| settings.get(name, &|key| std::env::var(key).ok()))
+    }
+
+    fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let preferred_min_throughput = setting_f64(lookup, "STASIS_AI_PREFERRED_MIN_THROUGHPUT")?;
+        let hard_min_throughput = setting_f64(lookup, "STASIS_AI_HARD_MIN_THROUGHPUT")?
+            .or_else(|| preferred_min_throughput.is_none().then_some(400.0));
+        let api_key = lookup("OPENROUTER_API_KEY").ok_or_else(|| {
             "OPENROUTER_API_KEY is required when STASIS_AI_PROVIDER=openrouter".to_string()
         })?;
         let config = Self {
             api_key,
-            base_url: env_nonempty("STASIS_OPENROUTER_URL").unwrap_or_else(|| DEFAULT_OPENROUTER_URL.to_string()),
-            model: env_nonempty("STASIS_AI_MODEL").unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string()),
+            base_url: setting_nonempty(lookup, "STASIS_OPENROUTER_URL")
+                .unwrap_or_else(|| DEFAULT_OPENROUTER_URL.to_string()),
+            model: setting_nonempty(lookup, "STASIS_AI_MODEL")
+                .unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string()),
             routing: RoutingConfig {
-                only: env_list("STASIS_AI_ROUTE_ONLY"),
-                order: env_list("STASIS_AI_ROUTE_ORDER"),
-                allow_fallbacks: env_bool("STASIS_AI_ALLOW_FALLBACKS", true)?,
-                sort: match env_nonempty("STASIS_AI_ROUTE_SORT").as_deref().unwrap_or("throughput") {
+                only: setting_list(lookup, "STASIS_AI_ROUTE_ONLY"),
+                order: setting_list(lookup, "STASIS_AI_ROUTE_ORDER"),
+                allow_fallbacks: setting_bool(lookup, "STASIS_AI_ALLOW_FALLBACKS", true)?,
+                sort: match setting_nonempty(lookup, "STASIS_AI_ROUTE_SORT")
+                    .as_deref()
+                    .unwrap_or("throughput")
+                {
                     "price" => RoutingSort::Price,
                     "throughput" => RoutingSort::Throughput,
                     "latency" => RoutingSort::Latency,
-                    value => return Err(format!("STASIS_AI_ROUTE_SORT must be price, throughput, or latency; got {value}")),
+                    _ => {
+                        return Err(
+                            "STASIS_AI_ROUTE_SORT must be price, throughput, or latency".into()
+                        )
+                    }
                 },
-                preferred_min_throughput: env_f64("STASIS_AI_PREFERRED_MIN_THROUGHPUT")?,
-                preferred_throughput_policy: match env_nonempty("STASIS_AI_PREFERRED_THROUGHPUT_POLICY").as_deref().unwrap_or("allow_below") {
+                preferred_min_throughput,
+                preferred_throughput_policy: match setting_nonempty(
+                    lookup,
+                    "STASIS_AI_PREFERRED_THROUGHPUT_POLICY",
+                )
+                .as_deref()
+                .unwrap_or("allow_below")
+                {
                     "allow_below" => PreferredThroughputPolicy::AllowBelow,
                     "fail" => PreferredThroughputPolicy::Fail,
-                    value => return Err(format!("STASIS_AI_PREFERRED_THROUGHPUT_POLICY must be allow_below or fail; got {value}")),
+                    _ => {
+                        return Err(
+                            "STASIS_AI_PREFERRED_THROUGHPUT_POLICY must be allow_below or fail"
+                                .into(),
+                        )
+                    }
                 },
-                hard_min_throughput: env_f64("STASIS_AI_HARD_MIN_THROUGHPUT")?,
-                max_price: env_f64("STASIS_AI_MAX_PRICE")?,
+                hard_min_throughput,
+                max_price: setting_f64(lookup, "STASIS_AI_MAX_PRICE")?,
             },
-            timeout: Duration::from_secs(env_u64("STASIS_AI_TIMEOUT_SECONDS")?.unwrap_or(120)),
+            timeout: Duration::from_secs(
+                setting_u64(lookup, "STASIS_AI_TIMEOUT_SECONDS")?.unwrap_or(120),
+            ),
         };
         config.validate()?;
         Ok(config)
@@ -177,6 +296,30 @@ impl ProviderConfig {
         }
     }
 
+    /// Resolve this workspace's provider without changing global environment.
+    pub fn from_workspace(root: &Path) -> Result<Self, String> {
+        Self::from_workspace_lookup(root, &|name| std::env::var(name).ok())
+    }
+
+    fn from_workspace_lookup(
+        root: &Path,
+        environment: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        let settings = WorkspaceSettings::read(root)?;
+        let lookup = |name: &str| settings.get(name, environment);
+        let selected = setting_nonempty(&lookup, "STASIS_AI_PROVIDER");
+        let default = if setting_nonempty(&lookup, "OPENROUTER_API_KEY").is_some() {
+            "openrouter"
+        } else {
+            "codex"
+        };
+        match selected.as_deref().unwrap_or(default) {
+            "codex" => Ok(Self::Codex),
+            "openrouter" => Ok(Self::OpenRouter(OpenRouterConfig::from_lookup(&lookup)?)),
+            _ => Err("STASIS_AI_PROVIDER must be codex or openrouter".into()),
+        }
+    }
+
     pub fn provider_name(&self) -> &'static str {
         match self {
             Self::Codex => "installed_codex_subscription",
@@ -197,7 +340,7 @@ impl ProviderConfig {
     pub fn supports_image_input(&self) -> bool {
         match self {
             Self::Codex => codex_model_supports_image_input(&self.model()),
-            Self::OpenRouter(config) => openrouter_model_supports_image_input(&config.model),
+            Self::OpenRouter(_) => false,
         }
     }
 
@@ -217,24 +360,40 @@ pub(crate) fn codex_model_supports_image_input(model: &str) -> bool {
     matches!(model.trim(), "gpt-5.6-sol")
 }
 
-fn openrouter_model_supports_image_input(model: &str) -> bool {
-    // Keep this explicit: aliases and text-only routes must not turn an attached
-    // frame into a request whose image is silently ignored.
-    matches!(
-        model.trim(),
-        "google/gemini-2.5-flash"
-            | "google/gemini-2.5-flash-lite"
-            | "google/gemini-2.5-pro"
-            | "openai/gpt-5.6-luna"
-    )
-}
-
 pub enum ConfiguredProvider {
     Codex(crate::CodexExecProvider),
     OpenRouter(OpenRouterProvider),
 }
 
 impl ConfiguredProvider {
+    pub fn cached_image_input_capability(&self) -> ImageInputCapability {
+        match self {
+            Self::Codex(provider) => {
+                let supported = codex_model_supports_image_input(&provider.model);
+                ImageInputCapability {
+                    model: provider.model.clone(),
+                    supported,
+                    reason: if supported {
+                        "Codex model is verified for image input".to_string()
+                    } else {
+                        "Codex model is not verified for image input".to_string()
+                    },
+                }
+            }
+            Self::OpenRouter(provider) => provider.cached_image_input_capability().clone(),
+        }
+    }
+
+    pub fn refresh_image_input_capability(
+        &mut self,
+        canceled: &AtomicBool,
+    ) -> Result<ImageInputCapability, String> {
+        match self {
+            Self::Codex(_) => Ok(self.cached_image_input_capability()),
+            Self::OpenRouter(provider) => provider.refresh_image_input_capability(canceled),
+        }
+    }
+
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         match &mut self {
             Self::Codex(provider) => provider.request_timeout = Some(timeout),
@@ -247,7 +406,10 @@ impl ConfiguredProvider {
         let model = model.into();
         match &mut self {
             Self::Codex(provider) => provider.model = model,
-            Self::OpenRouter(provider) => provider.config.model = model,
+            Self::OpenRouter(provider) => {
+                provider.config.model = model.clone();
+                provider.image_capability = ImageInputCapability::unknown(&model);
+            }
         }
         self
     }
@@ -288,16 +450,31 @@ impl ConfiguredProvider {
                 ));
             }
             Self::Codex(provider) => provider.images = images,
-            Self::OpenRouter(provider)
-                if !images.is_empty()
-                    && !openrouter_model_supports_image_input(&provider.config.model) =>
-            {
-                return Err(format!(
-                    "OpenRouter model {} does not support image input",
-                    provider.config.model
-                ));
+            Self::OpenRouter(_) if !images.is_empty() => {
+                return Err("OpenRouter transport does not support image attachments in this workspace flow".to_string());
             }
-            Self::OpenRouter(provider) => provider.images = images,
+            Self::OpenRouter(_) => {}
+        }
+        Ok(self)
+    }
+
+    pub fn with_openrouter_image_inputs(
+        mut self,
+        images: Vec<OpenRouterImageInput>,
+    ) -> Result<Self, String> {
+        match &mut self {
+            Self::OpenRouter(provider) => {
+                if images.len() > MAX_OPENROUTER_IMAGES {
+                    return Err(format!(
+                        "at most {MAX_OPENROUTER_IMAGES} images may be sent"
+                    ));
+                }
+                provider.images = images;
+            }
+            Self::Codex(_) if !images.is_empty() => {
+                return Err("OpenRouter image inputs require the OpenRouter provider".to_string())
+            }
+            Self::Codex(_) => {}
         }
         Ok(self)
     }
@@ -328,6 +505,19 @@ impl ModelProvider for ConfiguredProvider {
         match self {
             Self::Codex(provider) => provider.respond(request, canceled),
             Self::OpenRouter(provider) => provider.respond(request, canceled),
+        }
+    }
+    fn respond_with_progress(
+        &mut self,
+        request: &str,
+        canceled: &AtomicBool,
+        progress: &mut dyn FnMut(crate::ProviderProgress),
+    ) -> Result<ModelResponse, String> {
+        match self {
+            Self::Codex(provider) => provider.respond_with_progress(request, canceled, progress),
+            Self::OpenRouter(provider) => {
+                provider.respond_with_progress(request, canceled, progress)
+            }
         }
     }
     fn take_usage(&mut self) -> Option<Value> {
@@ -363,9 +553,10 @@ pub struct OpenRouterProvider {
     client: Client,
     last_usage: Option<Value>,
     call_count: u32,
+    images: Vec<OpenRouterImageInput>,
+    image_capability: ImageInputCapability,
     reasoning_effort: Option<String>,
     session_id: Option<String>,
-    images: Vec<std::path::PathBuf>,
 }
 
 impl OpenRouterProvider {
@@ -375,6 +566,7 @@ impl OpenRouterProvider {
             .connect_timeout(config.timeout.min(Duration::from_secs(30)))
             .build()
             .map_err(|error| format!("failed configuring OpenRouter HTTPS client: {error}"))?;
+        let image_capability = ImageInputCapability::unknown(&config.model);
         Ok(Self {
             config,
             client,
@@ -383,6 +575,107 @@ impl OpenRouterProvider {
             reasoning_effort: None,
             session_id: None,
             images: Vec::new(),
+            image_capability,
+        })
+    }
+
+    pub fn cached_image_input_capability(&self) -> &ImageInputCapability {
+        &self.image_capability
+    }
+
+    pub fn with_image_inputs(mut self, images: Vec<OpenRouterImageInput>) -> Result<Self, String> {
+        if images.len() > MAX_OPENROUTER_IMAGES {
+            return Err(format!(
+                "at most {MAX_OPENROUTER_IMAGES} images may be sent"
+            ));
+        }
+        self.images = images;
+        Ok(self)
+    }
+
+    pub fn refresh_image_input_capability(
+        &mut self,
+        canceled: &AtomicBool,
+    ) -> Result<ImageInputCapability, String> {
+        let deadline = Instant::now() + self.config.timeout;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed configuring OpenRouter async runtime: {error}"))?;
+        let capability = runtime.block_on(self.image_input_capability_async(deadline, canceled))?;
+        self.image_capability = capability.clone();
+        Ok(capability)
+    }
+
+    async fn image_input_capability_async(
+        &self,
+        deadline: Instant,
+        canceled: &AtomicBool,
+    ) -> Result<ImageInputCapability, String> {
+        if canceled.load(Ordering::Acquire) {
+            return Err("AI request canceled".to_string());
+        }
+        let response = await_cancelable(
+            self.client
+                .get(format!(
+                    "{}/models",
+                    self.config.base_url.trim_end_matches('/')
+                ))
+                .bearer_auth(&self.config.api_key)
+                .timeout(remaining_timeout(
+                    deadline,
+                    "OpenRouter model capability lookup",
+                )?)
+                .send(),
+            canceled,
+            deadline,
+            "OpenRouter model capability lookup",
+        )
+        .await?;
+        let status = response.status();
+        let value: Value = await_cancelable(
+            response.json(),
+            canceled,
+            deadline,
+            "OpenRouter model capability response",
+        )
+        .await?;
+        if !status.is_success() {
+            return Err(api_error(
+                "OpenRouter model capability lookup",
+                status.as_u16(),
+                &value,
+                &self.config.api_key,
+            ));
+        }
+        let models = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "OpenRouter model metadata omitted the model list".to_string())?;
+        let Some(model) = models
+            .iter()
+            .find(|model| model.get("id").and_then(Value::as_str) == Some(&self.config.model))
+        else {
+            return Ok(ImageInputCapability {
+                model: self.config.model.clone(),
+                supported: false,
+                reason: "configured model was absent from OpenRouter model metadata".to_string(),
+            });
+        };
+        let modalities = model
+            .pointer("/architecture/input_modalities")
+            .or_else(|| model.get("input_modalities"))
+            .and_then(Value::as_array);
+        let supported = modalities
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("image")));
+        Ok(ImageInputCapability {
+            model: self.config.model.clone(),
+            supported,
+            reason: if supported {
+                "OpenRouter reports image input for the configured model".to_string()
+            } else {
+                "OpenRouter does not report image input for the configured model".to_string()
+            },
         })
     }
 
@@ -470,9 +763,9 @@ impl OpenRouterProvider {
             };
             if healthy && throughput.is_some_and(|value| value >= minimum) {
                 if let Some(tag) = endpoint
-                    .get("provider")
+                    .get("tag")
                     .or_else(|| endpoint.get("provider_slug"))
-                    .or_else(|| endpoint.get("tag"))
+                    .or_else(|| endpoint.get("provider"))
                     .and_then(Value::as_str)
                     .and_then(normalize_provider_slug)
                 {
@@ -489,7 +782,10 @@ impl OpenRouterProvider {
                     .only
                     .iter()
                     .filter_map(|only| normalize_provider_slug(only))
-                    .any(|only| only == *tag)
+                    .any(|only| {
+                        only == *tag
+                            || (!only.contains('/') && tag.starts_with(&format!("{only}/")))
+                    })
             });
         }
         if tags.is_empty() {
@@ -554,22 +850,33 @@ impl OpenRouterProvider {
 
 impl ModelProvider for OpenRouterProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String> {
+        self.respond_with_progress(request, canceled, &mut |_| {})
+    }
+
+    fn respond_with_progress(
+        &mut self,
+        request: &str,
+        canceled: &AtomicBool,
+        progress: &mut dyn FnMut(crate::ProviderProgress),
+    ) -> Result<ModelResponse, String> {
         let turn_started = Instant::now();
         let deadline = turn_started + self.config.timeout;
         self.call_count = self.call_count.saturating_add(1);
         self.last_usage = None;
         self.config.validate()?;
-        if !self.images.is_empty() && !openrouter_model_supports_image_input(&self.config.model) {
-            return Err(format!(
-                "OpenRouter model {} does not support image input",
-                self.config.model
-            ));
-        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| format!("failed configuring OpenRouter async runtime: {error}"))?;
-        runtime.block_on(self.respond_async(request, canceled, turn_started, deadline))
+        let images = std::mem::take(&mut self.images);
+        runtime.block_on(self.respond_async(
+            request,
+            &images,
+            canceled,
+            turn_started,
+            deadline,
+            progress,
+        ))
     }
 
     fn take_usage(&mut self) -> Option<Value> {
@@ -585,13 +892,26 @@ impl OpenRouterProvider {
     async fn respond_async(
         &mut self,
         request: &str,
+        images: &[OpenRouterImageInput],
         canceled: &AtomicBool,
         turn_started: Instant,
         deadline: Instant,
+        progress: &mut dyn FnMut(crate::ProviderProgress),
     ) -> Result<ModelResponse, String> {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
         }
+        progress(crate::ProviderProgress::ContactingProvider);
+        if !images.is_empty() {
+            let capability = self
+                .image_input_capability_async(deadline, canceled)
+                .await?;
+            self.image_capability = capability.clone();
+            if !capability.supported {
+                return Err(capability.reason);
+            }
+        }
+
         let (hard_only, metadata_time) = match self.config.routing.hard_min_throughput {
             Some(minimum) => {
                 let (tags, elapsed) = self
@@ -609,22 +929,26 @@ impl OpenRouterProvider {
                 return self
                     .send(
                         request,
+                        images,
                         Some(tags),
                         metadata_time + elapsed,
                         turn_started,
                         deadline,
                         canceled,
+                        progress,
                     )
                     .await;
             }
         }
         self.send(
             request,
+            images,
             hard_only,
             metadata_time,
             turn_started,
             deadline,
             canceled,
+            progress,
         )
         .await
     }
@@ -632,23 +956,31 @@ impl OpenRouterProvider {
     async fn send(
         &mut self,
         request: &str,
+        images: &[OpenRouterImageInput],
         only: Option<Vec<String>>,
         metadata_time: Duration,
         turn_started: Instant,
         deadline: Instant,
         canceled: &AtomicBool,
+        progress: &mut dyn FnMut(crate::ProviderProgress),
     ) -> Result<ModelResponse, String> {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
         }
-        let timeout = remaining_timeout(deadline, "OpenRouter chat request")?;
         let route = self.route_json(only);
         let mut schema = model_response_schema_for_request(request)?;
-        // Gemini's structured-output compiler expands nested array bounds into
-        // an impractically large state machine. Local decoding and tool
-        // validation still enforce the repository's collection limits.
+        // Keep Gemini structured-output state bounded; local admission enforces array limits.
         strip_array_max_items(&mut schema);
-        let content = openrouter_message_content(request, &self.images)?;
+        let content =
+            if images.is_empty() {
+                Value::String(request.to_string())
+            } else {
+                let mut content = vec![json!({"type": "text", "text": request})];
+                content.extend(images.iter().map(
+                    |image| json!({"type": "image_url", "image_url": {"url": image.data_url()}}),
+                ));
+                Value::Array(content)
+            };
         let mut body = json!({
             "model": self.config.model,
             "messages": [{"role": "user", "content": content}],
@@ -665,21 +997,40 @@ impl OpenRouterProvider {
             body_object.insert("session_id".to_string(), json!(session_id));
         }
         let request_started = Instant::now();
-        let mut response = await_cancelable(
-            self.client
-                .post(format!(
-                    "{}/chat/completions",
-                    self.config.base_url.trim_end_matches('/')
-                ))
-                .bearer_auth(&self.config.api_key)
-                .json(&body)
-                .timeout(timeout)
-                .send(),
-            canceled,
-            deadline,
-            "OpenRouter request",
-        )
-        .await?;
+        let mut transport_attempts = 0_u32;
+        let mut response = loop {
+            transport_attempts = transport_attempts.saturating_add(1);
+            let timeout = remaining_timeout(deadline, "OpenRouter chat request")?;
+            let response = await_cancelable(
+                self.client
+                    .post(format!(
+                        "{}/chat/completions",
+                        self.config.base_url.trim_end_matches('/')
+                    ))
+                    .bearer_auth(&self.config.api_key)
+                    .json(&body)
+                    .timeout(timeout)
+                    .send(),
+                canceled,
+                deadline,
+                "OpenRouter request",
+            )
+            .await?;
+            if response.status() != StatusCode::TOO_MANY_REQUESTS
+                || transport_attempts > MAX_OPENROUTER_RATE_LIMIT_RETRIES
+            {
+                break response;
+            }
+            let delay = openrouter_retry_delay(
+                response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                transport_attempts,
+            );
+            sleep_cancelable(delay, canceled, deadline, "OpenRouter rate-limit retry").await?;
+            progress(crate::ProviderProgress::ContactingProvider);
+        };
         let header_time = request_started.elapsed();
         let status = response.status();
         if !status.is_success() {
@@ -697,8 +1048,13 @@ impl OpenRouterProvider {
                 }
                 Err(_) => Value::Null,
             };
+            let context = if status == StatusCode::TOO_MANY_REQUESTS && transport_attempts > 1 {
+                "OpenRouter request after bounded retries"
+            } else {
+                "OpenRouter request"
+            };
             return Err(api_error(
-                "OpenRouter request",
+                context,
                 status.as_u16(),
                 &value,
                 &self.config.api_key,
@@ -737,6 +1093,11 @@ impl OpenRouterProvider {
                         &self.config.api_key,
                     ));
                 }
+                finish_reason = chunk
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(Value::as_str)
+                    .map(sanitize_label)
+                    .or(finish_reason);
                 resolved_model = chunk
                     .get("model")
                     .and_then(Value::as_str)
@@ -747,11 +1108,6 @@ impl OpenRouterProvider {
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .or(resolved_provider);
-                finish_reason = chunk
-                    .pointer("/choices/0/finish_reason")
-                    .and_then(Value::as_str)
-                    .map(sanitize_label)
-                    .or(finish_reason);
                 if let Some(value) = chunk
                     .pointer("/choices/0/delta/reasoning")
                     .and_then(Value::as_str)
@@ -766,13 +1122,15 @@ impl OpenRouterProvider {
                     .and_then(Value::as_str)
                 {
                     if !value.is_empty() && first_content_ms.is_none() {
-                        first_content_ms = Some(duration_ms(request_started.elapsed()));
+                        let elapsed_ms = duration_ms(request_started.elapsed());
+                        first_content_ms = Some(elapsed_ms);
+                        progress(crate::ProviderProgress::FirstResponse { elapsed_ms });
                     }
                     content.push_str(value);
-                    if first_action_ms.is_none()
-                        && (content.contains("\"action_id\"") || content.contains("\"tool_calls\""))
-                    {
-                        first_action_ms = Some(duration_ms(request_started.elapsed()));
+                    if first_action_ms.is_none() && has_started_tool_call(&content) {
+                        let elapsed_ms = duration_ms(request_started.elapsed());
+                        first_action_ms = Some(elapsed_ms);
+                        progress(crate::ProviderProgress::FirstAction { elapsed_ms });
                     }
                 }
                 if let Some(value) = chunk.get("usage") {
@@ -801,17 +1159,21 @@ impl OpenRouterProvider {
             .as_deref()
             .map(sanitize_label)
             .unwrap_or_else(|| sanitize_label(&self.config.model));
-        let resolved_provider = resolved_provider
+        let resolved_provider_evidence = resolved_provider
             .as_deref()
-            .and_then(normalize_provider_slug)
-            .unwrap_or_else(|| "unknown".to_string());
-        let fallback = self
-            .config
-            .routing
-            .order
-            .first()
-            .and_then(|value| normalize_provider_slug(value))
-            .is_some_and(|first| first != resolved_provider);
+            .and_then(normalize_provider_slug);
+        let fallback = resolved_provider_evidence.as_ref().is_some_and(|resolved| {
+            self.config
+                .routing
+                .order
+                .first()
+                .and_then(|value| normalize_provider_slug(value))
+                .is_some_and(|first| first != *resolved)
+        });
+        let resolved_provider = resolved_provider_evidence.unwrap_or_else(|| "unknown".to_string());
+        if fallback {
+            progress(crate::ProviderProgress::Fallback);
+        }
         let prompt_tokens = metric_number(usage.get("prompt_tokens"));
         let completion_tokens = metric_number(usage.get("completion_tokens"));
         let reasoning_tokens =
@@ -822,6 +1184,7 @@ impl OpenRouterProvider {
             "resolved_provider": resolved_provider, "resolved_model": resolved_model,
             "route": route, "fallback": fallback,
             "timing_ms": {"metadata": duration_ms(metadata_time), "headers": duration_ms(header_time), "first_reasoning": first_reasoning_ms, "first_content": first_content_ms, "first_action": first_action_ms, "inference_total": duration_ms(request_started.elapsed()), "turn_total": duration_ms(turn_started.elapsed())},
+            "transport_attempts": transport_attempts,
             "tokens": {"prompt": prompt_tokens, "completion": completion_tokens, "reasoning": reasoning_tokens, "cache": cache_tokens},
             "cost": metric_number(usage.get("cost")),
             "throughput_tokens_per_second": throughput(&usage, request_started.elapsed()),
@@ -846,77 +1209,6 @@ fn strip_array_max_items(value: &mut Value) {
         }
         _ => {}
     }
-}
-
-const MAX_OPENROUTER_IMAGE_BYTES: usize = 16 * 1024 * 1024;
-
-fn openrouter_message_content(
-    request: &str,
-    images: &[std::path::PathBuf],
-) -> Result<Value, String> {
-    if images.is_empty() {
-        return Ok(json!(request));
-    }
-    let mut content = vec![json!({"type": "text", "text": request})];
-    for path in images {
-        let metadata = std::fs::symlink_metadata(path)
-            .map_err(|error| format!("OpenRouter image could not be inspected: {error}"))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err("OpenRouter image must be a regular file".to_string());
-        }
-        if metadata.len() > MAX_OPENROUTER_IMAGE_BYTES as u64 {
-            return Err(format!(
-                "OpenRouter image exceeds {MAX_OPENROUTER_IMAGE_BYTES} bytes"
-            ));
-        }
-        let bytes = std::fs::read(path)
-            .map_err(|error| format!("OpenRouter image could not be read: {error}"))?;
-        let mime = image_mime(&bytes)
-            .ok_or_else(|| "OpenRouter image must be PNG, JPEG, GIF, or WebP".to_string())?;
-        let data_url = format!("data:{mime};base64,{}", encode_base64(&bytes));
-        content.push(json!({
-            "type": "image_url",
-            "image_url": {"url": data_url}
-        }));
-    }
-    Ok(Value::Array(content))
-}
-
-fn image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
-
-fn encode_base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let value = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        encoded.push(TABLE[((value >> 18) & 63) as usize] as char);
-        encoded.push(TABLE[((value >> 12) & 63) as usize] as char);
-        encoded.push(if chunk.len() > 1 {
-            TABLE[((value >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        encoded.push(if chunk.len() > 2 {
-            TABLE[(value & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    encoded
 }
 
 #[derive(Default)]
@@ -993,6 +1285,38 @@ where
     }
 }
 
+fn openrouter_retry_delay(retry_after: Option<&str>, retry_number: u32) -> Duration {
+    let server_delay = retry_after
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+    server_delay
+        .unwrap_or_else(|| {
+            DEFAULT_OPENROUTER_RETRY_DELAY
+                .saturating_mul(1_u32 << retry_number.saturating_sub(1).min(3))
+        })
+        .min(MAX_OPENROUTER_RETRY_DELAY)
+}
+
+async fn sleep_cancelable(
+    delay: Duration,
+    canceled: &AtomicBool,
+    deadline: Instant,
+    context: &str,
+) -> Result<(), String> {
+    let wake = Instant::now() + delay;
+    loop {
+        if canceled.load(Ordering::Acquire) {
+            return Err("AI request canceled".to_string());
+        }
+        let remaining = remaining_timeout(deadline, context)?;
+        let until_wake = wake.saturating_duration_since(Instant::now());
+        if until_wake.is_zero() {
+            return Ok(());
+        }
+        tokio::time::sleep(remaining.min(until_wake).min(Duration::from_millis(10))).await;
+    }
+}
+
 fn sanitize_label(value: &str) -> String {
     value
         .chars()
@@ -1009,10 +1333,13 @@ fn metric_number(value: Option<&Value>) -> Value {
 }
 fn normalize_provider_slug(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
-    (!normalized.is_empty()
-        && normalized
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    (normalized.len() <= 256
+        && normalized.split('/').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        }))
     .then_some(normalized)
 }
 fn env_nonempty(name: &str) -> Option<String> {
@@ -1020,8 +1347,46 @@ fn env_nonempty(name: &str) -> Option<String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
 }
-fn env_list(name: &str) -> Vec<String> {
-    env_nonempty(name)
+fn setting_nonempty(lookup: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    lookup(name).filter(|value| !value.trim().is_empty())
+}
+
+struct WorkspaceSettings(BTreeMap<String, String>);
+
+impl WorkspaceSettings {
+    fn read(root: &Path) -> Result<Self, String> {
+        const MAX_BYTES: u64 = 64 * 1024;
+        let file = match std::fs::File::open(root.join(".env")) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self(BTreeMap::new()));
+            }
+            Err(_) => return Err("Cannot read workspace .env settings".into()),
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot read workspace .env settings".to_string())?;
+        if bytes.len() > MAX_BYTES as usize {
+            return Err("Workspace .env exceeds 64 KiB".into());
+        }
+        // Windows editors commonly write a UTF-8 byte-order mark.
+        let source = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+        let mut settings = BTreeMap::new();
+        for item in dotenvy::from_read_iter(source) {
+            let (key, value) = item.map_err(|_| "Invalid workspace .env syntax".to_string())?;
+            settings.entry(key).or_insert(value);
+        }
+        Ok(Self(settings))
+    }
+
+    fn get(&self, name: &str, environment: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+        environment(name).or_else(|| self.0.get(name).cloned())
+    }
+}
+
+fn setting_list(lookup: &dyn Fn(&str) -> Option<String>, name: &str) -> Vec<String> {
+    setting_nonempty(lookup, name)
         .map(|value| {
             value
                 .split(',')
@@ -1032,16 +1397,20 @@ fn env_list(name: &str) -> Vec<String> {
         })
         .unwrap_or_default()
 }
-fn env_bool(name: &str, default: bool) -> Result<bool, String> {
-    match env_nonempty(name).as_deref() {
+fn setting_bool(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    name: &str,
+    default: bool,
+) -> Result<bool, String> {
+    match setting_nonempty(lookup, name).as_deref() {
         None => Ok(default),
         Some("1" | "true") => Ok(true),
         Some("0" | "false") => Ok(false),
-        Some(value) => Err(format!("{name} must be true or false; got {value}")),
+        Some(_) => Err(format!("{name} must be true or false")),
     }
 }
-fn env_f64(name: &str) -> Result<Option<f64>, String> {
-    env_nonempty(name)
+fn setting_f64(lookup: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<Option<f64>, String> {
+    setting_nonempty(lookup, name)
         .map(|value| {
             value
                 .parse::<f64>()
@@ -1049,8 +1418,8 @@ fn env_f64(name: &str) -> Result<Option<f64>, String> {
         })
         .transpose()
 }
-fn env_u64(name: &str) -> Result<Option<u64>, String> {
-    env_nonempty(name)
+fn setting_u64(lookup: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<Option<u64>, String> {
+    setting_nonempty(lookup, name)
         .map(|value| {
             value
                 .parse::<u64>()
@@ -1060,6 +1429,66 @@ fn env_u64(name: &str) -> Result<Option<u64>, String> {
 }
 fn duration_ms(value: Duration) -> u64 {
     u64::try_from(value.as_millis()).unwrap_or(u64::MAX)
+}
+fn has_started_tool_call(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let mut index = 0;
+    let mut depth = 0_u32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b'"' => {
+                let start = index + 1;
+                index = start;
+                let mut escaped = false;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => {
+                            escaped = true;
+                            index = index.saturating_add(2);
+                        }
+                        b'"' => break,
+                        _ => index += 1,
+                    }
+                }
+                if index >= bytes.len() {
+                    return false;
+                }
+                let end = index;
+                index += 1;
+                if depth != 1 || escaped || &bytes[start..end] != b"tool_calls" {
+                    continue;
+                }
+                while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                if bytes.get(index) != Some(&b':') {
+                    continue;
+                }
+                index += 1;
+                // A required but empty tool_calls array is not an action.
+                for delimiter in [b'[', b'{'] {
+                    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                        index += 1;
+                    }
+                    if bytes.get(index) != Some(&delimiter) {
+                        return false;
+                    }
+                    index += 1;
+                }
+                return true;
+            }
+            _ => index += 1,
+        }
+    }
+    false
 }
 fn throughput(usage: &Value, elapsed: Duration) -> Value {
     usage
@@ -1105,7 +1534,258 @@ fn api_error(context: &str, status: u16, value: &Value, secret: &str) -> String 
 }
 #[cfg(test)]
 mod tests {
+    struct WorkspaceFixture(std::path::PathBuf);
+
+    impl WorkspaceFixture {
+        fn new(source: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "stasis-provider-settings-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join(".env"), source).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for WorkspaceFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn workspace_throughput_defaults_to_hard_400_unless_explicitly_configured() {
+        let fixture = WorkspaceFixture::new("OPENROUTER_API_KEY=test-key\n");
+        let ProviderConfig::OpenRouter(config) =
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap()
+        else {
+            panic!("expected OpenRouter");
+        };
+        assert_eq!(config.routing.hard_min_throughput, Some(400.0));
+        let config = OpenRouterConfig::from_lookup(&|name| match name {
+            "OPENROUTER_API_KEY" => Some("test-key".into()),
+            "STASIS_AI_PREFERRED_MIN_THROUGHPUT" => Some("250".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(config.routing.hard_min_throughput, None);
+        assert_eq!(config.routing.preferred_min_throughput, Some(250.0));
+    }
+
+    #[test]
+    fn workspace_key_selects_openrouter_with_model_and_hard_throughput() {
+        let fixture = WorkspaceFixture::new("\u{feff}# project only\nexport OPENROUTER_API_KEY='test-key'\nSTASIS_AI_MODEL=\"openai/gpt-oss-120b\" # model\nSTASIS_AI_HARD_MIN_THROUGHPUT=400\nSTASIS_AI_ROUTE_ONLY=cerebras,groq\nSTASIS_AI_ROUTE_ORDER=groq,cerebras\nSTASIS_AI_ALLOW_FALLBACKS=false\nSTASIS_AI_ROUTE_SORT=throughput\nSTASIS_AI_MAX_PRICE=2\nSTASIS_AI_TIMEOUT_SECONDS=45\n");
+        let ProviderConfig::OpenRouter(config) =
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap()
+        else {
+            panic!("expected OpenRouter");
+        };
+        assert_eq!(config.api_key, "test-key");
+        assert_eq!(config.model, "openai/gpt-oss-120b");
+        assert_eq!(config.routing.hard_min_throughput, Some(400.0));
+        assert_eq!(config.routing.only, ["cerebras", "groq"]);
+        assert_eq!(config.routing.order, ["groq", "cerebras"]);
+        assert!(!config.routing.allow_fallbacks);
+        assert_eq!(config.routing.max_price, Some(2.0));
+        assert_eq!(config.timeout, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn workspace_environment_overrides_file_and_explicit_codex_wins() {
+        let fixture = WorkspaceFixture::new("OPENROUTER_API_KEY=file-key\nSTASIS_AI_PROVIDER=openrouter\nSTASIS_AI_MODEL=openai/gpt-oss-120b\n");
+        assert!(matches!(
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|name| (name
+                == "STASIS_AI_PROVIDER")
+                .then(|| "codex".into()))
+            .unwrap(),
+            ProviderConfig::Codex
+        ));
+        let ProviderConfig::OpenRouter(config) =
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|name| match name {
+                "OPENROUTER_API_KEY" => Some("environment-key".into()),
+                "STASIS_AI_MODEL" => Some("other/model".into()),
+                _ => None,
+            })
+            .unwrap()
+        else {
+            panic!("expected OpenRouter");
+        };
+        assert_eq!(config.api_key, "environment-key");
+        assert_eq!(config.model, "other/model");
+        let fixture =
+            WorkspaceFixture::new("STASIS_AI_PROVIDER=codex\nOPENROUTER_API_KEY=file-key\n");
+        assert!(matches!(
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap(),
+            ProviderConfig::Codex
+        ));
+    }
+
+    #[test]
+    fn workspace_settings_do_not_search_parents_or_expose_parse_secrets() {
+        let fixture = WorkspaceFixture::new("OPENROUTER_API_KEY=parent-key\n");
+        let child = fixture.0.join("child");
+        std::fs::create_dir(&child).unwrap();
+        assert!(matches!(
+            ProviderConfig::from_workspace_lookup(&child, &|_| None).unwrap(),
+            ProviderConfig::Codex
+        ));
+        std::fs::write(
+            child.join(".env"),
+            "OPENROUTER_API_KEY=\"private-credential\n",
+        )
+        .unwrap();
+        let error = ProviderConfig::from_workspace_lookup(&child, &|_| None)
+            .err()
+            .unwrap();
+        assert_eq!(error, "Invalid workspace .env syntax");
+        assert!(!error.contains("private-credential"));
+    }
     use super::*;
+    #[test]
+    fn provider_error_surfaces_bounded_nested_message() {
+        let error = api_error(
+            "OpenRouter request",
+            400,
+            &json!({"error":{"message":"Provider returned error","metadata":{"raw":"{\"error\":{\"message\":\"response schema unsupported\"}}"}}}),
+            "unit-secret",
+        );
+        assert_eq!(
+            error,
+            "OpenRouter request failed with HTTP 400: response schema unsupported"
+        );
+    }
+
+    #[test]
+    fn openrouter_schema_removes_provider_state_exploding_array_maxima() {
+        let mut schema = json!({
+            "type": "array",
+            "maxItems": 50,
+            "items": {"type": "object", "properties": {"edits": {
+                "type": "array", "maxItems": 64, "items": {"type": "string"}
+            }}}
+        });
+        strip_array_max_items(&mut schema);
+        assert!(schema.pointer("/maxItems").is_none());
+        assert!(schema.pointer("/items/properties/edits/maxItems").is_none());
+        assert_eq!(
+            schema.pointer("/items/properties/edits/items/type"),
+            Some(&json!("string"))
+        );
+    }
+    static ENVIRONMENT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvironmentRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl Drop for EnvironmentRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn openrouter_environment_configuration_is_accepted_without_serializing_key() {
+        let _lock = ENVIRONMENT_TEST_LOCK.lock().unwrap();
+        let names = [
+            "STASIS_AI_PROVIDER",
+            "OPENROUTER_API_KEY",
+            "STASIS_AI_MODEL",
+            "STASIS_AI_ROUTE_ONLY",
+            "STASIS_AI_ALLOW_FALLBACKS",
+            "STASIS_AI_ROUTE_SORT",
+            "STASIS_AI_TIMEOUT_SECONDS",
+        ];
+        let _restore = EnvironmentRestore(
+            names
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        let secret = "environment-test-key-not-a-real-credential";
+        for (name, value) in [
+            ("STASIS_AI_PROVIDER", "openrouter"),
+            ("OPENROUTER_API_KEY", secret),
+            ("STASIS_AI_MODEL", "openai/gpt-oss-120b"),
+            ("STASIS_AI_ROUTE_ONLY", "cerebras,openai"),
+            ("STASIS_AI_ALLOW_FALLBACKS", "false"),
+            ("STASIS_AI_ROUTE_SORT", "latency"),
+            ("STASIS_AI_TIMEOUT_SECONDS", "45"),
+        ] {
+            std::env::set_var(name, value);
+        }
+
+        let ProviderConfig::OpenRouter(config) = ProviderConfig::from_env().unwrap() else {
+            panic!("OpenRouter environment selected a different provider");
+        };
+        assert_eq!(config.api_key, secret);
+        assert_eq!(config.model, "openai/gpt-oss-120b");
+        assert_eq!(config.routing.only, ["cerebras", "openai"]);
+        assert!(!config.routing.allow_fallbacks);
+        assert!(matches!(config.routing.sort, RoutingSort::Latency));
+        assert_eq!(config.timeout, Duration::from_secs(45));
+        let route = OpenRouterProvider::new(config).unwrap().route_json(None);
+        assert!(!route.to_string().contains(secret));
+    }
+
+    #[test]
+    fn action_progress_requires_a_nonempty_top_level_tool_calls_array() {
+        for content in [
+            r#"{"mode":"tool_calls"}"#,
+            r#"{"working_notes":"say \"tool_calls\": [] and {ignored}"}"#,
+            r#"{"nested":{"tool_calls":[{}]}}"#,
+            r#"{"mode":"done","tool_calls":[]}"#,
+            r#"{"tool_calls": [  ]}"#,
+            r#"{"tool_calls": null}"#,
+        ] {
+            assert!(!has_started_tool_call(content), "{content}");
+        }
+        let partial = r#"{"working_notes":"ok","tool_calls" : [  {"#;
+        for end in 0..partial.len() {
+            assert!(!has_started_tool_call(&partial[..end]));
+        }
+        assert!(has_started_tool_call(partial));
+    }
+
+    #[test]
+    fn streamed_done_reply_never_reports_first_action() {
+        let fragments = [
+            r#"{"mode":"done","working_notes":"","summary":"Done","tool_calls" :"#,
+            " [ ",
+            "]}",
+        ];
+        let mut body = String::new();
+        for content in fragments {
+            let chunk = json!({"choices":[{"delta":{"content":content}}]});
+            body.push_str(&format!("data: {chunk}\n\n"));
+        }
+        body.push_str("data: [DONE]\n\n");
+        let (base_url, _requests, worker) =
+            mock_server(vec![http_response("text/event-stream", &body)]);
+        let mut provider = OpenRouterProvider::new(test_config(base_url)).unwrap();
+        let mut progress = Vec::new();
+        let response = provider
+            .respond_with_progress(&test_request(), &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
+            .unwrap();
+        assert!(matches!(response, ModelResponse::Done { .. }));
+        assert!(!progress
+            .iter()
+            .any(|event| matches!(event, crate::ProviderProgress::FirstAction { .. })));
+        assert!(provider.take_usage().unwrap()["timing_ms"]["first_action"].is_null());
+        worker.join().unwrap();
+    }
 
     #[test]
     fn routing_serializes_all_knobs() {
@@ -1201,38 +1881,6 @@ mod tests {
         );
         assert!(!error.contains("secret"));
     }
-
-    #[test]
-    fn provider_error_surfaces_bounded_nested_message() {
-        let error = api_error(
-            "OpenRouter request",
-            400,
-            &json!({"error":{"message":"Provider returned error","metadata":{"raw":"{\"error\":{\"message\":\"response schema unsupported\"}}"}}}),
-            "unit-secret",
-        );
-        assert_eq!(
-            error,
-            "OpenRouter request failed with HTTP 400: response schema unsupported"
-        );
-    }
-
-    #[test]
-    fn openrouter_schema_removes_provider_state_exploding_array_maxima() {
-        let mut schema = json!({
-            "type": "array",
-            "maxItems": 50,
-            "items": {"type": "object", "properties": {"edits": {
-                "type": "array", "maxItems": 64, "items": {"type": "string"}
-            }}}
-        });
-        strip_array_max_items(&mut schema);
-        assert!(schema.pointer("/maxItems").is_none());
-        assert!(schema.pointer("/items/properties/edits/maxItems").is_none());
-        assert_eq!(
-            schema.pointer("/items/properties/edits/items/type"),
-            Some(&json!("string"))
-        );
-    }
     fn mock_server(
         responses: Vec<String>,
     ) -> (
@@ -1292,6 +1940,16 @@ mod tests {
         format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
     }
 
+    fn http_error_response(status: &str, retry_after: Option<&str>, body: &str) -> String {
+        let retry_after = retry_after
+            .map(|value| format!("Retry-After: {value}\r\n"))
+            .unwrap_or_default();
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{retry_after}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
     fn test_config(base_url: String) -> OpenRouterConfig {
         OpenRouterConfig {
             api_key: "unit-secret".into(),
@@ -1304,6 +1962,232 @@ mod tests {
 
     fn test_request() -> String {
         json!({"tool_specs": crate::workshop_tool_specs()}).to_string()
+    }
+
+    fn test_png() -> OpenRouterImageInput {
+        let source = image::RgbaImage::from_pixel(1, 1, image::Rgba([17, 34, 51, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode test PNG");
+        let bytes = bytes.into_inner();
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        OpenRouterImageInput::new("image/png", bytes, &hash).expect("test image")
+    }
+
+    fn done_stream(summary: &str) -> String {
+        let fixture = json!({
+            "mode":"done", "working_notes":"Inspected the selected image.", "summary":summary
+        });
+        let chunk = json!({
+            "model":DEFAULT_OPENROUTER_MODEL,"provider":"openai",
+            "choices":[{"delta":{"content":fixture.to_string()}}]
+        });
+        format!("data: {chunk}\n\ndata: [DONE]\n\n")
+    }
+
+    #[test]
+    fn rate_limit_retries_preserve_qualified_route_and_then_succeed() {
+        let metadata = json!({"data":{"endpoints":[{
+            "tag":"cerebras/fp16", "status":"healthy",
+            "throughput_last_30m":{"p50":673.0}
+        }]}})
+        .to_string();
+        let limited = json!({"error":{"message":"temporarily rate limited"}}).to_string();
+        let stream = done_stream("completed after retry");
+        let (base_url, requests, worker) = mock_server(vec![
+            http_response("application/json", &metadata),
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+            http_response("text/event-stream", &stream),
+        ]);
+        let mut config = test_config(base_url);
+        config.routing.hard_min_throughput = Some(400.0);
+        let mut provider = OpenRouterProvider::new(config).expect("provider");
+        let reply = provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect("bounded retry succeeds");
+        assert!(matches!(
+            reply,
+            ModelResponse::Done { summary, .. } if summary == "completed after retry"
+        ));
+        assert!(requests
+            .recv()
+            .expect("metadata request")
+            .starts_with("GET "));
+        for _ in 0..3 {
+            let request = requests.recv().expect("chat request");
+            let json_start = request.find("\r\n\r\n").expect("headers") + 4;
+            let body: Value = serde_json::from_str(&request[json_start..]).expect("body");
+            assert_eq!(
+                body.pointer("/provider/only"),
+                Some(&json!(["cerebras/fp16"]))
+            );
+        }
+        assert_eq!(provider.take_usage().unwrap()["transport_attempts"], 3);
+        worker.join().expect("server");
+    }
+
+    #[test]
+    fn persistent_rate_limit_stops_after_bounded_retries() {
+        let limited = json!({"error":{"message":"temporarily rate limited"}}).to_string();
+        let (base_url, requests, worker) = mock_server(vec![
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+            http_error_response("429 Too Many Requests", Some("0"), &limited),
+        ]);
+        let mut provider = OpenRouterProvider::new(test_config(base_url)).expect("provider");
+        let error = provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect_err("persistent rate limit");
+        assert!(error.contains("HTTP 429"));
+        assert!(error.contains("after bounded retries"));
+        for _ in 0..3 {
+            assert!(requests.recv().expect("chat request").starts_with("POST "));
+        }
+        worker.join().expect("server");
+    }
+
+    #[test]
+    fn immutable_image_input_enforces_mime_bound_and_hash() {
+        let bytes = b"\x89PNG\r\n\x1a\nselected-pixels".to_vec();
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let image = OpenRouterImageInput::new("image/png", bytes.clone(), &hash)
+            .expect("valid PNG snapshot");
+        assert_eq!(image.bytes(), bytes);
+        assert_eq!(image.sha256(), hash);
+        assert!(
+            OpenRouterImageInput::new("image/jpeg", bytes.clone(), &hash)
+                .unwrap_err()
+                .contains("JPEG signature")
+        );
+        assert!(
+            OpenRouterImageInput::new("image/png", bytes, &"0".repeat(64))
+                .unwrap_err()
+                .contains("changed after selection")
+        );
+        let oversized = vec![0; MAX_OPENROUTER_IMAGE_BYTES + 1];
+        assert!(
+            OpenRouterImageInput::new("image/png", oversized, &"0".repeat(64))
+                .unwrap_err()
+                .contains("between 1")
+        );
+    }
+
+    #[test]
+    fn metadata_capability_gates_and_sends_exact_selected_bytes() {
+        let metadata = json!({"data":[{
+            "id":DEFAULT_OPENROUTER_MODEL,
+            "architecture":{"input_modalities":["text","image"]}
+        }]})
+        .to_string();
+        let stream = done_stream("selected pixels received");
+        let (base_url, requests, worker) = mock_server(vec![
+            http_response("application/json", &metadata),
+            http_response("text/event-stream", &stream),
+            http_response("text/event-stream", &stream),
+        ]);
+        let image = test_png();
+        let expected_url = image.data_url();
+        let mut provider = OpenRouterProvider::new(test_config(base_url))
+            .expect("provider")
+            .with_image_inputs(vec![image])
+            .expect("image inputs");
+        provider.reasoning_effort = Some("low".to_string());
+        provider.session_id = Some("stasis-desktop-task-image".to_string());
+        provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect("image response");
+        let metadata_request = requests.recv().expect("metadata request");
+        assert!(metadata_request.starts_with("GET /models "));
+        let chat_request = requests.recv().expect("chat request");
+        let json_start = chat_request.find("\r\n\r\n").expect("headers") + 4;
+        let body: Value = serde_json::from_str(&chat_request[json_start..]).expect("body");
+        assert_eq!(body.pointer("/reasoning/effort"), Some(&json!("low")));
+        assert_eq!(
+            body.get("session_id"),
+            Some(&json!("stasis-desktop-task-image"))
+        );
+        assert_eq!(
+            body.pointer("/messages/0/content/1/image_url/url"),
+            Some(&Value::String(expected_url))
+        );
+        let encoded = body
+            .pointer("/messages/0/content/1/image_url/url")
+            .and_then(Value::as_str)
+            .and_then(|url| url.strip_prefix("data:image/png;base64,"))
+            .expect("PNG data URL");
+        let delivered = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("payload base64");
+        let decoded = image::load_from_memory_with_format(&delivered, image::ImageFormat::Png)
+            .expect("delivered PNG")
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [17, 34, 51, 255]);
+        assert!(provider.cached_image_input_capability().supported);
+        provider
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect("next text-only turn");
+        let next_request = requests.recv().expect("next chat request");
+        let next_json_start = next_request.find("\r\n\r\n").expect("headers") + 4;
+        let next_body: Value =
+            serde_json::from_str(&next_request[next_json_start..]).expect("next body");
+        assert!(next_body
+            .pointer("/messages/0/content")
+            .is_some_and(Value::is_string));
+        worker.join().expect("server");
+    }
+
+    #[test]
+    fn missing_image_modality_fails_before_chat_and_model_change_clears_cache() {
+        let metadata = json!({"data":[{
+            "id":DEFAULT_OPENROUTER_MODEL,
+            "architecture":{"input_modalities":["text"]}
+        }]})
+        .to_string();
+        let (base_url, requests, worker) =
+            mock_server(vec![http_response("application/json", &metadata)]);
+        let provider = OpenRouterProvider::new(test_config(base_url))
+            .expect("provider")
+            .with_image_inputs(vec![test_png()])
+            .expect("image inputs");
+        let mut configured = ConfiguredProvider::OpenRouter(provider);
+        let error = configured
+            .respond(&test_request(), &AtomicBool::new(false))
+            .expect_err("unsupported model");
+        assert!(error.contains("does not report image input"));
+        assert!(requests
+            .recv()
+            .expect("metadata request")
+            .starts_with("GET /models "));
+        configured = configured.with_model("vendor/new-model");
+        let ConfiguredProvider::OpenRouter(provider) = configured else {
+            unreachable!()
+        };
+        assert_eq!(
+            provider.cached_image_input_capability().model,
+            "vendor/new-model"
+        );
+        assert!(!provider.cached_image_input_capability().supported);
+        assert!(provider
+            .cached_image_input_capability()
+            .reason
+            .contains("not been verified"));
+        worker.join().expect("server");
+    }
+
+    #[test]
+    fn canceled_image_request_never_fetches_metadata_or_sends_chat() {
+        let mut provider = OpenRouterProvider::new(test_config("http://127.0.0.1:9".into()))
+            .expect("provider")
+            .with_image_inputs(vec![test_png()])
+            .expect("image inputs");
+        assert_eq!(
+            provider
+                .respond(&test_request(), &AtomicBool::new(true))
+                .unwrap_err(),
+            "AI request canceled"
+        );
     }
     #[test]
     fn openrouter_stream_and_codex_fixture_decode_identically() {
@@ -1320,11 +2204,16 @@ mod tests {
         let body = format!("data: {}\n\ndata: [DONE]\n\n", chunk);
         let (base_url, requests, worker) =
             mock_server(vec![http_response("text/event-stream", &body)]);
-        let mut provider = OpenRouterProvider::new(test_config(base_url)).expect("provider");
+        let mut config = test_config(base_url);
+        config.routing.order = vec!["openai".to_string(), "cerebras".to_string()];
+        let mut provider = OpenRouterProvider::new(config).expect("provider");
         provider.reasoning_effort = Some("low".to_string());
         provider.session_id = Some("stasis-test-session".to_string());
+        let mut progress = Vec::new();
         let openrouter = provider
-            .respond(&test_request(), &AtomicBool::new(false))
+            .respond_with_progress(&test_request(), &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
             .expect("stream response");
         let codex = crate::decode_codex_response(&fixture.to_string()).expect("Codex fixture");
         assert_eq!(openrouter, codex);
@@ -1364,11 +2253,63 @@ mod tests {
         );
         let usage = provider.take_usage().expect("usage");
         assert_eq!(usage["resolved_provider"], "cerebras");
+        assert_eq!(usage["fallback"], true);
         assert_eq!(usage["tokens"]["cache"], 2);
         assert!(usage["timing_ms"]["first_action"].is_number());
         assert!(usage["timing_ms"]["inference_total"].is_number());
         assert!(usage["timing_ms"]["turn_total"].is_number());
         assert!(usage["timing_ms"].get("total").is_none());
+        assert_eq!(
+            progress,
+            vec![
+                crate::ProviderProgress::ContactingProvider,
+                crate::ProviderProgress::FirstResponse {
+                    elapsed_ms: usage["timing_ms"]["first_content"]
+                        .as_u64()
+                        .expect("first content timing"),
+                },
+                crate::ProviderProgress::FirstAction {
+                    elapsed_ms: usage["timing_ms"]["first_action"]
+                        .as_u64()
+                        .expect("first action timing"),
+                },
+                crate::ProviderProgress::Fallback,
+            ]
+        );
+        worker.join().expect("mock worker");
+    }
+
+    #[test]
+    fn missing_resolved_provider_does_not_claim_fallback() {
+        let fixture = json!({
+            "mode": "done",
+            "working_notes": "Request complete.",
+            "summary": "complete"
+        });
+        let chunk = json!({
+            "model": DEFAULT_OPENROUTER_MODEL,
+            "choices": [{"delta": {"content": fixture.to_string()}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 3}
+        });
+        let body = format!("data: {}\n\ndata: [DONE]\n\n", chunk);
+        let (base_url, _requests, worker) =
+            mock_server(vec![http_response("text/event-stream", &body)]);
+        let mut config = test_config(base_url);
+        config.routing.order = vec!["cerebras".to_string(), "openai".to_string()];
+        let mut provider = OpenRouterProvider::new(config).expect("provider");
+        let mut progress = Vec::new();
+        provider
+            .respond_with_progress(&test_request(), &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
+            .expect("stream response");
+
+        let usage = provider.take_usage().expect("usage");
+        assert_eq!(usage["resolved_provider"], "unknown");
+        assert_eq!(usage["fallback"], false);
+        assert!(!progress
+            .iter()
+            .any(|event| matches!(event, crate::ProviderProgress::Fallback)));
         worker.join().expect("mock worker");
     }
 
@@ -1379,11 +2320,9 @@ mod tests {
         let (base_url, requests, worker) =
             mock_server(vec![http_response("text/event-stream", &body)]);
         let mut provider = OpenRouterProvider::new(test_config(base_url)).unwrap();
-        let error = provider
+        assert!(provider
             .respond(&test_request(), &AtomicBool::new(false))
-            .expect_err("malformed response");
-        assert!(error.contains("finish_reason=unknown"));
-        assert!(error.contains("response_bytes=8"));
+            .is_err());
         let usage = provider.take_usage().expect("failed response usage");
         assert_eq!(usage["cost"], 0.001);
         assert_eq!(usage["tokens"]["prompt"], 10);
@@ -1413,6 +2352,37 @@ mod tests {
         assert_eq!(qualifying, vec!["cerebras"]);
         worker.join().expect("mock worker");
     }
+    #[test]
+    fn hard_throughput_preserves_qualified_endpoint_variants() {
+        // Real endpoint metadata uses variant tags, not display provider names.
+        let metadata = json!({"data":{"endpoints":[
+            {"provider_name":"Cerebras","provider":"cerebras","tag":"cerebras/fp16","status":0,"throughput_last_30m":{"p50":673,"p75":1044}},
+            {"provider_name":"Cerebras","tag":"cerebras/slow","status":0,"throughput_last_30m":{"p50":100}},
+            {"provider_name":"Groq","tag":"groq","status":0,"throughput_last_30m":{"p50":245}},
+            {"tag":"cerebras//invalid","status":0,"throughput_last_30m":{"p50":900}}
+        ]}}).to_string();
+        let (base_url, _requests, worker) =
+            mock_server(vec![http_response("application/json", &metadata)]);
+        let mut config = test_config(base_url);
+        config.routing.only = vec!["cerebras".into()];
+        let provider = OpenRouterProvider::new(config).unwrap();
+        let (qualified, _) = provider
+            .qualifying_endpoints(400.0, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(qualified, ["cerebras/fp16"]);
+        assert_eq!(
+            provider.route_json(Some(qualified))["only"],
+            json!(["cerebras/fp16"])
+        );
+        worker.join().unwrap();
+        assert_eq!(
+            normalize_provider_slug("Google-Vertex/us-east5"),
+            Some("google-vertex/us-east5".into())
+        );
+        assert!(normalize_provider_slug("/cerebras").is_none());
+        assert!(normalize_provider_slug("cerebras/").is_none());
+    }
+
     #[test]
     fn hard_throughput_preflight_fails_closed_without_chat_request() {
         let metadata = json!({"data":{"endpoints":[{"tag":"cerebras","status":"healthy","throughput":900.0}]}}).to_string();
@@ -1502,10 +2472,14 @@ mod tests {
     fn canceled_request_never_starts_transport() {
         let mut provider =
             OpenRouterProvider::new(test_config("http://127.0.0.1:9".into())).expect("provider");
+        let mut progress = Vec::new();
         let error = provider
-            .respond("request", &AtomicBool::new(true))
+            .respond_with_progress("request", &AtomicBool::new(true), &mut |event| {
+                progress.push(event)
+            })
             .expect_err("canceled");
         assert_eq!(error, "AI request canceled");
+        assert!(progress.is_empty());
     }
 
     #[test]
@@ -1591,22 +2565,6 @@ mod tests {
             timeout: Duration::from_secs(1),
         });
         assert!(!openrouter.supports_image_input());
-        let vision_openrouter = ProviderConfig::OpenRouter(OpenRouterConfig {
-            api_key: "unit-secret".to_string(),
-            base_url: "http://127.0.0.1:9".to_string(),
-            model: "google/gemini-2.5-flash".to_string(),
-            routing: RoutingConfig::default(),
-            timeout: Duration::from_secs(1),
-        });
-        assert!(vision_openrouter.supports_image_input());
-
-        let unsupported_openrouter = openrouter
-            .build()
-            .expect("OpenRouter provider")
-            .with_images(vec![std::path::PathBuf::from("frame.png")]);
-        assert!(
-            matches!(unsupported_openrouter, Err(error) if error.contains("does not support image input"))
-        );
 
         let unsupported = ProviderConfig::Codex
             .build()
@@ -1628,26 +2586,5 @@ mod tests {
             .respond("request", &AtomicBool::new(false))
             .expect_err("dispatch must recheck image capability");
         assert!(error.contains("does not support image input"));
-    }
-
-    #[test]
-    fn openrouter_image_input_uses_multimodal_data_url_content() {
-        let path = std::env::temp_dir().join(format!(
-            "stasis-openrouter-image-{}-{}.png",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
-        std::fs::write(&path, b"\x89PNG\r\n\x1a\nfixture").expect("image fixture");
-        let content = openrouter_message_content("inspect frame", std::slice::from_ref(&path))
-            .expect("multimodal content");
-        let _ = std::fs::remove_file(path);
-
-        assert_eq!(content.pointer("/0/type"), Some(&json!("text")));
-        assert_eq!(content.pointer("/0/text"), Some(&json!("inspect frame")));
-        assert_eq!(content.pointer("/1/type"), Some(&json!("image_url")));
-        assert_eq!(
-            content.pointer("/1/image_url/url"),
-            Some(&json!("data:image/png;base64,iVBORw0KGgpmaXh0dXJl"))
-        );
     }
 }

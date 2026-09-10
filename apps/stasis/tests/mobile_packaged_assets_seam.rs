@@ -339,6 +339,7 @@ fn packaged_mobile_assets_reach_real_native_hosts_from_linked_aot() {
         .arg(format!("/I{}", runtime.display()))
         .arg(runtime.join("tests/stasis_mobile_packaged_assets_integration.c"))
         .arg(runtime.join("stasis_mobile_aot_runtime.c"))
+        .arg(runtime.join("stasis_platform_services.c"))
         .arg(runtime.join("stasis_audio_assets.c"))
         .arg(&bindings);
     for path in engine.object_paths_by_function_id.values() {

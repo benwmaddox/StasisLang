@@ -70,7 +70,17 @@ const GFX_CMD_NAME: &str = "gfx_cmd";
 const GFX_CMD_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const DESKTOP_NETWORK_ARTIFACTS: &[&str] = &[
-    "desktop/network/windows-x86_64/stasis_network.lib",
+    if cfg!(windows) {
+        "desktop/network/windows-x86_64/stasis_network.lib"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        "desktop/network/macos-arm64/libstasis_network.a"
+    } else if cfg!(target_os = "macos") {
+        "desktop/network/macos-x86_64/libstasis_network.a"
+    } else if cfg!(target_arch = "aarch64") {
+        "desktop/network/linux-arm64/libstasis_network.a"
+    } else {
+        "desktop/network/linux-x86_64/libstasis_network.a"
+    },
     "desktop/network/include/stasis_network.h",
 ];
 const MOBILE_RUNTIME_FILES: &[&str] = &[
@@ -206,7 +216,7 @@ if ! command -v stasis >/dev/null 2>&1; then
 fi
 
 echo "Stasis pre-commit: enforcing canonical source format"
-if ! stasis format; then
+if ! stasis format src tests; then
     echo "Commit blocked: 'stasis format' failed." >&2
     exit 1
 fi
@@ -1363,6 +1373,7 @@ fn execute(
                 _ => None,
             });
             let vendor_gate = match &other {
+                ToolchainCommand::Fmt { .. } => VendorGate::Inspect,
                 ToolchainCommand::Vendor { .. } => VendorGate::Inspect,
                 ToolchainCommand::Prepare => VendorGate::Inspect,
                 ToolchainCommand::Symbol { command } if command.is_read_only() => {
@@ -2778,6 +2789,22 @@ fn execute_noarg_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
 }
 
 fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandResult, String> {
+    test_workspace_with_progress(workspace, path, &mut |_| {})
+}
+
+fn report_toolchain_progress(
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+    stage: stasis_ai::task_controller::ProgressStage,
+) {
+    // Progress is observational and must not interrupt a source transaction.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| progress(stage)));
+}
+
+fn test_workspace_with_progress(
+    workspace: &Workspace,
+    path: Option<&Path>,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<CommandResult, String> {
     let directory = path
         .map(|value| workspace.root.join(value))
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
@@ -2797,6 +2824,11 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         None,
     )?;
     let mut session = StasisTestRunSession::new();
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::Compiling,
+    );
+    let mut running_tests_reported = false;
     let summary = stasis::run_jit_tests_in_directory_with_project_root_session_and_validator(
         &directory,
         &workspace.root,
@@ -2810,9 +2842,23 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
                 snapshot,
                 manifest.as_ref(),
             )?;
-            load_and_apply_play_data_bindings_for_test(&data_binding_paths, jit)
+            load_and_apply_play_data_bindings_for_test(&data_binding_paths, jit)?;
+            if !running_tests_reported {
+                report_toolchain_progress(
+                    progress,
+                    stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+                );
+                running_tests_reported = true;
+            }
+            Ok(())
         },
     )?;
+    if !running_tests_reported {
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+        );
+    }
     let scenarios = headless::run_scenarios(workspace, &directory)?;
     let data = json!({
         "files_discovered": summary.files_discovered,
@@ -4132,7 +4178,7 @@ fn build_workspace_with_desktop_network(
                     .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
             }
             let entry = Path::new(&workspace.manifest.entry);
-            let summary = if let Some(network) = desktop_network {
+            let summary = if let Some(network) = desktop_network.as_ref() {
                 run_self_host_aot_cli_with_desktop_network(
                     &workspace.root,
                     &output,
@@ -4168,12 +4214,11 @@ fn build_workspace_with_desktop_network(
                 .transpose()?;
             stage_workspace_assets(
                 workspace,
-                summary.linked_image_path.parent().ok_or_else(|| {
-                    format!(
-                        "release output has no parent: {}",
-                        summary.linked_image_path.display()
-                    )
-                })?,
+                release_asset_output_directory(
+                    &output,
+                    &summary.linked_image_path,
+                    desktop_network.is_some(),
+                )?,
                 retained.as_ref(),
             )?;
             Ok(CommandResult::success(
@@ -4233,15 +4278,23 @@ fn preflight_release_asset_preparation(
     cleanup
 }
 
+fn release_asset_output_directory<'a>(
+    requested: &'a Path,
+    linked: &'a Path,
+    network_package: bool,
+) -> Result<&'a Path, String> {
+    // Network monoliths share the package root with the browser guest bundle,
+    // including when the executable lives inside a macOS app bundle.
+    let output = if network_package { requested } else { linked };
+    output
+        .parent()
+        .ok_or_else(|| format!("release output has no parent: {}", output.display()))
+}
+
 fn build_desktop_network_library(
     staging_root: &Path,
     development_build: bool,
 ) -> Result<(PathBuf, PathBuf), String> {
-    if !cfg!(windows) {
-        return Err(
-            "network-enabled desktop production packaging currently requires Windows".to_string(),
-        );
-    }
     if let Some((library, header)) = bundled_network_artifacts_for_executable(
         &env::current_exe()
             .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
@@ -4269,10 +4322,12 @@ fn build_desktop_network_library(
     let target_dir = staging_root.join(".network-rust-target");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
-    if !rustflags.is_empty() {
-        rustflags.push(' ');
+    if cfg!(windows) {
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-C target-feature=+crt-static");
     }
-    rustflags.push_str("-C target-feature=+crt-static");
     let output = Command::new(cargo)
         .current_dir(&source_root)
         .args(["build", "-p", "stasis_network", "--release", "--target-dir"])
@@ -4506,7 +4561,7 @@ fn package_workspace(
             &workspace.root.join(MANIFEST_NAME),
             &payload_root.join(MANIFEST_NAME),
         )?;
-        if !cfg!(windows) {
+        if !cfg!(windows) && !network_enabled && !network_client_enabled {
             if let Some(runtime) = installed_runtime_library() {
                 copy_file(
                     &runtime,
@@ -5187,7 +5242,9 @@ fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTree
         })
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
-    let dynamic_text_paths = if imported_symbols.contains("stasis_jit_text_run_replace_from") {
+    let dynamic_text_paths = if imported_symbols.contains("stasis_jit_text_run_replace_from")
+        || imported_symbols.contains("stasis_jit_open_external_url")
+    {
         config["memory"]
             .as_object()
             .expect("generated memory layouts")
@@ -5722,7 +5779,11 @@ fn network_support_target(target: PackageTarget) -> Option<&'static str> {
         PackageTarget::AndroidX86_64 => Some("android-x86_64"),
         PackageTarget::IosArm64 => Some("ios-arm64"),
         PackageTarget::Desktop if cfg!(windows) => Some("windows-x86_64"),
+        PackageTarget::Desktop if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") => {
+            Some("macos-arm64")
+        }
         PackageTarget::Desktop if cfg!(target_os = "macos") => Some("macos-x86_64"),
+        PackageTarget::Desktop if cfg!(target_arch = "aarch64") => Some("linux-arm64"),
         PackageTarget::Desktop => Some("linux-x86_64"),
         PackageTarget::Web => None,
     }
@@ -7076,14 +7137,24 @@ fn apply_symbol_plan(
     plan: WorkshopSemanticEditPlan,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
-    apply_symbol_plan_with_validation(workspace, plan, options, None)
+    apply_symbol_plan_with_progress(workspace, plan, options, &mut |_| {})
 }
 
-fn apply_symbol_plan_with_validation(
+fn apply_symbol_plan_with_progress(
+    workspace: &Workspace,
+    plan: WorkshopSemanticEditPlan,
+    options: SymbolEditOptions,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<CommandResult, String> {
+    apply_symbol_plan_with_validation_and_progress(workspace, plan, options, None, progress)
+}
+
+fn apply_symbol_plan_with_validation_and_progress(
     workspace: &Workspace,
     plan: WorkshopSemanticEditPlan,
     options: SymbolEditOptions,
     prevalidated_test_result: Option<Value>,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
 ) -> Result<CommandResult, String> {
     if options.dry_run {
         return Ok(CommandResult::success(
@@ -7101,19 +7172,27 @@ fn apply_symbol_plan_with_validation(
         ));
     }
 
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+    );
     write_workshop_semantic_plan(&workspace.root, &plan, false)?;
     let validation = if let Some(test_result) = prevalidated_test_result {
         Ok(json!({"compiler": "passed", "tests": "passed", "test_result": test_result}))
     } else if options.no_tests {
         Ok(json!({"compiler": "passed", "tests": "skipped"}))
     } else {
-        test_workspace(workspace, None).map(
+        test_workspace_with_progress(workspace, None, progress).map(
             |result| json!({"compiler": "passed", "tests": "passed", "test_result": result.data}),
         )
     };
     let validation = match validation {
         Ok(validation) => validation,
         Err(error) => {
+            report_toolchain_progress(
+                progress,
+                stasis_ai::task_controller::ProgressStage::RollingBack,
+            );
             write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
                 format!(
                     "semantic edit validation failed: {error}; rollback also failed: {rollback}"
@@ -7132,6 +7211,10 @@ fn apply_symbol_plan_with_validation(
     let receipt = match write_symbol_receipt(workspace, &plan) {
         Ok(receipt) => receipt,
         Err(error) => {
+            report_toolchain_progress(
+                progress,
+                stasis_ai::task_controller::ProgressStage::RollingBack,
+            );
             write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
                 format!("semantic receipt failed: {error}; rollback also failed: {rollback}")
             })?;
@@ -7195,10 +7278,23 @@ fn desktop_preview_semantic_batch(
     })
 }
 
+#[cfg(test)]
 fn desktop_apply_semantic_preview(
     root: &Path,
     preview: &DesktopSemanticPreview,
 ) -> Result<(String, Value), String> {
+    desktop_apply_semantic_preview_with_progress(root, preview, &mut |_| {})
+}
+
+fn desktop_apply_semantic_preview_with_progress(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<(String, Value), String> {
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+    );
     let current_fingerprint = desktop_source_fingerprint(root, &[])?;
     if current_fingerprint != preview.source_fingerprint {
         return Err("stale semantic preview: project sources changed; generate a new preview before applying".into());
@@ -7234,6 +7330,14 @@ fn desktop_apply_semantic_preview(
     let committed_fingerprint = desktop_inputs_fingerprint(&validated_inputs);
     let apply_started = Instant::now();
     let test_started = Instant::now();
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::Compiling,
+    );
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+    );
     let test_result = run_staged_project_tests_bounded(
         &workspace.root,
         Path::new(&workspace.manifest.entry),
@@ -7241,6 +7345,10 @@ fn desktop_apply_semantic_preview(
         &AtomicBool::new(false),
     )
     .map_err(|error| {
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::RollingBack,
+        );
         format!(
             "semantic edit validation failed; candidate was discarded and all source changes were rolled back before publication: {error}"
         )
@@ -7253,7 +7361,7 @@ fn desktop_apply_semantic_preview(
                 .into(),
         );
     }
-    let mut result = apply_symbol_plan_with_validation(
+    let mut result = apply_symbol_plan_with_validation_and_progress(
         &workspace,
         preview.plan.clone(),
         SymbolEditOptions {
@@ -7261,6 +7369,7 @@ fn desktop_apply_semantic_preview(
             no_tests: false,
         },
         Some(test_result),
+        progress,
     )?;
     result.data["source_fingerprint"] = json!(committed_fingerprint);
     result.data["timing_micros"] = json!({
@@ -7276,17 +7385,42 @@ fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, 
     desktop_apply_semantic_preview(root, &preview)
 }
 
+#[cfg(test)]
 fn desktop_run_focused_tests(
     root: &Path,
     relevant_tests: &[String],
 ) -> Result<(String, Value), String> {
+    desktop_run_focused_tests_with_progress(root, relevant_tests, &mut |_| {})
+}
+
+fn desktop_run_focused_tests_with_progress(
+    root: &Path,
+    relevant_tests: &[String],
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<(String, Value), String> {
     if relevant_tests.is_empty() {
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::Compiling,
+        );
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+        );
         let receipt = run_project_tests_bounded_with_receipt(root, None, &AtomicBool::new(false))?;
         desktop_require_executed_tests(&receipt)?;
         return Ok(("focused tests passed".to_string(), receipt));
     }
     let mut receipts = Vec::with_capacity(relevant_tests.len());
     for relative in relevant_tests {
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::Compiling,
+        );
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+        );
         let receipt = run_project_tests_bounded_with_receipt(
             root,
             Some(Path::new(relative)),
@@ -7404,16 +7538,6 @@ fn desktop_source_context(root: &Path) -> Result<Vec<Value>, String> {
             })
         })
         .collect::<Vec<_>>();
-    if serde_json::to_vec(&context)
-        .map_err(|error| error.to_string())?
-        .len()
-        > 256 * 1024
-    {
-        return Err(
-            "Project source context exceeds 256 KiB; narrow the project before requesting edits."
-                .into(),
-        );
-    }
     Ok(context)
 }
 
@@ -8701,6 +8825,28 @@ mod tests {
     }
 
     #[test]
+    fn release_web_runtime_retains_external_url_text_and_import() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".to_string()]);
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; global url: utf8[64]; function main(): i32 { url.length = 0; return open_external_url_raw(url); }",
+        );
+        process.compile().expect("compile Web external URL fixture");
+        assert!(process
+            .imported_symbols()
+            .contains("stasis_jit_open_external_url"));
+
+        let release = web_runtime_config(&workspace, &process, false);
+        assert_eq!(release["memory"]["url"]["byte_backed"], json!(true));
+        assert!(release["globals"].get("url.length").is_some());
+        let runtime = link_web_runtime(&process, false, false).expect("link Web runtime");
+        assert!(runtime.contains("stasis_jit_open_external_url: openExternalUrl"));
+    }
+
+    #[test]
     fn web_runtime_import_markers_follow_imports_and_reject_malformed_layout() {
         let source = "before\n// @stasis-import web_input_axis begin\naxis\n// @stasis-import web_input_axis end\nmiddle\n// @stasis-import web_input_fire begin\nfire\n// @stasis-import web_input_fire end\nafter";
         let imports = BTreeSet::from(["web_input_fire".to_string()]);
@@ -9391,7 +9537,24 @@ mod tests {
         let preview = desktop_preview_semantic_batch(&root, payload.clone()).unwrap();
         assert_eq!(preview.payload, payload);
         let reviewed_plan = preview.plan.clone();
-        let (_, receipt) = desktop_apply_semantic_preview(&root, &preview).unwrap();
+        let mut progress = Vec::new();
+        let (_, receipt) =
+            desktop_apply_semantic_preview_with_progress(&root, &preview, &mut |stage| {
+                progress.push(stage)
+            })
+            .unwrap();
+        assert_eq!(
+            progress,
+            [
+                stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+                stasis_ai::task_controller::ProgressStage::Compiling,
+                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+                stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+            ]
+        );
+        assert!(
+            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
+        );
         assert_eq!(receipt["plan"], json!(reviewed_plan));
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).unwrap(),
@@ -9519,6 +9682,19 @@ mod tests {
     #[test]
     fn desktop_editor_fingerprints_selected_tests_and_rejects_empty_selection() {
         let root = desktop_editor_fixture("editor_fingerprint");
+        let mut progress = Vec::new();
+        desktop_run_focused_tests_with_progress(&root, &[], &mut |stage| progress.push(stage))
+            .unwrap();
+        assert_eq!(
+            progress,
+            [
+                stasis_ai::task_controller::ProgressStage::Compiling,
+                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+            ]
+        );
+        assert!(
+            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
+        );
         fs::create_dir_all(root.join("checks")).unwrap();
         fs::write(
             root.join("checks/selected.stasis"),
@@ -9571,8 +9747,25 @@ mod tests {
         };
         let (_, accepted_receipt) = desktop_apply_semantic_batch(&root, propose(2)).unwrap();
         let accepted_source = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        let error = desktop_apply_semantic_batch(&root, propose(-1)).unwrap_err();
+        let preview = desktop_preview_semantic_batch(&root, propose(-1)).unwrap();
+        let mut progress = Vec::new();
+        let error = desktop_apply_semantic_preview_with_progress(&root, &preview, &mut |stage| {
+            progress.push(stage)
+        })
+        .unwrap_err();
         assert!(error.contains("rolled back"), "{error}");
+        assert_eq!(
+            progress,
+            [
+                stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+                stasis_ai::task_controller::ProgressStage::Compiling,
+                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+                stasis_ai::task_controller::ProgressStage::RollingBack,
+            ]
+        );
+        assert!(
+            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
+        );
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).unwrap(),
             accepted_source
@@ -9970,6 +10163,10 @@ mod tests {
         assert!(error.contains("incomplete stdlib or documentation"));
         let (stdlib, docs) = resolve_vendor_directories(&[fallback]).unwrap();
         copy_dir_if_exists(&stdlib, &installed.join("src/stdlib")).unwrap();
+        assert_eq!(
+            fs::read(installed.join("src/stdlib/rig2d.stasis")).unwrap(),
+            fs::read(stdlib.join("rig2d.stasis")).unwrap()
+        );
         assert!(resolve_vendor_directories(&[installed.clone()]).is_err());
         copy_dir_if_exists(&docs, &installed.join("docs/knowledge")).unwrap();
         assert_eq!(
@@ -10045,6 +10242,49 @@ mod tests {
         assert!(vendor_root.join("stdlib/stdlib.stasis").is_file());
         assert!(vendor_root.join("docs/README.md").is_file());
         assert!(!vendor_root.join("src").exists());
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn formatting_preserves_mismatched_vendor_and_manifest() {
+        let root = temp_dir("format_preserves_vendor");
+        create_project(root.clone(), "format_preserves_vendor".into()).unwrap();
+        let manifest_path = root.join(MANIFEST_NAME);
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["vendor"]["stasis"]["release_id"] = json!("newer-than-this-toolchain");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("vendor/stasis/local-marker.txt"), "preserve me").unwrap();
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 {return 0;}\n",
+        )
+        .unwrap();
+        let original_manifest = fs::read(&manifest_path).unwrap();
+        let original_vendor = directory_sha256(&root.join("vendor/stasis")).unwrap();
+        for check in [false, true] {
+            execute(
+                ToolchainCommand::Fmt {
+                    check,
+                    stdin: false,
+                    paths: Vec::new(),
+                },
+                Some(root.clone()),
+                false,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&manifest_path).unwrap(), original_manifest);
+            assert_eq!(
+                directory_sha256(&root.join("vendor/stasis")).unwrap(),
+                original_vendor
+            );
+        }
+        assert!(PROJECT_PRE_COMMIT_HOOK.contains("stasis format src tests"));
+        assert!(!PROJECT_PRE_COMMIT_HOOK.contains("if ! stasis format;"));
         remove_temp(&root);
     }
 
@@ -10444,9 +10684,8 @@ mod tests {
         write_json_file(&manifest_path, &manifest).expect("write provenance fixture");
         verify_release_provenance(&manifest_path).expect("accept matching release");
 
-        let desktop_network = root.join("desktop/network");
-        let library = desktop_network.join("windows-x86_64/stasis_network.lib");
-        let header = desktop_network.join("include/stasis_network.h");
+        let library = root.join(DESKTOP_NETWORK_ARTIFACTS[0]);
+        let header = root.join(DESKTOP_NETWORK_ARTIFACTS[1]);
         fs::create_dir_all(library.parent().expect("library parent"))
             .expect("create desktop network library directory");
         fs::create_dir_all(header.parent().expect("header parent"))
@@ -10872,6 +11111,7 @@ mod tests {
             fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
                 .expect("read Android CMake project");
         assert!(android_cmake.contains("STASIS_ENABLE_SEAM_TESTS"));
+        assert!(android_cmake.contains("stasis_android_external_url.c"));
         assert!(android_jni.contains("STASIS_SEAM_TEST_ID"));
         assert!(android_jni.contains("nativeSetAssetManifestSha256"));
         assert!(android_jni.contains("STASIS_ASSET_MANIFEST_SHA256"));
@@ -10939,6 +11179,8 @@ mod tests {
         assert!(java.contains("performanceHud.setSingleLine(false)"));
         assert!(java.contains("new AndroidAssetSource(getAssets())"));
         assert!(java.contains("Asset cache preparation failed before runtime startup"));
+        assert!(java.contains("Intent.ACTION_VIEW"));
+        assert!(java.contains("externalUrlHostActive"));
         assert!(java.contains("setOnApplyWindowInsetsListener"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
@@ -11103,6 +11345,17 @@ mod tests {
             fs::read_to_string(ios_network.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
                 .expect("read network iOS Xcode project")
                 .contains("stasis_ios_network.m in Sources")
+        );
+        let ios_external_url =
+            fs::read_to_string(ios_network.join("ios/StasisMobile/stasis_ios_external_url.m"))
+                .expect("read iOS external URL adapter");
+        assert!(
+            ios_external_url.contains("openURL:target options:@{} completionHandler:completion")
+        );
+        assert!(
+            fs::read_to_string(ios_network.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
+                .expect("read iOS Xcode project")
+                .contains("stasis_ios_external_url.m in Sources")
         );
 
         let android_network = root.join("android-network-package");
@@ -11277,20 +11530,59 @@ mod tests {
         remove_temp(&root);
     }
 
-    #[cfg(windows)]
+    #[test]
+    fn desktop_network_assets_share_guest_root_outside_macos_app() {
+        let requested = Path::new("dist/Game");
+        let linked = Path::new("dist/Game.app/Contents/MacOS/Game");
+        assert_eq!(
+            release_asset_output_directory(requested, linked, true).unwrap(),
+            Path::new("dist")
+        );
+        assert_eq!(
+            release_asset_output_directory(requested, linked, false).unwrap(),
+            Path::new("dist/Game.app/Contents/MacOS")
+        );
+        assert_eq!(
+            release_asset_output_directory(requested, requested, true).unwrap(),
+            Path::new("dist")
+        );
+    }
+
+    #[test]
+    fn desktop_network_provenance_rejects_foreign_target_libraries() {
+        let root = temp_dir("foreign_desktop_network");
+        for library in [
+            "desktop/network/windows-x86_64/stasis_network.lib",
+            "desktop/network/linux-x86_64/libstasis_network.a",
+            "desktop/network/linux-arm64/libstasis_network.a",
+            "desktop/network/macos-x86_64/libstasis_network.a",
+            "desktop/network/macos-arm64/libstasis_network.a",
+        ] {
+            if library == DESKTOP_NETWORK_ARTIFACTS[0] {
+                continue;
+            }
+            let provenance = json!({"desktop_network_artifacts": {
+                (library): "foreign-library-hash",
+                (DESKTOP_NETWORK_ARTIFACTS[1]): "header-hash",
+            }});
+            let error = verify_desktop_network_artifact_hashes(&provenance, &root)
+                .expect_err("reject a release built for another platform before linking");
+            assert!(error.contains("artifact set mismatch"), "{error}");
+        }
+        remove_temp(&root);
+    }
+
     #[test]
     fn bundled_desktop_network_artifacts_resolve_beside_the_cli() {
         let root = temp_dir("relocated_desktop_network");
         let executable = root.join("bin/stasis.exe");
         let support = root.join("bin/desktop/network");
-        fs::create_dir_all(support.join("windows-x86_64")).expect("create library directory");
+        let library_path = root.join("bin").join(DESKTOP_NETWORK_ARTIFACTS[0]);
+        fs::create_dir_all(library_path.parent().unwrap()).expect("create library directory");
         fs::create_dir_all(support.join("include")).expect("create include directory");
         fs::write(&executable, b"relocated stasis executable").expect("write executable fixture");
-        fs::write(
-            support.join("windows-x86_64/stasis_network.lib"),
-            b"relocated desktop network library",
-        )
-        .expect("write relocated network library");
+        fs::write(&library_path, b"relocated desktop network library")
+            .expect("write relocated network library");
         fs::write(
             support.join("include/stasis_network.h"),
             b"/* relocated network header */\n",
@@ -11301,7 +11593,7 @@ mod tests {
             bundled_network_artifacts_for_executable(&executable, PackageTarget::Desktop)
                 .expect("resolve desktop support")
                 .expect("desktop support artifacts");
-        assert_eq!(library, support.join("windows-x86_64/stasis_network.lib"));
+        assert_eq!(library, library_path);
         assert_eq!(header, support.join("include/stasis_network.h"));
         remove_temp(&root);
     }
@@ -11398,6 +11690,15 @@ mod tests {
         assert!(root
             .join(".stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis")
             .is_file());
+        assert_eq!(
+            fs::read(root.join(".stasis_cache/toolchain/src/stdlib/rig2d.stasis")).unwrap(),
+            fs::read(
+                bundled_stdlib_dir()
+                    .expect("bundled stdlib")
+                    .join("rig2d.stasis")
+            )
+            .expect("read bundled rig2d stdlib")
+        );
 
         remove_temp(&root);
     }

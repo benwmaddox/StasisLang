@@ -119,3 +119,29 @@ requests, explicitly accepts and applies the reviewed semantic plans, and
 captures native editor/SDL renders. It never modifies the source sample.
 `STASIS_EDITOR_LIVE_LOCAL_APPLY_ONLY=1` runs the deterministic isolation preflight
 without inference. Clear that variable for provider acceptance.
+
+## PR 722 merge repair (2026-09-10)
+
+Resolved the worker-prepared merge with main while retaining native tiling,
+accessible compact layouts, aggregate provider usage, and isolated validation
+before atomic source publication. Integrated main's progress reporting, persisted
+editor history/diff expansion, source-symbol reads, and immutable OpenRouter
+image snapshots with provider-metadata capability checks. Updated the evidence
+harnesses for the merged APIs and regenerated the dependency lock with AccessKit.
+
+Validation in this repair execution:
+- `python tools/cargo_cache.py run -- cargo build -p stasis --bin stasis --offline --locked`: passed.
+- `python tools/cargo_cache.py run -- cargo test -p stasis_ai --lib --offline -- --test-threads=1`: 135 passed.
+- `python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis --offline --locked desktop_ -- --test-threads=1`: 120 passed.
+- Targeted rustfmt and diff whitespace checks passed; no unresolved merge paths remain.
+- The full staged whitespace check reports pre-existing whitespace in incoming
+  main files outside this repair; those files were preserved.
+
+Visual evidence: no new media captured for this merge repair. The previously
+recorded task acceptance media and measurements above remain historical evidence;
+the opt-in live/media harnesses compiled but were not activated by this test run.
+
+Theory gained: host progress must describe the isolated validation transaction;
+source publication begins only after child validation and the final fingerprint
+check. The passing isolation regression supports retaining that boundary when
+adding future progress or persistence features.

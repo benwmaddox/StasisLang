@@ -683,7 +683,8 @@ fn start_task(editor: &mut DesktopEditor, objective: &str, prompt: &str) -> Resu
 fn create_openrouter_task(editor: &mut DesktopEditor, objective: &str) -> Result<(), String> {
     editor.state.objective = objective.to_string();
     editor.state.create_task()?;
-    let config = selected_provider_config(Some(ProviderSelection::OpenRouter))?;
+    let config =
+        selected_provider_config(Some(ProviderSelection::OpenRouter), &editor.project_root)?;
     let task = editor
         .state
         .session

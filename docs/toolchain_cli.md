@@ -58,6 +58,16 @@ Commands discover
 `stasis.json` by walking from the selected path toward the filesystem root, so they work from the
 project root and nested directories. `--workspace PATH` selects a project explicitly.
 
+On Windows, opening a visible game window minimizes the attached console once by default.
+This applies to development/editor sessions and packaged release games. The game and editor
+remain visible; restore the console from the taskbar whenever you need its output. Resizing or
+reopening the game window does not minimize a console you restored. Windows Terminal may
+share one host window across tabs, so minimizing that host also minimizes its other tabs.
+Set `STASIS_CONSOLE_START_MINIMIZED=0` before launching to keep the console visible, including
+when using a console-based frontend. Headless recording and commands that do not open a visible
+game window leave the console alone. `STASIS_WINDOW_START_MINIMIZED` separately controls the
+game window.
+
 ## Workspace contract
 
 `stasis.json` is versioned and deterministic:
@@ -122,8 +132,8 @@ archive into the project.
 The project `name` may contain internal ASCII spaces, so display names such as `Chess TD` are
 valid; leading or trailing spaces are rejected. Manifest paths must be project-relative and cannot
 contain `..`. Generated projects include a
-runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building and semantic-edit
-guide, a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
+runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building, semantic-edit, and container-derived UI geometry
+guide (sourced from `docs/agent_workflow.md`), a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
 `PROJECT_ARCHITECTURE.md` with practical input, tick, state, and rendering guidance.
 Both `new` and `init` also add language-scoped VS Code settings that recommend the Stasis extension
 and enable its canonical formatter on save without changing the formatter for other languages.
@@ -272,6 +282,11 @@ restore release assets.
 
 `verify` remains reserved for a future non-presenting batch verifier. `replay` performs verification
 while presenting every reconstructed tick.
+
+Formatting checks and formatting writes leave `stasis.json` and `vendor/stasis` unchanged,
+even when the selected toolchain differs from the project's vendor pin. Generated commit hooks
+format explicit `src` and `tests` paths so older formatters also avoid workspace synchronization.
+Release changes remain separate from formatting.
 
 ### Headless scenarios
 
@@ -431,6 +446,28 @@ Windows graphical launch coverage is defined in
 PNG, SVG, font, tick, and framebuffer assertions.
 
 ### AI desktop editor keyboard commands
+
+Creating a task sends its objective as the first message. The editor starts with a bounded
+symbol catalog and reads exact source symbols as needed, so a project does not have to fit
+all its source into the initial AI prompt. Proposed changes still require acceptance.
+
+The desktop editor reads AI settings from the selected project's `.env` (not the launcher's
+working directory). Process environment values take precedence. An `OPENROUTER_API_KEY`
+selects OpenRouter when `STASIS_AI_PROVIDER` is unset; an explicit provider selection wins.
+Keep `.env` ignored by Git. The key is not included in task history or AI context.
+
+OpenRouter defaults to a hard 400 tokens/second endpoint minimum, without a throughput
+override. Routing fails if no healthy endpoint qualifies; it does not fall back to a slower
+endpoint. This uses endpoint throughput metadata, not a guarantee of each request's measured
+speed. Explicit `STASIS_AI_HARD_MIN_THROUGHPUT` or preferred-throughput settings override
+the default. `STASIS_AI_MODEL` selects the model.
+
+Failed requests show a credential-safe diagnostic in the task. Reconnect retries the saved
+request without duplicating its message during the current editor session. Reopening an
+editor never automatically replays an unfinished request. OpenRouter chat calls retry an
+HTTP 429 response up to two times before requiring a manual reconnect. Each retry remains
+inside the original request deadline and the same qualified endpoint set; a provider delay
+is capped at two seconds to keep the editor responsive.
 
 In the AI desktop editor, Ctrl+K or Ctrl+F opens the command palette. Type to
 filter commands, use Up/Down to select, Enter to invoke, and Escape to dismiss

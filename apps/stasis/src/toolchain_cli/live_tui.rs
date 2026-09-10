@@ -1149,6 +1149,9 @@ fn audit_agent_event(event: &AgentEvent) -> Value {
         AgentEvent::Turn { current, maximum } => {
             serde_json::json!({"event": "turn", "current": current, "maximum": maximum})
         }
+        AgentEvent::ProviderProgress(progress) => {
+            serde_json::json!({"event": "provider_progress", "progress": progress})
+        }
         AgentEvent::ProviderUsage(_) => unreachable!("provider usage has a separate log"),
         AgentEvent::WorkingNotes(notes) => {
             serde_json::json!({"event": "working_notes", "text": notes})
@@ -2387,6 +2390,11 @@ impl LiveTui {
                 AiUiEvent::Progress(AgentEvent::Turn { current, maximum }) => {
                     self.status = format!("AI turn {current}/{maximum}; Ctrl+C cancels");
                     self.audit(serde_json::json!({"event": "turn", "current": current, "maximum": maximum}));
+                }
+                AiUiEvent::Progress(AgentEvent::ProviderProgress(progress)) => {
+                    self.audit(
+                        serde_json::json!({"event": "provider_progress", "progress": progress}),
+                    );
                 }
                 AiUiEvent::Progress(AgentEvent::ProviderUsage(usage)) => {
                     if let Some(log) = &mut self.ai_audit {
@@ -5800,6 +5808,53 @@ mod tests {
             assert!(
                 !rendered.contains(internal),
                 "internal audio API leaked: {internal}"
+            );
+        }
+    }
+
+    #[test]
+    fn stdlib_rig2d_catalog_exposes_owned_layout_and_public_surface() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical project root");
+        let stdlib = project
+            .join("src/stdlib")
+            .canonicalize()
+            .expect("canonical stdlib root");
+        let root = StdlibApiRoot {
+            canonical_project: project,
+            canonical_root: stdlib.clone(),
+            import_prefix: "/src/stdlib",
+        };
+        let catalog = load_stdlib_module_index(Some(&root)).expect("stdlib module index");
+        assert!(catalog["modules"]
+            .as_array()
+            .expect("stdlib modules")
+            .iter()
+            .any(|module| {
+                module["module"] == "rig2d"
+                    && module["canonical_import"] == "/src/stdlib/rig2d.stasis"
+            }));
+
+        let source = fs::read_to_string(stdlib.join("rig2d.stasis")).expect("read rig2d source");
+        assert!(source.contains("bones: RigBone2D[RIG2D_BONE_CAPACITY];"));
+        let (_, items) = read_stdlib_api_items(&root, &stdlib.join("rig2d.stasis"))
+            .expect("read canonical rig2d API");
+        let rendered = serde_json::to_string(&items).expect("rig2d API JSON");
+        for public in [
+            "RIG2D_BONE_CAPACITY",
+            "RigBone2D",
+            "Rig2D",
+            "add_bone(self: Rig2D",
+            "blend_local(self: Rig2D",
+            "reset_pose(self: Rig2D",
+            "solve(self: Rig2D",
+            "world_angle(self: Rig2D",
+        ] {
+            assert!(
+                rendered.contains(public),
+                "missing public rig2d API: {public}"
             );
         }
     }

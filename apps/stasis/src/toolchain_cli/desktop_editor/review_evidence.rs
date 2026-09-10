@@ -96,6 +96,7 @@ fn capture_recorded_live_proposal_reviews() {
         width: f32,
         height: f32,
         scale: f32,
+        expanded: BTreeSet<String>,
     }
 
     impl eframe::App for CaptureApp {
@@ -177,6 +178,8 @@ fn capture_recorded_live_proposal_reviews() {
                     ui,
                     &review.plan,
                     ("recorded-live-proposal-review", self.index),
+                    &format!("{}/{}", review.task_id, review.action_id),
+                    &mut self.expanded,
                 );
             });
 
@@ -215,6 +218,7 @@ fn capture_recorded_live_proposal_reviews() {
                 width,
                 height,
                 scale,
+                expanded: BTreeSet::new(),
             })
         }),
     )

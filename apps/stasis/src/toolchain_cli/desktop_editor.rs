@@ -1,12 +1,24 @@
+mod host_progress;
+mod image_attachments;
+mod persistence;
+#[cfg(test)]
+mod request_image_tests;
 mod semantic_diff;
+#[cfg(test)]
+mod source_context_tests;
+
+use host_progress::{HostProgress, HostProgressState};
+use stasis_ai::task_controller::{ProgressReporter, ProgressStage};
 mod semantic_revisions;
 mod window_layout;
 
+use image_attachments::{AttachmentOrigin, SessionAttachmentStore};
 use semantic_revisions::proposal_revisions;
 
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use stasis_ai::session_store::{SessionSnapshot, SessionStore, WindowPreferences};
 use stasis_ai::task_session::{
     ActionState, ActivityKind, ConnectionState, FallbackState, ImageHandoffState, ImageReviewState,
     Key, KeyChord, Modifiers, ProviderSelection, ProviderState, RoutingState,
@@ -75,11 +87,59 @@ enum TimelineAction {
     ApproveImage(String, String),
     RejectImage(String, String),
     Import(String, String),
+    SelectAttachment(String, String),
+    UnselectAttachment(String, String),
+    RemoveAttachment(String, String),
+    PreviewAttachment(String, String),
 }
 
 #[derive(Default)]
 struct ProposalTools {
     proposals: Vec<ProviderActionProposal>,
+    sources: Vec<Value>,
+}
+
+const MAX_SOURCE_CONTEXT_BYTES: usize = 256 * 1024;
+
+impl ProposalTools {
+    fn source_catalog(&self) -> Result<Value, String> {
+        let catalog = Value::Array(
+            self.sources
+                .iter()
+                .map(|item| item["target"].clone())
+                .collect(),
+        );
+        if serde_json::to_vec(&catalog)
+            .map_err(|error| error.to_string())?
+            .len()
+            > MAX_SOURCE_CONTEXT_BYTES
+        {
+            return Err("Project symbol catalog exceeds 256 KiB; narrow the project before requesting edits.".into());
+        }
+        Ok(catalog)
+    }
+
+    fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
+        let symbol_id = args
+            .get("symbol_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "symbol_id must be a string".to_string())?;
+        let item = self
+            .sources
+            .iter()
+            .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id))
+            .ok_or_else(|| format!("Unknown source symbol: {symbol_id}"))?;
+        if serde_json::to_vec(item)
+            .map_err(|error| error.to_string())?
+            .len()
+            > MAX_SOURCE_CONTEXT_BYTES
+        {
+            return Err(format!(
+                "Source symbol {symbol_id} exceeds the 256 KiB read limit."
+            ));
+        }
+        Ok(item.clone())
+    }
 }
 
 impl ToolExecutor for ProposalTools {
@@ -92,6 +152,11 @@ impl ToolExecutor for ProposalTools {
                 }
                 let repair = call.tool == "repair_semantic_edit";
                 let result: Result<Value, String> = (|| {
+                    match call.tool.as_str() {
+                        "read_source_symbol" => return self.read_source_symbol(&call.args),
+                        "propose_semantic_edit" | "repair_semantic_edit" => {}
+                        _ => return Err(format!("Unknown desktop editor tool: {}", call.tool)),
+                    }
                     let id = call
                         .args
                         .get("proposal_id")
@@ -137,7 +202,7 @@ impl ToolExecutor for ProposalTools {
 }
 
 fn proposal_tool_specs() -> Vec<ToolSpec> {
-    [
+    let mut specs: Vec<ToolSpec> = [
         (
             "propose_semantic_edit",
             "Propose an atomic semantic edit for explicit user acceptance.",
@@ -159,7 +224,15 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
         ],
         optional_args: Vec::new(),
     })
-    .collect()
+    .collect();
+    specs.push(ToolSpec {
+        tool: "read_source_symbol".to_string(),
+        action_id: action_id_for_tool("read_source_symbol"),
+        purpose: "Read exact source and target metadata from the request's immutable source snapshot before proposing edits. Calls for multiple symbols can be batched.".to_string(),
+        required_args: vec!["symbol_id".to_string()],
+        optional_args: Vec::new(),
+    });
+    specs
 }
 
 fn bounded_provider_label(value: Option<&str>, fallback: &str) -> String {
@@ -297,13 +370,14 @@ fn provider_reply_usage(usage: Option<&Value>) -> ProviderUsage {
 
 fn selected_provider_config(
     selection: Option<ProviderSelection>,
+    project_root: &std::path::Path,
 ) -> Result<ProviderConfig, String> {
     match selection {
         Some(ProviderSelection::Codex) => Ok(ProviderConfig::Codex),
         Some(ProviderSelection::OpenRouter) => Ok(ProviderConfig::OpenRouter(
-            stasis_ai::OpenRouterConfig::from_env()?,
+            stasis_ai::OpenRouterConfig::from_workspace(project_root)?,
         )),
-        None => ProviderConfig::from_env(),
+        None => ProviderConfig::from_workspace(project_root),
     }
 }
 
@@ -320,25 +394,73 @@ fn run_reply_provider(
     request: ProviderRequest,
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
+    progress: ProgressReporter,
 ) -> Result<ProviderReply, String> {
-    run_reply_provider_observed(request, canceled, project_root, |_| {})
+    run_reply_provider_observed_with_progress(
+        request,
+        canceled,
+        project_root,
+        Some(progress),
+        |_| {},
+    )
 }
 
+#[cfg(test)]
 fn run_reply_provider_observed(
     request: ProviderRequest,
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
     mut observe_usage: impl FnMut(&Value),
 ) -> Result<ProviderReply, String> {
-    let config = selected_provider_config(request.selected_provider)?;
+    run_reply_provider_observed_with_progress(
+        request,
+        canceled,
+        project_root,
+        None,
+        &mut observe_usage,
+    )
+}
+
+fn run_reply_provider_observed_with_progress(
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    project_root: PathBuf,
+    progress: Option<ProgressReporter>,
+    mut observe_usage: impl FnMut(&Value),
+) -> Result<ProviderReply, String> {
+    let config = selected_provider_config(request.selected_provider, &project_root)?;
     let effective_reasoning_effort = (config.provider_name() == "openrouter").then_some("low");
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
-    let mut provider = config
+    if canceled.load(Ordering::Acquire) {
+        return Err("AI request canceled".into());
+    }
+    let provider = config
         .clone()
         .build()?
         .with_session_id(format!("stasis-desktop-task-{}", request.task_id))?
-        .with_timeout(Duration::from_secs(120))
-        .with_images(image_paths)?;
+        .with_timeout(Duration::from_secs(120));
+    let mut provider = if matches!(config, ProviderConfig::OpenRouter(_)) {
+        let images = image_paths
+            .iter()
+            .zip(&request.screenshots)
+            .map(|(path, screenshot)| {
+                let bytes = image_attachments::read_bounded(path)?;
+                let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    "image/png"
+                } else {
+                    "image/jpeg"
+                };
+                stasis_ai::OpenRouterImageInput::new(
+                    mime,
+                    bytes,
+                    screenshot.content_sha256.as_deref().unwrap_or_default(),
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        provider.with_openrouter_image_inputs(images)?
+    } else {
+        provider.with_images(image_paths)?
+    };
     if let Some(reasoning_effort) = effective_reasoning_effort {
         provider = provider.with_reasoning_effort(reasoning_effort);
     }
@@ -349,7 +471,15 @@ fn run_reply_provider_observed(
         .filter(|text| !text.is_empty())
         .unwrap_or(request.objective.as_str())
         .to_string();
+    if let Some(progress) = &progress {
+        progress.report(ProgressStage::InspectingSymbols);
+    }
     let source_context = super::desktop_source_context(&project_root)?;
+    let mut tools = ProposalTools {
+        sources: source_context,
+        ..ProposalTools::default()
+    };
+    let source_catalog = tools.source_catalog()?;
     let initial_context = json!({
         "task_id": request.task_id,
         "objective": request.objective,
@@ -360,18 +490,17 @@ fn run_reply_provider_observed(
         "screenshots": request.screenshots,
         "thread": request.context,
         "actions": request.actions,
-        "editable_sources": source_context,
+        "editable_symbols": source_catalog,
     });
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
-        max_turns: 3,
+        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Propose related source and behavioral tests together in one atomic batch. The editable_symbols catalog identifies project source. Use read_source_symbol to inspect exact source before proposing changes; batch independent symbol reads. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
+        max_turns: 4,
         ..AgentProfile::default()
     };
     let mut usage = None;
     let mut total_usage = ProviderUsage::default();
     let mut last_tool_error = None;
-    let mut tools = ProposalTools::default();
     let text = run_agent_with_profile(
         &mut provider,
         &mut tools,
@@ -393,10 +522,43 @@ fn run_reply_provider_observed(
                     })
                     .or(last_tool_error.take());
             }
-            if let AgentEvent::ProviderUsage(value) = event {
-                accumulate_provider_usage(&mut total_usage, &value);
-                observe_usage(&value);
-                usage = Some(value);
+            match event {
+                AgentEvent::ProviderUsage(value) => {
+                    accumulate_provider_usage(&mut total_usage, &value);
+                    observe_usage(&value);
+                    usage = Some(value);
+                }
+                AgentEvent::ProviderProgress(event) => {
+                    use stasis_ai::ProviderProgress;
+                    match event {
+                        ProviderProgress::ContactingProvider => {
+                            if let Some(progress) = &progress {
+                                progress.report(ProgressStage::ContactingProvider);
+                            }
+                        }
+                        ProviderProgress::FirstResponse { elapsed_ms } => {
+                            if let Some(progress) = &progress {
+                                progress.report_provider(ProgressStage::FirstResponse, elapsed_ms);
+                            }
+                        }
+                        ProviderProgress::FirstAction { elapsed_ms } => {
+                            if let Some(progress) = &progress {
+                                progress.report_provider(ProgressStage::FirstAction, elapsed_ms);
+                            }
+                        }
+                        ProviderProgress::Fallback => {
+                            if let Some(progress) = &progress {
+                                progress.report(ProgressStage::Fallback);
+                            }
+                        }
+                    }
+                }
+                AgentEvent::ToolBatch(_) => {
+                    if let Some(progress) = &progress {
+                        progress.report(ProgressStage::PreparingProposal);
+                    }
+                }
+                _ => {}
             }
         },
     )
@@ -418,7 +580,7 @@ fn verified_provider_screenshot_paths(
     if request.screenshots.is_empty() {
         return Ok(Vec::new());
     }
-    if !config.supports_image_input() {
+    if matches!(config, ProviderConfig::Codex) && !config.supports_image_input() {
         return Err(format!(
             "selected {} model {} does not support image input",
             config.provider_name(),
@@ -431,6 +593,12 @@ fn verified_provider_screenshot_paths(
         .map(|screenshot| {
             if screenshot.provenance.task_id != request.task_id {
                 return Err("screenshot provenance does not match provider task".to_string());
+            }
+            if screenshot.request_id != Some(request.request_id.get()) {
+                return Err("image provenance does not match provider request".to_string());
+            }
+            if !screenshot.selected_for_request || !screenshot.consent_to_send {
+                return Err("image pixels require explicit request consent".to_string());
             }
             let expected = screenshot
                 .content_sha256
@@ -497,8 +665,37 @@ struct HostRequest {
 #[derive(Debug)]
 struct HostResult {
     task_id: String,
+    request_id: u64,
     operation: HostOperation,
     result: Result<(String, Value, String), String>,
+}
+
+fn provider_timeline_stage(
+    task: &stasis_ai::Task,
+    request: &stasis_ai::TaskRequestSnapshot,
+) -> ProgressStage {
+    if task.lifecycle == TaskLifecycle::Canceled {
+        return ProgressStage::Canceled;
+    }
+    if request.state == stasis_ai::TaskRequestState::Completed
+        && task
+            .actions
+            .values()
+            .any(|action| matches!(action.state, ActionState::Proposed))
+    {
+        return ProgressStage::WaitingForApproval;
+    }
+    request
+        .progress
+        .last()
+        .map(|event| event.stage)
+        .unwrap_or(ProgressStage::Queued)
+}
+
+fn measured_ms(value: Option<u64>) -> String {
+    value
+        .map(|value| format!("{value} ms"))
+        .unwrap_or_else(|| "not measured".into())
 }
 
 fn receipt_has_test_evidence(receipt: &Value) -> bool {
@@ -521,6 +718,16 @@ fn bounded_failure(error: &str, max: usize) -> String {
     }
 }
 
+fn human_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn record_focused_test_failure(
     task: &mut stasis_ai::Task,
     run_id: u64,
@@ -537,8 +744,9 @@ fn record_focused_test_failure(
 }
 
 struct HostExecutor {
-    requests: Option<mpsc::Sender<HostRequest>>,
+    requests: Option<mpsc::SyncSender<(u64, HostRequest)>>,
     results: mpsc::Receiver<HostResult>,
+    progress: Arc<Mutex<HostProgressState>>,
     canceled: Arc<Mutex<BTreeSet<String>>>,
     shutdown: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
@@ -546,14 +754,22 @@ struct HostExecutor {
 
 impl HostExecutor {
     fn new(project_root: PathBuf) -> Self {
-        let (request_tx, request_rx) = mpsc::channel::<HostRequest>();
+        let (request_tx, request_rx) = mpsc::sync_channel::<(u64, HostRequest)>(8);
         let (result_tx, result_rx) = mpsc::channel::<HostResult>();
         let canceled = Arc::new(Mutex::new(BTreeSet::<String>::new()));
         let worker_canceled = Arc::clone(&canceled);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
+        let progress = Arc::new(Mutex::new(HostProgressState::default()));
+        let worker_progress = Arc::clone(&progress);
         let worker = thread::spawn(move || {
-            while let Ok(request) = request_rx.recv() {
+            while let Ok((request_id, request)) = request_rx.recv() {
+                let mut emit = |stage| {
+                    worker_progress
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .report(&request.task_id, request_id, stage);
+                };
                 let skip = worker_shutdown.load(Ordering::Acquire)
                     || worker_canceled
                         .lock()
@@ -564,10 +780,18 @@ impl HostExecutor {
                 } else {
                     let operation_result = match &request.operation {
                         HostOperation::Apply { preview, .. } => {
-                            super::desktop_apply_semantic_preview(&project_root, preview)
+                            super::desktop_apply_semantic_preview_with_progress(
+                                &project_root,
+                                preview,
+                                &mut emit,
+                            )
                         }
                         HostOperation::Test { paths, .. } => {
-                            super::desktop_run_focused_tests(&project_root, paths)
+                            super::desktop_run_focused_tests_with_progress(
+                                &project_root,
+                                paths,
+                                &mut emit,
+                            )
                         }
                     };
                     operation_result.and_then(|(summary, receipt)| match &request.operation {
@@ -591,8 +815,22 @@ impl HostExecutor {
                         }
                     })
                 };
+                if result.as_ref().is_ok_and(|(_, receipt, _)| {
+                    matches!(request.operation, HostOperation::Test { .. })
+                        || receipt_has_test_evidence(receipt)
+                }) {
+                    emit(ProgressStage::FocusedTestsPassed);
+                }
+                emit(if skip {
+                    ProgressStage::Canceled
+                } else if result.is_ok() {
+                    ProgressStage::Completed
+                } else {
+                    ProgressStage::Failed
+                });
                 if result_tx
                     .send(HostResult {
+                        request_id,
                         task_id: request.task_id,
                         operation: request.operation,
                         result,
@@ -606,6 +844,7 @@ impl HostExecutor {
         Self {
             requests: Some(request_tx),
             results: result_rx,
+            progress,
             canceled,
             shutdown,
             worker: Some(worker),
@@ -613,14 +852,36 @@ impl HostExecutor {
     }
 
     fn submit(&self, request: HostRequest) -> Result<(), String> {
-        self.requests
+        let sender = self
+            .requests
             .as_ref()
-            .ok_or_else(|| "desktop host executor is shut down".to_string())?
-            .send(request)
-            .map_err(|_| "desktop host executor is unavailable".to_string())
+            .ok_or_else(|| "desktop host executor is shut down".to_string())?;
+        let mut progress = self.progress.lock().unwrap_or_else(|p| p.into_inner());
+        let id = progress.admit(&request.task_id)?;
+        let task_id = request.task_id.clone();
+        let result = sender
+            .try_send((id, request))
+            .map_err(|_| "desktop host executor is at capacity or unavailable".to_string());
+        if result.is_err() {
+            progress.discard(&task_id, id);
+        }
+        result
+    }
+
+    fn snapshot(&self, task_id: &str) -> Option<HostProgress> {
+        self.progress
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .snapshots
+            .get(task_id)
+            .cloned()
     }
 
     fn cancel(&self, task_id: &str) {
+        self.progress
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .cancel(task_id);
         self.canceled
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -628,7 +889,12 @@ impl HostExecutor {
     }
 
     fn poll(&self) -> Vec<HostResult> {
-        self.results.try_iter().collect()
+        let results: Vec<_> = self.results.try_iter().collect();
+        let mut progress = self.progress.lock().unwrap_or_else(|p| p.into_inner());
+        for result in &results {
+            progress.release(&result.task_id, result.request_id);
+        }
+        results
     }
 
     fn shutdown_and_join(&mut self) {
@@ -657,6 +923,8 @@ struct DesktopEditor {
     host: HostExecutor,
     validation_fingerprints: BTreeMap<String, (String, Vec<String>)>,
     busy_tasks: BTreeSet<String>,
+    task_started: BTreeMap<String, Instant>,
+    task_tests_passed_ms: BTreeMap<String, u64>,
     execution_receipts: BTreeMap<(String, String), Value>,
     validation_receipts: BTreeMap<String, Value>,
     capture: Option<PendingCapture>,
@@ -665,8 +933,28 @@ struct DesktopEditor {
     next_capture: u64,
     preview_texture: Option<(String, egui::TextureHandle)>,
     asset_textures: BTreeMap<(String, String), Option<egui::TextureHandle>>,
+    attachment_store: SessionAttachmentStore,
+    attachment_textures: BTreeMap<(String, String), egui::TextureHandle>,
+    next_attachment: u64,
+    attachment_preview: Option<(String, String)>,
+    capability_cache: BTreeMap<(String, String, String), Result<(), String>>,
+    capability_pending: BTreeSet<(String, String, String)>,
+    capability_results: Receiver<CapabilityResult>,
+    capability_result_tx: mpsc::Sender<CapabilityResult>,
     semantic_job: Option<SemanticPreviewJob>,
     next_semantic_check: Instant,
+    store: Option<SessionStore>,
+    persisted_snapshot: Option<SessionSnapshot>,
+    autosave: Option<thread::JoinHandle<Result<SessionSnapshot, String>>>,
+    next_autosave: Instant,
+    uncertain_calls: BTreeSet<String>,
+    expanded: BTreeSet<String>,
+    window_preferences: Option<WindowPreferences>,
+    media_hashes: BTreeMap<String, String>,
+    unavailable_media: BTreeSet<String>,
+    erase_confirmation: bool,
+    recovery_error: bool,
+    recovered_previews: BTreeMap<SemanticPreviewKey, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -754,8 +1042,8 @@ impl DesktopEditor {
                         proposal.revision,
                         payload,
                     );
-                    let can_plan =
-                        proposal.current && matches!(proposal.state, ActionState::Proposed);
+                    let can_plan = self.recovered_previews.contains_key(&key)
+                        || (proposal.current && matches!(proposal.state, ActionState::Proposed));
                     self.state.semantic_previews.entry(key.clone()).or_insert_with(|| SemanticPreviewRecord {
                         result: if can_plan { None } else {
                             Some(Err("No retained preview for this proposal; it will not be regenerated".into()))
@@ -778,9 +1066,17 @@ impl DesktopEditor {
         if self.semantic_job.is_none() {
             if let Some((key, payload)) = queued.into_iter().next() {
                 let root = self.project_root.clone();
+                let expected = self.recovered_previews.get(&key).cloned();
                 let (tx, result) = mpsc::channel();
                 let worker = thread::spawn(move || {
-                    let _ = tx.send(super::desktop_preview_semantic_batch(&root, payload));
+                    let result = super::desktop_preview_semantic_batch(&root, payload).and_then(|preview| {
+                        if expected.as_ref().is_some_and(|expected| *expected != preview.source_fingerprint) {
+                            Err("Saved preview became stale during recovery; request a revised proposal.".into())
+                        } else {
+                            Ok(preview)
+                        }
+                    });
+                    let _ = tx.send(result);
                 });
                 self.semantic_job = Some(SemanticPreviewJob {
                     key,
@@ -809,6 +1105,12 @@ struct CaptureResult {
 }
 
 #[derive(Debug)]
+struct CapabilityResult {
+    key: (String, String, String),
+    result: Result<(), String>,
+}
+
+#[derive(Debug)]
 struct CaptureEvidence {
     path: PathBuf,
     bytes: Vec<u8>,
@@ -824,7 +1126,6 @@ struct CaptureEvidence {
 struct ScreenshotPreview {
     task_id: TaskId,
     screenshot_id: String,
-    path: PathBuf,
     rgba: Vec<u8>,
     width: usize,
     height: usize,
@@ -971,11 +1272,10 @@ fn capture_frame(
 fn screenshot_preview(
     task_id: &TaskId,
     screenshot_id: &str,
-    evidence: CaptureEvidence,
+    evidence: &CaptureEvidence,
 ) -> Result<ScreenshotPreview, String> {
-    let decoded = image::load_from_memory_with_format(&evidence.bytes, image::ImageFormat::Png)
-        .map_err(|error| format!("captured frame is not a valid PNG: {error}"))?
-        .to_rgba8();
+    let decoded = image_attachments::decode_png_rgba_limited(&evidence.bytes)
+        .map_err(|error| format!("captured frame is not a valid bounded PNG: {error}"))?;
     let (width, height) = decoded.dimensions();
     if width as usize != evidence.width || height as usize != evidence.height {
         return Err(format!(
@@ -986,14 +1286,13 @@ fn screenshot_preview(
     Ok(ScreenshotPreview {
         task_id: task_id.clone(),
         screenshot_id: screenshot_id.to_string(),
-        path: evidence.path,
         rgba: decoded.into_raw(),
         width: width as usize,
         height: height as usize,
         scheduled_tick: evidence.scheduled_tick,
         captured_tick: evidence.captured_tick,
-        sha256: evidence.sha256,
-        runtime_identity: evidence.runtime_identity,
+        sha256: evidence.sha256.clone(),
+        runtime_identity: evidence.runtime_identity.clone(),
     })
 }
 
@@ -1002,14 +1301,15 @@ impl DesktopEditor {
         let host = HostExecutor::new(project_root.clone());
         let provider_root = project_root.clone();
         let (capture_result_tx, capture_results) = mpsc::channel();
+        let (capability_result_tx, capability_results) = mpsc::channel();
         Self {
             windows: None,
             state: EditorState {
                 project_root: Some(project_root.clone()),
                 ..EditorState::default()
             },
-            controller: TaskController::new(move |request, canceled| {
-                run_reply_provider(request, canceled, provider_root.clone())
+            controller: TaskController::new_with_progress(move |request, canceled, progress| {
+                run_reply_provider(request, canceled, provider_root.clone(), progress)
             }),
             client,
             project_root,
@@ -1017,6 +1317,8 @@ impl DesktopEditor {
             host,
             validation_fingerprints: BTreeMap::new(),
             busy_tasks: BTreeSet::new(),
+            task_started: BTreeMap::new(),
+            task_tests_passed_ms: BTreeMap::new(),
             execution_receipts: BTreeMap::new(),
             validation_receipts: BTreeMap::new(),
             capture: None,
@@ -1025,9 +1327,185 @@ impl DesktopEditor {
             next_capture: 1,
             preview_texture: None,
             asset_textures: BTreeMap::new(),
+            attachment_store: SessionAttachmentStore::new(),
+            attachment_textures: BTreeMap::new(),
+            next_attachment: 1,
+            attachment_preview: None,
+            capability_cache: BTreeMap::new(),
+            capability_pending: BTreeSet::new(),
+            capability_results,
+            capability_result_tx,
             semantic_job: None,
             next_semantic_check: Instant::now(),
+            store: None,
+            persisted_snapshot: None,
+            autosave: None,
+            next_autosave: Instant::now() + Duration::from_millis(500),
+            uncertain_calls: BTreeSet::new(),
+            expanded: BTreeSet::new(),
+            window_preferences: None,
+            media_hashes: BTreeMap::new(),
+            unavailable_media: BTreeSet::new(),
+            erase_confirmation: false,
+            recovery_error: false,
+            recovered_previews: BTreeMap::new(),
         }
+    }
+
+    fn with_persistence(mut self) -> Self {
+        self.attachment_store = SessionAttachmentStore::persistent(&self.project_root);
+        match SessionStore::open(&self.project_root) {
+            Ok(store) => match store.load() {
+                Ok(loaded) => {
+                    self.store = Some(store);
+                    persistence::restore(&mut self, loaded);
+                }
+                Err(error) => {
+                    self.state.notice = Some(format!(
+                        "Could not recover saved editor state: {error}. Saved history is preserved; erase it explicitly to start over."
+                    ));
+                    self.recovery_error = true;
+                    self.store = Some(store);
+                }
+            },
+            Err(error) => {
+                self.state.notice = Some(format!("Editor persistence is unavailable: {error}"));
+                self.recovery_error = true;
+            }
+        }
+        self
+    }
+
+    fn save_snapshot(&mut self, mut snapshot: SessionSnapshot) -> Result<(), String> {
+        self.finish_autosave();
+        if self.recovery_error {
+            return Err("Saved history needs recovery or explicit erasure before saving.".into());
+        }
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        store
+            .prepare_snapshot(&mut snapshot)
+            .map_err(|error| error.to_string())?;
+        store.save(&snapshot).map_err(|error| error.to_string())?;
+        self.media_hashes = snapshot.media_hashes.clone();
+        self.persisted_snapshot = Some(snapshot);
+        Ok(())
+    }
+
+    fn finish_autosave(&mut self) {
+        let Some(worker) = self.autosave.take() else {
+            return;
+        };
+        match worker
+            .join()
+            .unwrap_or_else(|_| Err("session writer panicked".into()))
+        {
+            Ok(snapshot) => {
+                self.media_hashes = snapshot.media_hashes.clone();
+                self.persisted_snapshot = Some(snapshot);
+            }
+            Err(error) => {
+                self.state.notice = Some(format!("Could not save editor session: {error}"))
+            }
+        }
+    }
+
+    fn poll_autosave(&mut self, now: Instant) {
+        if self
+            .autosave
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            self.finish_autosave();
+        }
+        if self.autosave.is_some() || now < self.next_autosave {
+            return;
+        }
+        self.next_autosave = now + Duration::from_millis(500);
+        if self.recovery_error {
+            return;
+        }
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let mut snapshot = persistence::snapshot(self);
+        if self.persisted_snapshot.as_ref() == Some(&snapshot) {
+            return;
+        }
+        self.autosave = Some(thread::spawn(move || {
+            store
+                .prepare_snapshot(&mut snapshot)
+                .map_err(|error| error.to_string())?;
+            store.save(&snapshot).map_err(|error| error.to_string())?;
+            Ok(snapshot)
+        }));
+    }
+
+    fn persist_if_changed(&mut self) {
+        self.finish_autosave();
+        if self.store.is_none() || self.recovery_error {
+            return;
+        }
+        let snapshot = persistence::snapshot(self);
+        if self.persisted_snapshot.as_ref() == Some(&snapshot) {
+            return;
+        }
+        if let Err(error) = self.save_snapshot(snapshot) {
+            self.state.notice = Some(format!("Could not save editor session: {error}"));
+        }
+    }
+
+    fn erase_history(&mut self) -> Result<(), String> {
+        self.finish_autosave();
+        if self.state.session.tasks().any(|task| self.ui_busy(task)) {
+            return Err("Wait for running work to finish before erasing history.".into());
+        }
+        if let Some(store) = &self.store {
+            store.erase().map_err(|error| error.to_string())?;
+        }
+        self.state = EditorState {
+            project_root: Some(self.project_root.clone()),
+            ..EditorState::default()
+        };
+        self.execution_receipts.clear();
+        self.validation_receipts.clear();
+        self.validation_fingerprints.clear();
+        self.uncertain_calls.clear();
+        self.expanded.clear();
+        self.media_hashes.clear();
+        self.unavailable_media.clear();
+        self.asset_textures.clear();
+        self.attachment_textures.clear();
+        self.attachment_preview = None;
+        self.attachment_store = SessionAttachmentStore::persistent(&self.project_root);
+        self.preview_texture = None;
+        self.recovered_previews.clear();
+        if let Some(job) = self.semantic_job.take() {
+            let _ = job.worker.join();
+        }
+        let provider_root = self.project_root.clone();
+        self.controller = TaskController::new_with_progress(move |request, canceled, progress| {
+            run_reply_provider(request, canceled, provider_root.clone(), progress)
+        });
+        self.window_preferences = None;
+        self.recovery_error = false;
+        self.persisted_snapshot = Some(persistence::snapshot(self));
+        Ok(())
+    }
+
+    fn persist_provider_intent(
+        &mut self,
+        task: &TaskId,
+        candidate: &TaskSession,
+    ) -> Result<(), String> {
+        self.finish_autosave();
+        let mut snapshot = persistence::snapshot(self);
+        snapshot.session = candidate.clone();
+        snapshot.uncertain_calls.insert(task.to_string());
+        self.save_snapshot(snapshot)?;
+        self.uncertain_calls.insert(task.to_string());
+        Ok(())
     }
 
     fn process_shortcuts(&mut self, context: &egui::Context) {
@@ -1036,6 +1514,21 @@ impl DesktopEditor {
         }
         let events = context.input(|input| input.events.clone());
         for event in events {
+            if let egui::Event::Key {
+                key: egui::Key::V,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            {
+                if modifiers.ctrl && modifiers.shift {
+                    if let Some(task_id) = self.state.session.active_task_id().cloned() {
+                        context.input_mut(|input| input.consume_key(modifiers, egui::Key::V));
+                        self.paste_clipboard_image(&task_id);
+                    }
+                    continue;
+                }
+            }
             if let Some(command) =
                 EditorState::chord(&event).and_then(|chord| self.state.shortcuts.command_for(chord))
             {
@@ -1057,46 +1550,48 @@ impl DesktopEditor {
         for intent in intents {
             match intent {
                 EditorIntent::SendReply(task, text) => {
+                    let started = Instant::now();
                     let task = TaskId::new(task);
+                    let was_uncertain = self.uncertain_calls.contains(task.as_str());
                     let mut candidate = self.state.session.clone();
-                    let accepted = candidate
+                    let prepared = candidate
                         .task_mut(&task)
                         .and_then(|task| task.append_user_message(&text))
                         .map_err(|error| error.to_string())
                         .and_then(|()| {
-                            let needs_provider = candidate
-                                .task(&task)
-                                .map(|task| task.provider.provider.is_none())
-                                .unwrap_or(false);
-                            if needs_provider {
-                                if let Ok(config) = ProviderConfig::from_env() {
-                                    candidate
-                                        .task_mut(&task)
-                                        .and_then(|task| {
-                                            task.set_provider_state(configured_provider_state(
-                                                &config,
-                                            ))
-                                        })
-                                        .map_err(|error| error.to_string())?;
-                                }
-                            }
-                            let task = candidate
-                                .task_mut(&task)
-                                .map_err(|error| error.to_string())?;
-                            for screenshot in task.screenshots.values_mut() {
-                                screenshot.upload = UploadState::Pending;
-                                screenshot.analysis = ScreenshotAnalysisState::Pending;
+                            if let Ok(config) = selected_provider_config(
+                                candidate
+                                    .task(&task)
+                                    .ok()
+                                    .and_then(|task| task.selected_provider),
+                                &self.project_root,
+                            ) {
+                                candidate
+                                    .task_mut(&task)
+                                    .and_then(|task| {
+                                        task.set_provider_state(configured_provider_state(&config))
+                                    })
+                                    .map_err(|error| error.to_string())?;
                             }
                             Ok(())
-                        })
+                        });
+                    let accepted = prepared
+                        .and_then(|()| self.persist_provider_intent(&task, &candidate))
                         .and_then(|()| {
                             self.controller
-                                .send(&candidate, &task)
+                                .send(&mut candidate, &task)
                                 .map_err(|error| error.to_string())
                         });
                     match accepted {
-                        Ok(_) => self.state.session = candidate,
+                        Ok(_) => {
+                            self.task_started.entry(task.to_string()).or_insert(started);
+                            self.task_tests_passed_ms.remove(task.as_str());
+                            self.state.session = candidate;
+                        }
                         Err(error) => {
+                            if !was_uncertain {
+                                self.uncertain_calls.remove(task.as_str());
+                            }
                             if self.state.session.active_task_id() == Some(&task)
                                 && self.state.reply.is_empty()
                             {
@@ -1107,9 +1602,24 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::Retry(task) => {
+                    self.task_tests_passed_ms.remove(&task);
                     let task = TaskId::new(task);
-                    if let Err(error) = self.controller.retry(&mut self.state.session, &task) {
-                        self.state.notice = Some(error.to_string());
+                    let was_uncertain = self.uncertain_calls.contains(task.as_str());
+                    let candidate = self.state.session.clone();
+                    match self
+                        .persist_provider_intent(&task, &candidate)
+                        .and_then(|()| {
+                            self.controller
+                                .retry(&mut self.state.session, &task)
+                                .map_err(|error| error.to_string())
+                        }) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            if !was_uncertain {
+                                self.uncertain_calls.remove(task.as_str());
+                            }
+                            self.state.notice = Some(error);
+                        }
                     }
                 }
                 EditorIntent::Cancel(task) => {
@@ -1125,11 +1635,31 @@ impl DesktopEditor {
                 EditorIntent::Reconnect(task) => {
                     let task = TaskId::new(task);
                     self.cancel_capture_for(&task);
-                    if let Err(error) = self.controller.reconnect(&mut self.state.session, &task) {
-                        self.state.notice = Some(error.to_string());
+                    if self.store.is_some() && self.controller.snapshot(&task).is_none() {
+                        self.state.notice = match self.state.session.task_mut(&task).and_then(|task| task.reconnect()) {
+                            Ok(()) => Some("Task reconnected. Send a new message to continue; no previous request was replayed.".into()),
+                            Err(error) => Some(error.to_string()),
+                        };
+                    } else {
+                        let was_uncertain = self.uncertain_calls.contains(task.as_str());
+                        let candidate = self.state.session.clone();
+                        if let Err(error) = self
+                            .persist_provider_intent(&task, &candidate)
+                            .and_then(|()| {
+                                self.controller
+                                    .reconnect(&mut self.state.session, &task)
+                                    .map_err(|error| error.to_string())
+                            })
+                        {
+                            if !was_uncertain {
+                                self.uncertain_calls.remove(task.as_str());
+                            }
+                            self.state.notice = Some(error);
+                        }
                     }
                 }
                 EditorIntent::Apply(task, action) => {
+                    self.task_tests_passed_ms.remove(&task);
                     let accepted = self
                         .state
                         .session
@@ -1176,6 +1706,7 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::Test(task, run_id) => {
+                    self.task_tests_passed_ms.remove(&task);
                     if !self.busy_tasks.insert(task.clone()) {
                         let message = format!(
                             "An apply or focused-test operation is already running for {task}."
@@ -1251,6 +1782,260 @@ impl DesktopEditor {
         }
     }
 
+    fn image_attachment_capability(&self, task_id: &TaskId) -> Result<(), String> {
+        let task = self
+            .state
+            .session
+            .task(task_id)
+            .map_err(|error| error.to_string())?;
+        let config = selected_provider_config(task.selected_provider, &self.project_root)?;
+        match &config {
+            ProviderConfig::Codex if config.supports_image_input() => Ok(()),
+            ProviderConfig::Codex => Err(format!(
+                "{} model {} does not support image input",
+                config.provider_name(),
+                config.model()
+            )),
+            ProviderConfig::OpenRouter(openrouter) => {
+                let key = (
+                    config.provider_name().to_string(),
+                    openrouter.base_url.clone(),
+                    config.model(),
+                );
+                self.capability_cache.get(&key).cloned().unwrap_or_else(|| {
+                    Err(format!(
+                        "image support has not been verified for {} model {}",
+                        key.0, key.2
+                    ))
+                })
+            }
+        }
+    }
+
+    fn poll_image_capabilities(&mut self) {
+        for completed in self.capability_results.try_iter() {
+            self.capability_pending.remove(&completed.key);
+            self.capability_cache
+                .insert(completed.key, completed.result);
+        }
+    }
+
+    fn ensure_active_image_capability(&mut self) {
+        let Some(task_id) = self.state.session.active_task_id().cloned() else {
+            return;
+        };
+        let Ok(task) = self.state.session.task(&task_id) else {
+            return;
+        };
+        let Ok(ProviderConfig::OpenRouter(mut config)) =
+            selected_provider_config(task.selected_provider, &self.project_root)
+        else {
+            return;
+        };
+        let key = (
+            "openrouter".to_string(),
+            config.base_url.clone(),
+            config.model.clone(),
+        );
+        if self.capability_cache.contains_key(&key) || !self.capability_pending.insert(key.clone())
+        {
+            return;
+        }
+        let tx = self.capability_result_tx.clone();
+        let canceled = Arc::clone(&self.shutdown);
+        config.timeout = config.timeout.min(Duration::from_secs(15));
+        thread::spawn(move || {
+            let result = stasis_ai::OpenRouterProvider::new(config)
+                .and_then(|mut provider| provider.refresh_image_input_capability(&canceled))
+                .and_then(|capability| {
+                    if capability.supported {
+                        Ok(())
+                    } else {
+                        Err(capability.reason)
+                    }
+                });
+            let _ = tx.send(CapabilityResult { key, result });
+        });
+    }
+
+    fn refresh_active_image_capability(&mut self) {
+        let Some(task_id) = self.state.session.active_task_id().cloned() else {
+            return;
+        };
+        let Ok(task) = self.state.session.task(&task_id) else {
+            return;
+        };
+        let Ok(ProviderConfig::OpenRouter(config)) =
+            selected_provider_config(task.selected_provider, &self.project_root)
+        else {
+            return;
+        };
+        let key = ("openrouter".to_string(), config.base_url, config.model);
+        self.capability_cache.remove(&key);
+        self.capability_pending.remove(&key);
+        self.ensure_active_image_capability();
+    }
+
+    fn next_attachment_id(&mut self, prefix: &str) -> String {
+        let sequence = self.next_attachment;
+        self.next_attachment = self.next_attachment.saturating_add(1);
+        format!("{prefix}-{sequence}")
+    }
+
+    fn attach_encoded_image(
+        &mut self,
+        task_id: &TaskId,
+        id: String,
+        name: String,
+        origin: AttachmentOrigin,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if self.state.session.active_task_id() != Some(task_id) {
+            return Err("image attachment belongs to an inactive task".into());
+        }
+        self.image_attachment_capability(task_id)?;
+        let attachment =
+            self.attachment_store
+                .insert_encoded(task_id, id.clone(), name, origin, bytes)?;
+        let result = self
+            .state
+            .session
+            .task_mut(task_id)
+            .and_then(|task| task.set_vision_capability(true))
+            .and_then(|()| {
+                self.state.session.task_mut(task_id).and_then(|task| {
+                    task.attach_screenshot_with_sha256(
+                        id.as_str(),
+                        attachment.path.to_string_lossy().into_owned(),
+                        attachment.sha256.clone(),
+                    )
+                })
+            })
+            .map_err(|error| error.to_string());
+        if result.is_err() {
+            self.attachment_store.remove(task_id, &id);
+        }
+        result
+    }
+
+    fn attach_file_path(
+        &mut self,
+        task_id: &TaskId,
+        path: &std::path::Path,
+        origin: AttachmentOrigin,
+    ) {
+        let result = image_attachments::read_bounded(path).and_then(|bytes| {
+            let id = self.next_attachment_id("image");
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image")
+                .to_string();
+            self.attach_encoded_image(task_id, id, name, origin, &bytes)
+        });
+        self.state.notice = Some(match result {
+            Ok(()) => format!(
+                "Attached image from {}. Select Include once before sending pixels.",
+                origin.label()
+            ),
+            Err(error) => format!("Could not attach image: {error}"),
+        });
+    }
+
+    fn select_image_files(&mut self, task_id: &TaskId) {
+        if let Err(reason) = self.image_attachment_capability(task_id) {
+            self.state.notice = Some(format!("Cannot attach image: {reason}."));
+            return;
+        }
+        let files = rfd::FileDialog::new()
+            .add_filter("PNG or JPEG image", &["png", "jpg", "jpeg"])
+            .pick_files()
+            .unwrap_or_default();
+        for path in files.into_iter().take(8) {
+            self.attach_file_path(task_id, &path, AttachmentOrigin::FilePicker);
+        }
+    }
+
+    fn paste_clipboard_image(&mut self, task_id: &TaskId) {
+        let result = (|| {
+            self.image_attachment_capability(task_id)?;
+            let mut clipboard = arboard::Clipboard::new()
+                .map_err(|error| format!("clipboard is unavailable: {error}"))?;
+            let image = clipboard
+                .get_image()
+                .map_err(|error| format!("clipboard has no readable image: {error}"))?;
+            let id = self.next_attachment_id("paste");
+            let attachment = self.attachment_store.insert_rgba(
+                task_id,
+                id.clone(),
+                "clipboard.png".into(),
+                AttachmentOrigin::Clipboard,
+                image.width,
+                image.height,
+                image.bytes.as_ref(),
+            )?;
+            let attach = self
+                .state
+                .session
+                .task_mut(task_id)
+                .and_then(|task| task.set_vision_capability(true))
+                .and_then(|()| {
+                    self.state.session.task_mut(task_id).and_then(|task| {
+                        task.attach_screenshot_with_sha256(
+                            id.as_str(),
+                            attachment.path.to_string_lossy().into_owned(),
+                            attachment.sha256.clone(),
+                        )
+                    })
+                })
+                .map_err(|error| error.to_string());
+            if attach.is_err() {
+                self.attachment_store.remove(task_id, &id);
+            }
+            attach
+        })();
+        self.state.notice = Some(match result {
+            Ok(()) => "Pasted clipboard image. Select Include once before sending pixels.".into(),
+            Err(error) => format!("Could not paste image: {error}"),
+        });
+    }
+
+    fn process_dropped_images(&mut self, context: &egui::Context) {
+        let dropped = context.input(|input| input.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        let Some(task_id) = self.state.session.active_task_id().cloned() else {
+            self.state.notice = Some("Create a task before dropping an image.".into());
+            return;
+        };
+        for file in dropped.into_iter().take(8) {
+            if let Some(path) = file.path {
+                self.attach_file_path(&task_id, &path, AttachmentOrigin::FileDrop);
+            } else if let Some(bytes) = file.bytes {
+                let id = self.next_attachment_id("drop");
+                let name = if file.name.is_empty() {
+                    "dropped-image".into()
+                } else {
+                    file.name
+                };
+                let result = self.attach_encoded_image(
+                    &task_id,
+                    id,
+                    name,
+                    AttachmentOrigin::FileDrop,
+                    bytes.as_ref(),
+                );
+                self.state.notice = Some(match result {
+                    Ok(()) => {
+                        "Attached dropped image. Select Include once before sending pixels.".into()
+                    }
+                    Err(error) => format!("Could not attach dropped image: {error}"),
+                });
+            }
+        }
+    }
+
     fn start_capture(&mut self, task_id: TaskId) {
         if self.capture.is_some() {
             self.state.notice = Some("A game screenshot capture is already in progress.".into());
@@ -1260,25 +2045,8 @@ impl DesktopEditor {
             self.state.notice = Some("Ignored screenshot request from an inactive task.".into());
             return;
         }
-        let config = match self
-            .state
-            .session
-            .task(&task_id)
-            .map_err(|error| error.to_string())
-            .and_then(|task| selected_provider_config(task.selected_provider))
-        {
-            Ok(config) => config,
-            Err(error) => {
-                self.state.notice = Some(format!("Cannot attach screenshot: {error}"));
-                return;
-            }
-        };
-        if !config.supports_image_input() {
-            self.state.notice = Some(format!(
-                "Cannot attach screenshot: selected {} model {} does not support image input.",
-                config.provider_name(),
-                config.model()
-            ));
+        if let Err(error) = self.image_attachment_capability(&task_id) {
+            self.state.notice = Some(format!("Cannot attach screenshot: {error}."));
             return;
         }
         if let Err(error) = self
@@ -1365,30 +2133,54 @@ impl DesktopEditor {
             }
             match completed.result {
                 Ok(evidence) => {
-                    match screenshot_preview(&completed.task_id, &completed.screenshot_id, evidence)
-                    {
+                    match screenshot_preview(
+                        &completed.task_id,
+                        &completed.screenshot_id,
+                        &evidence,
+                    ) {
                         Ok(preview) => {
-                            let source = preview.path.to_string_lossy().into_owned();
-                            match self
-                                .state
-                                .session
-                                .task_mut(&completed.task_id)
-                                .and_then(|task| {
-                                    task.attach_screenshot_with_sha256(
-                                        completed.screenshot_id.as_str(),
-                                        source,
-                                        preview.sha256.clone(),
-                                    )
-                                }) {
+                            let original = self.attachment_store.insert_encoded(
+                                &completed.task_id,
+                                completed.screenshot_id.clone(),
+                                "game-frame.png".into(),
+                                AttachmentOrigin::GameCapture,
+                                &evidence.bytes,
+                            );
+                            let _ = std::fs::remove_file(&evidence.path);
+                            let result = original.and_then(|owned| {
+                                if owned.sha256 != preview.sha256 {
+                                    self.attachment_store
+                                        .remove(&completed.task_id, &completed.screenshot_id);
+                                    return Err(
+                                        "captured frame changed before it could be copied".into()
+                                    );
+                                }
+                                self.state
+                                    .session
+                                    .task_mut(&completed.task_id)
+                                    .and_then(|task| {
+                                        task.attach_screenshot_with_sha256(
+                                            completed.screenshot_id.as_str(),
+                                            owned.path.to_string_lossy().into_owned(),
+                                            owned.sha256,
+                                        )
+                                    })
+                                    .map_err(|error| error.to_string())
+                            });
+                            match result {
                                 Ok(()) => {
                                     self.state.notice = Some(format!(
-                                        "Captured {}x{} game frame for {}.",
+                                        "Captured {}x{} game frame for {}. Select Include once before sending pixels.",
                                         preview.width, preview.height, completed.task_id
                                     ));
                                     self.state.preview = Some(preview);
                                     self.preview_texture = None;
                                 }
-                                Err(error) => self.state.notice = Some(error.to_string()),
+                                Err(error) => {
+                                    self.attachment_store
+                                        .remove(&completed.task_id, &completed.screenshot_id);
+                                    self.state.notice = Some(error);
+                                }
                             }
                         }
                         Err(error) => self.state.notice = Some(error),
@@ -1401,6 +2193,13 @@ impl DesktopEditor {
 
     fn poll_controller(&mut self) {
         for event in self.controller.poll(&mut self.state.session) {
+            let completed_task = match &event {
+                TaskControllerEvent::Completed { task_id, .. }
+                | TaskControllerEvent::Failed { task_id, .. }
+                | TaskControllerEvent::Canceled { task_id, .. }
+                | TaskControllerEvent::Stale { task_id, .. } => task_id.to_string(),
+            };
+            self.uncertain_calls.remove(&completed_task);
             self.state.notice = match event {
                 TaskControllerEvent::Completed {
                     task_id, proposals, ..
@@ -1424,6 +2223,17 @@ impl DesktopEditor {
     fn poll_host(&mut self) {
         for completed in self.host.poll() {
             let task_id = completed.task_id;
+            if self
+                .host
+                .snapshot(&task_id)
+                .is_some_and(|record| record.request_id != completed.request_id)
+            {
+                continue;
+            }
+            let task_elapsed = self
+                .task_started
+                .get(&task_id)
+                .and_then(|started| self.host.snapshot(&task_id)?.task_to_tests_ms(*started));
             self.busy_tasks.remove(&task_id);
             let task = self.state.session.task_mut(task_id.as_str());
             match (completed.operation, completed.result, task) {
@@ -1458,6 +2268,9 @@ impl DesktopEditor {
                             continue;
                         }
                         if validated {
+                            if let Some(elapsed) = task_elapsed {
+                                self.task_tests_passed_ms.insert(task_id.clone(), elapsed);
+                            }
                             self.validation_fingerprints
                                 .insert(task_id.clone(), (fingerprint, Vec::new()));
                         }
@@ -1498,6 +2311,9 @@ impl DesktopEditor {
                     if let Err(error) = result {
                         self.state.notice = Some(error.to_string());
                         continue;
+                    }
+                    if let Some(elapsed) = task_elapsed {
+                        self.task_tests_passed_ms.insert(task_id.clone(), elapsed);
                     }
                     self.validation_receipts.insert(task_id.clone(), receipt);
                     self.validation_fingerprints
@@ -1569,7 +2385,7 @@ impl DesktopEditor {
             egui::Button::new(RichText::new("+  Create task").strong()),
         );
         if create.clicked() || submitted {
-            self.state.notice = self.state.create_task().err();
+            self.state.notice = self.state.create_and_send_task().err();
         }
         ui.add_space(18.0);
         let active = self.state.session.active_task_id().map(|id| id.to_string());
@@ -2176,6 +2992,19 @@ impl EditorState {
             .ok_or_else(|| format!("{EMPTY_TASK} first (Ctrl+N)."))
     }
 
+    fn create_and_send_task(&mut self) -> Result<(), String> {
+        self.create_task()?;
+        let task = self
+            .session
+            .active_task()
+            .map_err(|error| error.to_string())?;
+        self.intents.push(EditorIntent::SendReply(
+            task.id.to_string(),
+            task.objective.clone(),
+        ));
+        Ok(())
+    }
+
     fn create_task(&mut self) -> Result<(), String> {
         let objective = self.objective.trim().to_string();
         if objective.is_empty() {
@@ -2275,7 +3104,7 @@ impl EditorState {
                 if self.objective.trim().is_empty() {
                     Ok(())
                 } else {
-                    self.create_task()
+                    self.create_and_send_task()
                 }
             }
             TaskSessionCommand::SwitchNextTask => self.switch_relative(1),
@@ -2509,10 +3338,13 @@ impl DesktopEditor {
     }
 
     fn task_header(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        if self.uncertain_calls.contains(task.id.as_str()) && !self.ui_busy(task) {
+            ui.colored_label(warning(), "Previous AI request outcome is uncertain. It may already have incurred a charge; review before sending again.");
+        }
         let mut provider_choice = None;
-        let openrouter = stasis_ai::OpenRouterConfig::from_env().ok();
+        let openrouter = stasis_ai::OpenRouterConfig::from_workspace(&self.project_root).ok();
         egui::Frame::none()
-            .fill(panel_fill())
+            .fill(Color32::from_rgb(28, 33, 41))
             .stroke(egui::Stroke::new(1.0_f32, border()))
             .rounding(8.0)
             .inner_margin(egui::Margin::same(14.0))
@@ -2626,38 +3458,15 @@ impl DesktopEditor {
                     .on_hover_text("Retained conversation characters; excludes source, tools, images, and the model token window.");
                 });
                 ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    let total = task
-                        .metrics
-                        .input_tokens
-                        .saturating_add(task.metrics.output_tokens);
-                    ui.label(RichText::new(format!("Usage  {total} tokens")).size(12.0));
-                    ui.label(
-                        RichText::new(format!(
-                            "{} in / {} out",
-                            task.metrics.input_tokens, task.metrics.output_tokens
-                        ))
-                        .size(11.0)
-                        .color(muted_text()),
-                    );
-                    if task.metrics.estimated_cost_micros > 0 {
-                        ui.label(
-                            RichText::new(format!(
-                                "${:.4}",
-                                task.metrics.estimated_cost_micros as f64 / 1_000_000.0
-                            ))
-                            .size(11.0)
-                            .color(muted_text()),
-                        );
-                    }
-                    if task.metrics.elapsed_ms > 0 {
-                        ui.label(
-                            RichText::new(format!("{} ms", task.metrics.elapsed_ms))
-                                .size(11.0)
-                                .color(muted_text()),
-                        );
-                    }
-                });
+                let total = task.metrics.input_tokens.saturating_add(task.metrics.output_tokens);
+                egui::CollapsingHeader::new(format!("Usage  {total} tokens"))
+                    .id_source(("usage-details", task.id.as_str()))
+                    .show(ui, |ui| {
+                        ui.label(format!("{} in / {} out / ${:.4}", task.metrics.input_tokens,
+                            task.metrics.output_tokens, task.metrics.estimated_cost_micros as f64 / 1_000_000.0));
+                        ui.label(format!("Route: {:?}", task.provider.routing));
+                        ui.label(format!("Fallback: {:?}", task.provider.fallback));
+                    });
                 if let Some(request) = self.controller.snapshot(&task.id) {
                     ui.add_space(6.0);
                     ui.label(
@@ -2684,6 +3493,87 @@ impl DesktopEditor {
                 })
                 .err()
                 .map(|error| error.to_string());
+        }
+    }
+
+    fn progress_timeline(&self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        if let Some(request) = self.controller.snapshot(&task.id) {
+            let stage = provider_timeline_stage(task, &request);
+            egui::Frame::none()
+                .fill(Color32::from_rgb(28, 33, 41))
+                .stroke(egui::Stroke::new(1.0_f32, border()))
+                .rounding(8.0)
+                .inner_margin(13.0)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(format!(
+                            "AI request {}: {}",
+                            request.request_id.get(),
+                            stage.label()
+                        ))
+                        .strong(),
+                    );
+                    if let Some(error) = &request.error {
+                        ui.add(egui::Label::new(RichText::new(error).color(failure())).wrap(true));
+                        ui.label("Your message is saved. Reconnect to retry it without sending it twice.");
+                    }
+                    ui.label(format!(
+                        "Provider first action: {}",
+                        measured_ms(request.provider_first_action_ms)
+                    ));
+                    egui::CollapsingHeader::new("Provider timing and events")
+                        .id_source((
+                            "provider-progress",
+                            task.id.as_str(),
+                            request.request_id.get(),
+                        ))
+                        .show(ui, |ui| {
+                            ui.label(format!(
+                                "First response: {} / Request total: {} ms / Retry {}",
+                                measured_ms(request.provider_first_response_ms),
+                                request.elapsed_ms,
+                                request.retry_count
+                            ));
+                            for event in &request.progress {
+                                ui.label(format!(
+                                    "{} ms  {}",
+                                    event.elapsed_ms,
+                                    event.stage.label()
+                                ));
+                            }
+                        });
+                });
+            ui.add_space(9.0);
+        }
+        if let Some(host) = self.host.snapshot(task.id.as_str()) {
+            let stage = host
+                .events
+                .last()
+                .map(|event| event.0)
+                .unwrap_or(ProgressStage::Queued);
+            egui::Frame::none().fill(Color32::from_rgb(28, 33, 41)).stroke(egui::Stroke::new(1.0_f32, border())).rounding(8.0).inner_margin(13.0).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new(format!("Host request {}: {}", host.request_id, stage.label())).strong());
+                if host.cancel_requested {
+                    ui.label("Cancellation requested; any in-flight atomic operation settles before shutdown.");
+                }
+                if let Some(elapsed) = self.task_tests_passed_ms.get(task.id.as_str()) {
+                    ui.label(format!("Task to tests passed: {elapsed} ms"))
+                        .on_hover_text("From the first admitted task message in this editor session, including provider, approval wait, and host work.");
+                }
+                egui::CollapsingHeader::new("Host timing and events")
+                    .id_source(("host-progress", host.task_id.as_str(), host.request_id))
+                    .show(ui, |ui| {
+                        ui.label(format!("Apply: {}", measured_ms(host.phase_ms(ProgressStage::ApplyingAtomically))));
+                        let compile_test = host.phase_ms(ProgressStage::Compiling).map(|compile| compile.saturating_add(host.phase_ms(ProgressStage::RunningFocusedTests).unwrap_or(0)));
+                        ui.label(format!("Compile/test: {}", measured_ms(compile_test)));
+                        ui.label("Hot swap: not measured (no runtime commit acknowledgment)");
+                        for (phase, elapsed) in &host.events {
+                            ui.label(format!("{elapsed} ms  {}", phase.label()));
+                        }
+                    });
+            });
         }
     }
 
@@ -2746,6 +3636,7 @@ impl DesktopEditor {
                     }
                     ui.add_space(9.0);
                 }
+                self.progress_timeline(ui, task);
             });
         if let Some(command) = command {
             let result = match command {
@@ -2790,6 +3681,34 @@ impl DesktopEditor {
                         .push(EditorIntent::ImportImage(task, image));
                     Ok(())
                 }
+                TimelineAction::SelectAttachment(task, screenshot) => self
+                    .state
+                    .session
+                    .task_mut(task)
+                    .and_then(|task| task.select_screenshot_for_request(screenshot))
+                    .map_err(|error| error.to_string()),
+                TimelineAction::UnselectAttachment(task, screenshot) => self
+                    .state
+                    .session
+                    .task_mut(task)
+                    .and_then(|task| task.unselect_screenshot_for_request(screenshot))
+                    .map_err(|error| error.to_string()),
+                TimelineAction::RemoveAttachment(task, screenshot) => {
+                    let task_id = TaskId::new(task);
+                    self.attachment_textures
+                        .remove(&(task_id.to_string(), screenshot.clone()));
+                    self.attachment_store.remove(&task_id, &screenshot);
+                    self.state
+                        .session
+                        .task_mut(&task_id)
+                        .and_then(|task| task.remove_screenshot(screenshot))
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                }
+                TimelineAction::PreviewAttachment(task, screenshot) => {
+                    self.attachment_preview = Some((task, screenshot));
+                    Ok(())
+                }
             };
             self.state.notice = result.err();
         }
@@ -2808,7 +3727,7 @@ impl DesktopEditor {
         let (title, tint) = match &entry.kind {
             ActivityKind::UserMessage { .. } => ("You", Color32::from_rgb(190, 168, 255)),
             ActivityKind::AiReply { .. } => ("Stasis AI", Color32::from_rgb(228, 233, 240)),
-            ActivityKind::Attachment { .. } => ("Attached frame", Color32::from_rgb(101, 181, 246)),
+            ActivityKind::Attachment { .. } => ("Attached image", Color32::from_rgb(101, 181, 246)),
             ActivityKind::SemanticAction { .. } => {
                 ("Semantic change", Color32::from_rgb(118, 158, 246))
             }
@@ -2820,7 +3739,7 @@ impl DesktopEditor {
         };
         let mut command = None;
         egui::Frame::none()
-            .fill(panel_fill())
+            .fill(Color32::from_rgb(28, 33, 41))
             .stroke(egui::Stroke::new(1.0_f32, border()))
             .rounding(8.0)
             .inner_margin(egui::Margin::same(13.0))
@@ -2859,18 +3778,19 @@ impl DesktopEditor {
                             ui.horizontal_wrapped(|ui| {
                                 status_chip(
                                     ui,
-                                    &format!("{:?}", upload).to_ascii_lowercase(),
+                                    &format!("upload: {:?}", upload).to_ascii_lowercase(),
                                     status_for_upload(&upload),
                                 );
                                 status_chip(
                                     ui,
-                                    &format!("{:?}", analysis).to_ascii_lowercase(),
+                                    &format!("analysis: {:?}", analysis).to_ascii_lowercase(),
                                     status_for_analysis(&analysis),
                                 );
                                 ui.label(
                                     RichText::new(format!(
-                                        "task {} / {}",
+                                        "task {} / request {} / {}",
                                         screenshot.provenance.task_id,
+                                        screenshot.request_id.map(|id| id.to_string()).unwrap_or_else(|| "not sent".into()),
                                         screenshot
                                             .content_sha256
                                             .as_deref()
@@ -2881,12 +3801,65 @@ impl DesktopEditor {
                                     .color(muted_text()),
                                 );
                             });
-                            let name = std::path::Path::new(&screenshot.source)
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or(screenshot.id.as_str());
+                            let name = self
+                                .attachment_store
+                                .get(&task.id, screenshot.id.as_str())
+                                .map(|owned| owned.name.as_str())
+                                .unwrap_or_else(|| {
+                                    std::path::Path::new(&screenshot.source)
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or(screenshot.id.as_str())
+                                });
                             ui.label(RichText::new(name).size(12.0).strong())
                                 .on_hover_text(&screenshot.source);
+                            if let Some(owned) = self.attachment_store.get(&task.id, screenshot.id.as_str()) {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} x {} / {} / {} / {} / verified {}",
+                                        owned.width,
+                                        owned.height,
+                                        human_bytes(owned.byte_len),
+                                        owned.mime_type,
+                                        owned.origin.label(),
+                                        &owned.sha256[..12]
+                                    ))
+                                    .size(11.0)
+                                    .color(muted_text()),
+                                );
+                            }
+                            ui.horizontal_wrapped(|ui| {
+                                let destination = selected_provider_config(task.selected_provider, &self.project_root)
+                                    .map(|config| (config.provider_name().to_string(), config.model()))
+                                    .unwrap_or_else(|_| ("unavailable provider".into(), "unconfigured model".into()));
+                                let (provider, model) = destination;
+                                if screenshot.consent_to_send && screenshot.selected_for_request {
+                                    status_chip(ui, "included once", accent());
+                                    ui.label(RichText::new(format!("will send once to {provider} / {model}")).size(11.0).color(muted_text()));
+                                    if can_interact && ui.button("Undo inclusion").clicked() {
+                                        command = Some(TimelineAction::UnselectAttachment(task.id.to_string(), screenshot.id.to_string()));
+                                    }
+                                } else {
+                                    let retry = matches!(upload, UploadState::Failed { .. })
+                                        || matches!(analysis, ScreenshotAnalysisState::Failed { .. } | ScreenshotAnalysisState::Canceled);
+                                    let capability = self.image_attachment_capability(&task.id)
+                                        .and_then(|()| task.validate_screenshot_selection(screenshot.id.as_str()).map_err(|error| error.to_string()));
+                                    let can_include = can_interact && capability.is_ok();
+                                    let include = ui.add_enabled(can_include, egui::Button::new(if retry { "Retry once" } else { "Include once" }));
+                                    let clicked = include.clicked();
+                                    if let Err(reason) = capability { include.on_disabled_hover_text(reason); }
+                                    if clicked {
+                                        command = Some(TimelineAction::SelectAttachment(task.id.to_string(), screenshot.id.to_string()));
+                                    }
+                                    ui.label(RichText::new(format!("pixels stay local; Include once sends them to {provider} / {model}")).size(11.0).color(muted_text()));
+                                }
+                                if ui.button("Preview").clicked() {
+                                    command = Some(TimelineAction::PreviewAttachment(task.id.to_string(), screenshot.id.to_string()));
+                                }
+                                if can_interact && ui.button("Remove").clicked() {
+                                    command = Some(TimelineAction::RemoveAttachment(task.id.to_string(), screenshot.id.to_string()));
+                                }
+                            });
                         }
                     }
                     ActivityKind::SemanticAction {
@@ -2914,7 +3887,7 @@ impl DesktopEditor {
                                             match &record.result {
                                                 None => { ui.spinner(); ui.label("Planning semantic changes..."); }
                                                 Some(Err(error)) => { ui.colored_label(failure(), format!("Preview unavailable: {error}")); }
-                                                Some(Ok(preview)) => { semantic_diff::render(ui, &preview.plan, "semantic-files"); }
+                                                Some(Ok(preview)) => { semantic_diff::render(ui, &preview.plan, "semantic-files", &format!("{}/{}/{}/{}", key.task, key.action, key.revision, key.payload_hash), &mut self.expanded); }
                                             }
                                         } else {
                                             ui.label("Planning semantic changes...");
@@ -3010,6 +3983,7 @@ impl DesktopEditor {
                                 && matches!(review, ImageReviewState::Pending)
                                 && current.is_some_and(|image| {
                                     matches!(image.review, ImageReviewState::Pending)
+                                        && !self.unavailable_media.contains(&image.source)
                                 })
                             {
                                 if ui.button("Approve").clicked() {
@@ -3087,13 +4061,68 @@ impl DesktopEditor {
     }
 
     fn inline_screenshot(&mut self, ui: &mut egui::Ui, screenshot_id: &str) {
-        let active = self.state.session.active_task_id();
+        if let Some(source) = self.state.session.active_task().ok().and_then(|task| {
+            task.screenshots
+                .get(screenshot_id)
+                .map(|image| image.source.clone())
+        }) {
+            if self.unavailable_media.contains(&source) {
+                ui.colored_label(
+                    warning(),
+                    "Attachment unavailable: missing, changed, or unverified after restart.",
+                );
+                return;
+            }
+        }
+        let active = self.state.session.active_task_id().cloned();
+        if let Some(task_id) = active.as_ref() {
+            let key = (task_id.to_string(), screenshot_id.to_string());
+            if let Some(owned) = self.attachment_store.get(task_id, screenshot_id) {
+                if !self.attachment_textures.contains_key(&key) {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [
+                            owned.thumbnail_width as usize,
+                            owned.thumbnail_height as usize,
+                        ],
+                        &owned.thumbnail_rgba,
+                    );
+                    let texture = ui.ctx().load_texture(
+                        format!("attachment-{}-{screenshot_id}", task_id.as_str()),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.attachment_textures.insert(key.clone(), texture);
+                }
+                let texture = &self.attachment_textures[&key];
+                let original = texture.size_vec2();
+                let scale = (ui.available_width().min(560.0) / original.x)
+                    .min(160.0 / original.y)
+                    .min(1.0);
+                ui.image((texture.id(), original * scale));
+                return;
+            }
+        }
+        if let Some((task_id, source)) = self.state.session.active_task().ok().and_then(|task| {
+            task.screenshots
+                .get(screenshot_id)
+                .map(|image| (task.id.to_string(), image.source.clone()))
+        }) {
+            if self
+                .state
+                .preview
+                .as_ref()
+                .map_or(true, |preview| preview.screenshot_id != screenshot_id)
+            {
+                self.inline_generated_asset(ui, &task_id, screenshot_id, &source);
+                return;
+            }
+        }
         let Some(preview) = self
             .state
             .preview
             .as_ref()
             .filter(|preview| {
-                preview.screenshot_id == screenshot_id && Some(&preview.task_id) == active
+                preview.screenshot_id == screenshot_id && Some(&preview.task_id) == active.as_ref()
             })
             .cloned()
         else {
@@ -3145,6 +4174,13 @@ impl DesktopEditor {
         image_id: &str,
         source: &str,
     ) {
+        if self.unavailable_media.contains(source) {
+            ui.colored_label(
+                warning(),
+                "Media unavailable: missing, changed, or unverified after restart.",
+            );
+            return;
+        }
         let key = (task_id.to_string(), image_id.to_string());
         if !self.asset_textures.contains_key(&key) {
             let source_path = PathBuf::from(source);
@@ -3229,15 +4265,29 @@ impl DesktopEditor {
                 let interactive = task.lifecycle == TaskLifecycle::Active
                     && task.connection == ConnectionState::Connected
                     && !busy;
-                if ui.add_enabled(interactive, egui::Button::new("Attach frame")).on_hover_text(if interactive { "Capture a verified frame from the running native game" } else { "Attachments are unavailable while this task is closed, disconnected, or busy." }).clicked() {
+                let image_capability = self.image_attachment_capability(&task.id);
+                let can_attach = interactive && image_capability.is_ok();
+                let disabled_reason = image_capability.as_ref().err().map(String::as_str).unwrap_or("Attachments are unavailable while this task is closed, disconnected, or busy.");
+                if ui.add_enabled(can_attach, egui::Button::new("Attach frame")).on_hover_text("Capture a verified frame from the running native game; pixels remain local until Include once").on_disabled_hover_text(disabled_reason).clicked() {
                     self.state.dispatch(TaskSessionCommand::AttachScreenshot);
+                }
+                if ui.add_enabled(can_attach, egui::Button::new("Attach image")).on_hover_text("Select up to eight bounded PNG or JPEG files").on_disabled_hover_text(disabled_reason).clicked() {
+                    self.select_image_files(&task.id);
+                }
+                if ui.add_enabled(can_attach, egui::Button::new("Paste image")).on_hover_text("Copy clipboard image pixels into this task's session-only attachment storage").on_disabled_hover_text(disabled_reason).clicked() {
+                    self.paste_clipboard_image(&task.id);
+                }
+                if matches!(selected_provider_config(task.selected_provider, &self.project_root), Ok(ProviderConfig::OpenRouter(_)))
+                    && ui.small_button("Refresh image support").clicked()
+                {
+                    self.refresh_active_image_capability();
                 }
                 if ui.add_enabled(false, egui::Button::new("Generate image")).on_disabled_hover_text("Image generation is unavailable in the desktop editor.").clicked() {
                     self.state.dispatch(TaskSessionCommand::GenerateImage);
                 }
                 if show_shortcut_hint {
                     ui.label(
-                        RichText::new("Ctrl+Enter sends")
+                        RichText::new("Ctrl+Enter sends | Ctrl+Shift+V pastes image")
                             .size(10.0)
                             .color(muted_text()),
                     );
@@ -3447,7 +4497,7 @@ impl DesktopEditor {
                 .clicked()
                 || submitted
             {
-                self.state.notice = self.state.create_task().err();
+                self.state.notice = self.state.create_and_send_task().err();
             }
         });
         let active = self.state.session.active_task_id().map(ToString::to_string);
@@ -3493,6 +4543,9 @@ impl DesktopEditor {
         }
         configure_visuals(context);
         context.request_repaint_after(Duration::from_millis(100));
+        self.poll_image_capabilities();
+        self.ensure_active_image_capability();
+        self.process_dropped_images(context);
         self.poll_controller();
         self.poll_host();
         self.poll_capture();
@@ -3541,6 +4594,9 @@ impl DesktopEditor {
                                 .color(muted_text()),
                         );
                     }
+                    if self.store.is_some() && ui.button("Erase saved history...").clicked() {
+                        self.erase_confirmation = true;
+                    }
                 });
                 if let Some(notice) = &self.state.notice {
                     ui.colored_label(warning(), notice);
@@ -3585,7 +4641,58 @@ impl DesktopEditor {
             }
         }
         self.cancel_confirmation(context);
+        if self.erase_confirmation {
+            egui::Window::new("Erase saved history?").collapsible(false).resizable(false)
+                .show(context, |ui| {
+                    ui.label("Remove this project's tasks, drafts, and receipts. Source and media files are retained.");
+                    if ui.button("Keep history").clicked() {
+                        self.erase_confirmation = false;
+                    }
+                    if ui.button("Erase history").clicked() {
+                        self.state.notice = self.erase_history().err();
+                        self.erase_confirmation = false;
+                    }
+                });
+        }
+        self.attachment_preview_window(context);
         self.flush_intents();
+    }
+
+    fn attachment_preview_window(&mut self, context: &egui::Context) {
+        let Some((task, screenshot)) = self.attachment_preview.clone() else {
+            return;
+        };
+        let task_id = TaskId::new(task.clone());
+        let mut open = true;
+        egui::Window::new("Image attachment preview")
+            .open(&mut open)
+            .resizable(true)
+            .default_size([620.0, 520.0])
+            .show(context, |ui| {
+                if let Some(owned) = self.attachment_store.get(&task_id, &screenshot) {
+                    let key = (task.clone(), screenshot.clone());
+                    if let Some(texture) = self.attachment_textures.get(&key) {
+                        let original = texture.size_vec2();
+                        let scale = (ui.available_width() / original.x)
+                            .min((ui.available_height() - 50.0).max(1.0) / original.y)
+                            .min(1.0);
+                        ui.image((texture.id(), original * scale));
+                    }
+                    ui.label(format!(
+                        "{} | {} x {} | {} | {}",
+                        owned.name,
+                        owned.width,
+                        owned.height,
+                        human_bytes(owned.byte_len),
+                        owned.mime_type
+                    ));
+                } else {
+                    ui.label("This attachment is no longer available in this editor session.");
+                }
+            });
+        if !open {
+            self.attachment_preview = None;
+        }
     }
 
     fn cancel_confirmation(&mut self, context: &egui::Context) {
@@ -3617,10 +4724,20 @@ impl DesktopEditor {
 impl eframe::App for DesktopEditor {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui(context);
+        if let Some(rect) = context.input(|input| input.viewport().inner_rect) {
+            self.window_preferences =
+                Some(persistence::bounded_window([rect.width(), rect.height()]));
+        }
+        self.poll_autosave(Instant::now());
+        context.request_repaint_after(Duration::from_millis(500));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_if_changed();
         self.host.shutdown_and_join();
+        // Work already executing may have committed after the initial exit snapshot.
+        self.poll_host();
+        self.persist_if_changed();
         if let Some(job) = self.semantic_job.take() {
             let _ = job.worker.join();
         }
@@ -3638,10 +4755,20 @@ pub(super) fn run(
     project_root: PathBuf,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    let mut editor =
+        DesktopEditor::new(client.clone(), project_root.clone(), shutdown).with_persistence();
+    editor.windows = Some(window_layout::WindowLayout::new(
+        client.clone(),
+        &project_root,
+    ));
+    let size = editor
+        .window_preferences
+        .map(|preferences| preferences.size)
+        .unwrap_or([1440.0, 900.0]);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Stasis Editor")
-            .with_inner_size([1440.0, 900.0])
+            .with_inner_size(size)
             .with_min_inner_size([520.0, 600.0]),
         ..Default::default()
     };
@@ -3649,12 +4776,7 @@ pub(super) fn run(
     let result = eframe::run_native(
         "Stasis Editor",
         options,
-        Box::new(move |_context| {
-            let windows = window_layout::WindowLayout::new(client.clone(), &project_root);
-            let mut editor = DesktopEditor::new(client, project_root, shutdown);
-            editor.windows = Some(windows);
-            Box::new(editor)
-        }),
+        Box::new(move |_context| Box::new(editor)),
     );
     let _ = quit_client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
     result.map_err(|error| format!("desktop editor failed: {error}"))
@@ -4386,6 +5508,39 @@ mod tests {
         state.handle(TaskSessionCommand::NewTask).unwrap();
         assert_eq!(state.session.task_count(), 2);
         assert!(state.session.active_task().unwrap().thread.is_empty());
+        assert!(
+            matches!(state.intents.as_slice(), [EditorIntent::SendReply(task, text)]
+            if task == "task-2" && text == "Independent objective")
+        );
+    }
+
+    #[test]
+    fn new_task_submits_objective_once_and_retry_keeps_one_message() {
+        let root = super::super::tests::desktop_editor_fixture("first_message_send");
+        let (client, _server) = live_session(4);
+        let mut editor = DesktopEditor::new(client, root, Arc::new(AtomicBool::new(false)));
+        let (tx, rx) = mpsc::channel();
+        editor.controller = TaskController::new(move |request, _| {
+            tx.send(request).unwrap();
+            Err("OpenRouter routing failed closed: private model".into())
+        });
+        editor.state.objective = "Make the background brown".into();
+        editor.state.create_and_send_task().unwrap();
+        editor.flush_intents();
+        let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(first.context.len(), 1);
+        assert_eq!(first.context[0].text, first.objective);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.state.session.active_task().unwrap().connection == ConnectionState::Connected {
+            editor.poll_controller();
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        editor.state.handle(TaskSessionCommand::Reconnect).unwrap();
+        editor.flush_intents();
+        let retry = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(retry.context, first.context);
+        assert_eq!(editor.state.session.active_task().unwrap().thread.len(), 1);
     }
 
     #[test]
@@ -5025,11 +6180,12 @@ mod tests {
         editor.state.objective = "Second task".into();
         editor.state.create_task().unwrap();
 
-        let (request_tx, _request_rx) = mpsc::channel();
+        let (request_tx, _request_rx) = mpsc::sync_channel(8);
         let (result_tx, result_rx) = mpsc::channel();
         editor.host = HostExecutor {
             requests: Some(request_tx),
             results: result_rx,
+            progress: Arc::new(Mutex::new(HostProgressState::default())),
             canceled: Arc::new(Mutex::new(BTreeSet::new())),
             shutdown: Arc::new(AtomicBool::new(false)),
             worker: None,
@@ -5037,6 +6193,7 @@ mod tests {
         editor.busy_tasks.insert("task-1".to_string());
         result_tx
             .send(HostResult {
+                request_id: 0,
                 task_id: "task-1".to_string(),
                 operation: HostOperation::Test {
                     paths: Vec::new(),
@@ -5061,7 +6218,7 @@ mod tests {
 
     #[test]
     fn host_shutdown_waits_for_in_flight_work() {
-        let (request_tx, _request_rx) = mpsc::channel();
+        let (request_tx, _request_rx) = mpsc::sync_channel(8);
         let (_result_tx, result_rx) = mpsc::channel();
         let (started_tx, started_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
@@ -5086,6 +6243,7 @@ mod tests {
         let host = HostExecutor {
             requests: Some(request_tx),
             results: result_rx,
+            progress: Arc::new(Mutex::new(HostProgressState::default())),
             canceled: Arc::new(Mutex::new(BTreeSet::new())),
             shutdown,
             worker: Some(worker),
@@ -5103,6 +6261,45 @@ mod tests {
         release_tx.send(()).unwrap();
         assert!(dropped_rx.recv_timeout(Duration::from_secs(5)).unwrap());
         dropper.join().unwrap();
+    }
+
+    #[test]
+    fn provider_progress_label_tracks_approval_and_cancellation() {
+        let controller = TaskController::new(|_, _| Ok(ProviderReply::new("done")));
+        let mut session = TaskSession::new();
+        session.new_task("one", "Edit", "Project").unwrap();
+        controller.send_active(&mut session).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while controller.snapshot(&TaskId::new("one")).unwrap().state
+            == stasis_ai::TaskRequestState::Running
+        {
+            controller.poll(&mut session);
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        let snapshot = controller.snapshot(&TaskId::new("one")).unwrap();
+        let task = session.task_mut("one").unwrap();
+        assert_eq!(
+            provider_timeline_stage(task, &snapshot),
+            ProgressStage::Completed
+        );
+        task.propose_action("edit", "Edit value").unwrap();
+        assert_eq!(
+            provider_timeline_stage(task, &snapshot),
+            ProgressStage::WaitingForApproval
+        );
+        task.accept_action("edit").unwrap();
+        assert_eq!(
+            provider_timeline_stage(task, &snapshot),
+            ProgressStage::Completed
+        );
+        task.cancel().unwrap();
+        assert_eq!(
+            provider_timeline_stage(task, &snapshot),
+            ProgressStage::Canceled
+        );
+        assert_eq!(measured_ms(None), "not measured");
+        assert_eq!(measured_ms(Some(0)), "0 ms");
     }
 
     #[test]
@@ -5161,17 +6358,19 @@ mod tests {
                 task.begin_focused_tests().unwrap();
             }
             let before = task.clone();
-            let (request_tx, _request_rx) = mpsc::channel();
+            let (request_tx, _request_rx) = mpsc::sync_channel(8);
             let (result_tx, result_rx) = mpsc::channel();
             editor.host = HostExecutor {
                 requests: Some(request_tx),
                 results: result_rx,
+                progress: Arc::new(Mutex::new(HostProgressState::default())),
                 canceled: Arc::new(Mutex::new(BTreeSet::new())),
                 shutdown: Arc::new(AtomicBool::new(false)),
                 worker: None,
             };
             result_tx
                 .send(HostResult {
+                    request_id: 0,
                     task_id: "task-1".into(),
                     operation: HostOperation::Test {
                         paths: Vec::new(),

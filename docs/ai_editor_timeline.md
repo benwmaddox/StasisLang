@@ -175,3 +175,147 @@ Theory gained: timeline sequence and compiler preview identity are independent:
 activity controls presentation order, while task/action/revision/payload and source
 fingerprints control acceptance and application. Combined ordering and stale-source
 tests support this invariant for future card types.
+
+## Bounded live progress (task 522)
+
+Each provider request retains at most 32 typed progress events in its controller
+snapshot. The client, task, and request IDs are captured at admission; switching
+UI tasks cannot redirect a reporter. Retry gets a new request ID and fresh bounded
+history. Cancellation, callback closure, stale IDs, and terminal state reject late
+events. Consecutive duplicates are coalesced; the queued and terminal states are
+retained at capacity. Progress contains fixed labels and timing values, never
+provider reasoning, response fragments, or transport errors.
+
+The timeline shows the latest provider and host request for the selected task.
+Provider first-response and first-action milestones are request-wide, while
+contacting-provider can recur across turns. OpenRouter records first nonempty
+content and the start of the first object in the root `tool_calls` array at
+the same millisecond used in its
+usage audit. The required empty `tool_calls: []` field in a done response does
+not count as an action; its first-action latency remains unmeasured. These
+latencies start at the inference POST, excluding queue,
+source inspection, metadata lookup, and approval wait. Providers without streaming
+hooks report response completion as first response and leave first action
+unmeasured. Unknown route metadata never claims fallback.
+
+The host has one worker, eight admitted requests, and at most 32 events for each
+of the session's 32 tasks. Admission stays occupied until its result is drained.
+Progress is observational: a callback panic cannot interrupt source rollback.
+Cancellation requests do not pretend that an in-flight atomic operation stopped;
+the host retains its actual completion or failure after the request to cancel.
+Queued canceled operations never execute. Late events and results cannot replace
+a newer request's progress.
+
+Expandable details separate provider-boundary latency from source apply and the
+compile/test pipeline. The pipeline includes subsequent per-file compilations
+and scenario execution. Task-to-tests-passed starts with the first admitted
+message in this editor session and ends at the host's verified test result,
+including retries and approval wait; UI polling time is excluded. Missing or
+truncated measurements display as unmeasured. Progress snapshots are transient;
+the existing task activity and validation receipts retain completed outcomes.
+
+The desktop semantic source-write path has no runtime swap acknowledgment.
+`CommittingBetweenTicks` is a typed stage for hosts that can observe that boundary;
+this executor does not emit it or claim hot-swap latency. Extending it requires a
+runtime acknowledgment bound to the reviewed source revision.
+
+### Reproduction and limits
+
+Use the Cargo wrapper for focused checks (`--lib` for `stasis_ai`, `--bin stasis`
+with filter `desktop` for the editor). In restricted worktrees set
+`CARGO_TARGET_DIR` to a directory inside that worktree first.
+
+The existing native evidence test accepts `STASIS_EDITOR_EVIDENCE_PROGRESS=0..4`
+to capture queued, apply, compile, focused tests, and completed host states. Set
+`STASIS_EDITOR_EVIDENCE_PNG` to the desired PNG path; a sibling JSON file records
+the typed fixture events. These are explicitly labeled synthetic states, not
+executed edits or a live provider session.
+
+A credentialed provider trace can be reproduced with `OPENROUTER_API_KEY` and
+`STASIS_RUN_OPENROUTER_EVAL=1`, then:
+
+```powershell
+python tools/cargo_cache.py run -- cargo run -p stasis_ai --example openrouter_cerebras_eval
+```
+
+The example suppresses response content, requires an action, and compares typed
+first-response/action timing against the provider usage audit. The required live
+OpenRouter/UI acceptance trace remains unverified in this run because no API key
+is configured. It must be captured in a credentialed editor session before that
+acceptance criterion can be claimed.
+
+Theory gained: a progress label is evidence only when its owner observes the
+boundary. The source-apply path and its rollback tests show why successful source
+validation cannot stand in for a between-ticks runtime commit; a future swap
+observer must carry the same immutable revision and request identity.
+
+Validation (2026-09-06): 87 `stasis_ai --lib` tests and 76 desktop-filtered
+`stasis --bin stasis` tests passed on the final source. The OpenRouter example
+compiled with `cargo check`; formatting, unsafe-boundary, and diff checks passed.
+All Cargo commands used the repository wrapper. The full shell entrypoint could
+not start because `bash` is unavailable. One intermediate native capture was
+blocked by Device Guard; the final freshly built test executable and all five
+captures ran successfully through the repository signing runner. Optional signing
+reported no certificate. No test processes remained.
+
+Visual evidence: [phase3.png](evidence/ai-editor/task522/phase3.png) was inspected
+at native resolution for readable phase and latency labels, full-width cards,
+and a visible composer. [progress-fixture.mp4](evidence/ai-editor/task522/progress-fixture.mp4)
+was verified as 150 frames at 1100x900 over five seconds; its decoded
+[contact sheet](evidence/ai-editor/task522/video-contact.png) was inspected for
+queued, applying, compiling, running-tests, and completed ordering. The sibling
+`phase0.json` through `phase4.json` audits match these five synthetic states and
+the displayed 145 ms first-action value. This is fixture evidence only; the live
+OpenRouter trace remains outstanding.
+
+CI follow-up: stroke widths now use explicit `f32` literals, and the two
+non-progress convenience wrappers are test-only. Rust 1.97.1 compiled the exact
+workspace/all-targets command successfully; its execution stopped with 277
+library tests passed and 13 unrelated signing, path, and source-text failures.
+The exact Windows `network` filter passed 7 tests, the AI library passed 88, and
+the desktop filter passed 76. Formatting and diff checks passed.
+
+Visual evidence: no new media was captured for this correction. Layout is
+unchanged; a deterministic SSE test verifies that a done reply with a split,
+empty tool-call array emits no first-action event and leaves its audit latency
+null. The existing nonempty-action test still checks event/audit timing equality.
+Theory gained: a schema-required array key is not an action; the first contained
+object is the observable streaming boundary.
+
+Retained merge validation (2026-09-07): `MERGE_HEAD` and `origin/main` both
+resolve to `538c19ffc59d95a155dc2896a1c372e76d4debd5`; no unresolved paths
+remain. The combined source passes 102 AI library tests and 86 desktop-filtered
+binary tests through the Cargo wrapper, formatting, unsafe-boundary, and diff
+checks. No test processes remained. The full repository shell gate could not
+launch because Bash is unavailable. The opt-in OpenRouter example built and ran,
+but rejected execution because `OPENROUTER_API_KEY` is absent. The live trace
+acceptance criterion therefore remains unverified; deterministic provider and
+host timing tests passed. The prepared merge is preserved for worker publication.
+
+Visual evidence: no new media captured for merge validation; existing synthetic
+captures do not satisfy the outstanding live OpenRouter/UI trace requirement.
+
+Exact-base merge repair (2026-09-08): resolved against
+`cd4d3d4a4604303885e3bc3412566395988d8bc0`, preserving progress callbacks,
+image preflight and one-shot image consumption, provider failure usage audits,
+and persistence. History erasure recreates a progress-enabled controller.
+Updated progress tests for mutable session admission and persistence fixtures
+for bounded host channels and request IDs. No unresolved paths remain.
+
+Validation: 123 AI library tests and 95 desktop tests passed through
+`tools/cargo_cache.py`, with a fresh worktree-local build. Native evidence capture
+passed. Formatting, unsafe-boundary, and diff checks passed; no lingering test
+processes were found. Bash is unavailable, so the full shell gate could not
+launch. The opt-in OpenRouter example built but failed explicitly because
+`OPENROUTER_API_KEY` is absent; process, user, and machine probes also found no
+key. Deterministic tests are the available fallback, not live acceptance evidence.
+
+Visual evidence: `artifacts/task522-merged-progress.png` was captured and
+inspected: the focused-tests phase, separate 145 ms provider first-action label,
+and image-enabled composer remain readable. Its sibling JSON agrees with those
+synthetic values. No new MP4 or live OpenRouter/UI trace was captured.
+
+Theory gained: provider progress and image consumption must share the same
+request entry point, including controller recreation after history erasure.
+The combined AI, image, and persistence tests support retaining both contracts
+when adding another controller lifecycle path.

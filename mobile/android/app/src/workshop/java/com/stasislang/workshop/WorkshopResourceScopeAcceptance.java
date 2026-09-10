@@ -205,13 +205,11 @@ final class WorkshopResourceScopeAcceptance {
                 || alphaTrace != alphaReturn.getLong("command_trace")) {
             throw new IllegalStateException("surface/project restore changed logical command trace");
         }
-        if (!betaResources.getJSONArray("identities").toString()
-                        .equals(restored.getJSONArray("identities").toString())
-                || !alphaResources.getJSONArray("identities").toString()
-                        .equals(alphaReturn.getJSONObject("resources")
-                                .getJSONArray("identities").toString())
-                || alphaResources.getJSONArray("identities").toString()
-                        .equals(betaResources.getJSONArray("identities").toString())) {
+        String alphaIdentity = stableIdentities(alphaResources);
+        String betaIdentity = stableIdentities(betaResources);
+        if (!betaIdentity.equals(stableIdentities(restored))
+                || !alphaIdentity.equals(stableIdentities(alphaReturn.getJSONObject("resources")))
+                || alphaIdentity.equals(betaIdentity)) {
             throw new IllegalStateException("resource identities crossed a project or surface epoch");
         }
         if (restored.getInt("lifecycle_renderer_generation") <= generationBefore
@@ -231,6 +229,33 @@ final class WorkshopResourceScopeAcceptance {
                 || betaResources.getInt("project_switches") > 3) {
             throw new IllegalStateException("resource counts exceeded IT-029 bounds");
         }
+    }
+
+    static String stableIdentities(JSONObject resources) throws Exception {
+        int surface = resources.getInt("surface_generation");
+        int renderer = resources.getInt("renderer_generation");
+        // This fixed-size scenario gets one size callback after each context creation.
+        // Only context creation advances the provider's GPU resource epoch.
+        if (surface <= 0 || renderer <= 0
+                || surface + 1 != resources.getInt("lifecycle_surface_generation")
+                || renderer != resources.getInt("lifecycle_renderer_generation")) {
+            throw new IllegalStateException("resource snapshot has a stale generation");
+        }
+        JSONArray stable = new JSONArray();
+        JSONArray identities = resources.getJSONArray("identities");
+        for (int index = 0; index < identities.length(); index += 1) {
+            stable.put(stableIdentity(identities.getString(index), surface, renderer));
+        }
+        return stable.toString();
+    }
+
+    static String stableIdentity(String identity, int surface, int renderer) {
+        if (!identity.startsWith("sprite:")) return identity;
+        String epoch = ":surface=" + surface + ":renderer=" + renderer;
+        if (!identity.endsWith(epoch)) {
+            throw new IllegalStateException("sprite identity has a stale generation");
+        }
+        return identity.substring(0, identity.length() - epoch.length());
     }
 
     private static WorkshopProjectRegistry.ProjectInfo activeProject(MainActivity activity)

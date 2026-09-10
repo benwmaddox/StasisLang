@@ -20,6 +20,12 @@ system:
   buffers for the call; polling borrows a writable output buffer of the declared
   capacity. No pointer or credential is exposed to Stasis. The native runtime
   serializes handle access, replacement, and shutdown across SDL and JNI.
+- `crates/stasis_network/src/lib.rs` also owns the Windows supervision handle
+  boundary. Private pipe handles and process/job handles have one native owner;
+  child inheritance is restricted to the explicit handoff and standard handles.
+  The safe supervisor orchestration does not expose these handles or invite
+  bytes to Stasis source. Job ownership must cover children before they execute
+  and remain alive until bounded teardown finishes.
 
 All compiler, runner, language-service, editor, and application orchestration code must remain safe
 Rust. `tools/validate_repo.sh` enforces this file-level boundary.

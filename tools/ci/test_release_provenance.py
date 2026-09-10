@@ -8,13 +8,18 @@ import tempfile
 import unittest
 
 from tools.generate_release_provenance import (
-    DESKTOP_NETWORK_ARTIFACTS,
+    DESKTOP_NETWORK_LIBRARIES,
+    DESKTOP_NETWORK_HEADER,
     RUNTIME_DIRS,
     RUNTIME_FILES,
     desktop_network_artifact_hashes,
     render_contract_version,
 )
-from tools.verify_package_provenance import verify_asset_package_identities
+from tools.verify_package_provenance import (
+    verify_asset_package_identities,
+    verify_mobile_shells,
+    verify_network_guest_bundles,
+)
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -22,13 +27,101 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    def test_android_network_client_shell_provenance(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        template = (
+            ROOT / "mobile/shells/android/app/src/main/AndroidManifest.xml"
+        ).read_bytes()
+        for mode in ("offline", "network", "network_client"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                release = root / "release"
+                package = root / "package"
+                relative = "android/app/src/main/AndroidManifest.xml"
+                source = release / "mobile/shells" / relative
+                destination = package / relative
+                source.parent.mkdir(parents=True)
+                destination.parent.mkdir(parents=True)
+                source.write_bytes(template)
+                receipt = {
+                    "target": "android-arm64",
+                    "name": "demo",
+                    "package_id": "com.example.demo",
+                    "network": mode == "network",
+                    "network_client": mode == "network_client",
+                }
+                (package / "stasis_mobile_package.json").write_text(
+                    json.dumps(receipt), encoding="utf-8"
+                )
+                expected = template.decode("utf-8").replace("@STASIS_APP_NAME@", "demo")
+                expected = expected.replace(
+                    "@STASIS_ANDROID_ORIENTATION@", "sensorLandscape"
+                )
+                expected = expected.replace(
+                    "@STASIS_NETWORK_PERMISSION@",
+                    '    <uses-permission android:name="android.permission.INTERNET" />\n'
+                    if mode != "offline" else "",
+                ).replace(
+                    "@STASIS_NETWORK_CLIENT_PERMISSION@",
+                    '    <permission android:name="com.example.demo.permission.PROVISION_NETWORK_CLIENT" '
+                    'android:protectionLevel="signature" />'
+                    if mode == "network_client" else "",
+                ).replace(
+                    "@STASIS_NETWORK_CLIENT_ALIAS@",
+                    '        <activity-alias android:name=".NetworkJoin" '
+                    'android:targetActivity=".MainActivity" android:exported="true" '
+                    'android:permission="com.example.demo.permission.PROVISION_NETWORK_CLIENT" />'
+                    if mode == "network_client" else "",
+                )
+                destination.write_bytes(expected.encode("utf-8"))
+                activity_source = source.parent / "client.txt"
+                activity_source.write_bytes(
+                    b"@STASIS_NETWORK_ENABLED@ @STASIS_NETWORK_CLIENT_ENABLED@"
+                )
+                (destination.parent / "client.txt").write_bytes(
+                    {"offline": b"0 0", "network": b"1 0", "network_client": b"0 1"}[mode]
+                )
+                if mode != "offline":
+                    network = package / "android/app/src/main/cpp/network"
+                    (network / "include").mkdir(parents=True)
+                    (network / "libstasis_network.a").write_bytes(b"library")
+                    (network / "include/stasis_network.h").write_bytes(b"header")
+                (package / "common").mkdir()
+                (package / "common/stasis_package_provenance.h").write_bytes(
+                    b"#ifndef STASIS_PACKAGE_PROVENANCE_H\n#define STASIS_PACKAGE_PROVENANCE_H\n"
+                    b'#define STASIS_PACKAGE_RELEASE_TAG "development"\n'
+                    b'#define STASIS_PACKAGE_SOURCE_COMMIT "unknown"\n'
+                    b'#define STASIS_PACKAGE_BUILD_LABEL "non-release development build"\n#endif\n'
+                )
+                manifest = {
+                    "development_build": True,
+                    "mobile_shell_sources": {
+                        path.relative_to(release).as_posix(): hashlib.sha256(
+                            path.read_bytes()
+                        ).hexdigest()
+                        for path in (source, activity_source)
+                    },
+                }
+                verify_mobile_shells(Parser(), release, package, manifest)
+                destination.write_bytes(
+                    expected.replace(
+                        'android:exported="true"', 'android:exported="false"'
+                    ).encode("utf-8")
+                )
+                with self.assertRaisesRegex(ValueError, "does not match release transform"):
+                    verify_mobile_shells(Parser(), release, package, manifest)
+
     def test_desktop_network_artifact_hashes_are_exact_and_complete(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             self.assertEqual({}, desktop_network_artifact_hashes(root))
 
-            library = root / DESKTOP_NETWORK_ARTIFACTS[0]
-            header = root / DESKTOP_NETWORK_ARTIFACTS[1]
+            library = root / DESKTOP_NETWORK_LIBRARIES[0]
+            header = root / DESKTOP_NETWORK_HEADER
             library.parent.mkdir(parents=True)
             library.write_bytes(b"network library")
             with self.assertRaisesRegex(ValueError, "incomplete"):
@@ -38,15 +131,82 @@ class ReleaseProvenanceTests(unittest.TestCase):
             header.write_bytes(b"network header")
             self.assertEqual(
                 {
-                    DESKTOP_NETWORK_ARTIFACTS[0]: hashlib.sha256(
+                    DESKTOP_NETWORK_LIBRARIES[0]: hashlib.sha256(
                         b"network library"
                     ).hexdigest(),
-                    DESKTOP_NETWORK_ARTIFACTS[1]: hashlib.sha256(
+                    DESKTOP_NETWORK_HEADER: hashlib.sha256(
                         b"network header"
                     ).hexdigest(),
                 },
                 desktop_network_artifact_hashes(root),
             )
+
+    def test_desktop_network_native_archives_require_exactly_one_target(self):
+        for library in DESKTOP_NETWORK_LIBRARIES:
+            with self.subTest(library=library), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                header = root / DESKTOP_NETWORK_HEADER
+                header.parent.mkdir(parents=True)
+                header.write_bytes(b"header")
+                with self.assertRaisesRegex(ValueError, "incomplete"):
+                    desktop_network_artifact_hashes(root)
+                native = root / library
+                native.parent.mkdir(parents=True)
+                native.write_bytes(b"native")
+                self.assertEqual(
+                    {library: hashlib.sha256(b"native").hexdigest(),
+                     DESKTOP_NETWORK_HEADER: hashlib.sha256(b"header").hexdigest()},
+                    desktop_network_artifact_hashes(root),
+                )
+                other = next(name for name in DESKTOP_NETWORK_LIBRARIES if name != library)
+                other_path = root / other
+                other_path.parent.mkdir(parents=True, exist_ok=True)
+                other_path.write_bytes(b"wrong target")
+                with self.assertRaisesRegex(ValueError, "exactly one"):
+                    desktop_network_artifact_hashes(root)
+                other_path.unlink()
+                (native.parent / "unexpected.a").write_bytes(b"untracked payload")
+                with self.assertRaisesRegex(ValueError, "unsupported"):
+                    desktop_network_artifact_hashes(root)
+
+    def test_network_guest_bundle_identity_rejects_corruption_and_missing_pairs(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary)
+            bundle = package / "network_guest.bundle"
+            receipt = package / "network_guest.bundle.json"
+            payload = b"SGB1 test payload"
+            identity = {
+                "format": "stasis.static_bundle.v1",
+                "path": "network_guest.bundle",
+                "length": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            verify_network_guest_bundles(Parser(), package)
+            bundle.write_bytes(payload)
+            with self.assertRaisesRegex(ValueError, "identity is missing"):
+                verify_network_guest_bundles(Parser(), package)
+            receipt.write_text(json.dumps(identity), encoding="utf-8")
+            verify_network_guest_bundles(Parser(), package)
+            bundle.write_bytes(b"X" + payload[1:])
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                verify_network_guest_bundles(Parser(), package)
+            bundle.write_bytes(payload + b"X")
+            with self.assertRaisesRegex(ValueError, "length mismatch"):
+                verify_network_guest_bundles(Parser(), package)
+            bundle.unlink()
+            with self.assertRaisesRegex(ValueError, "bundle is missing"):
+                verify_network_guest_bundles(Parser(), package)
+            bundle.write_bytes(payload)
+            for path in ("../network_guest.bundle", "/network_guest.bundle", "other.bundle"):
+                identity["path"] = path
+                receipt.write_text(json.dumps(identity), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "unsafe"):
+                    verify_network_guest_bundles(Parser(), package)
 
     def test_asset_package_identity_binds_exact_manifest_bytes(self):
         class Parser:
@@ -130,8 +290,14 @@ class ReleaseProvenanceTests(unittest.TestCase):
             self.assertTrue((thorvg / source).is_file(), source)
 
         runtime_cmake = (ROOT / "runtime/CMakeLists.txt").read_text(encoding="utf-8")
-        self.assertIn("stasis_graphics.c stasis_image_writer.c", runtime_cmake)
-        self.assertIn("stasis_audio_assets.c stasis_svg.cpp", runtime_cmake)
+        graphics_sources = re.search(
+            r"target_sources\(\$\{target\}\s+PRIVATE\s+([^)]*)\)", runtime_cmake
+        )
+        self.assertIsNotNone(graphics_sources)
+        self.assertTrue({
+            "stasis_graphics.c", "stasis_image_writer.c", "stasis_audio_assets.c",
+            "stasis_platform_services.c", "stasis_svg.cpp",
+        }.issubset(set(graphics_sources.group(1).split())))
         self.assertIn("stasis_thorvg", runtime_cmake)
 
         android_cmake = (
@@ -408,6 +574,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             'gh release create "${NIGHTLY_TAG}" "${release_assets[@]}"',
             release_block,
         )
+        self.assertIn('--target "${GITHUB_SHA}"', release_block)
         self.assertNotRegex(
             release_block,
             r'gh release create .*dist/\*',
@@ -431,7 +598,11 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 b"@STASIS_APP_NAME@ @STASIS_PACKAGE_ID@ "
                 b"@STASIS_JNI_PACKAGE@ @STASIS_ANDROID_ORIENTATION@ "
                 b"@STASIS_ANDROID_VERSION_CODE@ @STASIS_ANDROID_VERSION_NAME@\n"
-                b"@STASIS_ANDROID_ABI@\n"
+                b"@STASIS_ANDROID_ABI@ @STASIS_NETWORK_ENABLED@ "
+                b"@STASIS_NETWORK_CLIENT_ENABLED@\n"
+                b"@STASIS_NETWORK_PERMISSION@"
+                b"@STASIS_NETWORK_CLIENT_PERMISSION@\n"
+                b"@STASIS_NETWORK_CLIENT_ALIAS@\n"
             )
             manifest = {
                 "schema": "stasis.release_provenance.v1",
@@ -458,7 +629,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             (package / "common/main.c").write_bytes(common_shell)
             (package / "android/main.c").write_bytes(
                 b"Demo App com.example.demo com_example_demo sensorPortrait 7 2.1.0\n"
-                b"arm64-v8a\n"
+                b"arm64-v8a 0 0\n\n\n"
             )
             (package / "stasis_mobile_package.json").write_text(
                 json.dumps(
@@ -493,6 +664,44 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "--expect-runtime-sources",
             ]
             self.assertEqual(subprocess.run(command, check=False).returncode, 0)
+            network_client_receipt = {
+                "target": "android-arm64",
+                "name": "demo",
+                "app_name": "Demo App",
+                "package_id": "com.example.demo",
+                "android_orientation": "sensorPortrait",
+                "android_version_code": "7",
+                "android_version_name": "2.1.0",
+                "network_client": True,
+            }
+            (package / "stasis_mobile_package.json").write_text(
+                json.dumps(network_client_receipt), encoding="utf-8"
+            )
+            (package / "android/main.c").write_bytes(
+                b"Demo App com.example.demo com_example_demo sensorPortrait 7 2.1.0\n"
+                b"arm64-v8a 0 1\n"
+                b'    <uses-permission android:name="android.permission.INTERNET" />\n'
+                b'    <permission android:name="com.example.demo.permission.PROVISION_NETWORK_CLIENT" android:protectionLevel="signature" />\n'
+                b'        <activity-alias android:name=".NetworkJoin" android:targetActivity=".MainActivity" android:exported="true" android:permission="com.example.demo.permission.PROVISION_NETWORK_CLIENT" />\n'
+            )
+            network = package / "android/app/src/main/cpp/network"
+            (network / "include").mkdir(parents=True)
+            (network / "libstasis_network.a").write_bytes(b"library")
+            (network / "include/stasis_network.h").write_bytes(b"header")
+            self.assertEqual(subprocess.run(command, check=False).returncode, 0)
+            network_client_receipt["network_client"] = False
+            (package / "stasis_mobile_package.json").write_text(
+                json.dumps(network_client_receipt), encoding="utf-8"
+            )
+            client_mismatch = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(client_mismatch.returncode, 0)
+            self.assertIn("release transform", client_mismatch.stderr)
+            (package / "stasis_mobile_package.json").write_text(
+                json.dumps(network_client_receipt | {"network_client": True}),
+                encoding="utf-8",
+            )
             legacy = dict(manifest)
             legacy["command_buffer"] = {"name": "gfx_cmd", "version": 4}
             (release / "stasis_release_provenance.json").write_text(

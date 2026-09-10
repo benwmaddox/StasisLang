@@ -55,6 +55,7 @@ function release(self: Sprite): void;
 
 function load_text_from(self: TextRun, font: i32, text: string): bool;
 function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void;
+function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void;
 ```
 
 Representative use:
@@ -204,6 +205,9 @@ The receiver is a mutable view into global-backed state, matching Stasis's exist
 ## Extension point
 
 Future work may add explicit downscale, fit, or intentionally upscaled operations. Those APIs must remain distinct from canonical `draw` and must validate against the resource's logical painted envelope. Asset-manifest IDs may eventually supply the logical size so paths and dimensions also have one declaration.
+
+`draw_text` is the public immediate command for genuinely dynamic or teaching
+UI text; stable labels should still use a cached `TextRun`.
 
 TextRun and font ownership intentionally remain unchanged in this slice. The
 existing host text cache retains font bytes and prepared runs through surface

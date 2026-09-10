@@ -15,6 +15,7 @@ Target user outcome: avoid hand-writing repeated `gfx_load_sprite("assets/foo.sv
 
 - Asset loading is runtime-only today through `gfx_load_sprite(path: string, max_w: i32, max_h: i32)`.
 - Runtime rasterization parses SVG width/height using the pinned ThorVG SVG loader and bakes to requested max dimensions.
+- Asset optimization: retain immutable masters and use the [validated SVGO precision-2 baseline](../tools/svg_evaluation/README.md). The post-SVGO evaluation found no additional pass worth promoting.
 - AOT manifest already carries compile-time metadata for:
   - `string_literals`
   - `collection_max_lengths`
