@@ -16,8 +16,10 @@ pub mod task_session;
 
 pub use openrouter::{
     ConfiguredProvider, ImageInputCapability, OpenRouterConfig, OpenRouterImageInput,
-    OpenRouterProvider, PreferredThroughputPolicy, ProviderConfig, ProviderKind, RoutingConfig,
-    RoutingSort, MAX_OPENROUTER_IMAGES, MAX_OPENROUTER_IMAGE_BYTES,
+    OpenRouterProvider, PreferredThroughputPolicy, ProjectAiConfig, ProjectOpenRouterConfig,
+    ProviderConfig, ProviderKind, RoutingConfig, RoutingSort, APPROVED_OPENROUTER_MODELS,
+    DEFAULT_OPENROUTER_MAX_LATENCY_SECONDS, DEFAULT_OPENROUTER_MIN_THROUGHPUT,
+    DEFAULT_OPENROUTER_MODEL, MAX_OPENROUTER_IMAGES, MAX_OPENROUTER_IMAGE_BYTES,
 };
 
 pub use session_store::{

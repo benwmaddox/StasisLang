@@ -42,11 +42,9 @@ fn run_live_acceptance() -> Result<(), String> {
     prepare_disposable_workspace(&repository, &source, &workspace)?;
     load_openrouter_key()?;
     std::env::set_var("STASIS_AI_PROVIDER", "openrouter");
-    std::env::set_var(
-        "STASIS_AI_MODEL",
-        std::env::var("STASIS_EDITOR_OPENROUTER_MODEL")
-            .unwrap_or_else(|_| "openai/gpt-5.6-luna".to_string()),
-    );
+    let initial_model = std::env::var("STASIS_EDITOR_OPENROUTER_MODEL")
+        .unwrap_or_else(|_| stasis_ai::DEFAULT_OPENROUTER_MODEL.to_string());
+    set_workspace_approved_model(&workspace, &initial_model)?;
 
     let manifest: Value = serde_json::from_slice(
         &std::fs::read(workspace.join("stasis.json"))
@@ -122,7 +120,11 @@ fn run_live_acceptance() -> Result<(), String> {
     }
 
     let (result_tx, result_rx) = mpsc::channel();
-    let model = std::env::var("STASIS_AI_MODEL").unwrap_or_default();
+    let model = manifest
+        .pointer("/ai/openrouter/approved_models/0")
+        .and_then(Value::as_str)
+        .unwrap_or(stasis_ai::DEFAULT_OPENROUTER_MODEL)
+        .to_string();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Stasis Editor - Task 524 live acceptance")
@@ -615,6 +617,31 @@ fn prepare_disposable_workspace(
             .map_err(|error| format!("replace disposable stdlib: {error}"))?;
     }
     copy_tree(&repository.join("src/stdlib"), &copied_stdlib)
+}
+
+#[cfg(target_os = "windows")]
+fn set_workspace_approved_model(workspace: &Path, model: &str) -> Result<(), String> {
+    let path = workspace.join("stasis.json");
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("read disposable workspace manifest: {error}"))?;
+    let mut manifest: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse disposable workspace manifest: {error}"))?;
+    let root = manifest
+        .as_object_mut()
+        .ok_or_else(|| "disposable workspace manifest must be a JSON object".to_string())?;
+    let ai = root.entry("ai").or_insert_with(|| json!({}));
+    let ai = ai
+        .as_object_mut()
+        .ok_or_else(|| "disposable workspace ai policy must be a JSON object".to_string())?;
+    let openrouter = ai.entry("openrouter").or_insert_with(|| json!({}));
+    let openrouter = openrouter
+        .as_object_mut()
+        .ok_or_else(|| "disposable OpenRouter policy must be a JSON object".to_string())?;
+    openrouter.insert("approved_models".to_string(), json!([model]));
+    let encoded = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("serialize disposable workspace manifest: {error}"))?;
+    std::fs::write(&path, encoded)
+        .map_err(|error| format!("write disposable workspace manifest: {error}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -1480,11 +1507,13 @@ impl eframe::App for LiveAcceptanceApp {
                             return;
                         }
                     }
-                    std::env::set_var(
-                        "STASIS_AI_MODEL",
-                        std::env::var("STASIS_EDITOR_OPENROUTER_IMAGE_MODEL")
-                            .unwrap_or_else(|_| "openai/gpt-5.6-luna".to_string()),
-                    );
+                    let image_model = std::env::var("STASIS_EDITOR_OPENROUTER_IMAGE_MODEL")
+                        .unwrap_or_else(|_| "openai/gpt-5.6-luna".to_string());
+                    if let Err(error) = set_workspace_approved_model(&self.workspace, &image_model)
+                    {
+                        self.fail(context, error);
+                        return;
+                    }
                     if let Err(error) = create_openrouter_task(
                         &mut self.editor,
                         "Improve ball readability from the live frame",

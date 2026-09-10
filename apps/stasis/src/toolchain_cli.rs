@@ -802,7 +802,7 @@ impl PackageTarget {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ProjectManifest {
     manifest_version: u32,
     name: String,
@@ -817,6 +817,8 @@ struct ProjectManifest {
     android: Option<AndroidProjectManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capabilities: Option<ProjectCapabilities>,
+    #[serde(default)]
+    ai: stasis_ai::ProjectAiConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web: Option<WebProjectManifest>,
 }
@@ -883,6 +885,7 @@ impl ProjectManifest {
             vendor: None,
             android: None,
             capabilities: None,
+            ai: stasis_ai::ProjectAiConfig::default(),
             web: None,
         }
     }
@@ -895,6 +898,7 @@ impl ProjectManifest {
             ));
         }
         validate_project_name(&self.name)?;
+        self.ai.validate()?;
         for (field, value) in [
             ("entry", self.entry.as_str()),
             ("tests", self.tests.as_str()),
@@ -2987,7 +2991,7 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
     if prompt.trim().is_empty() {
         return Err("AI prompt must not be empty".to_string());
     }
-    let configured_provider = stasis_ai::ProviderConfig::from_env()?
+    let configured_provider = stasis_ai::ProviderConfig::from_workspace(&workspace.root)?
         .provider_name()
         .to_string();
     let entry = workspace.root.join(&workspace.manifest.entry);
@@ -11605,6 +11609,49 @@ mod tests {
             ..ProjectManifest::new("demo".to_string())
         };
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_defaults_and_serializes_approved_ai_routing_policy() {
+        let manifest = ProjectManifest::new("demo".to_string());
+        assert_eq!(
+            manifest.ai.openrouter.approved_models,
+            [stasis_ai::DEFAULT_OPENROUTER_MODEL]
+        );
+        assert_eq!(manifest.ai.openrouter.min_throughput_tokens_per_second, 400);
+        assert_eq!(manifest.ai.openrouter.max_p50_latency_seconds, 2.0);
+        let encoded = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(
+            encoded.pointer("/ai/openrouter/approved_models/0"),
+            Some(&json!("openai/gpt-oss-120b"))
+        );
+        assert_eq!(
+            encoded.pointer("/ai/openrouter/max_p50_latency_seconds"),
+            Some(&json!(2.0))
+        );
+
+        let legacy: ProjectManifest = serde_json::from_value(json!({
+            "manifest_version": 1,
+            "name": "legacy",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build"
+        }))
+        .unwrap();
+        assert_eq!(legacy.ai, stasis_ai::ProjectAiConfig::default());
+
+        let mut invalid = manifest.clone();
+        invalid.ai.openrouter.approved_models.clear();
+        assert_eq!(
+            invalid.validate().unwrap_err(),
+            "ai.openrouter.approved_models must not be empty"
+        );
+        invalid = manifest;
+        invalid.ai.openrouter.max_p50_latency_seconds = 0.0;
+        assert_eq!(
+            invalid.validate().unwrap_err(),
+            "ai.openrouter.max_p50_latency_seconds must be a finite number greater than zero"
+        );
     }
 
     #[test]

@@ -19,19 +19,33 @@ The OpenRouter adapter uses HTTPS chat-completions streaming with a strict `resp
 ```powershell
 $env:STASIS_AI_PROVIDER = "openrouter"
 $env:OPENROUTER_API_KEY = "..."
-$env:STASIS_AI_MODEL = "openai/gpt-oss-120b"
 $env:STASIS_AI_ROUTE_ONLY = "cerebras"
 $env:STASIS_AI_ROUTE_ORDER = "cerebras"
 $env:STASIS_AI_ALLOW_FALLBACKS = "false"
-$env:STASIS_AI_ROUTE_SORT = "throughput"
 ```
 
-For OpenRouter Nitro routing, select the Nitro model variant and omit `STASIS_AI_ROUTE_ONLY` unless a provider pin is also required:
+Approved models and performance constraints belong in `stasis.json`:
 
-```powershell
-$env:STASIS_AI_MODEL = "openai/gpt-oss-120b:nitro"
-$env:STASIS_AI_ROUTE_SORT = "throughput"
+```json
+{
+  "ai": {
+    "openrouter": {
+      "approved_models": ["openai/gpt-oss-120b"],
+      "min_throughput_tokens_per_second": 400,
+      "max_p50_latency_seconds": 2.0
+    }
+  }
+}
 ```
+
+The current approved editor model is `openai/gpt-oss-120b`. Project manifests may list
+additional models only after they have been approved through representative semantic-edit and
+test evaluation. Stasis queries OpenRouter's rolling p50 endpoint metadata, rejects unhealthy
+endpoints below the throughput floor or at/above the latency ceiling, and selects the lowest
+completion-price qualifying model/endpoint. Selection is sticky for a task and shared by a
+bounded five-minute cache across tasks. Completed no-qualifying decisions back off for 15
+seconds, concurrent tasks with the same policy share one refresh, and the approved list is capped
+at eight models. Missing `ai.openrouter` fields use the values above.
 
 Routing variables are comma-separated where applicable:
 
@@ -39,14 +53,18 @@ Routing variables are comma-separated where applicable:
 - `STASIS_AI_ROUTE_ORDER`: preferred provider order.
 - `STASIS_AI_ALLOW_FALLBACKS`: `true` or `false`.
 - `STASIS_AI_ROUTE_SORT`: `price`, `throughput`, or `latency`. `price` requests lowest-price routing.
-- `STASIS_AI_PREFERRED_MIN_THROUGHPUT`: soft tokens/second target.
-- `STASIS_AI_PREFERRED_THROUGHPUT_POLICY`: `allow_below` (default) or `fail`. `fail` preflights endpoint metadata and pins only qualifying endpoints.
-- `STASIS_AI_HARD_MIN_THROUGHPUT`: hard tokens/second floor. Stasis preflights endpoint metadata and fails closed when no healthy, explicitly allowed endpoint qualifies; it never knowingly routes below the floor.
 - `STASIS_AI_MAX_PRICE`: maximum completion price accepted by the OpenRouter routing policy.
 - `STASIS_AI_TIMEOUT_SECONDS`: whole provider request timeout (default 120 seconds).
 - `STASIS_OPENROUTER_URL`: test/private gateway override; normally unset.
 
-Do not set both preferred and hard throughput thresholds. Metadata/preflight duration is logged separately from response header, first reasoning, first content, first action, inference-total, and turn-total timing. Inference timing and observed throughput exclude metadata preflight time. Usage records contain configured and resolved model/provider, route and fallback state, token/cache/reasoning counts, observed completion throughput, cost when returned by OpenRouter, and structured-validation status.
+Model, throughput, and p50 latency environment variables are intentionally ignored for workspace
+requests; the checked-in manifest is authoritative. Metadata/preflight duration is logged
+separately from response header, first reasoning, first content, first action, inference-total,
+and turn-total timing. Inference timing and observed throughput exclude metadata preflight time.
+The 3-10 second edit goal is an end-to-end product target, not an OpenRouter metadata field.
+Usage records contain configured and resolved model/provider, route and fallback state,
+token/cache/reasoning counts, observed completion throughput, cost when returned by OpenRouter,
+and structured-validation status.
 
 ## Credentialed evaluation (opt in)
 

@@ -145,6 +145,14 @@ impl From<String> for ScriptedAiFailure {
     }
 }
 
+fn configured_model_for_profile(provider: &ProviderConfig, profile: &AgentProfile) -> String {
+    if provider.provider_name() == "openrouter" {
+        provider.model()
+    } else {
+        profile.model.clone().unwrap_or_else(|| provider.model())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_scripted_ai_profile(
     client: &LiveSessionClient,
@@ -159,11 +167,9 @@ pub(super) fn run_scripted_ai_profile(
     require_imagegen: bool,
     canceled: &AtomicBool,
 ) -> Result<ScriptedAiOutcome, ScriptedAiFailure> {
-    let provider_config = ProviderConfig::from_env()?;
-    let configured_model = profile
-        .model
-        .clone()
-        .unwrap_or_else(|| provider_config.model());
+    let provider_config = ProviderConfig::from_workspace(project_root)?;
+    let configured_model = configured_model_for_profile(&provider_config, &profile);
+    let manifest_owns_model = provider_config.provider_name() == "openrouter";
     let effective_reasoning_effort = profile
         .reasoning_effort
         .as_deref()
@@ -183,8 +189,10 @@ pub(super) fn run_scripted_ai_profile(
         .with_session_id(provider_session_id)?
         .with_images(images)?
         .with_web_search(web_search)?;
-    if let Some(model) = profile.model.as_deref() {
-        provider = provider.with_model(model);
+    if !manifest_owns_model {
+        if let Some(model) = profile.model.as_deref() {
+            provider = provider.with_model(model);
+        }
     }
     if let Some(reasoning_effort) = effective_reasoning_effort {
         provider = provider.with_reasoning_effort(reasoning_effort);
@@ -2295,7 +2303,7 @@ impl LiveTui {
         let Some(prompt) = self.queued_ai_prompt.take() else {
             return;
         };
-        let provider_config = match ProviderConfig::from_env() {
+        let provider_config = match ProviderConfig::from_workspace(&self.project_root) {
             Ok(config) => config,
             Err(error) => {
                 self.status = format!("AI provider unavailable: {error}");
@@ -5478,6 +5486,30 @@ fn write_at(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn scripted_openrouter_profile_uses_manifest_model() {
+        let provider = ProviderConfig::OpenRouter(stasis_ai::OpenRouterConfig {
+            api_key: "test-only".into(),
+            base_url: "https://example.invalid".into(),
+            model: stasis_ai::DEFAULT_OPENROUTER_MODEL.into(),
+            approved_models: vec![stasis_ai::DEFAULT_OPENROUTER_MODEL.into()].into_boxed_slice(),
+            routing: stasis_ai::RoutingConfig::default(),
+            timeout: Duration::from_secs(1),
+        });
+        let profile = AgentProfile {
+            model: Some("unapproved/profile-model".into()),
+            ..AgentProfile::default()
+        };
+        assert_eq!(
+            configured_model_for_profile(&provider, &profile),
+            stasis_ai::DEFAULT_OPENROUTER_MODEL
+        );
+        assert_eq!(
+            configured_model_for_profile(&ProviderConfig::Codex, &profile),
+            "unapproved/profile-model"
+        );
+    }
 
     fn font_path_edit(source: &str) -> LiveEdit {
         LiveEdit {

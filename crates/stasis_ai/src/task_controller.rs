@@ -18,7 +18,7 @@ const SAFE_SESSION_ERROR: &str = "AI response could not be added to the task";
 pub fn safe_provider_error(error: &str) -> &'static str {
     let error = error.to_ascii_lowercase();
     if error.contains("routing failed closed") {
-        "OpenRouter found no healthy endpoint meeting the configured throughput requirement. Check the model and routing settings in the project .env; slower fallback was not used."
+        "OpenRouter found no approved model endpoint meeting the project throughput and p50 latency requirements. Check ai.openrouter in stasis.json; slower fallback was not used."
     } else if error.contains("workspace .env") || error.contains("openrouter_api_key") {
         "AI provider configuration failed. Check the project .env syntax and OPENROUTER_API_KEY."
     } else if error.contains("401")
@@ -1312,7 +1312,7 @@ mod tests {
         for (error, expected) in [
             (
                 "OpenRouter routing failed closed: private-model secret-key",
-                "throughput requirement",
+                "p50 latency requirements",
             ),
             ("OPENROUTER_API_KEY secret-key", "project .env"),
             ("HTTP 401 secret-key", "authentication failed"),

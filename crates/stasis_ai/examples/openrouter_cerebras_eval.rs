@@ -17,6 +17,7 @@ fn main() -> Result<(), String> {
         api_key,
         base_url: "https://openrouter.ai/api/v1".into(),
         model: "openai/gpt-oss-120b".into(),
+        approved_models: vec!["openai/gpt-oss-120b".into()].into_boxed_slice(),
         routing: RoutingConfig {
             only: vec!["cerebras".into()],
             order: vec!["cerebras".into()],
@@ -24,7 +25,8 @@ fn main() -> Result<(), String> {
             sort: RoutingSort::Throughput,
             preferred_min_throughput: Some(1_000.0),
             preferred_throughput_policy: PreferredThroughputPolicy::AllowBelow,
-            hard_min_throughput: None,
+            hard_min_throughput: Some(400.0),
+            hard_max_latency_seconds: Some(2.0),
             max_price: None,
         },
         timeout: Duration::from_secs(120),
