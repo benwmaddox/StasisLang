@@ -4318,6 +4318,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "atomic-write-file",
+ "base64",
  "clap",
  "crossterm",
  "eframe",

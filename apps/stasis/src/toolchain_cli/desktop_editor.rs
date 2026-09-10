@@ -1,3 +1,4 @@
+mod chat_export;
 mod host_progress;
 mod image_attachments;
 mod persistence;
@@ -97,11 +98,70 @@ enum TimelineAction {
 struct ProposalTools {
     proposals: Vec<ProviderActionProposal>,
     sources: Vec<Value>,
+    existing_actions: BTreeMap<String, String>,
 }
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 256 * 1024;
 
 impl ProposalTools {
+    fn validate_proposal(
+        &self,
+        id: &str,
+        description: &str,
+        payload: &Value,
+        repair: bool,
+    ) -> Result<(), String> {
+        if self.proposals.iter().any(|proposal| proposal.id == id) {
+            return Err(format!(
+                "proposal_id {id} was already used in this response; use one unique ID per proposal"
+            ));
+        }
+        match (repair, self.existing_actions.get(id).map(String::as_str)) {
+            (true, Some("rejected" | "needs_repair")) => {}
+            (true, Some(_)) => {
+                return Err(format!(
+                    "proposal_id {id} cannot repair accepted or pending work"
+                ));
+            }
+            (true, None) => {
+                return Err(format!(
+                    "proposal_id {id} cannot be repaired because it does not exist"
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(format!(
+                    "proposal_id {id} already exists; use repair_semantic_edit only for rejected work"
+                ));
+            }
+            (false, None) => {}
+        }
+        let new_proposals = self
+            .proposals
+            .iter()
+            .filter(|proposal| !proposal.repair)
+            .count();
+        if !repair
+            && self.existing_actions.len().saturating_add(new_proposals)
+                >= stasis_ai::task_session::MAX_ACTIONS
+        {
+            return Err("task action limit reached; finish or start a new task".into());
+        }
+        let mut validator = stasis_ai::Task::new(
+            "provider-proposal-validation",
+            "Validate provider proposal",
+            "Provider proposal validation",
+        )
+        .map_err(|error| error.to_string())?;
+        validator
+            .propose_action_with_payload(
+                id,
+                stasis_ai::ActionKind::Edit,
+                description,
+                payload.clone(),
+            )
+            .map_err(|error| format!("invalid proposal: {error}"))
+    }
+
     fn source_catalog(&self) -> Result<Value, String> {
         let catalog = Value::Array(
             self.sources
@@ -183,6 +243,7 @@ impl ToolExecutor for ProposalTools {
                         stasis_compiler::frontend::workshop::WorkshopSemanticEditBatch,
                     >(payload.clone())
                     .map_err(|error| format!("invalid semantic edit batch: {error}"))?;
+                    self.validate_proposal(id, description, &payload, repair)?;
                     self.proposals.push(ProviderActionProposal {
                         id: id.to_string(),
                         kind: stasis_ai::ActionKind::Edit,
@@ -494,6 +555,11 @@ fn run_reply_provider_observed_with_progress(
     let source_context = super::desktop_source_context(&project_root)?;
     let mut tools = ProposalTools {
         sources: source_context,
+        existing_actions: request
+            .actions
+            .iter()
+            .map(|action| (action.id.to_string(), action.state.to_string()))
+            .collect(),
         ..ProposalTools::default()
     };
     let source_catalog = tools.source_catalog()?;
@@ -658,6 +724,7 @@ enum EditorIntent {
     Retry(String),
     Reconnect(String),
     MarkDone(String),
+    ExportChat(String),
 }
 
 #[derive(Debug)]
@@ -964,6 +1031,12 @@ struct DesktopEditor {
     persisted_snapshot: Option<SessionSnapshot>,
     autosave: Option<thread::JoinHandle<Result<SessionSnapshot, String>>>,
     next_autosave: Instant,
+    auto_transcript_directory: Option<PathBuf>,
+    auto_transcript_hashes: BTreeMap<String, String>,
+    auto_transcript_writer: Option<thread::JoinHandle<Result<Vec<(String, String)>, String>>>,
+    next_auto_transcript: Instant,
+    auto_transcript_error: Option<String>,
+    auto_transcript_dirty: bool,
     uncertain_calls: BTreeSet<String>,
     expanded: BTreeSet<String>,
     window_preferences: Option<WindowPreferences>,
@@ -972,6 +1045,13 @@ struct DesktopEditor {
     erase_confirmation: bool,
     recovery_error: bool,
     recovered_previews: BTreeMap<SemanticPreviewKey, String>,
+}
+
+struct AutoTranscriptJob {
+    task: stasis_ai::Task,
+    diffs: chat_export::SemanticDiffs,
+    fingerprint: String,
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1042,6 +1122,7 @@ impl DesktopEditor {
                 let _ = job.worker.join();
                 if let Some(record) = self.state.semantic_previews.get_mut(&job.key) {
                     record.result = Some(result);
+                    self.auto_transcript_dirty = true;
                 }
             }
         }
@@ -1317,6 +1398,10 @@ impl DesktopEditor {
     fn new(client: LiveSessionClient, project_root: PathBuf, shutdown: Arc<AtomicBool>) -> Self {
         let host = HostExecutor::new(project_root.clone());
         let provider_root = project_root.clone();
+        let auto_transcript_directory = stasis_ai::ProjectAiConfig::from_workspace(&project_root)
+            .ok()
+            .filter(|config| config.editor.auto_persist_html_transcripts)
+            .map(|_| project_root.join(".stasis_cache/logs/ai-transcripts"));
         let (capture_result_tx, capture_results) = mpsc::channel();
         let (capability_result_tx, capability_results) = mpsc::channel();
         Self {
@@ -1358,6 +1443,12 @@ impl DesktopEditor {
             persisted_snapshot: None,
             autosave: None,
             next_autosave: Instant::now() + Duration::from_millis(500),
+            auto_transcript_directory,
+            auto_transcript_hashes: BTreeMap::new(),
+            auto_transcript_writer: None,
+            next_auto_transcript: Instant::now() + Duration::from_millis(500),
+            auto_transcript_error: None,
+            auto_transcript_dirty: true,
             uncertain_calls: BTreeSet::new(),
             expanded: BTreeSet::new(),
             window_preferences: None,
@@ -1405,9 +1496,20 @@ impl DesktopEditor {
             .prepare_snapshot(&mut snapshot)
             .map_err(|error| error.to_string())?;
         store.save(&snapshot).map_err(|error| error.to_string())?;
+        let transcript_changed = self.transcript_snapshot_changed(&snapshot);
         self.media_hashes = snapshot.media_hashes.clone();
         self.persisted_snapshot = Some(snapshot);
+        self.auto_transcript_dirty |= transcript_changed;
         Ok(())
+    }
+
+    fn transcript_snapshot_changed(&self, snapshot: &SessionSnapshot) -> bool {
+        self.persisted_snapshot.as_ref().is_none_or(|persisted| {
+            persisted.session != snapshot.session
+                || persisted.execution_receipts != snapshot.execution_receipts
+                || persisted.media_hashes != snapshot.media_hashes
+                || persisted.unavailable_media != snapshot.unavailable_media
+        })
     }
 
     fn finish_autosave(&mut self) {
@@ -1419,8 +1521,10 @@ impl DesktopEditor {
             .unwrap_or_else(|_| Err("session writer panicked".into()))
         {
             Ok(snapshot) => {
+                let transcript_changed = self.transcript_snapshot_changed(&snapshot);
                 self.media_hashes = snapshot.media_hashes.clone();
                 self.persisted_snapshot = Some(snapshot);
+                self.auto_transcript_dirty |= transcript_changed;
             }
             Err(error) => {
                 self.state.notice = Some(format!("Could not save editor session: {error}"))
@@ -1473,13 +1577,116 @@ impl DesktopEditor {
         }
     }
 
+    fn finish_auto_transcript_writer(&mut self) {
+        let Some(worker) = self.auto_transcript_writer.take() else {
+            return;
+        };
+        match worker
+            .join()
+            .unwrap_or_else(|_| Err("automatic transcript writer panicked".into()))
+        {
+            Ok(written) => {
+                self.auto_transcript_hashes.extend(written);
+                self.auto_transcript_error = None;
+            }
+            Err(error) => {
+                if self.auto_transcript_error.as_deref() != Some(&error) {
+                    self.state.notice = Some(format!(
+                        "Could not update automatic HTML transcripts: {error}"
+                    ));
+                }
+                self.auto_transcript_error = Some(error);
+                self.auto_transcript_dirty = true;
+                self.next_auto_transcript = Instant::now() + Duration::from_secs(5);
+            }
+        }
+    }
+
+    fn poll_auto_transcripts(&mut self, now: Instant) {
+        if self
+            .auto_transcript_writer
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            self.finish_auto_transcript_writer();
+        }
+        let Some(directory) = self.auto_transcript_directory.clone() else {
+            return;
+        };
+        if self.auto_transcript_writer.is_some()
+            || !self.auto_transcript_dirty
+            || now < self.next_auto_transcript
+        {
+            return;
+        }
+        self.auto_transcript_dirty = false;
+        self.next_auto_transcript = now + Duration::from_millis(500);
+        let jobs = self
+            .state
+            .session
+            .tasks()
+            .filter_map(|task| {
+                let diffs = self.semantic_diffs(task.id.as_str(), task);
+                let fingerprint = chat_export::content_fingerprint(
+                    task,
+                    &diffs,
+                    &self.media_hashes,
+                    &self.unavailable_media,
+                );
+                (self.auto_transcript_hashes.get(task.id.as_str()) != Some(&fingerprint)).then(
+                    || AutoTranscriptJob {
+                        task: task.clone(),
+                        diffs,
+                        fingerprint,
+                        path: directory.join(chat_export::auto_file_name(task)),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if jobs.is_empty() {
+            return;
+        }
+        let media_hashes = self.media_hashes.clone();
+        let unavailable_media = self.unavailable_media.clone();
+        self.auto_transcript_writer = Some(thread::spawn(move || {
+            let mut written = Vec::with_capacity(jobs.len());
+            for job in jobs {
+                let export =
+                    chat_export::render(&job.task, &job.diffs, &media_hashes, &unavailable_media);
+                chat_export::write(&job.path, &export.html)?;
+                written.push((job.task.id.to_string(), job.fingerprint));
+            }
+            Ok(written)
+        }));
+    }
+
+    fn flush_auto_transcripts(&mut self) {
+        self.finish_auto_transcript_writer();
+        self.next_auto_transcript = Instant::now();
+        self.poll_auto_transcripts(Instant::now());
+        self.finish_auto_transcript_writer();
+    }
+
     fn erase_history(&mut self) -> Result<(), String> {
         self.finish_autosave();
+        self.finish_auto_transcript_writer();
         if self.state.session.tasks().any(|task| self.ui_busy(task)) {
             return Err("Wait for running work to finish before erasing history.".into());
         }
         if let Some(store) = &self.store {
             store.erase().map_err(|error| error.to_string())?;
+        }
+        if let Some(directory) = &self.auto_transcript_directory {
+            match std::fs::remove_dir_all(directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "could not erase automatic transcripts at {}: {error}",
+                        directory.display()
+                    ))
+                }
+            }
         }
         self.state = EditorState {
             project_root: Some(self.project_root.clone()),
@@ -1498,6 +1705,8 @@ impl DesktopEditor {
         self.attachment_store = SessionAttachmentStore::persistent(&self.project_root);
         self.preview_texture = None;
         self.recovered_previews.clear();
+        self.auto_transcript_hashes.clear();
+        self.auto_transcript_dirty = false;
         if let Some(job) = self.semantic_job.take() {
             let _ = job.worker.join();
         }
@@ -1787,6 +1996,7 @@ impl DesktopEditor {
                         Err(error) => self.state.notice = Some(error),
                     }
                 }
+                EditorIntent::ExportChat(task) => self.export_chat(&task),
                 EditorIntent::GenerateImage(task) | EditorIntent::ImportImage(task, _) => {
                     let message = "Image generation and asset import are unavailable in the desktop editor. No asset was generated or imported.";
                     if let Ok(task) = self.state.session.task_mut(task.as_str()) {
@@ -1797,6 +2007,81 @@ impl DesktopEditor {
                 EditorIntent::Screenshot(task) => self.start_capture(TaskId::new(task)),
             }
         }
+    }
+
+    fn export_chat(&mut self, task_id: &str) {
+        let task = match self.state.session.task(task_id) {
+            Ok(task) => task.clone(),
+            Err(error) => {
+                self.state.notice = Some(error.to_string());
+                return;
+            }
+        };
+        let diffs = self.semantic_diffs(task_id, &task);
+        let export =
+            chat_export::render(&task, &diffs, &self.media_hashes, &self.unavailable_media);
+        let Some(mut path) = rfd::FileDialog::new()
+            .set_title("Export Stasis chat")
+            .set_file_name(chat_export::default_file_name(&task))
+            .add_filter("HTML", &["html"])
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension("html");
+        }
+        self.state.notice = Some(match chat_export::write(&path, &export.html) {
+            Ok(()) => format!(
+                "Exported chat to {} ({} picture{} embedded, {} omitted).",
+                path.display(),
+                export.embedded_media,
+                if export.embedded_media == 1 { "" } else { "s" },
+                export.omitted_media,
+            ),
+            Err(error) => error,
+        });
+    }
+
+    fn semantic_diffs(&self, task_id: &str, task: &stasis_ai::Task) -> chat_export::SemanticDiffs {
+        let mut diffs = self
+            .state
+            .semantic_previews
+            .iter()
+            .filter_map(|(key, record)| {
+                if key.task != task_id {
+                    return None;
+                }
+                let preview = record.result.as_ref()?.as_ref().ok()?;
+                Some((
+                    (key.action.clone(), key.revision),
+                    semantic_diff::unified_diff(&preview.plan),
+                ))
+            })
+            .collect::<chat_export::SemanticDiffs>();
+        for ((receipt_task, action_id), receipt) in &self.execution_receipts {
+            if receipt_task != task_id {
+                continue;
+            }
+            let Some(plan) = receipt
+                .get("plan")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+            else {
+                continue;
+            };
+            let Some(revision) = task
+                .actions
+                .get(action_id.as_str())
+                .map(|action| proposal_revisions(action).len().saturating_sub(1))
+            else {
+                continue;
+            };
+            diffs
+                .entry((action_id.clone(), revision))
+                .or_insert_with(|| semantic_diff::unified_diff(&plan));
+        }
+        diffs
     }
 
     fn image_attachment_capability(&self, task_id: &TaskId) -> Result<(), String> {
@@ -3146,6 +3431,11 @@ impl EditorState {
                 self.focus_pending = true;
                 Ok(())
             }
+            TaskSessionCommand::ExportChat => {
+                let task = self.active_id()?;
+                self.intents.push(EditorIntent::ExportChat(task));
+                Ok(())
+            }
             TaskSessionCommand::SendReply => {
                 let task = self.active_id()?;
                 let text = self.reply.trim().to_string();
@@ -3484,6 +3774,10 @@ impl DesktopEditor {
                         ui.label(format!("Route: {:?}", task.provider.routing));
                         ui.label(format!("Fallback: {:?}", task.provider.fallback));
                     });
+                ui.add_space(6.0);
+                if ui.button("Export chat as HTML").clicked() {
+                    self.state.dispatch(TaskSessionCommand::ExportChat);
+                }
                 if let Some(request) = self.controller.snapshot(&task.id) {
                     ui.add_space(6.0);
                     ui.label(
@@ -4360,6 +4654,7 @@ impl DesktopEditor {
             ("Cancel task", TaskSessionCommand::Cancel),
             ("Mark done", TaskSessionCommand::MarkDone),
             ("Focus game", TaskSessionCommand::FocusGame),
+            ("Export chat as HTML", TaskSessionCommand::ExportChat),
         ];
         let mut commands = commands
             .into_iter()
@@ -4752,16 +5047,20 @@ impl eframe::App for DesktopEditor {
             self.window_preferences =
                 Some(persistence::bounded_window([rect.width(), rect.height()]));
         }
-        self.poll_autosave(Instant::now());
+        let now = Instant::now();
+        self.poll_autosave(now);
+        self.poll_auto_transcripts(now);
         context.request_repaint_after(Duration::from_millis(500));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist_if_changed();
+        self.flush_auto_transcripts();
         self.host.shutdown_and_join();
         // Work already executing may have committed after the initial exit snapshot.
         self.poll_host();
         self.persist_if_changed();
+        self.flush_auto_transcripts();
         if let Some(job) = self.semantic_job.take() {
             let _ = job.worker.join();
         }
@@ -4877,6 +5176,78 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn proposal_tools_reject_duplicate_ids_before_task_publication() {
+        let (_, root, payload) = review_fixture("duplicate_provider_proposal");
+        let args = json!({
+            "proposal_id": "background-style",
+            "description": "Update the background",
+            "batch": payload,
+        });
+        let calls = [
+            ToolCall {
+                tool: "propose_semantic_edit".into(),
+                args: args.clone(),
+            },
+            ToolCall {
+                tool: "propose_semantic_edit".into(),
+                args,
+            },
+        ];
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(&calls, &AtomicBool::new(false));
+        assert!(observations[0].result.is_some());
+        assert!(observations[1]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already used in this response")));
+        assert_eq!(tools.proposals.len(), 1);
+
+        super::super::tests::remove_temp(&root);
+    }
+
+    #[test]
+    fn automatic_transcripts_coalesce_into_the_project_cache_logs() {
+        let (mut editor, root, _) = review_fixture("automatic_transcript");
+        finish_preview(&mut editor);
+        editor.store = Some(SessionStore::open(&root).unwrap());
+        editor.persist_if_changed();
+        let directory = root.join(".stasis_cache/logs/ai-transcripts");
+        editor.auto_transcript_directory = Some(directory.clone());
+        editor.next_auto_transcript = Instant::now();
+        editor.poll_auto_transcripts(Instant::now());
+        editor.finish_auto_transcript_writer();
+
+        let task = editor.state.session.active_task().unwrap().clone();
+        let path = directory.join(chat_export::auto_file_name(&task));
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.contains("diff --git"));
+        assert!(first.contains("function value(): i32"));
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+
+        editor.state.reply = "An unsent draft".into();
+        editor.persist_if_changed();
+        assert!(!editor.auto_transcript_dirty);
+
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .append_result("A later reply")
+            .unwrap();
+        editor.persist_if_changed();
+        assert!(editor.auto_transcript_dirty);
+        editor.next_auto_transcript = Instant::now();
+        editor.poll_auto_transcripts(Instant::now());
+        editor.finish_auto_transcript_writer();
+        let second = std::fs::read_to_string(path).unwrap();
+        assert_ne!(second, first);
+        assert!(second.contains("A later reply"));
+
+        super::super::tests::remove_temp(&root);
     }
 
     #[test]
@@ -6153,6 +6524,9 @@ mod tests {
     #[test]
     fn repaired_proposal_is_structured_and_keeps_its_action_id() {
         let mut tools = ProposalTools::default();
+        tools
+            .existing_actions
+            .insert("edit-speed".into(), "needs_repair".into());
         let observations = tools.execute(
             &[ToolCall {
                 tool: "repair_semantic_edit".to_string(),

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAX_TASKS: usize = 32;
 pub const MAX_ID_CHARS: usize = 96;
@@ -12,7 +13,7 @@ pub const MAX_RELEVANT_FILES: usize = 32;
 pub const MAX_RELEVANT_SYMBOLS: usize = 64;
 pub const MAX_RELEVANT_TESTS: usize = 32;
 pub const MAX_THREAD_ENTRIES: usize = 128;
-pub const MAX_THREAD_TEXT_CHARS: usize = 4_096;
+pub const MAX_THREAD_TEXT_CHARS: usize = 16_384;
 pub const MAX_ACTIONS: usize = 64;
 pub const MAX_ACTION_TEXT_CHARS: usize = 1_024;
 pub const MAX_ACTION_REVISIONS: usize = 16;
@@ -606,7 +607,36 @@ pub struct ActivityEntry {
     pub sequence: u64,
     /// False for a deterministic snapshot synthesized from state saved before activity logging.
     pub recorded: bool,
+    /// Wall-clock time for newly recorded activity. Legacy snapshots have no recoverable time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at_unix_ms: Option<u64>,
+    /// Provider metrics belong to the AI reply that completed the provider turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_turn: Option<ProviderTurnMetrics>,
     pub kind: ActivityKind,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderTurnMetrics {
+    pub elapsed_ms: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub estimated_cost_micros: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -683,6 +713,8 @@ impl Task {
         self.activity.push(ActivityEntry {
             sequence,
             recorded: true,
+            recorded_at_unix_ms: Some(unix_time_ms()),
+            provider_turn: None,
             kind,
         });
     }
@@ -748,6 +780,8 @@ impl Task {
             .map(|(index, kind)| ActivityEntry {
                 sequence: u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
                 recorded: false,
+                recorded_at_unix_ms: None,
+                provider_turn: None,
                 kind,
             })
             .collect()
@@ -902,6 +936,22 @@ impl Task {
         self.ensure_open("record a turn for")?;
         self.metrics
             .record_turn(elapsed_ms, input_tokens, output_tokens, cost_micros);
+        if let Some(entry) = self.activity.iter_mut().rev().find(|entry| {
+            matches!(entry.kind, ActivityKind::AiReply { .. }) && entry.provider_turn.is_none()
+        }) {
+            entry.provider_turn = Some(ProviderTurnMetrics {
+                elapsed_ms,
+                input_tokens,
+                output_tokens,
+                estimated_cost_micros: cost_micros,
+                provider: self.provider.provider.clone(),
+                model: self.provider.model.clone(),
+                route: match &self.provider.routing {
+                    RoutingState::Assigned { route } => Some(route.clone()),
+                    RoutingState::Unassigned => None,
+                },
+            });
+        }
         Ok(())
     }
 
@@ -2232,6 +2282,7 @@ pub enum TaskSessionCommand {
     Cancel,
     Reconnect,
     FocusGame,
+    ExportChat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3092,5 +3143,44 @@ mod tests {
         let encoded = serde_json::to_string(&session).expect("serialize session");
         let decoded: TaskSession = serde_json::from_str(&encoded).expect("deserialize session");
         assert_eq!(decoded, session);
+    }
+
+    #[test]
+    fn provider_turn_metrics_are_attached_to_the_reply_and_survive_json() {
+        let mut task = Task::new("task", "objective", "summary").unwrap();
+        task.append_user_message("go").unwrap();
+        task.append_result("done").unwrap();
+        task.set_provider_state(ProviderState {
+            provider: Some("openrouter".into()),
+            model: Some("cerebras/model".into()),
+            routing: RoutingState::Assigned {
+                route: "price".into(),
+            },
+            ..ProviderState::default()
+        })
+        .unwrap();
+        task.record_turn(1_234, 500, 100, 42).unwrap();
+        let reply = task
+            .activity
+            .iter()
+            .find(|entry| matches!(entry.kind, ActivityKind::AiReply { .. }))
+            .unwrap();
+        assert!(reply.recorded_at_unix_ms.is_some());
+        assert_eq!(reply.provider_turn.as_ref().unwrap().elapsed_ms, 1_234);
+        assert_eq!(
+            reply.provider_turn.as_ref().unwrap().model.as_deref(),
+            Some("cerebras/model")
+        );
+        let round_trip: Task =
+            serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();
+        assert_eq!(round_trip, task);
+    }
+
+    #[test]
+    fn activity_without_new_metadata_fields_remains_loadable() {
+        let json = r#"{"sequence":1,"recorded":true,"kind":{"UserMessage":{"thread_sequence":1}}}"#;
+        let entry: ActivityEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.recorded_at_unix_ms, None);
+        assert_eq!(entry.provider_turn, None);
     }
 }

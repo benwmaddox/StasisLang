@@ -34,6 +34,7 @@ atomic-write-file.workspace = true
 eframe = { version = "0.27", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 rfd = "=0.14.1"
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+base64 = "0.22"
 
 
 [dev-dependencies]
