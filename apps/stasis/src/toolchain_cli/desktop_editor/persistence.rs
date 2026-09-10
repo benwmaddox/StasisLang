@@ -74,6 +74,7 @@ pub(super) fn restore(editor: &mut DesktopEditor, loaded: LoadOutcome) {
         }
         return;
     };
+    saved.session.normalize_serial_queue(&saved.task_order);
     let mut stale = Vec::new();
     for task in saved.session.tasks.values_mut() {
         if task.validation.is_running()
@@ -356,6 +357,7 @@ mod tests {
             .session
             .new_task("task-2", "Another task", "Sample")
             .unwrap();
+        editor.state.session.queue_task("task-2").unwrap();
         editor.state.session.switch_task(&active).unwrap();
         editor.state.drafts.insert(
             "task-2".into(),
@@ -393,6 +395,41 @@ mod tests {
             .semantic_previews
             .values()
             .all(|record| matches!(record.result, Some(Ok(_)))));
+        drop(recovered);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_preserves_serial_queue_order_without_starting_conversations() {
+        let (mut editor, root, _) = super::super::tests::review_fixture("serial_queue_restart");
+        editor.store = Some(SessionStore::open(&root).unwrap());
+        editor.state.objective = "Second task".into();
+        editor.state.create_task().unwrap();
+        editor.state.objective = "Third task".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .session
+            .move_queued_task_to_back("task-2")
+            .unwrap();
+        editor.persist_if_changed();
+        drop(editor);
+
+        let recovered = reopen(&root);
+        assert_eq!(
+            recovered
+                .state
+                .session
+                .next_queued_task_id()
+                .unwrap()
+                .as_str(),
+            "task-3"
+        );
+        for id in ["task-2", "task-3"] {
+            let task = recovered.state.session.task(id).unwrap();
+            assert_eq!(task.lifecycle, TaskLifecycle::Queued);
+            assert!(task.thread.is_empty());
+        }
         drop(recovered);
         std::fs::remove_dir_all(root).unwrap();
     }

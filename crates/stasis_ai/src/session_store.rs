@@ -475,6 +475,24 @@ fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), StoreError> {
     {
         return Err(corrupt_identity());
     }
+    let queued_ids = snapshot
+        .session
+        .queued_task_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if queued_ids.len() != snapshot.session.queued_task_ids.len()
+        || snapshot.session.queued_task_ids.iter().any(|id| {
+            !snapshot.session.tasks.contains_key(id)
+                || snapshot
+                    .session
+                    .tasks
+                    .get(id)
+                    .is_some_and(|task| task.lifecycle != crate::TaskLifecycle::Queued)
+        })
+    {
+        return Err(corrupt_identity());
+    }
     for (id, task) in &snapshot.session.tasks {
         if id != &task.id
             || task.actions.iter().any(|(id, action)| id != &action.id)
@@ -488,6 +506,11 @@ fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), StoreError> {
         }
     }
     check_limit("tasks", snapshot.session.tasks.len(), MAX_TASKS)?;
+    check_limit(
+        "queued tasks",
+        snapshot.session.queued_task_ids.len(),
+        MAX_TASKS,
+    )?;
     check_limit("task order", snapshot.task_order.len(), MAX_TASKS)?;
     check_limit("drafts", snapshot.drafts.len(), MAX_TASKS)?;
     check_limit(

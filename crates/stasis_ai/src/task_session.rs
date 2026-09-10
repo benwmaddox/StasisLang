@@ -196,6 +196,7 @@ fn invalid_transition(
 pub enum TaskLifecycle {
     #[default]
     Active,
+    Queued,
     Canceled,
     Completed,
 }
@@ -800,8 +801,29 @@ impl Task {
     fn ensure_open(&self, action: &'static str) -> Result<(), TaskSessionError> {
         match self.lifecycle {
             TaskLifecycle::Active => Ok(()),
+            TaskLifecycle::Queued => Err(invalid_transition("task", action, "queued")),
             TaskLifecycle::Canceled => Err(invalid_transition("task", action, "canceled")),
             TaskLifecycle::Completed => Err(invalid_transition("task", action, "completed")),
+        }
+    }
+
+    fn queue(&mut self) {
+        self.lifecycle = TaskLifecycle::Queued;
+        self.connection = ConnectionState::Disconnected;
+    }
+
+    fn start(&mut self) -> Result<(), TaskSessionError> {
+        match self.lifecycle {
+            TaskLifecycle::Queued => {
+                self.lifecycle = TaskLifecycle::Active;
+                self.connection = ConnectionState::Connected;
+                Ok(())
+            }
+            state => Err(invalid_transition(
+                "task",
+                "start",
+                task_lifecycle_label(state),
+            )),
         }
     }
 
@@ -1740,6 +1762,10 @@ impl Task {
                 }
                 Ok(())
             }
+            TaskLifecycle::Queued => {
+                self.lifecycle = TaskLifecycle::Canceled;
+                Ok(())
+            }
             TaskLifecycle::Canceled => Err(invalid_transition("task", "cancel", "canceled")),
             TaskLifecycle::Completed => Err(invalid_transition("task", "cancel", "completed")),
         }
@@ -1840,6 +1866,17 @@ fn image_review_label(review: &ImageReviewState) -> &'static str {
 pub struct TaskSession {
     pub tasks: BTreeMap<TaskId, Task>,
     pub active_task_id: Option<TaskId>,
+    #[serde(default)]
+    pub queued_task_ids: Vec<TaskId>,
+}
+
+fn task_lifecycle_label(lifecycle: TaskLifecycle) -> &'static str {
+    match lifecycle {
+        TaskLifecycle::Active => "active",
+        TaskLifecycle::Queued => "queued",
+        TaskLifecycle::Canceled => "canceled",
+        TaskLifecycle::Completed => "completed",
+    }
 }
 
 impl TaskSession {
@@ -1919,6 +1956,125 @@ impl TaskSession {
 
     pub fn task_count(&self) -> usize {
         self.tasks.len()
+    }
+
+    pub fn running_task_id(&self) -> Option<&TaskId> {
+        self.tasks
+            .values()
+            .find(|task| task.lifecycle == TaskLifecycle::Active)
+            .map(|task| &task.id)
+    }
+
+    pub fn next_queued_task_id(&self) -> Option<&TaskId> {
+        self.queued_task_ids.iter().find(|id| {
+            self.tasks
+                .get(*id)
+                .is_some_and(|task| task.lifecycle == TaskLifecycle::Queued)
+        })
+    }
+
+    pub fn queue_task(&mut self, id: impl AsRef<str>) -> Result<(), TaskSessionError> {
+        let id = TaskId::new(id.as_ref());
+        if self.task(&id)?.lifecycle != TaskLifecycle::Active {
+            return Err(invalid_transition("task", "queue", "not active"));
+        }
+        self.task_mut(&id)?.queue();
+        if !self.queued_task_ids.contains(&id) {
+            self.queued_task_ids.push(id);
+        }
+        Ok(())
+    }
+
+    pub fn start_task(&mut self, id: impl AsRef<str>) -> Result<(), TaskSessionError> {
+        let id = TaskId::new(id.as_ref());
+        if let Some(running) = self.running_task_id() {
+            return Err(invalid_transition(
+                "task",
+                "start",
+                format!("{} is still active", running),
+            ));
+        }
+        if self.next_queued_task_id() != Some(&id) {
+            return Err(invalid_transition("task", "start", "not next in queue"));
+        }
+        self.task_mut(&id)?.start()?;
+        self.queued_task_ids.retain(|queued| queued != &id);
+        self.active_task_id = Some(id);
+        Ok(())
+    }
+
+    pub fn move_queued_task_to_back(
+        &mut self,
+        id: impl AsRef<str>,
+    ) -> Result<(), TaskSessionError> {
+        let id = TaskId::new(id.as_ref());
+        if self.task(&id)?.lifecycle != TaskLifecycle::Queued {
+            return Err(invalid_transition("task", "move to back", "not queued"));
+        }
+        self.queued_task_ids.retain(|queued| queued != &id);
+        self.queued_task_ids.push(id);
+        if let Some(next) = self.next_queued_task_id().cloned() {
+            self.active_task_id = Some(next);
+        }
+        Ok(())
+    }
+
+    pub fn reject_queued_task(&mut self, id: impl AsRef<str>) -> Result<(), TaskSessionError> {
+        let id = TaskId::new(id.as_ref());
+        if self.task(&id)?.lifecycle != TaskLifecycle::Queued {
+            return Err(invalid_transition("task", "reject", "not queued"));
+        }
+        self.task_mut(&id)?.cancel()?;
+        self.queued_task_ids.retain(|queued| queued != &id);
+        self.select_queue_gate_after(&id);
+        Ok(())
+    }
+
+    pub fn select_queue_gate_after(&mut self, resolved: &TaskId) {
+        if self.running_task_id().is_none() {
+            self.active_task_id = self
+                .next_queued_task_id()
+                .cloned()
+                .or_else(|| self.tasks.contains_key(resolved).then(|| resolved.clone()));
+        }
+    }
+
+    /// Migrates pre-queue sessions and repairs persisted queue ordering.
+    pub fn normalize_serial_queue(&mut self, task_order: &[String]) {
+        let preferred = self.active_task_id.clone().filter(|id| {
+            self.tasks
+                .get(id)
+                .is_some_and(|task| task.lifecycle == TaskLifecycle::Active)
+        });
+        let running = preferred.or_else(|| self.running_task_id().cloned());
+        for task in self.tasks.values_mut() {
+            if task.lifecycle == TaskLifecycle::Active && Some(&task.id) != running.as_ref() {
+                task.queue();
+            }
+        }
+        let mut ordered = Vec::new();
+        for id in self
+            .queued_task_ids
+            .iter()
+            .cloned()
+            .chain(task_order.iter().map(TaskId::new))
+            .chain(self.tasks.keys().cloned())
+        {
+            if !ordered.contains(&id)
+                && self
+                    .tasks
+                    .get(&id)
+                    .is_some_and(|task| task.lifecycle == TaskLifecycle::Queued)
+            {
+                ordered.push(id);
+            }
+        }
+        self.queued_task_ids = ordered;
+        if let Some(running) = running {
+            self.active_task_id = Some(running);
+        } else if let Some(next) = self.next_queued_task_id().cloned() {
+            self.active_task_id = Some(next);
+        }
     }
 
     pub fn switch_task(&mut self, id: impl AsRef<str>) -> Result<(), TaskSessionError> {
@@ -2613,6 +2769,46 @@ mod tests {
         assert_eq!(first.thread.len(), 1);
         assert_eq!(first.thread[0].text, "first-only reply");
         assert_eq!(first.relevant_files, vec!["src/first.rs"]);
+    }
+
+    #[test]
+    fn queued_tasks_require_explicit_start_and_preserve_fifo_order() {
+        let mut session = TaskSession::new();
+        session.new_task("one", "first", "project").unwrap();
+        session.new_task("two", "second", "project").unwrap();
+        session.queue_task("two").unwrap();
+        session.switch_task("one").unwrap();
+        session.new_task("three", "third", "project").unwrap();
+        session.queue_task("three").unwrap();
+
+        assert_eq!(session.running_task_id().unwrap().as_str(), "one");
+        assert_eq!(session.next_queued_task_id().unwrap().as_str(), "two");
+        assert!(session.start_task("two").is_err());
+        assert!(session.task("two").unwrap().thread.is_empty());
+
+        session.task_mut("one").unwrap().cancel().unwrap();
+        let one = TaskId::new("one");
+        session.select_queue_gate_after(&one);
+        assert_eq!(session.active_task_id().unwrap().as_str(), "two");
+        session.move_queued_task_to_back("two").unwrap();
+        assert_eq!(session.active_task_id().unwrap().as_str(), "three");
+        session.start_task("three").unwrap();
+        assert_eq!(session.running_task_id().unwrap().as_str(), "three");
+        assert!(session.task("three").unwrap().thread.is_empty());
+    }
+
+    #[test]
+    fn rejecting_a_queued_task_never_starts_its_conversation() {
+        let mut session = TaskSession::new();
+        session.new_task("one", "first", "project").unwrap();
+        session.new_task("two", "second", "project").unwrap();
+        session.queue_task("two").unwrap();
+        session.reject_queued_task("two").unwrap();
+
+        let rejected = session.task("two").unwrap();
+        assert_eq!(rejected.lifecycle, TaskLifecycle::Canceled);
+        assert!(rejected.thread.is_empty());
+        assert!(session.next_queued_task_id().is_none());
     }
 
     #[test]

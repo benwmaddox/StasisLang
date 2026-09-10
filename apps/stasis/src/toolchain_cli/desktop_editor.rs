@@ -9,7 +9,7 @@ mod semantic_diff;
 mod source_context_tests;
 
 use host_progress::{HostProgress, HostProgressState};
-use stasis_ai::task_controller::{ProgressReporter, ProgressStage};
+use stasis_ai::task_controller::{ProgressReporter, ProgressStage, TaskControllerConfig};
 mod semantic_revisions;
 mod window_layout;
 
@@ -1410,9 +1410,16 @@ impl DesktopEditor {
                 project_root: Some(project_root.clone()),
                 ..EditorState::default()
             },
-            controller: TaskController::new_with_progress(move |request, canceled, progress| {
-                run_reply_provider(request, canceled, provider_root.clone(), progress)
-            }),
+            controller: TaskController::with_config_and_progress(
+                move |request, canceled, progress| {
+                    run_reply_provider(request, canceled, provider_root.clone(), progress)
+                },
+                TaskControllerConfig {
+                    workers: 1,
+                    ..TaskControllerConfig::default()
+                },
+            )
+            .expect("desktop AI controller configuration is valid"),
             client,
             project_root,
             shutdown,
@@ -1852,9 +1859,26 @@ impl DesktopEditor {
                     let task = TaskId::new(task);
                     self.host.cancel(task.as_str());
                     let canceled_capture = self.cancel_capture_for(&task);
-                    if let Err(error) = self.controller.cancel(&mut self.state.session, &task) {
+                    let queued = self
+                        .state
+                        .session
+                        .task(&task)
+                        .is_ok_and(|value| value.lifecycle == TaskLifecycle::Queued);
+                    let result: Result<(), String> = if queued {
+                        self.state
+                            .session
+                            .reject_queued_task(&task)
+                            .map_err(|error| error.to_string())
+                    } else {
+                        self.controller
+                            .cancel(&mut self.state.session, &task)
+                            .map_err(|error| error.to_string())
+                    };
+                    if result.is_ok() {
+                        self.state.session.select_queue_gate_after(&task);
+                    } else if let Err(error) = result {
                         if !canceled_capture {
-                            self.state.notice = Some(error.to_string());
+                            self.state.notice = Some(error);
                         }
                     }
                 }
@@ -1978,12 +2002,16 @@ impl DesktopEditor {
                         .map(|(fingerprint, _)| fingerprint);
                     match current {
                         Ok(current) if expected == Some(&current) => {
-                            if let Err(error) = self
+                            let result = self
                                 .state
                                 .session
                                 .task_mut(task.as_str())
-                                .and_then(|task| task.mark_done())
-                            {
+                                .and_then(|task| task.mark_done());
+                            if result.is_ok() {
+                                self.state
+                                    .session
+                                    .select_queue_gate_after(&TaskId::new(&task));
+                            } else if let Err(error) = result {
                                 self.state.notice = Some(error.to_string());
                             }
                         }
@@ -2707,7 +2735,10 @@ impl DesktopEditor {
                 )
             })
             .collect::<Vec<_>>();
-        let queued = cards.len().saturating_sub(usize::from(active.is_some()));
+        let queued = cards
+            .iter()
+            .filter(|(_, _, lifecycle, _, _, _, _)| *lifecycle == TaskLifecycle::Queued)
+            .count();
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("TASKS")
@@ -2793,11 +2824,12 @@ fn project_name(root: &std::path::Path) -> String {
 }
 
 fn task_state_label(lifecycle: TaskLifecycle, connection: ConnectionState) -> String {
-    if connection == ConnectionState::Disconnected {
+    if connection == ConnectionState::Disconnected && lifecycle != TaskLifecycle::Queued {
         return "disconnected".into();
     }
     match lifecycle {
         TaskLifecycle::Active => "current".into(),
+        TaskLifecycle::Queued => "queued".into(),
         TaskLifecycle::Canceled => "canceled".into(),
         TaskLifecycle::Completed => "done".into(),
     }
@@ -2891,6 +2923,7 @@ fn validation_color(status: &ValidationStatus) -> Color32 {
 
 fn task_header_status(task: &stasis_ai::Task) -> (&'static str, Color32) {
     match task.lifecycle {
+        TaskLifecycle::Queued => return ("queued", warning()),
         TaskLifecycle::Canceled => return ("canceled", failure()),
         TaskLifecycle::Completed => return ("done", accent()),
         TaskLifecycle::Active => {}
@@ -3079,6 +3112,28 @@ impl Default for EditorState {
 }
 
 impl EditorState {
+    fn start_queued_task(&mut self, id: &str) -> Result<(), String> {
+        self.session
+            .start_task(id)
+            .map_err(|error| error.to_string())?;
+        let task = self.session.task(id).map_err(|error| error.to_string())?;
+        let first_message = task.thread.is_empty().then(|| task.objective.clone());
+        self.reply.clear();
+        self.focus = FocusArea::Reply;
+        self.focus_pending = true;
+        if let Some(first_message) = first_message {
+            self.intents
+                .push(EditorIntent::SendReply(id.to_string(), first_message));
+        }
+        Ok(())
+    }
+
+    fn move_queued_task_to_back(&mut self, id: &str) -> Result<(), String> {
+        self.session
+            .move_queued_task_to_back(id)
+            .map_err(|error| error.to_string())
+    }
+
     fn reviewed_preview(
         &self,
         task: &str,
@@ -3188,6 +3243,9 @@ impl EditorState {
                 enabled: false,
                 disabled_reason: Some(
                     match task.lifecycle {
+                        TaskLifecycle::Queued => {
+                            "Start this queued task to create its conversation."
+                        }
                         TaskLifecycle::Canceled => "Canceled tasks are read-only.",
                         TaskLifecycle::Completed => "This task is complete.",
                         TaskLifecycle::Active => unreachable!(),
@@ -3295,45 +3353,63 @@ impl EditorState {
     }
 
     fn create_and_send_task(&mut self) -> Result<(), String> {
-        self.create_task()?;
-        let task = self
-            .session
-            .active_task()
-            .map_err(|error| error.to_string())?;
-        self.intents.push(EditorIntent::SendReply(
-            task.id.to_string(),
-            task.objective.clone(),
-        ));
+        let id = self.create_task()?;
+        let task = self.session.task(&id).map_err(|error| error.to_string())?;
+        if task.lifecycle == TaskLifecycle::Active {
+            self.intents.push(EditorIntent::SendReply(
+                task.id.to_string(),
+                task.objective.clone(),
+            ));
+        }
         Ok(())
     }
 
-    fn create_task(&mut self) -> Result<(), String> {
+    fn create_task(&mut self) -> Result<TaskId, String> {
         let objective = self.objective.trim().to_string();
         if objective.is_empty() {
             self.focus = FocusArea::Tasks;
             self.focus_pending = true;
             return Err("Enter a task objective first.".into());
         }
+        let should_queue = self.session.running_task_id().is_some()
+            || self.session.next_queued_task_id().is_some();
         let id = format!("task-{}", self.next_task);
-        let previous = self.session.active_task_id().map(ToString::to_string);
-        self.session
+        let id = self
+            .session
             .new_task(
                 id.as_str(),
                 &objective,
                 "Stasis project; fresh task-scoped context",
             )
             .map_err(|e| e.to_string())?;
+        if should_queue {
+            self.session
+                .queue_task(&id)
+                .map_err(|error| error.to_string())?;
+            if let Some(running) = self.session.running_task_id().cloned() {
+                self.session
+                    .switch_task(&running)
+                    .map_err(|error| error.to_string())?;
+            } else if let Some(next) = self.session.next_queued_task_id().cloned() {
+                self.session
+                    .switch_task(&next)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         self.next_task = self.next_task.saturating_add(1);
         self.objective.clear();
-        if let Some(previous) = previous {
-            self.drafts
-                .insert(previous, (String::new(), std::mem::take(&mut self.reply)));
-        } else {
+        if self
+            .session
+            .task(&id)
+            .map_err(|error| error.to_string())?
+            .lifecycle
+            == TaskLifecycle::Active
+        {
             self.reply.clear();
+            self.focus = FocusArea::Reply;
+            self.focus_pending = true;
         }
-        self.focus = FocusArea::Reply;
-        self.focus_pending = true;
-        Ok(())
+        Ok(id)
     }
 
     fn switch_relative(&mut self, offset: isize) -> Result<(), String> {
@@ -3623,6 +3699,10 @@ impl DesktopEditor {
             return;
         };
         let task = task.clone();
+        if task.lifecycle == TaskLifecycle::Queued {
+            self.queue_gate(ui, &task);
+            return;
+        }
         egui::TopBottomPanel::bottom("task-composer")
             .resizable(false)
             .frame(
@@ -3642,6 +3722,46 @@ impl DesktopEditor {
                 ui.add_space(12.0);
                 self.timeline(ui, &task);
             });
+    }
+
+    fn queue_gate(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        let start_shortcut =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let move_shortcut =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::B));
+        let reject_shortcut =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
+        egui::Frame::none().inner_margin(32.0).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(72.0);
+                ui.label(RichText::new("Ready when you are").size(24.0).strong());
+                ui.add_space(8.0);
+                ui.label(RichText::new(&task.objective).size(17.0));
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Starting creates a fresh AI conversation. No queued task contacts a provider.",
+                    )
+                    .size(13.0)
+                    .color(muted_text()),
+                );
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Start task (Enter)").clicked() || start_shortcut {
+                        self.state.notice = self.state.start_queued_task(task.id.as_str()).err();
+                    }
+                    if ui.button("Move to back (B)").clicked() || move_shortcut {
+                        self.state.notice = self
+                            .state
+                            .move_queued_task_to_back(task.id.as_str())
+                            .err();
+                    }
+                    if ui.button("Reject... (Del)").clicked() || reject_shortcut {
+                        self.state.cancel_confirmation = Some(task.id.to_string());
+                    }
+                });
+            });
+        });
     }
 
     fn task_header(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
@@ -5018,20 +5138,29 @@ impl DesktopEditor {
         let Some(task_id) = self.state.cancel_confirmation.clone() else {
             return;
         };
-        egui::Window::new("Cancel task?")
+        let queued = self
+            .state
+            .session
+            .task(task_id.as_str())
+            .is_ok_and(|task| task.lifecycle == TaskLifecycle::Queued);
+        egui::Window::new(if queued { "Reject queued task?" } else { "Cancel task?" })
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(context, |ui| {
                 let objective = self.state.session.task(task_id.as_str())
                     .map(|task| task.objective.as_str()).unwrap_or(&task_id);
-                ui.label(format!("Cancel {objective}?"));
-                ui.label("This stops its work and permanently closes the task. You cannot continue it afterward.");
+                ui.label(format!("{} {objective}?", if queued { "Reject" } else { "Cancel" }));
+                ui.label(if queued {
+                    "This removes it from the queue. No AI conversation will be started."
+                } else {
+                    "This stops its work and permanently closes the task. You cannot continue it afterward."
+                });
                 ui.horizontal(|ui| {
-                    if ui.button("Keep task open").clicked() {
+                    if ui.button(if queued { "Keep queued" } else { "Keep task open" }).clicked() {
                         self.state.cancel_confirmation = None;
                     }
-                    if ui.button("Permanently cancel task").clicked() {
+                    if ui.button(if queued { "Reject task" } else { "Permanently cancel task" }).clicked() {
                         self.state.intents.push(EditorIntent::Cancel(task_id.clone()));
                         self.state.cancel_confirmation = None;
                     }
@@ -5617,12 +5746,13 @@ mod tests {
         state.reply = "unsent first".into();
         state.objective = "second".into();
         state.create_task().unwrap();
+        assert_eq!(state.session.active_task_id().unwrap().as_str(), "task-1");
+        assert_eq!(state.reply, "unsent first");
+        state.switch_task("task-2").unwrap();
         assert!(state.reply.is_empty());
         state.reply = "unsent second".into();
         state.objective = "future second objective".into();
-        state
-            .handle(TaskSessionCommand::SwitchPreviousTask)
-            .unwrap();
+        state.switch_task("task-1").unwrap();
         assert_eq!(state.reply, "unsent first");
         assert!(state.objective.is_empty());
         state.objective = "future first objective".into();
@@ -5816,6 +5946,7 @@ mod tests {
         }
         editor.state.objective = "second".into();
         editor.state.create_task().unwrap();
+        editor.state.switch_task("task-2").unwrap();
         for (query, expected) in [
             ("previous task", "task-1"),
             ("next task", "task-2"),
@@ -5902,11 +6033,13 @@ mod tests {
         state.objective = "Independent objective".into();
         state.handle(TaskSessionCommand::NewTask).unwrap();
         assert_eq!(state.session.task_count(), 2);
-        assert!(state.session.active_task().unwrap().thread.is_empty());
-        assert!(
-            matches!(state.intents.as_slice(), [EditorIntent::SendReply(task, text)]
-            if task == "task-2" && text == "Independent objective")
+        assert_eq!(state.session.active_task_id().unwrap().as_str(), "task-1");
+        assert_eq!(
+            state.session.task("task-2").unwrap().lifecycle,
+            TaskLifecycle::Queued
         );
+        assert!(state.session.task("task-2").unwrap().thread.is_empty());
+        assert!(state.intents.is_empty());
     }
 
     #[test]
@@ -5939,18 +6072,25 @@ mod tests {
     }
 
     #[test]
-    fn independent_tasks_keep_queued_replies_scoped() {
+    fn queued_task_starts_a_fresh_scoped_conversation_after_resolution() {
         let mut state = task_state();
         state.reply = "First reply".into();
         state.handle(TaskSessionCommand::SendReply).unwrap();
         state.objective = "Change enemy art".into();
         state.create_task().unwrap();
+        assert!(state.session.task("task-2").unwrap().thread.is_empty());
+        state.session.task_mut("task-1").unwrap().cancel().unwrap();
+        state
+            .session
+            .select_queue_gate_after(&TaskId::new("task-1"));
+        state.start_queued_task("task-2").unwrap();
         state.reply = "Second reply".into();
         state.handle(TaskSessionCommand::SendReply).unwrap();
         assert!(matches!(
             state.intents.as_slice(),
-            [EditorIntent::SendReply(first, first_text), EditorIntent::SendReply(second, second_text)]
+            [EditorIntent::SendReply(first, first_text), EditorIntent::SendReply(objective_task, objective), EditorIntent::SendReply(second, second_text)]
                 if first == "task-1" && first_text == "First reply"
+                    && objective_task == "task-2" && objective == "Change enemy art"
                     && second == "task-2" && second_text == "Second reply"
         ));
     }
@@ -6017,11 +6157,12 @@ mod tests {
         ));
         state.objective = "Cancelable task".into();
         state.create_task().unwrap();
+        state.switch_task("task-2").unwrap();
         state.handle(TaskSessionCommand::Cancel).unwrap();
         assert_eq!(state.cancel_confirmation.as_deref(), Some("task-2"));
         assert_eq!(
             state.session.active_task().unwrap().lifecycle,
-            TaskLifecycle::Active
+            TaskLifecycle::Queued
         );
     }
 
@@ -6038,6 +6179,7 @@ mod tests {
             .unwrap();
         editor.state.objective = "Unrelated task".into();
         editor.state.create_task().unwrap();
+        editor.state.session.switch_task("task-2").unwrap();
 
         editor.flush_intents();
 
@@ -6171,6 +6313,7 @@ mod tests {
         });
         editor.state.objective = "Second task".into();
         editor.state.create_task().unwrap();
+        editor.state.session.switch_task("task-2").unwrap();
         editor
             .capture_result_tx
             .send(CaptureResult {
@@ -6578,6 +6721,7 @@ mod tests {
             .validation_run_id;
         editor.state.objective = "Second task".into();
         editor.state.create_task().unwrap();
+        editor.state.session.switch_task("task-2").unwrap();
 
         let (request_tx, _request_rx) = mpsc::sync_channel(8);
         let (result_tx, result_rx) = mpsc::channel();
@@ -6837,6 +6981,7 @@ mod tests {
         editor.flush_intents();
         editor.state.objective = "Unrelated task".into();
         editor.state.create_task().unwrap();
+        editor.state.session.switch_task("task-2").unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while editor.busy_tasks.contains("task-1") && std::time::Instant::now() < deadline {
