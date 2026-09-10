@@ -16,7 +16,6 @@ use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 
@@ -335,7 +334,6 @@ pub enum DesktopNetworkMode {
     Client,
 }
 
-#[cfg(windows)]
 impl DesktopNetworkMode {
     fn cmake_value(self) -> &'static str {
         match self {
@@ -3404,27 +3402,22 @@ fn resolve_engine_bundle_symbol(
         .ok_or_else(|| format!("engine bundle manifest is missing required symbol {name}"))
 }
 
-#[cfg(windows)]
 fn cmake_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-#[cfg(windows)]
 static MONOLITH_CMAKE_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(windows)]
 struct MonolithCmakeBuildDir {
     path: PathBuf,
 }
 
-#[cfg(windows)]
 impl Drop for MonolithCmakeBuildDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
-#[cfg(windows)]
 fn create_monolith_cmake_build_dir(
     aot_root: &Path,
     output_exe: &Path,
@@ -3542,7 +3535,7 @@ fn resolve_vcvars64() -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn run_cmake_in_msvc_environment(arguments: &[String]) -> Result<std::process::Output, String> {
+fn run_monolith_cmake(arguments: &[String]) -> Result<std::process::Output, String> {
     let vcvars = resolve_vcvars64()?;
     let quoted_arguments = arguments
         .iter()
@@ -3574,7 +3567,14 @@ fn run_cmake_in_msvc_environment(arguments: &[String]) -> Result<std::process::O
     output
 }
 
-#[cfg(windows)]
+#[cfg(not(windows))]
+fn run_monolith_cmake(arguments: &[String]) -> Result<std::process::Output, String> {
+    std::process::Command::new("cmake")
+        .args(arguments)
+        .output()
+        .map_err(|error| format!("failed to launch CMake: {error}"))
+}
+
 fn monolith_configure_arguments(
     runtime_root: &Path,
     build_dir: &Path,
@@ -3590,6 +3590,7 @@ fn monolith_configure_arguments(
         "-B".to_string(),
         cmake_path(build_dir),
         "-DSTASIS_BUILD_MONOLITH=ON".to_string(),
+        "-DCMAKE_BUILD_TYPE=Release".to_string(),
         format!("-DSTASIS_MONOLITH_AOT_DIR={}", cmake_path(aot_root)),
         format!("-DSTASIS_MONOLITH_MAIN_SOURCE={}", cmake_path(shell_source)),
         format!("-DSTASIS_MONOLITH_OUTPUT_DIR={}", cmake_path(output_dir)),
@@ -3612,8 +3613,7 @@ fn monolith_configure_arguments(
     arguments
 }
 
-#[cfg(windows)]
-fn package_engine_bundle_monolithic_windows(
+fn package_engine_bundle_monolithic_desktop(
     backend: &IncrementalCompilerBackend,
     bundle: &AotEngineBundle,
     output_exe: &Path,
@@ -3621,10 +3621,10 @@ fn package_engine_bundle_monolithic_windows(
     desktop_network: Option<&DesktopNetworkLink>,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let repo_root = self_host_repo_root()?;
-    let aot_root = backend.aot_artifact_root.join("windows_monolith");
+    let aot_root = backend.aot_artifact_root.join("desktop_monolith");
     std::fs::create_dir_all(&aot_root).map_err(|error| {
         format!(
-            "failed to create Windows monolith directory {}: {error}",
+            "failed to create desktop monolith directory {}: {error}",
             aot_root.display()
         )
     })?;
@@ -3688,7 +3688,7 @@ fn package_engine_bundle_monolithic_windows(
             &crate::escape_mobile_c_string_literal(app_name),
         )
         .replace("@STASIS_ASSET_BASE@", ".");
-    let shell_source_path = aot_root.join("stasis_windows_main.c");
+    let shell_source_path = aot_root.join("stasis_desktop_main.c");
     std::fs::write(&shell_source_path, shell_source)
         .map_err(|error| format!("failed to write {}: {error}", shell_source_path.display()))?;
 
@@ -3707,15 +3707,15 @@ fn package_engine_bundle_monolithic_windows(
         output_name,
         desktop_network,
     );
-    let configure = run_cmake_in_msvc_environment(&configure_arguments)?;
+    let configure = run_monolith_cmake(&configure_arguments)?;
     if !configure.status.success() {
         return Err(format!(
-            "Windows monolith configure failed\nstdout:\n{}\nstderr:\n{}",
+            "desktop monolith configure failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&configure.stdout),
             String::from_utf8_lossy(&configure.stderr)
         ));
     }
-    let build = run_cmake_in_msvc_environment(&[
+    let build = run_monolith_cmake(&[
         "--build".to_string(),
         cmake_path(&build_dir.path),
         "--config".to_string(),
@@ -3725,18 +3725,48 @@ fn package_engine_bundle_monolithic_windows(
     ])?;
     if !build.status.success() {
         return Err(format!(
-            "Windows monolith build failed\nstdout:\n{}\nstderr:\n{}",
+            "desktop monolith build failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&build.stdout),
             String::from_utf8_lossy(&build.stderr)
         ));
     }
     if !output_exe.is_file() {
         return Err(format!(
-            "Windows monolith build did not produce {}",
+            "desktop monolith build did not produce {}",
             output_exe.display()
         ));
     }
+    if cfg!(target_os = "macos") {
+        let contents = output_exe
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| format!("invalid macOS monolith path {}", output_exe.display()))?;
+        std::fs::create_dir_all(contents.join("Resources")).map_err(|error| {
+            format!(
+                "failed to create macOS app resources directory {}: {error}",
+                contents.join("Resources").display()
+            )
+        })?;
+        let executable_name = output_exe
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| format!("invalid macOS monolith name {}", output_exe.display()))?;
+        write_macos_runner_info_plist(
+            &contents.join("Info.plist"),
+            executable_name,
+            desktop_network.is_some_and(|network| network.mode == DesktopNetworkMode::Host),
+        )?;
+    }
     sign_output_artifact_if_configured(output_exe)?;
+    if cfg!(target_os = "macos") {
+        if let Some(app_bundle) = output_exe
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        {
+            sign_output_artifact_if_configured(app_bundle)?;
+        }
+    }
     Ok(SelfHostedAotCliSummary {
         source_file_count: bundle.object_paths().count() + 1,
         linked_image_path: output_exe.to_path_buf(),
@@ -3814,7 +3844,11 @@ fn xml_text(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn write_macos_runner_info_plist(path: &Path, executable_name: &str) -> Result<(), String> {
+fn write_macos_runner_info_plist(
+    path: &Path,
+    executable_name: &str,
+    local_network_host: bool,
+) -> Result<(), String> {
     let mut bundle_component = String::new();
     for ch in executable_name.chars() {
         if ch.is_ascii_alphanumeric() {
@@ -3830,6 +3864,11 @@ fn write_macos_runner_info_plist(path: &Path, executable_name: &str) -> Result<(
         bundle_component
     };
     let executable_name = xml_text(executable_name);
+    let local_network_usage = if local_network_host {
+        "    <key>NSLocalNetworkUsageDescription</key>\n    <string>Host browser guests on your local network.</string>\n"
+    } else {
+        ""
+    };
     let contents = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -3853,6 +3892,7 @@ fn write_macos_runner_info_plist(path: &Path, executable_name: &str) -> Result<(
     <string>1</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+{local_network_usage}
 </dict>
 </plist>
 "#
@@ -3871,7 +3911,7 @@ fn package_engine_bundle_release(
     output_exe: &Path,
     project_dir: &Path,
     entry_file_override: Option<&Path>,
-    _desktop_network: Option<&DesktopNetworkLink>,
+    desktop_network: Option<&DesktopNetworkLink>,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let manifest = backend.read_engine_bundle_manifest(&bundle.manifest_path)?;
     let entry_symbol = resolve_engine_bundle_symbol(&manifest, "main")?;
@@ -3903,25 +3943,30 @@ fn package_engine_bundle_release(
         )
     })?;
 
+    let monolithic_desktop = matches!(
+        backend.aot_compile_config.target,
+        stasis_jit::AotTarget::Native
+    ) && (cfg!(windows) || desktop_network.is_some());
+    let support_root = if monolithic_desktop {
+        output_exe.parent().unwrap_or_else(|| Path::new("."))
+    } else {
+        output_root
+    };
     let entry_file = resolve_self_host_aot_entry_file(project_dir, entry_file_override)?;
-    let support = stage_entry_support_files(project_dir, entry_file.as_deref(), output_root)?;
+    let support = stage_entry_support_files(project_dir, entry_file.as_deref(), support_root)?;
     let state_layout = backend
         .last_program_snapshot
         .as_ref()
         .map(ProgramSnapshot::state_layout)
         .ok_or_else(|| "AOT program snapshot missing during packaging".to_string())?;
     let runtime_fields = merge_runtime_fields(state_layout, &support.runtime_fields)?;
-    #[cfg(windows)]
-    if matches!(
-        backend.aot_compile_config.target,
-        stasis_jit::AotTarget::Native
-    ) {
-        return package_engine_bundle_monolithic_windows(
+    if monolithic_desktop {
+        return package_engine_bundle_monolithic_desktop(
             backend,
             bundle,
             packaged_output_exe,
             project_dir,
-            _desktop_network,
+            desktop_network,
         );
     }
     let mut function_aliases = vec![PackagedFunctionAlias {
@@ -4132,7 +4177,7 @@ fn package_engine_bundle_release(
                     packaged_output_exe.display()
                 )
             })?;
-        write_macos_runner_info_plist(info_plist, executable_name)?;
+        write_macos_runner_info_plist(info_plist, executable_name, false)?;
     }
     sign_output_artifact_if_configured(packaged_output_exe)?;
     sign_output_artifact_if_configured(&linked_library_path)?;
@@ -4164,9 +4209,8 @@ fn package_engine_bundle_release(
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
-    fn windows_monolith_network_configuration_is_explicit_and_optional() {
+    fn desktop_monolith_network_configuration_is_explicit_and_optional() {
         let base = monolith_configure_arguments(
             Path::new("runtime"),
             Path::new("build"),
@@ -4177,6 +4221,7 @@ mod tests {
             None,
         );
         assert!(!base.iter().any(|arg| arg.contains("NETWORK")));
+        assert!(base.iter().any(|arg| arg == "-DCMAKE_BUILD_TYPE=Release"));
 
         let network = DesktopNetworkLink {
             library: PathBuf::from("network/stasis_network.lib"),
@@ -4222,6 +4267,26 @@ mod tests {
     }
 
     #[test]
+    fn desktop_network_shell_keeps_private_join_links_behind_explicit_copy() {
+        let source = include_str!("../../../mobile/shells/common/stasis_mobile_main.c")
+            .replace("\r\n", "\n");
+        assert!(
+            source.contains("defined(STASIS_DESKTOP_MONOLITH) && defined(STASIS_NETWORK_ENABLED)")
+        );
+        let explicit_copy = source
+            .find("if (SDL_ShowMessageBox(&card, &button) && button == 1)")
+            .expect("private URL copy must require the native copy button");
+        let private_url = source[explicit_copy..]
+            .find("stasis_network_copy_private_join_url(")
+            .expect("explicit action must copy through the wiping helper");
+        assert!(private_url > 0);
+        assert!(source.contains("#if defined(STASIS_DESKTOP_MONOLITH)\nint main("));
+        assert!(source.contains("SDL_SetMainReady();"));
+        assert!(source.contains("network_join_shortcut_down"));
+        assert!(source.contains("snprintf(path, sizeof(path), \"%s../../../\", base)"));
+    }
+
+    #[test]
     fn engine_manifest_accepts_versioned_hot_render_metadata() {
         assert_eq!(
             stasis_compiler::backend::hot_render::HOT_RENDER_METADATA_VERSION,
@@ -4259,11 +4324,17 @@ mod tests {
         let temp_root = std::env::temp_dir().join(format!("stasis_macos_runner_plist_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create plist test directory");
         let plist = temp_root.join("Info.plist");
-        write_macos_runner_info_plist(&plist, "Chess & TD").expect("write macOS app plist");
+        write_macos_runner_info_plist(&plist, "Chess & TD", true).expect("write macOS app plist");
         let contents = fs::read_to_string(&plist).expect("read macOS app plist");
         assert!(contents.contains("<key>NSHighResolutionCapable</key>\n    <true/>"));
         assert!(contents.contains("<string>Chess &amp; TD</string>"));
         assert!(contents.contains("<string>org.stasislang.game.chess-td</string>"));
+        assert!(contents.contains("<key>NSLocalNetworkUsageDescription</key>"));
+        let client_plist = temp_root.join("ClientInfo.plist");
+        write_macos_runner_info_plist(&client_plist, "Chess & TD", false)
+            .expect("write macOS client app plist");
+        let client_contents = fs::read_to_string(&client_plist).expect("read client app plist");
+        assert!(!client_contents.contains("NSLocalNetworkUsageDescription"));
         fs::remove_dir_all(&temp_root).ok();
     }
 

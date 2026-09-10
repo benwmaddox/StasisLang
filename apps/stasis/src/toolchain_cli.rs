@@ -69,7 +69,17 @@ const GFX_CMD_NAME: &str = "gfx_cmd";
 const GFX_CMD_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const DESKTOP_NETWORK_ARTIFACTS: &[&str] = &[
-    "desktop/network/windows-x86_64/stasis_network.lib",
+    if cfg!(windows) {
+        "desktop/network/windows-x86_64/stasis_network.lib"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        "desktop/network/macos-arm64/libstasis_network.a"
+    } else if cfg!(target_os = "macos") {
+        "desktop/network/macos-x86_64/libstasis_network.a"
+    } else if cfg!(target_arch = "aarch64") {
+        "desktop/network/linux-arm64/libstasis_network.a"
+    } else {
+        "desktop/network/linux-x86_64/libstasis_network.a"
+    },
     "desktop/network/include/stasis_network.h",
 ];
 const MOBILE_RUNTIME_FILES: &[&str] = &[
@@ -4166,7 +4176,7 @@ fn build_workspace_with_desktop_network(
                     .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
             }
             let entry = Path::new(&workspace.manifest.entry);
-            let summary = if let Some(network) = desktop_network {
+            let summary = if let Some(network) = desktop_network.as_ref() {
                 run_self_host_aot_cli_with_desktop_network(
                     &workspace.root,
                     &output,
@@ -4202,12 +4212,11 @@ fn build_workspace_with_desktop_network(
                 .transpose()?;
             stage_workspace_assets(
                 workspace,
-                summary.linked_image_path.parent().ok_or_else(|| {
-                    format!(
-                        "release output has no parent: {}",
-                        summary.linked_image_path.display()
-                    )
-                })?,
+                release_asset_output_directory(
+                    &output,
+                    &summary.linked_image_path,
+                    desktop_network.is_some(),
+                )?,
                 retained.as_ref(),
             )?;
             Ok(CommandResult::success(
@@ -4267,15 +4276,23 @@ fn preflight_release_asset_preparation(
     cleanup
 }
 
+fn release_asset_output_directory<'a>(
+    requested: &'a Path,
+    linked: &'a Path,
+    network_package: bool,
+) -> Result<&'a Path, String> {
+    // Network monoliths share the package root with the browser guest bundle,
+    // including when the executable lives inside a macOS app bundle.
+    let output = if network_package { requested } else { linked };
+    output
+        .parent()
+        .ok_or_else(|| format!("release output has no parent: {}", output.display()))
+}
+
 fn build_desktop_network_library(
     staging_root: &Path,
     development_build: bool,
 ) -> Result<(PathBuf, PathBuf), String> {
-    if !cfg!(windows) {
-        return Err(
-            "network-enabled desktop production packaging currently requires Windows".to_string(),
-        );
-    }
     if let Some((library, header)) = bundled_network_artifacts_for_executable(
         &env::current_exe()
             .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
@@ -4303,10 +4320,12 @@ fn build_desktop_network_library(
     let target_dir = staging_root.join(".network-rust-target");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
-    if !rustflags.is_empty() {
-        rustflags.push(' ');
+    if cfg!(windows) {
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-C target-feature=+crt-static");
     }
-    rustflags.push_str("-C target-feature=+crt-static");
     let output = Command::new(cargo)
         .current_dir(&source_root)
         .args(["build", "-p", "stasis_network", "--release", "--target-dir"])
@@ -4540,7 +4559,7 @@ fn package_workspace(
             &workspace.root.join(MANIFEST_NAME),
             &payload_root.join(MANIFEST_NAME),
         )?;
-        if !cfg!(windows) {
+        if !cfg!(windows) && !network_enabled && !network_client_enabled {
             if let Some(runtime) = installed_runtime_library() {
                 copy_file(
                     &runtime,
@@ -5758,7 +5777,11 @@ fn network_support_target(target: PackageTarget) -> Option<&'static str> {
         PackageTarget::AndroidX86_64 => Some("android-x86_64"),
         PackageTarget::IosArm64 => Some("ios-arm64"),
         PackageTarget::Desktop if cfg!(windows) => Some("windows-x86_64"),
+        PackageTarget::Desktop if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") => {
+            Some("macos-arm64")
+        }
         PackageTarget::Desktop if cfg!(target_os = "macos") => Some("macos-x86_64"),
+        PackageTarget::Desktop if cfg!(target_arch = "aarch64") => Some("linux-arm64"),
         PackageTarget::Desktop => Some("linux-x86_64"),
         PackageTarget::Web => None,
     }
@@ -10418,9 +10441,8 @@ mod tests {
         write_json_file(&manifest_path, &manifest).expect("write provenance fixture");
         verify_release_provenance(&manifest_path).expect("accept matching release");
 
-        let desktop_network = root.join("desktop/network");
-        let library = desktop_network.join("windows-x86_64/stasis_network.lib");
-        let header = desktop_network.join("include/stasis_network.h");
+        let library = root.join(DESKTOP_NETWORK_ARTIFACTS[0]);
+        let header = root.join(DESKTOP_NETWORK_ARTIFACTS[1]);
         fs::create_dir_all(library.parent().expect("library parent"))
             .expect("create desktop network library directory");
         fs::create_dir_all(header.parent().expect("header parent"))
@@ -11265,20 +11287,59 @@ mod tests {
         remove_temp(&root);
     }
 
-    #[cfg(windows)]
+    #[test]
+    fn desktop_network_assets_share_guest_root_outside_macos_app() {
+        let requested = Path::new("dist/Game");
+        let linked = Path::new("dist/Game.app/Contents/MacOS/Game");
+        assert_eq!(
+            release_asset_output_directory(requested, linked, true).unwrap(),
+            Path::new("dist")
+        );
+        assert_eq!(
+            release_asset_output_directory(requested, linked, false).unwrap(),
+            Path::new("dist/Game.app/Contents/MacOS")
+        );
+        assert_eq!(
+            release_asset_output_directory(requested, requested, true).unwrap(),
+            Path::new("dist")
+        );
+    }
+
+    #[test]
+    fn desktop_network_provenance_rejects_foreign_target_libraries() {
+        let root = temp_dir("foreign_desktop_network");
+        for library in [
+            "desktop/network/windows-x86_64/stasis_network.lib",
+            "desktop/network/linux-x86_64/libstasis_network.a",
+            "desktop/network/linux-arm64/libstasis_network.a",
+            "desktop/network/macos-x86_64/libstasis_network.a",
+            "desktop/network/macos-arm64/libstasis_network.a",
+        ] {
+            if library == DESKTOP_NETWORK_ARTIFACTS[0] {
+                continue;
+            }
+            let provenance = json!({"desktop_network_artifacts": {
+                (library): "foreign-library-hash",
+                (DESKTOP_NETWORK_ARTIFACTS[1]): "header-hash",
+            }});
+            let error = verify_desktop_network_artifact_hashes(&provenance, &root)
+                .expect_err("reject a release built for another platform before linking");
+            assert!(error.contains("artifact set mismatch"), "{error}");
+        }
+        remove_temp(&root);
+    }
+
     #[test]
     fn bundled_desktop_network_artifacts_resolve_beside_the_cli() {
         let root = temp_dir("relocated_desktop_network");
         let executable = root.join("bin/stasis.exe");
         let support = root.join("bin/desktop/network");
-        fs::create_dir_all(support.join("windows-x86_64")).expect("create library directory");
+        let library_path = root.join("bin").join(DESKTOP_NETWORK_ARTIFACTS[0]);
+        fs::create_dir_all(library_path.parent().unwrap()).expect("create library directory");
         fs::create_dir_all(support.join("include")).expect("create include directory");
         fs::write(&executable, b"relocated stasis executable").expect("write executable fixture");
-        fs::write(
-            support.join("windows-x86_64/stasis_network.lib"),
-            b"relocated desktop network library",
-        )
-        .expect("write relocated network library");
+        fs::write(&library_path, b"relocated desktop network library")
+            .expect("write relocated network library");
         fs::write(
             support.join("include/stasis_network.h"),
             b"/* relocated network header */\n",
@@ -11289,7 +11350,7 @@ mod tests {
             bundled_network_artifacts_for_executable(&executable, PackageTarget::Desktop)
                 .expect("resolve desktop support")
                 .expect("desktop support artifacts");
-        assert_eq!(library, support.join("windows-x86_64/stasis_network.lib"));
+        assert_eq!(library, library_path);
         assert_eq!(header, support.join("include/stasis_network.h"));
         remove_temp(&root);
     }

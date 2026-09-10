@@ -70,6 +70,29 @@ def verify_asset_package_identities(
             )
 
 
+def verify_network_guest_bundles(
+    parser: argparse.ArgumentParser, package_root: pathlib.Path
+) -> None:
+    for bundle in sorted(package_root.rglob("network_guest.bundle")):
+        if not bundle.with_suffix(".bundle.json").is_file():
+            parser.error(f"network guest bundle identity is missing: {bundle}")
+    for receipt in sorted(package_root.rglob("network_guest.bundle.json")):
+        identity = json.loads(receipt.read_text(encoding="utf-8"))
+        if not isinstance(identity, dict) or set(identity) != {"format", "path", "length", "sha256"}:
+            parser.error(f"malformed network guest bundle identity: {receipt}")
+        if identity["format"] != "stasis.static_bundle.v1":
+            parser.error(f"unsupported network guest bundle format: {receipt}")
+        if identity["path"] != "network_guest.bundle":
+            parser.error(f"unsafe network guest bundle path: {receipt}")
+        bundle = receipt.parent / "network_guest.bundle"
+        if not bundle.is_file():
+            parser.error(f"network guest bundle is missing: {bundle}")
+        if type(identity["length"]) is not int or bundle.stat().st_size != identity["length"]:
+            parser.error(f"network guest bundle length mismatch: {bundle}")
+        if sha256(bundle) != identity["sha256"]:
+            parser.error(f"network guest bundle hash mismatch: {bundle}")
+
+
 def validate_command_buffer(parser: argparse.ArgumentParser, manifest: dict) -> None:
     command_buffer = manifest.get("command_buffer")
     if not isinstance(command_buffer, dict):
@@ -253,6 +276,7 @@ def main() -> int:
     if release != packaged:
         parser.error("packaged provenance does not exactly match the release manifest")
     verify_asset_package_identities(parser, args.package_root)
+    verify_network_guest_bundles(parser, args.package_root)
     runtime_sources = release["runtime_sources"] if args.expect_runtime_sources else {}
     for relative, expected in runtime_sources.items():
         relative_path = pathlib.PurePosixPath(relative)

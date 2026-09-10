@@ -271,8 +271,8 @@ if(STASIS_GRAPHICS_BUILD_TESTS AND (TARGET stasis_graphics_static OR TARGET stas
 endif()
 
 if(STASIS_BUILD_MONOLITH)
-    if(NOT WIN32)
-        message(FATAL_ERROR "The desktop production monolith currently targets Windows")
+    if(NOT WIN32 AND NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "The desktop production monolith supports Windows, Linux, and macOS")
     endif()
     if(NOT STASIS_MONOLITH_AOT_DIR OR NOT EXISTS "${STASIS_MONOLITH_AOT_DIR}/published_aot_objects.cmake")
         message(FATAL_ERROR "STASIS_MONOLITH_AOT_DIR must contain published_aot_objects.cmake")
@@ -288,7 +288,7 @@ if(STASIS_BUILD_MONOLITH)
         ${STASIS_PUBLISHED_AOT_OBJECTS}
         stasis_runner.manifest
     )
-    target_compile_definitions(stasis_monolith PRIVATE STASIS_WINDOWS_MONOLITH=1)
+    target_compile_definitions(stasis_monolith PRIVATE STASIS_DESKTOP_MONOLITH=1)
     target_include_directories(
         stasis_monolith
         PRIVATE "${STASIS_MONOLITH_AOT_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -321,11 +321,30 @@ if(STASIS_BUILD_MONOLITH)
         target_link_libraries(stasis_monolith PRIVATE "${STASIS_MONOLITH_NETWORK_LIBRARY}")
         if(WIN32)
             target_link_libraries(stasis_monolith PRIVATE ws2_32 iphlpapi bcrypt userenv ntdll)
+        elseif(APPLE)
+            target_link_libraries(
+                stasis_monolith PRIVATE
+                "-framework Security"
+                "-framework CoreFoundation"
+                resolv
+            )
+        else()
+            find_package(Threads REQUIRED)
+            target_link_libraries(stasis_monolith PRIVATE ${CMAKE_DL_LIBS} Threads::Threads m)
         endif()
     endif()
     set_property(TARGET stasis_monolith PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    target_compile_options(stasis_monolith PRIVATE /O1 /Gy /Gw)
-    target_link_options(stasis_monolith PRIVATE /OPT:REF /OPT:ICF)
+    if(MSVC)
+        target_compile_options(stasis_monolith PRIVATE /O1 /Gy /Gw)
+        target_link_options(stasis_monolith PRIVATE /OPT:REF /OPT:ICF)
+    else()
+        target_compile_options(stasis_monolith PRIVATE -Os -ffunction-sections -fdata-sections)
+        if(APPLE)
+            target_link_options(stasis_monolith PRIVATE -Wl,-dead_strip)
+        else()
+            target_link_options(stasis_monolith PRIVATE -Wl,--gc-sections)
+        endif()
+    endif()
     set_target_properties(stasis_monolith PROPERTIES
         OUTPUT_NAME "${STASIS_MONOLITH_OUTPUT_NAME}"
         RUNTIME_OUTPUT_DIRECTORY "${STASIS_MONOLITH_OUTPUT_DIR}"

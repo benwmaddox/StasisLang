@@ -8,7 +8,8 @@ import tempfile
 import unittest
 
 from tools.generate_release_provenance import (
-    DESKTOP_NETWORK_ARTIFACTS,
+    DESKTOP_NETWORK_LIBRARIES,
+    DESKTOP_NETWORK_HEADER,
     RUNTIME_DIRS,
     RUNTIME_FILES,
     desktop_network_artifact_hashes,
@@ -17,6 +18,7 @@ from tools.generate_release_provenance import (
 from tools.verify_package_provenance import (
     verify_asset_package_identities,
     verify_mobile_shells,
+    verify_network_guest_bundles,
 )
 
 
@@ -118,8 +120,8 @@ class ReleaseProvenanceTests(unittest.TestCase):
             root = pathlib.Path(temporary)
             self.assertEqual({}, desktop_network_artifact_hashes(root))
 
-            library = root / DESKTOP_NETWORK_ARTIFACTS[0]
-            header = root / DESKTOP_NETWORK_ARTIFACTS[1]
+            library = root / DESKTOP_NETWORK_LIBRARIES[0]
+            header = root / DESKTOP_NETWORK_HEADER
             library.parent.mkdir(parents=True)
             library.write_bytes(b"network library")
             with self.assertRaisesRegex(ValueError, "incomplete"):
@@ -129,15 +131,82 @@ class ReleaseProvenanceTests(unittest.TestCase):
             header.write_bytes(b"network header")
             self.assertEqual(
                 {
-                    DESKTOP_NETWORK_ARTIFACTS[0]: hashlib.sha256(
+                    DESKTOP_NETWORK_LIBRARIES[0]: hashlib.sha256(
                         b"network library"
                     ).hexdigest(),
-                    DESKTOP_NETWORK_ARTIFACTS[1]: hashlib.sha256(
+                    DESKTOP_NETWORK_HEADER: hashlib.sha256(
                         b"network header"
                     ).hexdigest(),
                 },
                 desktop_network_artifact_hashes(root),
             )
+
+    def test_desktop_network_native_archives_require_exactly_one_target(self):
+        for library in DESKTOP_NETWORK_LIBRARIES:
+            with self.subTest(library=library), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                header = root / DESKTOP_NETWORK_HEADER
+                header.parent.mkdir(parents=True)
+                header.write_bytes(b"header")
+                with self.assertRaisesRegex(ValueError, "incomplete"):
+                    desktop_network_artifact_hashes(root)
+                native = root / library
+                native.parent.mkdir(parents=True)
+                native.write_bytes(b"native")
+                self.assertEqual(
+                    {library: hashlib.sha256(b"native").hexdigest(),
+                     DESKTOP_NETWORK_HEADER: hashlib.sha256(b"header").hexdigest()},
+                    desktop_network_artifact_hashes(root),
+                )
+                other = next(name for name in DESKTOP_NETWORK_LIBRARIES if name != library)
+                other_path = root / other
+                other_path.parent.mkdir(parents=True, exist_ok=True)
+                other_path.write_bytes(b"wrong target")
+                with self.assertRaisesRegex(ValueError, "exactly one"):
+                    desktop_network_artifact_hashes(root)
+                other_path.unlink()
+                (native.parent / "unexpected.a").write_bytes(b"untracked payload")
+                with self.assertRaisesRegex(ValueError, "unsupported"):
+                    desktop_network_artifact_hashes(root)
+
+    def test_network_guest_bundle_identity_rejects_corruption_and_missing_pairs(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary)
+            bundle = package / "network_guest.bundle"
+            receipt = package / "network_guest.bundle.json"
+            payload = b"SGB1 test payload"
+            identity = {
+                "format": "stasis.static_bundle.v1",
+                "path": "network_guest.bundle",
+                "length": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            verify_network_guest_bundles(Parser(), package)
+            bundle.write_bytes(payload)
+            with self.assertRaisesRegex(ValueError, "identity is missing"):
+                verify_network_guest_bundles(Parser(), package)
+            receipt.write_text(json.dumps(identity), encoding="utf-8")
+            verify_network_guest_bundles(Parser(), package)
+            bundle.write_bytes(b"X" + payload[1:])
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                verify_network_guest_bundles(Parser(), package)
+            bundle.write_bytes(payload + b"X")
+            with self.assertRaisesRegex(ValueError, "length mismatch"):
+                verify_network_guest_bundles(Parser(), package)
+            bundle.unlink()
+            with self.assertRaisesRegex(ValueError, "bundle is missing"):
+                verify_network_guest_bundles(Parser(), package)
+            bundle.write_bytes(payload)
+            for path in ("../network_guest.bundle", "/network_guest.bundle", "other.bundle"):
+                identity["path"] = path
+                receipt.write_text(json.dumps(identity), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "unsafe"):
+                    verify_network_guest_bundles(Parser(), package)
 
     def test_asset_package_identity_binds_exact_manifest_bytes(self):
         class Parser:
