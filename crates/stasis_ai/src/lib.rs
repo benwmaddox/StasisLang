@@ -44,6 +44,9 @@ pub use task_session::{
 pub const DEFAULT_AGENT_TURNS: usize = 50;
 pub const MAX_AGENT_TURNS: usize = 50;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 50;
+pub const MAX_SEMANTIC_EDITS_PER_BATCH: usize = 64;
+const MAX_SYMBOL_QUERY_FILES: usize = 16;
+const MAX_PNG_SHAPES: usize = 512;
 pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_REASONING_EFFORT: &str = "medium";
@@ -874,6 +877,28 @@ fn validate_tool_call(
             call.tool
         ));
     }
+    // Provider grammars may omit upper array bounds; admission still enforces them.
+    let bound = match spec.tool.as_str() {
+        "propose_semantic_edit" | "repair_semantic_edit" => {
+            Some(("/batch/edits", MAX_SEMANTIC_EDITS_PER_BATCH))
+        }
+        "list_symbols" => Some(("/files", MAX_SYMBOL_QUERY_FILES)),
+        "write_png_asset" => Some(("/shapes", MAX_PNG_SHAPES)),
+        _ => None,
+    };
+    if let Some((path, limit)) = bound {
+        if call
+            .args
+            .pointer(path)
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.len() > limit)
+        {
+            return Err(format!(
+                "AI action {} exceeds {path} limit of {limit}",
+                spec.tool
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1045,7 +1070,10 @@ fn full_tool_args_schema(spec: &ToolSpec) -> Value {
         ),
         "list_symbols" => object_schema(
             &[
-                ("files", array_schema(string_schema(), Some(16))),
+                (
+                    "files",
+                    array_schema(string_schema(), Some(MAX_SYMBOL_QUERY_FILES)),
+                ),
                 ("query", string_schema()),
                 ("kind", string_schema()),
                 ("owner", string_schema()),
@@ -1168,7 +1196,10 @@ fn full_tool_args_schema(spec: &ToolSpec) -> Value {
                 ("width", integer_schema(Some(1), Some(2048))),
                 ("height", integer_schema(Some(1), Some(2048))),
                 ("background", string_schema()),
-                ("shapes", array_schema(png_shape_schema(), Some(512))),
+                (
+                    "shapes",
+                    array_schema(png_shape_schema(), Some(MAX_PNG_SHAPES)),
+                ),
             ],
             &["id", "path", "width", "height", "background", "shapes"],
         ),
@@ -1262,7 +1293,10 @@ fn semantic_edit_batch_schema() -> Value {
     object_schema(
         &[
             ("schema_version", integer_schema(Some(1), Some(2))),
-            ("edits", array_schema(edit, Some(64))),
+            (
+                "edits",
+                array_schema(edit, Some(MAX_SEMANTIC_EDITS_PER_BATCH)),
+            ),
         ],
         &["schema_version", "edits"],
     )
@@ -3536,6 +3570,49 @@ mod tests {
         )
         .unwrap_err()
         .contains("non-boolean"));
+    }
+
+    #[test]
+    fn host_enforces_array_caps_without_provider_grammar_bounds() {
+        for (tool, arg, path, limit) in [
+            (
+                "propose_semantic_edit",
+                "batch",
+                "/batch/edits",
+                MAX_SEMANTIC_EDITS_PER_BATCH,
+            ),
+            (
+                "repair_semantic_edit",
+                "batch",
+                "/batch/edits",
+                MAX_SEMANTIC_EDITS_PER_BATCH,
+            ),
+            ("list_symbols", "files", "/files", MAX_SYMBOL_QUERY_FILES),
+            ("write_png_asset", "shapes", "/shapes", MAX_PNG_SHAPES),
+        ] {
+            let specs = vec![spec(tool, "bounded request", &[arg], &[])];
+            let known = BTreeSet::from([tool.to_string()]);
+            let mut args = if arg == "batch" {
+                json!({"batch":{"edits":[]}})
+            } else {
+                json!({arg:[]})
+            };
+            *args.pointer_mut(path).unwrap() = json!(vec![Value::Null; limit]);
+            let mut call = ToolCall {
+                tool: tool.into(),
+                args,
+            };
+            validate_tool_call(&call, &specs, &known, false).unwrap();
+            call.args
+                .pointer_mut(path)
+                .unwrap()
+                .as_array_mut()
+                .unwrap()
+                .push(Value::Null);
+            assert!(validate_tool_call(&call, &specs, &known, false)
+                .unwrap_err()
+                .contains("limit of"));
+        }
     }
 
     #[test]

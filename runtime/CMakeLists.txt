@@ -229,6 +229,26 @@ if(STASIS_GRAPHICS_BUILD_STATIC)
     )
 endif()
 
+if(STASIS_GRAPHICS_BUILD_TESTS AND TARGET stasis_graphics_static)
+    add_executable(
+        stasis_window_placement_test
+        tests/stasis_window_placement_test.c
+    )
+    target_link_libraries(stasis_window_placement_test PRIVATE stasis_graphics_static)
+    add_test(NAME stasis_window_placement_contract COMMAND stasis_window_placement_test)
+    if(WIN32)
+        set_tests_properties(
+            stasis_window_placement_contract
+            PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=windows;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy"
+        )
+    else()
+        set_tests_properties(
+            stasis_window_placement_contract
+            PROPERTIES ENVIRONMENT "SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy"
+        )
+    endif()
+endif()
+
 if(STASIS_BUILD_MOBILE_RUNTIME)
     add_library(
         stasis_mobile_runtime STATIC

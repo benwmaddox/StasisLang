@@ -1072,6 +1072,79 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 
 const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 3;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DesktopRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GameWindowPlacement {
+    /// Outer window bounds in SDL's platform-native desktop coordinates.
+    pub outer: DesktopRect,
+    /// Usable bounds of the monitor containing the game window, in the same coordinates.
+    pub usable_monitor: DesktopRect,
+    /// Content scale expected for readable UI on the window's current display.
+    pub display_scale: f32,
+    /// Physical pixels per SDL window coordinate (1.0 on Windows).
+    pub pixel_density: f32,
+    pub minimized: bool,
+    pub maximized: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MonitorPlacement {
+    pub usable: DesktopRect,
+    pub display_scale: f32,
+    pub pixel_density: f32,
+}
+
+fn decode_window_placement(
+    values: [i32; 10],
+    scales: [f32; 2],
+) -> Result<GameWindowPlacement, String> {
+    let outer = decode_desktop_rect(
+        values[..4].try_into().expect("fixed window bounds"),
+        "window",
+    )?;
+    let usable_monitor = decode_desktop_rect(
+        values[4..8].try_into().expect("fixed monitor bounds"),
+        "monitor",
+    )?;
+    validate_window_scales(scales)?;
+    Ok(GameWindowPlacement {
+        outer,
+        usable_monitor,
+        display_scale: scales[0],
+        pixel_density: scales[1],
+        minimized: values[8] != 0,
+        maximized: values[9] != 0,
+    })
+}
+
+fn decode_desktop_rect(values: [i32; 4], label: &str) -> Result<DesktopRect, String> {
+    if values[2] < 1 || values[3] < 1 {
+        return Err(format!(
+            "graphics runtime returned invalid native {label} bounds"
+        ));
+    }
+    Ok(DesktopRect {
+        x: values[0],
+        y: values[1],
+        width: values[2],
+        height: values[3],
+    })
+}
+
+fn validate_window_scales(scales: [f32; 2]) -> Result<(), String> {
+    if !scales[0].is_finite() || scales[0] <= 0.0 || !scales[1].is_finite() || scales[1] <= 0.0 {
+        return Err("graphics runtime returned invalid native window scale".to_string());
+    }
+    Ok(())
+}
+
 fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String> {
     let address = lib
         .symbol_address("stasis_graphics_runtime_abi_version")
@@ -1246,6 +1319,10 @@ pub struct StasisGraphicsApi {
     stasis_test_get_render_submission_state: Option<usize>,
     stasis_gfx_notify_file_changed: Option<usize>,
     stasis_load_font: Option<usize>,
+    stasis_host_get_window_placement: Option<usize>,
+    stasis_host_apply_window_placement: Option<usize>,
+    stasis_host_focus_window: Option<usize>,
+    stasis_host_get_monitor_usable_bounds: Option<usize>,
     stasis_sleep_ms: usize,
 }
 
@@ -1310,6 +1387,17 @@ impl StasisGraphicsApi {
         let stasis_gfx_notify_file_changed =
             lib.symbol_address("stasis_gfx_notify_file_changed").ok();
         let stasis_load_font = lib.symbol_address("stasis_load_font").ok();
+        // Window placement is additive to graphics ABI 3. Installed older ABI-3
+        // runtimes remain loadable and report this feature as unsupported.
+        let stasis_host_get_window_placement =
+            lib.symbol_address("stasis_host_get_window_placement").ok();
+        let stasis_host_apply_window_placement = lib
+            .symbol_address("stasis_host_apply_window_placement")
+            .ok();
+        let stasis_host_focus_window = lib.symbol_address("stasis_host_focus_window").ok();
+        let stasis_host_get_monitor_usable_bounds = lib
+            .symbol_address("stasis_host_get_monitor_usable_bounds")
+            .ok();
         let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
         Ok(Self {
             _lib: lib,
@@ -1327,6 +1415,10 @@ impl StasisGraphicsApi {
             stasis_test_get_render_submission_state,
             stasis_gfx_notify_file_changed,
             stasis_load_font,
+            stasis_host_get_window_placement,
+            stasis_host_apply_window_placement,
+            stasis_host_focus_window,
+            stasis_host_get_monitor_usable_bounds,
             stasis_sleep_ms,
         })
     }
@@ -1349,6 +1441,110 @@ impl StasisGraphicsApi {
                 unsafe { std::mem::transmute(self.stasis_init_window) };
             Ok(callback(width, height, title.as_ptr()) != 0)
         }
+    }
+
+    pub fn window_placement(&self) -> Result<GameWindowPlacement, String> {
+        let address = self
+            .stasis_host_get_window_placement
+            .ok_or_else(|| "graphics runtime lacks native window placement support".to_string())?;
+        let mut integers = [0_i32; 10];
+        let mut floats = [0.0_f32; 2];
+        #[cfg(windows)]
+        let callback: extern "system" fn(*mut i32, i32, *mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(*mut i32, i32, *mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        if callback(
+            integers.as_mut_ptr(),
+            integers.len() as i32,
+            floats.as_mut_ptr(),
+            floats.len() as i32,
+        ) == 0
+        {
+            return Err("graphics runtime could not read native window placement".to_string());
+        }
+        decode_window_placement(integers, floats)
+    }
+
+    /// Restore, position, and resize the native game window between runtime ticks.
+    ///
+    /// `rect` is an outer window rectangle in SDL's platform-native desktop
+    /// coordinate space, matching [`GameWindowPlacement::outer`].
+    pub fn apply_window_placement(&self, rect: DesktopRect, raise: bool) -> Result<(), String> {
+        if rect.width < 1 || rect.height < 1 {
+            return Err("native window placement requires a positive extent".to_string());
+        }
+        let address = self
+            .stasis_host_apply_window_placement
+            .ok_or_else(|| "graphics runtime lacks native window placement support".to_string())?;
+        #[cfg(windows)]
+        let callback: extern "system" fn(i32, i32, i32, i32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(i32, i32, i32, i32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        if callback(
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            if raise { 1 } else { 0 },
+        ) == 0
+        {
+            return Err("graphics runtime rejected native window placement".to_string());
+        }
+        Ok(())
+    }
+
+    /// Restore a minimized game window and request keyboard/mouse focus without
+    /// changing its current size, position, maximized state, or fullscreen mode.
+    pub fn focus_window(&self) -> Result<(), String> {
+        let address = self
+            .stasis_host_focus_window
+            .ok_or_else(|| "graphics runtime lacks native window focus support".to_string())?;
+        #[cfg(windows)]
+        let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+        if callback() == 0 {
+            return Err("graphics runtime rejected native window focus request".to_string());
+        }
+        Ok(())
+    }
+
+    /// Return the usable bounds and scales for the display containing `(x, y)`.
+    /// Disconnected/off-desktop saved coordinates resolve to the primary display.
+    pub fn monitor_usable_bounds_at(&self, x: i32, y: i32) -> Result<MonitorPlacement, String> {
+        let address = self
+            .stasis_host_get_monitor_usable_bounds
+            .ok_or_else(|| "graphics runtime lacks native monitor bounds support".to_string())?;
+        let mut values = [0_i32; 4];
+        let mut scales = [0.0_f32; 2];
+        #[cfg(windows)]
+        let callback: extern "system" fn(i32, i32, *mut i32, i32, *mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(i32, i32, *mut i32, i32, *mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        if callback(
+            x,
+            y,
+            values.as_mut_ptr(),
+            values.len() as i32,
+            scales.as_mut_ptr(),
+            scales.len() as i32,
+        ) == 0
+        {
+            return Err("graphics runtime could not resolve native monitor bounds".to_string());
+        }
+        let usable = decode_desktop_rect(values, "monitor")?;
+        validate_window_scales(scales)?;
+        Ok(MonitorPlacement {
+            usable,
+            display_scale: scales[0],
+            pixel_density: scales[1],
+        })
     }
 
     pub fn set_recording_config(&self, width: u32, height: u32, fps: u32) -> Result<(), String> {
@@ -7406,6 +7602,41 @@ fn jit_string_literal_table() -> &'static Mutex<JitStringLiteralMap> {
 mod tests {
     use super::*;
     use std::sync::MutexGuard;
+
+    #[test]
+    fn window_placement_decodes_signed_desktop_coordinates_and_scales() {
+        let placement = decode_window_placement(
+            [-1920, 24, 960, 1056, -1920, 0, 1920, 1080, 1, 0],
+            [1.5, 1.0],
+        )
+        .expect("valid placement");
+
+        assert_eq!(
+            placement.outer,
+            DesktopRect {
+                x: -1920,
+                y: 24,
+                width: 960,
+                height: 1056,
+            }
+        );
+        assert_eq!(placement.usable_monitor.x, -1920);
+        assert_eq!(placement.display_scale, 1.5);
+        assert_eq!(placement.pixel_density, 1.0);
+        assert!(placement.minimized);
+        assert!(!placement.maximized);
+    }
+
+    #[test]
+    fn window_placement_rejects_invalid_runtime_values() {
+        assert!(
+            decode_window_placement([0, 0, 0, 600, 0, 0, 1920, 1040, 0, 0], [1.0, 1.0],).is_err()
+        );
+        assert!(
+            decode_window_placement([0, 0, 800, 600, 0, 0, 1920, 1040, 0, 0], [f32::NAN, 1.0],)
+                .is_err()
+        );
+    }
 
     fn hot_image(path: &str, count: Option<u64>, eligible: bool) -> HotRenderRuntimeImage {
         HotRenderRuntimeImage {

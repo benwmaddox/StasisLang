@@ -47,6 +47,81 @@ fn text_rects(output: &egui::FullOutput, wanted: &str) -> Vec<egui::Rect> {
     found
 }
 
+fn visible_text_starting_with(
+    output: &egui::FullOutput,
+    wanted: &str,
+) -> Vec<(String, egui::Rect)> {
+    fn collect(
+        shape: &egui::epaint::Shape,
+        clip: egui::Rect,
+        wanted: &str,
+        found: &mut Vec<(String, egui::Rect)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text.starts_with(wanted) => {
+                found.push((
+                    text.galley.job.text.clone(),
+                    text.galley
+                        .rect
+                        .translate(text.pos.to_vec2())
+                        .intersect(clip),
+                ));
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect(shape, clip, wanted, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for shape in &output.shapes {
+        collect(&shape.shape, shape.clip_rect, wanted, &mut found);
+    }
+    found
+}
+
+fn accesskit_nodes(output: &egui::FullOutput) -> Vec<&egui::accesskit::Node> {
+    let update = output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .expect("accessibility tree update");
+    fn visit<'a>(
+        id: egui::accesskit::NodeId,
+        nodes: &'a [(egui::accesskit::NodeId, egui::accesskit::Node)],
+        ordered: &mut Vec<&'a egui::accesskit::Node>,
+    ) {
+        let node = nodes
+            .iter()
+            .find_map(|(candidate, node)| (*candidate == id).then_some(node))
+            .expect("accessibility child node");
+        ordered.push(node);
+        for child in node.children() {
+            visit(*child, nodes, ordered);
+        }
+    }
+    let mut ordered = Vec::new();
+    visit(
+        update.tree.as_ref().expect("accessibility tree").root,
+        &update.nodes,
+        &mut ordered,
+    );
+    ordered
+}
+
+fn accesskit_node_named<'a>(
+    nodes: &'a [&egui::accesskit::Node],
+    name: &str,
+) -> &'a egui::accesskit::Node {
+    nodes
+        .iter()
+        .copied()
+        .find(|node| node.name() == Some(name))
+        .unwrap_or_else(|| panic!("missing accessible node named {name:?}"))
+}
+
 fn click(
     editor: &mut DesktopEditor,
     context: &egui::Context,
@@ -194,6 +269,150 @@ fn composer_stays_visible_at_narrow_wide_and_high_dpi_sizes() {
 }
 
 #[test]
+fn compact_and_wide_layouts_expose_named_accessible_controls() {
+    for width in [520.0, 1100.0] {
+        let mut editor = editor();
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let size = egui::vec2(width, 900.0);
+        let output = frame(&mut editor, &context, size, vec![]);
+        let nodes = accesskit_nodes(&output);
+
+        assert_eq!(
+            accesskit_node_named(&nodes, "New task objective").role(),
+            egui::accesskit::Role::TextInput
+        );
+        assert_eq!(
+            accesskit_node_named(&nodes, "Reply to Stasis AI about Improve player movement").role(),
+            egui::accesskit::Role::MultilineTextInput
+        );
+        let task_name = if width < 760.0 {
+            "Task: Improve player movement"
+        } else {
+            "Task: Improve player movement. Status: current"
+        };
+        assert_eq!(
+            accesskit_node_named(&nodes, task_name).role(),
+            egui::accesskit::Role::ToggleButton
+        );
+        assert_eq!(
+            accesskit_node_named(
+                &nodes,
+                "Provider and model. Current selection: Provider pending, model pending"
+            )
+            .role(),
+            egui::accesskit::Role::ComboBox
+        );
+
+        let node_names = nodes.iter().map(|node| node.name()).collect::<Vec<_>>();
+        let objective_index = node_names
+            .iter()
+            .position(|name| *name == Some("New task objective"))
+            .unwrap();
+        let create_label = if width < 760.0 {
+            "+ Task"
+        } else {
+            "+  Create task"
+        };
+        let create_index = node_names
+            .iter()
+            .position(|name| *name == Some(create_label))
+            .unwrap();
+        let task_index = node_names
+            .iter()
+            .position(|name| *name == Some(task_name))
+            .unwrap();
+        assert!(objective_index < create_index && create_index < task_index);
+    }
+}
+
+#[test]
+fn compact_layout_honors_new_task_focus_before_typing() {
+    let mut editor = editor();
+    editor.state.objective.clear();
+    editor.state.focus = FocusArea::Tasks;
+    editor.state.focus_pending = true;
+    let context = egui::Context::default();
+    let size = egui::vec2(520.0, 700.0);
+
+    frame(&mut editor, &context, size, vec![]);
+    frame(
+        &mut editor,
+        &context,
+        size,
+        vec![egui::Event::Text("Describe the next task".into())],
+    );
+
+    assert_eq!(editor.state.objective, "Describe the next task");
+    assert!(!editor.state.focus_pending);
+}
+
+#[test]
+fn compact_layout_scrolls_the_active_task_into_view() {
+    let mut editor = editor();
+    for objective in [
+        "Add an arena tileset",
+        "Polish the pause menu",
+        "Add dash ability",
+    ] {
+        editor.state.objective = objective.into();
+        editor.state.create_task().unwrap();
+    }
+    let context = egui::Context::default();
+    let size = egui::vec2(520.0, 700.0);
+
+    for _ in 0..10 {
+        frame(&mut editor, &context, size, vec![]);
+    }
+    let output = frame(&mut editor, &context, size, vec![]);
+    let active = text_rects(&output, "Add dash ability")
+        .into_iter()
+        .find(|rect| rect.max.y < 130.0)
+        .expect("active compact task selector");
+
+    assert!(
+        egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains_rect(active),
+        "active compact selector remains clipped: {active:?}"
+    );
+}
+
+#[test]
+fn visuals_use_high_contrast_boundaries_and_no_transition_motion() {
+    fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+        let luminance = |color: Color32| {
+            let channel = |value: u8| {
+                let value = value as f32 / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+        };
+        let (lighter, darker) = if luminance(a) >= luminance(b) {
+            (luminance(a), luminance(b))
+        } else {
+            (luminance(b), luminance(a))
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    let context = egui::Context::default();
+    configure_visuals(&context);
+    let style = context.style();
+
+    assert_eq!(style.animation_time, 0.0);
+    assert_eq!(style.visuals.widgets.inactive.bg_stroke.color, border());
+    assert_eq!(
+        style.visuals.widgets.noninteractive.fg_stroke.color,
+        muted_text()
+    );
+    assert!(contrast_ratio(border(), panel_fill()) >= 3.0);
+    assert!(contrast_ratio(muted_text(), panel_fill()) >= 4.5);
+}
+
+#[test]
 fn disabled_send_ignores_pointer_and_focus_command_allows_typing() {
     let mut editor = editor();
     let context = egui::Context::default();
@@ -249,6 +468,55 @@ fn header_usage_never_overlaps_provider_at_compact_widths() {
         assert!(
             usage.min.y > provider.max.y,
             "header rows overlap at {width}: {provider:?} / {usage:?}"
+        );
+    }
+}
+
+#[test]
+fn compact_chrome_reserves_space_for_notices_task_creation_and_status() {
+    let notice = "AI reply completed for task-1; 1 action(s) proposed";
+    let objective = "Make the paddle slightly wider without changing collision timing";
+    for width in [420.0, 520.0, 620.0] {
+        let mut editor = editor();
+        editor.project_root = PathBuf::from(
+            "a-very-long-project-directory-name-that-must-not-hide-task-creation-controls",
+        );
+        editor.state.notice = Some(notice.into());
+        editor.state.session.active_task_mut().unwrap().objective = objective.into();
+        let context = egui::Context::default();
+        let size = egui::vec2(width, 949.0);
+
+        frame(&mut editor, &context, size, vec![]);
+        let output = frame(&mut editor, &context, size, vec![]);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let tile = text_rects(&output, "Tile Editor + Game")[0];
+        let notice_rect = text_rects(&output, notice)[0];
+        let objective_input = text_rects(&output, "New task objective")[0];
+        let create = text_rects(&output, "+ Task")[0];
+        let status = text_rects(&output, "not tested")[0];
+        let title = visible_text_starting_with(&output, "Make the paddle")
+            .into_iter()
+            .map(|(_, rect)| rect)
+            .find(|rect| (rect.center().y - status.center().y).abs() < 20.0)
+            .expect("truncated task header title");
+
+        assert!(
+            notice_rect.min.y >= tile.max.y,
+            "top rows overlap at {width}"
+        );
+        assert!(screen.contains_rect(objective_input));
+        assert!(screen.contains_rect(create));
+        assert!(objective_input.max.x < create.min.x);
+        assert!(
+            title.max.x < status.min.x,
+            "header overlaps at {width}: {title:?} / {status:?}"
+        );
+        assert!(screen.contains_rect(status));
+        editor.state.objective = "Create from the compact header".into();
+        click(&mut editor, &context, size, create.center());
+        assert_eq!(
+            editor.state.session.active_task().unwrap().objective,
+            "Create from the compact header"
         );
     }
 }

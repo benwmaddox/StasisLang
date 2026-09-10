@@ -119,6 +119,14 @@ STASIS_EXPORT void stasis_host_log_message(const char* message) {
 
 STASIS_EXPORT void stasis_set_window_size(int width, int height);
 STASIS_EXPORT int stasis_set_maximized(int maximized);
+STASIS_EXPORT int stasis_host_get_window_placement(
+    int32_t* out_i32, int32_t capacity, float* out_f32, int32_t float_capacity);
+STASIS_EXPORT int stasis_host_apply_window_placement(
+    int32_t x, int32_t y, int32_t width, int32_t height, int32_t raise);
+STASIS_EXPORT int stasis_host_focus_window(void);
+STASIS_EXPORT int stasis_host_get_monitor_usable_bounds(
+    int32_t x, int32_t y, int32_t* out_i32, int32_t capacity,
+    float* out_f32, int32_t float_capacity);
 STASIS_EXPORT int stasis_get_time_us(void);
 STASIS_EXPORT int stasis_load_font(const char* path, int font_size);
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
@@ -3354,6 +3362,180 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
     }
     stasis_query_available_presentation(
         g_native_window_width, g_native_window_height, width, height);
+}
+
+/*
+ * Read the desktop placement of the live game window.
+ *
+ * Rectangle values use SDL's platform-native desktop coordinate space. This is
+ * physical device pixels on Windows and window coordinates on macOS/Wayland.
+ * out_i32 contains the outer window bounds, the usable bounds of its monitor,
+ * and minimized/maximized flags. out_f32 contains the content display scale and
+ * physical pixels per window coordinate. This function must run on the SDL
+ * runtime thread.
+ */
+STASIS_EXPORT int stasis_host_get_window_placement(
+    int32_t* out_i32, int32_t capacity, float* out_f32, int32_t float_capacity) {
+    if (!g_window || !out_i32 || capacity < 10 || !out_f32 || float_capacity < 2 ||
+        g_recording_presentation) {
+        return 0;
+    }
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    return 0;
+#else
+    int x = 0;
+    int y = 0;
+    int client_width = 0;
+    int client_height = 0;
+    int border_top = 0;
+    int border_left = 0;
+    int border_bottom = 0;
+    int border_right = 0;
+    SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
+    SDL_Rect usable = {0, 0, 0, 0};
+    if (!SDL_GetWindowPosition(g_window, &x, &y) ||
+        !SDL_GetWindowSize(g_window, &client_width, &client_height)) {
+        return 0;
+    }
+    /* Some valid backends do not expose decoration metrics. Zero is the exact
+       client/outer relationship for those undecorated windows. */
+    (void)SDL_GetWindowBordersSize(
+        g_window, &border_top, &border_left, &border_bottom, &border_right);
+    if (display == 0) display = SDL_GetPrimaryDisplay();
+    if (display == 0 || !SDL_GetDisplayUsableBounds(display, &usable)) return 0;
+
+    /* SDL window positions identify the client origin on Windows. Normalize to
+       an outer rectangle so the host can tile without decorations crossing the
+       monitor's usable edge. */
+    out_i32[0] = x - border_left;
+    out_i32[1] = y - border_top;
+    out_i32[2] = client_width + border_left + border_right;
+    out_i32[3] = client_height + border_top + border_bottom;
+    out_i32[4] = usable.x;
+    out_i32[5] = usable.y;
+    out_i32[6] = usable.w;
+    out_i32[7] = usable.h;
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    out_i32[8] = (flags & SDL_WINDOW_MINIMIZED) != 0 ? 1 : 0;
+    out_i32[9] = (flags & SDL_WINDOW_MAXIMIZED) != 0 ? 1 : 0;
+    out_f32[0] = SDL_GetWindowDisplayScale(g_window);
+    out_f32[1] = SDL_GetWindowPixelDensity(g_window);
+    if (!(out_f32[0] > 0.0f) || !(out_f32[1] > 0.0f)) return 0;
+    return 1;
+#endif
+}
+
+/*
+ * Restore and move the live game window to the requested outer bounds. The
+ * extent includes native window decorations; SDL_SetWindowSize receives the
+ * corresponding client extent. This function must run on the SDL runtime
+ * thread, between game ticks.
+ */
+STASIS_EXPORT int stasis_host_apply_window_placement(
+    int32_t x, int32_t y, int32_t width, int32_t height, int32_t raise) {
+    if (!g_window || width < 1 || height < 1 || g_recording_presentation) return 0;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    (void)x;
+    (void)y;
+    (void)raise;
+    return 0;
+#else
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    int presentation_changed = 0;
+    if ((flags & SDL_WINDOW_FULLSCREEN) != 0) {
+        if (!SDL_SetWindowFullscreen(g_window, false)) return 0;
+        presentation_changed = 1;
+    }
+    if ((flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) {
+        if (!SDL_RestoreWindow(g_window)) return 0;
+        presentation_changed = 1;
+    }
+    if (presentation_changed && !SDL_SyncWindow(g_window)) return 0;
+
+    int border_top = 0;
+    int border_left = 0;
+    int border_bottom = 0;
+    int border_right = 0;
+    (void)SDL_GetWindowBordersSize(
+        g_window, &border_top, &border_left, &border_bottom, &border_right);
+
+    /* Moving between monitors can synchronously change DPI and native border
+       metrics. Use the current metrics only to select the destination display,
+       then measure again before applying the exact outer extent. */
+    if (!SDL_SetWindowPosition(g_window, x + border_left, y + border_top) ||
+        !SDL_SyncWindow(g_window)) {
+        return 0;
+    }
+    border_top = 0;
+    border_left = 0;
+    border_bottom = 0;
+    border_right = 0;
+    (void)SDL_GetWindowBordersSize(
+        g_window, &border_top, &border_left, &border_bottom, &border_right);
+    const int border_width = border_left + border_right;
+    const int border_height = border_top + border_bottom;
+    if (width <= border_width || height <= border_height) return 0;
+    if (!SDL_SetWindowPosition(g_window, x + border_left, y + border_top) ||
+        !SDL_SetWindowSize(g_window, width - border_width, height - border_height) ||
+        !SDL_SyncWindow(g_window)) {
+        return 0;
+    }
+    if (raise != 0 && !SDL_RaiseWindow(g_window)) return 0;
+    g_window_minimized = false;
+    stasis_sync_display_metrics();
+    return 1;
+#endif
+}
+
+/* Raise and focus without changing a visible window's presentation state. */
+STASIS_EXPORT int stasis_host_focus_window(void) {
+    if (!g_window || g_recording_presentation) return 0;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    return 0;
+#else
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    if ((flags & SDL_WINDOW_MINIMIZED) != 0 &&
+        (!SDL_RestoreWindow(g_window) || !SDL_SyncWindow(g_window))) {
+        return 0;
+    }
+    if (!SDL_RaiseWindow(g_window)) return 0;
+    g_window_minimized = false;
+    return 1;
+#endif
+}
+
+/* Resolve saved desktop coordinates to a connected monitor, primary fallback. */
+STASIS_EXPORT int stasis_host_get_monitor_usable_bounds(
+    int32_t x, int32_t y, int32_t* out_i32, int32_t capacity,
+    float* out_f32, int32_t float_capacity) {
+    if (!g_window || !out_i32 || capacity < 4 || !out_f32 || float_capacity < 2 ||
+        g_recording_presentation) {
+        return 0;
+    }
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    (void)x;
+    (void)y;
+    return 0;
+#else
+    const SDL_Point point = {x, y};
+    SDL_DisplayID display = SDL_GetDisplayForPoint(&point);
+    if (display == 0) display = SDL_GetPrimaryDisplay();
+    SDL_Rect usable = {0, 0, 0, 0};
+    const SDL_DisplayMode* mode = display != 0 ? SDL_GetDesktopDisplayMode(display) : NULL;
+    if (display == 0 || !SDL_GetDisplayUsableBounds(display, &usable) || !mode ||
+        !(mode->pixel_density > 0.0f)) {
+        return 0;
+    }
+    const float display_scale = SDL_GetDisplayContentScale(display);
+    if (!(display_scale > 0.0f)) return 0;
+    out_i32[0] = usable.x;
+    out_i32[1] = usable.y;
+    out_i32[2] = usable.w;
+    out_i32[3] = usable.h;
+    out_f32[0] = display_scale;
+    out_f32[1] = mode->pixel_density;
+    return 1;
+#endif
 }
 
 static void stasis_set_logical_size(int width, int height) {

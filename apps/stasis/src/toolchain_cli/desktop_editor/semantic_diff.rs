@@ -49,7 +49,7 @@ pub(super) fn render(
         .map(|(_, diff, _, _)| diff.removed)
         .sum::<usize>();
 
-    ui.horizontal_wrapped(|ui| {
+    let header = ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Semantic source diff").strong());
         ui.label(format!(
             "{} changed file{}",
@@ -66,6 +66,24 @@ pub(super) fn render(
             ui.ctx().copy_text(unified_diff(plan));
         }
     });
+    #[cfg(test)]
+    if ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(egui::Id::new("expand-semantic-evidence")))
+        .unwrap_or(false)
+    {
+        let scroll_id = base_id.with("evidence-scrolled");
+        if !ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(scroll_id))
+            .unwrap_or(false)
+        {
+            header.response.scroll_to_me(Some(egui::Align::TOP));
+            ui.ctx().data_mut(|data| data.insert_temp(scroll_id, true));
+        }
+    }
+    #[cfg(not(test))]
+    let _ = header;
 
     if file_diffs.is_empty() {
         ui.label(RichText::new("No semantic source changes.").weak());
@@ -176,6 +194,16 @@ fn render_file(
         id,
         expanded.contains(expansion_key),
     );
+    #[cfg(test)]
+    let mut state = state;
+    #[cfg(test)]
+    if ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(egui::Id::new("expand-semantic-evidence")))
+        .unwrap_or(false)
+    {
+        state.set_open(true);
+    }
     let show_compact = !state.is_open();
     let header = state.show_header(ui, |ui| {
         ui.vertical(|ui| {

@@ -968,7 +968,9 @@ impl OpenRouterProvider {
             return Err("AI request canceled".to_string());
         }
         let route = self.route_json(only);
-        let schema = model_response_schema_for_request(request)?;
+        let mut schema = model_response_schema_for_request(request)?;
+        // Keep Gemini structured-output state bounded; local admission enforces array limits.
+        strip_array_max_items(&mut schema);
         let content =
             if images.is_empty() {
                 Value::String(request.to_string())
@@ -1067,6 +1069,7 @@ impl OpenRouterProvider {
         let mut first_reasoning_ms = None;
         let mut first_content_ms = None;
         let mut first_action_ms = None;
+        let mut finish_reason = None;
         let mut saw_done = false;
         loop {
             let Some(bytes) =
@@ -1090,6 +1093,11 @@ impl OpenRouterProvider {
                         &self.config.api_key,
                     ));
                 }
+                finish_reason = chunk
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(Value::as_str)
+                    .map(sanitize_label)
+                    .or(finish_reason);
                 resolved_model = chunk
                     .get("model")
                     .and_then(Value::as_str)
@@ -1140,7 +1148,13 @@ impl OpenRouterProvider {
         if !saw_done {
             return Err("OpenRouter stream ended before the [DONE] marker".to_string());
         }
-        let parsed = decode_model_response(&content, "OpenRouter");
+        let parsed = decode_model_response(&content, "OpenRouter").map_err(|error| {
+            format!(
+                "{error} (finish_reason={}, response_bytes={})",
+                finish_reason.as_deref().unwrap_or("unknown"),
+                content.len()
+            )
+        });
         let resolved_model = resolved_model
             .as_deref()
             .map(sanitize_label)
@@ -1177,6 +1191,23 @@ impl OpenRouterProvider {
             "validation": {"structured_schema": if parsed.is_ok() { "accepted" } else { "rejected" }, "repair_count": 0}
         }));
         parsed
+    }
+}
+
+fn strip_array_max_items(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("maxItems");
+            for child in object.values_mut() {
+                strip_array_max_items(child);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                strip_array_max_items(child);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1477,11 +1508,22 @@ fn sanitized_transport_error(context: &str, error: &reqwest::Error) -> String {
     }
 }
 fn api_error(context: &str, status: u16, value: &Value, secret: &str) -> String {
-    let message = value
+    let primary = value
         .pointer("/error/message")
         .or_else(|| value.get("message"))
         .and_then(Value::as_str)
         .unwrap_or("request rejected");
+    let nested = value
+        .pointer("/error/metadata/raw")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|raw| {
+            raw.pointer("/error/message")
+                .or_else(|| raw.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let message = nested.as_deref().unwrap_or(primary);
     let bounded = message
         .chars()
         .filter(|ch| !ch.is_control())
@@ -1606,7 +1648,37 @@ mod tests {
         assert!(!error.contains("private-credential"));
     }
     use super::*;
+    #[test]
+    fn provider_error_surfaces_bounded_nested_message() {
+        let error = api_error(
+            "OpenRouter request",
+            400,
+            &json!({"error":{"message":"Provider returned error","metadata":{"raw":"{\"error\":{\"message\":\"response schema unsupported\"}}"}}}),
+            "unit-secret",
+        );
+        assert_eq!(
+            error,
+            "OpenRouter request failed with HTTP 400: response schema unsupported"
+        );
+    }
 
+    #[test]
+    fn openrouter_schema_removes_provider_state_exploding_array_maxima() {
+        let mut schema = json!({
+            "type": "array",
+            "maxItems": 50,
+            "items": {"type": "object", "properties": {"edits": {
+                "type": "array", "maxItems": 64, "items": {"type": "string"}
+            }}}
+        });
+        strip_array_max_items(&mut schema);
+        assert!(schema.pointer("/maxItems").is_none());
+        assert!(schema.pointer("/items/properties/edits/maxItems").is_none());
+        assert_eq!(
+            schema.pointer("/items/properties/edits/items/type"),
+            Some(&json!("string"))
+        );
+    }
     static ENVIRONMENT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct EnvironmentRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
