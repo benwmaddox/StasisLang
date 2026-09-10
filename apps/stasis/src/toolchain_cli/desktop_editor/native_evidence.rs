@@ -20,6 +20,7 @@ fn capture_native_task_timeline() {
         .parse()
         .unwrap();
     let repair = std::env::var_os("STASIS_EDITOR_EVIDENCE_REPAIR").is_some();
+    let outcomes = std::env::var_os("STASIS_EDITOR_EVIDENCE_OUTCOMES").is_some();
     let (client, _server) = stasis_runner::live::live_session(16);
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -49,6 +50,9 @@ fn capture_native_task_timeline() {
     let pixels = image::load_from_memory(&bytes).unwrap().to_rgba8();
     task.attach_screenshot_with_sha256("arena-reference", asset.display().to_string(), &sha256)
         .unwrap();
+    if outcomes {
+        task.mark_screenshot_uploaded("arena-reference").unwrap();
+    }
     let task_id = task.id.clone();
     task.append_result("I will update player movement and add focused coverage for the cooldown and collision behavior.").unwrap();
     let attachment_mode = std::env::var("STASIS_EDITOR_EVIDENCE_ATTACHMENTS").ok();
@@ -94,6 +98,15 @@ fn capture_native_task_timeline() {
         .unwrap();
     }
     task.record_turn(1840, 2410, 386, 1200).unwrap();
+    if outcomes && !repair && attachment_mode.is_none() {
+        editor.validation_fingerprints.insert(
+            task_id.to_string(),
+            (
+                "native-evidence-current-sources".into(),
+                vec!["focused".into()],
+            ),
+        );
+    }
     editor.state.preview = Some(ScreenshotPreview {
         task_id,
         screenshot_id: "arena-reference".into(),

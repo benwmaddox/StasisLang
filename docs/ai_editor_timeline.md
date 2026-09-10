@@ -37,6 +37,10 @@ The additive live commands do not change the live envelope schema version.
 The native editor enables AccessKit, names task navigation and editing controls,
 uses a visible focus outline, and disables transition animation for reduced
 motion. Compact layouts keep task creation and the reply composer reachable.
+The composer keeps one text entry above four stable buttons: **Attach image**,
+**Send (Ctrl+Enter)**, **Success (Ctrl+Shift+D)**, and **Reject (Ctrl+Esc)**.
+Contextual edit review and testing controls stay with their timeline cards or in
+the command palette instead of competing with these task-level outcomes.
 
 ## Serial task queue
 
@@ -48,8 +52,8 @@ after approval and validation, or confirms cancellation. Completion first shows
 the exact task-time paths that will be saved in a Git commit. Applied
 compiler-plan paths are labeled **Stasis edit**; other paths created or changed
 after the task started, such as an image written by an external generator, are
-labeled **External edit**. The user can **Keep working (Esc)** or **Commit and
-complete (Enter)**.
+labeled **External edit**. **Success** opens this review; the user can **Keep
+working (Esc)** or **Commit and mark accomplished (Enter)**.
 
 A task with no project changes can still be explicitly completed; the review
 states that no commit will be created.
@@ -150,6 +154,8 @@ python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis capture_nat
 
 Set width to `680` for compact layout, or scale to `1.5` for high-DPI layout.
 Set `STASIS_EDITOR_EVIDENCE_REPAIR=1` to show failed validation and repair.
+Set `STASIS_EDITOR_EVIDENCE_OUTCOMES=1` to show the simplified composer with a
+current passing validation and enabled **Success** action.
 Set `STASIS_EDITOR_EVIDENCE_ATTACHMENTS=1` to show attachment and generated-asset
 review using the repository's arena artwork as an explicitly labeled fixture.
 Use `reference` instead of `1` for the shorter message/attachment/reply overview.

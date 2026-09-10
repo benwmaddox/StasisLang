@@ -3231,30 +3231,6 @@ impl EditorState {
         Ok(preview)
     }
 
-    fn review_command_enabled(&self, command: &TaskSessionCommand) -> bool {
-        let accepted = match command {
-            TaskSessionCommand::AcceptAction => false,
-            TaskSessionCommand::ApplyAction => true,
-            _ => return true,
-        };
-        let Ok(task) = self.session.active_task() else {
-            return false;
-        };
-        task.actions
-            .values()
-            .find(|action| {
-                if accepted {
-                    matches!(action.state, ActionState::Accepted)
-                } else {
-                    matches!(action.state, ActionState::Proposed)
-                }
-            })
-            .is_some_and(|action| {
-                self.check_preview(task.id.as_str(), action.id.as_str(), false)
-                    .is_ok()
-            })
-    }
-
     fn primary_action(&self, busy: bool) -> PrimaryAction {
         let Ok(task) = self.session.active_task() else {
             return PrimaryAction {
@@ -3366,7 +3342,7 @@ impl EditorState {
             })
         {
             return PrimaryAction {
-                label: "Complete... (Ctrl+Shift+D)",
+                label: "Success (Ctrl+Shift+D)",
                 command: TaskSessionCommand::MarkDone,
                 enabled: true,
                 disabled_reason: None,
@@ -3374,7 +3350,7 @@ impl EditorState {
         }
         let enabled = !self.reply.trim().is_empty();
         PrimaryAction {
-            label: "Send to AI",
+            label: "Send (Ctrl+Enter)",
             command: TaskSessionCommand::SendReply,
             enabled,
             disabled_reason: (!enabled).then(|| "Write a task-scoped message first.".into()),
@@ -3986,6 +3962,7 @@ impl DesktopEditor {
             ui.colored_label(warning(), "Previous AI request outcome is uncertain. It may already have incurred a charge; review before sending again.");
         }
         let mut provider_choice = None;
+        let mut refresh_image_support = false;
         let openrouter = stasis_ai::OpenRouterConfig::from_workspace(&self.project_root).ok();
         egui::Frame::none()
             .fill(Color32::from_rgb(28, 33, 41))
@@ -4076,6 +4053,12 @@ impl DesktopEditor {
                                     .small()
                                     .color(muted_text()),
                                 );
+                                if provider != "installed_codex_subscription"
+                                    && ui.button("Refresh image support").clicked()
+                                {
+                                    refresh_image_support = true;
+                                    ui.close_menu();
+                                }
                         });
                         provider_menu.response.widget_info(|| {
                             egui::WidgetInfo::labeled(
@@ -4141,6 +4124,9 @@ impl DesktopEditor {
                 })
                 .err()
                 .map(|error| error.to_string());
+        }
+        if refresh_image_support {
+            self.refresh_active_image_capability();
         }
     }
 
@@ -4907,7 +4893,6 @@ impl DesktopEditor {
             if reply.has_focus() {
                 self.state.focus = FocusArea::Reply;
             }
-            let show_shortcut_hint = ui.available_width() >= 620.0;
             ui.horizontal_wrapped(|ui| {
                 let busy = self.ui_busy(task);
                 let interactive = task.lifecycle == TaskLifecycle::Active
@@ -4916,59 +4901,52 @@ impl DesktopEditor {
                 let image_capability = self.image_attachment_capability(&task.id);
                 let can_attach = interactive && image_capability.is_ok();
                 let disabled_reason = image_capability.as_ref().err().map(String::as_str).unwrap_or("Attachments are unavailable while this task is closed, disconnected, or busy.");
-                if ui.add_enabled(can_attach, egui::Button::new("Attach frame")).on_hover_text("Capture a verified frame from the running native game; pixels remain local until Include once").on_disabled_hover_text(disabled_reason).clicked() {
-                    self.state.dispatch(TaskSessionCommand::AttachScreenshot);
-                }
                 if ui.add_enabled(can_attach, egui::Button::new("Attach image")).on_hover_text("Select up to eight bounded PNG or JPEG files").on_disabled_hover_text(disabled_reason).clicked() {
                     self.select_image_files(&task.id);
                 }
-                if ui.add_enabled(can_attach, egui::Button::new("Paste image")).on_hover_text("Copy clipboard image pixels into this task's session-only attachment storage").on_disabled_hover_text(disabled_reason).clicked() {
-                    self.paste_clipboard_image(&task.id);
-                }
-                if matches!(selected_provider_config(task.selected_provider, &self.project_root), Ok(ProviderConfig::OpenRouter(_)))
-                    && ui.small_button("Refresh image support").clicked()
+
+                let can_send = interactive && !self.state.reply.trim().is_empty();
+                if ui
+                    .add_enabled(can_send, egui::Button::new("Send (Ctrl+Enter)"))
+                    .on_hover_text(if can_send {
+                        "Send this message and keep the task active"
+                    } else {
+                        "Write a message before sending."
+                    })
+                    .clicked()
                 {
-                    self.refresh_active_image_capability();
+                    self.state.dispatch(TaskSessionCommand::SendReply);
                 }
-                if ui.add_enabled(false, egui::Button::new("Generate image")).on_disabled_hover_text("Image generation is unavailable in the desktop editor.").clicked() {
-                    self.state.dispatch(TaskSessionCommand::GenerateImage);
+
+                let primary = self.state.primary_action(busy);
+                let success_ready = primary.command == TaskSessionCommand::MarkDone
+                    && primary.enabled
+                    && self.validation_fingerprints.contains_key(task.id.as_str());
+                if ui
+                    .add_enabled(
+                        success_ready,
+                        egui::Button::new("Success (Ctrl+Shift+D)"),
+                    )
+                    .on_hover_text(if success_ready {
+                        "Review task-time files, commit them, and mark this task accomplished"
+                    } else {
+                        "Resolve pending changes and pass focused tests before marking success."
+                    })
+                    .clicked()
+                {
+                    self.state.dispatch(TaskSessionCommand::MarkDone);
                 }
-                if show_shortcut_hint {
-                    ui.label(
-                        RichText::new("Ctrl+Enter sends | Ctrl+Shift+V pastes image")
-                            .size(10.0)
-                            .color(muted_text()),
-                    );
+
+                if ui
+                    .add_enabled(
+                        task.lifecycle == TaskLifecycle::Active,
+                        egui::Button::new("Reject (Ctrl+Esc)"),
+                    )
+                    .on_hover_text("Close this task after confirmation")
+                    .clicked()
+                {
+                    self.state.dispatch(TaskSessionCommand::Cancel);
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut primary = self.state.primary_action(busy);
-                    if !self.state.review_command_enabled(&primary.command) {
-                        primary.enabled = false;
-                        primary.disabled_reason = Some("Review a current compiler-owned preview before accepting or applying.".into());
-                    }
-                    if primary.command == TaskSessionCommand::MarkDone && !self.validation_fingerprints.contains_key(task.id.as_str()) {
-                        primary.enabled = false;
-                        primary.disabled_reason = Some("Run focused tests against the current sources before marking done.".into());
-                    }
-                    let response = ui.add_enabled(primary.enabled, egui::Button::new(RichText::new(primary.label).strong().color(if primary.enabled { Color32::BLACK } else { muted_text() })).fill(if primary.enabled { accent() } else { raised_fill() }));
-                    let clicked = response.clicked();
-                    if let Some(reason) = primary.disabled_reason { response.on_hover_text(reason); }
-                    let is_test = primary.command == TaskSessionCommand::RunFocusedTests;
-                    let is_reject = primary.command == TaskSessionCommand::Cancel;
-                    if clicked { self.state.dispatch(primary.command); }
-                    if task.lifecycle == TaskLifecycle::Active
-                        && !is_reject
-                        && ui
-                            .button("Reject... (Ctrl+Esc)")
-                            .on_hover_text("Permanently close this task after confirmation")
-                            .clicked()
-                    {
-                        self.state.dispatch(TaskSessionCommand::Cancel);
-                    }
-                    if task.lifecycle == TaskLifecycle::Active && task.validation.is_passing() && !is_test {
-                        if ui.add_enabled(interactive, egui::Button::new("Run focused tests")).on_hover_text(if interactive { "Validate the current project sources" } else { "Tests are unavailable while disconnected or busy." }).clicked() { self.state.dispatch(TaskSessionCommand::RunFocusedTests); }
-                    }
-                });
             });
         });
     }
@@ -4999,7 +4977,7 @@ impl DesktopEditor {
             ("Generate image", TaskSessionCommand::GenerateImage),
             ("Reconnect", TaskSessionCommand::Reconnect),
             ("Reject active task", TaskSessionCommand::Cancel),
-            ("Complete task and commit", TaskSessionCommand::MarkDone),
+            ("Task accomplished and commit", TaskSessionCommand::MarkDone),
             ("Focus game", TaskSessionCommand::FocusGame),
             ("Export chat as HTML", TaskSessionCommand::ExportChat),
         ];
@@ -5372,7 +5350,7 @@ impl DesktopEditor {
             context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         let keep =
             context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        egui::Window::new("Complete task and commit?")
+        egui::Window::new("Task accomplished - commit changes?")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -5395,9 +5373,9 @@ impl DesktopEditor {
                         self.completion_confirmation = None;
                     }
                     let complete_label = if plan.paths.is_empty() {
-                        "Complete task (Enter)"
+                        "Mark accomplished (Enter)"
                     } else {
-                        "Commit and complete (Enter)"
+                        "Commit and mark accomplished (Enter)"
                     };
                     if ui.button(complete_label).clicked() || confirm {
                         self.completion_confirmation = None;
@@ -5701,9 +5679,7 @@ mod tests {
             .handle(TaskSessionCommand::AcceptAction)
             .is_err());
         finish_preview(&mut editor);
-        assert!(editor
-            .state
-            .review_command_enabled(&TaskSessionCommand::AcceptAction));
+        assert!(editor.state.check_preview("task-1", "value", false).is_ok());
         editor
             .state
             .handle(TaskSessionCommand::AcceptAction)
@@ -5718,9 +5694,10 @@ mod tests {
             .contains("Stale"));
         editor.next_semantic_check = Instant::now();
         editor.poll_semantic_previews();
-        assert!(!editor
+        assert!(editor
             .state
-            .review_command_enabled(&TaskSessionCommand::ApplyAction));
+            .check_preview("task-1", "value", false)
+            .is_err());
         std::fs::write(&entry, old).unwrap();
         assert!(
             editor.state.reviewed_preview("task-1", "value").is_err(),
