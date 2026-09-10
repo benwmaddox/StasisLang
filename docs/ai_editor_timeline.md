@@ -38,6 +38,21 @@ The native editor enables AccessKit, names task navigation and editing controls,
 uses a visible focus outline, and disables transition animation for reduced
 motion. Compact layouts keep task creation and the reply composer reachable.
 
+## Serial task queue
+
+The desktop editor runs one task at a time. Creating another task while work is
+active stores only its objective in a durable FIFO queue; it does not contact an
+AI provider or create conversation history. Provider completion never advances
+the queue. The active task remains open until the user explicitly marks it done
+after approval and validation, or confirms cancellation.
+
+After that resolution, the next queued objective is shown at a queue gate. The
+user can **Start task (Enter)**, **Move to back (B)**, or **Reject (Del)** it;
+rejection requires confirmation. Starting is the point where a fresh conversation and first
+provider request are created. Queue order and lifecycle survive editor restart,
+and legacy sessions with multiple active tasks are normalized to one active task
+plus an ordered queue.
+
 Activity belongs to the task session, not to a rendered frame. Successful user,
 provider, attachment, semantic-action, generated-asset, host, and focused-test
 operations append typed entries with task-local sequence numbers. State changes

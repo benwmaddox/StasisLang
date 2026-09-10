@@ -176,6 +176,17 @@ fn capture_native_task_timeline() {
         None
     };
     editor.state.focus = FocusArea::Game;
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_QUEUE").is_some() {
+        let current = editor.state.session.running_task_id().unwrap().clone();
+        editor
+            .state
+            .session
+            .task_mut(&current)
+            .unwrap()
+            .cancel()
+            .unwrap();
+        editor.state.session.select_queue_gate_after(&current);
+    }
     if std::env::var_os("STASIS_EDITOR_EVIDENCE_CANCEL").is_some() {
         editor.state.handle(TaskSessionCommand::Cancel).unwrap();
     }

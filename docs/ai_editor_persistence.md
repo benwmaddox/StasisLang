@@ -5,9 +5,10 @@ directory is ignored by Git. The canonical project directory is part of the
 versioned envelope: copying history into another project does not authorize that
 project to load it.
 
-The snapshot contains task chronology and semantic revisions, drafts, the active
-task, provider display summaries, validation evidence, attachment references and
-hashes, generated-image review state, and explicitly selected UI preferences.
+The snapshot contains task chronology and semantic revisions, drafts, the
+selected task, the serial queue order and lifecycle, provider display summaries,
+validation evidence, attachment references and hashes, generated-image review
+state, and explicitly selected UI preferences.
 Provider configuration, authorization headers, transport envelopes, and hidden
 reasoning are outside the persistence model. User-authored messages and source
 code are private content, not credentials storage; do not put secrets in them.
