@@ -971,6 +971,7 @@ struct DesktopEditor {
     auto_transcript_writer: Option<thread::JoinHandle<Result<Vec<(String, String)>, String>>>,
     next_auto_transcript: Instant,
     auto_transcript_error: Option<String>,
+    auto_transcript_dirty: bool,
     uncertain_calls: BTreeSet<String>,
     expanded: BTreeSet<String>,
     window_preferences: Option<WindowPreferences>,
@@ -1056,6 +1057,7 @@ impl DesktopEditor {
                 let _ = job.worker.join();
                 if let Some(record) = self.state.semantic_previews.get_mut(&job.key) {
                     record.result = Some(result);
+                    self.auto_transcript_dirty = true;
                 }
             }
         }
@@ -1381,6 +1383,7 @@ impl DesktopEditor {
             auto_transcript_writer: None,
             next_auto_transcript: Instant::now() + Duration::from_millis(500),
             auto_transcript_error: None,
+            auto_transcript_dirty: true,
             uncertain_calls: BTreeSet::new(),
             expanded: BTreeSet::new(),
             window_preferences: None,
@@ -1428,9 +1431,20 @@ impl DesktopEditor {
             .prepare_snapshot(&mut snapshot)
             .map_err(|error| error.to_string())?;
         store.save(&snapshot).map_err(|error| error.to_string())?;
+        let transcript_changed = self.transcript_snapshot_changed(&snapshot);
         self.media_hashes = snapshot.media_hashes.clone();
         self.persisted_snapshot = Some(snapshot);
+        self.auto_transcript_dirty |= transcript_changed;
         Ok(())
+    }
+
+    fn transcript_snapshot_changed(&self, snapshot: &SessionSnapshot) -> bool {
+        self.persisted_snapshot.as_ref().is_none_or(|persisted| {
+            persisted.session != snapshot.session
+                || persisted.execution_receipts != snapshot.execution_receipts
+                || persisted.media_hashes != snapshot.media_hashes
+                || persisted.unavailable_media != snapshot.unavailable_media
+        })
     }
 
     fn finish_autosave(&mut self) {
@@ -1442,8 +1456,10 @@ impl DesktopEditor {
             .unwrap_or_else(|_| Err("session writer panicked".into()))
         {
             Ok(snapshot) => {
+                let transcript_changed = self.transcript_snapshot_changed(&snapshot);
                 self.media_hashes = snapshot.media_hashes.clone();
                 self.persisted_snapshot = Some(snapshot);
+                self.auto_transcript_dirty |= transcript_changed;
             }
             Err(error) => {
                 self.state.notice = Some(format!("Could not save editor session: {error}"))
@@ -1515,6 +1531,7 @@ impl DesktopEditor {
                     ));
                 }
                 self.auto_transcript_error = Some(error);
+                self.auto_transcript_dirty = true;
                 self.next_auto_transcript = Instant::now() + Duration::from_secs(5);
             }
         }
@@ -1531,9 +1548,13 @@ impl DesktopEditor {
         let Some(directory) = self.auto_transcript_directory.clone() else {
             return;
         };
-        if self.auto_transcript_writer.is_some() || now < self.next_auto_transcript {
+        if self.auto_transcript_writer.is_some()
+            || !self.auto_transcript_dirty
+            || now < self.next_auto_transcript
+        {
             return;
         }
+        self.auto_transcript_dirty = false;
         self.next_auto_transcript = now + Duration::from_millis(500);
         let jobs = self
             .state
@@ -1620,6 +1641,7 @@ impl DesktopEditor {
         self.preview_texture = None;
         self.recovered_previews.clear();
         self.auto_transcript_hashes.clear();
+        self.auto_transcript_dirty = false;
         if let Some(job) = self.semantic_job.take() {
             let _ = job.worker.join();
         }
@@ -5095,6 +5117,8 @@ mod tests {
     fn automatic_transcripts_coalesce_into_the_project_cache_logs() {
         let (mut editor, root, _) = review_fixture("automatic_transcript");
         finish_preview(&mut editor);
+        editor.store = Some(SessionStore::open(&root).unwrap());
+        editor.persist_if_changed();
         let directory = root.join(".stasis_cache/logs/ai-transcripts");
         editor.auto_transcript_directory = Some(directory.clone());
         editor.next_auto_transcript = Instant::now();
@@ -5108,6 +5132,10 @@ mod tests {
         assert!(first.contains("function value(): i32"));
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
 
+        editor.state.reply = "An unsent draft".into();
+        editor.persist_if_changed();
+        assert!(!editor.auto_transcript_dirty);
+
         editor
             .state
             .session
@@ -5115,6 +5143,8 @@ mod tests {
             .unwrap()
             .append_result("A later reply")
             .unwrap();
+        editor.persist_if_changed();
+        assert!(editor.auto_transcript_dirty);
         editor.next_auto_transcript = Instant::now();
         editor.poll_auto_transcripts(Instant::now());
         editor.finish_auto_transcript_writer();
