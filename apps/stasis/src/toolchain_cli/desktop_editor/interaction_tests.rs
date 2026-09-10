@@ -564,7 +564,7 @@ fn provider_request_disables_new_work_only_on_its_own_task() {
     let size = egui::vec2(1100.0, 900.0);
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    assert_eq!(text_rects(&output, "Cancel task").len(), 1);
+    assert_eq!(text_rects(&output, "Reject task (Ctrl+Esc)").len(), 1);
     assert!(text_rects(&output, "Send to AI").is_empty());
     editor.state.objective = "Independent task".into();
     editor.state.create_task().unwrap();
@@ -590,7 +590,7 @@ fn cancel_requires_confirmation_and_keeps_originating_task_identity() {
         &mut editor,
         &context,
         size,
-        text_rects(&output, "Keep task open")[0].center(),
+        text_rects(&output, "Keep task (Esc)")[0].center(),
     );
     assert!(editor.state.cancel_confirmation.is_none());
     assert_eq!(
@@ -602,12 +602,14 @@ fn cancel_requires_confirmation_and_keeps_originating_task_identity() {
     editor.state.create_task().unwrap();
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    click(
+    assert_eq!(text_rects(&output, "Reject task (Enter)").len(), 1);
+    frame(
         &mut editor,
         &context,
         size,
-        text_rects(&output, "Permanently cancel task")[0].center(),
+        vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
     );
+    editor.flush_intents();
     assert_eq!(
         editor.state.session.task("task-1").unwrap().lifecycle,
         TaskLifecycle::Canceled
@@ -616,6 +618,26 @@ fn cancel_requires_confirmation_and_keeps_originating_task_identity() {
         editor.state.session.active_task().unwrap().lifecycle,
         TaskLifecycle::Queued
     );
+}
+
+#[test]
+fn disconnected_active_task_keeps_visible_reject_action() {
+    let mut editor = editor();
+    editor.state.session.disconnect().unwrap();
+    let context = egui::Context::default();
+    let size = egui::vec2(680.0, 900.0);
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+    assert_eq!(text_rects(&output, "Reconnect").len(), 1);
+    assert_eq!(text_rects(&output, "Reject... (Ctrl+Esc)").len(), 1);
+
+    frame(
+        &mut editor,
+        &context,
+        size,
+        vec![key_event(egui::Key::Escape, egui::Modifiers::CTRL)],
+    );
+    assert_eq!(editor.state.cancel_confirmation.as_deref(), Some("task-1"));
 }
 
 #[test]
