@@ -11,7 +11,11 @@ const TEST_SECRET: [u8; 32] = [
     0xa1, 0x7c, 0x9e, 0x24, 0x0d, 0x6b, 0x3f, 0x81, 0x52, 0xa4, 0x8c, 0x70, 0xe9, 0x3d, 0xb6, 0xf1,
     0xa1, 0x7c, 0x9e, 0x24, 0x0d, 0x6b, 0x3f, 0x81, 0x52, 0xa4, 0x8c, 0x70, 0xe9, 0x3d, 0xb6, 0xf1,
 ];
-const TIMEOUT: Duration = Duration::from_secs(30);
+// Hosted Windows runners can spend close to a minute starting Chrome before the
+// page can make its first connection. Keep that startup allowance separate from
+// the bounded protocol exchange so a slow browser launch cannot kill the host.
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
+const PROTOCOL_TIMEOUT: Duration = Duration::from_secs(30);
 
 const INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
@@ -95,7 +99,7 @@ fn main() -> Result<(), String> {
     fs::write(&ready_file, host.address().port().to_string())
         .map_err(|error| format!("ready file failed: {error}"))?;
 
-    let deadline = Instant::now() + TIMEOUT;
+    let mut deadline = Instant::now() + CONNECTION_TIMEOUT;
     let mut handle = None;
     let mut phase = 0_u8;
     while Instant::now() < deadline {
@@ -112,6 +116,7 @@ fn main() -> Result<(), String> {
                 handle = Some(event.connection);
                 send_json(&host, event.connection, br#"{"kind":"join_ack","seat":0}"#)?;
                 phase = 1;
+                deadline = Instant::now() + PROTOCOL_TIMEOUT;
             }
             (1, EventKind::Message)
                 if event.payload
