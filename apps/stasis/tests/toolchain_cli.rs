@@ -1702,6 +1702,96 @@ fn headless_ticks_and_seeded_scenarios_are_deterministic_and_reproducible() {
 }
 
 #[test]
+fn semantic_symbol_queries_ignore_quoted_keywords() {
+    let parent = temp_dir("quoted_symbols");
+    fs::create_dir_all(&parent).unwrap();
+    let project = parent.join("demo");
+    assert!(stasis(&["new", "demo", "--dir", "demo"], &parent)
+        .status
+        .success());
+    let source = r#"
+const words: string = "global const struct enum function test import from as { } ` actual";
+struct Real { value: i32; }
+enum Choice { One, Two }
+global state: Real;
+function actual(): i32 { return 1; }
+test `checkers mandatory capture is global and removes one piece`(): bool { return actual() == 1; }
+test `const struct enum function test import from as " // { } actual`(): bool { return true; }
+"#;
+    let file = "tests/checkers.test.stasis";
+    fs::write(project.join(file), source).unwrap();
+    let listed = stasis(&["--json", "symbol", "list", "--file", file], &project);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listing = json_stdout(&listed);
+    let items = listing["result"]["items"].as_array().unwrap();
+    for name in [
+        "globals",
+        "Real",
+        "actual",
+        "checkers mandatory capture is global and removes one piece",
+    ] {
+        assert!(
+            items.iter().any(|item| item["name"] == name),
+            "missing {name}: {listing}"
+        );
+    }
+    assert_eq!(items.len(), 5, "{listing}");
+    let read = stasis(
+        &["--json", "symbol", "read", "actual", "--file", file],
+        &project,
+    );
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(json_stdout(&read).to_string().contains("return 1;"));
+    let references = stasis(&["--json", "symbol", "references", "actual"], &project);
+    assert!(
+        references.status.success(),
+        "{}",
+        String::from_utf8_lossy(&references.stderr)
+    );
+    assert_eq!(
+        json_stdout(&references)["result"]["references"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let executed = stasis(&["--json", "test", file], &project);
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert_eq!(json_stdout(&executed)["result"]["tests_passed"], 2);
+    for (invalid, message) in [
+        (
+            "test `global const function",
+            "unterminated test name (missing closing backtick)",
+        ),
+        (
+            "const words: string = \"global",
+            "unterminated string literal",
+        ),
+    ] {
+        fs::write(project.join(file), invalid).unwrap();
+        let output = stasis(&["--json", "symbol", "list", "--file", file], &project);
+        assert!(!output.status.success());
+        assert!(json_stderr(&output)["message"]
+            .as_str()
+            .unwrap()
+            .contains(message));
+    }
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
 fn semantic_symbol_cli_previews_applies_runs_and_reverts() {
     let parent = temp_dir("semantic_symbols");
     fs::create_dir_all(&parent).expect("create temp parent");

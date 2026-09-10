@@ -4,6 +4,7 @@ pub enum TokenKind {
     Identifier,
     Integer,
     StringLiteral,
+    BacktickLiteral,
     LParen,
     RParen,
     LBrace,
@@ -49,16 +50,16 @@ pub fn lex_with_diagnostic(source: &str) -> Result<Vec<Token>, LexerDiagnostic> 
             }
             continue;
         }
-        if b == b'"' {
+        if b == b'"' || b == b'`' {
             let start = i;
             i += 1;
             let mut closed = false;
             while i < bytes.len() {
-                if bytes[i] == b'\\' {
+                if b == b'"' && bytes[i] == b'\\' {
                     i += 2;
                     continue;
                 }
-                if bytes[i] == b'"' {
+                if bytes[i] == b {
                     i += 1;
                     closed = true;
                     break;
@@ -67,12 +68,21 @@ pub fn lex_with_diagnostic(source: &str) -> Result<Vec<Token>, LexerDiagnostic> 
             }
             if !closed {
                 return Err(LexerDiagnostic {
-                    message: "unterminated string literal".to_string(),
+                    message: if b == b'`' {
+                        "unterminated test name (missing closing backtick)"
+                    } else {
+                        "unterminated string literal"
+                    }
+                    .to_string(),
                     offset: start,
                 });
             }
             tokens.push(Token {
-                kind: TokenKind::StringLiteral,
+                kind: if b == b'`' {
+                    TokenKind::BacktickLiteral
+                } else {
+                    TokenKind::StringLiteral
+                },
                 start,
                 end: i.min(bytes.len()),
             });
@@ -135,41 +145,66 @@ pub fn lex_with_diagnostic(source: &str) -> Result<Vec<Token>, LexerDiagnostic> 
     Ok(tokens)
 }
 
-pub(crate) fn is_inside_backtick_literal(source: &str, offset: usize) -> bool {
-    let bytes = &source.as_bytes()[..offset.min(source.len())];
-    let mut cursor = 0usize;
-    let mut in_string = false;
-    let mut in_comment = false;
-    let mut in_backtick = false;
-    while cursor < bytes.len() {
-        let byte = bytes[cursor];
-        if in_comment {
-            if byte == b'\n' {
-                in_comment = false;
-            }
-        } else if in_string {
-            if byte == b'\\' {
-                cursor = cursor.saturating_add(1);
-            } else if byte == b'"' {
-                in_string = false;
-            }
-        } else if !in_backtick && byte == b'/' && bytes.get(cursor + 1) == Some(&b'/') {
-            in_comment = true;
-            cursor = cursor.saturating_add(1);
-        } else if !in_backtick && byte == b'"' {
-            in_string = true;
-        } else if byte == b'`' {
-            in_backtick = !in_backtick;
-        }
-        cursor = cursor.saturating_add(1);
-    }
-    in_backtick
-}
-
 fn is_identifier_start(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || byte == b'_'
 }
 
 fn is_identifier_continue(byte: u8) -> bool {
     is_identifier_start(byte) || byte.is_ascii_digit()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quoted_regions_are_opaque_and_preserve_byte_ranges() {
+        for (source, kind) in [
+            (
+                r#""global const struct enum function test import from as \" ` { } //""#,
+                TokenKind::StringLiteral,
+            ),
+            (
+                r#"`global const struct enum function test import from as " \ { } // text`"#,
+                TokenKind::BacktickLiteral,
+            ),
+        ] {
+            let tokens = lex(source).unwrap();
+            assert_eq!(tokens.len(), 2);
+            assert_eq!(
+                tokens[0],
+                Token {
+                    kind,
+                    start: 0,
+                    end: source.len()
+                }
+            );
+            assert_eq!(tokens[1].kind, TokenKind::Eof);
+        }
+        // Backticks have no escape syntax; a backslash does not hide the closer.
+        assert_eq!(
+            lex(r#"`name\`"#).unwrap()[0].kind,
+            TokenKind::BacktickLiteral
+        );
+    }
+
+    #[test]
+    fn unterminated_quoted_regions_report_the_opening_offset() {
+        for (source, message) in [
+            ("  \"global", "unterminated string literal"),
+            ("  \"global\\", "unterminated string literal"),
+            (
+                "  `global \" //",
+                "unterminated test name (missing closing backtick)",
+            ),
+        ] {
+            assert_eq!(
+                lex_with_diagnostic(source).unwrap_err(),
+                LexerDiagnostic {
+                    message: message.to_string(),
+                    offset: 2,
+                }
+            );
+        }
+    }
 }

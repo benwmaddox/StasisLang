@@ -1856,6 +1856,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quoted_keywords_do_not_declare_symbols() {
+        let source = r#"
+const words: string = "global const struct enum function test import from as { } `";
+test `checkers mandatory capture is global and removes one piece`(): bool { return true; }
+test `const struct enum function test import from as " // { }`(): bool { return true; }
+struct Real { value: i32; }
+enum Choice { One, Two }
+global state: Real;
+function actual(): i32 { return 1; }
+"#;
+        let layout = parse_top_level_type_layout(source).expect("quoted layout");
+        assert_eq!(layout.constants.len(), 1);
+        assert_eq!(layout.structs[0].name, "Real");
+        assert_eq!(layout.structs.len(), 1);
+        assert_eq!(layout.enums.len(), 1);
+        assert_eq!(layout.globals.len(), 1);
+        let functions = parse_top_level_functions(source).expect("quoted functions");
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "actual");
+        assert_eq!(parse_top_level_test_declarations(source).unwrap().len(), 2);
+        assert!(
+            crate::frontend::module_graph::parse_imports("quoted.stasis", source)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn parses_function_signature_and_body_range() {
         let source = "function main(): i32 { return 0; }\n";
         let parsed = parse_top_level_functions(source).expect("parse");
