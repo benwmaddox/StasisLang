@@ -1276,10 +1276,10 @@ impl eframe::App for LiveAcceptanceApp {
         {
             // Set the persistent collapse state before the production UI renders
             // the frame that the native screenshot command will capture.
-            semantic_diff::expand_for_evidence(context);
+            expand_for_evidence(context);
         }
         self.editor.ui(context);
-        semantic_diff::clear_evidence(context);
+        clear_evidence(context);
         self.usage_records.extend(self.provider_usage.try_iter());
         if self.state != AcceptanceState::HoldBeforeStart
             && self.pending_editor_capture.is_none()
@@ -1419,7 +1419,7 @@ impl eframe::App for LiveAcceptanceApp {
                         self.fail(context, error);
                         return;
                     }
-                    semantic_diff::expand_for_evidence(context);
+                    expand_for_evidence(context);
                     self.transition(AcceptanceState::SettleFirstProposal);
                 }
             }
@@ -1531,7 +1531,7 @@ impl eframe::App for LiveAcceptanceApp {
                         self.fail(context, error);
                         return;
                     }
-                    semantic_diff::expand_for_evidence(context);
+                    expand_for_evidence(context);
                     self.transition(AcceptanceState::SettleSecondProposal);
                 }
             }

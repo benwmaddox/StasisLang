@@ -153,11 +153,11 @@ fn capture_recorded_live_proposal_reviews() {
                     return;
                 }
                 self.frames = 0;
-                semantic_diff::clear_evidence(context);
+                clear_evidence(context);
             }
 
             configure_visuals(context);
-            semantic_diff::expand_for_evidence(context);
+            expand_for_evidence(context);
             let review = &self.reviews[self.index];
             egui::CentralPanel::default().show(context, |ui| {
                 ui.heading("Recorded live proposal review");

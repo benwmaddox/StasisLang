@@ -406,6 +406,23 @@ fn run_reply_provider(
 }
 
 #[cfg(all(test, target_os = "windows"))]
+fn expand_for_evidence(context: &egui::Context) {
+    context.data_mut(|data| data.insert_temp(egui::Id::new("expand-semantic-evidence"), true));
+}
+
+#[cfg(test)]
+fn evidence_expanded(context: &egui::Context) -> bool {
+    context
+        .data(|data| data.get_temp::<bool>(egui::Id::new("expand-semantic-evidence")))
+        .unwrap_or(false)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+fn clear_evidence(context: &egui::Context) {
+    context.data_mut(|data| data.remove::<bool>(egui::Id::new("expand-semantic-evidence")));
+}
+
+#[cfg(all(test, target_os = "windows"))]
 fn run_reply_provider_observed(
     request: ProviderRequest,
     canceled: Arc<AtomicBool>,
@@ -3595,7 +3612,7 @@ impl DesktopEditor {
         let mut command = None;
         let follow_latest = true;
         #[cfg(test)]
-        let follow_latest = follow_latest && !semantic_diff::evidence_expanded(ui.ctx());
+        let follow_latest = follow_latest && !evidence_expanded(ui.ctx());
         egui::ScrollArea::vertical()
             .id_source(("task-timeline", task.id.as_str()))
             .auto_shrink([false, false])
