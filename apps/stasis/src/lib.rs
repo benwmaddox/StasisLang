@@ -24,7 +24,10 @@ pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use compiler_backend::sign_output_artifact_if_configured;
 pub use compiler_backend::DesktopNetworkMode;
 pub use events::RunnerEvent;
-pub use live_workspace::{run_project_tests_bounded, LiveRunConfig};
+pub use live_workspace::{
+    run_project_tests_bounded, run_project_tests_bounded_with_receipt,
+    run_staged_project_tests_bounded, LiveRunConfig,
+};
 pub use mobile_aot_bindings::{
     audit_mobile_aot_bindings, escape_mobile_c_string_literal, mobile_aot_function_for,
     write_mobile_aot_bindings_source, write_mobile_aot_bindings_source_with_profile,
@@ -5910,6 +5913,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn explicit_x11_scale_control_owns_a_windowed_launch() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
         for required in [
             "SDL_VIDEO_X11_SCALING_FACTOR",
             "stasis_display_scale_control_is_valid(",
@@ -5919,7 +5923,7 @@ function render(): void {{ {draws} return; }}
             "stasis_apply_x11_window_scale(1);",
         ] {
             assert!(
-                STASIS_GRAPHICS_SOURCE.contains(required),
+                graphics_source.contains(required),
                 "scale-controlled X11 launch should contain {required}"
             );
         }
@@ -6050,6 +6054,7 @@ function render(): void {{ {draws} return; }}
 
     #[test]
     fn mobile_runtime_uses_fixed_entries_and_sdl_only_static_target() {
+        let graphics_source = STASIS_GRAPHICS_SOURCE.replace("\r\n", "\n");
         for required in [
             "typedef void (*StasisMobileBindEntry)(void)",
             "typedef int32_t (*StasisMobileI32Entry)(void)",
@@ -6093,16 +6098,16 @@ function render(): void {{ {draws} return; }}
             "mobile target should be static and exclude the SDL desktop main shim"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("stasis_storage_load_i32")
-                && STASIS_GRAPHICS_SOURCE.contains("stasis_storage_save_i32")
+            graphics_source.contains("stasis_storage_load_i32")
+                && graphics_source.contains("stasis_storage_save_i32")
                 && !STASIS_RUNTIME_CMAKE
                     .contains("stasis_mobile_aot_runtime.c\n        stasis_platform_storage.c")
                 && !STASIS_MOBILE_MAIN_SOURCE.contains("stasis_storage_set_root"),
             "graphical mobile packages must use the single SDL preference host"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("#if defined(__ANDROID__)\n    written = snprintf(path, capacity, \"%s%s\", root, scope);")
-                && STASIS_GRAPHICS_SOURCE.contains("\"%s%s/%s.%s\", root, scope, key, extension"),
+            graphics_source.contains("#if defined(__ANDROID__)\n    written = snprintf(path, capacity, \"%s%s\", root, scope);")
+                && graphics_source.contains("\"%s%s/%s.%s\", root, scope, key, extension"),
             "Android storage must add the validated scope below the app-private SDL preference root"
         );
         assert!(
@@ -6112,14 +6117,14 @@ function render(): void {{ {draws} return; }}
             "mobile runtime must not acquire desktop loader or hot-swap dependencies"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("SDL_DestroyRenderer(g_renderer);")
-                && STASIS_GRAPHICS_SOURCE.contains("g_renderer = NULL;")
-                && STASIS_GRAPHICS_SOURCE.contains("g_window = NULL;"),
+            graphics_source.contains("SDL_DestroyRenderer(g_renderer);")
+                && graphics_source.contains("g_renderer = NULL;")
+                && graphics_source.contains("g_window = NULL;"),
             "mobile lifecycle cleanup should support safe shutdown and initialization retry"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("STASIS_EXPORT int stasis_mobile_poll_events(void)")
-                && STASIS_GRAPHICS_SOURCE.contains("SDL_PauseAudioStreamDevice(g_audio_stream)"),
+            graphics_source.contains("STASIS_EXPORT int stasis_mobile_poll_events(void)")
+                && graphics_source.contains("SDL_PauseAudioStreamDevice(g_audio_stream)"),
             "mobile pause should continue polling events and pause the audio device"
         );
         for required in [
@@ -6128,12 +6133,12 @@ function render(): void {{ {draws} return; }}
             "stasis_renderer_lifecycle_resume(&g_resource_lifecycle);",
         ] {
             assert!(
-                STASIS_GRAPHICS_SOURCE.contains(required),
+                graphics_source.contains(required),
                 "mobile renderer lifecycle should contain {required}"
             );
         }
         assert!(
-            !STASIS_GRAPHICS_SOURCE.contains(
+            !graphics_source.contains(
                 "stasis_renderer_lifecycle_resume(&g_resource_lifecycle);\n                    stasis_invalidate_renderer_resources(0);"
             ),
             "ordinary foreground resume must not invalidate a surviving SDL renderer"

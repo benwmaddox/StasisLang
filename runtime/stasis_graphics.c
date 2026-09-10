@@ -26,6 +26,7 @@
 #include "stasis_display_scale.h"
 #include "stasis_renderer_lifecycle.h"
 #include "stasis_performance_metrics.h"
+#include "stasis_platform_services.h"
 #include "stasis_image_writer.h"
 #include "stasis_sprite_atlas_policy.h"
 #if defined(STASIS_NETWORK_CLIENT_ENABLED)
@@ -118,6 +119,14 @@ STASIS_EXPORT void stasis_host_log_message(const char* message) {
 
 STASIS_EXPORT void stasis_set_window_size(int width, int height);
 STASIS_EXPORT int stasis_set_maximized(int maximized);
+STASIS_EXPORT int stasis_host_get_window_placement(
+    int32_t* out_i32, int32_t capacity, float* out_f32, int32_t float_capacity);
+STASIS_EXPORT int stasis_host_apply_window_placement(
+    int32_t x, int32_t y, int32_t width, int32_t height, int32_t raise);
+STASIS_EXPORT int stasis_host_focus_window(void);
+STASIS_EXPORT int stasis_host_get_monitor_usable_bounds(
+    int32_t x, int32_t y, int32_t* out_i32, int32_t capacity,
+    float* out_f32, int32_t float_capacity);
 STASIS_EXPORT int stasis_get_time_us(void);
 STASIS_EXPORT int stasis_load_font(const char* path, int font_size);
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
@@ -164,6 +173,7 @@ static int g_recording_width = 0;
 static int g_recording_height = 0;
 static uint32_t g_recording_fps = 0;
 static bool g_recording_config_pending = false;
+static StasisExternalUrlActionState g_external_url_action;
 static StasisDisplayMetrics g_display_metrics;
 static int g_display_generation = 0;
 static int g_density_generation = 0;
@@ -325,6 +335,37 @@ static int stasis_draw_mixed_order_span(
 
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter);
+
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+int stasis_platform_open_external_url(const char *url, int32_t length);
+#else
+static int stasis_platform_open_external_url(const char *url, int32_t length) {
+    char copy[STASIS_EXTERNAL_URL_MAX_BYTES + 1];
+    if (length <= 0 || length > STASIS_EXTERNAL_URL_MAX_BYTES) return 0;
+    memcpy(copy, url, (size_t)length);
+    copy[length] = '\0';
+    return SDL_OpenURL(copy) ? 1 : 0;
+}
+#endif
+
+static int stasis_external_url_open_adapter(
+    const char *url,
+    int32_t length,
+    void *user_data
+) {
+    (void)user_data;
+    return stasis_platform_open_external_url(url, length);
+}
+
+STASIS_EXPORT int stasis_open_external_url(const char *url, int length) {
+    return stasis_external_url_action_request(
+        &g_external_url_action,
+        url,
+        (int32_t)length,
+        stasis_external_url_open_adapter,
+        NULL
+    );
+}
 
 /* Sprite atlas bookkeeping (paths + rasterized sprites). */
 #define SPRITE_TABLE_INITIAL_CAPACITY 256
@@ -1007,6 +1048,7 @@ static int stasis_ios_active_finger_count(void) {
 #endif
 
 static void stasis_pump_events(void) {
+    int external_url_input_edge = 0;
     if (!g_window) return;
     stasis_sync_display_metrics();
 
@@ -1040,6 +1082,7 @@ static void stasis_pump_events(void) {
                 if (event.key.scancode >= 0 && event.key.scancode < SDL_SCANCODE_COUNT) {
                     g_keyboard_event_state[event.key.scancode] = 1;
                 }
+                if (!event.key.repeat) external_url_input_edge = 1;
                 if (event.key.key == SDLK_ESCAPE) {
                     SDL_Log("Stasis quit requested: Escape key");
                     g_should_quit = true;
@@ -1078,6 +1121,10 @@ static void stasis_pump_events(void) {
             case SDL_EVENT_WINDOW_MINIMIZED:
                 g_window_minimized = true;
                 break;
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                external_url_input_edge = 0;
+                stasis_external_url_action_clear(&g_external_url_action);
+                break;
             case SDL_EVENT_WINDOW_RESTORED:
                 g_window_minimized = false;
                 stasis_sync_display_metrics();
@@ -1102,6 +1149,8 @@ static void stasis_pump_events(void) {
                     g_resource_lifecycle.renderer_generation);
                 break;
             case SDL_EVENT_WILL_ENTER_BACKGROUND:
+                external_url_input_edge = 0;
+                stasis_external_url_action_clear(&g_external_url_action);
 #if defined(STASIS_NETWORK_CLIENT_ENABLED)
                 (void)stasis_mobile_network_client_set_background(1);
 #endif
@@ -1119,6 +1168,7 @@ static void stasis_pump_events(void) {
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
                 if (event.button.button == SDL_BUTTON_LEFT) {
                     g_input_frame.pointers[0].went_down = 1;
+                    external_url_input_edge = 1;
                 }
                 break;
             case SDL_EVENT_MOUSE_BUTTON_UP:
@@ -1136,6 +1186,7 @@ static void stasis_pump_events(void) {
                     int idx = slot + 1;
                     g_input_frame.pointers[idx].is_down = 1;
                     g_input_frame.pointers[idx].went_down = 1;
+                    external_url_input_edge = 1;
                     float logical_x = 0.0f;
                     float logical_y = 0.0f;
                     stasis_window_to_logical(
@@ -1220,6 +1271,11 @@ static void stasis_pump_events(void) {
         }
     }
     g_input_frame.pointer_count = max_idx + 1;
+    stasis_external_url_action_begin_frame(
+        &g_external_url_action,
+        external_url_input_edge,
+        g_recording_presentation || g_window == NULL
+    );
 }
 
 STASIS_EXPORT int stasis_input_pointer_count(void) {
@@ -2941,6 +2997,51 @@ STASIS_EXPORT int stasis_set_recording_config(int width, int height, uint32_t fp
     return 1;
 }
 
+#if defined(_WIN32)
+static void stasis_request_terminal_minimize(void) {
+    HANDLE output = CreateFileW(
+        L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_EXISTING, 0, NULL);
+    if (output == INVALID_HANDLE_VALUE) return;
+
+    DWORD mode = 0;
+    if (!GetConsoleMode(output, &mode)) {
+        CloseHandle(output);
+        return;
+    }
+
+    const DWORD vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    if (!SetConsoleMode(output, vt_mode)) {
+        CloseHandle(output);
+        return;
+    }
+    static const char iconify[] = "\x1b[2t";
+    DWORD written = 0;
+    WriteConsoleA(output, iconify, (DWORD)(sizeof(iconify) - 1), &written, NULL);
+    SetConsoleMode(output, mode);
+    CloseHandle(output);
+}
+
+static void stasis_minimize_launch_console(void) {
+    static bool applied = false;
+    if (applied) return;
+    applied = true;
+
+    const char* enabled = SDL_getenv("STASIS_CONSOLE_START_MINIMIZED");
+    if (enabled && strcmp(enabled, "0") == 0) return;
+
+    HWND console = GetConsoleWindow();
+    if (!console) return;
+    HWND terminal = GetAncestor(console, GA_ROOTOWNER);
+    if (terminal && IsWindowVisible(terminal)) {
+        ShowWindowAsync(terminal, SW_MINIMIZE);
+    } else {
+        /* ConPTY exposes only a message window; ask its frontend to iconify. */
+        stasis_request_terminal_minimize();
+    }
+}
+#endif
+
 /*
  * Initialize graphics window
  * Returns 1 on success, 0 on failure
@@ -3091,6 +3192,11 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
         SDL_Quit();
         return 0;
     }
+#if defined(_WIN32)
+    if (!(window_flags & SDL_WINDOW_HIDDEN)) {
+        stasis_minimize_launch_console();
+    }
+#endif
     if (!g_recording_presentation) {
         SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
@@ -3256,6 +3362,180 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
     }
     stasis_query_available_presentation(
         g_native_window_width, g_native_window_height, width, height);
+}
+
+/*
+ * Read the desktop placement of the live game window.
+ *
+ * Rectangle values use SDL's platform-native desktop coordinate space. This is
+ * physical device pixels on Windows and window coordinates on macOS/Wayland.
+ * out_i32 contains the outer window bounds, the usable bounds of its monitor,
+ * and minimized/maximized flags. out_f32 contains the content display scale and
+ * physical pixels per window coordinate. This function must run on the SDL
+ * runtime thread.
+ */
+STASIS_EXPORT int stasis_host_get_window_placement(
+    int32_t* out_i32, int32_t capacity, float* out_f32, int32_t float_capacity) {
+    if (!g_window || !out_i32 || capacity < 10 || !out_f32 || float_capacity < 2 ||
+        g_recording_presentation) {
+        return 0;
+    }
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    return 0;
+#else
+    int x = 0;
+    int y = 0;
+    int client_width = 0;
+    int client_height = 0;
+    int border_top = 0;
+    int border_left = 0;
+    int border_bottom = 0;
+    int border_right = 0;
+    SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
+    SDL_Rect usable = {0, 0, 0, 0};
+    if (!SDL_GetWindowPosition(g_window, &x, &y) ||
+        !SDL_GetWindowSize(g_window, &client_width, &client_height)) {
+        return 0;
+    }
+    /* Some valid backends do not expose decoration metrics. Zero is the exact
+       client/outer relationship for those undecorated windows. */
+    (void)SDL_GetWindowBordersSize(
+        g_window, &border_top, &border_left, &border_bottom, &border_right);
+    if (display == 0) display = SDL_GetPrimaryDisplay();
+    if (display == 0 || !SDL_GetDisplayUsableBounds(display, &usable)) return 0;
+
+    /* SDL window positions identify the client origin on Windows. Normalize to
+       an outer rectangle so the host can tile without decorations crossing the
+       monitor's usable edge. */
+    out_i32[0] = x - border_left;
+    out_i32[1] = y - border_top;
+    out_i32[2] = client_width + border_left + border_right;
+    out_i32[3] = client_height + border_top + border_bottom;
+    out_i32[4] = usable.x;
+    out_i32[5] = usable.y;
+    out_i32[6] = usable.w;
+    out_i32[7] = usable.h;
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    out_i32[8] = (flags & SDL_WINDOW_MINIMIZED) != 0 ? 1 : 0;
+    out_i32[9] = (flags & SDL_WINDOW_MAXIMIZED) != 0 ? 1 : 0;
+    out_f32[0] = SDL_GetWindowDisplayScale(g_window);
+    out_f32[1] = SDL_GetWindowPixelDensity(g_window);
+    if (!(out_f32[0] > 0.0f) || !(out_f32[1] > 0.0f)) return 0;
+    return 1;
+#endif
+}
+
+/*
+ * Restore and move the live game window to the requested outer bounds. The
+ * extent includes native window decorations; SDL_SetWindowSize receives the
+ * corresponding client extent. This function must run on the SDL runtime
+ * thread, between game ticks.
+ */
+STASIS_EXPORT int stasis_host_apply_window_placement(
+    int32_t x, int32_t y, int32_t width, int32_t height, int32_t raise) {
+    if (!g_window || width < 1 || height < 1 || g_recording_presentation) return 0;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    (void)x;
+    (void)y;
+    (void)raise;
+    return 0;
+#else
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    int presentation_changed = 0;
+    if ((flags & SDL_WINDOW_FULLSCREEN) != 0) {
+        if (!SDL_SetWindowFullscreen(g_window, false)) return 0;
+        presentation_changed = 1;
+    }
+    if ((flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) {
+        if (!SDL_RestoreWindow(g_window)) return 0;
+        presentation_changed = 1;
+    }
+    if (presentation_changed && !SDL_SyncWindow(g_window)) return 0;
+
+    int border_top = 0;
+    int border_left = 0;
+    int border_bottom = 0;
+    int border_right = 0;
+    (void)SDL_GetWindowBordersSize(
+        g_window, &border_top, &border_left, &border_bottom, &border_right);
+
+    /* Moving between monitors can synchronously change DPI and native border
+       metrics. Use the current metrics only to select the destination display,
+       then measure again before applying the exact outer extent. */
+    if (!SDL_SetWindowPosition(g_window, x + border_left, y + border_top) ||
+        !SDL_SyncWindow(g_window)) {
+        return 0;
+    }
+    border_top = 0;
+    border_left = 0;
+    border_bottom = 0;
+    border_right = 0;
+    (void)SDL_GetWindowBordersSize(
+        g_window, &border_top, &border_left, &border_bottom, &border_right);
+    const int border_width = border_left + border_right;
+    const int border_height = border_top + border_bottom;
+    if (width <= border_width || height <= border_height) return 0;
+    if (!SDL_SetWindowPosition(g_window, x + border_left, y + border_top) ||
+        !SDL_SetWindowSize(g_window, width - border_width, height - border_height) ||
+        !SDL_SyncWindow(g_window)) {
+        return 0;
+    }
+    if (raise != 0 && !SDL_RaiseWindow(g_window)) return 0;
+    g_window_minimized = false;
+    stasis_sync_display_metrics();
+    return 1;
+#endif
+}
+
+/* Raise and focus without changing a visible window's presentation state. */
+STASIS_EXPORT int stasis_host_focus_window(void) {
+    if (!g_window || g_recording_presentation) return 0;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    return 0;
+#else
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    if ((flags & SDL_WINDOW_MINIMIZED) != 0 &&
+        (!SDL_RestoreWindow(g_window) || !SDL_SyncWindow(g_window))) {
+        return 0;
+    }
+    if (!SDL_RaiseWindow(g_window)) return 0;
+    g_window_minimized = false;
+    return 1;
+#endif
+}
+
+/* Resolve saved desktop coordinates to a connected monitor, primary fallback. */
+STASIS_EXPORT int stasis_host_get_monitor_usable_bounds(
+    int32_t x, int32_t y, int32_t* out_i32, int32_t capacity,
+    float* out_f32, int32_t float_capacity) {
+    if (!g_window || !out_i32 || capacity < 4 || !out_f32 || float_capacity < 2 ||
+        g_recording_presentation) {
+        return 0;
+    }
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    (void)x;
+    (void)y;
+    return 0;
+#else
+    const SDL_Point point = {x, y};
+    SDL_DisplayID display = SDL_GetDisplayForPoint(&point);
+    if (display == 0) display = SDL_GetPrimaryDisplay();
+    SDL_Rect usable = {0, 0, 0, 0};
+    const SDL_DisplayMode* mode = display != 0 ? SDL_GetDesktopDisplayMode(display) : NULL;
+    if (display == 0 || !SDL_GetDisplayUsableBounds(display, &usable) || !mode ||
+        !(mode->pixel_density > 0.0f)) {
+        return 0;
+    }
+    const float display_scale = SDL_GetDisplayContentScale(display);
+    if (!(display_scale > 0.0f)) return 0;
+    out_i32[0] = usable.x;
+    out_i32[1] = usable.y;
+    out_i32[2] = usable.w;
+    out_i32[3] = usable.h;
+    out_f32[0] = display_scale;
+    out_f32[1] = mode->pixel_density;
+    return 1;
+#endif
 }
 
 static void stasis_set_logical_size(int width, int height) {
@@ -3613,6 +3893,7 @@ static void stasis_perf_draw_overlay(void) {
  */
 STASIS_EXPORT void stasis_end_frame(void) {
     if (!g_resource_frame_ready) {
+        stasis_external_url_action_clear(&g_external_url_action);
         g_perf_render_started_counter = 0;
         g_line_count = 0;
         g_events_pumped_this_frame = 0;
@@ -3649,6 +3930,7 @@ STASIS_EXPORT void stasis_end_frame(void) {
     }
 
     g_debug_frame_counter++;
+    stasis_external_url_action_clear(&g_external_url_action);
     g_events_pumped_this_frame = 0;
 }
 
@@ -4719,15 +5001,17 @@ static int stasis_sprite_atlas_reserve_on_page(
     }
     int x = page->cursor_x;
     int y = page->cursor_y;
+    int row_h = page->row_h;
     if (x + alloc_w > page->width) {
         x = 1;
-        y += page->row_h;
-        page->row_h = 0;
+        y += row_h;
+        row_h = 0;
     }
+    /* Failed probes must preserve the occupied shelf for later allocations. */
     if (y + alloc_h > page->height) return 0;
     page->cursor_x = x + alloc_w;
     page->cursor_y = y;
-    if (alloc_h > page->row_h) page->row_h = alloc_h;
+    page->row_h = alloc_h > row_h ? alloc_h : row_h;
     page->live_allocations++;
     *out_x = x + STASIS_SDL_ATLAS_PADDING;
     *out_y = y + STASIS_SDL_ATLAS_PADDING;
@@ -6107,6 +6391,7 @@ STASIS_EXPORT void stasis_mobile_set_paused(int paused) {
         }
     }
     if (paused) {
+        stasis_external_url_action_clear(&g_external_url_action);
         stasis_renderer_lifecycle_pause(&g_resource_lifecycle);
         g_resource_frame_ready = false;
     } else if (g_resource_lifecycle.state == STASIS_RENDERER_PAUSED) {

@@ -145,6 +145,14 @@ impl From<String> for ScriptedAiFailure {
     }
 }
 
+fn configured_model_for_profile(provider: &ProviderConfig, profile: &AgentProfile) -> String {
+    if provider.provider_name() == "openrouter" {
+        provider.model()
+    } else {
+        profile.model.clone().unwrap_or_else(|| provider.model())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_scripted_ai_profile(
     client: &LiveSessionClient,
@@ -159,11 +167,9 @@ pub(super) fn run_scripted_ai_profile(
     require_imagegen: bool,
     canceled: &AtomicBool,
 ) -> Result<ScriptedAiOutcome, ScriptedAiFailure> {
-    let provider_config = ProviderConfig::from_env()?;
-    let configured_model = profile
-        .model
-        .clone()
-        .unwrap_or_else(|| provider_config.model());
+    let provider_config = ProviderConfig::from_workspace(project_root)?;
+    let configured_model = configured_model_for_profile(&provider_config, &profile);
+    let manifest_owns_model = provider_config.provider_name() == "openrouter";
     let effective_reasoning_effort = profile
         .reasoning_effort
         .as_deref()
@@ -183,8 +189,10 @@ pub(super) fn run_scripted_ai_profile(
         .with_session_id(provider_session_id)?
         .with_images(images)?
         .with_web_search(web_search)?;
-    if let Some(model) = profile.model.as_deref() {
-        provider = provider.with_model(model);
+    if !manifest_owns_model {
+        if let Some(model) = profile.model.as_deref() {
+            provider = provider.with_model(model);
+        }
     }
     if let Some(reasoning_effort) = effective_reasoning_effort {
         provider = provider.with_reasoning_effort(reasoning_effort);
@@ -1148,6 +1156,9 @@ fn audit_agent_event(event: &AgentEvent) -> Value {
     match event {
         AgentEvent::Turn { current, maximum } => {
             serde_json::json!({"event": "turn", "current": current, "maximum": maximum})
+        }
+        AgentEvent::ProviderProgress(progress) => {
+            serde_json::json!({"event": "provider_progress", "progress": progress})
         }
         AgentEvent::ProviderUsage(_) => unreachable!("provider usage has a separate log"),
         AgentEvent::WorkingNotes(notes) => {
@@ -2292,7 +2303,7 @@ impl LiveTui {
         let Some(prompt) = self.queued_ai_prompt.take() else {
             return;
         };
-        let provider_config = match ProviderConfig::from_env() {
+        let provider_config = match ProviderConfig::from_workspace(&self.project_root) {
             Ok(config) => config,
             Err(error) => {
                 self.status = format!("AI provider unavailable: {error}");
@@ -2387,6 +2398,11 @@ impl LiveTui {
                 AiUiEvent::Progress(AgentEvent::Turn { current, maximum }) => {
                     self.status = format!("AI turn {current}/{maximum}; Ctrl+C cancels");
                     self.audit(serde_json::json!({"event": "turn", "current": current, "maximum": maximum}));
+                }
+                AiUiEvent::Progress(AgentEvent::ProviderProgress(progress)) => {
+                    self.audit(
+                        serde_json::json!({"event": "provider_progress", "progress": progress}),
+                    );
                 }
                 AiUiEvent::Progress(AgentEvent::ProviderUsage(usage)) => {
                     if let Some(log) = &mut self.ai_audit {
@@ -5471,6 +5487,30 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn scripted_openrouter_profile_uses_manifest_model() {
+        let provider = ProviderConfig::OpenRouter(stasis_ai::OpenRouterConfig {
+            api_key: "test-only".into(),
+            base_url: "https://example.invalid".into(),
+            model: stasis_ai::DEFAULT_OPENROUTER_MODEL.into(),
+            approved_models: vec![stasis_ai::DEFAULT_OPENROUTER_MODEL.into()].into_boxed_slice(),
+            routing: stasis_ai::RoutingConfig::default(),
+            timeout: Duration::from_secs(1),
+        });
+        let profile = AgentProfile {
+            model: Some("unapproved/profile-model".into()),
+            ..AgentProfile::default()
+        };
+        assert_eq!(
+            configured_model_for_profile(&provider, &profile),
+            stasis_ai::DEFAULT_OPENROUTER_MODEL
+        );
+        assert_eq!(
+            configured_model_for_profile(&ProviderConfig::Codex, &profile),
+            "unapproved/profile-model"
+        );
+    }
+
     fn font_path_edit(source: &str) -> LiveEdit {
         LiveEdit {
             operation: LiveEditOperation::Update,
@@ -5800,6 +5840,53 @@ mod tests {
             assert!(
                 !rendered.contains(internal),
                 "internal audio API leaked: {internal}"
+            );
+        }
+    }
+
+    #[test]
+    fn stdlib_rig2d_catalog_exposes_owned_layout_and_public_surface() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical project root");
+        let stdlib = project
+            .join("src/stdlib")
+            .canonicalize()
+            .expect("canonical stdlib root");
+        let root = StdlibApiRoot {
+            canonical_project: project,
+            canonical_root: stdlib.clone(),
+            import_prefix: "/src/stdlib",
+        };
+        let catalog = load_stdlib_module_index(Some(&root)).expect("stdlib module index");
+        assert!(catalog["modules"]
+            .as_array()
+            .expect("stdlib modules")
+            .iter()
+            .any(|module| {
+                module["module"] == "rig2d"
+                    && module["canonical_import"] == "/src/stdlib/rig2d.stasis"
+            }));
+
+        let source = fs::read_to_string(stdlib.join("rig2d.stasis")).expect("read rig2d source");
+        assert!(source.contains("bones: RigBone2D[RIG2D_BONE_CAPACITY];"));
+        let (_, items) = read_stdlib_api_items(&root, &stdlib.join("rig2d.stasis"))
+            .expect("read canonical rig2d API");
+        let rendered = serde_json::to_string(&items).expect("rig2d API JSON");
+        for public in [
+            "RIG2D_BONE_CAPACITY",
+            "RigBone2D",
+            "Rig2D",
+            "add_bone(self: Rig2D",
+            "blend_local(self: Rig2D",
+            "reset_pose(self: Rig2D",
+            "solve(self: Rig2D",
+            "world_angle(self: Rig2D",
+        ] {
+            assert!(
+                rendered.contains(public),
+                "missing public rig2d API: {public}"
             );
         }
     }

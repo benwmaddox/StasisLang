@@ -807,6 +807,7 @@ extern "C" fn stasis_jit_host_render_trampoline() -> i32 {
 }
 
 extern "C" fn stasis_jit_host_on_code_swap_trampoline() {
+    let _external_urls = ExternalUrlSuppression::enter();
     if let Some(target) = jit_host_entry_targets().and_then(|targets| targets.on_code_swap) {
         call_jit_host_void_target(target);
     }
@@ -901,6 +902,7 @@ thread_local! {
 }
 
 pub fn invoke_code_swap_hook(address: usize) -> Result<(), String> {
+    let _external_urls = ExternalUrlSuppression::enter();
     let _ = CODE_SWAP_REJECTION.with(|rejection| rejection.borrow_mut().take());
     invoke_noarg_void(address)?;
     CODE_SWAP_REJECTION.with(|rejection| rejection.borrow_mut().take().map_or(Ok(()), Err))
@@ -1069,6 +1071,79 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // ============================================================
 
 const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DesktopRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GameWindowPlacement {
+    /// Outer window bounds in SDL's platform-native desktop coordinates.
+    pub outer: DesktopRect,
+    /// Usable bounds of the monitor containing the game window, in the same coordinates.
+    pub usable_monitor: DesktopRect,
+    /// Content scale expected for readable UI on the window's current display.
+    pub display_scale: f32,
+    /// Physical pixels per SDL window coordinate (1.0 on Windows).
+    pub pixel_density: f32,
+    pub minimized: bool,
+    pub maximized: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MonitorPlacement {
+    pub usable: DesktopRect,
+    pub display_scale: f32,
+    pub pixel_density: f32,
+}
+
+fn decode_window_placement(
+    values: [i32; 10],
+    scales: [f32; 2],
+) -> Result<GameWindowPlacement, String> {
+    let outer = decode_desktop_rect(
+        values[..4].try_into().expect("fixed window bounds"),
+        "window",
+    )?;
+    let usable_monitor = decode_desktop_rect(
+        values[4..8].try_into().expect("fixed monitor bounds"),
+        "monitor",
+    )?;
+    validate_window_scales(scales)?;
+    Ok(GameWindowPlacement {
+        outer,
+        usable_monitor,
+        display_scale: scales[0],
+        pixel_density: scales[1],
+        minimized: values[8] != 0,
+        maximized: values[9] != 0,
+    })
+}
+
+fn decode_desktop_rect(values: [i32; 4], label: &str) -> Result<DesktopRect, String> {
+    if values[2] < 1 || values[3] < 1 {
+        return Err(format!(
+            "graphics runtime returned invalid native {label} bounds"
+        ));
+    }
+    Ok(DesktopRect {
+        x: values[0],
+        y: values[1],
+        width: values[2],
+        height: values[3],
+    })
+}
+
+fn validate_window_scales(scales: [f32; 2]) -> Result<(), String> {
+    if !scales[0].is_finite() || scales[0] <= 0.0 || !scales[1].is_finite() || scales[1] <= 0.0 {
+        return Err("graphics runtime returned invalid native window scale".to_string());
+    }
+    Ok(())
+}
 
 fn verify_graphics_runtime_abi(lib: &Library, path: &Path) -> Result<(), String> {
     let address = lib
@@ -1244,6 +1319,10 @@ pub struct StasisGraphicsApi {
     stasis_test_get_render_submission_state: Option<usize>,
     stasis_gfx_notify_file_changed: Option<usize>,
     stasis_load_font: Option<usize>,
+    stasis_host_get_window_placement: Option<usize>,
+    stasis_host_apply_window_placement: Option<usize>,
+    stasis_host_focus_window: Option<usize>,
+    stasis_host_get_monitor_usable_bounds: Option<usize>,
     stasis_sleep_ms: usize,
 }
 
@@ -1308,6 +1387,17 @@ impl StasisGraphicsApi {
         let stasis_gfx_notify_file_changed =
             lib.symbol_address("stasis_gfx_notify_file_changed").ok();
         let stasis_load_font = lib.symbol_address("stasis_load_font").ok();
+        // Window placement is additive to graphics ABI 3. Installed older ABI-3
+        // runtimes remain loadable and report this feature as unsupported.
+        let stasis_host_get_window_placement =
+            lib.symbol_address("stasis_host_get_window_placement").ok();
+        let stasis_host_apply_window_placement = lib
+            .symbol_address("stasis_host_apply_window_placement")
+            .ok();
+        let stasis_host_focus_window = lib.symbol_address("stasis_host_focus_window").ok();
+        let stasis_host_get_monitor_usable_bounds = lib
+            .symbol_address("stasis_host_get_monitor_usable_bounds")
+            .ok();
         let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
         Ok(Self {
             _lib: lib,
@@ -1325,6 +1415,10 @@ impl StasisGraphicsApi {
             stasis_test_get_render_submission_state,
             stasis_gfx_notify_file_changed,
             stasis_load_font,
+            stasis_host_get_window_placement,
+            stasis_host_apply_window_placement,
+            stasis_host_focus_window,
+            stasis_host_get_monitor_usable_bounds,
             stasis_sleep_ms,
         })
     }
@@ -1347,6 +1441,110 @@ impl StasisGraphicsApi {
                 unsafe { std::mem::transmute(self.stasis_init_window) };
             Ok(callback(width, height, title.as_ptr()) != 0)
         }
+    }
+
+    pub fn window_placement(&self) -> Result<GameWindowPlacement, String> {
+        let address = self
+            .stasis_host_get_window_placement
+            .ok_or_else(|| "graphics runtime lacks native window placement support".to_string())?;
+        let mut integers = [0_i32; 10];
+        let mut floats = [0.0_f32; 2];
+        #[cfg(windows)]
+        let callback: extern "system" fn(*mut i32, i32, *mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(*mut i32, i32, *mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        if callback(
+            integers.as_mut_ptr(),
+            integers.len() as i32,
+            floats.as_mut_ptr(),
+            floats.len() as i32,
+        ) == 0
+        {
+            return Err("graphics runtime could not read native window placement".to_string());
+        }
+        decode_window_placement(integers, floats)
+    }
+
+    /// Restore, position, and resize the native game window between runtime ticks.
+    ///
+    /// `rect` is an outer window rectangle in SDL's platform-native desktop
+    /// coordinate space, matching [`GameWindowPlacement::outer`].
+    pub fn apply_window_placement(&self, rect: DesktopRect, raise: bool) -> Result<(), String> {
+        if rect.width < 1 || rect.height < 1 {
+            return Err("native window placement requires a positive extent".to_string());
+        }
+        let address = self
+            .stasis_host_apply_window_placement
+            .ok_or_else(|| "graphics runtime lacks native window placement support".to_string())?;
+        #[cfg(windows)]
+        let callback: extern "system" fn(i32, i32, i32, i32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(i32, i32, i32, i32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        if callback(
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            if raise { 1 } else { 0 },
+        ) == 0
+        {
+            return Err("graphics runtime rejected native window placement".to_string());
+        }
+        Ok(())
+    }
+
+    /// Restore a minimized game window and request keyboard/mouse focus without
+    /// changing its current size, position, maximized state, or fullscreen mode.
+    pub fn focus_window(&self) -> Result<(), String> {
+        let address = self
+            .stasis_host_focus_window
+            .ok_or_else(|| "graphics runtime lacks native window focus support".to_string())?;
+        #[cfg(windows)]
+        let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+        if callback() == 0 {
+            return Err("graphics runtime rejected native window focus request".to_string());
+        }
+        Ok(())
+    }
+
+    /// Return the usable bounds and scales for the display containing `(x, y)`.
+    /// Disconnected/off-desktop saved coordinates resolve to the primary display.
+    pub fn monitor_usable_bounds_at(&self, x: i32, y: i32) -> Result<MonitorPlacement, String> {
+        let address = self
+            .stasis_host_get_monitor_usable_bounds
+            .ok_or_else(|| "graphics runtime lacks native monitor bounds support".to_string())?;
+        let mut values = [0_i32; 4];
+        let mut scales = [0.0_f32; 2];
+        #[cfg(windows)]
+        let callback: extern "system" fn(i32, i32, *mut i32, i32, *mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(i32, i32, *mut i32, i32, *mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(address) };
+        if callback(
+            x,
+            y,
+            values.as_mut_ptr(),
+            values.len() as i32,
+            scales.as_mut_ptr(),
+            scales.len() as i32,
+        ) == 0
+        {
+            return Err("graphics runtime could not resolve native monitor bounds".to_string());
+        }
+        let usable = decode_desktop_rect(values, "monitor")?;
+        validate_window_scales(scales)?;
+        Ok(MonitorPlacement {
+            usable,
+            display_scale: scales[0],
+            pixel_density: scales[1],
+        })
     }
 
     pub fn set_recording_config(&self, width: u32, height: u32, fps: u32) -> Result<(), String> {
@@ -1690,6 +1888,7 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_measure_text_cached_height: usize,
     stasis_clipboard_load_ascii: Option<usize>,
     stasis_clipboard_save_ascii: Option<usize>,
+    stasis_open_external_url: Option<usize>,
     stasis_audio_init: Option<usize>,
     stasis_audio_shutdown: Option<usize>,
     stasis_audio_is_available: Option<usize>,
@@ -1775,6 +1974,7 @@ impl StasisGraphicsAssetsApi {
                 .symbol_address("stasis_gfx_measure_text_cached_height")?,
             stasis_clipboard_load_ascii: lib.symbol_address("stasis_clipboard_load_ascii").ok(),
             stasis_clipboard_save_ascii: lib.symbol_address("stasis_clipboard_save_ascii").ok(),
+            stasis_open_external_url: lib.symbol_address("stasis_open_external_url").ok(),
             stasis_audio_init: lib.symbol_address("stasis_audio_init").ok(),
             stasis_audio_shutdown: lib.symbol_address("stasis_audio_shutdown").ok(),
             stasis_audio_is_available: lib.symbol_address("stasis_audio_is_available").ok(),
@@ -3888,6 +4088,7 @@ pub fn copy_jit_render_active(
 }
 
 unsafe extern "C" {
+    fn stasis_external_url_validate(value: *const c_char, length: i32) -> i32;
     fn stasis_render_trace_native(
         cmd_i32: *const i32,
         cmd_f32: *const f32,
@@ -4811,6 +5012,82 @@ fn jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
         .lock()
         .expect("jit string literal table mutex poisoned");
     guard.get(&value_id).map(|text| text.as_bytes().to_vec())
+}
+
+// Check the guest length before allocating or copying any text.
+fn bounded_jit_text_arg_bytes(value_id: i32, limit: usize) -> Option<Vec<u8>> {
+    if jit_text_buffer_is_registered(value_id) {
+        let length = usize::try_from(stasis_jit_collection_i32_load(value_id, 1)).ok()?;
+        if length > limit {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(length);
+        for index in 0..length {
+            bytes.push(
+                u8::try_from(stasis_jit_global_i32_array_load(value_id, 0, index as i32)).ok()?,
+            );
+        }
+        return Some(bytes);
+    }
+    let guard = jit_string_literal_table()
+        .lock()
+        .expect("jit string literal table mutex poisoned");
+    let text = guard.get(&value_id)?;
+    (text.len() <= limit).then(|| text.as_bytes().to_vec())
+}
+
+thread_local! {
+    static EXTERNAL_URL_HOST: std::cell::Cell<Option<fn(&[u8]) -> i32>> =
+        const { std::cell::Cell::new(None) };
+    static EXTERNAL_URL_SUPPRESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ExternalUrlSuppression(bool);
+
+impl ExternalUrlSuppression {
+    fn enter() -> Self {
+        Self(EXTERNAL_URL_SUPPRESSED.with(|slot| slot.replace(true)))
+    }
+}
+
+impl Drop for ExternalUrlSuppression {
+    fn drop(&mut self) {
+        EXTERNAL_URL_SUPPRESSED.with(|slot| slot.set(self.0));
+    }
+}
+
+/// Embedded adapters must enforce a real input edge and deterministic-run suppression.
+pub fn set_external_url_host(host: Option<fn(&[u8]) -> i32>) {
+    EXTERNAL_URL_HOST.with(|slot| slot.set(host));
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_open_external_url(value_id: i32) -> i32 {
+    let Some(value) = bounded_jit_text_arg_bytes(value_id, 2048) else {
+        return -1;
+    };
+    if unsafe { stasis_external_url_validate(value.as_ptr().cast(), value.len() as i32) } == 0 {
+        return -1;
+    }
+    if EXTERNAL_URL_SUPPRESSED.with(|slot| slot.get()) {
+        return 0;
+    }
+    if let Some(host) = EXTERNAL_URL_HOST.with(|slot| slot.get()) {
+        return host(&value);
+    }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return 0;
+    };
+    let Some(address) = api.stasis_open_external_url else {
+        return 0;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(*const c_char, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(*const c_char, i32) -> i32 =
+        unsafe { std::mem::transmute(address) };
+    callback(value.as_ptr().cast(), value.len() as i32)
 }
 
 fn validated_jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
@@ -7326,6 +7603,41 @@ mod tests {
     use super::*;
     use std::sync::MutexGuard;
 
+    #[test]
+    fn window_placement_decodes_signed_desktop_coordinates_and_scales() {
+        let placement = decode_window_placement(
+            [-1920, 24, 960, 1056, -1920, 0, 1920, 1080, 1, 0],
+            [1.5, 1.0],
+        )
+        .expect("valid placement");
+
+        assert_eq!(
+            placement.outer,
+            DesktopRect {
+                x: -1920,
+                y: 24,
+                width: 960,
+                height: 1056,
+            }
+        );
+        assert_eq!(placement.usable_monitor.x, -1920);
+        assert_eq!(placement.display_scale, 1.5);
+        assert_eq!(placement.pixel_density, 1.0);
+        assert!(placement.minimized);
+        assert!(!placement.maximized);
+    }
+
+    #[test]
+    fn window_placement_rejects_invalid_runtime_values() {
+        assert!(
+            decode_window_placement([0, 0, 0, 600, 0, 0, 1920, 1040, 0, 0], [1.0, 1.0],).is_err()
+        );
+        assert!(
+            decode_window_placement([0, 0, 800, 600, 0, 0, 1920, 1040, 0, 0], [f32::NAN, 1.0],)
+                .is_err()
+        );
+    }
+
     fn hot_image(path: &str, count: Option<u64>, eligible: bool) -> HotRenderRuntimeImage {
         HotRenderRuntimeImage {
             logical_path: path.to_string(),
@@ -7425,7 +7737,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "representative timing report; run explicitly with --ignored"]
     fn hot_render_planner_microbenchmark() {
         let realized = (0..8)
             .map(|index| RealizedHotRenderImage {
@@ -8415,6 +8726,39 @@ mod tests {
         assert_eq!(stasis_jit_collection_i32_load(1234, 1), 5);
         assert_eq!(stasis_jit_collection_i32_load(1234, 2), 5);
         assert_eq!(stasis_jit_collection_i32_load(1234, 3), 5);
+    }
+
+    #[test]
+    fn external_url_validates_before_host_dispatch_and_bounds_guest_copy() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+        // A deterministic embedded host never launches a browser.
+        set_external_url_host(Some(|url| {
+            assert_eq!(url, b"https://www.maddoxlabs.com/");
+            0
+        }));
+        upsert_jit_string_literal(1234, "https://www.maddoxlabs.com/");
+        assert_eq!(stasis_jit_open_external_url(1234), 0);
+        for invalid in [
+            "javascript:alert(1)",
+            "https://example.com/\n",
+            "https://",
+            "https://user@example.com/",
+        ] {
+            upsert_jit_string_literal(1234, invalid);
+            assert_eq!(stasis_jit_open_external_url(1234), -1, "{invalid:?}");
+        }
+        upsert_jit_string_literal(1234, &format!("https://example.com/{}", "a".repeat(2048)));
+        assert!(bounded_jit_text_arg_bytes(1234, 2048).is_none());
+        assert_eq!(stasis_jit_open_external_url(1234), -1);
+        assert_eq!(stasis_jit_open_external_url(1235), -1);
+        stasis_jit_collection_i32_store(1236, 1, i32::MAX);
+        assert!(bounded_jit_text_arg_bytes(1236, 2048).is_none());
+        assert_eq!(stasis_jit_open_external_url(1236), -1);
+        set_external_url_host(None);
     }
 
     #[test]

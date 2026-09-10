@@ -14,6 +14,8 @@
   };
   const keys = new Set();
   const pointer = { id: 0, x: 0, y: 0, dx: 0, dy: 0, hover: false, down: false, wentDown: false, wentUp: false };
+  let externalActionGeneration = 0;
+  let pendingExternalActionGeneration = 0;
   const commands = [];
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
   const sprites = new Map();
@@ -245,6 +247,9 @@
   let audioChannels = 2;
   let audioNextStart = 0;
   let audioUnderruns = 0;
+  const audioStreamSources = new Set();
+  let audioStreamActive = false;
+  let audioStreamCapacity = 8192;
   let audioSuspendedByLifecycle = false;
   let pendingAudioFrames = 0;
   let nextAudioVoiceHandle = 1;
@@ -911,11 +916,11 @@
     }
     return Number.isInteger(length) && length >= 0 && length <= memory.length ? length : null;
   };
-  const runtimeTextValue = reference => {
+  const runtimeTextValue = (reference, maxBytes = Number.POSITIVE_INFINITY) => {
     const memory = resolveU8Memory(reference);
     if (memory) {
       const length = runtimeCollectionLength(memory);
-      if (length === null) return null;
+      if (length === null || length > maxBytes) return null;
       const bytes = Array.from({ length }, (_, index) => readU8(memory, index));
       try {
         return { text: new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)), bytes: bytes.length };
@@ -925,10 +930,115 @@
     }
     if (Object.prototype.hasOwnProperty.call(game.strings || {}, String(reference))) {
       const text = String(game.strings[String(reference)]);
-      return { text, bytes: new TextEncoder().encode(text).length };
+      if (text.length > maxBytes) return null;
+      const bytes = new TextEncoder().encode(text).length;
+      return bytes <= maxBytes ? { text, bytes } : null;
     }
     return null;
   };
+  const EXTERNAL_URL_MAX_BYTES = 2048;
+  const publishExternalUrlResult = result => {
+    if (document.body?.dataset) document.body.dataset.externalUrlResult = result;
+  };
+  const markExternalActionGesture = () => {
+    externalActionGeneration += 1;
+    pendingExternalActionGeneration = externalActionGeneration;
+  };
+  const clearExternalActionGesture = () => { pendingExternalActionGeneration = 0; };
+  const validExternalUrlPort = value => /^\d{1,5}$/.test(value)
+    && Number(value) >= 1 && Number(value) <= 65535;
+  const validExternalUrlDnsHost = value => {
+    if (value.length < 1 || value.length > 253 || value.startsWith(".") || value.endsWith(".")) return false;
+    const labels = value.split(".");
+    if (labels.some(label => label.length < 1 || label.length > 63
+        || label.startsWith("-") || label.endsWith("-") || !/^[a-zA-Z0-9-]+$/.test(label))) return false;
+    if (!labels.every(label => /^\d+$/.test(label))) return true;
+    return labels.length === 4 && labels.every(label => label.length <= 3
+      && (label.length === 1 || !label.startsWith("0")) && Number(label) <= 255);
+  };
+  const validExternalUrlAuthority = value => {
+    if (value.length < 1 || value.includes("@") || /[^\x00-\x7f]/.test(value)) return false;
+    if (value.startsWith("[")) {
+      const close = value.indexOf("]");
+      if (close <= 1 || !/^[0-9a-fA-F:]+$/.test(value.slice(1, close))) return false;
+      return close === value.length - 1
+        || (value[close + 1] === ":" && validExternalUrlPort(value.slice(close + 2)));
+    }
+    const colon = value.indexOf(":");
+    if (colon !== value.lastIndexOf(":")) return false;
+    const host = colon < 0 ? value : value.slice(0, colon);
+    return validExternalUrlDnsHost(host)
+      && (colon < 0 || validExternalUrlPort(value.slice(colon + 1)));
+  };
+  const validatedExternalUrl = reference => {
+    const value = runtimeTextValue(reference, EXTERNAL_URL_MAX_BYTES);
+    if (!value || value.bytes < 1 || value.bytes > EXTERNAL_URL_MAX_BYTES
+        || /[\u0000-\u0020\u007f-\u009f]/u.test(value.text)
+        || value.text.includes("\\") || /%(?![0-9a-fA-F]{2})/.test(value.text)
+        || !/^(?:http|https):\/\//.test(value.text)) return null;
+    try {
+      const bytes = new TextEncoder().encode(value.text);
+      if (bytes.length !== value.bytes
+          || new TextDecoder("utf-8", { fatal: true }).decode(bytes) !== value.text) return null;
+      const authority = value.text.slice(value.text.indexOf("//") + 2).split(/[/?#]/, 1)[0];
+      if (!validExternalUrlAuthority(authority)) return null;
+      const parsed = new URL(value.text);
+      if ((parsed.protocol !== "http:" && parsed.protocol !== "https:")
+          || parsed.username !== "" || parsed.password !== "" || parsed.hostname === "") return null;
+      return value.text;
+    } catch (_) {
+      return null;
+    }
+  };
+  const openExternalUrl = reference => {
+    const url = validatedExternalUrl(reference);
+    if (url === null) { publishExternalUrlResult("invalid"); return -1; }
+    if (pendingExternalActionGeneration === 0) {
+      publishExternalUrlResult("ignored");
+      return 0;
+    }
+    clearExternalActionGesture();
+    const userActivation = globalThis.navigator?.userActivation;
+    if (globalThis.STASIS_HEADLESS === true || globalThis.STASIS_RECORDING === true
+        || game.headless === true || game.recording === true
+        || userActivation?.isActive !== true || typeof window.open !== "function") {
+      publishExternalUrlResult("unavailable");
+      return 0;
+    }
+    let opened;
+    try {
+      opened = window.open("about:blank", "_blank");
+      if (!opened) { publishExternalUrlResult("blocked"); return 0; }
+      opened.opener = null;
+      const link = opened.document?.createElement?.("a");
+      if (!link) {
+        opened.close?.();
+        publishExternalUrlResult("blocked");
+        return 0;
+      }
+      link.href = url;
+      link.target = "_self";
+      link.rel = "noopener noreferrer";
+      link.referrerPolicy = "no-referrer";
+      opened.document.body?.append?.(link);
+      link.click();
+      link.remove?.();
+      publishExternalUrlResult("opened");
+      return 1;
+    } catch (_) {
+      opened?.close?.();
+      publishExternalUrlResult("blocked");
+      return 0;
+    }
+  };
+  if (globalThis.STASIS_CHARACTERIZATION_TEST === true) {
+    Object.assign(window.__STASIS_CHARACTERIZATION__, {
+      openExternalUrl,
+      validatedExternalUrl,
+      markExternalActionGesture,
+      clearExternalActionGesture,
+    });
+  }
   const getViewField = (base, index, field) => {
     const path = game.views?.[String(base)]?.[field];
     if (!path) return 0;
@@ -1628,9 +1738,14 @@
     audioContext ||= new AudioContext();
     return audioContext;
   };
-  const scheduledAudioFrames = () => audioContext
-    ? Math.max(0, Math.round((audioNextStart - audioContext.currentTime) * audioSampleRate))
-    : 0;
+  const scheduledAudioFrames = () => {
+    if (!audioContext) return 0;
+    let frames = 0;
+    for (const entry of audioStreamSources) {
+      frames += Math.max(0, Math.round((entry.end - Math.max(entry.start, audioContext.currentTime)) * audioSampleRate));
+    }
+    return frames;
+  };
   const queuedAudioFrames = () => scheduledAudioFrames() + pendingAudioFrames;
   const pendingAudioFrameLimit = () => Math.max(1, Math.round(audioSampleRate * PENDING_AUDIO_SECONDS));
   const queuePendingAudio = (start, frames = 0) => {
@@ -1643,7 +1758,9 @@
     if (!audioContext || audioContext.state !== "running") return;
     const ready = pendingAudio.splice(0);
     pendingAudioFrames = 0;
-    for (const entry of ready) void entry.start();
+    for (const entry of ready) {
+      if (entry.start() === false) break;
+    }
   };
   const loadAudio = pathId => {
     const handle = nextHandle++;
@@ -1813,7 +1930,9 @@
     document.body.dataset.audioState = audioContext?.state || "closed";
   };
   const enableWebAudio = () => {
-    const audio = ensureAudio();
+    let audio;
+    try { audio = ensureAudio(); }
+    catch { updateAudioState(); return Promise.resolve(false); }
     if (audio.state === "running") {
       flushPendingAudio();
       updateAudioState();
@@ -1860,6 +1979,12 @@
     });
   };
   const shutdownWebAudio = () => {
+    audioStreamActive = false;
+    for (const entry of audioStreamSources) {
+      try { entry.source.stop(); } catch {}
+      entry.source.disconnect();
+    }
+    audioStreamSources.clear();
     audioSuspendedByLifecycle = false;
     pendingAudio.length = 0;
     pendingAudioFrames = 0;
@@ -1868,41 +1993,69 @@
     audioContext = undefined;
     audioEnablePromise = undefined;
     audioNextStart = 0;
-    if (closingContext && closingContext.state !== "closed") void closingContext.close();
+    audioUnderruns = 0;
+    if (closingContext && closingContext.state !== "closed") void closingContext.close().catch(() => {});
     updateAudioState();
   };
   const pushAudio = (byteOffset, frameCount) => {
-    if (!instance?.exports.memory || frameCount <= 0) return 0;
+    if (!audioStreamAvailable() || !instance?.exports.memory || frameCount <= 0 || byteOffset % 4 !== 0) return 0;
     const suspended = !audioContext || audioContext.state !== "running";
     const acceptedFrames = suspended
-      ? Math.min(frameCount, Math.max(0, pendingAudioFrameLimit() - queuedAudioFrames()))
-      : frameCount;
+      ? Math.min(frameCount, Math.max(0, Math.min(audioStreamCapacity, pendingAudioFrameLimit()) - queuedAudioFrames()))
+      : Math.min(frameCount, Math.max(0, audioStreamCapacity - queuedAudioFrames()));
     if (acceptedFrames <= 0 || (suspended && pendingAudio.length >= PENDING_AUDIO_ENTRY_LIMIT)) return 0;
     const sampleCount = acceptedFrames * audioChannels;
     if (byteOffset < 0 || byteOffset + sampleCount * 4 > instance.exports.memory.buffer.byteLength) return 0;
     const samples = new Float32Array(instance.exports.memory.buffer, byteOffset, sampleCount).slice();
-    const start = async () => {
-      const audio = ensureAudio();
-      const buffer = audio.createBuffer(audioChannels, acceptedFrames, audioSampleRate);
-      for (let channel = 0; channel < audioChannels; channel += 1) {
-        const output = buffer.getChannelData(channel);
-        for (let frame = 0; frame < acceptedFrames; frame += 1) output[frame] = samples[frame * audioChannels + channel];
+    const start = () => {
+      try {
+        const audio = ensureAudio();
+        const buffer = audio.createBuffer(audioChannels, acceptedFrames, audioSampleRate);
+        for (let channel = 0; channel < audioChannels; channel += 1) {
+          const output = buffer.getChannelData(channel);
+          for (let frame = 0; frame < acceptedFrames; frame += 1) output[frame] = samples[frame * audioChannels + channel];
+        }
+        const source = audio.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audio.destination);
+        const earliest = audio.currentTime + 0.005;
+        if (audioNextStart > 0 && audioNextStart < audio.currentTime) audioUnderruns += 1;
+        const startAt = Math.max(earliest, audioNextStart);
+        source.start(startAt);
+        audioNextStart = startAt + acceptedFrames / audioSampleRate;
+        const entry = { source, start: startAt, end: audioNextStart };
+        audioStreamSources.add(entry);
+        source.onended = () => {
+          audioStreamSources.delete(entry);
+          source.disconnect();
+        };
+        audioEvents += 1;
+        document.body.dataset.audioEvents = String(audioEvents);
+        document.body.dataset.audioMode = "stream";
+        return true;
+      } catch {
+        shutdownWebAudio();
+        return false;
       }
-      const source = audio.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audio.destination);
-      const earliest = audio.currentTime + 0.005;
-      if (audioNextStart > 0 && audioNextStart < audio.currentTime) audioUnderruns += 1;
-      const startAt = Math.max(earliest, audioNextStart);
-      source.start(startAt);
-      audioNextStart = startAt + acceptedFrames / audioSampleRate;
-      audioEvents += 1;
-      document.body.dataset.audioEvents = String(audioEvents);
-      document.body.dataset.audioMode = "stream";
     };
     if (suspended) queuePendingAudio(start, acceptedFrames);
-    else void start();
+    else if (!start()) return 0;
     return acceptedFrames;
+  };
+  const audioStreamAvailable = () => audioStreamActive && audioContext && audioContext.state !== "closed" ? 1 : 0;
+  const initAudioStream = (sampleRate, channels, targetLatencyFrames = 2048) => {
+    if ((channels !== 0 && channels !== 2) || targetLatencyFrames > (1 << 20)) return 0;
+    shutdownWebAudio();
+    audioSampleRate = Math.max(8000, Math.min(sampleRate || 48000, 192000));
+    audioChannels = 2;
+    audioStreamCapacity = Math.max(8192, Math.max(512, targetLatencyFrames > 0 ? targetLatencyFrames : 2048) * 4);
+    try {
+      ensureAudio();
+      audioStreamActive = true;
+      return audioStreamAvailable();
+    } catch {
+      return 0;
+    }
   };
   // @stasis-feature audio end
   const cancelAssetTask = task => {
@@ -1945,6 +2098,9 @@
     // @stasis-import web_pointer_down begin
     web_pointer_down: () => pointer.down ? 1 : 0,
     // @stasis-import web_pointer_down end
+    // @stasis-import stasis_jit_open_external_url begin
+    stasis_jit_open_external_url: openExternalUrl,
+    // @stasis-import stasis_jit_open_external_url end
     web_begin_frame: (r, g, b) => { commands.length = 0; commands.push([0, r, g, b]); },
     web_draw_rect: (x, y, width, height, r, g, b) => commands.push([1, x, y, width, height, r, g, b]),
     web_draw_text: (x, y, value) => commands.push([2, x, y, value]),
@@ -2087,21 +2243,22 @@
       return 1;
     },
     // @stasis-feature audio begin
-    audio_init: (sampleRate, channels) => {
-      audioSampleRate = Math.max(8000, Math.min(sampleRate || 48000, 192000));
-      audioChannels = Math.max(1, Math.min(channels || 2, 2));
-      ensureAudio();
-      return 1;
-    },
-    audio_shutdown: () => {
-      shutdownWebAudio();
-    },
-    audio_is_available: () => 1,
+    audio_init: initAudioStream,
+    audio_shutdown: shutdownWebAudio,
+    audio_is_available: audioStreamAvailable,
     audio_get_sample_rate: () => audioSampleRate,
     audio_get_channels: () => audioChannels,
     audio_get_queued_frames: () => queuedAudioFrames(),
     audio_get_underruns: () => audioUnderruns,
-    audio_push_f32_interleaved: (byteOffset, frameCount) => pushAudio(byteOffset, frameCount),
+    audio_push_f32_interleaved: pushAudio,
+    stasis_jit_audio_init: initAudioStream,
+    stasis_jit_audio_shutdown: shutdownWebAudio,
+    stasis_jit_audio_is_available: audioStreamAvailable,
+    stasis_jit_audio_get_sample_rate: () => audioSampleRate,
+    stasis_jit_audio_get_channels: () => audioChannels,
+    stasis_jit_audio_get_queued_frames: () => queuedAudioFrames(),
+    stasis_jit_audio_get_underruns: () => audioUnderruns,
+    stasis_jit_audio_push_f32_interleaved: pushAudio,
     audio_load_wav: pathId => loadAudio(pathId),
     audio_release: handle => { audioAssets.delete(handle); stopAudioAsset(handle); },
     audio_play: (handle, loop, volume, pan) => startAudio(handle, loop, volume, pan),
@@ -2109,6 +2266,11 @@
     audio_voice_is_playing: handle => audioVoices.has(handle) ? 1 : 0,
     audio_voice_set_paused: (handle, paused) => setAudioVoicePaused(handle, paused),
     audio_voice_set_volume_pan: (handle, volume, pan) => setAudioVoiceVolumePan(handle, volume, pan),
+    stasis_jit_audio_play: (handle, loop, volume, pan) => startAudio(handle, loop, volume, pan),
+    stasis_jit_audio_stop: handle => stopAudio(handle),
+    stasis_jit_audio_voice_is_playing: handle => audioVoices.has(handle) ? 1 : 0,
+    stasis_jit_audio_voice_set_paused: (handle, paused) => setAudioVoicePaused(handle, paused),
+    stasis_jit_audio_voice_set_volume_pan: (handle, volume, pan) => setAudioVoiceVolumePan(handle, volume, pan),
     stasis_jit_audio_load_music: pathId => loadAudio(pathId),
     stasis_jit_audio_load_effect: pathId => loadAudio(pathId),
     stasis_jit_audio_play_music: (handle, loop, volume) => {
@@ -3047,7 +3209,10 @@
     const pushClip = index => {
       if (index < 0 || index >= clipCount) return;
       const base = GFX_F_CLIP_BASE + index * GFX_CLIP_STRIDE_F32;
-      let clip = { x: f32[base], y: f32[base + 1], width: f32[base + 2], height: f32[base + 3] };
+      let clip = {
+        x: f32[base], y: f32[base + 1],
+        width: Math.max(0, f32[base + 2]), height: Math.max(0, f32[base + 3])
+      };
       const parent = clipStack[clipStack.length - 1];
       if (parent) {
         const x = Math.max(parent.x, clip.x);
@@ -3214,6 +3379,7 @@
   }
 
   function finishHostFrame() {
+    clearExternalActionGesture();
     pointer.wentDown = false;
     pointer.wentUp = false;
     pointer.dx = 0;
@@ -3403,6 +3569,7 @@
     pointer.hover = event.pointerType !== "touch" && inside;
   }
   addEventListener("keydown", event => {
+    if (!event.repeat && !keys.has(event.code)) markExternalActionGesture();
     keys.add(event.code);
     // @stasis-feature audio begin
     void enableWebAudio();
@@ -3417,6 +3584,7 @@
   // @stasis-feature audio end
   canvas.addEventListener("pointerdown", event => {
     updatePointer(event);
+    if (!pointer.down) markExternalActionGesture();
     pointer.down = true;
     pointer.wentDown = true;
     canvas.setPointerCapture(event.pointerId);
@@ -3429,6 +3597,10 @@
     pointer.wentUp = true;
   });
   canvas.addEventListener("pointercancel", () => { pointer.hover = false; pointer.down = false; pointer.wentUp = true; });
+  addEventListener("blur", clearExternalActionGesture);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) clearExternalActionGesture();
+  });
   addEventListener("resize", markResized);
   addEventListener("orientationchange", markResized);
   if (window.visualViewport) window.visualViewport.addEventListener("resize", markResized);

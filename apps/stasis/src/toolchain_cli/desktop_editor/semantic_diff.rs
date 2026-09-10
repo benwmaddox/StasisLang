@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, RichText};
 use stasis_compiler::frontend::workshop::{WorkshopSemanticEditPlan, WorkshopSemanticFileChange};
+use std::collections::BTreeSet;
 use std::hash::Hash;
 use std::ops::Range;
 
@@ -17,7 +18,13 @@ const HUNK_TEXT: Color32 = Color32::from_rgb(135, 180, 230);
 ///
 /// The plan is intentionally the only input to this module. In particular, no
 /// semantic-edit payload is reparsed or treated as a text-edit instruction here.
-pub(super) fn render(ui: &mut egui::Ui, plan: &WorkshopSemanticEditPlan, id: impl Hash) {
+pub(super) fn render(
+    ui: &mut egui::Ui,
+    plan: &WorkshopSemanticEditPlan,
+    id: impl Hash,
+    expansion_base: &str,
+    expanded: &mut BTreeSet<String>,
+) {
     let base_id = ui.make_persistent_id(id);
     let file_diffs = plan
         .changed_files
@@ -25,19 +32,24 @@ pub(super) fn render(ui: &mut egui::Ui, plan: &WorkshopSemanticEditPlan, id: imp
         .enumerate()
         .map(|(index, change)| {
             let file_id = base_id.with(("semantic-file", index, change.file.as_str()));
-            (change, cached_file_diff(ui, file_id, change), file_id)
+            (
+                change,
+                cached_file_diff(ui, file_id, change),
+                file_id,
+                format!("{expansion_base}/{}", change.file),
+            )
         })
         .collect::<Vec<_>>();
     let total_added = file_diffs
         .iter()
-        .map(|(_, diff, _)| diff.added)
+        .map(|(_, diff, _, _)| diff.added)
         .sum::<usize>();
     let total_removed = file_diffs
         .iter()
-        .map(|(_, diff, _)| diff.removed)
+        .map(|(_, diff, _, _)| diff.removed)
         .sum::<usize>();
 
-    ui.horizontal_wrapped(|ui| {
+    let header = ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Semantic source diff").strong());
         ui.label(format!(
             "{} changed file{}",
@@ -54,14 +66,32 @@ pub(super) fn render(ui: &mut egui::Ui, plan: &WorkshopSemanticEditPlan, id: imp
             ui.ctx().copy_text(unified_diff(plan));
         }
     });
+    #[cfg(test)]
+    if ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(egui::Id::new("expand-semantic-evidence")))
+        .unwrap_or(false)
+    {
+        let scroll_id = base_id.with("evidence-scrolled");
+        if !ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(scroll_id))
+            .unwrap_or(false)
+        {
+            header.response.scroll_to_me(Some(egui::Align::TOP));
+            ui.ctx().data_mut(|data| data.insert_temp(scroll_id, true));
+        }
+    }
+    #[cfg(not(test))]
+    let _ = header;
 
     if file_diffs.is_empty() {
         ui.label(RichText::new("No semantic source changes.").weak());
         return;
     }
 
-    for (change, diff, file_id) in file_diffs {
-        render_file(ui, &change.file, &diff, file_id);
+    for (change, diff, file_id, expansion_key) in file_diffs {
+        render_file(ui, &change.file, &diff, file_id, &expansion_key, expanded);
     }
 }
 
@@ -140,7 +170,14 @@ fn cached_file_diff(ui: &egui::Ui, id: egui::Id, change: &WorkshopSemanticFileCh
     diff
 }
 
-fn render_file(ui: &mut egui::Ui, file: &str, diff: &FileDiff, id: egui::Id) {
+fn render_file(
+    ui: &mut egui::Ui,
+    file: &str,
+    diff: &FileDiff,
+    id: egui::Id,
+    expansion_key: &str,
+    expanded: &mut BTreeSet<String>,
+) {
     let added = diff.added;
     let removed = diff.removed;
     let hunk_count = diff.hunks.len();
@@ -152,8 +189,21 @@ fn render_file(ui: &mut egui::Ui, file: &str, diff: &FileDiff, id: egui::Id) {
         .as_ref()
         .zip(diff.hunks.first())
         .is_some_and(|(compact, full)| compact.end < full.end);
-    let state =
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+        ui.ctx(),
+        id,
+        expanded.contains(expansion_key),
+    );
+    #[cfg(test)]
+    let mut state = state;
+    #[cfg(test)]
+    if ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(egui::Id::new("expand-semantic-evidence")))
+        .unwrap_or(false)
+    {
+        state.set_open(true);
+    }
     let show_compact = !state.is_open();
     let header = state.show_header(ui, |ui| {
         ui.vertical(|ui| {
@@ -200,6 +250,7 @@ fn render_file(ui: &mut egui::Ui, file: &str, diff: &FileDiff, id: egui::Id) {
             }
         });
     });
+    let is_open = header.is_open();
     let _ = header.body(|ui| {
         if diff.hunks.is_empty() {
             ui.label(RichText::new("No line changes.").weak());
@@ -207,6 +258,11 @@ fn render_file(ui: &mut egui::Ui, file: &str, diff: &FileDiff, id: egui::Id) {
             render_hunks(ui, diff, &diff.hunks, id.with("expanded"));
         }
     });
+    if is_open {
+        expanded.insert(expansion_key.to_string());
+    } else {
+        expanded.remove(expansion_key);
+    }
 }
 
 fn render_hunks(ui: &mut egui::Ui, diff: &FileDiff, ranges: &[Range<usize>], id: egui::Id) {
@@ -426,7 +482,7 @@ fn unified_file_diff(file: &str, diff: &FileDiff) -> String {
     output
 }
 
-fn unified_diff(plan: &WorkshopSemanticEditPlan) -> String {
+pub(super) fn unified_diff(plan: &WorkshopSemanticEditPlan) -> String {
     if plan.changed_files.is_empty() {
         return "No semantic source changes.\n".to_string();
     }

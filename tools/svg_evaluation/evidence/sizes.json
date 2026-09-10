@@ -1,0 +1,179 @@
+{
+  "schema": 1,
+  "svgo": "3.3.2",
+  "node": "v24.12.0",
+  "zlib": "1.3.1-470d3a2",
+  "brotli": "1.1.0",
+  "baselineConfig": {
+    "multipass": false,
+    "floatPrecision": 2,
+    "plugins": [
+      {
+        "name": "preset-default",
+        "params": {
+          "overrides": {
+            "removeViewBox": false
+          }
+        }
+      }
+    ]
+  },
+  "assets": {
+    "character": {
+      "master": {
+        "sha256": "7a43e3fe96a45e3a53f199d0f12904b36bcc82f332ab780a89646328f86e31cc",
+        "raw": 200186,
+        "gzip": 66300,
+        "brotli": 57199
+      },
+      "baseline": {
+        "sha256": "72e95a07ea835131971256e7059e97336937aef441deb4cb5a08cbbc98888078",
+        "raw": 49207,
+        "gzip": 18782,
+        "brotli": 16621,
+        "identicalBaseline": true
+      },
+      "structural": {
+        "sha256": "72e95a07ea835131971256e7059e97336937aef441deb4cb5a08cbbc98888078",
+        "raw": 49207,
+        "gzip": 18782,
+        "brotli": 16621,
+        "identicalBaseline": true
+      },
+      "numeric": {
+        "sha256": "5630e317757d6606b63750e3734b67a2efb44cbaab7dcb2df690d3b03f1b8183",
+        "raw": 49204,
+        "gzip": 18785,
+        "brotli": 16622,
+        "identicalBaseline": false
+      },
+      "palette": {
+        "sha256": "6c38e78363060dff71422378011ab594818bdc1e9292fc3dccabc3adc1ac8385",
+        "raw": 49176,
+        "gzip": 18954,
+        "brotli": 16719,
+        "identicalBaseline": false
+      },
+      "reuse": {
+        "sha256": "72e95a07ea835131971256e7059e97336937aef441deb4cb5a08cbbc98888078",
+        "raw": 49207,
+        "gzip": 18782,
+        "brotli": 16621,
+        "identicalBaseline": true
+      },
+      "consolidation": {
+        "sha256": "72e95a07ea835131971256e7059e97336937aef441deb4cb5a08cbbc98888078",
+        "raw": 49207,
+        "gzip": 18782,
+        "brotli": 16621,
+        "identicalBaseline": true
+      },
+      "structural_numeric": {
+        "sha256": "5630e317757d6606b63750e3734b67a2efb44cbaab7dcb2df690d3b03f1b8183",
+        "raw": 49204,
+        "gzip": 18785,
+        "brotli": 16622,
+        "identicalBaseline": false
+      },
+      "palette_reuse": {
+        "sha256": "6c38e78363060dff71422378011ab594818bdc1e9292fc3dccabc3adc1ac8385",
+        "raw": 49176,
+        "gzip": 18954,
+        "brotli": 16719,
+        "identicalBaseline": false
+      },
+      "subpixel": {
+        "sha256": "72e95a07ea835131971256e7059e97336937aef441deb4cb5a08cbbc98888078",
+        "raw": 49207,
+        "gzip": 18782,
+        "brotli": 16621,
+        "identicalBaseline": true
+      },
+      "precision1": {
+        "sha256": "3ada6329810f2e970dbaa0fc66371a22697f6950e4f9c813f0edc5ea54be17a7",
+        "raw": 40324,
+        "gzip": 14227,
+        "brotli": 12644,
+        "identicalBaseline": false
+      }
+    },
+    "screen": {
+      "master": {
+        "sha256": "5c7dcf1b4a0292f5b8057130b116f70498c586f6bbda26332f5417ae58fc7528",
+        "raw": 1004102,
+        "gzip": 330035,
+        "brotli": 261897
+      },
+      "baseline": {
+        "sha256": "4b073ffeb97db489ecc4748d5dfa765cfd334ffcef825abfbc4dfdefb88bd8e5",
+        "raw": 246083,
+        "gzip": 92178,
+        "brotli": 83212,
+        "identicalBaseline": true
+      },
+      "structural": {
+        "sha256": "4b073ffeb97db489ecc4748d5dfa765cfd334ffcef825abfbc4dfdefb88bd8e5",
+        "raw": 246083,
+        "gzip": 92178,
+        "brotli": 83212,
+        "identicalBaseline": true
+      },
+      "numeric": {
+        "sha256": "88f84e79e4f4e571987594b16d25082ca1d4a7e33203fcfcd52928ae3281b150",
+        "raw": 246078,
+        "gzip": 92164,
+        "brotli": 83201,
+        "identicalBaseline": false
+      },
+      "palette": {
+        "sha256": "ceed71dce7eb5922e8f7c765b8446293fd594af5cc0f04425a8b2038b419cfad",
+        "raw": 246364,
+        "gzip": 92528,
+        "brotli": 83460,
+        "identicalBaseline": false
+      },
+      "reuse": {
+        "sha256": "4b073ffeb97db489ecc4748d5dfa765cfd334ffcef825abfbc4dfdefb88bd8e5",
+        "raw": 246083,
+        "gzip": 92178,
+        "brotli": 83212,
+        "identicalBaseline": true
+      },
+      "consolidation": {
+        "sha256": "4b073ffeb97db489ecc4748d5dfa765cfd334ffcef825abfbc4dfdefb88bd8e5",
+        "raw": 246083,
+        "gzip": 92178,
+        "brotli": 83212,
+        "identicalBaseline": true
+      },
+      "structural_numeric": {
+        "sha256": "88f84e79e4f4e571987594b16d25082ca1d4a7e33203fcfcd52928ae3281b150",
+        "raw": 246078,
+        "gzip": 92164,
+        "brotli": 83201,
+        "identicalBaseline": false
+      },
+      "palette_reuse": {
+        "sha256": "ceed71dce7eb5922e8f7c765b8446293fd594af5cc0f04425a8b2038b419cfad",
+        "raw": 246364,
+        "gzip": 92528,
+        "brotli": 83460,
+        "identicalBaseline": false
+      },
+      "subpixel": {
+        "sha256": "4b073ffeb97db489ecc4748d5dfa765cfd334ffcef825abfbc4dfdefb88bd8e5",
+        "raw": 246083,
+        "gzip": 92178,
+        "brotli": 83212,
+        "identicalBaseline": true
+      },
+      "precision1": {
+        "sha256": "00dfaaa3d7afb94562574706a58461ecd683143baababee4bc25cc3679b9af7d",
+        "raw": 202821,
+        "gzip": 69285,
+        "brotli": 62562,
+        "identicalBaseline": false
+      }
+    }
+  }
+}
