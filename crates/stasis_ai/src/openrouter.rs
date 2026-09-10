@@ -17,12 +17,119 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-oss-120b";
+pub const APPROVED_OPENROUTER_MODELS: &[&str] = &[DEFAULT_OPENROUTER_MODEL];
+pub const DEFAULT_OPENROUTER_MIN_THROUGHPUT: f64 = 400.0;
+pub const DEFAULT_OPENROUTER_MAX_LATENCY_SECONDS: f64 = 2.0;
 const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 pub const MAX_OPENROUTER_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_OPENROUTER_IMAGES: usize = crate::task_session::MAX_SCREENSHOTS_PER_REQUEST;
 const MAX_OPENROUTER_RATE_LIMIT_RETRIES: u32 = 2;
 const DEFAULT_OPENROUTER_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MAX_OPENROUTER_RETRY_DELAY: Duration = Duration::from_secs(2);
+const MAX_APPROVED_OPENROUTER_MODELS: usize = 8;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectAiConfig {
+    #[serde(default)]
+    pub openrouter: ProjectOpenRouterConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectOpenRouterConfig {
+    #[serde(default = "default_approved_openrouter_models")]
+    pub approved_models: Vec<String>,
+    #[serde(default = "default_openrouter_min_throughput")]
+    pub min_throughput_tokens_per_second: u32,
+    #[serde(default = "default_openrouter_max_latency_seconds")]
+    pub max_p50_latency_seconds: f64,
+}
+
+impl Default for ProjectOpenRouterConfig {
+    fn default() -> Self {
+        Self {
+            approved_models: default_approved_openrouter_models(),
+            min_throughput_tokens_per_second: default_openrouter_min_throughput(),
+            max_p50_latency_seconds: default_openrouter_max_latency_seconds(),
+        }
+    }
+}
+
+fn default_approved_openrouter_models() -> Vec<String> {
+    APPROVED_OPENROUTER_MODELS
+        .iter()
+        .map(|model| (*model).to_string())
+        .collect()
+}
+
+fn default_openrouter_min_throughput() -> u32 {
+    DEFAULT_OPENROUTER_MIN_THROUGHPUT as u32
+}
+
+fn default_openrouter_max_latency_seconds() -> f64 {
+    DEFAULT_OPENROUTER_MAX_LATENCY_SECONDS
+}
+
+#[derive(Deserialize)]
+struct ProjectAiManifest {
+    #[serde(default)]
+    ai: ProjectAiConfig,
+}
+
+impl ProjectAiConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        self.openrouter.validate()
+    }
+
+    fn from_workspace(root: &Path) -> Result<Self, String> {
+        let path = root.join("stasis.json");
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        let manifest: ProjectAiManifest = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("invalid stasis.json AI configuration: {error}"))?;
+        Ok(manifest.ai)
+    }
+}
+
+impl ProjectOpenRouterConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.approved_models.is_empty() {
+            return Err("ai.openrouter.approved_models must not be empty".to_string());
+        }
+        if self.approved_models.len() > MAX_APPROVED_OPENROUTER_MODELS {
+            return Err(format!(
+                "ai.openrouter.approved_models must contain at most {MAX_APPROVED_OPENROUTER_MODELS} models"
+            ));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        for model in &self.approved_models {
+            if model.trim().is_empty()
+                || !model.contains('/')
+                || model.len() > 256
+                || model.chars().any(char::is_control)
+            {
+                return Err(format!(
+                    "ai.openrouter.approved_models contains an invalid author/model identifier: {model}"
+                ));
+            }
+            if !unique.insert(model) {
+                return Err("ai.openrouter.approved_models must not contain duplicates".to_string());
+            }
+        }
+        if self.min_throughput_tokens_per_second == 0 {
+            return Err(
+                "ai.openrouter.min_throughput_tokens_per_second must be greater than zero"
+                    .to_string(),
+            );
+        }
+        if !self.max_p50_latency_seconds.is_finite() || self.max_p50_latency_seconds <= 0.0 {
+            return Err(
+                "ai.openrouter.max_p50_latency_seconds must be a finite number greater than zero"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenRouterImageInput {
@@ -132,6 +239,8 @@ pub struct RoutingConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hard_min_throughput: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_max_latency_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_price: Option<f64>,
 }
 
@@ -145,6 +254,7 @@ impl Default for RoutingConfig {
             preferred_min_throughput: None,
             preferred_throughput_policy: PreferredThroughputPolicy::AllowBelow,
             hard_min_throughput: None,
+            preferred_max_latency_seconds: None,
             max_price: None,
         }
     }
@@ -155,25 +265,34 @@ pub struct OpenRouterConfig {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    pub approved_models: Box<[String]>,
     pub routing: RoutingConfig,
     pub timeout: Duration,
 }
 
 impl OpenRouterConfig {
     pub fn from_env() -> Result<Self, String> {
-        Self::from_lookup(&|name| std::env::var(name).ok())
+        Self::from_lookup(
+            &|name| std::env::var(name).ok(),
+            &ProjectOpenRouterConfig::default(),
+        )
     }
 
-    /// Read only this workspace's .env; process environment takes precedence.
+    /// Read project AI policy from stasis.json and secrets/transport from this workspace's .env.
     pub fn from_workspace(root: &Path) -> Result<Self, String> {
         let settings = WorkspaceSettings::read(root)?;
-        Self::from_lookup(&|name| settings.get(name, &|key| std::env::var(key).ok()))
+        let project = ProjectAiConfig::from_workspace(root)?;
+        Self::from_lookup(
+            &|name| settings.get(name, &|key| std::env::var(key).ok()),
+            &project.openrouter,
+        )
     }
 
-    fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
-        let preferred_min_throughput = setting_f64(lookup, "STASIS_AI_PREFERRED_MIN_THROUGHPUT")?;
-        let hard_min_throughput = setting_f64(lookup, "STASIS_AI_HARD_MIN_THROUGHPUT")?
-            .or_else(|| preferred_min_throughput.is_none().then_some(400.0));
+    fn from_lookup(
+        lookup: &dyn Fn(&str) -> Option<String>,
+        project: &ProjectOpenRouterConfig,
+    ) -> Result<Self, String> {
+        project.validate()?;
         let api_key = lookup("OPENROUTER_API_KEY").ok_or_else(|| {
             "OPENROUTER_API_KEY is required when STASIS_AI_PROVIDER=openrouter".to_string()
         })?;
@@ -181,43 +300,17 @@ impl OpenRouterConfig {
             api_key,
             base_url: setting_nonempty(lookup, "STASIS_OPENROUTER_URL")
                 .unwrap_or_else(|| DEFAULT_OPENROUTER_URL.to_string()),
-            model: setting_nonempty(lookup, "STASIS_AI_MODEL")
-                .unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string()),
+            model: project.approved_models.first().cloned().unwrap_or_default(),
+            approved_models: project.approved_models.clone().into_boxed_slice(),
             routing: RoutingConfig {
                 only: setting_list(lookup, "STASIS_AI_ROUTE_ONLY"),
-                order: setting_list(lookup, "STASIS_AI_ROUTE_ORDER"),
+                order: Vec::new(),
                 allow_fallbacks: setting_bool(lookup, "STASIS_AI_ALLOW_FALLBACKS", true)?,
-                sort: match setting_nonempty(lookup, "STASIS_AI_ROUTE_SORT")
-                    .as_deref()
-                    .unwrap_or("throughput")
-                {
-                    "price" => RoutingSort::Price,
-                    "throughput" => RoutingSort::Throughput,
-                    "latency" => RoutingSort::Latency,
-                    _ => {
-                        return Err(
-                            "STASIS_AI_ROUTE_SORT must be price, throughput, or latency".into()
-                        )
-                    }
-                },
-                preferred_min_throughput,
-                preferred_throughput_policy: match setting_nonempty(
-                    lookup,
-                    "STASIS_AI_PREFERRED_THROUGHPUT_POLICY",
-                )
-                .as_deref()
-                .unwrap_or("allow_below")
-                {
-                    "allow_below" => PreferredThroughputPolicy::AllowBelow,
-                    "fail" => PreferredThroughputPolicy::Fail,
-                    _ => {
-                        return Err(
-                            "STASIS_AI_PREFERRED_THROUGHPUT_POLICY must be allow_below or fail"
-                                .into(),
-                        )
-                    }
-                },
-                hard_min_throughput,
+                sort: RoutingSort::Price,
+                preferred_min_throughput: Some(project.min_throughput_tokens_per_second.into()),
+                preferred_throughput_policy: PreferredThroughputPolicy::AllowBelow,
+                hard_min_throughput: None,
+                preferred_max_latency_seconds: Some(project.max_p50_latency_seconds),
                 max_price: setting_f64(lookup, "STASIS_AI_MAX_PRICE")?,
             },
             timeout: Duration::from_secs(
@@ -238,6 +331,37 @@ impl OpenRouterConfig {
         if self.model.len() > 256 || self.model.chars().any(char::is_control) {
             return Err("OpenRouter model must be at most 256 printable characters".to_string());
         }
+        if self.approved_models.is_empty() {
+            return Err("OpenRouter approved_models must contain at least one model".to_string());
+        }
+        if self.approved_models.len() > MAX_APPROVED_OPENROUTER_MODELS {
+            return Err(format!(
+                "OpenRouter approved_models must contain at most {MAX_APPROVED_OPENROUTER_MODELS} models"
+            ));
+        }
+        for model in &self.approved_models {
+            if model.trim().is_empty() || !model.contains('/') {
+                return Err(format!(
+                    "approved OpenRouter model must be an author/model identifier: {model}"
+                ));
+            }
+            if model.len() > 256 || model.chars().any(char::is_control) {
+                return Err(
+                    "approved OpenRouter models must be at most 256 printable characters"
+                        .to_string(),
+                );
+            }
+        }
+        let unique_models = self
+            .approved_models
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if unique_models.len() != self.approved_models.len() {
+            return Err("OpenRouter approved_models must not contain duplicates".to_string());
+        }
+        if !self.approved_models.contains(&self.model) {
+            return Err("selected OpenRouter model must be in approved_models".to_string());
+        }
         for (field, values) in [("only", &self.routing.only), ("order", &self.routing.order)] {
             if let Some(value) = values
                 .iter()
@@ -257,6 +381,10 @@ impl OpenRouterConfig {
                 self.routing.preferred_min_throughput,
             ),
             ("hard minimum throughput", self.routing.hard_min_throughput),
+            (
+                "preferred maximum latency in seconds",
+                self.routing.preferred_max_latency_seconds,
+            ),
             ("maximum price", self.routing.max_price),
         ] {
             if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
@@ -277,6 +405,7 @@ impl OpenRouterConfig {
 }
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)] // Keep the public provider-config shape source-compatible.
 pub enum ProviderConfig {
     Codex,
     OpenRouter(OpenRouterConfig),
@@ -315,7 +444,13 @@ impl ProviderConfig {
         };
         match selected.as_deref().unwrap_or(default) {
             "codex" => Ok(Self::Codex),
-            "openrouter" => Ok(Self::OpenRouter(OpenRouterConfig::from_lookup(&lookup)?)),
+            "openrouter" => {
+                let project = ProjectAiConfig::from_workspace(root)?;
+                Ok(Self::OpenRouter(OpenRouterConfig::from_lookup(
+                    &lookup,
+                    &project.openrouter,
+                )?))
+            }
             _ => Err("STASIS_AI_PROVIDER must be codex or openrouter".into()),
         }
     }
@@ -679,135 +814,24 @@ impl OpenRouterProvider {
         })
     }
 
-    #[cfg(test)]
-    fn qualifying_endpoints(
-        &self,
-        minimum: f64,
-        canceled: &AtomicBool,
-    ) -> Result<(Vec<String>, Duration), String> {
-        let started = Instant::now();
-        let deadline = started + self.config.timeout;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| format!("failed configuring OpenRouter async runtime: {error}"))?;
-        runtime.block_on(self.qualifying_endpoints_async(minimum, deadline, canceled))
-    }
-
-    async fn qualifying_endpoints_async(
-        &self,
-        minimum: f64,
-        deadline: Instant,
-        canceled: &AtomicBool,
-    ) -> Result<(Vec<String>, Duration), String> {
-        let started = Instant::now();
-        let timeout = remaining_timeout(deadline, "OpenRouter endpoint preflight")?;
-        let url = format!(
-            "{}/models/{}/endpoints",
-            self.config.base_url.trim_end_matches('/'),
-            self.config.model
-        );
-        let response = await_cancelable(
-            self.client
-                .get(url)
-                .bearer_auth(&self.config.api_key)
-                .timeout(timeout)
-                .send(),
-            canceled,
-            deadline,
-            "OpenRouter endpoint preflight",
-        )
-        .await?;
-        let status = response.status();
-        let value: Value = await_cancelable(
-            response.json(),
-            canceled,
-            deadline,
-            "OpenRouter endpoint preflight response",
-        )
-        .await?;
-        if !status.is_success() {
-            return Err(api_error(
-                "OpenRouter endpoint preflight",
-                status.as_u16(),
-                &value,
-                &self.config.api_key,
-            ));
-        }
-        let endpoints = value
-            .pointer("/data/endpoints")
-            .or_else(|| value.get("data"))
-            .or_else(|| value.get("endpoints"))
-            .and_then(Value::as_array)
-            .ok_or_else(|| "OpenRouter endpoint preflight omitted endpoint metadata".to_string())?;
-        let mut tags = Vec::new();
-        for endpoint in endpoints {
-            let throughput = endpoint
-                .pointer("/throughput_last_30m/p50")
-                .and_then(Value::as_f64)
-                .or_else(|| endpoint.get("throughput_last_30m").and_then(Value::as_f64))
-                .or_else(|| endpoint.get("throughput").and_then(Value::as_f64))
-                .or_else(|| {
-                    endpoint
-                        .pointer("/metrics/throughput")
-                        .and_then(Value::as_f64)
-                });
-            let healthy = match endpoint.get("status") {
-                Some(Value::Number(status)) => status.as_i64() == Some(0),
-                Some(Value::String(status)) => matches!(
-                    status.to_ascii_lowercase().as_str(),
-                    "healthy" | "available" | "active" | "up"
-                ),
-                Some(_) => false,
-                None => true,
-            };
-            if healthy && throughput.is_some_and(|value| value >= minimum) {
-                if let Some(tag) = endpoint
-                    .get("tag")
-                    .or_else(|| endpoint.get("provider_slug"))
-                    .or_else(|| endpoint.get("provider"))
-                    .and_then(Value::as_str)
-                    .and_then(normalize_provider_slug)
-                {
-                    tags.push(tag);
-                }
-            }
-        }
-        tags.sort();
-        tags.dedup();
-        if !self.config.routing.only.is_empty() {
-            tags.retain(|tag| {
-                self.config
-                    .routing
-                    .only
-                    .iter()
-                    .filter_map(|only| normalize_provider_slug(only))
-                    .any(|only| {
-                        only == *tag
-                            || (!only.contains('/') && tag.starts_with(&format!("{only}/")))
-                    })
-            });
-        }
-        if tags.is_empty() {
-            return Err(format!("OpenRouter routing failed closed: no healthy endpoint for {} provides at least {minimum} tokens/s", self.config.model));
-        }
-        Ok((tags, started.elapsed()))
-    }
-
-    fn route_json(&self, hard_only: Option<Vec<String>>) -> Value {
+    fn route_json(&self) -> Value {
         let routing = &self.config.routing;
         let mut value = json!({
             "allow_fallbacks": routing.allow_fallbacks,
-            "sort": match routing.sort {
-                RoutingSort::Price => "price",
-                RoutingSort::Throughput => "throughput",
-                RoutingSort::Latency => "latency",
+            "sort": {
+                "by": match routing.sort {
+                    RoutingSort::Price => "price",
+                    RoutingSort::Throughput => "throughput",
+                    RoutingSort::Latency => "latency",
+                },
+                "partition": "none"
             },
             "require_parameters": true,
         });
         let object = value.as_object_mut().expect("route object");
-        let only = hard_only
-            .unwrap_or_else(|| routing.only.clone())
+        let only = routing
+            .only
+            .clone()
             .into_iter()
             .filter_map(|value| normalize_provider_slug(&value))
             .collect::<Vec<_>>();
@@ -824,8 +848,17 @@ impl OpenRouterProvider {
                     .collect::<Vec<_>>()),
             );
         }
-        if let Some(target) = routing.preferred_min_throughput {
-            object.insert("preferred_min_throughput".to_string(), json!(target));
+        if let Some(target) = routing
+            .preferred_min_throughput
+            .or(routing.hard_min_throughput)
+        {
+            object.insert(
+                "preferred_min_throughput".to_string(),
+                json!({"p50": target}),
+            );
+        }
+        if let Some(target) = routing.preferred_max_latency_seconds {
+            object.insert("preferred_max_latency".to_string(), json!({"p50": target}));
         }
         if let Some(max_price) = routing.max_price {
             object.insert("max_price".to_string(), json!({"completion": max_price}));
@@ -912,53 +945,14 @@ impl OpenRouterProvider {
             }
         }
 
-        let (hard_only, metadata_time) = match self.config.routing.hard_min_throughput {
-            Some(minimum) => {
-                let (tags, elapsed) = self
-                    .qualifying_endpoints_async(minimum, deadline, canceled)
-                    .await?;
-                (Some(tags), elapsed)
-            }
-            None => (None, Duration::ZERO),
-        };
-        if self.config.routing.preferred_throughput_policy == PreferredThroughputPolicy::Fail {
-            if let Some(minimum) = self.config.routing.preferred_min_throughput {
-                let (tags, elapsed) = self
-                    .qualifying_endpoints_async(minimum, deadline, canceled)
-                    .await?;
-                return self
-                    .send(
-                        request,
-                        images,
-                        Some(tags),
-                        metadata_time + elapsed,
-                        turn_started,
-                        deadline,
-                        canceled,
-                        progress,
-                    )
-                    .await;
-            }
-        }
-        self.send(
-            request,
-            images,
-            hard_only,
-            metadata_time,
-            turn_started,
-            deadline,
-            canceled,
-            progress,
-        )
-        .await
+        self.send(request, images, turn_started, deadline, canceled, progress)
+            .await
     }
 
     async fn send(
         &mut self,
         request: &str,
         images: &[OpenRouterImageInput],
-        only: Option<Vec<String>>,
-        metadata_time: Duration,
         turn_started: Instant,
         deadline: Instant,
         canceled: &AtomicBool,
@@ -967,7 +961,7 @@ impl OpenRouterProvider {
         if canceled.load(Ordering::Acquire) {
             return Err("AI request canceled".to_string());
         }
-        let route = self.route_json(only);
+        let route = self.route_json();
         let mut schema = model_response_schema_for_request(request)?;
         // Keep Gemini structured-output state bounded; local admission enforces array limits.
         strip_array_max_items(&mut schema);
@@ -982,7 +976,7 @@ impl OpenRouterProvider {
                 Value::Array(content)
             };
         let mut body = json!({
-            "model": self.config.model,
+            "models": self.config.approved_models,
             "messages": [{"role": "user", "content": content}],
             "stream": true,
             "stream_options": {"include_usage": true},
@@ -1181,9 +1175,10 @@ impl OpenRouterProvider {
         let cache_tokens = metric_number(usage.pointer("/prompt_tokens_details/cached_tokens"));
         self.last_usage = Some(json!({
             "configured_provider": "openrouter", "configured_model": self.config.model,
+            "approved_models": self.config.approved_models,
             "resolved_provider": resolved_provider, "resolved_model": resolved_model,
             "route": route, "fallback": fallback,
-            "timing_ms": {"metadata": duration_ms(metadata_time), "headers": duration_ms(header_time), "first_reasoning": first_reasoning_ms, "first_content": first_content_ms, "first_action": first_action_ms, "inference_total": duration_ms(request_started.elapsed()), "turn_total": duration_ms(turn_started.elapsed())},
+            "timing_ms": {"metadata": 0, "headers": duration_ms(header_time), "first_reasoning": first_reasoning_ms, "first_content": first_content_ms, "first_action": first_action_ms, "inference_total": duration_ms(request_started.elapsed()), "turn_total": duration_ms(turn_started.elapsed())},
             "transport_attempts": transport_attempts,
             "tokens": {"prompt": prompt_tokens, "completion": completion_tokens, "reasoning": reasoning_tokens, "cache": cache_tokens},
             "cost": metric_number(usage.get("cost")),
@@ -1550,6 +1545,7 @@ mod tests {
             ));
             std::fs::create_dir_all(&path).unwrap();
             std::fs::write(path.join(".env"), source).unwrap();
+            std::fs::write(path.join("stasis.json"), r#"{"manifest_version":1}"#).unwrap();
             Self(path)
         }
     }
@@ -1561,27 +1557,27 @@ mod tests {
     }
 
     #[test]
-    fn workspace_throughput_defaults_to_hard_400_unless_explicitly_configured() {
+    fn workspace_ai_policy_defaults_to_approved_model_and_performance_gates() {
         let fixture = WorkspaceFixture::new("OPENROUTER_API_KEY=test-key\n");
         let ProviderConfig::OpenRouter(config) =
             ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap()
         else {
             panic!("expected OpenRouter");
         };
-        assert_eq!(config.routing.hard_min_throughput, Some(400.0));
-        let config = OpenRouterConfig::from_lookup(&|name| match name {
-            "OPENROUTER_API_KEY" => Some("test-key".into()),
-            "STASIS_AI_PREFERRED_MIN_THROUGHPUT" => Some("250".into()),
-            _ => None,
-        })
-        .unwrap();
+        assert_eq!(config.routing.preferred_min_throughput, Some(400.0));
         assert_eq!(config.routing.hard_min_throughput, None);
-        assert_eq!(config.routing.preferred_min_throughput, Some(250.0));
+        assert_eq!(config.routing.preferred_max_latency_seconds, Some(2.0));
+        assert_eq!(config.approved_models.as_ref(), [DEFAULT_OPENROUTER_MODEL]);
     }
 
     #[test]
-    fn workspace_key_selects_openrouter_with_model_and_hard_throughput() {
-        let fixture = WorkspaceFixture::new("\u{feff}# project only\nexport OPENROUTER_API_KEY='test-key'\nSTASIS_AI_MODEL=\"openai/gpt-oss-120b\" # model\nSTASIS_AI_HARD_MIN_THROUGHPUT=400\nSTASIS_AI_ROUTE_ONLY=cerebras,groq\nSTASIS_AI_ROUTE_ORDER=groq,cerebras\nSTASIS_AI_ALLOW_FALLBACKS=false\nSTASIS_AI_ROUTE_SORT=throughput\nSTASIS_AI_MAX_PRICE=2\nSTASIS_AI_TIMEOUT_SECONDS=45\n");
+    fn workspace_manifest_owns_approved_models_and_performance_constraints() {
+        let fixture = WorkspaceFixture::new("\u{feff}# secrets and transport only\nexport OPENROUTER_API_KEY='test-key'\nSTASIS_AI_MODEL=ignored/model\nSTASIS_AI_HARD_MIN_THROUGHPUT=9999\nSTASIS_AI_ROUTE_ONLY=cerebras,groq\nSTASIS_AI_ROUTE_ORDER=groq,cerebras\nSTASIS_AI_ALLOW_FALLBACKS=false\nSTASIS_AI_ROUTE_SORT=throughput\nSTASIS_AI_MAX_PRICE=2\nSTASIS_AI_TIMEOUT_SECONDS=45\n");
+        std::fs::write(
+            fixture.0.join("stasis.json"),
+            r#"{"manifest_version":1,"ai":{"openrouter":{"approved_models":["openai/gpt-oss-120b","future/approved"],"min_throughput_tokens_per_second":450,"max_p50_latency_seconds":1.75}}}"#,
+        )
+        .unwrap();
         let ProviderConfig::OpenRouter(config) =
             ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap()
         else {
@@ -1589,12 +1585,35 @@ mod tests {
         };
         assert_eq!(config.api_key, "test-key");
         assert_eq!(config.model, "openai/gpt-oss-120b");
-        assert_eq!(config.routing.hard_min_throughput, Some(400.0));
+        assert_eq!(
+            config.approved_models.as_ref(),
+            ["openai/gpt-oss-120b", "future/approved"]
+        );
+        assert_eq!(config.routing.preferred_min_throughput, Some(450.0));
+        assert_eq!(config.routing.hard_min_throughput, None);
+        assert_eq!(config.routing.preferred_max_latency_seconds, Some(1.75));
         assert_eq!(config.routing.only, ["cerebras", "groq"]);
-        assert_eq!(config.routing.order, ["groq", "cerebras"]);
+        assert!(config.routing.order.is_empty());
+        assert!(matches!(config.routing.sort, RoutingSort::Price));
         assert!(!config.routing.allow_fallbacks);
         assert_eq!(config.routing.max_price, Some(2.0));
         assert_eq!(config.timeout, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn approved_model_list_is_bounded() {
+        let mut project = ProjectOpenRouterConfig {
+            approved_models: (0..=MAX_APPROVED_OPENROUTER_MODELS)
+                .map(|index| format!("approved/model-{index}"))
+                .collect(),
+            ..ProjectOpenRouterConfig::default()
+        };
+        assert_eq!(
+            project.validate().unwrap_err(),
+            "ai.openrouter.approved_models must contain at most 8 models"
+        );
+        project.approved_models.pop();
+        project.validate().unwrap();
     }
 
     #[test]
@@ -1618,7 +1637,7 @@ mod tests {
             panic!("expected OpenRouter");
         };
         assert_eq!(config.api_key, "environment-key");
-        assert_eq!(config.model, "other/model");
+        assert_eq!(config.model, DEFAULT_OPENROUTER_MODEL);
         let fixture =
             WorkspaceFixture::new("STASIS_AI_PROVIDER=codex\nOPENROUTER_API_KEY=file-key\n");
         assert!(matches!(
@@ -1716,7 +1735,7 @@ mod tests {
         for (name, value) in [
             ("STASIS_AI_PROVIDER", "openrouter"),
             ("OPENROUTER_API_KEY", secret),
-            ("STASIS_AI_MODEL", "openai/gpt-oss-120b"),
+            ("STASIS_AI_MODEL", "ignored/model"),
             ("STASIS_AI_ROUTE_ONLY", "cerebras,openai"),
             ("STASIS_AI_ALLOW_FALLBACKS", "false"),
             ("STASIS_AI_ROUTE_SORT", "latency"),
@@ -1732,9 +1751,9 @@ mod tests {
         assert_eq!(config.model, "openai/gpt-oss-120b");
         assert_eq!(config.routing.only, ["cerebras", "openai"]);
         assert!(!config.routing.allow_fallbacks);
-        assert!(matches!(config.routing.sort, RoutingSort::Latency));
+        assert!(matches!(config.routing.sort, RoutingSort::Price));
         assert_eq!(config.timeout, Duration::from_secs(45));
-        let route = OpenRouterProvider::new(config).unwrap().route_json(None);
+        let route = OpenRouterProvider::new(config).unwrap().route_json();
         assert!(!route.to_string().contains(secret));
     }
 
@@ -1797,19 +1816,21 @@ mod tests {
             preferred_min_throughput: Some(1500.0),
             preferred_throughput_policy: PreferredThroughputPolicy::AllowBelow,
             hard_min_throughput: None,
+            preferred_max_latency_seconds: None,
             max_price: Some(0.8),
         };
         let config = OpenRouterConfig {
             api_key: "secret".into(),
             base_url: DEFAULT_OPENROUTER_URL.into(),
             model: DEFAULT_OPENROUTER_MODEL.into(),
+            approved_models: default_approved_openrouter_models().into_boxed_slice(),
             routing,
             timeout: Duration::from_secs(2),
         };
         let provider = OpenRouterProvider::new(config).expect("provider");
         assert_eq!(
-            provider.route_json(None),
-            json!({"only":["cerebras"], "order":["cerebras","openai"], "allow_fallbacks":false, "sort":"price", "require_parameters":true, "preferred_min_throughput":1500.0, "max_price":{"completion":0.8}})
+            provider.route_json(),
+            json!({"only":["cerebras"], "order":["cerebras","openai"], "allow_fallbacks":false, "sort":{"by":"price","partition":"none"}, "require_parameters":true, "preferred_min_throughput":{"p50":1500.0}, "max_price":{"completion":0.8}})
         );
     }
 
@@ -1819,12 +1840,16 @@ mod tests {
             api_key: "secret".into(),
             base_url: DEFAULT_OPENROUTER_URL.into(),
             model: DEFAULT_OPENROUTER_MODEL.into(),
+            approved_models: default_approved_openrouter_models().into_boxed_slice(),
             routing: RoutingConfig::default(),
             timeout: Duration::from_secs(2),
         })
         .expect("provider");
         provider.reasoning_effort = Some("low".to_string());
-        assert_eq!(provider.route_json(None)["sort"], "throughput");
+        assert_eq!(
+            provider.route_json()["sort"],
+            json!({"by":"throughput", "partition":"none"})
+        );
 
         provider.observe_tool_results(&[crate::ToolObservation::error(
             "write_symbol",
@@ -1839,6 +1864,7 @@ mod tests {
             api_key: "secret".into(),
             base_url: DEFAULT_OPENROUTER_URL.into(),
             model: DEFAULT_OPENROUTER_MODEL.into(),
+            approved_models: default_approved_openrouter_models().into_boxed_slice(),
             routing: RoutingConfig {
                 hard_min_throughput: Some(1.0),
                 preferred_min_throughput: Some(2.0),
@@ -1955,6 +1981,7 @@ mod tests {
             api_key: "unit-secret".into(),
             base_url,
             model: DEFAULT_OPENROUTER_MODEL.into(),
+            approved_models: default_approved_openrouter_models().into_boxed_slice(),
             routing: RoutingConfig::default(),
             timeout: Duration::from_secs(2),
         }
@@ -1987,23 +2014,25 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_retries_preserve_qualified_route_and_then_succeed() {
-        let metadata = json!({"data":{"endpoints":[{
-            "tag":"cerebras/fp16", "status":"healthy",
-            "throughput_last_30m":{"p50":673.0}
-        }]}})
-        .to_string();
+    fn rate_limit_retries_preserve_native_route_request_and_then_succeed() {
         let limited = json!({"error":{"message":"temporarily rate limited"}}).to_string();
         let stream = done_stream("completed after retry");
         let (base_url, requests, worker) = mock_server(vec![
-            http_response("application/json", &metadata),
             http_error_response("429 Too Many Requests", Some("0"), &limited),
             http_error_response("429 Too Many Requests", Some("0"), &limited),
             http_response("text/event-stream", &stream),
         ]);
         let mut config = test_config(base_url);
-        config.routing.hard_min_throughput = Some(400.0);
+        config.approved_models = vec![
+            "openai/gpt-oss-120b".to_string(),
+            "qwen/qwen3-coder".to_string(),
+        ]
+        .into_boxed_slice();
+        config.routing.preferred_min_throughput = Some(400.0);
+        config.routing.preferred_max_latency_seconds = Some(2.0);
+        config.routing.sort = RoutingSort::Price;
         let mut provider = OpenRouterProvider::new(config).expect("provider");
+        provider.session_id = Some("stasis-task-sticky".to_string());
         let reply = provider
             .respond(&test_request(), &AtomicBool::new(false))
             .expect("bounded retry succeeds");
@@ -2011,19 +2040,30 @@ mod tests {
             reply,
             ModelResponse::Done { summary, .. } if summary == "completed after retry"
         ));
-        assert!(requests
-            .recv()
-            .expect("metadata request")
-            .starts_with("GET "));
         for _ in 0..3 {
             let request = requests.recv().expect("chat request");
             let json_start = request.find("\r\n\r\n").expect("headers") + 4;
             let body: Value = serde_json::from_str(&request[json_start..]).expect("body");
             assert_eq!(
-                body.pointer("/provider/only"),
-                Some(&json!(["cerebras/fp16"]))
+                body.get("models"),
+                Some(&json!(["openai/gpt-oss-120b", "qwen/qwen3-coder"]))
             );
+            assert!(body.get("model").is_none());
+            assert_eq!(
+                body.pointer("/provider/sort"),
+                Some(&json!({"by":"price", "partition":"none"}))
+            );
+            assert_eq!(
+                body.pointer("/provider/preferred_min_throughput/p50"),
+                Some(&json!(400.0))
+            );
+            assert_eq!(
+                body.pointer("/provider/preferred_max_latency/p50"),
+                Some(&json!(2.0))
+            );
+            assert_eq!(body.get("session_id"), Some(&json!("stasis-task-sticky")));
         }
+        assert!(requests.try_recv().is_err());
         assert_eq!(provider.take_usage().unwrap()["transport_attempts"], 3);
         worker.join().expect("server");
     }
@@ -2334,117 +2374,6 @@ mod tests {
     }
 
     #[test]
-    fn official_endpoint_metadata_uses_p50_numeric_status_and_normalized_slug() {
-        let metadata = json!({"data":{"endpoints":[
-            {"provider":"CEREBRAS","provider_name":"Cerebras Display", "status":0,
-             "throughput_last_30m":{"p50":1250.0,"p75":1400.0,"p90":1500.0,"p99":1600.0}},
-            {"provider":"unhealthy","status":1,"throughput_last_30m":{"p50":9000.0}},
-            {"provider_name":"Display Name Is Not A Slug","status":0,"throughput_last_30m":{"p50":9000.0}}
-        ]}}).to_string();
-        let (base_url, _requests, worker) =
-            mock_server(vec![http_response("application/json", &metadata)]);
-        let mut config = test_config(base_url);
-        config.routing.only = vec!["CeReBrAs".into()];
-        let provider = OpenRouterProvider::new(config).expect("provider");
-        let (qualifying, _) = provider
-            .qualifying_endpoints(1000.0, &AtomicBool::new(false))
-            .expect("official metadata");
-        assert_eq!(qualifying, vec!["cerebras"]);
-        worker.join().expect("mock worker");
-    }
-    #[test]
-    fn hard_throughput_preserves_qualified_endpoint_variants() {
-        // Real endpoint metadata uses variant tags, not display provider names.
-        let metadata = json!({"data":{"endpoints":[
-            {"provider_name":"Cerebras","provider":"cerebras","tag":"cerebras/fp16","status":0,"throughput_last_30m":{"p50":673,"p75":1044}},
-            {"provider_name":"Cerebras","tag":"cerebras/slow","status":0,"throughput_last_30m":{"p50":100}},
-            {"provider_name":"Groq","tag":"groq","status":0,"throughput_last_30m":{"p50":245}},
-            {"tag":"cerebras//invalid","status":0,"throughput_last_30m":{"p50":900}}
-        ]}}).to_string();
-        let (base_url, _requests, worker) =
-            mock_server(vec![http_response("application/json", &metadata)]);
-        let mut config = test_config(base_url);
-        config.routing.only = vec!["cerebras".into()];
-        let provider = OpenRouterProvider::new(config).unwrap();
-        let (qualified, _) = provider
-            .qualifying_endpoints(400.0, &AtomicBool::new(false))
-            .unwrap();
-        assert_eq!(qualified, ["cerebras/fp16"]);
-        assert_eq!(
-            provider.route_json(Some(qualified))["only"],
-            json!(["cerebras/fp16"])
-        );
-        worker.join().unwrap();
-        assert_eq!(
-            normalize_provider_slug("Google-Vertex/us-east5"),
-            Some("google-vertex/us-east5".into())
-        );
-        assert!(normalize_provider_slug("/cerebras").is_none());
-        assert!(normalize_provider_slug("cerebras/").is_none());
-    }
-
-    #[test]
-    fn hard_throughput_preflight_fails_closed_without_chat_request() {
-        let metadata = json!({"data":{"endpoints":[{"tag":"cerebras","status":"healthy","throughput":900.0}]}}).to_string();
-        let (base_url, requests, worker) =
-            mock_server(vec![http_response("application/json", &metadata)]);
-        let mut config = test_config(base_url);
-        config.routing.hard_min_throughput = Some(1000.0);
-        let mut provider = OpenRouterProvider::new(config).expect("provider");
-        let error = provider
-            .respond("request", &AtomicBool::new(false))
-            .expect_err("must fail closed");
-        assert!(error.contains("no healthy endpoint"));
-        let request = requests.recv().expect("preflight request");
-        assert!(request.starts_with("GET "));
-        worker.join().expect("mock worker");
-    }
-
-    #[test]
-    fn preflight_and_generation_share_one_timeout_deadline() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let worker = std::thread::spawn(move || {
-            let (mut metadata_stream, _) = listener.accept().expect("metadata accept");
-            let mut buffer = [0_u8; 2048];
-            let _ = metadata_stream.read(&mut buffer);
-            std::thread::sleep(Duration::from_millis(150));
-            let metadata = json!({"data":{"endpoints":[{
-                "provider":"cerebras", "status":0,
-                "throughput_last_30m":{"p50":1500.0}
-            }]}})
-            .to_string();
-            metadata_stream
-                .write_all(http_response("application/json", &metadata).as_bytes())
-                .expect("metadata response");
-            drop(metadata_stream);
-
-            let (mut chat_stream, _) = listener.accept().expect("chat accept");
-            let _ = chat_stream.read(&mut buffer);
-            std::thread::sleep(Duration::from_millis(250));
-        });
-
-        let mut config = test_config(format!("http://{address}"));
-        config.routing.hard_min_throughput = Some(1000.0);
-        config.timeout = Duration::from_millis(250);
-        let mut provider = OpenRouterProvider::new(config).expect("provider");
-        let started = Instant::now();
-        let error = provider
-            .respond(&test_request(), &AtomicBool::new(false))
-            .expect_err("shared timeout");
-        let elapsed = started.elapsed();
-        assert!(error.contains("timed out"));
-        assert!(
-            elapsed < Duration::from_millis(350),
-            "preflight and generation exceeded one timeout budget: {elapsed:?}"
-        );
-        worker.join().expect("worker");
-    }
-
-    #[test]
     fn stalled_transport_respects_timeout_without_leaking_secret() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -2561,6 +2490,7 @@ mod tests {
             api_key: "unit-secret".to_string(),
             base_url: "http://127.0.0.1:9".to_string(),
             model: DEFAULT_OPENROUTER_MODEL.to_string(),
+            approved_models: default_approved_openrouter_models().into_boxed_slice(),
             routing: RoutingConfig::default(),
             timeout: Duration::from_secs(1),
         });

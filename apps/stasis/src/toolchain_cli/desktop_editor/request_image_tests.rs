@@ -111,6 +111,7 @@ fn dispatch_checks_task_request_consent_and_exact_content() {
         api_key: "local-test-only".into(),
         base_url: "http://127.0.0.1:1".into(),
         model: "test/vision".into(),
+        approved_models: vec!["test/vision".into()].into_boxed_slice(),
         routing: stasis_ai::RoutingConfig::default(),
         timeout: Duration::from_secs(1),
     });

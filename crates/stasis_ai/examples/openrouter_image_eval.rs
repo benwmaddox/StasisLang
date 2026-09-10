@@ -44,7 +44,8 @@ fn main() -> Result<(), String> {
     let config = OpenRouterConfig {
         api_key,
         base_url: "https://openrouter.ai/api/v1".into(),
-        model,
+        model: model.clone(),
+        approved_models: vec![model].into_boxed_slice(),
         routing: RoutingConfig::default(),
         timeout: Duration::from_secs(120),
     };

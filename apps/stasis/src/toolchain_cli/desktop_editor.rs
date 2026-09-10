@@ -6020,6 +6020,7 @@ mod tests {
             api_key: "test-only".into(),
             base_url: "https://example.invalid".into(),
             model: "example/model".into(),
+            approved_models: vec!["example/model".into()].into_boxed_slice(),
             routing: stasis_ai::RoutingConfig::default(),
             timeout: Duration::from_secs(1),
         });

@@ -79,6 +79,13 @@ game window.
   "entry": "src/main.stasis",
   "tests": "tests",
   "output": "build",
+  "ai": {
+    "openrouter": {
+      "approved_models": ["openai/gpt-oss-120b"],
+      "min_throughput_tokens_per_second": 400,
+      "max_p50_latency_seconds": 2.0
+    }
+  },
   "web": {
     "loading_font": "/assets/fonts/display.ttf",
     "viewport": { "width": 1600, "height": 900 }
@@ -451,22 +458,31 @@ Creating a task sends its objective as the first message. The editor starts with
 symbol catalog and reads exact source symbols as needed, so a project does not have to fit
 all its source into the initial AI prompt. Proposed changes still require acceptance.
 
-The desktop editor reads AI settings from the selected project's `.env` (not the launcher's
-working directory). Process environment values take precedence. An `OPENROUTER_API_KEY`
-selects OpenRouter when `STASIS_AI_PROVIDER` is unset; an explicit provider selection wins.
-Keep `.env` ignored by Git. The key is not included in task history or AI context.
+The desktop editor reads secrets and transport selection from the selected project's `.env`
+(not the launcher's working directory). Process environment values take precedence for those
+operational settings. An `OPENROUTER_API_KEY` selects OpenRouter when `STASIS_AI_PROVIDER` is
+unset; an explicit provider selection wins. Keep `.env` ignored by Git. The key is not included
+in task history or AI context.
 
-OpenRouter defaults to a hard 400 tokens/second endpoint minimum, without a throughput
-override. Routing fails if no healthy endpoint qualifies; it does not fall back to a slower
-endpoint. This uses endpoint throughput metadata, not a guarantee of each request's measured
-speed. Explicit `STASIS_AI_HARD_MIN_THROUGHPUT` or preferred-throughput settings override
-the default. `STASIS_AI_MODEL` selects the model.
+Approved models and their performance preferences have one source of truth: `stasis.json`. The
+`ai.openrouter.approved_models` list defaults to `openai/gpt-oss-120b`, the current approved
+editor model. The defaults ask OpenRouter for at least 400 output tokens/second p50 throughput and
+at most 2.0 seconds p50 latency. These values are OpenRouter routing preferences, not hard endpoint
+exclusions or a guarantee that every edit completes in the 3-10 second product target.
+
+Normal generation is one request: Stasis sends the approved `models`, the two preferences, global
+lowest-price sorting, and a stable task `session_id` with the chat completion. There is no local
+metadata preflight or route cache. OpenRouter applies its current price, performance, and health
+view and owns server-side route and prompt-cache locality. All turns in a task reuse the same
+session ID; a new task gets a new ID. Manifest changes, provider reconnect, and editor restart
+reconstruct the request policy, while OpenRouter controls the lifetime and invalidation of its
+server-side caches.
 
 Failed requests show a credential-safe diagnostic in the task. Reconnect retries the saved
 request without duplicating its message during the current editor session. Reopening an
 editor never automatically replays an unfinished request. OpenRouter chat calls retry an
 HTTP 429 response up to two times before requiring a manual reconnect. Each retry remains
-inside the original request deadline and the same qualified endpoint set; a provider delay
+inside the original request deadline and use the same models, preferences, and session ID; a provider delay
 is capped at two seconds to keep the editor responsive.
 
 In the AI desktop editor, Ctrl+K or Ctrl+F opens the command palette. Type to
