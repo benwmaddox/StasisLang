@@ -21,8 +21,8 @@ use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
 use crate::frontend::types::{
-    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
-    TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+    TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::{AssignTarget, SimpleCondition, SimpleExpr, SimpleStmt};
 use crate::ir::hir::{DebugStatement, FunctionHIR};
@@ -2318,13 +2318,19 @@ impl JitProcess {
         let tick_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.tick)?;
         let render_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.render)?;
         let render_construction_reset_code_ptr = self
-            .symbol_code_ptrs()
-            .get("gfx_cmd_construction_reset")
-            .copied();
+            .optional_render_construction_helper_code_ptr(
+                "gfx_cmd_construction_reset",
+                TYPE_ID_VOID,
+                &[],
+                "function gfx_cmd_construction_reset(): void",
+            )?;
         let render_construction_finish_code_ptr = self
-            .symbol_code_ptrs()
-            .get("gfx_cmd_construction_finish")
-            .copied();
+            .optional_render_construction_helper_code_ptr(
+                "gfx_cmd_construction_finish",
+                TYPE_ID_I32,
+                &[TYPE_ID_I32],
+                "function gfx_cmd_construction_finish(render_result: i32): i32",
+            )?;
         if render_construction_reset_code_ptr.is_some()
             != render_construction_finish_code_ptr.is_some()
         {
@@ -2374,6 +2380,35 @@ impl JitProcess {
         self.artifact_for_function_id(function.id)
             .map(|artifact| artifact.code_ptr)
             .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))
+    }
+
+    fn optional_render_construction_helper_code_ptr(
+        &self,
+        name: &str,
+        expected_return_type: TypeId,
+        expected_params: &[TypeId],
+        expected_signature: &str,
+    ) -> Result<Option<u64>, String> {
+        if !self
+            .compiler
+            .functions()
+            .iter()
+            .any(|function| function.name == name)
+        {
+            return Ok(None);
+        }
+        let function = self.unique_host_alias(name)?;
+        if function.return_type != expected_return_type || function.params != expected_params {
+            return Err(format!(
+                "render construction helper signature mismatch for '{name}': expected `{expected_signature}`; actual return type id {}, parameter types {:?}",
+                function.return_type, function.params
+            ));
+        }
+        self.artifact_for_function_id(function.id)
+            .map(|artifact| Some(artifact.code_ptr))
+            .ok_or_else(|| {
+                format!("compiled artifact missing for render construction helper '{name}'")
+            })
     }
 
     fn unique_host_alias(&self, name: &str) -> Result<&FunctionMeta, String> {
@@ -8963,6 +8998,37 @@ function main(): i32 { batch.update(0); return 0; }
             .expect_err("void tick should fail");
         assert!(error.contains("expected `function tick(): i32`"));
         assert!(error.contains("actual return type id"));
+    }
+
+    #[test]
+    fn jit_engine_package_rejects_invalid_render_construction_helper_signatures() {
+        let mut invalid_reset = JitProcess::new();
+        invalid_reset.upsert_file(
+            "tests/stasis/seams/invalid_render_construction_reset.stasis",
+            "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction @internal gfx_cmd_construction_reset(): i32 { return 0; }\nfunction @internal gfx_cmd_construction_finish(render_result: i32): i32 { return render_result; }\n",
+        );
+        invalid_reset
+            .compile()
+            .expect("compile invalid reset fixture");
+        let error = invalid_reset
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect_err("invalid reset signature must fail packaging");
+        assert!(error.contains("expected `function gfx_cmd_construction_reset(): void`"));
+        drop(invalid_reset);
+
+        let mut invalid_finish = JitProcess::new();
+        invalid_finish.upsert_file(
+            "tests/stasis/seams/invalid_render_construction_finish.stasis",
+            "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction @internal gfx_cmd_construction_reset(): void { return; }\nfunction @internal gfx_cmd_construction_finish(): i32 { return 0; }\n",
+        );
+        invalid_finish
+            .compile()
+            .expect("compile invalid finish fixture");
+        let error = invalid_finish
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect_err("invalid finish signature must fail packaging");
+        assert!(error
+            .contains("expected `function gfx_cmd_construction_finish(render_result: i32): i32`"));
     }
 
     #[test]
