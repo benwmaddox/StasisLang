@@ -464,22 +464,25 @@ operational settings. An `OPENROUTER_API_KEY` selects OpenRouter when `STASIS_AI
 unset; an explicit provider selection wins. Keep `.env` ignored by Git. The key is not included
 in task history or AI context.
 
-Approved models and their performance gates have one source of truth: `stasis.json`. The
+Approved models and their performance preferences have one source of truth: `stasis.json`. The
 `ai.openrouter.approved_models` list defaults to `openai/gpt-oss-120b`, the current approved
-editor model. The performance defaults require OpenRouter's rolling p50 endpoint metadata to
-report at least 400 output tokens/second and less than 2.0 seconds latency. Stasis discards missing,
-unhealthy, or nonqualifying endpoints, then pins the lowest completion-price qualifying
-model/endpoint. The decision is sticky within a task and is reused across tasks through a bounded
-five-minute process cache, avoiding metadata lookup on every model turn. Completed no-qualifying
-decisions back off for 15 seconds, concurrent tasks with the same policy share one refresh, and
-each refresh is capped at eight approved model lookups. These are routing
-admission metrics, not a guarantee that every edit completes in the 3-10 second product target.
+editor model. The defaults ask OpenRouter for at least 400 output tokens/second p50 throughput and
+at most 2.0 seconds p50 latency. These values are OpenRouter routing preferences, not hard endpoint
+exclusions or a guarantee that every edit completes in the 3-10 second product target.
+
+Normal generation is one request: Stasis sends the approved `models`, the two preferences, global
+lowest-price sorting, and a stable task `session_id` with the chat completion. There is no local
+metadata preflight or route cache. OpenRouter applies its current price, performance, and health
+view and owns server-side route and prompt-cache locality. All turns in a task reuse the same
+session ID; a new task gets a new ID. Manifest changes, provider reconnect, and editor restart
+reconstruct the request policy, while OpenRouter controls the lifetime and invalidation of its
+server-side caches.
 
 Failed requests show a credential-safe diagnostic in the task. Reconnect retries the saved
 request without duplicating its message during the current editor session. Reopening an
 editor never automatically replays an unfinished request. OpenRouter chat calls retry an
 HTTP 429 response up to two times before requiring a manual reconnect. Each retry remains
-inside the original request deadline and the same qualified endpoint set; a provider delay
+inside the original request deadline and use the same models, preferences, and session ID; a provider delay
 is capped at two seconds to keep the editor responsive.
 
 In the AI desktop editor, Ctrl+K or Ctrl+F opens the command palette. Type to

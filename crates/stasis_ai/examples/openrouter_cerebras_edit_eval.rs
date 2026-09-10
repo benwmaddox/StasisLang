@@ -29,7 +29,6 @@ fn main() -> Result<(), String> {
         .current_dir(&project)
         .env("STASIS_AI_PROVIDER", "openrouter")
         .env("STASIS_AI_ROUTE_ONLY", "cerebras")
-        .env("STASIS_AI_ROUTE_ORDER", "cerebras")
         .env("STASIS_AI_ALLOW_FALLBACKS", "false")
         .args(["ai", prompt])
         .output()
