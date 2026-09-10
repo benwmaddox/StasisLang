@@ -484,8 +484,11 @@ struct JitArena {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitEnginePackage {
+    pub render_construction_lifecycle_version: u32,
     pub tick_code_ptr: u64,
     pub render_code_ptr: u64,
+    pub render_construction_reset_code_ptr: Option<u64>,
+    pub render_construction_finish_code_ptr: Option<u64>,
     pub on_code_swap_code_ptr: Option<u64>,
     pub symbol_code_ptrs: BTreeMap<String, u64>,
     pub function_code_ptrs: BTreeMap<FunctionId, u64>,
@@ -505,6 +508,12 @@ impl JitEnginePackage {
             main: main as usize,
             tick: self.tick_code_ptr as usize,
             render: self.render_code_ptr as usize,
+            render_construction_reset: self
+                .render_construction_reset_code_ptr
+                .map(|address| address as usize),
+            render_construction_finish: self
+                .render_construction_finish_code_ptr
+                .map(|address| address as usize),
             on_code_swap: self.on_code_swap_code_ptr.map(|address| address as usize),
         })
     }
@@ -1335,8 +1344,15 @@ impl JitProcess {
     }
 
     fn is_host_export_name(&self, name: &str) -> bool {
-        matches!(name, "main" | "tick" | "render" | "on_code_swap")
-            || self.required_emit_roots.iter().any(|root| root == name)
+        matches!(
+            name,
+            "main"
+                | "tick"
+                | "render"
+                | "on_code_swap"
+                | "gfx_cmd_construction_reset"
+                | "gfx_cmd_construction_finish"
+        ) || self.required_emit_roots.iter().any(|root| root == name)
     }
 
     pub fn clif_for_function_name(&self, name: &str) -> Option<&str> {
@@ -2301,6 +2317,24 @@ impl JitProcess {
     ) -> Result<JitEnginePackage, String> {
         let tick_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.tick)?;
         let render_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.render)?;
+        let render_construction_reset_code_ptr = self
+            .symbol_code_ptrs()
+            .get("gfx_cmd_construction_reset")
+            .copied();
+        let render_construction_finish_code_ptr = self
+            .symbol_code_ptrs()
+            .get("gfx_cmd_construction_finish")
+            .copied();
+        if render_construction_reset_code_ptr.is_some()
+            != render_construction_finish_code_ptr.is_some()
+        {
+            return Err(
+                "render construction lifecycle requires matching reset and finish helpers"
+                    .to_string(),
+            );
+        }
+        let render_construction_lifecycle_version =
+            u32::from(render_construction_reset_code_ptr.is_some());
         let on_code_swap_code_ptr = if let Some(name) = entrypoints.on_code_swap.as_ref() {
             self.validate_on_code_swap_signature()?;
             Some(self.code_ptr_for_function_name(name)?)
@@ -2309,8 +2343,11 @@ impl JitProcess {
         };
 
         Ok(JitEnginePackage {
+            render_construction_lifecycle_version,
             tick_code_ptr,
             render_code_ptr,
+            render_construction_reset_code_ptr,
+            render_construction_finish_code_ptr,
             on_code_swap_code_ptr,
             symbol_code_ptrs: self.symbol_code_ptrs(),
             function_code_ptrs: self.function_code_ptrs(),

@@ -1677,7 +1677,7 @@ fn run_android_workshop_tick_internal(
         drop(external_url_authorization);
         take_embedded_resource_error().map_err(|error| resource_phase_error("tick", error))?;
         session.tick_count = session.tick_count.saturating_add(1);
-        execute_optional_lifecycle_noarg(&session.jit, "render")
+        execute_render_construction(&session.jit)
             .map_err(|error| AndroidBridgeError::phase("runtime_entry", "render", error, None))?;
         take_embedded_resource_error().map_err(|error| resource_phase_error("render", error))?;
         let write_runtime_state = should_write_jit_runtime_state(initialized, recompiled);
@@ -2212,6 +2212,60 @@ fn execute_optional_lifecycle_noarg(jit: &JitProcess, name: &str) -> Result<(), 
         Ok(()) => Ok(()),
         Err(error) if error.contains("function '") && error.contains("not found") => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+fn execute_render_construction(jit: &JitProcess) -> Result<(), String> {
+    let snapshot = jit.program_snapshot();
+    let has_render = snapshot.is_some_and(|snapshot| {
+        snapshot
+            .functions()
+            .iter()
+            .any(|function| function.name == "render")
+    });
+    if !has_render {
+        return Ok(());
+    }
+    let has_reset = snapshot.is_some_and(|snapshot| {
+        snapshot
+            .functions()
+            .iter()
+            .any(|function| function.name == "gfx_cmd_construction_reset")
+    });
+    let has_finish = snapshot.is_some_and(|snapshot| {
+        snapshot
+            .functions()
+            .iter()
+            .any(|function| function.name == "gfx_cmd_construction_finish")
+    });
+    match (has_reset, has_finish) {
+        (false, false) => execute_optional_lifecycle_noarg(jit, "render"),
+        (true, true) => {
+            jit.execute_void_noarg_by_name("gfx_cmd_construction_reset")?;
+            let render_result = match jit.execute_i32_noarg_by_name("render") {
+                Ok(result) => result,
+                Err(i32_error) => jit
+                    .execute_void_noarg_by_name("render")
+                    .map(|()| 0)
+                    .map_err(|void_error| {
+                        format!(
+                            "failed executing render construction: i32={i32_error}; void={void_error}"
+                        )
+                    })?,
+            };
+            let result =
+                jit.execute_i32_onearg_by_name("gfx_cmd_construction_finish", render_result)?;
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "render construction returned nonzero status {result}"
+                ))
+            }
+        }
+        _ => Err(
+            "render construction lifecycle requires matching reset and finish helpers".to_string(),
+        ),
     }
 }
 
@@ -3061,9 +3115,12 @@ pub extern "C" fn stasis_android_bridge_run_render_frame(
         let i32_values = std::slice::from_raw_parts_mut(out_i32, out_i32_len);
         let f32_values = std::slice::from_raw_parts_mut(out_f32, out_f32_len);
         let u8_values = std::slice::from_raw_parts_mut(out_u8, out_u8_len);
-        stasis_dynload::copy_jit_render_active(i32_values, f32_values, u8_values)
+        let copied = stasis_dynload::copy_jit_render_active(i32_values, f32_values, u8_values)
             .map_err(|error| AndroidBridgeError::phase("render_schema", "render", error, None))?;
-        write_android_display_metadata(i32_values).map_err(AndroidBridgeError::from)
+        if copied.published {
+            write_android_display_metadata(i32_values).map_err(AndroidBridgeError::from)?;
+        }
+        Ok(())
     }));
     match result {
         Ok(Ok(())) => {
@@ -4796,7 +4853,7 @@ function tick(): void {}
             take_embedded_resource_error()
                 .map_err(|error| format!("touch tick resource error: {}", error.detail))?;
             session.tick_count = session.tick_count.saturating_add(1);
-            execute_optional_lifecycle_noarg(&session.jit, "render")?;
+            execute_render_construction(&session.jit)?;
             take_embedded_resource_error()
                 .map_err(|error| format!("touch render resource error: {}", error.detail))?;
             Ok(())
@@ -5953,7 +6010,7 @@ function tick(): void {}
             expected_checksum,
             "IT-017 stable frame must retain its checked-in state oracle"
         );
-        assert_eq!(&frame_i32[0..5], &[1196967473, 7, 3, 0, 0]);
+        assert_eq!(&frame_i32[0..5], &[1196967473, 8, 3, 0, 0]);
         assert_eq!(frame_i32[7], 0, "IT-017 sample must not emit text");
         assert_eq!(frame_i32[9], 0, "IT-017 sample must not emit text bytes");
         assert_eq!(frame_i32[10], logical_w);
@@ -6065,7 +6122,7 @@ function tick(): void {}
                 .expect("read IT-018 stable probe sequence"),
             0
         );
-        assert_eq!(&frame_i32[..5], &[1196967473, 7, 3, 0, 0]);
+        assert_eq!(&frame_i32[..5], &[1196967473, 8, 3, 0, 0]);
         assert_eq!(
             &frame_i32[10..16],
             &[logical_w, logical_h, NATIVE_W, NATIVE_H, NATIVE_W, NATIVE_H]
@@ -6309,7 +6366,7 @@ function tick(): void {}
         assert!((global_f32("seam_pointer_y") - 540.0).abs() < 0.01);
         assert!((global_f32("seam_pointer_x_n") - 0.75).abs() < 0.01);
         assert!((global_f32("seam_pointer_y_n") - 0.75).abs() < 0.01);
-        assert_eq!(frame_i32[1], 7);
+        assert_eq!(frame_i32[1], 8);
         assert_eq!(frame_i32[22], 3, "IT-018 final render order count");
         assert_eq!(frame_i32[24], 3, "IT-018 final render rectangle count");
         assert_eq!(
@@ -7123,7 +7180,7 @@ function on_code_swap(): void {}\n",
     }
 
     #[test]
-    fn it031_render_schema_frame_failure_is_typed_at_copy_call_site() {
+    fn negotiated_render_discards_stale_malformed_working_storage() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("it031_render_schema");
@@ -7148,9 +7205,9 @@ function on_code_swap(): void {}\n",
         }
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("src/main.stasis").expect("entry cstr");
-        let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
-        let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
-        let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
+        let mut i32_values = vec![-71; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut f32_values = vec![-72.0; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut u8_values = vec![73; ANDROID_RENDER_GFX_U8_CAPACITY];
         let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
@@ -7166,26 +7223,10 @@ function on_code_swap(): void {}\n",
             u8_values.as_mut_ptr(),
             u8_values.len(),
         );
-        assert_eq!(status, -1);
-        let error_ptr = stasis_android_bridge_last_frame_error();
-        let error = unsafe { CStr::from_ptr(error_ptr) }
-            .to_string_lossy()
-            .into_owned();
-        stasis_android_bridge_free_string(error_ptr);
-        let envelope = error
-            .split("diagnostic_envelope=")
-            .nth(1)
-            .map(percent_decode_for_test)
-            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
-            .expect("render envelope");
-        assert_eq!(envelope["stage"], "render_schema");
-        assert_eq!(envelope["code"], "stasis.renderSchema");
-        assert_eq!(envelope["context"]["symbol"], "render");
-        assert_eq!(envelope["causes"][0], "render_schema phase");
-        assert_eq!(
-            envelope["causes"].as_array().unwrap().last().unwrap(),
-            &envelope["detail"]
-        );
+        assert_eq!(status, 0);
+        assert!(i32_values.iter().all(|value| *value == -71));
+        assert!(f32_values.iter().all(|value| *value == -72.0));
+        assert!(u8_values.iter().all(|value| *value == 73));
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
     }
@@ -7206,7 +7247,6 @@ global host_req_window_h_px: i32;
 function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
 function tick(): void {}
 function render(): void {
-  begin_frame();
   clear(0.1, 0.2, 0.3, 0.4);
   draw_line(host_f32[0], host_f32[1], 30.0, 40.0, 1.0, 0.0, 0.0, 1.0);
   draw_text(5, \"A\", 12.0, 13.0, 1.0, 1.0, 1.0, 1.0);
@@ -7238,7 +7278,7 @@ function render(): void {
         );
         assert_eq!(status, 0);
         // Current source frames copy into the canonical destination layout.
-        assert_eq!(&frame_i32[..5], &[1196967473, 7, 3, 1, 0]);
+        assert_eq!(&frame_i32[..5], &[1196967473, 8, 3, 1, 0]);
         assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
         assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
         assert_eq!(&frame_i32[20..22], &[1, 1]);

@@ -319,7 +319,8 @@
   // Keep the production gfx_cmd decoder values named and mechanically checked
   // against runtime/stasis_render_contract.h by the ABI gate.
   const GFX_CMD_MAGIC = 0x47584631;
-  const GFX_CMD_VERSION = 7;
+  const GFX_CMD_VERSION = 8;
+  const GFX_CMD_LEGACY_VERSION = 7;
   const GFX_FLAG_CLEAR = 1;
   const GFX_FLAG_PRESENT = 2;
   const GFX_I_MAGIC = 0;
@@ -2701,11 +2702,13 @@
           lastTexture = null;
         },
         beginFrame: (red, green, blue, alpha = 1) => {
+          gl.clearColor(red, green, blue, alpha);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        },
+        prepareFrame: () => {
           failIfLost();
           gl.disable(gl.SCISSOR_TEST);
           gl.viewport(0, 0, display.backingWidth, display.backingHeight);
-          gl.clearColor(red, green, blue, alpha);
-          gl.clear(gl.COLOR_BUFFER_BIT);
         },
         setClip: clip => {
           if (!clip) { gl.disable(gl.SCISSOR_TEST); return; }
@@ -2864,6 +2867,7 @@
     }
   };
   function executeCommands() {
+    getGpuBatcher()?.prepareFrame();
     performanceWorkload.commands += commands.length;
     for (const command of commands) {
       if (command[0] === 0) {
@@ -2889,7 +2893,7 @@
     const f32 = new Float32Array(instance.exports.memory.buffer, fLayout.offset, fLayout.length);
     if (i32[GFX_I_MAGIC] !== GFX_CMD_MAGIC) return;
     const version = i32[GFX_I_VERSION];
-    if (version !== GFX_CMD_VERSION) return;
+    if (version !== GFX_CMD_VERSION && version !== GFX_CMD_LEGACY_VERSION) return;
     const publishedSprites = i32[GFX_I_SPRITE_COUNT];
     const publishedRuns = i32[GFX_I_SPRITE_RUN_COUNT];
     if (publishedSprites < 0 || publishedSprites > GFX_MAX_SPRITES
@@ -2919,6 +2923,7 @@
     const batcher = getGpuBatcher();
     if (!batcher) return;
     const flags = i32[GFX_I_FLAGS];
+    if (version >= 8 && !(flags & GFX_FLAG_PRESENT)) return;
     if (flags & GFX_FLAG_CLEAR) {
       batcher.beginFrame(f32[GFX_F_CLEAR_BASE], f32[GFX_F_CLEAR_BASE + 1],
         f32[GFX_F_CLEAR_BASE + 2], Math.max(0, Math.min(1, f32[GFX_F_CLEAR_BASE + 3])));
@@ -3450,7 +3455,29 @@
     instance.exports.tick();
     const tickMs = performance.now() - tickStart;
     const wasmRenderStart = performance.now();
-    instance.exports.render();
+    const constructionReset = instance.exports.gfx_cmd_construction_reset;
+    const constructionFinish = instance.exports.gfx_cmd_construction_finish;
+    if ((typeof constructionReset === "function") !== (typeof constructionFinish === "function")) {
+      throw new Error("render construction lifecycle requires matching reset and finish exports");
+    }
+    const lifecycleVersion = typeof constructionReset === "function" ? 1 : 0;
+    if ((game.renderConstructionLifecycleVersion ?? 0) !== lifecycleVersion) {
+      throw new Error(`render construction lifecycle mismatch: package=${game.renderConstructionLifecycleVersion ?? 0} runtime=${lifecycleVersion}`);
+    }
+    const renderContractVersion = game.renderContractVersion ?? GFX_CMD_LEGACY_VERSION;
+    const expectedRenderContractVersion = lifecycleVersion === 1
+      ? GFX_CMD_VERSION : GFX_CMD_LEGACY_VERSION;
+    if (renderContractVersion !== expectedRenderContractVersion) {
+      throw new Error(`render contract mismatch: package=${renderContractVersion} lifecycle=${lifecycleVersion} expected=${expectedRenderContractVersion}`);
+    }
+    if (typeof constructionReset === "function") constructionReset();
+    const renderResult = instance.exports.render();
+    const constructionResult = typeof constructionFinish === "function"
+      ? constructionFinish(renderResult ?? 0) : (renderResult ?? 0);
+    if (constructionResult !== 0) {
+      document.body.dataset.guestStopped = String(constructionResult);
+      return;
+    }
     const wasmRenderMs = performance.now() - wasmRenderStart;
     performanceWorkload.commands = 0;
     performanceWorkload.lines = 0;

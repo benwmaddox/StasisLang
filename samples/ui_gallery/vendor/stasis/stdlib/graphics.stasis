@@ -539,7 +539,7 @@ function set_maximized_canvas(width: i32, height: i32): i32 {
 
 // Legacy-ish names retained as pure wrappers (no host calls).
 function begin_frame(): void {
-    gfx_cmd_begin();
+    gfx_cmd_manual_begin();
 }
 
 function end_frame(): void {

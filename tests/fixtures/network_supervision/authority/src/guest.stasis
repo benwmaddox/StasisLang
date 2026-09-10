@@ -9,7 +9,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.02, 0.04, 0.08, 1.0);
     end_frame();
     return 0;

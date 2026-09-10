@@ -1548,6 +1548,16 @@ fn build_engine_bundle_manifest(
         "  \"optimization_profile\": \"{}\",\n",
         optimization_profile.as_str()
     ));
+    let has_reset = rows
+        .iter()
+        .any(|(_, _, name, _, _, _)| name == "gfx_cmd_construction_reset");
+    let has_finish = rows
+        .iter()
+        .any(|(_, _, name, _, _, _)| name == "gfx_cmd_construction_finish");
+    let lifecycle_version = if has_reset && has_finish { 1 } else { 0 };
+    out.push_str(&format!(
+        "  \"render_construction_lifecycle_version\": {lifecycle_version},\n"
+    ));
     out.push_str("  \"entrypoints\": {\n");
     out.push_str(&format!(
         "    \"tick\": \"{}\",\n",

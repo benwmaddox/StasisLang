@@ -27,7 +27,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.04, 0.08, 0.16, 1.0);
     draw_line(0.0, 0.0, 359.0, 0.0, 1.0, 0.2, 0.1, 1.0);
     draw_line(359.0, 0.0, 359.0, 719.0, 0.2, 1.0, 0.1, 1.0);

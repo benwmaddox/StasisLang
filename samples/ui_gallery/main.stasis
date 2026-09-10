@@ -44,7 +44,6 @@ function tick(): i32 {
 
 function render(): i32 {
     ui_gallery_host_frame.refresh();
-    begin_frame();
     clear(0.02, 0.04, 0.07, 1.0);
     gallery_layout(UiPass.Paint);
     end_frame();

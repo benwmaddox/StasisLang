@@ -6165,8 +6165,8 @@ function render(): void {{ {draws} return; }}
         let runtime_cmake = STASIS_RUNTIME_CMAKE.replace("\r\n", "\n");
         for required in [
             "STASIS_RENDER_MAGIC 0x47584631",
-            "STASIS_RENDER_VERSION 7",
-            "STASIS_RENDER_TRACE_VERSION 7",
+            "STASIS_RENDER_VERSION 8",
+            "STASIS_RENDER_TRACE_VERSION 8",
             "STASIS_RENDER_I_ORDER_BASE",
             "STASIS_RENDER_I_RECT_COUNT",
             "STASIS_RENDER_MAX_ORDER",

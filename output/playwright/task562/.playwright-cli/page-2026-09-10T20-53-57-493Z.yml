@@ -1,0 +1,7 @@
+- main [ref=e2]:
+  - generic "render_parity game canvas" [ref=e3]
+  - status [ref=e4]:
+    - generic [ref=e5]:
+      - heading "render_parity" [level=1] [ref=e7]
+      - generic [ref=e9]: Preparing…
+  - status: Starting Wasm...

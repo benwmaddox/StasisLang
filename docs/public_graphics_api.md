@@ -2,9 +2,11 @@
 
 Application Stasis code imports `stdlib/graphics.stasis`. The supported frame path is:
 
-1. `begin_frame()` and `clear(...)`.
+1. Enter `render()`; a lifecycle-v1 host resets the command builder exactly once before calling guest code. Call optional `clear(...)` when the frame requests background replacement.
 2. Immediate `draw_line`, `fill_rect`, typed `draw_sprite(SpriteRef, ...)`, `draw_text`, drawable methods, or caller-owned `PresentationList`, `SpriteRunWriter`, and `LineBatch` values.
-3. `end_frame()`.
+3. Call `end_frame()` to request publication. Repeated calls are idempotent, and a later `clear(...)` preserves the request.
+
+Returning without `end_frame()` discards the working construction. A nonzero render result, malformed frame, or unfinished `SpriteRunWriter` also aborts it, leaving the last accepted frame independently owned by the consumer. A no-clear publication requests no background replacement and does not promise retained framebuffer pixels. `begin_frame()` remains only for legacy packages and explicit manual/tick-only builders; negotiated `render()` implementations must not call it.
 
 `LineBatch` owns storage for 512 typed `Line` values and its bounded count. Use `reset_lines`, `append` or `append_line`, then `draw`. Failed appends return `false`; drawing clamps a corrupted count to owned storage. Lines still enter the canonical command stream one at a time, preserving painter order, the shared line/rectangle capacity, and deterministic drop accounting.
 

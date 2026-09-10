@@ -234,6 +234,8 @@ pub struct JitHostEntryTargets {
     pub main: usize,
     pub tick: usize,
     pub render: usize,
+    pub render_construction_reset: Option<usize>,
+    pub render_construction_finish: Option<usize>,
     pub on_code_swap: Option<usize>,
 }
 
@@ -803,7 +805,21 @@ extern "C" fn stasis_jit_host_tick_trampoline() -> i32 {
 }
 
 extern "C" fn stasis_jit_host_render_trampoline() -> i32 {
-    call_jit_host_i32_target(active_jit_host_target(|targets| Some(targets.render)))
+    let Some(targets) = jit_host_entry_targets() else {
+        return -1;
+    };
+    match (
+        targets.render_construction_reset,
+        targets.render_construction_finish,
+    ) {
+        (Some(reset), Some(finish)) => {
+            call_jit_host_void_target(reset);
+            let result = call_jit_host_i32_target(targets.render);
+            call_jit_host_i32_arg_target(finish, result)
+        }
+        (None, None) => call_jit_host_i32_target(targets.render),
+        _ => -1,
+    }
 }
 
 extern "C" fn stasis_jit_host_on_code_swap_trampoline() {
@@ -833,6 +849,17 @@ fn call_jit_host_void_target(address: usize) {
     #[cfg(not(windows))]
     let callback: extern "C" fn() = unsafe { std::mem::transmute(address) };
     callback();
+}
+
+fn call_jit_host_i32_arg_target(address: usize, value: i32) -> i32 {
+    if address == 0 {
+        return -1;
+    }
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(value)
 }
 
 pub fn invoke_noarg_u64(address: usize) -> Result<u64, String> {
@@ -3903,7 +3930,8 @@ pub const STASIS_RENDER_I32_COUNT: usize = 67_888;
 pub const STASIS_RENDER_F32_COUNT: usize = 146_564;
 pub const STASIS_RENDER_U8_COUNT: usize = 65_536;
 pub const STASIS_RENDER_MAGIC: i32 = 0x4758_4631;
-pub const STASIS_RENDER_VERSION: i32 = 7;
+pub const STASIS_RENDER_VERSION: i32 = 8;
+pub const STASIS_RENDER_LEGACY_VERSION: i32 = 7;
 const STASIS_RENDER_HEADER_I32_COUNT: usize = 10;
 const STASIS_RENDER_ORDER_COUNT_INDEX: usize = 22;
 const STASIS_RENDER_ORDER_HEADER_END: usize = 24;
@@ -3941,6 +3969,7 @@ const STASIS_RENDER_CLIP_STRIDE_F32: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderActiveCounts {
+    pub published: bool,
     pub lines: usize,
     pub rects: usize,
     pub sprites: usize,
@@ -3982,7 +4011,7 @@ pub fn copy_jit_render_active(
         return Err("production render buffers were not registered by the JIT".to_string());
     }
     let version = unsafe { *i32_header_ptr.add(1) };
-    if version != STASIS_RENDER_VERSION {
+    if version != STASIS_RENDER_VERSION && version != STASIS_RENDER_LEGACY_VERSION {
         return Err(format!(
             "JIT frame has unsupported gfx_cmd version {version}; expected {STASIS_RENDER_VERSION}"
         ));
@@ -4004,12 +4033,34 @@ pub fn copy_jit_render_active(
     let source_i32 = unsafe { std::slice::from_raw_parts(i32_ptr, STASIS_RENDER_I32_COUNT) };
     let source_f32 = unsafe { std::slice::from_raw_parts(f32_ptr, STASIS_RENDER_F32_COUNT) };
     let source_u8 = unsafe { std::slice::from_raw_parts(u8_ptr, STASIS_RENDER_U8_COUNT) };
-    if source_i32[0] != STASIS_RENDER_MAGIC || source_i32[1] != STASIS_RENDER_VERSION {
+    if source_i32[0] != STASIS_RENDER_MAGIC
+        || (source_i32[1] != STASIS_RENDER_VERSION && source_i32[1] != STASIS_RENDER_LEGACY_VERSION)
+    {
         return Err("JIT frame is not a supported production gfx_cmd frame".to_string());
+    }
+    if source_i32[1] == STASIS_RENDER_VERSION && source_i32[2] & 2 == 0 {
+        return Ok(RenderActiveCounts {
+            published: false,
+            lines: 0,
+            rects: 0,
+            sprites: 0,
+            sprite_runs: 0,
+            text: 0,
+            text_bytes: 0,
+            order: 0,
+            clips: 0,
+        });
+    }
+    if unsafe {
+        stasis_render_trace_native(source_i32.as_ptr(), source_f32.as_ptr(), source_u8.as_ptr())
+    } == 0
+    {
+        return Err("JIT frame failed canonical render validation".to_string());
     }
 
     let lines = source_i32[3].clamp(0, STASIS_RENDER_MAX_LINES as i32) as usize;
     let counts = RenderActiveCounts {
+        published: true,
         lines,
         rects: source_i32[STASIS_RENDER_RECT_COUNT_INDEX]
             .clamp(0, (STASIS_RENDER_MAX_GEOMETRY - lines) as i32) as usize,
@@ -4133,7 +4184,10 @@ pub fn current_render_trace(cmd_i32: &[i32], cmd_f32: &[f32], cmd_u8: &[u8]) -> 
         || cmd_f32.len() != STASIS_RENDER_F32_COUNT
         || cmd_u8.len() != STASIS_RENDER_U8_COUNT
         || cmd_i32.first().copied() != Some(STASIS_RENDER_MAGIC)
-        || cmd_i32.get(1).copied() != Some(STASIS_RENDER_VERSION)
+        || !matches!(
+            cmd_i32.get(1).copied(),
+            Some(STASIS_RENDER_VERSION) | Some(STASIS_RENDER_LEGACY_VERSION)
+        )
     {
         return 0;
     }
@@ -4161,7 +4215,9 @@ pub unsafe extern "C" fn stasis_jit_render_trace(
     }
     let magic = *cmd_i32_header;
     let version = *cmd_i32_header.add(1);
-    if magic != STASIS_RENDER_MAGIC || version != STASIS_RENDER_VERSION {
+    if magic != STASIS_RENDER_MAGIC
+        || (version != STASIS_RENDER_VERSION && version != STASIS_RENDER_LEGACY_VERSION)
+    {
         return 0;
     }
     let cmd_i32 = stasis_jit_global_i32_array_ptr(cmd_i32_id, 0, cmd_i32_len);
@@ -8442,7 +8498,9 @@ mod tests {
         );
         assert_eq!(current_render_trace(&i32s, &f32s, &u8s[..u8s.len() - 1]), 0);
 
-        i32s[1] = STASIS_RENDER_VERSION - 1;
+        i32s[1] = STASIS_RENDER_LEGACY_VERSION;
+        assert_ne!(current_render_trace(&i32s, &f32s, &u8s), 0);
+        i32s[1] = STASIS_RENDER_LEGACY_VERSION - 1;
         assert_eq!(current_render_trace(&i32s, &f32s, &u8s), 0);
         i32s[1] = STASIS_RENDER_VERSION;
         i32s[0] ^= 1;
@@ -8537,9 +8595,13 @@ mod tests {
         let mut u8s = vec![0u8; STASIS_RENDER_U8_COUNT];
         i32s[0] = STASIS_RENDER_MAGIC;
         i32s[1] = STASIS_RENDER_VERSION;
+        i32s[2] = 2;
         i32s[3] = 1;
         i32s[STASIS_RENDER_RECT_COUNT_INDEX] = 2;
         i32s[STASIS_RENDER_ORDER_COUNT_INDEX] = 3;
+        i32s[STASIS_RENDER_ORDER_BASE] = 16_384;
+        i32s[STASIS_RENDER_ORDER_BASE + 1] = 4 * 16_384;
+        i32s[STASIS_RENDER_ORDER_BASE + 2] = 4 * 16_384 + 1;
         f32s[4..12].copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 0.4]);
         let rect_start = STASIS_RENDER_SPRITE_BASE_F32 - 2 * STASIS_RENDER_LINE_STRIDE;
         f32s[rect_start..STASIS_RENDER_SPRITE_BASE_F32].copy_from_slice(&[
@@ -8567,6 +8629,7 @@ mod tests {
         let counts = copy_jit_render_active(&mut out_i32, &mut out_f32, &mut out_u8)
             .expect("copy current buffer");
 
+        assert!(counts.published);
         assert_eq!(counts.lines, 1);
         assert_eq!(counts.rects, 2);
         assert_eq!(counts.order, 3);
@@ -8575,6 +8638,51 @@ mod tests {
             &out_f32[rect_start..STASIS_RENDER_SPRITE_BASE_F32],
             &f32s[rect_start..STASIS_RENDER_SPRITE_BASE_F32]
         );
+
+        clear_registered_global_memory();
+    }
+
+    #[test]
+    fn active_render_copy_leaves_accepted_storage_unchanged_without_publication() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+
+        let mut i32s = vec![0i32; STASIS_RENDER_I32_COUNT];
+        let mut f32s = vec![0.0f32; STASIS_RENDER_F32_COUNT];
+        let mut u8s = vec![0u8; STASIS_RENDER_U8_COUNT];
+        i32s[0] = STASIS_RENDER_MAGIC;
+        i32s[1] = STASIS_RENDER_VERSION;
+        i32s[3] = 1;
+        register_global_i32_array(
+            global_path_hash("gfx_cmd_i32"),
+            0,
+            i32s.as_mut_ptr(),
+            i32s.len(),
+        );
+        register_global_f32_array(
+            global_path_hash("gfx_cmd_f32"),
+            0,
+            f32s.as_mut_ptr(),
+            f32s.len(),
+        );
+        register_global_u8_array(
+            global_path_hash("gfx_cmd_u8"),
+            0,
+            u8s.as_mut_ptr(),
+            u8s.len(),
+        );
+
+        let mut out_i32 = vec![41i32; STASIS_RENDER_I32_COUNT];
+        let mut out_f32 = vec![42.0f32; STASIS_RENDER_F32_COUNT];
+        let mut out_u8 = vec![43u8; STASIS_RENDER_U8_COUNT];
+        let counts = copy_jit_render_active(&mut out_i32, &mut out_f32, &mut out_u8)
+            .expect("reject unpublished working buffer without mutating accepted storage");
+
+        assert!(!counts.published);
+        assert_eq!(counts.lines, 0);
+        assert!(out_i32.iter().all(|value| *value == 41));
+        assert!(out_f32.iter().all(|value| *value == 42.0));
+        assert!(out_u8.iter().all(|value| *value == 43));
 
         clear_registered_global_memory();
     }
@@ -9102,6 +9210,8 @@ mod tests {
             main: host_entry_one as *const () as usize,
             tick: host_entry_one as *const () as usize,
             render: host_entry_one as *const () as usize,
+            render_construction_reset: None,
+            render_construction_finish: None,
             on_code_swap: None,
         })
         .expect("publish first host-entry table");
@@ -9113,6 +9223,8 @@ mod tests {
             main: host_entry_two as *const () as usize,
             tick: host_entry_two as *const () as usize,
             render: host_entry_two as *const () as usize,
+            render_construction_reset: None,
+            render_construction_finish: None,
             on_code_swap: None,
         })
         .expect("publish second host-entry table");
@@ -9126,6 +9238,8 @@ mod tests {
             main: host_entry_one as *const () as usize,
             tick: host_entry_one as *const () as usize,
             render: host_entry_one as *const () as usize,
+            render_construction_reset: None,
+            render_construction_finish: None,
             on_code_swap: None,
         })
         .expect_err("stale publication")

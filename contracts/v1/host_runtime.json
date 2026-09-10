@@ -51,7 +51,7 @@
     "accepted_versions": [7],
     "constants": {
       "STASIS_RENDER_MAGIC": 1196967473,
-      "STASIS_RENDER_VERSION": 7,
+      "STASIS_RENDER_VERSION": 8,
       "STASIS_RENDER_TRACE_VERSION": 7,
       "STASIS_GRAPHICS_RUNTIME_ABI_VERSION": 3,
       "STASIS_RENDER_I32_COUNT": 67888,

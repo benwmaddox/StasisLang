@@ -17,6 +17,7 @@ $codexRustRoot = Join-Path $upstreamRoot "codex-rs"
 $wrapperRoot = Join-Path $codexRustRoot "stasis-codex-android"
 $sharedAiRoot = Join-Path $codexRustRoot "stasis-ai"
 $patchPath = Join-Path $scriptRoot "patches\codex-android-rustls.patch"
+$cargoInvocationRoot = (Get-Location).Path
 
 if (-not $AndroidHome) {
     if ($env:ANDROID_HOME) {
@@ -62,7 +63,7 @@ Copy-Item -Force (Join-Path $scriptRoot "codex_native\Cargo.toml") (Join-Path $w
 Copy-Item -Force (Join-Path $scriptRoot "codex_native\src\lib.rs") (Join-Path $wrapperRoot "src\lib.rs")
 New-Item -ItemType Directory -Force (Join-Path $sharedAiRoot "src") | Out-Null
 Copy-Item -Force (Join-Path $repoRoot "crates\stasis_ai\Cargo.toml") (Join-Path $sharedAiRoot "Cargo.toml")
-Copy-Item -Force (Join-Path $repoRoot "crates\stasis_ai\src\lib.rs") (Join-Path $sharedAiRoot "src\lib.rs")
+Copy-Item -Recurse -Force (Join-Path $repoRoot "crates\stasis_ai\src\*") (Join-Path $sharedAiRoot "src")
 $sharedManifest = Join-Path $sharedAiRoot "Cargo.toml"
 $sharedCargo = Get-Content -Raw $sharedManifest
 $sharedCargo = $sharedCargo.Replace('version.workspace = true', 'version = "0.1.0"')
@@ -70,6 +71,7 @@ $sharedCargo = $sharedCargo.Replace('edition.workspace = true', 'edition = "2021
 $sharedCargo = $sharedCargo.Replace('license.workspace = true', 'license = "MIT"')
 $sharedCargo = $sharedCargo.Replace('serde.workspace = true', 'serde = { version = "1", features = ["derive"] }')
 $sharedCargo = $sharedCargo.Replace('serde_json.workspace = true', 'serde_json = "1"')
+$sharedCargo = $sharedCargo.Replace('atomic-write-file.workspace = true', 'atomic-write-file = "0.3"')
 Set-Content -NoNewline -Path $sharedManifest -Value $sharedCargo
 $wrapperManifest = Join-Path $wrapperRoot "Cargo.toml"
 $wrapperCargo = Get-Content -Raw $wrapperManifest
@@ -109,7 +111,16 @@ foreach ($abi in $Abis) {
     cargo +1.95.0 build --manifest-path (Join-Path $wrapperRoot "Cargo.toml") --target $rustTarget @profileArgs
     if ($LASTEXITCODE -ne 0) { throw "Codex Android native build failed with exit code $LASTEXITCODE" }
 
-    $source = Join-Path $codexRustRoot "target\$rustTarget\$profileDir\libstasis_codex_android.so"
+    $targetRoot = if ($env:CARGO_TARGET_DIR) {
+        if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+            [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+        } else {
+            [System.IO.Path]::GetFullPath((Join-Path $cargoInvocationRoot $env:CARGO_TARGET_DIR))
+        }
+    } else {
+        Join-Path $codexRustRoot "target"
+    }
+    $source = Join-Path $targetRoot "$rustTarget\$profileDir\libstasis_codex_android.so"
     if (-not (Test-Path $source)) { throw "Codex Android library was not produced: $source" }
     $destDir = Join-Path $scriptRoot "app\src\workshop\jniLibs\$abi"
     New-Item -ItemType Directory -Force $destDir | Out-Null

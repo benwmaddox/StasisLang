@@ -30,6 +30,18 @@ pub fn wasm_global_hash(path: &str) -> i32 {
     hash_global_path(path)
 }
 
+fn is_wasm_host_export(name: &str) -> bool {
+    matches!(
+        name,
+        "main"
+            | "tick"
+            | "render"
+            | "on_code_swap"
+            | "gfx_cmd_construction_reset"
+            | "gfx_cmd_construction_finish"
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WasmProcess {
     compiler: Compiler,
@@ -960,12 +972,7 @@ fn encode_module(
     uleb(
         functions
             .iter()
-            .filter(|(function, _)| {
-                matches!(
-                    function.name.as_str(),
-                    "main" | "tick" | "render" | "on_code_swap"
-                )
-            })
+            .filter(|(function, _)| is_wasm_host_export(&function.name))
             .count() as u32
             + if debug_symbols {
                 globals.len() as u32
@@ -977,10 +984,7 @@ fn encode_module(
         &mut export_section,
     );
     for (index, (function, _)) in functions.iter().enumerate() {
-        if !matches!(
-            function.name.as_str(),
-            "main" | "tick" | "render" | "on_code_swap"
-        ) {
+        if !is_wasm_host_export(&function.name) {
             continue;
         }
         string(&function.name, &mut export_section);
@@ -1114,12 +1118,7 @@ fn encode_module(
         functions
             .iter()
             .enumerate()
-            .filter(|(_, (function, _))| {
-                matches!(
-                    function.name.as_str(),
-                    "main" | "tick" | "render" | "on_code_swap"
-                )
-            })
+            .filter(|(_, (function, _))| is_wasm_host_export(&function.name))
             .map(|(index, (function, _))| ((imports.len() + index) as u32, function.name.clone()))
             .collect()
     };

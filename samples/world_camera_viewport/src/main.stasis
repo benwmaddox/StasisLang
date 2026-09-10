@@ -188,7 +188,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.02, 0.03, 0.06, 1.0);
     // The current host renders immediately after each tick, so the live phase
     // is the completed endpoint. The cadence test models future 120 Hz phases.

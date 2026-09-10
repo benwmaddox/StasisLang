@@ -120,7 +120,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.04, 0.06, 0.1, 1.0);
     if (gate.phase == LoadingPhase.Gameplay) {
         draw_sprite(hero.sprite_ref, 288.0, 148.0, 64.0, 64.0, 0, 255);

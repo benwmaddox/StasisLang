@@ -1,8 +1,9 @@
 # BeginFrame tracked-source inventory
 
-Companion to [the design proposal](begin_frame_design.md). Audited 2026-09-10.
-Line numbers identify the pre-proposal source snapshot; function names in the
-proposal remain useful after lines move. Includes comments, fixture strings and
+Companion to [the implemented design](begin_frame_design.md). Audited 2026-09-10.
+This is the immutable pre-migration inventory used to scope Task 562, not a list
+of current call sites. Line numbers identify that source snapshot; function names
+remain useful after lines move. Includes comments, fixture strings and
 UI names so that similarly named operations are not silently conflated.
 Third-party ThorVG animation segment documentation is excluded: its "begin frame"
 is an animation range, not a Stasis rendering lifecycle call.
@@ -452,4 +453,3 @@ is a test stub. No compiler-specific BeginFrame lowering was found.
 ## [vscode-stasis/test/fixture/src/main.stasis](../vscode-stasis/test/fixture/src/main.stasis)
 
 - Line 40: `begin_frame();`
-

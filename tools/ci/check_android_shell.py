@@ -1681,7 +1681,8 @@ def main() -> int:
     assert '"orientation": "sensorLandscape"' in pong_project
     preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
     assert 'import "/vendor/stasis/src/stdlib/graphics.stasis";' in preview_adapter
-    assert "begin_frame();" in preview_adapter
+    assert "begin_frame();" not in preview_adapter
+    assert "end_frame();" in preview_adapter
     assert "PongHost.writer.reserve(4," in preview_adapter
     assert "PongHost.writer.finalize(4);" in preview_adapter
     assert "gfx_cmd_i32" not in preview_adapter

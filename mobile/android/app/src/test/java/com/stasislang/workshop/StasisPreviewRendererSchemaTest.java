@@ -213,8 +213,13 @@ public final class StasisPreviewRendererSchemaTest {
         assertTrue(StasisPreviewRenderer.shouldPresent(frame, floats));
         for (int version = 2; version < RENDER_VERSION; version += 1) {
             frame.put(1, version);
-            assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
-            assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
+            if (version == StasisPreviewRenderer.LEGACY_RENDER_VERSION) {
+                assertTrue(StasisPreviewRenderer.isValidFrame(frame, floats));
+                assertTrue(StasisPreviewRenderer.shouldPresent(frame, floats));
+            } else {
+                assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
+                assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
+            }
         }
         frame.put(1, 1);
         assertFalse(StasisPreviewRenderer.isValidFrame(frame, floats));
