@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { encodeVideo } from "./network_browser_video.mjs";
-import { waitForBrowserEndpoint } from "./network_browser_startup.mjs";
+import { startBrowserWithRetry } from "./network_browser_startup.mjs";
 
 class Cdp {
   constructor(url) {
@@ -50,7 +50,6 @@ const scratchRoot = path.resolve("target/network-browser-scratch");
 await mkdir(scratchRoot, { recursive: true });
 const scratch = await mkdtemp(path.join(scratchRoot, "run-"));
 const readyFile = path.join(scratch, "ready.txt");
-const profile = path.join(scratch, "chrome-profile");
 
 const host = spawn(hostExecutable, ["--ready-file", readyFile], { stdio: ["ignore", "pipe", "pipe"] });
 let hostStdout = "";
@@ -65,15 +64,19 @@ let frame = 0;
 try {
   const port = Number(await waitForFile(readyFile, 15_000));
   assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, "host returned an invalid port");
-  browser = spawn(browserExecutable, [
-    "--headless=new", "--no-sandbox", "--disable-gpu-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
-    "--no-first-run", "--no-default-browser-check",
-    "--remote-allow-origins=*",
-    "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
-  ], { stdio: ["ignore", "pipe", "pipe"] });
-  browser.stderr.on("data", chunk => { browserStderr += chunk; });
-  // Cold browser initialization on hosted Windows runners can exceed 15 seconds.
-  const { port: debugPort, version } = await waitForBrowserEndpoint(browser, profile, 60_000);
+  const started = await startBrowserWithRetry(attempt => {
+    const profile = path.join(scratch, `chrome-profile-${attempt}`);
+    const candidate = spawn(browserExecutable, [
+      "--headless=new", "--no-sandbox", "--disable-gpu-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+      "--no-first-run", "--no-default-browser-check",
+      "--remote-allow-origins=*",
+      "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    candidate.stderr.on("data", chunk => { browserStderr += chunk; });
+    return { browser: candidate, profile };
+  }, terminate, { attempts: 2, timeout: 60_000 });
+  browser = started.browser;
+  const { port: debugPort, version } = started;
   const pageInfo = await fetch(`http://127.0.0.1:${debugPort}/json/new?about%3Ablank`, { method: "PUT" }).then(checkResponse).then(r => r.json());
   cdp = new Cdp(pageInfo.webSocketDebuggerUrl);
   await cdp.ready;

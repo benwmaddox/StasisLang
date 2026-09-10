@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { waitForBrowserEndpoint } from "../network_browser_startup.mjs";
+import { startBrowserWithRetry, waitForBrowserEndpoint } from "../network_browser_startup.mjs";
 
 const fixture = `
   const http = require('node:http');
@@ -66,4 +66,27 @@ test("a hanging debugging HTTP endpoint cannot exceed the startup bound", { time
 test("a launch error is reported without an unhandled child error", { timeout: 5_000 }, async () => {
   const child = spawn(path.resolve("target/nonexistent-browser-startup-fixture.exe"), [], { stdio: "ignore" });
   await assert.rejects(waitForBrowserEndpoint(child, "", 10_000), /could not be launched/);
+});
+
+test("a hung browser is stopped before a clean-profile retry", { timeout: 5_000 }, async t => {
+  const first = await startFixture(t, "hang");
+  const second = await startFixture(t, "ready");
+  const launches = [first, second];
+  const stopped = [];
+  const result = await startBrowserWithRetry(
+    attempt => ({ browser: launches[attempt - 1].child, profile: launches[attempt - 1].profile }),
+    async browser => {
+      stopped.push(browser);
+      if (browser.exitCode === null && browser.signalCode === null) {
+        const closed = once(browser, "close");
+        browser.kill();
+        await closed;
+      }
+    },
+    { attempts: 2, timeout: 500 },
+  );
+  assert.equal(stopped.length, 1);
+  assert.equal(stopped[0], first.child);
+  assert.equal(result.browser, second.child);
+  assert.equal(result.version.Browser, "startup-fixture");
 });

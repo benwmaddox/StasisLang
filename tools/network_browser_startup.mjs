@@ -2,6 +2,21 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
+export async function startBrowserWithRetry(launch, stop, { attempts, timeout }) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const started = await launch(attempt);
+    try {
+      const endpoint = await waitForBrowserEndpoint(started.browser, started.profile, timeout);
+      return { ...started, ...endpoint };
+    } catch (error) {
+      lastError = error;
+      await stop(started.browser);
+    }
+  }
+  throw new Error(`browser startup failed after ${attempts} attempts: ${lastError?.message || "unknown error"}`);
+}
+
 export async function waitForBrowserEndpoint(browser, profile, timeout) {
   const deadline = performance.now() + timeout;
   let launchFailed = false;
