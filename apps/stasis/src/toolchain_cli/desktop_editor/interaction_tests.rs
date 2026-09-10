@@ -266,7 +266,13 @@ fn composer_stays_visible_at_narrow_wide_and_high_dpi_sizes() {
         let size = egui::vec2(width, height);
         frame(&mut editor, &context, size, vec![]);
         let output = frame(&mut editor, &context, size, vec![]);
-        for label in ["Reply to Stasis AI...", "Send to AI"] {
+        for label in [
+            "Reply to Stasis AI...",
+            "Attach image",
+            "Send (Ctrl+Enter)",
+            "Success (Ctrl+Shift+D)",
+            "Reject (Ctrl+Esc)",
+        ] {
             let rects = text_rects(&output, label);
             assert_eq!(rects.len(), 1, "{width}x{height}@{scale}: {label}");
             assert!(
@@ -436,7 +442,7 @@ fn disabled_send_ignores_pointer_and_focus_command_allows_typing() {
     let size = egui::vec2(1100.0, 900.0);
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    let send = text_rects(&output, "Send to AI")[0].center();
+    let send = text_rects(&output, "Send (Ctrl+Enter)")[0].center();
     click(&mut editor, &context, size, send);
     assert!(editor.controller.snapshot(&TaskId::new("task-1")).is_none());
     assert!(editor
@@ -462,6 +468,48 @@ fn disabled_send_ignores_pointer_and_focus_command_allows_typing() {
         vec![egui::Event::Text("Keep the draft task-local".into())],
     );
     assert_eq!(editor.state.reply, "Keep the draft task-local");
+}
+
+#[test]
+fn ready_task_keeps_send_success_and_reject_choices_visible() {
+    let mut editor = editor();
+    editor.controller = TaskController::new(|_, _| Ok(ProviderReply::new("acknowledged")));
+    editor.state.session.begin_focused_tests().unwrap();
+    editor
+        .state
+        .session
+        .finish_focused_tests(stasis_ai::FocusedTestResult::passed("ready"))
+        .unwrap();
+    editor.validation_fingerprints.insert(
+        "task-1".into(),
+        ("fixture-source".into(), vec!["focused".into()]),
+    );
+    editor.state.reply = "Please make one last small adjustment".into();
+
+    let context = egui::Context::default();
+    let size = egui::vec2(940.0, 900.0);
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+
+    assert_eq!(text_rects(&output, "Attach image").len(), 1);
+    assert_eq!(text_rects(&output, "Send (Ctrl+Enter)").len(), 1);
+    assert_eq!(text_rects(&output, "Success (Ctrl+Shift+D)").len(), 1);
+    assert_eq!(text_rects(&output, "Reject (Ctrl+Esc)").len(), 1);
+
+    let send = text_rects(&output, "Send (Ctrl+Enter)")[0].center();
+    click(&mut editor, &context, size, send);
+    assert!(editor
+        .state
+        .session
+        .active_task()
+        .unwrap()
+        .thread
+        .iter()
+        .any(|message| message.text == "Please make one last small adjustment"));
+    assert_eq!(
+        editor.state.session.active_task().unwrap().lifecycle,
+        TaskLifecycle::Active
+    );
 }
 
 #[test]
@@ -564,8 +612,8 @@ fn provider_request_disables_new_work_only_on_its_own_task() {
     let size = egui::vec2(1100.0, 900.0);
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    assert_eq!(text_rects(&output, "Reject task (Ctrl+Esc)").len(), 1);
-    assert!(text_rects(&output, "Send to AI").is_empty());
+    assert_eq!(text_rects(&output, "Reject (Ctrl+Esc)").len(), 1);
+    assert_eq!(text_rects(&output, "Send (Ctrl+Enter)").len(), 1);
     editor.state.objective = "Independent task".into();
     editor.state.create_task().unwrap();
     assert!(editor.ui_busy(editor.state.session.active_task().unwrap()));
@@ -621,15 +669,17 @@ fn cancel_requires_confirmation_and_keeps_originating_task_identity() {
 }
 
 #[test]
-fn disconnected_active_task_keeps_visible_reject_action() {
+fn disconnected_active_task_keeps_simple_outcomes_visible() {
     let mut editor = editor();
     editor.state.session.disconnect().unwrap();
     let context = egui::Context::default();
     let size = egui::vec2(680.0, 900.0);
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    assert_eq!(text_rects(&output, "Reconnect").len(), 1);
-    assert_eq!(text_rects(&output, "Reject... (Ctrl+Esc)").len(), 1);
+    assert!(text_rects(&output, "Reconnect").is_empty());
+    assert_eq!(text_rects(&output, "Send (Ctrl+Enter)").len(), 1);
+    assert_eq!(text_rects(&output, "Success (Ctrl+Shift+D)").len(), 1);
+    assert_eq!(text_rects(&output, "Reject (Ctrl+Esc)").len(), 1);
 
     frame(
         &mut editor,
