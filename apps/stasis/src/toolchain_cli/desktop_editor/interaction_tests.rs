@@ -478,6 +478,9 @@ fn compact_chrome_reserves_space_for_notices_task_creation_and_status() {
     let objective = "Make the paddle slightly wider without changing collision timing";
     for width in [420.0, 520.0, 620.0] {
         let mut editor = editor();
+        editor.project_root = PathBuf::from(
+            "a-very-long-project-directory-name-that-must-not-hide-task-creation-controls",
+        );
         editor.state.notice = Some(notice.into());
         editor.state.session.active_task_mut().unwrap().objective = objective.into();
         let context = egui::Context::default();
@@ -509,6 +512,12 @@ fn compact_chrome_reserves_space_for_notices_task_creation_and_status() {
             "header overlaps at {width}: {title:?} / {status:?}"
         );
         assert!(screen.contains_rect(status));
+        editor.state.objective = "Create from the compact header".into();
+        click(&mut editor, &context, size, create.center());
+        assert_eq!(
+            editor.state.session.active_task().unwrap().objective,
+            "Create from the compact header"
+        );
     }
 }
 

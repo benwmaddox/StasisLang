@@ -4468,9 +4468,16 @@ impl DesktopEditor {
 impl DesktopEditor {
     fn compact_rail(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(project_name(&self.project_root)).strong());
-            let input_width =
-                (ui.available_width() - 72.0 - ui.spacing().item_spacing.x).clamp(100.0, 250.0);
+            let spacing = ui.spacing().item_spacing.x;
+            let project_width = (ui.available_width() * 0.25)
+                .min((ui.available_width() - 164.0 - 2.0 * spacing).max(0.0));
+            let name = project_name(&self.project_root);
+            ui.add_sized(
+                [project_width, 30.0],
+                egui::Label::new(RichText::new(&name).strong()).truncate(true),
+            )
+            .on_hover_text(&name);
+            let input_width = (ui.available_width() - 64.0 - spacing).clamp(0.0, 250.0);
             let input = ui.add_sized(
                 [input_width, 30.0],
                 egui::TextEdit::singleline(&mut self.state.objective)

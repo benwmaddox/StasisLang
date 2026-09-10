@@ -145,3 +145,21 @@ Theory gained: host progress must describe the isolated validation transaction;
 source publication begins only after child validation and the final fingerprint
 check. The passing isolation regression supports retaining that boundary when
 adding future progress or persistence features.
+
+## Compact project-name review repair
+
+The compact header now reserves the task input and button widths before sizing
+its project label. Long names truncate with the full name available on hover.
+The regression uses a long project basename at 420, 520, and 620 points, checks
+control bounds, and creates a task through a pointer click on `+ Task`.
+
+Validation: all 14 interaction tests passed; the opt-in native capture test
+passed. Targeted rustfmt and `git diff --check` passed.
+
+Visual evidence: `compact-long-project.png` was captured and inspected at
+520 x 900 pixels. It shows the truncated project label, readable objective input,
+and fully visible `+ Task` button. This is a deterministic graphical fixture.
+
+Theory gained: compact controls need reserved width before variable-length
+labels are laid out; the long-name pointer regression verifies task creation
+remains reachable regardless of the project basename.

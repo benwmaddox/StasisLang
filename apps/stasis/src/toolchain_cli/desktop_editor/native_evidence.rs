@@ -26,6 +26,9 @@ fn capture_native_task_timeline() {
         .canonicalize()
         .unwrap();
     let mut editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+    if let Ok(name) = std::env::var("STASIS_EDITOR_EVIDENCE_PROJECT_NAME") {
+        editor.project_root = root.join(name);
+    }
     for objective in [
         "Improve enemy movement",
         "Add an arena tileset",
