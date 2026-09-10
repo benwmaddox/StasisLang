@@ -11620,6 +11620,7 @@ mod tests {
         );
         assert_eq!(manifest.ai.openrouter.min_throughput_tokens_per_second, 400);
         assert_eq!(manifest.ai.openrouter.max_p50_latency_seconds, 2.0);
+        assert!(!manifest.ai.editor.auto_persist_html_transcripts);
         let encoded = serde_json::to_value(&manifest).unwrap();
         assert_eq!(
             encoded.pointer("/ai/openrouter/approved_models/0"),
@@ -11628,6 +11629,10 @@ mod tests {
         assert_eq!(
             encoded.pointer("/ai/openrouter/max_p50_latency_seconds"),
             Some(&json!(2.0))
+        );
+        assert_eq!(
+            encoded.pointer("/ai/editor/auto_persist_html_transcripts"),
+            Some(&json!(false))
         );
 
         let legacy: ProjectManifest = serde_json::from_value(json!({

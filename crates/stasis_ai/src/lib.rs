@@ -16,10 +16,11 @@ pub mod task_session;
 
 pub use openrouter::{
     ConfiguredProvider, ImageInputCapability, OpenRouterConfig, OpenRouterImageInput,
-    OpenRouterProvider, PreferredThroughputPolicy, ProjectAiConfig, ProjectOpenRouterConfig,
-    ProviderConfig, ProviderKind, RoutingConfig, RoutingSort, APPROVED_OPENROUTER_MODELS,
-    DEFAULT_OPENROUTER_MAX_LATENCY_SECONDS, DEFAULT_OPENROUTER_MIN_THROUGHPUT,
-    DEFAULT_OPENROUTER_MODEL, MAX_OPENROUTER_IMAGES, MAX_OPENROUTER_IMAGE_BYTES,
+    OpenRouterProvider, PreferredThroughputPolicy, ProjectAiConfig, ProjectEditorConfig,
+    ProjectOpenRouterConfig, ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+    APPROVED_OPENROUTER_MODELS, DEFAULT_OPENROUTER_MAX_LATENCY_SECONDS,
+    DEFAULT_OPENROUTER_MIN_THROUGHPUT, DEFAULT_OPENROUTER_MODEL, MAX_OPENROUTER_IMAGES,
+    MAX_OPENROUTER_IMAGE_BYTES,
 };
 
 pub use session_store::{
@@ -36,11 +37,11 @@ pub use task_controller::{
 pub use task_session::{
     ActionId, ActionKind, ActionRevision, ActionState, ConnectionState, FallbackState,
     FocusedTestResult, GeneratedImageArtifact, GeneratedImageId, ImageAttribution,
-    ImageHandoffState, ImageReviewState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
-    ScreenshotAnalysisState, ScreenshotAttachment, ScreenshotId, ShortcutBinding, ShortcutMapper,
-    Task, TaskAction, TaskId, TaskLifecycle, TaskMetrics, TaskProvenance, TaskSession,
-    TaskSessionCommand, TaskSessionError, ThreadEntry, ThreadEntryKind, UploadState,
-    ValidationStatus, VisionCapability,
+    ImageHandoffState, ImageReviewState, Key, KeyChord, Modifiers, ProviderState,
+    ProviderTurnMetrics, RoutingState, ScreenshotAnalysisState, ScreenshotAttachment, ScreenshotId,
+    ShortcutBinding, ShortcutMapper, Task, TaskAction, TaskId, TaskLifecycle, TaskMetrics,
+    TaskProvenance, TaskSession, TaskSessionCommand, TaskSessionError, ThreadEntry,
+    ThreadEntryKind, UploadState, ValidationStatus, VisionCapability,
 };
 
 pub const DEFAULT_AGENT_TURNS: usize = 50;

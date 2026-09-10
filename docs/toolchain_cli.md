@@ -494,6 +494,11 @@ underlying task fields and global shortcuts, including Ctrl+Enter and Escape.
 The palette exposes new task, next/previous task and individual task switching,
 focus reply/game, send reply, accept/reject/apply action, focused tests, retry,
 attach screenshot, generate/import image, reconnect, cancel, and mark done.
+It also exposes **Export chat as HTML**, which writes a user-selected, self-contained
+snapshot of the active task without contacting the configured AI provider.
+Set `ai.editor.auto_persist_html_transcripts` to `true` in `stasis.json` to
+atomically keep task transcripts current in the Git-ignored
+`.stasis_cache/logs/ai-transcripts/` folder. The default is `false`.
 Unsent objective and reply drafts are kept separately for each task across both
 mouse and keyboard switching. Creating a task consumes the objective, starts
 with an empty reply, and preserves the previous task's unsent reply.

@@ -482,7 +482,7 @@ fn unified_file_diff(file: &str, diff: &FileDiff) -> String {
     output
 }
 
-fn unified_diff(plan: &WorkshopSemanticEditPlan) -> String {
+pub(super) fn unified_diff(plan: &WorkshopSemanticEditPlan) -> String {
     if plan.changed_files.is_empty() {
         return "No semantic source changes.\n".to_string();
     }

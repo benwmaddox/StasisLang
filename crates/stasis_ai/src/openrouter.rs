@@ -32,6 +32,14 @@ const MAX_APPROVED_OPENROUTER_MODELS: usize = 8;
 pub struct ProjectAiConfig {
     #[serde(default)]
     pub openrouter: ProjectOpenRouterConfig,
+    #[serde(default)]
+    pub editor: ProjectEditorConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectEditorConfig {
+    #[serde(default)]
+    pub auto_persist_html_transcripts: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,7 +88,7 @@ impl ProjectAiConfig {
         self.openrouter.validate()
     }
 
-    fn from_workspace(root: &Path) -> Result<Self, String> {
+    pub fn from_workspace(root: &Path) -> Result<Self, String> {
         let path = root.join("stasis.json");
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -1559,6 +1567,12 @@ mod tests {
     #[test]
     fn workspace_ai_policy_defaults_to_approved_model_and_performance_gates() {
         let fixture = WorkspaceFixture::new("OPENROUTER_API_KEY=test-key\n");
+        assert!(
+            !ProjectAiConfig::from_workspace(&fixture.0)
+                .unwrap()
+                .editor
+                .auto_persist_html_transcripts
+        );
         let ProviderConfig::OpenRouter(config) =
             ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap()
         else {
@@ -1575,7 +1589,7 @@ mod tests {
         let fixture = WorkspaceFixture::new("\u{feff}# secrets and transport only\nexport OPENROUTER_API_KEY='test-key'\nSTASIS_AI_MODEL=ignored/model\nSTASIS_AI_HARD_MIN_THROUGHPUT=9999\nSTASIS_AI_ROUTE_ONLY=cerebras,groq\nSTASIS_AI_ROUTE_ORDER=groq,cerebras\nSTASIS_AI_ALLOW_FALLBACKS=false\nSTASIS_AI_ROUTE_SORT=throughput\nSTASIS_AI_MAX_PRICE=2\nSTASIS_AI_TIMEOUT_SECONDS=45\n");
         std::fs::write(
             fixture.0.join("stasis.json"),
-            r#"{"manifest_version":1,"ai":{"openrouter":{"approved_models":["openai/gpt-oss-120b","future/approved"],"min_throughput_tokens_per_second":450,"max_p50_latency_seconds":1.75}}}"#,
+            r#"{"manifest_version":1,"ai":{"openrouter":{"approved_models":["openai/gpt-oss-120b","future/approved"],"min_throughput_tokens_per_second":450,"max_p50_latency_seconds":1.75},"editor":{"auto_persist_html_transcripts":true}}}"#,
         )
         .unwrap();
         let ProviderConfig::OpenRouter(config) =
@@ -1598,6 +1612,12 @@ mod tests {
         assert!(!config.routing.allow_fallbacks);
         assert_eq!(config.routing.max_price, Some(2.0));
         assert_eq!(config.timeout, Duration::from_secs(45));
+        assert!(
+            ProjectAiConfig::from_workspace(&fixture.0)
+                .unwrap()
+                .editor
+                .auto_persist_html_transcripts
+        );
     }
 
     #[test]

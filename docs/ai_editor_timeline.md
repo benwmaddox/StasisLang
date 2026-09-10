@@ -50,6 +50,33 @@ provider metadata remains descriptive; it cannot change the selected transport
 for a later request. The thread-context meter uses the controller's retained
 character budget, not an estimate of the model's token window.
 
+**Export chat as HTML** in the task header or command palette writes an explicit,
+local snapshot of the active task. The standalone page presents the chronological
+user, agent, host, attachment, semantic-action, generated-asset, and focused-test
+activity as a simple chat. It includes retained semantic diffs and embeds PNG/JPEG
+media only after its saved SHA-256 still matches, up to 64 MiB total. Missing,
+changed, unverified, or over-budget media is identified in place rather than read
+or linked. Text and diffs are HTML-escaped, the page has a network-denying content
+security policy, and no provider request or metadata lookup occurs during export.
+
+New activity records a wall-clock timestamp. Completed AI replies also retain
+their request duration, input/output tokens, estimated cost, provider, model, and
+route; the page reveals these details on hover or keyboard focus. Older saved
+tasks remain compatible, but show unavailable for timestamps and per-turn values
+that were not historically retained. Aggregate task usage remains visible in the
+export header. A manual export is a point-in-time file; export again to include
+later task activity.
+
+Projects can opt into quiet automatic snapshots with
+`ai.editor.auto_persist_html_transcripts: true` in `stasis.json`. The editor
+coalesces task changes off the UI thread and atomically refreshes one stable file
+per task under `.stasis_cache/logs/ai-transcripts/`; unchanged tasks are not
+rewritten. The cache directory is excluded by the standard project `.gitignore`
+entry for `.stasis_cache/`. Automatic snapshots use the same escaping, content
+security policy, integrity checks, size limit, and retained-diff sources as the
+manual export. Success is silent, repeated failures are rate-limited, and the
+existing **Erase history** action removes these automatic transcripts too.
+
 ## Validation
 
 Desktop Apply validates the reviewed candidate in a staged workspace using a
