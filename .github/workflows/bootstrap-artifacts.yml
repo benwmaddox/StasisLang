@@ -139,8 +139,7 @@ jobs:
           cp -R samples "${out}/"
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
-          network_target=linux-x86_64
-          if [[ "${RUNNER_OS}" == "macOS" ]]; then network_target=macos-arm64; fi
+          network_target="$(python3 tools/desktop_network_target.py "${RUNNER_OS}" "${RUNNER_ARCH}")"
           mkdir -p "${out}/desktop/network/${network_target}" "${out}/desktop/network/include"
           cp "build/codex-cargo-target/release/libstasis_network.a" "${out}/desktop/network/${network_target}/"
           cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"

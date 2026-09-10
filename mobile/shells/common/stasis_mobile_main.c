@@ -431,7 +431,8 @@ static int configure_asset_root(void) {
         return -1;
     }
     return _putenv_s("STASIS_ASSET_ROOT", _access(path, 0) == 0 ? path : ".");
-#elif defined(__APPLE__)
+#else
+#if defined(__APPLE__)
     written = snprintf(path, sizeof(path), "%s../../../", base);
 #else
     written = snprintf(path, sizeof(path), "%s", base);
@@ -440,6 +441,7 @@ static int configure_asset_root(void) {
         return -1;
     }
     return setenv("STASIS_ASSET_ROOT", path, 1);
+#endif
 #elif defined(__APPLE__) && !defined(__ANDROID__)
     const char *base = SDL_GetBasePath();
     if (base == NULL) {

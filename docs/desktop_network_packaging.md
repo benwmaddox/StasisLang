@@ -94,6 +94,10 @@ Nightly and bootstrap toolchain archives include one target-native library:
 - `desktop/network/linux-x86_64/libstasis_network.a`
 - `desktop/network/macos-arm64/libstasis_network.a`
 
+Unix bootstrap archives follow the runner's OS and architecture, using
+`linux-arm64` or `macos-x86_64` when built on those runners. Unsupported runner
+architectures fail assembly instead of publishing a mislabeled library.
+
 Each archive includes `desktop/network/include/stasis_network.h`. Installed
 packaging resolves these relative to the compiler executable and checks the
 exact native pair and its recorded provenance hashes before linking. A library

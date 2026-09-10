@@ -1,6 +1,8 @@
 import pathlib
 import unittest
 
+from tools.desktop_network_target import network_target
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/nightly-release.yml"
@@ -11,6 +13,20 @@ ANDROID_SHELL = (
 
 
 class NightlyNetworkSupportContractTests(unittest.TestCase):
+    def test_bootstrap_native_runner_architectures(self):
+        for system, architecture, expected in (
+            ("macOS", "X64", "macos-x86_64"),
+            ("macOS", "ARM64", "macos-arm64"),
+            ("Linux", "X64", "linux-x86_64"),
+            ("Linux", "ARM64", "linux-arm64"),
+        ):
+            with self.subTest(system=system, architecture=architecture):
+                self.assertEqual(network_target(system, architecture), expected)
+        for system, architecture in (("Linux", "X86"), ("macOS", "unknown"), ("unknown", "X64")):
+            with self.subTest(system=system, architecture=architecture):
+                with self.assertRaises(ValueError):
+                    network_target(system, architecture)
+
     def test_windows_supervisor_is_shipped_and_release_gated(self):
         for name in ("nightly-release.yml", "bootstrap-artifacts.yml"):
             workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
@@ -58,8 +74,11 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             with self.subTest(workflow=name):
                 workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
                 self.assertIn("name: Build desktop network support (unix)", workflow)
-                self.assertIn("network_target=linux-x86_64", workflow)
-                self.assertIn("network_target=macos-arm64", workflow)
+                if name == "bootstrap-artifacts.yml":
+                    self.assertIn('tools/desktop_network_target.py "${RUNNER_OS}" "${RUNNER_ARCH}"', workflow)
+                else:
+                    self.assertIn("network_target=linux-x86_64", workflow)
+                    self.assertIn("network_target=macos-arm64", workflow)
                 library_copy = (
                     'cp "build/codex-cargo-target/' + target_directory
                     + 'release/libstasis_network.a" "${out}/desktop/network/${network_target}/"'
