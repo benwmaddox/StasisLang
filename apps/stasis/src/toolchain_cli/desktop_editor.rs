@@ -98,11 +98,70 @@ enum TimelineAction {
 struct ProposalTools {
     proposals: Vec<ProviderActionProposal>,
     sources: Vec<Value>,
+    existing_actions: BTreeMap<String, String>,
 }
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 256 * 1024;
 
 impl ProposalTools {
+    fn validate_proposal(
+        &self,
+        id: &str,
+        description: &str,
+        payload: &Value,
+        repair: bool,
+    ) -> Result<(), String> {
+        if self.proposals.iter().any(|proposal| proposal.id == id) {
+            return Err(format!(
+                "proposal_id {id} was already used in this response; use one unique ID per proposal"
+            ));
+        }
+        match (repair, self.existing_actions.get(id).map(String::as_str)) {
+            (true, Some("rejected" | "needs_repair")) => {}
+            (true, Some(_)) => {
+                return Err(format!(
+                    "proposal_id {id} cannot repair accepted or pending work"
+                ));
+            }
+            (true, None) => {
+                return Err(format!(
+                    "proposal_id {id} cannot be repaired because it does not exist"
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(format!(
+                    "proposal_id {id} already exists; use repair_semantic_edit only for rejected work"
+                ));
+            }
+            (false, None) => {}
+        }
+        let new_proposals = self
+            .proposals
+            .iter()
+            .filter(|proposal| !proposal.repair)
+            .count();
+        if !repair
+            && self.existing_actions.len().saturating_add(new_proposals)
+                >= stasis_ai::task_session::MAX_ACTIONS
+        {
+            return Err("task action limit reached; finish or start a new task".into());
+        }
+        let mut validator = stasis_ai::Task::new(
+            "provider-proposal-validation",
+            "Validate provider proposal",
+            "Provider proposal validation",
+        )
+        .map_err(|error| error.to_string())?;
+        validator
+            .propose_action_with_payload(
+                id,
+                stasis_ai::ActionKind::Edit,
+                description,
+                payload.clone(),
+            )
+            .map_err(|error| format!("invalid proposal: {error}"))
+    }
+
     fn source_catalog(&self) -> Result<Value, String> {
         let catalog = Value::Array(
             self.sources
@@ -184,6 +243,7 @@ impl ToolExecutor for ProposalTools {
                         stasis_compiler::frontend::workshop::WorkshopSemanticEditBatch,
                     >(payload.clone())
                     .map_err(|error| format!("invalid semantic edit batch: {error}"))?;
+                    self.validate_proposal(id, description, &payload, repair)?;
                     self.proposals.push(ProviderActionProposal {
                         id: id.to_string(),
                         kind: stasis_ai::ActionKind::Edit,
@@ -495,6 +555,11 @@ fn run_reply_provider_observed_with_progress(
     let source_context = super::desktop_source_context(&project_root)?;
     let mut tools = ProposalTools {
         sources: source_context,
+        existing_actions: request
+            .actions
+            .iter()
+            .map(|action| (action.id.to_string(), action.state.to_string()))
+            .collect(),
         ..ProposalTools::default()
     };
     let source_catalog = tools.source_catalog()?;
@@ -5114,6 +5179,36 @@ mod tests {
     }
 
     #[test]
+    fn proposal_tools_reject_duplicate_ids_before_task_publication() {
+        let (_, root, payload) = review_fixture("duplicate_provider_proposal");
+        let args = json!({
+            "proposal_id": "background-style",
+            "description": "Update the background",
+            "batch": payload,
+        });
+        let calls = [
+            ToolCall {
+                tool: "propose_semantic_edit".into(),
+                args: args.clone(),
+            },
+            ToolCall {
+                tool: "propose_semantic_edit".into(),
+                args,
+            },
+        ];
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(&calls, &AtomicBool::new(false));
+        assert!(observations[0].result.is_some());
+        assert!(observations[1]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already used in this response")));
+        assert_eq!(tools.proposals.len(), 1);
+
+        super::super::tests::remove_temp(&root);
+    }
+
+    #[test]
     fn automatic_transcripts_coalesce_into_the_project_cache_logs() {
         let (mut editor, root, _) = review_fixture("automatic_transcript");
         finish_preview(&mut editor);
@@ -6429,6 +6524,9 @@ mod tests {
     #[test]
     fn repaired_proposal_is_structured_and_keeps_its_action_id() {
         let mut tools = ProposalTools::default();
+        tools
+            .existing_actions
+            .insert("edit-speed".into(), "needs_repair".into());
         let observations = tools.execute(
             &[ToolCall {
                 tool: "repair_semantic_edit".to_string(),

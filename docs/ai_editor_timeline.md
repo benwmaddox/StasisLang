@@ -50,6 +50,13 @@ provider metadata remains descriptive; it cannot change the selected transport
 for a later request. The thread-context meter uses the controller's retained
 character budget, not an estimate of the model's token window.
 
+Provider summaries and stored thread entries allow 16,384 characters. The
+structured response schema advertises that same bound, and Stasis defensively
+truncates a longer summary if a provider ignores it. Semantic proposal IDs,
+descriptions, payload sizes, repair state, and per-response uniqueness are
+validated while the provider can still correct a rejected tool call; a malformed
+proposal is never acknowledged and then rejected only during task publication.
+
 **Export chat as HTML** in the task header or command palette writes an explicit,
 local snapshot of the active task. The standalone page presents the chronological
 user, agent, host, attachment, semantic-action, generated-asset, and focused-test

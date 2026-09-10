@@ -14,6 +14,30 @@ use std::time::Instant;
 
 const SAFE_PROVIDER_ERROR: &str = "AI provider request failed";
 const SAFE_SESSION_ERROR: &str = "AI response could not be added to the task";
+fn safe_session_error(error: &TaskSessionError) -> &'static str {
+    match error {
+        TaskSessionError::EmptyField {
+            field: "thread entry",
+        } => "AI returned an empty task reply",
+        TaskSessionError::FieldTooLong {
+            field: "thread entry",
+            ..
+        } => "AI reply exceeded the task message limit",
+        TaskSessionError::DuplicateActionId(_) => "AI response repeated a proposal ID",
+        TaskSessionError::EmptyField { field } | TaskSessionError::FieldTooLong { field, .. }
+            if matches!(
+                *field,
+                "ActionId" | "action description" | "action payload bytes"
+            ) =>
+        {
+            "AI proposal exceeded the task action contract"
+        }
+        TaskSessionError::ActionNotFound(_) | TaskSessionError::InvalidTransition { .. } => {
+            "AI proposal no longer matched the task action state"
+        }
+        _ => SAFE_SESSION_ERROR,
+    }
+}
 /// Return an actionable category without exposing provider output or credentials.
 pub fn safe_provider_error(error: &str) -> &'static str {
     let error = error.to_ascii_lowercase();
@@ -930,27 +954,31 @@ impl TaskController {
                         );
                         Ok(task)
                     });
-                let Ok(updated_task) = applied else {
-                    if let Ok(task) = session.task_mut(&completion.task_id) {
-                        update_screenshots(
-                            task,
-                            &record.request.screenshots,
-                            ScreenshotOutcome::Failed(SAFE_SESSION_ERROR),
+                let updated_task = match applied {
+                    Ok(task) => task,
+                    Err(error) => {
+                        let message = safe_session_error(&error);
+                        if let Ok(task) = session.task_mut(&completion.task_id) {
+                            update_screenshots(
+                                task,
+                                &record.request.screenshots,
+                                ScreenshotOutcome::Failed(message),
+                            );
+                        }
+                        record.snapshot.state = TaskRequestState::Failed;
+                        record.snapshot.error = Some(message.to_string());
+                        push_progress(
+                            &mut record.snapshot,
+                            ProgressStage::Failed,
+                            completion.elapsed_ms,
+                            None,
                         );
+                        return TaskControllerEvent::Failed {
+                            request_id: completion.request_id,
+                            task_id: completion.task_id,
+                            message: message.to_string(),
+                        };
                     }
-                    record.snapshot.state = TaskRequestState::Failed;
-                    record.snapshot.error = Some(SAFE_SESSION_ERROR.to_string());
-                    push_progress(
-                        &mut record.snapshot,
-                        ProgressStage::Failed,
-                        completion.elapsed_ms,
-                        None,
-                    );
-                    return TaskControllerEvent::Failed {
-                        request_id: completion.request_id,
-                        task_id: completion.task_id,
-                        message: SAFE_SESSION_ERROR.to_string(),
-                    };
                 };
                 *session
                     .task_mut(&completion.task_id)
@@ -1945,6 +1973,24 @@ mod tests {
         let events = wait_for(&controller, &mut session);
         assert!(matches!(&events[0], TaskControllerEvent::Failed { .. }));
         assert_eq!(session.task("one").unwrap(), &before);
+    }
+
+    #[test]
+    fn response_admission_failures_have_safe_actionable_categories() {
+        assert_eq!(
+            safe_session_error(&TaskSessionError::FieldTooLong {
+                field: "thread entry",
+                max: 16_384,
+                actual: 16_385,
+            }),
+            "AI reply exceeded the task message limit"
+        );
+        assert_eq!(
+            safe_session_error(&TaskSessionError::DuplicateActionId(ActionId::new(
+                "duplicate"
+            ))),
+            "AI response repeated a proposal ID"
+        );
     }
 
     #[test]

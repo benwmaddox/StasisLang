@@ -51,6 +51,7 @@ pub const MAX_SEMANTIC_EDITS_PER_BATCH: usize = 64;
 const MAX_SYMBOL_QUERY_FILES: usize = 16;
 const MAX_PNG_SHAPES: usize = 512;
 pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
+pub const MAX_SUMMARY_CHARS: usize = task_session::MAX_THREAD_TEXT_CHARS;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_REASONING_EFFORT: &str = "medium";
 pub const MAX_OBSERVATION_BYTES: usize = 1024 * 1024;
@@ -806,6 +807,12 @@ fn validate_working_notes(notes: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn truncate_summary(summary: &mut String) {
+    if summary.chars().count() > MAX_SUMMARY_CHARS {
+        *summary = summary.chars().take(MAX_SUMMARY_CHARS).collect();
+    }
+}
+
 fn resolve_tool_spec<'a>(
     call: &ToolCall,
     specs: &'a [ToolSpec],
@@ -1065,8 +1072,14 @@ fn full_tool_args_schema(spec: &ToolSpec) -> Value {
         ),
         "propose_semantic_edit" | "repair_semantic_edit" => object_schema(
             &[
-                ("proposal_id", string_schema()),
-                ("description", string_schema()),
+                (
+                    "proposal_id",
+                    bounded_string_schema(1, task_session::MAX_ID_CHARS),
+                ),
+                (
+                    "description",
+                    bounded_string_schema(1, task_session::MAX_ACTION_TEXT_CHARS),
+                ),
                 ("batch", semantic_edit_batch_schema()),
             ],
             &["proposal_id", "description", "batch"],
@@ -1309,6 +1322,10 @@ fn string_schema() -> Value {
     json!({"type": "string"})
 }
 
+fn bounded_string_schema(min_length: usize, max_length: usize) -> Value {
+    json!({"type": "string", "minLength": min_length, "maxLength": max_length})
+}
+
 fn number_schema() -> Value {
     json!({"type": "number"})
 }
@@ -1411,7 +1428,7 @@ pub fn model_response_schema() -> Value {
         "properties": {
             "mode": {"type": "string", "enum": ["tool_calls", "done"]},
             "working_notes": {"type": "string", "minLength": 1, "maxLength": MAX_WORKING_NOTES_CHARS},
-            "summary": {"type": "string"},
+            "summary": {"type": "string", "maxLength": MAX_SUMMARY_CHARS},
             "tool_calls": {
                 "type": "array",
                 "maxItems": MAX_TOOL_CALLS_PER_TURN,
@@ -1932,6 +1949,10 @@ fn decode_model_response(source: &str, provider: &str) -> Result<ModelResponse, 
     };
     let mut response: ModelResponse = serde_json::from_value(value)
         .map_err(|error| format!("{provider} returned invalid agent response: {error}"))?;
+    let summary = match &mut response {
+        ModelResponse::ToolCalls { summary, .. } | ModelResponse::Done { summary, .. } => summary,
+    };
+    truncate_summary(summary);
     if complete {
         if let ModelResponse::Done {
             working_notes,
@@ -2044,6 +2065,14 @@ mod tests {
                 optional_args: Vec::new(),
             };
             let schema = tool_args_schema(&spec);
+            assert_eq!(
+                schema["properties"]["proposal_id"]["maxLength"],
+                task_session::MAX_ID_CHARS
+            );
+            assert_eq!(
+                schema["properties"]["description"]["maxLength"],
+                task_session::MAX_ACTION_TEXT_CHARS
+            );
             let batch = &schema["properties"]["batch"];
             assert_eq!(batch["type"], "object");
             let edit = &batch["properties"]["edits"]["items"];
@@ -3693,6 +3722,28 @@ mod tests {
         .expect_err("unknown call field");
         assert!(error.contains("unknown field"));
     }
+
+    #[test]
+    fn provider_summary_matches_the_task_thread_limit_and_truncates_defensively() {
+        assert_eq!(
+            model_response_schema().pointer("/properties/summary/maxLength"),
+            Some(&json!(MAX_SUMMARY_CHARS))
+        );
+        let oversized = json!({
+            "mode": "done",
+            "working_notes": "Complete.",
+            "summary": "x".repeat(MAX_SUMMARY_CHARS + 1),
+            "tool_calls": []
+        });
+        let response = decode_codex_response(&oversized.to_string()).expect("bounded summary");
+        let summary = match response {
+            ModelResponse::Done { summary, .. } => summary,
+            ModelResponse::ToolCalls { .. } => panic!("expected done response"),
+        };
+        assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS);
+        assert_eq!(MAX_SUMMARY_CHARS, 16_384);
+    }
+
     #[test]
     fn response_schema_requires_native_object_args() {
         assert_eq!(
