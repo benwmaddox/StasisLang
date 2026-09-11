@@ -47,6 +47,10 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("STASIS_SIGNING_TIMEOUT_SECONDS", source)
         self.assertIn("http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com", source)
         self.assertIn("& pwsh -NoProfile -File tools/windows/stasis-signing.ps1 sign", source)
+        signing_step = source.split(
+            "- name: Authenticode sign Stasis Windows binaries", 1
+        )[1].split("- name: Assemble bundle (unix)", 1)[0]
+        self.assertIn("timeout-minutes: 15", signing_step)
         self.assertIn("Remove nightly signing root trust", source)
         self.assertIn("if: always() && runner.os == 'Windows'", source)
         self.assertNotIn("runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''", source)
@@ -202,7 +206,8 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         source = (ROOT / "tools/windows/stasis-signing.ps1").read_text(encoding="utf-8")
         self.assertIn("Invoke-BoundedSignTool", source)
         self.assertIn("$process.WaitForExit($timeoutSeconds * 1000)", source)
-        self.assertIn("$process.Kill($true)", source)
+        self.assertIn("$process.Kill()", source)
+        self.assertNotIn("$process.Kill($true)", source)
         self.assertIn("$process.WaitForExit(5000)", source)
         self.assertNotIn("$process.WaitForExit()", source)
         self.assertIn("$env:STASIS_SIGNING_TIMESTAMP_URLS -split ';'", source)

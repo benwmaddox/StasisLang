@@ -282,6 +282,7 @@ jobs:
 
       - name: Authenticode sign Stasis Windows binaries
         if: runner.os == 'Windows'
+        timeout-minutes: 15
         shell: pwsh
         run: |
           $certificate = Join-Path $env:RUNNER_TEMP "stasis-signing.pfx"
