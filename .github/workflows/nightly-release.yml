@@ -319,6 +319,43 @@ jobs:
             $env:STASIS_SIGNING_PROFILE = "production"
             $env:STASIS_SIGNING_TIMESTAMP_URLS = "http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com"
             $env:STASIS_SIGNING_TIMEOUT_SECONDS = "30"
+            function Invoke-BoundedSigningCommand([string] $mode, [string] $artifact) {
+              $startInfo = [Diagnostics.ProcessStartInfo]::new()
+              $startInfo.FileName = (Get-Command pwsh -ErrorAction Stop).Source
+              $startInfo.UseShellExecute = $false
+              foreach ($argument in @(
+                '-NoProfile',
+                '-File',
+                'tools/windows/stasis-signing.ps1',
+                $mode,
+                '-Artifact',
+                $artifact
+              )) {
+                $startInfo.ArgumentList.Add($argument)
+              }
+              $process = [Diagnostics.Process]::new()
+              $process.StartInfo = $startInfo
+              try {
+                Write-Host "Starting Authenticode $mode for $artifact"
+                if (-not $process.Start()) { throw "Authenticode $mode process did not start for $artifact" }
+                if (-not $process.WaitForExit(90000)) {
+                  try {
+                    $process.Kill()
+                  } catch [InvalidOperationException] {
+                    if (-not $process.HasExited) { throw }
+                  }
+                  if (-not $process.WaitForExit(5000)) {
+                    throw "Authenticode $mode timed out for $artifact and did not terminate within 5 seconds"
+                  }
+                  throw "Authenticode $mode timed out after 90 seconds for $artifact"
+                }
+                if ($process.ExitCode -ne 0) {
+                  throw "Authenticode $mode failed for $artifact with exit code $($process.ExitCode)"
+                }
+              } finally {
+                $process.Dispose()
+              }
+            }
             @(
               "target/${{ matrix.rust_target }}/release/stasis.exe",
               "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe",
@@ -326,10 +363,8 @@ jobs:
               "runtime/build_ci/bin/Release/stasis_graphics.dll",
               "runtime/build_ci/bin/Release/stasis_runner.exe"
             ) | ForEach-Object {
-              & pwsh -NoProfile -File tools/windows/stasis-signing.ps1 sign -Artifact $_
-              if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $_" }
-              & pwsh -NoProfile -File tools/windows/stasis-signing.ps1 verify -Artifact $_
-              if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $_" }
+              Invoke-BoundedSigningCommand sign $_
+              Invoke-BoundedSigningCommand verify $_
             }
           } finally {
             Remove-Item -LiteralPath $certificate -Force -ErrorAction SilentlyContinue
