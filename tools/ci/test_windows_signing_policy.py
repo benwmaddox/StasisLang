@@ -43,6 +43,10 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn('$expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"', source)
         self.assertIn('"Root"', source)
         self.assertNotIn('"TrustedPeople"', source)
+        self.assertIn("STASIS_SIGNING_TIMESTAMP_URLS", source)
+        self.assertIn("STASIS_SIGNING_TIMEOUT_SECONDS", source)
+        self.assertIn("http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com", source)
+        self.assertIn("& pwsh -NoProfile -File tools/windows/stasis-signing.ps1 sign", source)
         self.assertIn("Remove nightly signing root trust", source)
         self.assertIn("if: always() && runner.os == 'Windows'", source)
         self.assertNotIn("runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''", source)
@@ -193,6 +197,51 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             )
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("real signtool.exe", rejected.stderr)
+
+    def test_signtool_timestamp_attempts_are_bounded_and_retryable(self):
+        source = (ROOT / "tools/windows/stasis-signing.ps1").read_text(encoding="utf-8")
+        self.assertIn("Invoke-BoundedSignTool", source)
+        self.assertIn("$process.WaitForExit($timeoutSeconds * 1000)", source)
+        self.assertIn("$process.Kill($true)", source)
+        self.assertIn("$env:STASIS_SIGNING_TIMESTAMP_URLS -split ';'", source)
+        self.assertIn("foreach ($timestamp in $timestamps)", source)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell timestamp retry test")
+    def test_powershell_retries_the_next_timestamp_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            tool = root / "signtool.cmd"
+            log = root / "args.txt"
+            artifact = root / "artifact.exe"
+            certificate = root / "signing.pfx"
+            artifact.write_bytes(b"fixture")
+            certificate.write_bytes(b"fixture")
+            tool.write_text(
+                "@echo off\r\n"
+                f'>> "{log}" echo %*\r\n'
+                'echo %* | findstr /C:"timestamp.acs.microsoft.com" >nul '
+                "&& exit /b 1\r\n"
+                "exit /b 0\r\n",
+                encoding="ascii",
+            )
+            environment = os.environ.copy()
+            environment["STASIS_SIGNING_TIMESTAMP_URLS"] = (
+                "http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com"
+            )
+            result = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-NonInteractive",
+                    "-ExecutionPolicy", "Bypass", "-File",
+                    str(ROOT / "tools/windows/stasis-signing.ps1"), "sign",
+                    "-Tool", str(tool), "-Certificate", str(certificate),
+                    "-Artifact", str(artifact),
+                ],
+                capture_output=True, text=True, env=environment, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            attempts = log.read_text(encoding="ascii")
+            self.assertIn("http://timestamp.acs.microsoft.com/", attempts)
+            self.assertIn("http://timestamp.digicert.com", attempts)
 
 
 if __name__ == "__main__":
