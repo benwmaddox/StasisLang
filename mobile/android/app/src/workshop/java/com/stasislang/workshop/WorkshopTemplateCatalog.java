@@ -93,7 +93,7 @@ final class WorkshopTemplateCatalog {
                     "assets/opaque.svg",
                     "assets/translucent.svg",
                     "assets/parity.ttf"
-            }, true);
+            }, false);
 
     private WorkshopTemplateCatalog() {}
 

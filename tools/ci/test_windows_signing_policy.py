@@ -40,6 +40,10 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("needs: [detect, mobile_network_support, release_preconditions]", source)
         self.assertIn('$env:STASIS_SIGNING_PROFILE = "production"', source)
         self.assertIn("stasis-signing.ps1 verify -Artifact $_", source)
+        self.assertIn('$expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"', source)
+        self.assertIn('"TrustedPeople"', source)
+        self.assertIn("Remove private signing identity trust", source)
+        self.assertIn("if: always() && runner.os == 'Windows'", source)
         self.assertNotIn("runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''", source)
 
     def test_cargo_runner_routes_signtool_through_policy_entrypoint(self):
