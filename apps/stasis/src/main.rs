@@ -2195,6 +2195,8 @@ fn write_mobile_aot_package_manifest(
         .join(DEFAULT_ASSET_MANIFEST_PATH);
     let mut manifest = serde_json::json!({
         "schema": "stasis.mobile_aot_bundle.v1",
+        "render_contract_version": 8,
+        "render_construction_lifecycle_version": engine_manifest["render_construction_lifecycle_version"],
         "target": target.as_str(),
         "engine_manifest": mobile_aot_relative_path(output_dir, engine_manifest_path)?,
         "symbols_header": mobile_aot_relative_path(output_dir, symbols_header)?,

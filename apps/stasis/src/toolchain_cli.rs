@@ -67,7 +67,8 @@ const MANIFEST_VERSION: u32 = 1;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const GFX_CMD_NAME: &str = "gfx_cmd";
-const GFX_CMD_VERSION: i64 = 7;
+const GFX_CMD_VERSION: i64 = 8;
+const GFX_CMD_LEGACY_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const DESKTOP_NETWORK_ARTIFACTS: &[&str] = &[
     if cfg!(windows) {
@@ -182,7 +183,6 @@ function @effects(state) tick(): i32 {
 }
 
 function @effects(graphics) render(): i32 {
-    begin_frame();
     clear(0.05, 0.07, 0.10, 1.0);
     end_frame();
     return 0;
@@ -5214,6 +5214,15 @@ fn web_runtime_config(
             )
         })
         .collect::<serde_json::Map<_, _>>();
+    let render_construction_lifecycle_version = process.program_snapshot().is_some_and(|snapshot| {
+        let has = |name: &str| {
+            snapshot
+                .functions()
+                .iter()
+                .any(|function| function.name == name)
+        };
+        has("gfx_cmd_construction_reset") && has("gfx_cmd_construction_finish")
+    }) as u8;
     let mut config = json!({
         "name": workspace.manifest.name,
         "strings": strings,
@@ -5221,6 +5230,8 @@ fn web_runtime_config(
         "views": views,
         "globals": globals,
         "assets": {},
+        "renderContractVersion": if render_construction_lifecycle_version == 1 { GFX_CMD_VERSION } else { GFX_CMD_LEGACY_VERSION },
+        "renderConstructionLifecycleVersion": render_construction_lifecycle_version,
     });
     if !development_build {
         prune_release_web_runtime_config(&mut config, process.imported_symbols());

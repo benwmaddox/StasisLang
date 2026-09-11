@@ -44,7 +44,6 @@ function tick(): i32 {
 function render(): i32 {
     entry_trace = entry_trace * 10 + 3;
     render_score = score;
-    begin_frame();
     clear(0.05, 0.10, 0.15, 1.0);
     fill_rect(12.0, 14.0, 30.0, 18.0, 0.8, 0.2, 0.1, 1.0);
     emit_text_outer("Café");

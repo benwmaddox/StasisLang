@@ -154,7 +154,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.015, 0.025, 0.055, 1.0);
     fill_rect(0.0, 0.0, SCREEN_W, 1.0, 0.16, 0.28, 0.42, 1.0);
     fill_rect(0.0, SCREEN_H - 1.0, SCREEN_W, 1.0, 0.16, 0.28, 0.42, 1.0);

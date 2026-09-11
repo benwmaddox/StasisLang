@@ -25,8 +25,7 @@ function exploration_host_sync_input(): void {
     }
 }
 
-function exploration_host_begin_frame(): void {
-    begin_frame();
+function exploration_host_prepare_frame(): void {
     if (GameState.tutorial_stage >= 2) {
         clear(0.09, 0.24, 0.13, 1.0);
     } else {

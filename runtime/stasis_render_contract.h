@@ -8,8 +8,9 @@
 
 /* Canonical guest-to-renderer command ABI used by JIT and AOT runtimes. */
 #define STASIS_RENDER_MAGIC 0x47584631
-#define STASIS_RENDER_VERSION 7
-#define STASIS_RENDER_TRACE_VERSION 7
+#define STASIS_RENDER_VERSION 8
+#define STASIS_RENDER_LEGACY_VERSION 7
+#define STASIS_RENDER_TRACE_VERSION 8
 #define STASIS_GRAPHICS_RUNTIME_ABI_VERSION 3
 
 #define STASIS_RENDER_FLAG_CLEAR 1
@@ -148,7 +149,8 @@ static inline StasisRenderValidation stasis_render_validate(
     if (cmd_i32[STASIS_RENDER_I_MAGIC] != STASIS_RENDER_MAGIC) {
         return STASIS_RENDER_BAD_MAGIC;
     }
-    if (cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_VERSION) {
+    if (cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_VERSION &&
+        cmd_i32[STASIS_RENDER_I_VERSION] != STASIS_RENDER_LEGACY_VERSION) {
         return STASIS_RENDER_BAD_VERSION;
     }
     const int32_t line_count = cmd_i32[STASIS_RENDER_I_LINE_COUNT];
@@ -308,7 +310,8 @@ static inline int32_t stasis_render_clamp_count(int32_t value, int32_t maximum) 
 static inline int stasis_render_is_valid(const int32_t *cmd_i32) {
     return cmd_i32 != NULL &&
         cmd_i32[STASIS_RENDER_I_MAGIC] == STASIS_RENDER_MAGIC &&
-        cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_VERSION;
+        (cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_VERSION ||
+         cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_LEGACY_VERSION);
 }
 
 static inline int32_t stasis_render_rect_count(

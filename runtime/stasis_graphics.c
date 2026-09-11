@@ -4278,6 +4278,15 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
         }
         return;
     }
+    const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
+    if (cmd_i32[STASIS_RENDER_I_VERSION] == STASIS_RENDER_VERSION &&
+        (flags & STASIS_RENDER_FLAG_PRESENT) == 0) {
+        /* Negotiated construction did not publish. Backend-private event,
+         * restore, viewport, and capture preparation still runs. */
+        stasis_begin_frame();
+        g_perf_render_started_counter = 0;
+        return;
+    }
     g_render_accepted_frames++;
     g_render_last_validation = STASIS_RENDER_VALID;
     if (!g_render_contract_logged || stasis_render_trace_is_enabled()) {
@@ -4290,7 +4299,6 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
         cmd_i32[STASIS_RENDER_I_DENSITY_GENERATION];
     g_perf_render_started_counter = host_started_counter;
 
-    const int32_t flags = cmd_i32[STASIS_RENDER_I_FLAGS];
     const int32_t gfx_cmd_max_lines = STASIS_RENDER_MAX_LINES;
     const int32_t gfx_cmd_max_sprites = STASIS_RENDER_MAX_SPRITES;
     const int32_t gfx_cmd_max_text = STASIS_RENDER_MAX_TEXT;

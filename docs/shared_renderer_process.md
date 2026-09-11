@@ -46,7 +46,7 @@ cache keys, and resource replacement live in `stasis_graphics.c`, so platform
 shells cannot redefine them.
 
 Logical, native, drawable, safe-viewport, input-transform, and resource-density
-semantics are defined in `display_metrics.md`. Reserved gfx_cmd v7 header slots
+semantics are defined in `display_metrics.md`. Reserved gfx_cmd v8 header slots
 carry host display metadata to embedded previews but do not participate in the
 backend-independent command trace.
 

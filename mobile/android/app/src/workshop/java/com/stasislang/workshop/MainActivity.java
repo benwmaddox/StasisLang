@@ -11180,14 +11180,16 @@ public final class MainActivity extends Activity {
                 WorkshopTemplateCatalog.Template template = activeWorkshopTemplate();
                 for (String file : template.sourceFiles) {
                     try {
-                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
+                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file),
+                                template.replaceExistingFiles);
                     } catch (IOException ignored) {
                         // The recursive load below includes files that were seeded successfully.
                     }
                 }
                 for (String file : template.testFiles) {
                     try {
-                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
+                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file),
+                                template.replaceExistingFiles);
                     } catch (IOException ignored) {
                         // The recursive load below includes files that were seeded successfully.
                     }
@@ -11195,14 +11197,15 @@ public final class MainActivity extends Activity {
                 for (WorkshopTemplateCatalog.DirectoryMount mount : template.directoryMounts) {
                     try {
                         ensureProjectDirectory(assets, mount.assetDirectory,
-                                new File(projectRoot, mount.projectDirectory));
+                                new File(projectRoot, mount.projectDirectory), mount.replaceExisting);
                     } catch (IOException ignored) {
                         // The recursive load below includes directory files that were seeded successfully.
                     }
                 }
                 for (String file : template.auxiliaryFiles) {
                     try {
-                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
+                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file),
+                                template.replaceExistingFiles);
                     } catch (IOException ignored) {
                         // Optional template support files do not prevent source discovery.
                     }
@@ -11376,7 +11379,12 @@ public final class MainActivity extends Activity {
     }
 
     private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile) throws IOException {
-        if (diskFile.isFile()) {
+        ensureProjectFile(assets, assetPath, diskFile, false);
+    }
+
+    private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile,
+            boolean replaceExisting) throws IOException {
+        if (!replaceExisting && diskFile.isFile()) {
             return;
         }
         File parent = diskFile.getParentFile();
@@ -11393,9 +11401,10 @@ public final class MainActivity extends Activity {
         }
         try {
             try {
-                Files.move(temporary.toPath(), diskFile.toPath(), StandardCopyOption.ATOMIC_MOVE);
+                Files.move(temporary.toPath(), diskFile.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException unsupported) {
-                Files.move(temporary.toPath(), diskFile.toPath());
+                Files.move(temporary.toPath(), diskFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
             }
         } finally {
             if (temporary.exists()) temporary.delete();
@@ -11404,6 +11413,11 @@ public final class MainActivity extends Activity {
 
     private void ensureProjectDirectory(AssetManager assets, String assetPath, File diskDirectory)
             throws IOException {
+        ensureProjectDirectory(assets, assetPath, diskDirectory, false);
+    }
+
+    private void ensureProjectDirectory(AssetManager assets, String assetPath, File diskDirectory,
+            boolean replaceExisting) throws IOException {
         if (diskDirectory.exists() && !diskDirectory.isDirectory()) {
             throw new IOException("project directory path is a file: "
                     + diskDirectory.getAbsolutePath());
@@ -11421,9 +11435,9 @@ public final class MainActivity extends Activity {
             File childDiskPath = new File(diskDirectory, child);
             String[] grandchildren = assets.list(childAssetPath);
             if (grandchildren != null && grandchildren.length > 0) {
-                ensureProjectDirectory(assets, childAssetPath, childDiskPath);
+                ensureProjectDirectory(assets, childAssetPath, childDiskPath, replaceExisting);
             } else {
-                ensureProjectFile(assets, childAssetPath, childDiskPath);
+                ensureProjectFile(assets, childAssetPath, childDiskPath, replaceExisting);
             }
         }
     }

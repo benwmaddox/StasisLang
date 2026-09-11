@@ -1,8 +1,9 @@
-# BeginFrame ownership proposal
+# Host-owned frame construction lifecycle
 
-Status: proposed, awaiting design approval. Task 410; source audit 2026-09-10.
-This note changes no implementation or existing contract. No follow-up Maddox
-tasks should be created until the direction is approved.
+Status: approved in Task 410 and implemented by Task 562; source audit 2026-09-10.
+The historical call graph below records the pre-migration behavior that motivated
+the v8 construction contract. The lifecycle and compatibility sections are the
+normative implementation design.
 
 ## Recommendation
 
@@ -17,8 +18,7 @@ device. The host knows when it invokes rendering; the shared guest helper knows
 the command layout and writer generations. Have the host invoke that helper
 through a generated entry wrapper, rather than duplicate its stores in each
 host. Backend submission preparation remains host-private and runs even when
-there is no clear. This is a proposed contract, not a description of behavior
-already implemented.
+there is no clear. This is the implemented v8 contract.
 
 ## Evidence and current call graph
 
@@ -159,7 +159,7 @@ store intent; repeated BeginFrame would erase commands rather than model it.
 | Surface recreation | Resource restore and viewport generations are host-owned, not repaired by guest reset. | Re-prepare resources and replay accepted logical commands or show host loading state; never publish the discarded working builder. |
 | Error during replay | Validation is backend-specific; source does not prove rollback of every GPU-side error. | Validate before adoption; never replace accepted snapshot on guest/schema failure. Resource/GPU failure withholds presentation and retries; do not promise restoration of already-modified pixels without an offscreen transaction. |
 
-## Proposed lifecycle and compatibility
+## Lifecycle and compatibility
 
 The host invokes `reset -> guest render -> finish` once per scheduled construction.
 Reset executes the existing bounded stores, preserves display metadata and
@@ -208,10 +208,9 @@ generation flow, not independent edits to snapshots. Rollback consists of
 retaining old package/host contract support and rebuilding with explicit calls;
 never downgrade the interpretation of already-negotiated new packages.
 
-## Sequence after approval and focused validation
+## Implementation sequence and focused validation
 
-The following are proposed bounded work packages, **not created Maddox tasks**.
-Only after approval should the task owner turn them into tasks with these gates.
+The implementation follows these bounded work packages and gates.
 
 1. Characterize reset/clear/publication: add a shared fixture covering stale
    geometry/text, repeated clears/end, unfinished writer and early returns;
@@ -229,8 +228,7 @@ Only after approval should the task owner turn them into tasks with these gates.
    exact-string begin assertions with lifecycle behavior checks; deprecate/remove
    guest begin only for the negotiated contract. Preserve native export adapters.
 
-Each command must stay within 900 seconds. Suggested focused commands (future
-gates, not claims of execution in this task):
+Each command must stay within 900 seconds. The focused validation commands are:
 
 ```text
 python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test sealed_display_list -- --test-threads=1

@@ -9,9 +9,9 @@ final class WorkshopTemplateCatalog {
     static final String LEGACY_TEMPLATE_ID = "pong";
     static final String RENDER_ACCEPTANCE_TEMPLATE_ID = "render-parity";
     private static final DirectoryMount VENDORED_STDLIB = new DirectoryMount(
-            "stasis_stdlib", "vendor/stasis/src/stdlib");
+            "stasis_stdlib", "vendor/stasis/src/stdlib", false);
     private static final DirectoryMount TOOLCHAIN_STDLIB = new DirectoryMount(
-            "stasis_stdlib", ".stasis_cache/toolchain/src/stdlib");
+            "stasis_stdlib", ".stasis_cache/toolchain/src/stdlib", true);
 
     private static final Template PONG = new Template(
             "pong",
@@ -37,7 +37,7 @@ final class WorkshopTemplateCatalog {
                     "assets/ball.svg",
                     "assets/paddle.svg",
                     "assets/center_line.svg"
-            });
+            }, false);
 
     private static final Template EXPLORATION = new Template(
             "exploration",
@@ -76,7 +76,7 @@ final class WorkshopTemplateCatalog {
                     "stasis.json",
                     "README.md",
                     "qa/first_keepsake.json"
-            });
+            }, false);
 
     private static final Template RENDER_ACCEPTANCE = new Template(
             RENDER_ACCEPTANCE_TEMPLATE_ID,
@@ -93,7 +93,7 @@ final class WorkshopTemplateCatalog {
                     "assets/opaque.svg",
                     "assets/translucent.svg",
                     "assets/parity.ttf"
-            });
+            }, true);
 
     private WorkshopTemplateCatalog() {}
 
@@ -120,9 +120,11 @@ final class WorkshopTemplateCatalog {
         final String[] testFiles;
         final DirectoryMount[] directoryMounts;
         final String[] auxiliaryFiles;
+        final boolean replaceExistingFiles;
 
         Template(String id, String name, String assetRoot, String[] sourceFiles, String[] testFiles,
-                DirectoryMount[] directoryMounts, String[] auxiliaryFiles) {
+                DirectoryMount[] directoryMounts, String[] auxiliaryFiles,
+                boolean replaceExistingFiles) {
             this.id = id;
             this.name = name;
             this.assetRoot = assetRoot;
@@ -130,6 +132,7 @@ final class WorkshopTemplateCatalog {
             this.testFiles = testFiles.clone();
             this.directoryMounts = directoryMounts.clone();
             this.auxiliaryFiles = auxiliaryFiles.clone();
+            this.replaceExistingFiles = replaceExistingFiles;
         }
 
         @Override public String toString() {
@@ -140,10 +143,12 @@ final class WorkshopTemplateCatalog {
     static final class DirectoryMount {
         final String assetDirectory;
         final String projectDirectory;
+        final boolean replaceExisting;
 
-        DirectoryMount(String assetDirectory, String projectDirectory) {
+        DirectoryMount(String assetDirectory, String projectDirectory, boolean replaceExisting) {
             this.assetDirectory = assetDirectory;
             this.projectDirectory = projectDirectory;
+            this.replaceExisting = replaceExisting;
         }
     }
 }
