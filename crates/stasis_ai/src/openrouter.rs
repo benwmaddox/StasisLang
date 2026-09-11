@@ -31,9 +31,27 @@ const MAX_APPROVED_OPENROUTER_MODELS: usize = 8;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectAiConfig {
     #[serde(default)]
+    pub provider: Option<ProjectProvider>,
+    #[serde(default)]
     pub openrouter: ProjectOpenRouterConfig,
     #[serde(default)]
     pub editor: ProjectEditorConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectProvider {
+    Codex,
+    OpenRouter,
+}
+
+impl ProjectProvider {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::OpenRouter => "openrouter",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,6 +461,11 @@ impl ProviderConfig {
         environment: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let settings = WorkspaceSettings::read(root)?;
+        let project = if root.join("stasis.json").is_file() {
+            ProjectAiConfig::from_workspace(root)?
+        } else {
+            ProjectAiConfig::default()
+        };
         let lookup = |name: &str| settings.get(name, environment);
         let selected = setting_nonempty(&lookup, "STASIS_AI_PROVIDER");
         let default = if setting_nonempty(&lookup, "OPENROUTER_API_KEY").is_some() {
@@ -450,15 +473,13 @@ impl ProviderConfig {
         } else {
             "codex"
         };
-        match selected.as_deref().unwrap_or(default) {
+        let configured = project.provider.map(ProjectProvider::label);
+        match selected.as_deref().or(configured).unwrap_or(default) {
             "codex" => Ok(Self::Codex),
-            "openrouter" => {
-                let project = ProjectAiConfig::from_workspace(root)?;
-                Ok(Self::OpenRouter(OpenRouterConfig::from_lookup(
-                    &lookup,
-                    &project.openrouter,
-                )?))
-            }
+            "openrouter" => Ok(Self::OpenRouter(OpenRouterConfig::from_lookup(
+                &lookup,
+                &project.openrouter,
+            )?)),
             _ => Err("STASIS_AI_PROVIDER must be codex or openrouter".into()),
         }
     }
@@ -1582,6 +1603,20 @@ mod tests {
         assert_eq!(config.routing.hard_min_throughput, None);
         assert_eq!(config.routing.preferred_max_latency_seconds, Some(2.0));
         assert_eq!(config.approved_models.as_ref(), [DEFAULT_OPENROUTER_MODEL]);
+    }
+
+    #[test]
+    fn workspace_manifest_can_choose_openrouter_as_the_project_default() {
+        let fixture = WorkspaceFixture::new("OPENROUTER_API_KEY=test-key\n");
+        std::fs::write(
+            fixture.0.join("stasis.json"),
+            r#"{"manifest_version":1,"ai":{"provider":"openrouter"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            ProviderConfig::from_workspace_lookup(&fixture.0, &|_| None).unwrap(),
+            ProviderConfig::OpenRouter(_)
+        ));
     }
 
     #[test]
