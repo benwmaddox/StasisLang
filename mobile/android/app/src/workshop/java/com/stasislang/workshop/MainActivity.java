@@ -5387,6 +5387,15 @@ public final class MainActivity extends Activity {
         return nativeRunTests(projectRoot);
     }
 
+    void materializeIt029Project(WorkshopProjectRegistry.ProjectInfo project) throws IOException {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+            throw new IllegalStateException("IT-029 project materialization is acceptance-only");
+        }
+        WorkshopTemplateCatalog.Template template = WorkshopTemplateCatalog.require(
+                project.templateId);
+        materializeTemplateProject(getAssets(), template, project.root, false);
+    }
+
     WorkshopAiProjectTransaction.Snapshot acceptanceCaptureProject(String projectRoot)
             throws Exception {
         return WorkshopAiProjectTransaction.capture(new File(projectRoot));
@@ -11177,38 +11186,7 @@ public final class MainActivity extends Activity {
         if (sampleProject) {
             try {
                 WorkshopTemplateCatalog.Template template = activeWorkshopTemplate();
-                for (String file : template.sourceFiles) {
-                    try {
-                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file),
-                                template.replaceExistingFiles);
-                    } catch (IOException ignored) {
-                        // The recursive load below includes files that were seeded successfully.
-                    }
-                }
-                for (String file : template.testFiles) {
-                    try {
-                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file),
-                                template.replaceExistingFiles);
-                    } catch (IOException ignored) {
-                        // The recursive load below includes files that were seeded successfully.
-                    }
-                }
-                for (WorkshopTemplateCatalog.DirectoryMount mount : template.directoryMounts) {
-                    try {
-                        ensureProjectDirectory(assets, mount.assetDirectory,
-                                new File(projectRoot, mount.projectDirectory), mount.replaceExisting);
-                    } catch (IOException ignored) {
-                        // The recursive load below includes directory files that were seeded successfully.
-                    }
-                }
-                for (String file : template.auxiliaryFiles) {
-                    try {
-                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file),
-                                template.replaceExistingFiles);
-                    } catch (IOException ignored) {
-                        // Optional template support files do not prevent source discovery.
-                    }
-                }
+                materializeTemplateProject(assets, template, projectRoot, true);
             } catch (IOException ignored) {
                 // Registry validation normally prevents an unknown template from reaching this path.
             }
@@ -11221,6 +11199,40 @@ public final class MainActivity extends Activity {
         }
 
         return enrichCanonicalSymbolIds(ProjectSnapshot.from(files), projectRootPath());
+    }
+
+    private void materializeTemplateProject(AssetManager assets,
+            WorkshopTemplateCatalog.Template template, File root, boolean bestEffort)
+            throws IOException {
+        for (String file : template.sourceFiles) {
+            materializeTemplateFile(assets, template.assetRoot + file, new File(root, file),
+                    template.replaceExistingFiles, bestEffort);
+        }
+        for (String file : template.testFiles) {
+            materializeTemplateFile(assets, template.assetRoot + file, new File(root, file),
+                    template.replaceExistingFiles, bestEffort);
+        }
+        for (WorkshopTemplateCatalog.DirectoryMount mount : template.directoryMounts) {
+            try {
+                ensureProjectDirectory(assets, mount.assetDirectory,
+                        new File(root, mount.projectDirectory), mount.replaceExisting);
+            } catch (IOException error) {
+                if (!bestEffort) throw error;
+            }
+        }
+        for (String file : template.auxiliaryFiles) {
+            materializeTemplateFile(assets, template.assetRoot + file, new File(root, file),
+                    template.replaceExistingFiles, bestEffort);
+        }
+    }
+
+    private void materializeTemplateFile(AssetManager assets, String assetPath, File file,
+            boolean replaceExisting, boolean bestEffort) throws IOException {
+        try {
+            ensureProjectFile(assets, assetPath, file, replaceExisting);
+        } catch (IOException error) {
+            if (!bestEffort) throw error;
+        }
     }
 
     private AiApiResponse callCodexResponses(String requestJson) throws Exception {

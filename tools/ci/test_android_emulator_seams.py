@@ -685,6 +685,19 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("directTextAssignments", source)
         self.assertNotIn("cmd_u8", source)
 
+    def test_workshop_it029_customizes_assets_before_project_activation(self):
+        method = self.workshop_resource_scope.split(
+            "private static JSONObject activateCustomizeRender", 1
+        )[1].split("private static void customize", 1)[0]
+        self.assertLess(
+            method.index("activity.materializeIt029Project(project);"),
+            method.index("customize(project.root, identity);"),
+        )
+        self.assertLess(
+            method.index("customize(project.root, identity);"),
+            method.index("activity.activateProject(project)"),
+        )
+
     def test_workshop_fatal_scan_delegates_only_valid_it031_case_records(self):
         self.assertIn("ConvertFrom-Json -ErrorAction Stop", self.workshop_script)
         self.assertIn('$case.test_id -eq "IT-031"', self.workshop_script)
