@@ -110,7 +110,9 @@ function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments) {
     try {
         if (-not $process.Start()) { throw 'signtool process did not start' }
         if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
-            try { $process.Kill($true) } catch { $process.Kill() }
+            # SignTool does not launch a process tree that must be supervised. Killing the
+            # direct process also avoids the Windows process-tree enumeration path hanging.
+            $process.Kill()
             if (-not $process.WaitForExit(5000)) {
                 throw "signtool timed out after $timeoutSeconds seconds and did not terminate within 5 seconds"
             }
