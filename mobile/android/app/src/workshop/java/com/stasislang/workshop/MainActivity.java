@@ -371,7 +371,6 @@ public final class MainActivity extends Activity {
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
     static native String nativeFrameAbiDescriptor();
-    static native boolean nativeCorruptRenderSchemaForAcceptance();
     static native int nativeFrameTrace(ByteBuffer frameI32, ByteBuffer frameF32, ByteBuffer frameU8);
     private static native String nativeDrainSpriteReleases();
     private static native String nativePollSpriteReleaseCancellations();
@@ -12391,6 +12390,7 @@ public final class MainActivity extends Activity {
 
         private final MainActivity activity;
         private final StasisPreviewRenderer renderer;
+        private final Runnable performanceRenderPump;
         private final WorkshopTextureProvider textureProvider;
         private static final long ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS = 100L;
         private int touchX;
@@ -12408,6 +12408,13 @@ public final class MainActivity extends Activity {
             textureProvider = new WorkshopTextureProvider(activity);
             renderer = new StasisPreviewRenderer(textureProvider,
                     activity::recordRenderTimeNanos);
+            performanceRenderPump = new Runnable() {
+                @Override public void run() {
+                    if (!renderer.isPerformanceSamplingForAcceptanceActive()) return;
+                    requestRender();
+                    postOnAnimation(this);
+                }
+            };
             setRenderer(renderer);
             setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
             setFocusable(true);
@@ -12463,8 +12470,10 @@ public final class MainActivity extends Activity {
 
         void startPerformanceSamplingForAcceptance() {
             if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
+            removeCallbacks(performanceRenderPump);
             queueEvent(renderer::startPerformanceSamplingForAcceptance);
-            requestRender();
+            queueEvent(() -> activity.runOnUiThread(
+                    () -> postOnAnimation(performanceRenderPump)));
         }
 
         JSONObject resourceScopeSnapshot() throws Exception {
@@ -12547,6 +12556,7 @@ public final class MainActivity extends Activity {
         }
 
         void onHostPause() {
+            removeCallbacks(performanceRenderPump);
             renderer.onHostPaused();
             onPause();
         }
@@ -12555,6 +12565,9 @@ public final class MainActivity extends Activity {
             onResume();
             queueEvent(renderer::onHostResumed);
             requestRender();
+            if (renderer.isPerformanceSamplingForAcceptanceActive()) {
+                postOnAnimation(performanceRenderPump);
+            }
         }
 
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
