@@ -36,9 +36,14 @@ The additive live commands do not change the live envelope schema version.
 
 The native editor enables AccessKit, names task navigation and editing controls,
 uses a visible focus outline, and disables transition animation for reduced
-motion. Compact layouts keep task creation and the reply composer reachable.
-The composer keeps one text entry above four stable buttons: **Attach image**,
-**Send (Ctrl+Enter)**, **Success (Ctrl+Shift+D)**, and **Reject (Ctrl+Esc)**.
+motion. At half-screen widths, a slim header keeps only the current objective;
+provider, usage, task switching, export, and window commands move into its
+overflow menu. Transcript messages are plain rows, while actionable edit and
+media reviews retain richer cards. A completed provider reply shows one entry
+above **Attach**, **Send**, **Success**, and **Reject**. While a request is
+running, those outcomes are replaced by a draft entry and **Stop (Esc)**; Stop
+cancels only that provider request and leaves the task active. **Ctrl+N** reveals
+the compact new-task entry. Wider layouts retain the fully labeled controls.
 Contextual edit review and testing controls stay with their timeline cards or in
 the command palette instead of competing with these task-level outcomes.
 
@@ -148,11 +153,15 @@ the renderer's screenshot event, writes a PNG, and closes the window:
 New-Item -ItemType Directory -Force artifacts/task519 | Out-Null
 $env:STASIS_EDITOR_EVIDENCE_PNG = "$PWD/artifacts/task519/wide.png"
 $env:STASIS_EDITOR_EVIDENCE_WIDTH = "1100"
+$env:STASIS_EDITOR_EVIDENCE_HEIGHT = "900"
 $env:STASIS_EDITOR_EVIDENCE_SCALE = "1"
 python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis capture_native_task_timeline -- --test-threads=1
 ```
 
-Set width to `680` for compact layout, or scale to `1.5` for high-DPI layout.
+Set width to `520`, height to `400`-`450`, and scale to `2` for a high-DPI compact
+half-screen capture. Set `STASIS_EDITOR_EVIDENCE_WORKING=1` to show the running
+request state without contacting a provider. Set `STASIS_EDITOR_EVIDENCE_QUEUE=1`
+to show the next-task gate.
 Set `STASIS_EDITOR_EVIDENCE_REPAIR=1` to show failed validation and repair.
 Set `STASIS_EDITOR_EVIDENCE_OUTCOMES=1` to show the simplified composer with a
 current passing validation and enabled **Success** action.
@@ -171,6 +180,9 @@ cards remain in the scrollable history.
 
 | PNG | Evidence |
 | --- | --- |
+| [Compact active reply](evidence/ai-editor/compact-flow/active-reply.png) | Half-width, high-DPI task header, sent-image thumbnail, wrapped AI reply, validation outcome, and four task actions without overlap. |
+| [Compact working](evidence/ai-editor/compact-flow/working.png) | Fixed current-task header, plain user message, slim provider progress, draft entry, and request-only Stop action. |
+| [Compact queue gate](evidence/ai-editor/compact-flow/queue-gate.png) | One queued objective with visible keyboard shortcuts and the following objective summarized without starting another conversation. |
 | [Overview](evidence/ai-editor/task519/overview.png) | Wide task rail; user, attachment, and AI reply in sequence; fixed composer. |
 | [Compact](evidence/ai-editor/task519/compact.png) | 680-point navigation and task canvas; separate provider and usage rows. |
 | [Assets](evidence/ai-editor/task519/assets.png) | Inline asset thumbnail, review controls, provenance, and secondary queued tasks. |
