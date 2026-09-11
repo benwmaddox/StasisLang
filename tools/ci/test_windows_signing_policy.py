@@ -203,6 +203,8 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("Invoke-BoundedSignTool", source)
         self.assertIn("$process.WaitForExit($timeoutSeconds * 1000)", source)
         self.assertIn("$process.Kill($true)", source)
+        self.assertIn("$process.WaitForExit(5000)", source)
+        self.assertNotIn("$process.WaitForExit()", source)
         self.assertIn("$env:STASIS_SIGNING_TIMESTAMP_URLS -split ';'", source)
         self.assertIn("foreach ($timestamp in $timestamps)", source)
         self.assertIn(
