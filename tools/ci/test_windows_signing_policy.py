@@ -70,10 +70,15 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         trust_source = (ROOT / "tools/windows/stasis-signing-trust.ps1").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Get-AuthenticodeSignature", trust_source)
-        self.assertIn("$certificate.Thumbprint -ne $ExpectedThumbprint", trust_source)
-        self.assertIn("$certificate.Subject -ne $certificate.Issuer", trust_source)
-        self.assertIn("StoreLocation]::CurrentUser", trust_source)
+        self.assertIn("Get-Command openssl.exe", trust_source)
+        self.assertIn("Get-Command certutil.exe", trust_source)
+        self.assertIn("'env:STASIS_SIGNING_PFX_PASSWORD'", trust_source)
+        self.assertIn("$publicCertificate.Thumbprint -ne $ExpectedThumbprint", trust_source)
+        self.assertIn("$publicCertificate.Subject -ne $publicCertificate.Issuer", trust_source)
+        self.assertIn("'-user', '-f', '-addstore', 'Root'", trust_source)
+        self.assertIn("$process.WaitForExit(30000)", trust_source)
+        self.assertIn("$process.Kill()", trust_source)
+        self.assertNotIn("Get-AuthenticodeSignature", trust_source)
         self.assertNotIn("X509Certificate2]::new", signing_step)
 
     def test_cargo_runner_routes_signtool_through_policy_entrypoint(self):

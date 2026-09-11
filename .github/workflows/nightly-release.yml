@@ -337,7 +337,7 @@ jobs:
             )
             Invoke-BoundedSigningCommand sign $artifacts[0]
             Invoke-BoundedPowerShellCommand "temporary signer trust for $($artifacts[0])" 'tools/windows/stasis-signing-trust.ps1' @(
-              '-Artifact', $artifacts[0], '-ExpectedThumbprint', $expectedThumbprint
+              '-Certificate', $certificate, '-ExpectedThumbprint', $expectedThumbprint
             )
             Invoke-BoundedSigningCommand verify $artifacts[0]
             $artifacts | Select-Object -Skip 1 | ForEach-Object {
