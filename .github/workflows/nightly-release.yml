@@ -289,55 +289,22 @@ jobs:
           $expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"
           try {
             [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:STASIS_SIGNING_PFX_BASE64))
-            $pfx = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
-              $certificate,
-              $env:STASIS_SIGNING_PFX_PASSWORD,
-              [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
-            )
-            if ($pfx.Thumbprint -ne $expectedThumbprint) {
-              throw "Windows signing certificate does not match the pinned release identity"
-            }
-            if ($pfx.Subject -ne $pfx.Issuer) {
-              throw "Pinned private signing identity must remain self-signed"
-            }
-            $publicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
-              $pfx.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-            )
-            $trustedRoots = [Security.Cryptography.X509Certificates.X509Store]::new(
-              "Root",
-              [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-            )
-            try {
-              $trustedRoots.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-              $trustedRoots.Add($publicCertificate)
-            } finally {
-              if ($trustedRoots) { $trustedRoots.Close() }
-              if ($publicCertificate) { $publicCertificate.Dispose() }
-              if ($pfx) { $pfx.Dispose() }
-            }
             $env:STASIS_SIGNING_CERTIFICATE = $certificate
             $env:STASIS_SIGNING_PROFILE = "production"
             $env:STASIS_SIGNING_TIMESTAMP_URLS = "http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com"
             $env:STASIS_SIGNING_TIMEOUT_SECONDS = "30"
-            function Invoke-BoundedSigningCommand([string] $mode, [string] $artifact) {
+            function Invoke-BoundedPowerShellCommand([string] $label, [string] $script, [string[]] $arguments) {
               $startInfo = [Diagnostics.ProcessStartInfo]::new()
               $startInfo.FileName = (Get-Command pwsh -ErrorAction Stop).Source
               $startInfo.UseShellExecute = $false
-              foreach ($argument in @(
-                '-NoProfile',
-                '-File',
-                'tools/windows/stasis-signing.ps1',
-                $mode,
-                '-Artifact',
-                $artifact
-              )) {
+              foreach ($argument in @('-NoProfile', '-File', $script) + $arguments) {
                 $startInfo.ArgumentList.Add($argument)
               }
               $process = [Diagnostics.Process]::new()
               $process.StartInfo = $startInfo
               try {
-                Write-Host "Starting Authenticode $mode for $artifact"
-                if (-not $process.Start()) { throw "Authenticode $mode process did not start for $artifact" }
+                Write-Host "Starting $label"
+                if (-not $process.Start()) { throw "$label process did not start" }
                 if (-not $process.WaitForExit(90000)) {
                   try {
                     $process.Kill()
@@ -345,24 +312,35 @@ jobs:
                     if (-not $process.HasExited) { throw }
                   }
                   if (-not $process.WaitForExit(5000)) {
-                    throw "Authenticode $mode timed out for $artifact and did not terminate within 5 seconds"
+                    throw "$label timed out and did not terminate within 5 seconds"
                   }
-                  throw "Authenticode $mode timed out after 90 seconds for $artifact"
+                  throw "$label timed out after 90 seconds"
                 }
                 if ($process.ExitCode -ne 0) {
-                  throw "Authenticode $mode failed for $artifact with exit code $($process.ExitCode)"
+                  throw "$label failed with exit code $($process.ExitCode)"
                 }
               } finally {
                 $process.Dispose()
               }
             }
-            @(
+            function Invoke-BoundedSigningCommand([string] $mode, [string] $artifact) {
+              Invoke-BoundedPowerShellCommand "Authenticode $mode for $artifact" 'tools/windows/stasis-signing.ps1' @(
+                $mode, '-Artifact', $artifact
+              )
+            }
+            $artifacts = @(
               "target/${{ matrix.rust_target }}/release/stasis.exe",
               "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe",
               "target/${{ matrix.rust_target }}/release/stasis_dynload.dll",
               "runtime/build_ci/bin/Release/stasis_graphics.dll",
               "runtime/build_ci/bin/Release/stasis_runner.exe"
-            ) | ForEach-Object {
+            )
+            Invoke-BoundedSigningCommand sign $artifacts[0]
+            Invoke-BoundedPowerShellCommand "temporary signer trust for $($artifacts[0])" 'tools/windows/stasis-signing-trust.ps1' @(
+              '-Artifact', $artifacts[0], '-ExpectedThumbprint', $expectedThumbprint
+            )
+            Invoke-BoundedSigningCommand verify $artifacts[0]
+            $artifacts | Select-Object -Skip 1 | ForEach-Object {
               Invoke-BoundedSigningCommand sign $_
               Invoke-BoundedSigningCommand verify $_
             }
