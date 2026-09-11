@@ -107,8 +107,9 @@ controller. Each request captures bounded context from one task and carries an
 immutable task ID and request ID. Switching the selected task never changes the
 destination of an in-flight reply. Provider work runs off the UI thread; polling
 only collects completed work. Editing tools produce task-owned semantic proposals;
-they do not write source during a provider turn. Accept approves a proposal, and
-Apply submits the approved payload to the host's atomic semantic-edit path.
+they do not write source during a provider turn. Once the compiler-owned preview
+is ready, the editor automatically approves and atomically publishes one proposal,
+requests the live swap, and starts focused tests.
 
 Each action retains its payload and prior revisions. Provider repair responses
 may replace only rejected actions or actions marked for repair; they cannot
@@ -126,9 +127,9 @@ when another task is selected.
 
 Host operations are serialized. Cancellation stops queued work; an atomic edit
 already executing finishes or rolls back, and any committed receipt is retained
-on its originating task. Source conflicts and failed edit tests preserve the
-previous source and return a repairable failure. An empty focused-test selection
-cannot unlock Done.
+on its originating task. Source conflicts preserve the previous source. Failed
+focused tests restore the published source through its hash-bound receipt and
+return a repairable failure. An empty focused-test selection cannot unlock Done.
 
 Cancellation and reconnect invalidate the old request before another response can
 be accepted. A late response cannot append to the thread or update its metrics.
