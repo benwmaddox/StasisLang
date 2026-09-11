@@ -1,0 +1,15 @@
+{
+  "command": [
+    "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\BannerfallTactics\\build\\bannerfall_tactics.exe"
+  ],
+  "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\BannerfallTactics\\build",
+  "exit": 0,
+  "duration_seconds": 3.172,
+  "sha256": "087302acd0d0f333a90e883fb0a810bd6d21c63dc838725224e6181ccea52c6c",
+  "bytes": 2673432,
+  "environment": {
+    "STASIS_SCREENSHOT_ONCE": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\docs\\validation\\task386\\nightly299\\bannerfall-native.png",
+    "STASIS_SCREENSHOT_FRAME": "120",
+    "STASIS_EXIT_AFTER_SCREENSHOT": "1"
+  }
+}
