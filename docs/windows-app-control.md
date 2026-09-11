@@ -48,7 +48,7 @@ Stasis-controlled Authenticode signing always requests a SHA-256 file digest and
 Production credentials are supplied externally with `STASIS_SIGNING_CERT_THUMBPRINT` or
 `STASIS_SIGNING_CERTIFICATE`; Stasis never generates, exports, prints, or logs private keys.
 The nightly currently uses a pinned, self-signed Maddox Labs release identity. Its Windows job
-adds only that public leaf certificate to the ephemeral runner's CurrentUser `TrustedPeople`
+adds that pinned self-signed certificate to the ephemeral runner's CurrentUser `Root`
 store, performs strict Authenticode verification before and after packaging, and removes the
 trust entry in an `always()` cleanup step. This proves artifact integrity and stable private
 publisher identity in CI, but it does not confer public CA trust or SmartScreen reputation on

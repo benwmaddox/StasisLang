@@ -132,6 +132,13 @@ Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","
 RenderAcceptanceFrame: count=30 frame_token=77
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":30,"frame_token":77}
 """
+GOOD = GOOD.replace('"name":"render_schema"', '"name":"render_construction"')
+GOOD = GOOD.replace(
+    '"stage":"render_schema","code":"stasis.renderSchema"',
+    '"stage":"runtime_entry","code":"stasis.runtimeEntry"')
+GOOD = GOOD.replace(
+    '"causes":["render_schema phase","render detail"]',
+    '"causes":["runtime_entry phase","render detail"]')
 # Keep the fixture's IT-031 case evidence in separate bounded log records, as
 # the Android logcat line limit cannot carry five duplicated full cases.
 def _it029_case(phase, sequence, root, text_hash, capture_hash, command_trace,
@@ -334,7 +341,8 @@ GOOD = GOOD.replace('"causes":["parse phase","parse detail"]}},',
                     '"actual":{"line":3,"column":1,"end_line":4,"end_column":1}}},', 1)
 
 for _name, _detail in (("parse", "parse detail"), ("extern_resolution", "extern detail"),
-                       ("runtime_entry", "runtime detail"), ("render_schema", "render detail"),
+                       ("runtime_entry", "runtime detail"),
+                       ("render_construction", "render detail"),
                        ("missing_resource", "resource detail")):
     GOOD = GOOD.replace(
         '{"name":"' + _name + '","equal":true,',
@@ -479,7 +487,7 @@ class WorkshopSeamTests(unittest.TestCase):
                 ("parse", "parse", "stasis.parse"),
                 ("extern_resolution", "extern_resolution", "stasis.unresolvedExtern"),
                 ("runtime_entry", "runtime_entry", "stasis.runtimeEntry"),
-                ("render_schema", "render_schema", "stasis.renderSchema"),
+                ("render_construction", "runtime_entry", "stasis.runtimeEntry"),
                 ("missing_resource", "resource", "stasis.missingResource")]:
             diagnostic = {"schema": "stasis.native_diagnostic.v1", "version": 1,
                           "stage": stage, "code": code, "context": {},
@@ -495,7 +503,7 @@ class WorkshopSeamTests(unittest.TestCase):
                 diagnostic["context"]["resource"] = "assets/IT031_missing.svg"
             if name == "runtime_entry":
                 diagnostic["context"]["symbol"] = "tick"
-            if name == "render_schema":
+            if name == "render_construction":
                 diagnostic["context"]["symbol"] = "render"
             case = {"name": name, "native": diagnostic, "ui": diagnostic,
                     "displayed_text": diagnostic["detail"], "equal": True}
@@ -516,7 +524,7 @@ class WorkshopSeamTests(unittest.TestCase):
                 ("parse", "parse", "stasis.parse"),
                 ("extern_resolution", "extern_resolution", "stasis.unresolvedExtern"),
                 ("runtime_entry", "runtime_entry", "stasis.runtimeEntry"),
-                ("render_schema", "render_schema", "stasis.renderSchema"),
+                ("render_construction", "runtime_entry", "stasis.runtimeEntry"),
                 ("missing_resource", "resource", "stasis.missingResource")]:
             diagnostic = {"schema": "stasis.native_diagnostic.v1", "version": 1,
                           "stage": stage, "code": code, "context": {},
@@ -531,7 +539,7 @@ class WorkshopSeamTests(unittest.TestCase):
                 diagnostic["context"]["resource"] = "assets/IT031_missing.svg"
             if name == "runtime_entry":
                 diagnostic["context"]["symbol"] = "tick"
-            if name == "render_schema":
+            if name == "render_construction":
                 diagnostic["context"]["symbol"] = "render"
             ui = dict(diagnostic)
             ui["detail"] = "changed"
@@ -586,8 +594,11 @@ class WorkshopSeamTests(unittest.TestCase):
             verify_log(generic_detail, MANIFEST)
 
     def test_rejects_wrong_it031_case_order_context_and_cleanup(self):
-        wrong_code = GOOD.replace('"code":"stasis.renderSchema"',
-                                  '"code":"stasis.parse"')
+        wrong_code = GOOD.replace(
+            '"stage":"runtime_entry","code":"stasis.runtimeEntry",'
+            '"context":{"symbol":"render"}',
+            '"stage":"runtime_entry","code":"stasis.parse",'
+            '"context":{"symbol":"render"}')
         with self.assertRaisesRegex(SeamError, "stage, code"):
             verify_log(wrong_code, MANIFEST)
         wrong_context = GOOD.replace('"symbol":"tick"', '"symbol":"main"')

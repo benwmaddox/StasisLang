@@ -12,7 +12,7 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
 
     @Test public void casesAreTheSingleOrderedNativeSequence() {
         assertArrayEquals(new String[] {"parse", "extern_resolution", "runtime_entry",
-                "render_schema", "missing_resource"},
+                "render_construction", "missing_resource"},
                 WorkshopDiagnosticSeamAcceptance.caseNames());
     }
 
@@ -20,8 +20,8 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
         String source = "function render(): i32 {\n"
                 + "  pong_game_render();\n  return 0;\n}\n\n"
                 + "function on_code_swap(): void {\n  pong_game_on_code_swap();\n}\n";
-        String render = WorkshopDiagnosticSeamAcceptance.renderSchemaSource(source);
-        assertTrue(render.indexOf("return 0;") < render.indexOf("pong_game_render();"));
+        String render = WorkshopDiagnosticSeamAcceptance.renderConstructionSource(source);
+        assertTrue(render.indexOf("return 17;") < render.indexOf("pong_game_render();"));
         assertFalse(render.contains("gfx_cmd_"));
         assertFalse(render.contains("/internal/gfx_cmd.stasis"));
         String resource = WorkshopDiagnosticSeamAcceptance.missingResourceSource(source);
@@ -33,10 +33,10 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
 
     }
 
-    @Test public void renderSchemaMutationUsesOnlyPublicSource() {
-        String mutated = WorkshopDiagnosticSeamAcceptance.renderSchemaSource(
+    @Test public void renderConstructionMutationUsesOnlyPublicSource() {
+        String mutated = WorkshopDiagnosticSeamAcceptance.renderConstructionSource(
                 "function render(): i32 { pong_game_render(); return 0; }\n");
-        assertTrue(mutated.startsWith("function render(): i32 {\n    return 0;\n"));
+        assertTrue(mutated.startsWith("function render(): i32 {\n    return 17;\n"));
         assertFalse(mutated.contains("import"));
         assertFalse(mutated.contains("gfx_cmd_"));
     }
@@ -44,14 +44,14 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
     @Test public void renderMutationHandlesCrLfAndInlineBodies() {
         String source = "function render(): i32 { return 0; }\r\n"
                 + "function later(): i32 { return 1; }\r\n";
-        String mutated = WorkshopDiagnosticSeamAcceptance.renderSchemaSource(source);
-        assertEquals("function render(): i32 {\n    return 0;\n return 0; }\r\n"
+        String mutated = WorkshopDiagnosticSeamAcceptance.renderConstructionSource(source);
+        assertEquals("function render(): i32 {\n    return 17;\n return 0; }\r\n"
                 + "function later(): i32 { return 1; }\r\n", mutated);
     }
 
     @Test public void renderMutationRejectsMissingDeclaration() {
         assertThrows(IllegalStateException.class, () ->
-                WorkshopDiagnosticSeamAcceptance.renderSchemaSource(
+                WorkshopDiagnosticSeamAcceptance.renderConstructionSource(
                         "function later(): i32 { return 1; }\n"));
     }
 }

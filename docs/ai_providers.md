@@ -28,6 +28,7 @@ Approved models and performance constraints belong in `stasis.json`:
 ```json
 {
   "ai": {
+    "provider": "openrouter",
     "openrouter": {
       "approved_models": ["openai/gpt-oss-120b"],
       "min_throughput_tokens_per_second": 400,
@@ -36,6 +37,10 @@ Approved models and performance constraints belong in `stasis.json`:
   }
 }
 ```
+
+`ai.provider` sets the default provider for new editor tasks to `codex` or `openrouter`.
+The per-task provider picker can still change an individual conversation. Secrets remain in
+`.env`; selecting OpenRouter requires `OPENROUTER_API_KEY`.
 
 The current approved editor model is `openai/gpt-oss-120b`. Project manifests may list
 additional models only after they have been approved through representative semantic-edit and

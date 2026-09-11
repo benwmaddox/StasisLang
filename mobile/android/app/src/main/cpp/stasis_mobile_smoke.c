@@ -1230,27 +1230,6 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
 }
 
 #if STASIS_RENDER_ACCEPTANCE
-JNIEXPORT jboolean JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeCorruptRenderSchemaForAcceptance(
-        JNIEnv *env, jclass activity_class) {
-    (void)env;
-    (void)activity_class;
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL) return JNI_FALSE;
-    typedef int32_t *(*global_i32_array_ptr_fn)(int32_t, int32_t, int32_t);
-    global_i32_array_ptr_fn global_i32_array_ptr = (global_i32_array_ptr_fn)dlsym(
-            bridge->handle, "stasis_jit_global_i32_array_ptr");
-    if (global_i32_array_ptr == NULL) return JNI_FALSE;
-    uint32_t hash = 2166136261u;
-    const unsigned char *name = (const unsigned char *)"gfx_cmd_i32";
-    for (; *name != 0; ++name) hash = (hash ^ *name) * 16777619u;
-    int32_t *header = global_i32_array_ptr((int32_t)hash, 0, 2);
-    if (header == NULL) return JNI_FALSE;
-    header[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
-    header[STASIS_RENDER_I_VERSION] = 99;
-    return JNI_TRUE;
-}
-
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeFrameAbiDescriptor(
         JNIEnv *env, jclass activity_class) {
