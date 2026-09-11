@@ -1,0 +1,435 @@
+[
+  {
+    "local_id": "D1",
+    "repository": "Afterlight",
+    "title": "Restore Afterlight source compatibility with Stasis nightly 299",
+    "classification": "game defect (stale API or module naming; also fails nightly 290)",
+    "source_commit": "f1bb277923cd7f368671d4ce0a5964c515569f61",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/Afterlight.git commit f1bb277923cd7f368671d4ce0a5964c515569f61 into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "src/main.stasis:1:1: cannot resolve call 'audio_init'"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "src/main.stasis:1:1: cannot resolve call 'audio_init'",
+    "regression_comparison": "Nightly 290 source check exit 1; see nightly290/Afterlight-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "Afterlight"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 549,
+    "task_issue_id": "7a39df48-fe85-42e6-afb8-48661479f5cb"
+  },
+  {
+    "local_id": "D2",
+    "repository": "ChessTD",
+    "title": "Restore ChessTD source compatibility with Stasis nightly 299",
+    "classification": "StasisLang regression (source compatibility; passes nightly 290)",
+    "source_commit": "617fdb0ed321abff23cd9ff8d16d2fc3a4314040",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/ChessTD.git commit 617fdb0ed321abff23cd9ff8d16d2fc3a4314040 into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "src/game/systems/presentation.stasis:1:1: unknown local struct field path 'aura.handle' in current jit path"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "src/game/systems/presentation.stasis:1:1: unknown local struct field path 'aura.handle' in current jit path",
+    "regression_comparison": "Nightly 290 source check exit 0; see nightly290/ChessTD-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "ChessTD"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 480,
+    "task_issue_id": "d4d7273b-d7e5-4e62-87c4-fa9119662e50"
+  },
+  {
+    "local_id": "D3",
+    "repository": "Exterminator",
+    "title": "Restore Exterminator source compatibility with Stasis nightly 299",
+    "classification": "game defect (stale API or module naming; also fails nightly 290)",
+    "source_commit": "3b03140a25447c9832e556d543be8c3c824ca24a",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/Exterminator.git commit 3b03140a25447c9832e556d543be8c3c824ca24a into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "workshop module graph failed: graphics internal identifier 'gfx_cmd_sprite' is unavailable here; use stdlib/graphics.stasis"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "workshop module graph failed: graphics internal identifier 'gfx_cmd_sprite' is unavailable here; use stdlib/graphics.stasis",
+    "regression_comparison": "Nightly 290 source check exit 1; see nightly290/Exterminator-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "Exterminator"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 550,
+    "task_issue_id": "1782606e-2a5b-4e01-b55e-0ee1dd76a2fa"
+  },
+  {
+    "local_id": "D4",
+    "repository": "HamsterHavenTycoon",
+    "title": "Restore HamsterHavenTycoon source compatibility with Stasis nightly 299",
+    "classification": "StasisLang regression (source compatibility; passes nightly 290)",
+    "source_commit": "319adf9857a701f0dbb919d4e858e3b08a959613",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/HamsterHavenTycoon.git commit 319adf9857a701f0dbb919d4e858e3b08a959613 into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "src/main.stasis:1:1: unknown identifier 's.wheel_art.handle' in current jit path"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "src/main.stasis:1:1: unknown identifier 's.wheel_art.handle' in current jit path",
+    "regression_comparison": "Nightly 290 source check exit 0; see nightly290/HamsterHavenTycoon-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "HamsterHavenTycoon"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 551,
+    "task_issue_id": "f69acc5b-0378-4107-81c9-78e72d530bb4"
+  },
+  {
+    "local_id": "D5",
+    "repository": "maddox-and-friends",
+    "title": "Restore maddox-and-friends source compatibility with Stasis nightly 299",
+    "classification": "StasisLang regression (source compatibility; passes nightly 290)",
+    "source_commit": "610061c912040c8eb811bfc6124f57a5fde0171e",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/maddox-and-friends.git commit 610061c912040c8eb811bfc6124f57a5fde0171e into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "src/network.stasis:1:1: array property 'payload.length' is unavailable; use 'payload.max_length' for declared capacity"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "src/network.stasis:1:1: array property 'payload.length' is unavailable; use 'payload.max_length' for declared capacity",
+    "regression_comparison": "Nightly 290 source check exit 0; see nightly290/maddox-and-friends-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "maddox-and-friends"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 552,
+    "task_issue_id": "c93e707c-58a7-4da9-aeaf-0d83165a41a4"
+  },
+  {
+    "local_id": "D6",
+    "repository": "maddox-marble-run",
+    "title": "Restore maddox-marble-run source compatibility with Stasis nightly 299",
+    "classification": "StasisLang regression (source compatibility; passes nightly 290)",
+    "source_commit": "b29fee1b4000a4b88578ab537e584270b72c792b",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/maddox-marble-run.git commit b29fee1b4000a4b88578ab537e584270b72c792b into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "src/render.stasis:1:1: unknown local struct field path 'sprite.handle' in current jit path"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "src/render.stasis:1:1: unknown local struct field path 'sprite.handle' in current jit path",
+    "regression_comparison": "Nightly 290 source check exit 0; see nightly290/maddox-marble-run-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "maddox-marble-run"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 553,
+    "task_issue_id": "beb3fd67-779d-4e31-b9e6-a870808cf132"
+  },
+  {
+    "local_id": "D7",
+    "repository": "RobotTournaments",
+    "title": "Restore RobotTournaments source compatibility with Stasis nightly 299",
+    "classification": "game defect (stale API or module naming; also fails nightly 290)",
+    "source_commit": "4bc1d6723c1d3c639caa139289fd38c168150172",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/RobotTournaments.git commit 4bc1d6723c1d3c639caa139289fd38c168150172 into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "src/rt_input.stasis:1:1: cannot resolve call 'is_key_down'"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "src/rt_input.stasis:1:1: cannot resolve call 'is_key_down'",
+    "regression_comparison": "Nightly 290 source check exit 1; see nightly290/RobotTournaments-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "RobotTournaments"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 554,
+    "task_issue_id": "284b18ba-5cd6-4bbe-918b-8651f662b776"
+  },
+  {
+    "local_id": "D8",
+    "repository": "RootbeerMaze3",
+    "title": "Restore RootbeerMaze3 source compatibility with Stasis nightly 299",
+    "classification": "game defect (stale API or module naming; also fails nightly 290)",
+    "source_commit": "ce9ffc70dccbacf79bd4aec1c38c1afbdc1929e7",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/RootbeerMaze3.git commit ce9ffc70dccbacf79bd4aec1c38c1afbdc1929e7 into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "workshop module graph failed: duplicate module alias 'asset_tasks' for 'src/asset_tasks.stasis' and 'vendor/stasis/stdlib/asset_tasks.stasis'"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "workshop module graph failed: duplicate module alias 'asset_tasks' for 'src/asset_tasks.stasis' and 'vendor/stasis/stdlib/asset_tasks.stasis'",
+    "regression_comparison": "Nightly 290 source check exit 1; see nightly290/RootbeerMaze3-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "RootbeerMaze3"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 555,
+    "task_issue_id": "aca497a2-8534-4a9b-8b2e-0644b070aeec"
+  },
+  {
+    "local_id": "D9",
+    "repository": "SheepHerder",
+    "title": "Restore SheepHerder source compatibility with Stasis nightly 299",
+    "classification": "StasisLang regression (source compatibility; passes nightly 290)",
+    "source_commit": "24959b208c434d06fec4b006c58a261533415b23",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/SheepHerder.git commit 24959b208c434d06fec4b006c58a261533415b23 into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "src/main.stasis:1:1: unknown identifier 'app.resources.dog_sprite.handle' in current jit path"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "src/main.stasis:1:1: unknown identifier 'app.resources.dog_sprite.handle' in current jit path",
+    "regression_comparison": "Nightly 290 source check exit 0; see nightly290/SheepHerder-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "SheepHerder"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode dev",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 556,
+    "task_issue_id": "657347b2-988f-4e87-8e77-e751f9505b74"
+  },
+  {
+    "local_id": "D10",
+    "repository": "ToddlerMatch",
+    "title": "Restore ToddlerMatch source compatibility with Stasis nightly 299",
+    "classification": "StasisLang regression (source compatibility; passes nightly 290)",
+    "source_commit": "7a9225596b32097f0df461ee63d01e4a04c95b5c",
+    "toolchain": "nightly-20260909-299",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "checkout": "Export https://github.com/benwmaddox/ToddlerMatch.git commit 7a9225596b32097f0df461ee63d01e4a04c95b5c into a clean validation directory.",
+      "commands": [
+        "stasis vendor update",
+        "stasis --json check"
+      ],
+      "first_diagnostic": "src/main.stasis:1:1: unknown indexed collection field path 'handle'"
+    },
+    "expected": "Source check succeeds with the selected official toolchain; native build and bounded runtime remain usable.",
+    "actual": "src/main.stasis:1:1: unknown indexed collection field path 'handle'",
+    "regression_comparison": "Nightly 290 source check exit 0; see nightly290/ToddlerMatch-check.log. Nightly 299 source check exit 1.",
+    "affected_games": [
+      "ToddlerMatch"
+    ],
+    "affected_targets": [
+      "Windows source check, native build, and headless runtime; other targets not exercised"
+    ],
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "constraints": "Use an official fingerprint-verified shared toolchain. No local compiler binary or compatibility shim. Diagnose the first failure, then validate the full project to expose additional failures. API migrations belong in the affected game; an unintended compiler/stdlib regression belongs in repo:stasislang.",
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "task_sequence": 557,
+    "task_issue_id": "64912e63-f2b9-44e2-87fa-22e63ad155b4"
+  },
+  {
+    "local_id": "D11",
+    "repository": "ChessTD",
+    "title": "Restore canonical formatting in two ChessTD source files",
+    "classification": "game defect (format gate)",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "reproduction": {
+      "commands": [
+        "stasis fmt --check"
+      ],
+      "actual": "formatting required: src/game/audio_presentation.stasis, src/game/view/gameplay.stasis"
+    },
+    "expected": "Canonical formatting check succeeds.",
+    "regression_comparison": "Fails on both nightly 270 and 299.",
+    "acceptance_commands": [
+      "stasis fmt --check",
+      "stasis check",
+      "stasis test"
+    ],
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "source_commit": "617fdb0ed321abff23cd9ff8d16d2fc3a4314040",
+    "affected_games": [
+      "ChessTD"
+    ],
+    "affected_targets": [
+      "Windows"
+    ],
+    "task_sequence": 558,
+    "task_issue_id": "48d0c6f6-585e-46a5-9ab4-c6682ba5ee45"
+  },
+  {
+    "local_id": "D12",
+    "repository": "Exterminator",
+    "title": "Provide the asset manifest required for native Exterminator builds",
+    "classification": "game defect (missing asset contract)",
+    "toolchain_identity_file": "toolchain-verification.json",
+    "toolchain": "nightly-20260831-270",
+    "reproduction": {
+      "commands": [
+        "stasis vendor update",
+        "stasis build --mode release"
+      ],
+      "actual": "asset_manifest_missing (assets/manifest.json)"
+    },
+    "expected": "Native build resolves the game asset manifest and produces a verified executable.",
+    "regression_comparison": "Nightly 270 check, test and 120-tick headless run pass, but native build fails. Nightly 299 fails earlier on private graphics API use; resolve D3 before revalidating the asset path with 299.",
+    "acceptance_commands": [
+      "stasis check",
+      "stasis test",
+      "stasis build --mode release",
+      "stasis run --headless --ticks 120 --fast-forward"
+    ],
+    "publication": "Existing Maddox task verified read-only on 2026-09-11.",
+    "source_commit": "3b03140a25447c9832e556d543be8c3c824ca24a",
+    "affected_games": [
+      "Exterminator"
+    ],
+    "affected_targets": [
+      "Windows"
+    ],
+    "task_sequence": 559,
+    "task_issue_id": "d6f603a5-4429-4e68-906f-cbb408422076"
+  }
+]

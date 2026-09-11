@@ -1,0 +1,6 @@
+cache_cleanup_removed_files=0
+cache_cleanup_removed_dirs=1
+cache_cleanup_ttl_days=7
+Done Adding Additional Store
+Successfully signed: D:\code\MaddoxTasks-worktrees\stasislang-386\artifacts\task386\BannerfallTactics\build\bannerfall_tactics.exe
+{"command":"build","ok":true,"result":{"backend":"aot","entry_symbol":"main","output":"D:/code/MaddoxTasks-worktrees/stasislang-386/artifacts/task386/BannerfallTactics/build/bannerfall_tactics.exe","source_files":12}}

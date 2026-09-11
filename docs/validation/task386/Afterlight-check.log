@@ -1,0 +1,1 @@
+{"code":"command_failed","command":"check","message":"src/courier_rig.stasis:1:1: cannot resolve call 'reserve'","ok":false}
