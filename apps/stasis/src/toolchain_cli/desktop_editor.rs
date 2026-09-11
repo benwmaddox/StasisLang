@@ -86,9 +86,6 @@ struct PrimaryAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TimelineAction {
-    Accept(String, String),
-    Reject(String, String),
-    Apply(String, String),
     ApproveImage(String, String),
     RejectImage(String, String),
     Import(String, String),
@@ -581,7 +578,7 @@ fn run_reply_provider_observed_with_progress(
     });
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Propose related source and behavioral tests together in one atomic batch. The editable_symbols catalog identifies project source. Use read_source_symbol to inspect exact source before proposing changes; batch independent symbol reads. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
+        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Return at most one semantic edit proposal, containing related source and behavioral tests together as one atomic batch. The editor validates and applies that batch immediately after this response, then requests a live hot swap and runs focused tests; do not ask the user to apply it. The editable_symbols catalog identifies project source. Use read_source_symbol to inspect exact source before proposing changes; batch independent symbol reads. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Keep the response concise and self-contained.".to_string(),
         max_turns: 4,
         ..AgentProfile::default()
     };
@@ -740,6 +737,7 @@ enum HostOperation {
     Test {
         paths: Vec<String>,
         run_id: u64,
+        rollback_receipts: Vec<String>,
     },
 }
 
@@ -868,18 +866,39 @@ impl HostExecutor {
                 } else {
                     let operation_result = match &request.operation {
                         HostOperation::Apply { preview, .. } => {
-                            super::desktop_apply_semantic_preview_with_progress(
+                            super::desktop_publish_semantic_preview_with_progress(
                                 &project_root,
                                 preview,
                                 &mut emit,
                             )
                         }
-                        HostOperation::Test { paths, .. } => {
-                            super::desktop_run_focused_tests_with_progress(
+                        HostOperation::Test {
+                            paths,
+                            rollback_receipts,
+                            ..
+                        } => {
+                            let tested = super::desktop_run_focused_tests_with_progress(
                                 &project_root,
                                 paths,
                                 &mut emit,
-                            )
+                            );
+                            tested.map_err(|error| {
+                                if rollback_receipts.is_empty() {
+                                    return error;
+                                }
+                                emit(ProgressStage::RollingBack);
+                                match super::desktop_revert_semantic_receipts(
+                                    &project_root,
+                                    rollback_receipts,
+                                ) {
+                                    Ok(()) => format!(
+                                        "{error}; the applied source changes were rolled back"
+                                    ),
+                                    Err(rollback) => format!(
+                                        "{error}; automatic rollback also failed: {rollback}"
+                                    ),
+                                }
+                            })
                         }
                     };
                     operation_result.and_then(|(summary, receipt)| match &request.operation {
@@ -1191,6 +1210,86 @@ impl DesktopEditor {
                     worker,
                 });
             }
+        }
+    }
+
+    fn auto_apply_ready_proposal(&mut self) {
+        let Some(task_id) = self
+            .state
+            .session
+            .running_task_id()
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+        if self.busy_tasks.contains(&task_id)
+            || self.state.intents.iter().any(|intent| {
+                matches!(intent, EditorIntent::Apply(task, _) | EditorIntent::Test(task, _) if task == &task_id)
+            })
+        {
+            return;
+        }
+        let proposal = self.state.session.task(&task_id).ok().and_then(|task| {
+            task.activity
+                .iter()
+                .find_map(|entry| match &entry.kind {
+                    ActivityKind::SemanticAction { action_id, .. } => task
+                        .actions
+                        .get(action_id)
+                        .filter(|action| matches!(action.state, ActionState::Proposed))
+                        .map(|action| (action_id, action)),
+                    _ => None,
+                })
+                .and_then(|(id, action)| {
+                    action.payload.as_ref().map(|payload| {
+                        (
+                            id.to_string(),
+                            SemanticPreviewKey::new(
+                                &task_id,
+                                id.as_str(),
+                                proposal_revisions(action).len() - 1,
+                                payload,
+                            ),
+                        )
+                    })
+                })
+        });
+        let Some((action_id, key)) = proposal else {
+            return;
+        };
+        let Some(record) = self.state.semantic_previews.get(&key) else {
+            return;
+        };
+        match &record.result {
+            None => return,
+            Some(Err(error)) => {
+                let reason = bounded_failure(error, 900);
+                if let Ok(task) = self.state.session.task_mut(&task_id) {
+                    let _ = task.mark_action_for_repair(&action_id, reason.clone());
+                    let _ = task.append_host_result(format!(
+                        "Could not prepare {action_id} for automatic application: {reason}"
+                    ));
+                }
+                self.state.notice = Some(format!("Could not prepare {action_id}: {error}"));
+                return;
+            }
+            Some(Ok(_)) if record.stale => return,
+            Some(Ok(_)) => {}
+        }
+        if self.state.reviewed_preview(&task_id, &action_id).is_err() {
+            return;
+        }
+        let accepted = self
+            .state
+            .session
+            .task_mut(&task_id)
+            .and_then(|task| task.accept_action(&action_id));
+        match accepted {
+            Ok(()) => self
+                .state
+                .intents
+                .push(EditorIntent::Apply(task_id, action_id)),
+            Err(error) => self.state.notice = Some(error.to_string()),
         }
     }
 }
@@ -1883,12 +1982,41 @@ impl DesktopEditor {
                         .session
                         .task(&task)
                         .is_ok_and(|value| value.lifecycle == TaskLifecycle::Queued);
+                    let receipts = self
+                        .execution_receipts
+                        .iter()
+                        .filter(|((receipt_task, _), _)| receipt_task == task.as_str())
+                        .filter_map(|(_, receipt)| {
+                            receipt
+                                .get("receipt")
+                                .and_then(Value::as_str)
+                                .map(ToString::to_string)
+                        })
+                        .collect::<Vec<_>>();
                     let result: Result<(), String> = if queued {
                         self.state
                             .session
                             .reject_queued_task(&task)
                             .map_err(|error| error.to_string())
                     } else {
+                        if !receipts.is_empty() {
+                            if let Err(error) = super::desktop_revert_semantic_receipts(
+                                &self.project_root,
+                                &receipts,
+                            ) {
+                                self.state.notice = Some(format!(
+                                    "Could not reject {task} safely because its applied changes could not be restored: {error}"
+                                ));
+                                continue;
+                            }
+                            if let Ok(task_state) = self.state.session.task_mut(&task) {
+                                let _ = task_state.append_host_result(
+                                    "Task rejected by the user; its applied source changes were discarded and restored from the recorded edit receipt.",
+                                );
+                            }
+                            self.execution_receipts
+                                .retain(|(receipt_task, _), _| receipt_task != task.as_str());
+                        }
                         self.controller
                             .cancel(&mut self.state.session, &task)
                             .map_err(|error| error.to_string())
@@ -1998,7 +2126,21 @@ impl DesktopEditor {
                         .and_then(|source_before| {
                             self.host.submit(HostRequest {
                                 task_id: task.clone(),
-                                operation: HostOperation::Test { paths, run_id },
+                                operation: HostOperation::Test {
+                                    paths,
+                                    run_id,
+                                    rollback_receipts: self
+                                        .execution_receipts
+                                        .iter()
+                                        .filter(|((receipt_task, _), _)| receipt_task == &task)
+                                        .filter_map(|(_, receipt)| {
+                                            receipt
+                                                .get("receipt")
+                                                .and_then(Value::as_str)
+                                                .map(ToString::to_string)
+                                        })
+                                        .collect(),
+                                },
                                 source_before: Some(source_before),
                             })
                         });
@@ -2544,7 +2686,7 @@ impl DesktopEditor {
                 TaskControllerEvent::Completed {
                     task_id, proposals, ..
                 } => Some(format!(
-                    "AI reply completed for {task_id}; {} action(s) proposed",
+                    "AI reply completed for {task_id}; preparing {} atomic change(s)",
                     proposals.len()
                 )),
                 TaskControllerEvent::Failed {
@@ -2583,11 +2725,10 @@ impl DesktopEditor {
                     Ok(task),
                 ) => {
                     let validated = receipt_has_test_evidence(&receipt);
-                    let receipt_summary = receipt
+                    let receipt_path = receipt
                         .get("receipt")
                         .and_then(Value::as_str)
-                        .unwrap_or("recorded validation receipt")
-                        .to_string();
+                        .map(ToString::to_string);
                     self.execution_receipts
                         .insert((task_id.clone(), action_id.clone()), receipt);
                     if task.lifecycle == stasis_ai::TaskLifecycle::Active {
@@ -2599,7 +2740,7 @@ impl DesktopEditor {
                                 ))?;
                             }
                             task.append_host_result(format!(
-                                "Applied {action_id}: {summary}\nValidation receipt: {receipt_summary}"
+                                "Applied {action_id} atomically and requested a live swap. Edit receipt recorded."
                             ))?;
                             Ok(())
                         });
@@ -2615,11 +2756,38 @@ impl DesktopEditor {
                                 .insert(task_id.clone(), (fingerprint, Vec::new()));
                         }
                         self.state.notice = Some(format!("Applied {action_id} for {task_id}"));
+                        if task.begin_focused_tests().is_ok() {
+                            let run_id = task.validation_run_id;
+                            self.state
+                                .intents
+                                .push(EditorIntent::Test(task_id.clone(), run_id));
+                            self.state.notice = Some(format!(
+                                "Applied {action_id} for {task_id}; live swap requested and focused tests started"
+                            ));
+                        }
                     } else if let Some(action) = task.actions.get_mut(action_id.as_str()) {
-                        action.state = ActionState::Applied;
-                        self.state.notice = Some(format!(
-                            "{action_id} committed before {task_id} cancellation completed"
-                        ));
+                        let restored = receipt_path.as_ref().is_some_and(|receipt| {
+                            super::desktop_revert_semantic_receipts(
+                                &self.project_root,
+                                std::slice::from_ref(receipt),
+                            )
+                            .is_ok()
+                        });
+                        if restored {
+                            action.state = ActionState::Rejected {
+                                reason: "Task was rejected while the edit was being applied; the published source was restored from its receipt.".into(),
+                            };
+                            self.execution_receipts
+                                .remove(&(task_id.clone(), action_id.clone()));
+                            self.state.notice = Some(format!(
+                                "{action_id} finished after {task_id} was rejected and was immediately restored"
+                            ));
+                        } else {
+                            action.state = ActionState::Applied;
+                            self.state.notice = Some(format!(
+                                "{action_id} committed before {task_id} cancellation completed; automatic restore needs review"
+                            ));
+                        }
                     }
                 }
                 (HostOperation::Apply { action_id, .. }, Err(error), Ok(task)) => {
@@ -2634,7 +2802,7 @@ impl DesktopEditor {
                     self.state.notice = Some(format!("Apply failed for {task_id}: {error}"));
                 }
                 (
-                    HostOperation::Test { paths, run_id },
+                    HostOperation::Test { paths, run_id, .. },
                     Ok((summary, receipt, fingerprint)),
                     Ok(task),
                 ) => {
@@ -2671,6 +2839,18 @@ impl DesktopEditor {
                     }
                     self.state.notice =
                         Some(format!("Focused tests failed for {task_id}: {error}"));
+                    let repair_reason = bounded_failure(&error, 900);
+                    let applied = task
+                        .actions
+                        .iter()
+                        .filter(|(_, action)| matches!(action.state, ActionState::Applied))
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>();
+                    for action_id in applied {
+                        let _ = task.mark_action_for_repair(action_id, repair_reason.clone());
+                    }
+                    self.execution_receipts
+                        .retain(|(receipt_task, _), _| receipt_task != &task_id);
                 }
                 (_, _, Err(error)) => self.state.notice = Some(error.to_string()),
             }
@@ -3280,10 +3460,12 @@ impl EditorState {
             .any(|action| matches!(action.state, ActionState::Proposed))
         {
             return PrimaryAction {
-                label: "Accept proposal",
+                label: "Preparing change...",
                 command: TaskSessionCommand::AcceptAction,
-                enabled: true,
-                disabled_reason: None,
+                enabled: false,
+                disabled_reason: Some(
+                    "The editor is validating the atomic edit before publishing it.".into(),
+                ),
             };
         }
         if task
@@ -3292,10 +3474,10 @@ impl EditorState {
             .any(|action| matches!(action.state, ActionState::Accepted))
         {
             return PrimaryAction {
-                label: "Apply change",
+                label: "Applying change...",
                 command: TaskSessionCommand::ApplyAction,
-                enabled: true,
-                disabled_reason: None,
+                enabled: false,
+                disabled_reason: Some("The validated edit is being published for hot swap.".into()),
             };
         }
         if task
@@ -4581,27 +4763,6 @@ impl DesktopEditor {
             });
         if let Some(command) = command {
             let result = match command {
-                TimelineAction::Accept(task, action) => self
-                    .state
-                    .reviewed_preview(&task, &action)
-                    .map(|_| ())
-                    .and_then(|()| {
-                        self.state
-                            .session
-                            .task_mut(task)
-                            .and_then(|task| task.accept_action(action))
-                            .map_err(|error| error.to_string())
-                    }),
-                TimelineAction::Reject(task, action) => self
-                    .state
-                    .session
-                    .task_mut(task)
-                    .and_then(|task| task.reject_action(action, "Rejected in desktop editor"))
-                    .map_err(|error| error.to_string()),
-                TimelineAction::Apply(task, action) => {
-                    self.state.intents.push(EditorIntent::Apply(task, action));
-                    Ok(())
-                }
                 TimelineAction::ApproveImage(task, image) => self
                     .state
                     .session
@@ -4873,7 +5034,10 @@ impl DesktopEditor {
                             .iter()
                             .find(|item| item.sequence == thread_sequence)
                         {
-                            ui.label(RichText::new(&message.text).size(14.0));
+                            ui.add(
+                                egui::Label::new(RichText::new(&message.text).size(14.0))
+                                    .wrap(true),
+                            );
                         }
                     }
                     ActivityKind::Attachment {
@@ -4990,7 +5154,7 @@ impl DesktopEditor {
                                         semantic_revisions::render_heading(ui, action_id.as_str(), &proposal);
                                         if let Some(record) = self.state.semantic_previews.get(&key) {
                                             if record.stale {
-                                                ui.colored_label(warning(), "Stale: project sources changed. Acceptance and Apply disabled.");
+                                                ui.colored_label(warning(), "Stale: project sources changed. Automatic apply stopped.");
                                             }
                                             match &record.result {
                                                 None => { ui.spinner(); ui.label("Planning semantic changes..."); }
@@ -5016,28 +5180,14 @@ impl DesktopEditor {
                             (ActionState::Proposed, Some(ActionState::Proposed), true)
                                 if can_interact =>
                             {
-                                if ui.add_enabled(self.state.check_preview(task.id.as_str(), action_id.as_str(), false).is_ok(), egui::Button::new("Accept")).clicked() {
-                                    command = Some(TimelineAction::Accept(
-                                        task.id.to_string(),
-                                        action_id.to_string(),
-                                    ));
-                                }
-                                if ui.button("Reject").clicked() {
-                                    command = Some(TimelineAction::Reject(
-                                        task.id.to_string(),
-                                        action_id.to_string(),
-                                    ));
-                                }
+                                ui.spinner();
+                                ui.label("Validating, then applying automatically...");
                             }
                             (ActionState::Accepted, Some(ActionState::Accepted), true)
                                 if can_interact =>
                             {
-                                if ui.add_enabled(self.state.check_preview(task.id.as_str(), action_id.as_str(), false).is_ok(), egui::Button::new("Apply change")).clicked() {
-                                    command = Some(TimelineAction::Apply(
-                                        task.id.to_string(),
-                                        action_id.to_string(),
-                                    ));
-                                }
+                                ui.spinner();
+                                ui.label("Publishing for live swap...");
                             }
                             _ => {}
                         });
@@ -5672,6 +5822,7 @@ impl DesktopEditor {
         self.poll_host();
         self.poll_capture();
         self.poll_semantic_previews();
+        self.auto_apply_ready_proposal();
         self.process_shortcuts(context);
         if let Some(windows) = self.windows.as_mut() {
             if self.state.focus == FocusArea::Game && self.state.focus_pending {
@@ -6298,8 +6449,29 @@ mod tests {
             .unwrap();
         editor.flush_intents();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !editor.busy_tasks.is_empty() {
+        while !editor.busy_tasks.is_empty()
+            || editor
+                .state
+                .session
+                .active_task()
+                .is_ok_and(|task| task.validation.is_running())
+            || editor
+                .state
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, EditorIntent::Test(task, _) if task == "task-1"))
+        {
             editor.poll_host();
+            editor.flush_intents();
+            if editor.busy_tasks.is_empty()
+                && editor
+                    .state
+                    .session
+                    .active_task()
+                    .is_ok_and(|task| !task.validation.is_running())
+            {
+                break;
+            }
             assert!(Instant::now() < deadline, "host apply exceeded deadline");
             thread::sleep(Duration::from_millis(10));
         }
@@ -6441,6 +6613,56 @@ mod tests {
             serde_json::to_vec_pretty(&frames).unwrap(),
         )
         .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ready_semantic_proposal_is_accepted_and_queued_for_apply_automatically() {
+        let (mut editor, _root, _) = review_fixture("preview_auto_apply");
+        finish_preview(&mut editor);
+
+        editor.auto_apply_ready_proposal();
+
+        assert!(matches!(
+            editor.state.session.active_task().unwrap().actions["value"].state,
+            ActionState::Accepted
+        ));
+        assert!(editor.state.intents.iter().any(|intent| matches!(
+            intent,
+            EditorIntent::Apply(task, action) if task == "task-1" && action == "value"
+        )));
+    }
+
+    #[test]
+    fn rejecting_an_applied_task_restores_its_source_receipt() {
+        let (mut editor, root, _) = review_fixture("reject_restores_applied");
+        let before = std::fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        finish_preview(&mut editor);
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        finish_apply(&mut editor);
+        assert_ne!(
+            std::fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+
+        editor
+            .state
+            .intents
+            .push(EditorIntent::Cancel("task-1".into()));
+        editor.flush_intents();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+        assert_eq!(
+            editor.state.session.task("task-1").unwrap().lifecycle,
+            TaskLifecycle::Canceled
+        );
+        assert!(editor.execution_receipts.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -7552,6 +7774,7 @@ mod tests {
                 operation: HostOperation::Test {
                     paths: Vec::new(),
                     run_id: first_run_id,
+                    rollback_receipts: Vec::new(),
                 },
                 result: Err("test player_speed failed at tests/player.test.stasis".to_string()),
             })
@@ -7677,6 +7900,7 @@ mod tests {
             operation: HostOperation::Test {
                 paths: Vec::new(),
                 run_id: 1,
+                rollback_receipts: Vec::new(),
             },
             source_before: Some("unused".to_string()),
         })
@@ -7729,6 +7953,7 @@ mod tests {
                     operation: HostOperation::Test {
                         paths: Vec::new(),
                         run_id: old_run,
+                        rollback_receipts: Vec::new(),
                     },
                     result: Err("late failure".into()),
                 })
@@ -7813,6 +8038,18 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while editor.busy_tasks.contains("task-1") && std::time::Instant::now() < deadline {
             editor.poll_host();
+            editor.flush_intents();
+            thread::yield_now();
+        }
+        while editor
+            .state
+            .session
+            .task("task-1")
+            .is_ok_and(|task| task.validation.is_running())
+            && std::time::Instant::now() < deadline
+        {
+            editor.poll_host();
+            editor.flush_intents();
             thread::yield_now();
         }
 
