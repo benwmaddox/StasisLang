@@ -1,36 +1,70 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string] $Artifact,
+    [string] $Certificate,
     [Parameter(Mandatory = $true)]
     [string] $ExpectedThumbprint
 )
 
 $ErrorActionPreference = 'Stop'
 
-if (-not (Test-Path -LiteralPath $Artifact -PathType Leaf)) {
-    throw "signed artifact does not exist: $Artifact"
+if (-not (Test-Path -LiteralPath $Certificate -PathType Leaf)) {
+    throw "signing certificate does not exist: $Certificate"
 }
 
-$signature = Get-AuthenticodeSignature -LiteralPath $Artifact
-$certificate = $signature.SignerCertificate
-if (-not $certificate) {
-    throw "signed artifact does not contain a signer certificate: $Artifact"
-}
-if ($certificate.Thumbprint -ne $ExpectedThumbprint) {
-    throw "Windows signing certificate does not match the pinned release identity"
-}
-if ($certificate.Subject -ne $certificate.Issuer) {
-    throw "Pinned private signing identity must remain self-signed"
+function Invoke-BoundedNativeCommand([string] $Label, [string] $Executable, [string[]] $Arguments) {
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Executable
+    $startInfo.UseShellExecute = $false
+    foreach ($argument in $Arguments) { $startInfo.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        Write-Host "Starting $Label"
+        if (-not $process.Start()) { throw "$Label process did not start" }
+        if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            if (-not $process.WaitForExit(5000)) {
+                throw "$Label timed out and did not terminate within 5 seconds"
+            }
+            throw "$Label timed out after 30 seconds"
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "$Label failed with exit code $($process.ExitCode)"
+        }
+    } finally {
+        $process.Dispose()
+    }
 }
 
-$trustedRoots = [Security.Cryptography.X509Certificates.X509Store]::new(
-    'Root',
-    [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-)
+$openssl = (Get-Command openssl.exe -ErrorAction Stop).Source
+$certutil = (Get-Command certutil.exe -ErrorAction Stop).Source
+$publicPem = Join-Path $env:RUNNER_TEMP "stasis-signing-public.pem"
+$publicDer = Join-Path $env:RUNNER_TEMP "stasis-signing-public.cer"
 try {
-    $trustedRoots.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    $trustedRoots.Add($certificate)
+    Invoke-BoundedNativeCommand 'public signing certificate extraction' $openssl @(
+        'pkcs12', '-legacy', '-in', $Certificate, '-clcerts', '-nokeys',
+        '-out', $publicPem, '-passin', 'env:STASIS_SIGNING_PFX_PASSWORD'
+    )
+    Invoke-BoundedNativeCommand 'public signing certificate conversion' $openssl @(
+        'x509', '-in', $publicPem, '-outform', 'DER', '-out', $publicDer
+    )
+
+    $publicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($publicDer)
+    try {
+        if ($publicCertificate.Thumbprint -ne $ExpectedThumbprint) {
+            throw "Windows signing certificate does not match the pinned release identity"
+        }
+        if ($publicCertificate.Subject -ne $publicCertificate.Issuer) {
+            throw "Pinned private signing identity must remain self-signed"
+        }
+    } finally {
+        $publicCertificate.Dispose()
+    }
+
+    Invoke-BoundedNativeCommand 'temporary signer root trust' $certutil @(
+        '-user', '-f', '-addstore', 'Root', $publicDer
+    )
 } finally {
-    $trustedRoots.Close()
+    Remove-Item -LiteralPath $publicPem, $publicDer -Force -ErrorAction SilentlyContinue
 }
