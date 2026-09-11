@@ -12,7 +12,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     if (tick_generation == 404) {
         clear(0.44, 0.84, 0.24, 1.0);
     } else {

@@ -2,9 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crate::frontend::lexer::{
-    is_inside_backtick_literal, lex, lex_with_diagnostic, Token, TokenKind,
-};
+use crate::frontend::lexer::{lex, lex_with_diagnostic, Token, TokenKind};
 use crate::frontend::parser::{
     lexer_error_context, parse_string_literal_text, parse_top_level_extern_functions,
     parse_top_level_type_layout,
@@ -447,10 +445,7 @@ pub fn parse_imports(path: &str, source: &str) -> Result<Vec<ModuleImport>, Sour
     let mut cursor = 0usize;
     while cursor < tokens.len() {
         let token = tokens[cursor];
-        if token.kind != TokenKind::Identifier
-            || token_text(source, token) != "import"
-            || is_inside_backtick_literal(source, token.start)
-        {
+        if token.kind != TokenKind::Identifier || token_text(source, token) != "import" {
             cursor += 1;
             continue;
         }

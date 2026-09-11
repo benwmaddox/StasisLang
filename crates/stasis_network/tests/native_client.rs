@@ -181,8 +181,7 @@ fn rejects_wrong_protocol_and_redacts_credentials() {
     assert!(!debug.contains("stasis-resume-v1"));
     assert_eq!(client.connect(), 0);
     server.join().expect("server");
-    thread::sleep(Duration::from_millis(100));
-    assert_eq!(client.status(), -4);
+    wait_status(&client, -4);
     assert_eq!(client.poll(&mut [0_u8; 64]), -4);
     assert_eq!(client.disconnect(), 0);
 

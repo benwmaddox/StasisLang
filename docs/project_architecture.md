@@ -286,7 +286,6 @@ By the time `render()` starts, the visible game should already be decided:
 
 ```stasis
 function render(): i32 {
-    begin_frame();
     clear(0.03, 0.04, 0.07, 1.0);
 
     if (game.ui.screen == Screen.Menu) {

@@ -927,6 +927,56 @@ impl LiveWorkspace {
             LiveCommand::CaptureFrame { .. } => {
                 unreachable!("frame captures are deferred before dispatch")
             }
+            LiveCommand::WindowPlacement {
+                editor_point,
+                game_point,
+            } => {
+                let gfx = stasis_dynload::StasisGraphicsApi::load_default()?;
+                let placement = gfx.window_placement()?;
+                let rect = |r: stasis_dynload::DesktopRect| json!([r.x, r.y, r.width, r.height]);
+                let editor_monitor = editor_point
+                    .map(|[x, y]| gfx.monitor_usable_bounds_at(x, y))
+                    .transpose()?;
+                let game_monitor = game_point
+                    .map(|[x, y]| gfx.monitor_usable_bounds_at(x, y))
+                    .transpose()?;
+                Ok((
+                    "window_placement",
+                    json!({
+                        "outer": rect(placement.outer),
+                        "monitor": rect(placement.usable_monitor),
+                        "editor_monitor": editor_monitor.map(|monitor| rect(monitor.usable)),
+                        "editor_monitor_pixel_density": editor_monitor.map(|monitor| monitor.pixel_density),
+                        "game_monitor": game_monitor.map(|monitor| rect(monitor.usable)),
+                        "display_scale": placement.display_scale,
+                        "pixel_density": placement.pixel_density,
+                        "minimized": placement.minimized,
+                        "maximized": placement.maximized,
+                    }),
+                ))
+            }
+            LiveCommand::PlaceGameWindow {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                stasis_dynload::StasisGraphicsApi::load_default()?.apply_window_placement(
+                    stasis_dynload::DesktopRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                    false,
+                )?;
+                Ok(("window_placed", json!({})))
+            }
+            LiveCommand::FocusGameWindow => {
+                let gfx = stasis_dynload::StasisGraphicsApi::load_default()?;
+                gfx.focus_window()?;
+                Ok(("window_focused", json!({})))
+            }
             LiveCommand::SetInputState { pointers } => {
                 validate_live_pointers(&pointers)?;
                 self.input_override = (!pointers.is_empty()).then_some(pointers);
@@ -2889,14 +2939,16 @@ fn run_staged_tests(
     files: &[WorkshopSourceFile],
     request_id: u64,
     canceled: &AtomicBool,
-) -> Result<(), String> {
-    let stamp = workshop_source_hash(
-        &files
+) -> Result<Value, String> {
+    let stamp = workshop_source_hash(&format!(
+        "{}\n{}",
+        config.project_root.display(),
+        files
             .iter()
             .map(|file| format!("{}:{}", file.path, workshop_source_hash(&file.source)))
             .collect::<Vec<_>>()
-            .join("\n"),
-    );
+            .join("\n")
+    ));
     let root = std::env::temp_dir().join(format!(
         "stasis-live-prepare-{}-{request_id}-{}",
         std::process::id(),
@@ -2915,6 +2967,8 @@ fn run_staged_tests(
             fs::copy(&manifest, root.join("stasis.json"))
                 .map_err(|error| format!("failed staging stasis.json: {error}"))?;
         }
+        stage_live_test_sidecars(&config.project_root, &root, canceled)?;
+        stage_live_test_data_bindings(config, &root, canceled)?;
         let staged_files = staged_test_source_closure(config, files, canceled)?;
         for file in staged_files {
             check_preparation_canceled(canceled)?;
@@ -2933,21 +2987,43 @@ fn run_staged_tests(
             "isolated staged tests require a stasis executable beside the running test binary"
                 .to_string()
         })?;
-        run_staged_test_process(&executable, &root, canceled)
+        run_staged_test_process(&executable, &root, None, canceled)
     })();
     let cleanup = fs::remove_dir_all(&root);
     match (result, cleanup) {
         (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(format!("failed cleaning live test overlay: {error}")),
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(_), Err(error)) => Err(format!("failed cleaning live test overlay: {error}")),
+        (Ok(receipt), Ok(())) => Ok(receipt),
     }
 }
 
 pub fn run_project_tests_bounded(project_root: &Path, canceled: &AtomicBool) -> Result<(), String> {
+    run_project_tests_bounded_with_receipt(project_root, None, canceled).map(|_| ())
+}
+
+pub fn run_project_tests_bounded_with_receipt(
+    project_root: &Path,
+    path: Option<&Path>,
+    canceled: &AtomicBool,
+) -> Result<Value, String> {
     let executable = locate_stasis_executable()?.ok_or_else(|| {
         "baseline tests require a stasis executable beside the running binary".to_string()
     })?;
-    run_staged_test_process(&executable, project_root, canceled)
+    run_staged_test_process(&executable, project_root, path, canceled)
+}
+
+pub fn run_staged_project_tests_bounded(
+    project_root: &Path,
+    entry: &Path,
+    files: &[WorkshopSourceFile],
+    canceled: &AtomicBool,
+) -> Result<Value, String> {
+    let config = LiveRunConfig::new(
+        project_root.to_path_buf(),
+        entry.to_path_buf(),
+        PathBuf::from("build"),
+    );
+    run_staged_tests(&config, files, 0, canceled)
 }
 
 fn staged_test_source_closure(
@@ -3002,6 +3078,77 @@ fn stage_live_test_assets(
         return Ok(());
     }
     copy_live_test_asset_directory(&source, &overlay_root.join("assets"), canceled)
+}
+
+fn stage_live_test_sidecars(
+    project_root: &Path,
+    overlay_root: &Path,
+    canceled: &AtomicBool,
+) -> Result<(), String> {
+    let manifest_path = project_root.join("stasis.json");
+    if !manifest_path.is_file() {
+        return Ok(());
+    }
+    let manifest = serde_json::from_slice::<Value>(
+        &fs::read(&manifest_path)
+            .map_err(|error| format!("failed reading stasis.json for staged tests: {error}"))?,
+    )
+    .map_err(|error| format!("failed decoding stasis.json for staged tests: {error}"))?;
+    let tests = manifest
+        .get("tests")
+        .and_then(Value::as_str)
+        .unwrap_or("tests");
+    let relative = Path::new(tests);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "staged test directory must remain inside the project: {tests}"
+        ));
+    }
+    let source = project_root.join(relative);
+    if !source.exists() {
+        return Ok(());
+    }
+    copy_live_test_asset_directory(&source, &overlay_root.join(relative), canceled)
+}
+
+fn stage_live_test_data_bindings(
+    config: &LiveRunConfig,
+    overlay_root: &Path,
+    canceled: &AtomicBool,
+) -> Result<(), String> {
+    let bindings = crate::resolve_play_data_binding_paths(
+        &config.project_root.join(&config.entry),
+        &config.project_root,
+        None,
+        None,
+    )?;
+    for (data, metadata) in bindings {
+        for source in [data, metadata] {
+            check_preparation_canceled(canceled)?;
+            let relative = source.strip_prefix(&config.project_root).map_err(|_| {
+                format!(
+                    "staged test data binding is outside the project: {}",
+                    source.display()
+                )
+            })?;
+            let destination = overlay_root.join(relative);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed creating staged data directory: {error}"))?;
+            }
+            fs::copy(&source, &destination).map_err(|error| {
+                format!(
+                    "failed staging test data binding {}: {error}",
+                    source.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn copy_live_test_asset_directory(
@@ -3073,10 +3220,21 @@ fn locate_stasis_executable_from(current: &Path) -> Option<PathBuf> {
 fn run_staged_test_process(
     executable: &Path,
     root: &Path,
+    path: Option<&Path>,
     canceled: &AtomicBool,
-) -> Result<(), String> {
-    let mut child = Command::new(executable)
-        .args(["--json", "test"])
+) -> Result<Value, String> {
+    let mut command = Command::new(executable);
+    command.args(["--json", "test"]);
+    if let Some(path) = path {
+        command.arg(path);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
         .current_dir(root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -3095,7 +3253,7 @@ fn run_staged_test_process(
     let stdout_total = Arc::clone(&total_bytes);
     let stdout_overflow = Arc::clone(&output_overflow);
     let stdout_worker = std::thread::spawn(move || {
-        drain_bounded_test_output(stdout, &stdout_total, &stdout_overflow)
+        drain_complete_test_output(stdout, &stdout_total, &stdout_overflow)
     });
     let stderr_total = Arc::clone(&total_bytes);
     let stderr_overflow = Arc::clone(&output_overflow);
@@ -3145,12 +3303,51 @@ fn run_staged_test_process(
     }
     let status = outcome?;
     if status.success() {
-        return Ok(());
+        let envelope_line = stdout
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .ok_or_else(|| "staged tests returned no JSON envelope".to_string())?;
+        let envelope = serde_json::from_str::<Value>(envelope_line.trim())
+            .map_err(|error| format!("staged tests returned invalid JSON envelope: {error}"))?;
+        if envelope.get("ok").and_then(Value::as_bool) != Some(true)
+            || envelope.get("command").and_then(Value::as_str) != Some("test")
+        {
+            return Err("staged tests returned an invalid success envelope".to_string());
+        }
+        return envelope
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "staged tests returned no result receipt".to_string());
     }
     Err(format!(
         "staged live tests failed: {}",
         format_staged_test_failure(&stdout, &stderr)
     ))
+}
+
+fn drain_complete_test_output(
+    mut reader: impl Read,
+    total_bytes: &AtomicUsize,
+    overflow: &AtomicBool,
+) -> Result<String, String> {
+    let mut captured = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("failed draining staged test output: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        let previous = total_bytes.fetch_add(count, Ordering::AcqRel);
+        if previous.saturating_add(count) > MAX_STAGED_TEST_OUTPUT_BYTES {
+            overflow.store(true, Ordering::Release);
+        } else {
+            captured.extend_from_slice(&buffer[..count]);
+        }
+    }
+    Ok(String::from_utf8_lossy(&captured).into_owned())
 }
 
 fn drain_bounded_test_output(

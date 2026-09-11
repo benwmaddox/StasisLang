@@ -256,9 +256,12 @@
     "test:unit": "npm run check && esbuild src/protocol.test.ts src/liveValueTree.test.ts --bundle --platform=node --target=node20 --format=cjs --outdir=dist && node --test dist/protocol.test.js dist/liveValueTree.test.js",
     "test:e2e": "npm run package && npm run bundle:e2e && node dist/e2e-run.cjs",
     "prepackage": "node scripts/prepare-toolchain.mjs && node -e \"require('node:fs').mkdirSync('.vsix', { recursive: true })\"",
-    "package": "npm run build && vsce package --out .vsix/stasislang.stasis.vsix"
+    "scan:package-secrets": "secretlint \"**/*\" --secretlintrc .secretlintrc.json --secretlintignore .secretlintignore",
+    "package": "npm run build && npm run scan:package-secrets && vsce package --allow-package-all-secrets --allow-package-env-file --out .vsix/stasislang.stasis.vsix"
   },
   "devDependencies": {
+    "@secretlint/secretlint-rule-no-dotenv": "^10.2.2",
+    "@secretlint/secretlint-rule-preset-recommend": "^10.2.2",
     "@types/node": "^22.10.2",
     "@types/pngjs": "^6.0.5",
     "@types/vscode": "^1.96.0",
@@ -266,6 +269,7 @@
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.28.1",
     "pngjs": "^7.0.0",
+    "secretlint": "^10.2.2",
     "typescript": "^5.7.2"
   },
   "dependencies": {

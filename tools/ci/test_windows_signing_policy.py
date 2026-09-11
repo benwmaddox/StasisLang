@@ -30,6 +30,22 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             source = (ROOT / workflow).read_text(encoding="utf-8")
             self.assertIn("tools/windows/stasis-signing.ps1", source)
 
+    def test_nightly_publication_requires_and_verifies_production_signing(self):
+        source = (ROOT / ".github/workflows/nightly-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("release_preconditions:", source)
+        self.assertIn("Require production Windows signing configuration", source)
+        self.assertIn("owned by Maddox task #525", source)
+        self.assertIn("needs: [detect, mobile_network_support, release_preconditions]", source)
+        self.assertIn('$env:STASIS_SIGNING_PROFILE = "production"', source)
+        self.assertIn("stasis-signing.ps1 verify -Artifact $_", source)
+        self.assertIn('$expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"', source)
+        self.assertIn('"TrustedPeople"', source)
+        self.assertIn("Remove private signing identity trust", source)
+        self.assertIn("if: always() && runner.os == 'Windows'", source)
+        self.assertNotIn("runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''", source)
+
     def test_cargo_runner_routes_signtool_through_policy_entrypoint(self):
         source = (ROOT / ".cargo/stasis-sign-and-run.cmd").read_text(encoding="utf-8")
         self.assertIn("stasis-signing.ps1", source)

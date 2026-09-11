@@ -1,0 +1,1 @@
+{"code":"command_failed","command":"run","message":"src/network.stasis:1:1: array property 'payload.length' is unavailable; use 'payload.max_length' for declared capacity","ok":false}

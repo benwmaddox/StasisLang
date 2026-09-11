@@ -93,7 +93,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.05, 0.05, 0.10, 1.0);
     draw_line(state.x, 60.0, state.x + 120.0, 60.0,
               1.0, 1.0, 1.0, 1.0);
@@ -212,6 +211,9 @@ stasis test --dir tests/stasis
 ```
 
 Tests use the same compiler and JIT path as programs, so they exercise language behavior rather than a separate test interpreter.
+
+The optional [`rig2d` standard-library module](docs/rig2d.md) provides bounded,
+renderer-independent forward kinematics for rigid cutout characters and articulated props.
 
 ## The Everyday Workflow
 

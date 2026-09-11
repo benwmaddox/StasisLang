@@ -1548,6 +1548,16 @@ fn build_engine_bundle_manifest(
         "  \"optimization_profile\": \"{}\",\n",
         optimization_profile.as_str()
     ));
+    let has_reset = rows
+        .iter()
+        .any(|(_, _, name, _, _, _)| name == "gfx_cmd_construction_reset");
+    let has_finish = rows
+        .iter()
+        .any(|(_, _, name, _, _, _)| name == "gfx_cmd_construction_finish");
+    let lifecycle_version = if has_reset && has_finish { 1 } else { 0 };
+    out.push_str(&format!(
+        "  \"render_construction_lifecycle_version\": {lifecycle_version},\n"
+    ));
     out.push_str("  \"entrypoints\": {\n");
     out.push_str(&format!(
         "    \"tick\": \"{}\",\n",
@@ -3097,6 +3107,99 @@ mod tests {
             analysis.resolved_extern_signatures[0].symbol,
             "custom_symbol"
         );
+    }
+
+    #[test]
+    fn aot_process_resolves_native_network_client_mailbox_contract() {
+        let network_client = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/network_client.stasis"
+        ));
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "vendor/stasis/stdlib/network_client.stasis",
+            format!(
+                "{network_client}\nfunction main(): i32 {{ return network_client_supported(); }}\n"
+            ),
+        );
+
+        process
+            .compile()
+            .expect("compile native network client AOT");
+        let signatures = &process
+            .program_snapshot
+            .as_ref()
+            .expect("program snapshot")
+            .analysis
+            .resolved_extern_signatures;
+        let actual = signatures
+            .iter()
+            .map(|signature| signature.symbol.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            "stasis_web_network_supported",
+            "stasis_web_network_connect",
+            "stasis_web_network_status",
+            "stasis_web_network_poll",
+            "stasis_web_network_send",
+            "stasis_web_network_resume_seat",
+            "stasis_web_network_last_sequence",
+            "stasis_web_network_checkpoint",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn aot_emits_external_url_call_and_retains_its_string_literal() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        let clif = capture_aot_clif_by_function(&mut process);
+
+        assert!(
+            clif.get("open_external_url")
+                .expect("external URL wrapper CLIF")
+                .contains("call"),
+            "AOT wrapper must emit the host call"
+        );
+        assert!(process
+            .string_literals()
+            .values()
+            .any(|literal| literal == "https://www.maddoxlabs.com/"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_links_and_executes_external_url_headless_contract() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let deps_dir = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("Cargo deps directory")
+            .to_path_buf();
+        let (_, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
+        if !optional_signer_is_usable(&runtime_dll) {
+            return;
+        }
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return 10 + open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        process.compile().expect("compile external URL AOT fixture");
+
+        let Some(result) =
+            run_linked_i32_noarg_fixture(&process, "main", "external_url_headless", &link_config)
+        else {
+            return;
+        };
+        assert_eq!(result, 10, "headless AOT execution must ignore the request");
     }
 
     #[test]

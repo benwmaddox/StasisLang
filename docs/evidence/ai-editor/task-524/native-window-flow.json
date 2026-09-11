@@ -1,0 +1,111 @@
+﻿{
+    "observedAtUtc":  "2026-09-10T11:00:34.9622520+00:00",
+    "taskProcessId":  29096,
+    "taskProcessName":  "stasis-967dbc88aec979a8",
+    "rollback":  "Close the disposable process or run set-tiling for each recorded container id.",
+    "before":  [
+                   {
+                       "id":  "4d57b1ad-88f2-42e6-a6be-04e52cb9155e",
+                       "handle":  1772632,
+                       "title":  "Task 524 live acceptance game",
+                       "processName":  "stasis-967dbc88aec979a8",
+                       "x":  648,
+                       "y":  72,
+                       "width":  624,
+                       "height":  996,
+                       "state":  "tiling"
+                   },
+                   {
+                       "id":  "fe1c18b8-ac01-4bbd-9413-a31d1ccaee10",
+                       "handle":  5703892,
+                       "title":  "Stasis Editor - Task 524 live acceptance",
+                       "processName":  "stasis-967dbc88aec979a8",
+                       "x":  1284,
+                       "y":  72,
+                       "width":  624,
+                       "height":  996,
+                       "state":  "tiling"
+                   }
+               ],
+    "floatCommands":  [
+
+                      ],
+    "afterFloat":  [
+                       {
+                           "id":  "4d57b1ad-88f2-42e6-a6be-04e52cb9155e",
+                           "handle":  1772632,
+                           "title":  "Task 524 live acceptance game",
+                           "processName":  "stasis-967dbc88aec979a8",
+                           "x":  648,
+                           "y":  72,
+                           "width":  624,
+                           "height":  996,
+                           "state":  "tiling",
+                           "centered":  null
+                       },
+                       {
+                           "id":  "fe1c18b8-ac01-4bbd-9413-a31d1ccaee10",
+                           "handle":  5703892,
+                           "title":  "Stasis Editor - Task 524 live acceptance",
+                           "processName":  "stasis-967dbc88aec979a8",
+                           "x":  1284,
+                           "y":  72,
+                           "width":  624,
+                           "height":  996,
+                           "state":  "tiling",
+                           "centered":  null
+                       }
+                   ],
+    "tileControl":  {
+                        "name":  "Tile Editor + Game",
+                        "controlType":  "ControlType.Button",
+                        "invoked":  false,
+                        "reason":  "Existing product-tiled windows captured without another setup mutation."
+                    },
+    "afterTile":  {
+                      "editor":  {
+                                     "handle":  5703892,
+                                     "title":  "Stasis Editor - Task 524 live acceptance",
+                                     "processId":  29096,
+                                     "minimized":  false,
+                                     "outer":  [
+                                                   0,
+                                                   0,
+                                                   956,
+                                                   1080
+                                               ]
+                                 },
+                      "game":  {
+                                   "handle":  1772632,
+                                   "title":  "Task 524 live acceptance game",
+                                   "processId":  29096,
+                                   "minimized":  false,
+                                   "outer":  [
+                                                 964,
+                                                 0,
+                                                 956,
+                                                 1080
+                                             ]
+                               },
+                      "gap":  8,
+                      "nonoverlapping":  true,
+                      "captureUnion":  [
+                                           0,
+                                           0,
+                                           1920,
+                                           1080
+                                       ]
+                  },
+    "focusObservation":  {
+                             "sawGameMinimized":  false,
+                             "sawGameForeground":  false,
+                             "restoredAfterObservedMinimize":  false,
+                             "minimizedAtUtc":  null,
+                             "restoredAtUtc":  null
+                         },
+    "stopReason":  "fresh_report.json",
+    "freshReport":  "D:\\code\\MaddoxTasks-worktrees\\stasislang-524\\docs\\evidence\\ai-editor\\task-524\\report.json",
+    "captureKind":  "Labeled composite of exact native HWND surfaces via PrintWindow; no desktop pixels.",
+    "png":  "D:\\code\\MaddoxTasks-worktrees\\stasislang-524\\docs\\evidence\\ai-editor\\task-524\\native-window-flow.png",
+    "mp4":  "D:\\code\\MaddoxTasks-worktrees\\stasislang-524\\docs\\evidence\\ai-editor\\task-524\\native-window-flow.mp4"
+}

@@ -8,3 +8,5 @@ dist/e2e-*.cjs
 dist/*.map
 tsconfig.json
 *.vsix
+.secretlintignore
+.secretlintrc.json

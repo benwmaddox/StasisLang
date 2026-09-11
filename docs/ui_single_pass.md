@@ -8,18 +8,28 @@ scratch values and are never game state.
 
 - `ui_vstack_begin` and `ui_hstack_begin` carve fixed main-axis extents with
   explicit spacing. `UiStackDirection.Reverse` starts at the far edge.
+  Their `*_begin_current` forms use the current rectangle directly.
 - `ui_*stack_next_fixed` consumes one known extent. At most one
   `ui_*stack_next_rest` child is allowed, and it should be the final child.
 - `ui_anchor` places a known-size child with the existing `UiHorizontal` and
   `UiVertical` enums. Use `ui_inset` first for safe-area padding.
 - `ui_scroll_begin` stores only a keyed offset and drag pointer. Rows can use
   `ui_scroll_item_y` and `ui_scroll_item_visible` without retaining rectangles.
+  `ui_scroll_drag_current(layer_id)` routes the snapshotted pointer through the
+  same modal layer policy as taps and cancels a drag when its layer is blocked.
   In the render pass, pair `ui_scroll_clip_begin` with `ui_scroll_end` so the
   same viewport becomes an ordered renderer clip.
 - `ui_viewport_fit` derives `Stretch`, `Contain`, `Cover`, or `IntegerScale`
   geometry. `ui_viewport_map_x/y` convert screen coordinates to content space.
-- `ui_button` uses a stable integer ID. Active ID, pointer capture, hot ID, and
-  modal layer are interaction state; button rectangles remain frame-local.
+- `ui_input_begin_primary(frame)` snapshots the primary logical pointer from a
+  refreshed `HostFrame` and resets interaction routing once per tick.
+  `ui_input_begin` supports tests and custom
+  one-pointer routing policies. A missing pointer cancels any outstanding
+  capture. `ui_tap` and `ui_tap_current` return true when a captured press releases
+  inside the same stable ID. Active ID, pointer capture, hot ID, and modal layer
+  are interaction state; tap rectangles remain frame-local. `ui_tap_hot` and
+  `ui_tap_active` use the same `(layer, id)` identity as interaction routing.
+  Tap IDs must be positive because zero is the no-capture sentinel.
 
 `ui_current_x`, `ui_current_y`, `ui_current_width`, and
 `ui_current_height` expose the one current rectangle so drawing and hit testing
@@ -29,8 +39,9 @@ can use exactly the same geometry.
 
 Every child must provide a known main-axis extent when encountered. This keeps
 layout a forward cursor operation with bounded work and no lookahead. A screen
-may call the same recipe once while routing input and once while painting. Each
-invocation is one forward layout pass: there is no measurement pass, no
+may call the same `UiPass` recipe with `ui_layout_begin` once while routing
+input and again while painting. The layout reset preserves the hot state
+completed by the input recipe. Each invocation is one forward layout pass: there is no measurement pass, no
 multi-pass negotiation, and no geometry read from the previous frame. Recompute
 the fitted viewport before mapping input, then recompute it again before drawing.
 

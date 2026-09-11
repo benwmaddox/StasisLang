@@ -1,0 +1,332 @@
+[
+  {
+    "project": "Afterlight",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": false,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "BannerfallTactics",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": false,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "ChessTD",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": true,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "Exterminator",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": true,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "HamsterHavenTycoon",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": true,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "maddox-and-friends",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": false,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "maddox-marble-run",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": true,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "RobotTournaments",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": true,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "RootbeerMaze3",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": true,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "SheepHerder",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": true,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  },
+  {
+    "project": "ToddlerMatch",
+    "update": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "changed": true,
+        "release_id": "nightly-20260909-299",
+        "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+      }
+    },
+    "status": {
+      "command": "vendor",
+      "ok": true,
+      "result": {
+        "actual_sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a",
+        "current": true,
+        "installed": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "local_changes": false,
+        "recorded": {
+          "release_id": "nightly-20260909-299",
+          "sha256": "0e0b69676125ca3d4972b7632bad8f2c4f8ce68b70e2dc86d83e44288d4ca90a"
+        },
+        "update_available": false
+      }
+    }
+  }
+]

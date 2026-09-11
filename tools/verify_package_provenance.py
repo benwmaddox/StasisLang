@@ -10,7 +10,7 @@ import pathlib
 
 
 COMMAND_BUFFER_NAME = "gfx_cmd"
-CURRENT_COMMAND_BUFFER_VERSION = 7
+CURRENT_COMMAND_BUFFER_VERSION = 8
 ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
 ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
 ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"
@@ -70,6 +70,29 @@ def verify_asset_package_identities(
             )
 
 
+def verify_network_guest_bundles(
+    parser: argparse.ArgumentParser, package_root: pathlib.Path
+) -> None:
+    for bundle in sorted(package_root.rglob("network_guest.bundle")):
+        if not bundle.with_suffix(".bundle.json").is_file():
+            parser.error(f"network guest bundle identity is missing: {bundle}")
+    for receipt in sorted(package_root.rglob("network_guest.bundle.json")):
+        identity = json.loads(receipt.read_text(encoding="utf-8"))
+        if not isinstance(identity, dict) or set(identity) != {"format", "path", "length", "sha256"}:
+            parser.error(f"malformed network guest bundle identity: {receipt}")
+        if identity["format"] != "stasis.static_bundle.v1":
+            parser.error(f"unsupported network guest bundle format: {receipt}")
+        if identity["path"] != "network_guest.bundle":
+            parser.error(f"unsafe network guest bundle path: {receipt}")
+        bundle = receipt.parent / "network_guest.bundle"
+        if not bundle.is_file():
+            parser.error(f"network guest bundle is missing: {bundle}")
+        if type(identity["length"]) is not int or bundle.stat().st_size != identity["length"]:
+            parser.error(f"network guest bundle length mismatch: {bundle}")
+        if sha256(bundle) != identity["sha256"]:
+            parser.error(f"network guest bundle hash mismatch: {bundle}")
+
+
 def validate_command_buffer(parser: argparse.ArgumentParser, manifest: dict) -> None:
     command_buffer = manifest.get("command_buffer")
     if not isinstance(command_buffer, dict):
@@ -112,6 +135,7 @@ def verify_mobile_shells(
     platform = target.split("-", 1)[0]
     package_id = receipt.get("package_id") or mobile_package_id(receipt["name"])
     network_enabled = receipt.get("network") is True
+    network_client_enabled = receipt.get("network_client") is True
     replacements = {
         "@STASIS_APP_NAME@": receipt.get("app_name") or receipt["name"],
         "@STASIS_PACKAGE_ID@": package_id,
@@ -125,9 +149,23 @@ def verify_mobile_shells(
         "@STASIS_ANDROID_VERSION_NAME@": receipt.get("android_version_name") or "1.0",
         "@STASIS_ANDROID_ABI@": "arm64-v8a" if target == "android-arm64" else "",
         "@STASIS_NETWORK_ENABLED@": "1" if network_enabled else "0",
+        "@STASIS_NETWORK_CLIENT_ENABLED@": "1" if network_client_enabled else "0",
+        "@STASIS_NETWORK_CLIENT_PERMISSION@": (
+            f'    <permission android:name="{package_id}.permission.PROVISION_NETWORK_CLIENT" '
+            'android:protectionLevel="signature" />'
+            if network_client_enabled
+            else ""
+        ),
+        "@STASIS_NETWORK_CLIENT_ALIAS@": (
+            '        <activity-alias android:name=".NetworkJoin" '
+            'android:targetActivity=".MainActivity" android:exported="true" '
+            f'android:permission="{package_id}.permission.PROVISION_NETWORK_CLIENT" />'
+            if network_client_enabled
+            else ""
+        ),
         "@STASIS_NETWORK_PERMISSION@": (
             '    <uses-permission android:name="android.permission.INTERNET" />\n'
-            if network_enabled and platform == "android"
+            if network_enabled or network_client_enabled
             else ""
         ),
         "@STASIS_LOCAL_NETWORK_USAGE@": (
@@ -160,7 +198,7 @@ def verify_mobile_shells(
     expected_paths.add(("common", "stasis_package_provenance.h"))
     if target == "ios-arm64":
         expected_paths.add(("ios", "StasisMobile.xcconfig"))
-    if network_enabled:
+    if network_enabled or network_client_enabled:
         if target == "ios-arm64":
             expected_paths.update(
                 {
@@ -238,6 +276,7 @@ def main() -> int:
     if release != packaged:
         parser.error("packaged provenance does not exactly match the release manifest")
     verify_asset_package_identities(parser, args.package_root)
+    verify_network_guest_bundles(parser, args.package_root)
     runtime_sources = release["runtime_sources"] if args.expect_runtime_sources else {}
     for relative, expected in runtime_sources.items():
         relative_path = pathlib.PurePosixPath(relative)

@@ -1,4 +1,4 @@
-import "ui_single_pass.stasis";
+import "/vendor/stasis/stdlib/ui_single_pass.stasis";
 
 enum GalleryPage {
     Stacks,
@@ -25,7 +25,6 @@ struct GalleryState {
     page: GalleryPage;
     fit: UiViewportFit;
     modal_open: bool;
-    world_tick: i32;
     world_x: f32;
     world_y: f32;
     mapped_x: f32;

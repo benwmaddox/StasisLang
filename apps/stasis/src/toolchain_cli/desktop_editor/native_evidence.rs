@@ -20,12 +20,16 @@ fn capture_native_task_timeline() {
         .parse()
         .unwrap();
     let repair = std::env::var_os("STASIS_EDITOR_EVIDENCE_REPAIR").is_some();
+    let outcomes = std::env::var_os("STASIS_EDITOR_EVIDENCE_OUTCOMES").is_some();
     let (client, _server) = stasis_runner::live::live_session(16);
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .unwrap();
     let mut editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+    if let Ok(name) = std::env::var("STASIS_EDITOR_EVIDENCE_PROJECT_NAME") {
+        editor.project_root = root.join(name);
+    }
     for objective in [
         "Improve enemy movement",
         "Add an arena tileset",
@@ -46,6 +50,9 @@ fn capture_native_task_timeline() {
     let pixels = image::load_from_memory(&bytes).unwrap().to_rgba8();
     task.attach_screenshot_with_sha256("arena-reference", asset.display().to_string(), &sha256)
         .unwrap();
+    if outcomes {
+        task.mark_screenshot_uploaded("arena-reference").unwrap();
+    }
     let task_id = task.id.clone();
     task.append_result("I will update player movement and add focused coverage for the cooldown and collision behavior.").unwrap();
     let attachment_mode = std::env::var("STASIS_EDITOR_EVIDENCE_ATTACHMENTS").ok();
@@ -74,7 +81,10 @@ fn capture_native_task_timeline() {
             ))
             .unwrap();
         }
-    } else if attachment_mode.as_deref() != Some("reference") {
+    } else if !matches!(
+        attachment_mode.as_deref(),
+        Some("reference" | "multimodal" | "limit")
+    ) {
         task.add_generated_image(
             "arena-asset",
             asset.display().to_string(),
@@ -88,10 +98,18 @@ fn capture_native_task_timeline() {
         .unwrap();
     }
     task.record_turn(1840, 2410, 386, 1200).unwrap();
+    if outcomes && !repair && attachment_mode.is_none() {
+        editor.validation_fingerprints.insert(
+            task_id.to_string(),
+            (
+                "native-evidence-current-sources".into(),
+                vec!["focused".into()],
+            ),
+        );
+    }
     editor.state.preview = Some(ScreenshotPreview {
         task_id,
         screenshot_id: "arena-reference".into(),
-        path: asset,
         width: pixels.width() as usize,
         height: pixels.height() as usize,
         rgba: pixels.into_raw(),
@@ -106,7 +124,63 @@ fn capture_native_task_timeline() {
             complete: true,
         },
     });
-    let semantic_root = if std::env::var_os("STASIS_EDITOR_EVIDENCE_SEMANTIC").is_some() {
+    if attachment_mode.as_deref() == Some("multimodal") {
+        let task_id = editor.state.session.active_task_id().unwrap().clone();
+        editor
+            .attach_encoded_image(
+                &task_id,
+                "selected-reference".into(),
+                "arena_background.png".into(),
+                AttachmentOrigin::FilePicker,
+                &bytes,
+            )
+            .unwrap();
+    }
+    if attachment_mode.as_deref() == Some("limit") {
+        let task_id = editor.state.session.active_task_id().unwrap().clone();
+        for index in 0..9 {
+            let id = format!("reference-{index}");
+            editor
+                .attach_encoded_image(
+                    &task_id,
+                    id.clone(),
+                    format!("reference-{}.png", index + 1),
+                    AttachmentOrigin::FilePicker,
+                    &bytes,
+                )
+                .unwrap();
+            if index < 8 {
+                editor
+                    .state
+                    .session
+                    .task_mut(&task_id)
+                    .unwrap()
+                    .select_screenshot_for_request(id)
+                    .unwrap();
+            }
+        }
+    }
+    let semantic_root = if std::env::var_os("STASIS_EDITOR_EVIDENCE_RECOVERY").is_some() {
+        let (mut saved, root, _) = super::tests::review_fixture("session_recovery_native");
+        saved.store = Some(SessionStore::open(&root).unwrap());
+        saved.state.reply = "Keep the value change small and rerun focused tests.".into();
+        saved
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .append_reply("I prepared the value change for review.")
+            .unwrap();
+        let task = saved.state.session.active_task_id().unwrap().to_string();
+        saved.uncertain_calls.insert(task);
+        saved.persist_if_changed();
+        drop(saved);
+        let (client, _server) = stasis_runner::live::live_session(1);
+        editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)))
+            .with_persistence();
+        super::tests::finish_preview(&mut editor);
+        Some(root)
+    } else if std::env::var_os("STASIS_EDITOR_EVIDENCE_SEMANTIC").is_some() {
         let (mut preview_editor, root, _) = super::tests::review_fixture("merged_timeline_native");
         super::tests::finish_preview(&mut preview_editor);
         editor = preview_editor;
@@ -115,8 +189,130 @@ fn capture_native_task_timeline() {
         None
     };
     editor.state.focus = FocusArea::Game;
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_QUEUE").is_some() {
+        let current = editor.state.session.running_task_id().unwrap().clone();
+        editor
+            .state
+            .session
+            .task_mut(&current)
+            .unwrap()
+            .cancel()
+            .unwrap();
+        editor.state.session.select_queue_gate_after(&current);
+    }
     if std::env::var_os("STASIS_EDITOR_EVIDENCE_CANCEL").is_some() {
         editor.state.handle(TaskSessionCommand::Cancel).unwrap();
+    }
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_COMPLETION").is_some() {
+        let task_id = editor.state.session.running_task_id().unwrap().to_string();
+        editor.completion_confirmation = Some(git_completion::evidence_plan(&task_id));
+    }
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_ROLLBACK").is_some() {
+        let completed_task = "task-1".to_string();
+        editor.completion_commits.insert(
+            completed_task.clone(),
+            TaskCompletionCommit {
+                commit: "0123456789012345678901234567890123456789".into(),
+                paths: git_completion::evidence_plan(&completed_task).paths,
+                reverted_by: None,
+            },
+        );
+    }
+
+    if let Ok(phase) = std::env::var("STASIS_EDITOR_EVIDENCE_PROGRESS") {
+        let (client, _server) = stasis_runner::live::live_session(16);
+        editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Progress fixture: review a bounded edit".into();
+        editor.state.create_task().unwrap();
+        let task = editor.state.session.active_task_mut().unwrap();
+        task.append_user_message("Demonstrate progress states. These are deterministic fixture events, not an executed provider request or source edit.").unwrap();
+        task.select_provider(ProviderSelection::Codex).unwrap();
+        editor.controller = TaskController::new_with_progress(|_, _, progress| {
+            progress.report(ProgressStage::InspectingSymbols);
+            progress.report(ProgressStage::ContactingProvider);
+            progress.report_provider(ProgressStage::FirstResponse, 120);
+            progress.report_provider(ProgressStage::FirstAction, 145);
+            progress.report(ProgressStage::PreparingProposal);
+            Ok(ProviderReply::new(
+                "Fixture response received. The host card demonstrates the subsequent phase.",
+            ))
+        });
+        editor
+            .controller
+            .send_active(&mut editor.state.session)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor
+            .controller
+            .snapshot(editor.state.session.active_task_id().unwrap())
+            .is_some_and(|snapshot| snapshot.state == stasis_ai::TaskRequestState::Running)
+        {
+            editor.poll_controller();
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        let task_id = editor.state.session.active_task_id().unwrap().to_string();
+        let mut progress = editor.host.progress.lock().unwrap();
+        let id = progress.admit(&task_id).unwrap();
+        let count = phase.parse::<usize>().unwrap();
+        for (index, stage) in [
+            ProgressStage::ApplyingAtomically,
+            ProgressStage::Compiling,
+            ProgressStage::RunningFocusedTests,
+            ProgressStage::Completed,
+        ]
+        .into_iter()
+        .enumerate()
+        .take(count)
+        {
+            progress.report_at(&task_id, id, stage, (index as u64 + 1) * 200);
+        }
+        let provider = editor
+            .controller
+            .snapshot(&TaskId::new(task_id.clone()))
+            .unwrap();
+        let host = &progress.snapshots[&task_id];
+        let audit = json!({
+            "fixture": true, "task_id": task_id,
+            "provider_request_id": provider.request_id.get(),
+            "provider_first_action_ms": provider.provider_first_action_ms,
+            "provider_events": provider.progress.iter().map(|event| json!({"sequence": event.sequence, "stage": event.stage.label(), "elapsed_ms": event.elapsed_ms, "provider_elapsed_ms": event.provider_elapsed_ms})).collect::<Vec<_>>(),
+            "host_request_id": host.request_id,
+            "host_events": host.events.iter().map(|(stage, elapsed)| json!({"stage": stage.label(), "elapsed_ms": elapsed})).collect::<Vec<_>>(),
+        });
+        std::fs::write(
+            PathBuf::from(&output).with_extension("json"),
+            serde_json::to_vec_pretty(&audit).unwrap(),
+        )
+        .unwrap();
+    }
+
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_FAILURE").is_some() {
+        let (client, _server) = stasis_runner::live::live_session(16);
+        editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.controller = TaskController::new(|_, _| {
+            Err("OpenRouter routing failed closed: fixture endpoint".into())
+        });
+        editor.state.objective = "Make the background a neutral brown".into();
+        editor.state.create_and_send_task().unwrap();
+        editor.flush_intents();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.state.session.active_task().unwrap().connection == ConnectionState::Connected {
+            editor.poll_controller();
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .set_provider_state(stasis_ai::ProviderState {
+                provider: Some("openrouter".into()),
+                model: Some("openai/gpt-oss-120b".into()),
+                ..Default::default()
+            })
+            .unwrap();
     }
 
     struct CaptureApp {

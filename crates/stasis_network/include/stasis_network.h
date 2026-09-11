@@ -8,6 +8,7 @@
 #define STASIS_NETWORK_CLIENT_ABI_VERSION 1u
 #define STASIS_NETWORK_MAX_MESSAGE_BYTES (64u * 1024u)
 #define STASIS_NETWORK_ADVERTISE_IPV4_ENV "STASIS_NETWORK_ADVERTISE_IPV4"
+#define STASIS_NETWORK_SUPERVISION_HANDLE_ENV "STASIS_NETWORK_SUPERVISION_HANDLE"
 
 typedef struct stasis_network_host stasis_network_host;
 typedef struct stasis_network_client stasis_network_client;
@@ -57,6 +58,9 @@ uint32_t stasis_network_host_overflow_count(stasis_network_host *host);
 uint16_t stasis_network_host_port(stasis_network_host *host);
 int32_t stasis_network_host_copy_join_url(stasis_network_host *host, char *out,
     size_t capacity, size_t *out_length);
+/* Publishes the private join URL to a supervisor-owned inherited handle. Returns
+ * 0 when not supervised, 1 after publication, or a negative error. */
+int32_t stasis_network_host_publish_supervision_join_url(stasis_network_host *host);
 /* Display-safe URL without pairing or resume credentials. */
 int32_t stasis_network_host_copy_join_card(stasis_network_host *host, char *out,
     size_t capacity, size_t *out_length);

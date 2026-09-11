@@ -1,0 +1,1 @@
+{"code":"command_failed","command":"run","message":"src/render.stasis:1:1: unknown local struct field path 'sprite.handle' in current jit path","ok":false}

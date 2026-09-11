@@ -34,7 +34,6 @@ function pong_host_write_sprite(sprite_ref: SpriteRef, x: i32, y: i32, w: i32, h
 }
 
 function pong_host_render(): void {
-    begin_frame();
     clear(0.0588, 0.0667, 0.1098, 1.0);
     if (PongHost.writer.reserve(4, -1, 0, 0, 0, 0, 0)) {
         let written: i32 = 0;

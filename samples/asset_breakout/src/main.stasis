@@ -272,7 +272,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.02, 0.02, 0.08, 1.0);
     if (loader.failed) {
         fill_rect(96.0, 140.0, 448.0, 5.0, 0.45, 0.10, 0.16, 1.0);
