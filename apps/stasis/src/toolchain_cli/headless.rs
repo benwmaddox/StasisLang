@@ -825,6 +825,32 @@ mod tests {
     }
 
     #[test]
+    fn headless_tick_hashes_nominal_enum_struct_array_fields() {
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&["main".to_string(), "tick".to_string()]);
+        jit.upsert_file(
+            "main.stasis",
+            "enum AssetState { None, Pending, Loading, Loaded, Failed, Cancelled, }\n\
+             struct AudioAsset { handle: i32; request: i32; state: AssetState; }\n\
+             global prompt_audio_assets: AudioAsset[1];\n\
+             function main(): i32 { prompt_audio_assets[0].state = AssetState.None; return 0; }\n\
+             function tick(): i32 { prompt_audio_assets[0].state = AssetState.Pending; return 0; }\n",
+        );
+        jit.compile()
+            .expect("compile headless enum collection fixture");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(0));
+
+        let summary = run_ticks(&jit, 1).expect("run and collect headless tick state");
+
+        assert_eq!(summary.ticks_executed, 1);
+        assert!(summary.state_hash.is_some());
+        assert_eq!(
+            jit.read_global_collection_scalar("prompt_audio_assets", "state", 0),
+            Ok(JitScalarValue::I32(1))
+        );
+    }
+
+    #[test]
     fn preflight_binds_the_scenario_bytes_used_for_execution() {
         let workspace = test_workspace("bound_preflight");
         let path = workspace.root.join("case.scenario.json");

@@ -804,6 +804,49 @@ mod tests {
     }
 
     #[test]
+    fn initial_state_round_trips_nominal_enum_struct_array_fields() {
+        let _global_guard = crate::jit_test_support::lock();
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            "main.stasis",
+            "enum AssetState { None, Pending, Loading, Loaded, Failed, Cancelled, }\n\
+             struct AudioAsset { handle: i32; request: i32; state: AssetState; }\n\
+             global prompt_audio_assets: AudioAsset[1];\n\
+             function main(): i32 { prompt_audio_assets[0].state = AssetState.Loaded; return 0; }\n",
+        );
+        jit.compile()
+            .expect("compile replay enum collection fixture");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(0));
+
+        let captured = capture_initial_state(&jit).expect("capture nominal enum collection state");
+        assert!(captured.values.iter().any(|entry| {
+            matches!(
+                &entry.location,
+                StateLocation::Collection { path, field, index }
+                    if path == "prompt_audio_assets" && field == "state" && *index == 0
+            ) && entry.value == encode_scalar(JitScalarValue::I32(3))
+        }));
+        jit.write_global_collection_scalar(
+            "prompt_audio_assets",
+            "state",
+            0,
+            JitScalarValue::I32(0),
+        )
+        .expect("clear enum collection field");
+
+        restore_initial_state(&jit, &captured).expect("restore nominal enum collection state");
+
+        assert_eq!(
+            jit.read_global_collection_scalar("prompt_audio_assets", "state", 0),
+            Ok(JitScalarValue::I32(3))
+        );
+        assert_eq!(
+            simulation_state_hash(&jit),
+            Ok(captured.state_sha256.clone())
+        );
+    }
+
+    #[test]
     fn unfinished_tick_can_be_discarded_after_guest_shutdown() {
         let mut recorder = ReplayRecorder {
             output: PathBuf::from("unused.replay.json"),

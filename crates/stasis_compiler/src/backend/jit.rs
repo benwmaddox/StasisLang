@@ -1780,6 +1780,13 @@ impl JitProcess {
                 stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
                     as u32,
             )),
+            type_id if self.is_named_i32_collection_scalar(type_id) => Ok(JitScalarValue::I32(
+                stasis_dynload::stasis_jit_global_i32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
             _ => Err(format!(
                 "global collection path '{path}' field '{field}' is not a supported scalar"
             )),
@@ -1871,6 +1878,16 @@ impl JitProcess {
                     field_hash,
                     index,
                     value as i32,
+                )
+            }
+            (type_id, JitScalarValue::I32(value))
+                if self.is_named_i32_collection_scalar(type_id) =>
+            {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
                 )
             }
             (_, value) => {
@@ -1991,6 +2008,19 @@ impl JitProcess {
                 &snapshot.analysis.global_path_types,
                 snapshot.types(),
             )
+        })
+    }
+
+    fn is_named_i32_collection_scalar(&self, type_id: u16) -> bool {
+        self.program_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .types()
+                .type_info(type_id)
+                .is_some_and(|info| info.category == TypeCategory::Named)
+                && !snapshot
+                    .analysis
+                    .named_struct_field_types
+                    .contains_key(&type_id)
         })
     }
 
@@ -2131,6 +2161,9 @@ impl JitProcess {
         }
         match type_id {
             TYPE_ID_I32 | TYPE_ID_BOOL | TYPE_ID_U32 => {
+                i32_capacity(collection_hash, field_hash, capacity)
+            }
+            type_id if self.is_named_i32_collection_scalar(type_id) => {
                 i32_capacity(collection_hash, field_hash, capacity)
             }
             TYPE_ID_F32 => f32_capacity(collection_hash, field_hash, capacity),
@@ -6306,6 +6339,72 @@ function main(): i32 {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_round_trips_nominal_enum_collection_fields() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["main".to_string(), "host_values_match".to_string()]);
+        process.upsert_file(
+            "sample.stasis",
+            "enum Mood { Waiting, Happy, }\n\
+             enum AssetState { None, Pending, Loading, Loaded, Failed, Cancelled, }\n\
+             struct Ham { mood: Mood; }\n\
+             struct AudioAsset { handle: i32; request: i32; state: AssetState; }\n\
+             global hams: Ham[1];\n\
+             global prompt_audio_assets: AudioAsset[1];\n\
+             function main(): i32 { hams[0].mood = Mood.Happy; prompt_audio_assets[0].state = AssetState.Loaded; return 0; }\n\
+             function host_values_match(): i32 { if (hams[0].mood == Mood.Waiting && prompt_audio_assets[0].state == AssetState.Failed) { return 1; } return 0; }\n",
+        );
+        process.compile().expect("compile enum collection fixture");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(0));
+
+        assert_eq!(
+            process.read_global_collection_scalar("hams", "mood", 0),
+            Ok(JitScalarValue::I32(1))
+        );
+        assert_eq!(
+            process.read_global_collection_scalar("prompt_audio_assets", "state", 0),
+            Ok(JitScalarValue::I32(3))
+        );
+        process
+            .write_global_collection_scalar("hams", "mood", 0, JitScalarValue::I32(0))
+            .expect("write Mood through its i32 storage lane");
+        process
+            .write_global_collection_scalar(
+                "prompt_audio_assets",
+                "state",
+                0,
+                JitScalarValue::I32(4),
+            )
+            .expect("write AssetState through its i32 storage lane");
+        assert_eq!(
+            process.execute_i32_noarg_by_name("host_values_match"),
+            Ok(1)
+        );
+
+        assert_eq!(
+            process
+                .write_global_collection_scalar(
+                    "prompt_audio_assets",
+                    "state",
+                    0,
+                    JitScalarValue::Bool(true),
+                )
+                .expect_err("nominal enum field must reject a mismatched storage value"),
+            "global collection path 'prompt_audio_assets' field 'state' does not accept bool"
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("prompt_audio_assets", "state", 1)
+                .expect_err("enum field bounds must remain enforced"),
+            "global collection path 'prompt_audio_assets' index 1 is outside capacity 1"
+        );
+        assert!(process
+            .read_global_collection_scalar("prompt_audio_assets", "", 0)
+            .expect_err("a whole struct element must not be exposed as a scalar")
+            .contains("field '' was not found"));
     }
 
     #[cfg(windows)]
