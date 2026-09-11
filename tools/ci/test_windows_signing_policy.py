@@ -42,7 +42,6 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("'tools/windows/stasis-signing.ps1'", source)
         self.assertIn("'tools/windows/stasis-signing-trust.ps1'", source)
         self.assertIn('$expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"', source)
-        self.assertIn('"Root"', source)
         self.assertNotIn('"TrustedPeople"', source)
         self.assertIn("STASIS_SIGNING_TIMESTAMP_URLS", source)
         self.assertIn("STASIS_SIGNING_TIMEOUT_SECONDS", source)
@@ -65,6 +64,12 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("$process.ExitCode -ne 0", signing_step)
         self.assertIn("Remove nightly signing root trust", source)
         self.assertIn("if: always() && runner.os == 'Windows'", source)
+        cleanup_step = source.split("- name: Remove nightly signing root trust", 1)[1].split(
+            "- name: Upload packaged artifact", 1
+        )[0]
+        self.assertIn("timeout-minutes: 2", cleanup_step)
+        self.assertIn("-Mode remove -ExpectedThumbprint $thumbprint", cleanup_step)
+        self.assertNotIn("X509Store", cleanup_step)
         self.assertNotIn("runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''", source)
 
         trust_source = (ROOT / "tools/windows/stasis-signing-trust.ps1").read_text(
@@ -76,7 +81,8 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertNotIn("'-legacy'", trust_source)
         self.assertIn("$publicCertificate.Thumbprint -ne $ExpectedThumbprint", trust_source)
         self.assertIn("$publicCertificate.Subject -ne $publicCertificate.Issuer", trust_source)
-        self.assertIn("'-user', '-f', '-addstore', 'Root'", trust_source)
+        self.assertIn("'-user', '-f', '-silent', '-addstore', 'Root'", trust_source)
+        self.assertIn("'-user', '-f', '-silent', '-delstore', 'Root'", trust_source)
         self.assertIn("$process.WaitForExit(30000)", trust_source)
         self.assertIn("$process.Kill()", trust_source)
         self.assertNotIn("Get-AuthenticodeSignature", trust_source)

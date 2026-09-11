@@ -694,23 +694,11 @@ jobs:
 
       - name: Remove nightly signing root trust
         if: always() && runner.os == 'Windows'
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $thumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"
-          $trustedRoots = [Security.Cryptography.X509Certificates.X509Store]::new(
-            "Root",
-            [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-          )
-          try {
-            $trustedRoots.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-            @($trustedRoots.Certificates.Find(
-              [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
-              $thumbprint,
-              $false
-            )) | ForEach-Object { $trustedRoots.Remove($_) }
-          } finally {
-            if ($trustedRoots) { $trustedRoots.Close() }
-          }
+          & 'tools/windows/stasis-signing-trust.ps1' -Mode remove -ExpectedThumbprint $thumbprint
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
