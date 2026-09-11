@@ -4067,7 +4067,7 @@ impl DesktopEditor {
 
         egui::Frame::none()
             .fill(Color32::from_rgb(22, 27, 34))
-            .stroke(egui::Stroke::new(1.0, border()))
+            .stroke(egui::Stroke::new(1.0_f32, border()))
             .inner_margin(egui::Margin::symmetric(8.0, 5.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
