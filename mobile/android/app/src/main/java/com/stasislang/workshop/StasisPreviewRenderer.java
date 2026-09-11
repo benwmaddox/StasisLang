@@ -252,7 +252,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         private int sampleCount;
         private int minimumDrawCalls = Integer.MAX_VALUE;
         private int maximumDrawCalls;
-        private boolean reported;
+        private volatile boolean reported;
 
         FramePerformanceSamples(int warmupFrames, int sampleFrames) {
             if (warmupFrames < 0 || sampleFrames <= 0) {
@@ -289,6 +289,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + " draw_calls_max=" + maximumDrawCalls
                     + " lines=" + lines + " rects=" + rectangles
                     + " sprites=" + sprites + " text=" + text + " order=" + order;
+        }
+
+        boolean isComplete() {
+            return reported;
         }
 
         private static long percentileMicros(long[] values, int percentile) {
@@ -737,6 +741,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
         performanceSamples = new FramePerformanceSamples(
                 PERFORMANCE_WARMUP_FRAMES, PERFORMANCE_SAMPLE_FRAMES);
+    }
+
+    synchronized boolean isPerformanceSamplingForAcceptanceActive() {
+        return performanceSamples != null && !performanceSamples.isComplete();
     }
 
     // Acceptance synchronization waits for the GL thread to consume the exact

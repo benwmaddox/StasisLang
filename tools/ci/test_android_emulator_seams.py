@@ -157,6 +157,18 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             "queueEvent(renderer::startPerformanceSamplingForAcceptance)",
             self.workshop_activity,
         )
+        self.assertIn(
+            "renderer.isPerformanceSamplingForAcceptanceActive()",
+            self.workshop_activity,
+        )
+        self.assertIn("postOnAnimation(this)", self.workshop_activity)
+        self.assertIn(
+            "postOnAnimation(performanceRenderPump)", self.workshop_activity
+        )
+        self.assertIn(
+            "removeCallbacks(performanceRenderPump)", self.workshop_activity
+        )
+        self.assertIn("private volatile boolean reported", self.preview_renderer)
 
     def test_workshop_benchmarks_after_capture_with_one_retry(self):
         third_capture = self.workshop_script.index("$stableCaptures -ge 3")
