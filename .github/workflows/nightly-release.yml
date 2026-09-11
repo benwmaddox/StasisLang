@@ -285,8 +285,35 @@ jobs:
         shell: pwsh
         run: |
           $certificate = Join-Path $env:RUNNER_TEMP "stasis-signing.pfx"
+          $expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"
           try {
             [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:STASIS_SIGNING_PFX_BASE64))
+            $pfx = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+              $certificate,
+              $env:STASIS_SIGNING_PFX_PASSWORD,
+              [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+            )
+            if ($pfx.Thumbprint -ne $expectedThumbprint) {
+              throw "Windows signing certificate does not match the pinned release identity"
+            }
+            if ($pfx.Subject -ne $pfx.Issuer) {
+              throw "Pinned private signing identity must remain self-signed"
+            }
+            $publicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+              $pfx.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+            )
+            $trustedPeople = [Security.Cryptography.X509Certificates.X509Store]::new(
+              "TrustedPeople",
+              [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+            )
+            try {
+              $trustedPeople.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+              $trustedPeople.Add($publicCertificate)
+            } finally {
+              if ($trustedPeople) { $trustedPeople.Close() }
+              if ($publicCertificate) { $publicCertificate.Dispose() }
+              if ($pfx) { $pfx.Dispose() }
+            }
             $env:STASIS_SIGNING_CERTIFICATE = $certificate
             $env:STASIS_SIGNING_PROFILE = "production"
             $env:STASIS_SIGNING_TIMESTAMP_URL = "http://timestamp.digicert.com"
@@ -649,6 +676,26 @@ jobs:
           python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ios" --expect-runtime-sources
           python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-android" --expect-runtime-sources
           if [[ "${RUNNER_OS}" == "macOS" ]]; then python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-ios" --expect-runtime-sources; fi
+
+      - name: Remove private signing identity trust
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $thumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"
+          $trustedPeople = [Security.Cryptography.X509Certificates.X509Store]::new(
+            "TrustedPeople",
+            [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+          )
+          try {
+            $trustedPeople.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+            @($trustedPeople.Certificates.Find(
+              [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
+              $thumbprint,
+              $false
+            )) | ForEach-Object { $trustedPeople.Remove($_) }
+          } finally {
+            if ($trustedPeople) { $trustedPeople.Close() }
+          }
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
