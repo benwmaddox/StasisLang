@@ -174,7 +174,7 @@ fn header_reports_repair_and_closed_states_instead_of_validation_only() {
 }
 
 #[test]
-fn pointer_accepts_displayed_action_and_hover_uses_interactive_style() {
+fn ready_proposals_auto_apply_in_chronological_order_without_accept_buttons() {
     let (mut editor, root, payload) = super::tests::review_fixture("timeline_pointer_preview");
     editor
         .state
@@ -212,34 +212,11 @@ fn pointer_accepts_displayed_action_and_hover_uses_interactive_style() {
     let size = egui::vec2(1100.0, 1400.0);
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    let buttons = text_rects(&output, "Accept");
-    assert_eq!(buttons.len(), 2);
-    let position = buttons[0].center();
-    let hovered = frame(
-        &mut editor,
-        &context,
-        size,
-        vec![egui::Event::PointerMoved(position)],
-    );
-    fn has_hover(shape: &egui::epaint::Shape, position: egui::Pos2) -> bool {
-        match shape {
-            egui::epaint::Shape::Rect(rect) => {
-                rect.rect.contains(position) && rect.fill == Color32::from_rgb(29, 42, 56)
-            }
-            egui::epaint::Shape::Vec(shapes) => {
-                shapes.iter().any(|shape| has_hover(shape, position))
-            }
-            _ => false,
-        }
-    }
-    assert!(hovered
-        .shapes
-        .iter()
-        .any(|shape| has_hover(&shape.shape, position)));
-    click(&mut editor, &context, size, position);
+    assert!(text_rects(&output, "Accept").is_empty());
     let task = editor.state.session.active_task().unwrap();
     assert_eq!(task.actions["z-first"].state, ActionState::Accepted);
     assert_eq!(task.actions["a-second"].state, ActionState::Proposed);
+    assert!(editor.busy_tasks.contains("task-1"));
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -1230,9 +1230,16 @@ impl DesktopEditor {
             return;
         }
         let proposal = self.state.session.task(&task_id).ok().and_then(|task| {
-            task.actions
+            task.activity
                 .iter()
-                .find(|(_, action)| matches!(action.state, ActionState::Proposed))
+                .find_map(|entry| match &entry.kind {
+                    ActivityKind::SemanticAction { action_id, .. } => task
+                        .actions
+                        .get(action_id)
+                        .filter(|action| matches!(action.state, ActionState::Proposed))
+                        .map(|action| (action_id, action)),
+                    _ => None,
+                })
                 .and_then(|(id, action)| {
                     action.payload.as_ref().map(|payload| {
                         (
