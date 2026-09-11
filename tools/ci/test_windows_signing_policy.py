@@ -40,6 +40,7 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("needs: [detect, mobile_network_support, release_preconditions]", source)
         self.assertIn('$env:STASIS_SIGNING_PROFILE = "production"', source)
         self.assertIn("'tools/windows/stasis-signing.ps1'", source)
+        self.assertIn("'tools/windows/stasis-signing-trust.ps1'", source)
         self.assertIn('$expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"', source)
         self.assertIn('"Root"', source)
         self.assertNotIn('"TrustedPeople"', source)
@@ -48,6 +49,9 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com", source)
         self.assertIn("Invoke-BoundedSigningCommand sign $_", source)
         self.assertIn("Invoke-BoundedSigningCommand verify $_", source)
+        self.assertIn("Invoke-BoundedSigningCommand sign $artifacts[0]", source)
+        self.assertIn("Invoke-BoundedSigningCommand verify $artifacts[0]", source)
+        self.assertIn("temporary signer trust for $($artifacts[0])", source)
         signing_step = source.split(
             "- name: Authenticode sign Stasis Windows binaries", 1
         )[1].split("- name: Assemble bundle (unix)", 1)[0]
@@ -55,13 +59,22 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("$process.WaitForExit(90000)", signing_step)
         self.assertIn("$process.Kill()", signing_step)
         self.assertIn("$process.WaitForExit(5000)", signing_step)
-        self.assertIn("Starting Authenticode $mode for $artifact", signing_step)
+        self.assertIn('Write-Host "Starting $label"', signing_step)
         self.assertIn("$startInfo.UseShellExecute = $false", signing_step)
         self.assertIn("$startInfo.ArgumentList.Add($argument)", signing_step)
         self.assertIn("$process.ExitCode -ne 0", signing_step)
         self.assertIn("Remove nightly signing root trust", source)
         self.assertIn("if: always() && runner.os == 'Windows'", source)
         self.assertNotIn("runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''", source)
+
+        trust_source = (ROOT / "tools/windows/stasis-signing-trust.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Get-AuthenticodeSignature", trust_source)
+        self.assertIn("$certificate.Thumbprint -ne $ExpectedThumbprint", trust_source)
+        self.assertIn("$certificate.Subject -ne $certificate.Issuer", trust_source)
+        self.assertIn("StoreLocation]::CurrentUser", trust_source)
+        self.assertNotIn("X509Certificate2]::new", signing_step)
 
     def test_cargo_runner_routes_signtool_through_policy_entrypoint(self):
         source = (ROOT / ".cargo/stasis-sign-and-run.cmd").read_text(encoding="utf-8")
