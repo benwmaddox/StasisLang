@@ -111,7 +111,9 @@ function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments) {
         if (-not $process.Start()) { throw 'signtool process did not start' }
         if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
             try { $process.Kill($true) } catch { $process.Kill() }
-            $process.WaitForExit()
+            if (-not $process.WaitForExit(5000)) {
+                throw "signtool timed out after $timeoutSeconds seconds and did not terminate within 5 seconds"
+            }
             throw "signtool timed out after $timeoutSeconds seconds"
         }
         if ($process.ExitCode -ne 0) {
