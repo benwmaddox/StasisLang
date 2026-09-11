@@ -8,14 +8,15 @@ use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use stasis::run_staged_project_tests_bounded;
 use stasis::{
     load_and_apply_play_data_bindings_for_test, provision_local_certificate,
     resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
     run_play_in_process_with_replay, run_play_in_process_with_window_title,
     run_project_tests_bounded_with_receipt, run_self_host_aot_cli_with_desktop_network,
-    run_self_host_aot_cli_with_options, run_staged_project_tests_bounded, sign_artifacts,
-    signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
-    SigningOptions, StasisTestRunSession,
+    run_self_host_aot_cli_with_options, sign_artifacts, signing_status, verify_artifacts,
+    DesktopNetworkMode, LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
@@ -7323,6 +7324,7 @@ fn desktop_apply_semantic_preview(
     desktop_apply_semantic_preview_with_progress(root, preview, &mut |_| {})
 }
 
+#[cfg(test)]
 fn desktop_apply_semantic_preview_with_progress(
     root: &Path,
     preview: &DesktopSemanticPreview,
@@ -7414,6 +7416,48 @@ fn desktop_apply_semantic_preview_with_progress(
         "apply_total": apply_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
     });
     Ok((result.human, result.data))
+}
+
+fn desktop_publish_semantic_preview_with_progress(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<(String, Value), String> {
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+    );
+    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
+        return Err(
+            "stale semantic preview: project sources changed; generate a new preview before applying"
+                .into(),
+        );
+    }
+    let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
+    if replanned.source_fingerprint != preview.source_fingerprint || replanned.plan != preview.plan
+    {
+        return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+    }
+    let workspace = load_workspace(Some(root))?;
+    let mut result = apply_symbol_plan_with_progress(
+        &workspace,
+        preview.plan.clone(),
+        SymbolEditOptions {
+            dry_run: false,
+            no_tests: true,
+        },
+        progress,
+    )?;
+    result.data["source_fingerprint"] = json!(desktop_source_fingerprint(root, &[])?);
+    Ok((result.human, result.data))
+}
+
+fn desktop_revert_semantic_receipts(root: &Path, receipts: &[String]) -> Result<(), String> {
+    let workspace = load_workspace(Some(root))?;
+    for receipt in receipts.iter().rev() {
+        revert_symbol_plan(&workspace, Path::new(receipt), false, true)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -9600,6 +9644,35 @@ mod tests {
         assert_eq!(
             receipt["source_fingerprint"],
             desktop_source_fingerprint(&root, &[]).unwrap()
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_publish_exposes_source_before_tests_and_receipt_can_restore_it() {
+        let root = desktop_editor_fixture("semantic_publish_then_test");
+        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return -1; }");
+        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
+        let (_, receipt) =
+            desktop_publish_semantic_preview_with_progress(&root, &preview, &mut |_| {}).unwrap();
+
+        assert_eq!(receipt["validation"]["tests"], "skipped");
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            preview.plan.changed_files[0].after_source
+        );
+        assert!(desktop_run_focused_tests(&root, &[]).is_err());
+
+        desktop_revert_semantic_receipts(
+            &root,
+            &[receipt["receipt"].as_str().unwrap().to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
         );
         remove_temp(&root);
     }
