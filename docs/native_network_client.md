@@ -82,6 +82,7 @@ python tools/cargo_cache.py run -- cargo test -p stasis_network --test native_cl
 python tools/ci/test_android_network_join_policy.py
 node --test runtime/web/tests/network_mailbox_contract.test.mjs
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_desktop_network_link.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_windows_desktop_network_client_package.ps1
 python tools/ci/test_android_network_client.py --serial emulator-5554 --ndk C:/Android/Sdk/ndk/27.0.12077973
 ```
 
@@ -96,3 +97,11 @@ probe, not graphical application or multi-device LAN acceptance.
 The network acceptance workflow runs the native client tests alongside the
 existing browser acceptance gate. The protocol is shared; neither native
 transport nor native packaging replaces the browser path.
+
+A post-fix Windows nightly qualifies this contract only after the extracted,
+signed toolchain passes `test_windows_desktop_network_client_package.ps1` with
+the checkout's `crates/stasis_network` source hidden. The probe packages a fresh
+vendored-stdlib client, consumes `STASIS_NETWORK_JOIN_URL`, exercises all eight
+mailbox imports against a real host, observes graceful disconnect, and rejects
+logs containing the private URL. The nightly workflow keeps signing publication
+behind the existing task #525 release precondition.

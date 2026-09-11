@@ -535,6 +535,27 @@ jobs:
           python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-android" --expect-runtime-sources
           if ($env:RUNNER_OS -eq "macOS") { python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-ios" --expect-runtime-sources }
 
+      - name: Qualify extracted Windows native client package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = "Stop"
+          $checkoutRoot = (Get-Location).Path
+          $repoNetworkSource = Join-Path $checkoutRoot "crates/stasis_network"
+          $repoNetworkBackup = Join-Path $env:RUNNER_TEMP ("stasis-network-client-source-backup-" + [guid]::NewGuid().ToString())
+          try {
+            Move-Item $repoNetworkSource $repoNetworkBackup -Force
+            powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_windows_desktop_network_client_package.ps1 `
+              -Toolchain "build/network-supervision-release/stasis.exe" `
+              -InstalledToolchain
+            if ($LASTEXITCODE -ne 0) { throw "extracted Windows native client package qualification failed" }
+          } finally {
+            if (Test-Path $repoNetworkBackup) {
+              Move-Item $repoNetworkBackup $repoNetworkSource -Force
+            }
+          }
+
       - name: Smoke test bundled CLI (unix)
         if: runner.os != 'Windows'
         shell: bash

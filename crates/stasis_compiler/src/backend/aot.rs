@@ -3110,6 +3110,48 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_resolves_native_network_client_mailbox_contract() {
+        let network_client = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/network_client.stasis"
+        ));
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "vendor/stasis/stdlib/network_client.stasis",
+            format!(
+                "{network_client}\nfunction main(): i32 {{ return network_client_supported(); }}\n"
+            ),
+        );
+
+        process
+            .compile()
+            .expect("compile native network client AOT");
+        let signatures = &process
+            .program_snapshot
+            .as_ref()
+            .expect("program snapshot")
+            .analysis
+            .resolved_extern_signatures;
+        let actual = signatures
+            .iter()
+            .map(|signature| signature.symbol.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            "stasis_web_network_supported",
+            "stasis_web_network_connect",
+            "stasis_web_network_status",
+            "stasis_web_network_poll",
+            "stasis_web_network_send",
+            "stasis_web_network_resume_seat",
+            "stasis_web_network_last_sequence",
+            "stasis_web_network_checkpoint",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn aot_emits_external_url_call_and_retains_its_string_literal() {
         let mut process = AotProcess::new();
         process.upsert_file(

@@ -54,6 +54,16 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
         self.assertIn('Copy-Item tools/diagnose_desktop_network.ps1', self.workflow)
         self.assertIn('runtime/stasis_network_join_card.h', self.workflow)
 
+    def test_windows_nightly_qualifies_relocated_native_client_package(self):
+        step = "name: Qualify extracted Windows native client package"
+        hide_source = "Move-Item $repoNetworkSource $repoNetworkBackup -Force"
+        package_probe = "test_windows_desktop_network_client_package.ps1"
+        self.assertIn(step, self.workflow)
+        qualification = self.workflow.index(step)
+        self.assertLess(self.workflow.index(hide_source, qualification), self.workflow.index(package_probe, qualification))
+        self.assertIn('-Toolchain "build/network-supervision-release/stasis.exe"', self.workflow)
+        self.assertIn("-InstalledToolchain", self.workflow[qualification:])
+
     def test_bootstrap_windows_network_support_is_staged_before_provenance(self):
         workflow = (ROOT / ".github/workflows/bootstrap-artifacts.yml").read_text(encoding="utf-8")
         self.assertIn("name: Build desktop network support (windows)", workflow)
