@@ -302,15 +302,15 @@ jobs:
             $publicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
               $pfx.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert)
             )
-            $trustedPeople = [Security.Cryptography.X509Certificates.X509Store]::new(
-              "TrustedPeople",
+            $trustedRoots = [Security.Cryptography.X509Certificates.X509Store]::new(
+              "Root",
               [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
             )
             try {
-              $trustedPeople.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-              $trustedPeople.Add($publicCertificate)
+              $trustedRoots.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+              $trustedRoots.Add($publicCertificate)
             } finally {
-              if ($trustedPeople) { $trustedPeople.Close() }
+              if ($trustedRoots) { $trustedRoots.Close() }
               if ($publicCertificate) { $publicCertificate.Dispose() }
               if ($pfx) { $pfx.Dispose() }
             }
@@ -677,24 +677,24 @@ jobs:
           python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-android" --expect-runtime-sources
           if [[ "${RUNNER_OS}" == "macOS" ]]; then python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-ios" --expect-runtime-sources; fi
 
-      - name: Remove private signing identity trust
+      - name: Remove nightly signing root trust
         if: always() && runner.os == 'Windows'
         shell: pwsh
         run: |
           $thumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"
-          $trustedPeople = [Security.Cryptography.X509Certificates.X509Store]::new(
-            "TrustedPeople",
+          $trustedRoots = [Security.Cryptography.X509Certificates.X509Store]::new(
+            "Root",
             [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
           )
           try {
-            $trustedPeople.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-            @($trustedPeople.Certificates.Find(
+            $trustedRoots.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+            @($trustedRoots.Certificates.Find(
               [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
               $thumbprint,
               $false
-            )) | ForEach-Object { $trustedPeople.Remove($_) }
+            )) | ForEach-Object { $trustedRoots.Remove($_) }
           } finally {
-            if ($trustedPeople) { $trustedPeople.Close() }
+            if ($trustedRoots) { $trustedRoots.Close() }
           }
 
       - name: Upload packaged artifact
