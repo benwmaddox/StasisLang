@@ -33,7 +33,7 @@ jobs:
       nightly_tag: ${{ steps.meta.outputs.nightly_tag }}
       last_tag: ${{ steps.meta.outputs.last_tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -82,16 +82,16 @@ jobs:
             kind: ios
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Rust targets
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.kind == 'android' && 'aarch64-linux-android,x86_64-linux-android' || 'aarch64-apple-ios' }}
 
       - name: Install pinned Android NDK
         if: matrix.kind == 'android'
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
 
       - name: Build Android network support
         if: matrix.kind == 'android'
@@ -134,8 +134,9 @@ jobs:
           cp target/aarch64-apple-ios/release/libstasis_network.a network-artifact/ios-arm64/
 
       - name: Upload immutable mobile network support
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: mobile-network-support-${{ matrix.kind }}
           path: network-artifact
           if-no-files-found: error
@@ -168,7 +169,7 @@ jobs:
       STASIS_SIGNING_PFX_BASE64: ${{ secrets.STASIS_SIGNING_PFX_BASE64 }}
       STASIS_SIGNING_PFX_PASSWORD: ${{ secrets.STASIS_SIGNING_PFX_PASSWORD }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Compute shared toolchain fingerprint
         shell: bash
@@ -177,14 +178,14 @@ jobs:
           echo "STASIS_BUILD_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
 
       - name: Download immutable mobile network support
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: mobile-network-support-*
           path: mobile/network
           merge-multiple: true
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.rust_target }}
 
@@ -201,7 +202,7 @@ jobs:
 
       - name: Setup MSVC dev environment (windows)
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
       - name: Build stasis (release)
         run: cargo build -p stasis --release --target ${{ matrix.rust_target }}
@@ -551,8 +552,9 @@ jobs:
           if [[ "${RUNNER_OS}" == "macOS" ]]; then python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-ios" --expect-runtime-sources; fi
 
       - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: ${{ matrix.archive }}
           path: dist/${{ matrix.archive }}.${{ matrix.ext }}
           if-no-files-found: error
@@ -588,12 +590,13 @@ jobs:
       STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/vscode-nightly/${{ matrix.archive }}/${{ matrix.executable }}
       STASIS_E2E_SCREENSHOT: ${{ github.workspace }}/target/vscode-e2e/frame.png
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          package-manager-cache: false
+          node-version: "24"
           cache: npm
           cache-dependency-path: vscode-stasis/package-lock.json
 
@@ -609,7 +612,7 @@ jobs:
         run: brew install pkg-config
 
       - name: Download matching nightly toolchain
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ matrix.archive }}
           path: target/vscode-nightly
@@ -667,8 +670,9 @@ jobs:
           Compress-Archive -Path "$releaseRoot/*" -DestinationPath "target/stasis-editor-release-${{ matrix.vsce_target }}.zip" -Force
 
       - name: Upload atomic editor release
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: stasis-editor-release-${{ matrix.vsce_target }}
           path: target/stasis-editor-release-${{ matrix.vsce_target }}.zip
           if-no-files-found: error
@@ -678,11 +682,11 @@ jobs:
     if: needs.detect.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true

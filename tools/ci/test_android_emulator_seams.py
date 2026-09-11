@@ -55,14 +55,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     def test_workflow_uses_hosted_x86_emulator(self):
         self.assertIn("runs-on: ubuntu-latest", self.workflow)
         self.assertNotIn("runs-on: macos-15", self.workflow)
-        self.assertIn("reactivecircus/android-emulator-runner@v2", self.workflow)
+        self.assertIn("reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d", self.workflow)
         self.assertIn("api-level: 35", self.workflow)
         self.assertIn("arch: x86_64", self.workflow)
         self.assertIn("Enable KVM", self.workflow)
         self.assertIn("workflow_call:", self.workflow)
         self.assertIn("workflow_dispatch:", self.workflow)
         self.assertNotIn("pull_request:", self.workflow)
-        self.assertIn('uses: actions/setup-python@v5', self.workflow)
+        self.assertIn('uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97', self.workflow)
         self.assertIn('python-version: "3.12"', self.workflow)
         self.assertIn("group: android-emulator-seams-nightly", self.workflow)
         self.assertIn("cancel-in-progress: false", self.workflow)
@@ -201,7 +201,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("needs:", self.workflow)
         for body in job_bodies.values():
             self.assertEqual(1, body.count("runs-on: ubuntu-latest"))
-            self.assertEqual(1, body.count("reactivecircus/android-emulator-runner@v2"))
+            self.assertEqual(1, body.count("reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d"))
             for setup in (
                 "- name: Setup Gradle",
                 "- name: Checkout SDL3",

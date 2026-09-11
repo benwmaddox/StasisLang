@@ -136,7 +136,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         upload = step(self.windows, upload_name)
         upload_markers = (
             "if: always()",
-            "uses: actions/upload-artifact@v4",
+            "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             "name: windows-platform-seam-evidence",
             "if-no-files-found: warn",
             "target/render-parity-ci/frame.png",
