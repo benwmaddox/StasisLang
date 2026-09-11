@@ -365,6 +365,9 @@ fn hover_details(entry: &ActivityEntry) -> String {
         if let Some(model) = &turn.model {
             lines.push(format!("Model: {model}"));
         }
+        if let Some(reasoning_effort) = &turn.reasoning_effort {
+            lines.push(format!("Reasoning: {reasoning_effort}"));
+        }
         if let Some(route) = &turn.route {
             lines.push(format!("Route: {route}"));
         }
@@ -504,6 +507,7 @@ mod tests {
         task.set_provider_state(ProviderState {
             provider: Some("openrouter".into()),
             model: Some("model/x".into()),
+            reasoning_effort: Some("low".into()),
             routing: RoutingState::Assigned {
                 route: "price".into(),
             },
@@ -527,6 +531,7 @@ mod tests {
         assert!(export.html.contains("Cost: $0.001200"));
         assert!(export.html.contains("Provider: openrouter"));
         assert!(export.html.contains("Model: model/x"));
+        assert!(export.html.contains("Reasoning: low"));
     }
 
     #[test]
