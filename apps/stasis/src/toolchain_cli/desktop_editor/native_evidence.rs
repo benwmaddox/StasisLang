@@ -15,6 +15,10 @@ fn capture_native_task_timeline() {
         .unwrap_or_else(|_| "1100".into())
         .parse()
         .unwrap();
+    let height: f32 = std::env::var("STASIS_EDITOR_EVIDENCE_HEIGHT")
+        .unwrap_or_else(|_| "900".into())
+        .parse()
+        .unwrap();
     let scale: f32 = std::env::var("STASIS_EDITOR_EVIDENCE_SCALE")
         .unwrap_or_else(|_| "1".into())
         .parse()
@@ -315,6 +319,37 @@ fn capture_native_task_timeline() {
             .unwrap();
     }
 
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_WORKING").is_some() {
+        let (client, _server) = stasis_runner::live::live_session(16);
+        editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Improve enemy movement".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .append_reply("Add a short dash with a cooldown.")
+            .unwrap();
+        editor.controller = TaskController::new_with_progress(|_, canceled, progress| {
+            progress.report(ProgressStage::ContactingProvider);
+            while !canceled.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err("fixture request stopped".into())
+        });
+        editor
+            .controller
+            .send_active(&mut editor.state.session)
+            .unwrap();
+        editor.state.focus = FocusArea::Reply;
+        editor.state.focus_pending = false;
+    }
+
+    // Evidence controls its own viewport; project window tiling would move or
+    // resize the native capture after the requested dimensions are applied.
+    editor.windows = None;
+
     struct CaptureApp {
         editor: DesktopEditor,
         output: PathBuf,
@@ -322,6 +357,7 @@ fn capture_native_task_timeline() {
         started: Instant,
         captured: Arc<AtomicBool>,
         width: f32,
+        height: f32,
         scale: f32,
     }
     impl eframe::App for CaptureApp {
@@ -329,7 +365,8 @@ fn capture_native_task_timeline() {
             if self.frames < 2 {
                 context.set_pixels_per_point(self.scale);
                 context.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                    self.width, 900.0,
+                    self.width,
+                    self.height,
                 )));
             }
             assert!(
@@ -375,7 +412,7 @@ fn capture_native_task_timeline() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Stasis editor - deterministic review fixture")
-            .with_inner_size([width, 900.0]),
+            .with_inner_size([width, height]),
         event_loop_builder: Some(Box::new(|builder| {
             builder.with_any_thread(true);
         })),
@@ -393,6 +430,7 @@ fn capture_native_task_timeline() {
                 started: Instant::now(),
                 captured,
                 width,
+                height,
                 scale,
             })
         }),
