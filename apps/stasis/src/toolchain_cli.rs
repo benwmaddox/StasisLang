@@ -23,7 +23,7 @@ use stasis_assets::{
     DEFAULT_ASSET_MANIFEST_PATH,
 };
 use stasis_compiler::backend::aot::AotProcess;
-use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::jit::{JitExternProfile, JitProcess};
 use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::wasm::WasmProcess;
@@ -2571,12 +2571,20 @@ fn validate_program_snapshot_assets(
 }
 
 fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
-    compile_workspace_jit_with_debug(workspace, false)
+    compile_workspace_jit_with_options(workspace, false, None)
 }
 
 fn compile_workspace_jit_with_debug(
     workspace: &Workspace,
     debug_instrumentation: bool,
+) -> Result<JitProcess, String> {
+    compile_workspace_jit_with_options(workspace, debug_instrumentation, None)
+}
+
+fn compile_workspace_jit_with_options(
+    workspace: &Workspace,
+    debug_instrumentation: bool,
+    extern_profile: Option<JitExternProfile>,
 ) -> Result<JitProcess, String> {
     let entry = workspace.root.join(&workspace.manifest.entry);
     validate_workspace_destination(workspace, "entry", &entry)?;
@@ -2585,6 +2593,9 @@ fn compile_workspace_jit_with_debug(
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
     jit.set_debug_instrumentation(debug_instrumentation)?;
+    if let Some(profile) = extern_profile {
+        jit.set_extern_profile(profile)?;
+    }
     jit.set_project_root(display_path(&workspace.root))?;
     jit.set_required_emit_roots(&runtime_analysis_roots());
     let mut sources = BTreeMap::new();
@@ -4170,7 +4181,18 @@ fn build_workspace_with_desktop_network(
             ))
         }
         BuildMode::Release => {
-            let validation_jit = compile_workspace_jit(workspace)?;
+            let validation_jit = if desktop_network
+                .as_ref()
+                .is_some_and(|network| network.mode == DesktopNetworkMode::Client)
+            {
+                compile_workspace_jit_with_options(
+                    workspace,
+                    false,
+                    Some(JitExternProfile::DeterministicOfflineWebNetwork),
+                )?
+            } else {
+                compile_workspace_jit(workspace)?
+            };
             let manifest = validate_compiled_workspace_assets(workspace, &validation_jit)?;
             preflight_release_asset_preparation(workspace, &validation_jit, manifest.as_ref())?;
             let output = output
@@ -10935,6 +10957,42 @@ mod tests {
             error,
             "capabilities.network and capabilities.network_client are mutually exclusive"
         );
+    }
+
+    #[test]
+    fn native_network_client_release_preflight_uses_offline_mailbox_profile() {
+        let root = temp_dir("native_network_client_preflight");
+        fs::create_dir_all(root.join("vendor/stasis/stdlib"))
+            .expect("create network client vendor directory");
+        fs::write(
+            root.join(MANIFEST_NAME),
+            r#"{"manifest_version":1,"name":"client","entry":"main.stasis","tests":"tests","output":"build","capabilities":{"network_client":true}}"#,
+        )
+        .expect("write network client manifest");
+        fs::write(
+            root.join("main.stasis"),
+            "import \"/vendor/stasis/stdlib/network_client.stasis\"; function main(): i32 { return network_client_supported(); } function tick(): i32 { return 0; } function render(): i32 { return 0; }\n",
+        )
+        .expect("write network client entry");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/stdlib/network_client.stasis"),
+            root.join("vendor/stasis/stdlib/network_client.stasis"),
+        )
+        .expect("vendor network client stdlib");
+        let workspace = load_workspace(Some(&root)).expect("load network client workspace");
+
+        let default_error = match compile_workspace_jit(&workspace) {
+            Ok(_) => panic!("ordinary native JIT must not acquire browser mailbox shims"),
+            Err(error) => error,
+        };
+        assert!(default_error.contains("stasis_web_network_supported"));
+        compile_workspace_jit_with_options(
+            &workspace,
+            false,
+            Some(JitExternProfile::DeterministicOfflineWebNetwork),
+        )
+        .expect("client package release preflight");
+        remove_temp(&root);
     }
 
     #[test]

@@ -155,6 +155,9 @@ jobs:
       - name: Test desktop package native network link and lifecycle
         shell: pwsh
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_desktop_network_link.ps1
+      - name: Test generated Windows native client package
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_windows_desktop_network_client_package.ps1
       - name: Test Windows LAN and firewall diagnostics
         shell: pwsh
         run: python -m unittest tools.ci.test_desktop_network_diagnostics
