@@ -1,0 +1,26 @@
+[
+  {
+    "project": "Afterlight",
+    "command": [
+      "powershell",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      "tools/build.ps1"
+    ],
+    "exit": 1,
+    "duration_seconds": 0.656
+  },
+  {
+    "project": "maddox-and-friends",
+    "command": [
+      "python",
+      "tools/run_stasis_tests.py",
+      "--stasis",
+      "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\toolchain-299\\toolchain\\stasis.exe"
+    ],
+    "exit": 1,
+    "duration_seconds": 26.922
+  }
+]
