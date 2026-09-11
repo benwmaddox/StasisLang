@@ -43,7 +43,7 @@ $publicPem = Join-Path $env:RUNNER_TEMP "stasis-signing-public.pem"
 $publicDer = Join-Path $env:RUNNER_TEMP "stasis-signing-public.cer"
 try {
     Invoke-BoundedNativeCommand 'public signing certificate extraction' $openssl @(
-        'pkcs12', '-legacy', '-in', $Certificate, '-clcerts', '-nokeys',
+        'pkcs12', '-in', $Certificate, '-clcerts', '-nokeys',
         '-out', $publicPem, '-passin', 'env:STASIS_SIGNING_PFX_PASSWORD'
     )
     Invoke-BoundedNativeCommand 'public signing certificate conversion' $openssl @(

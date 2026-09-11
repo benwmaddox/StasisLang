@@ -73,6 +73,7 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("Get-Command openssl.exe", trust_source)
         self.assertIn("Get-Command certutil.exe", trust_source)
         self.assertIn("'env:STASIS_SIGNING_PFX_PASSWORD'", trust_source)
+        self.assertNotIn("'-legacy'", trust_source)
         self.assertIn("$publicCertificate.Thumbprint -ne $ExpectedThumbprint", trust_source)
         self.assertIn("$publicCertificate.Subject -ne $publicCertificate.Issuer", trust_source)
         self.assertIn("'-user', '-f', '-addstore', 'Root'", trust_source)
