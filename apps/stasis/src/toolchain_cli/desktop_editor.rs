@@ -3123,7 +3123,7 @@ fn render_message_provider(
     };
     ui.label(
         RichText::new(format!(
-            "Provider: {}  ·  Model: {}  ·  Reasoning: {}",
+            "Provider: {}  |  Model: {}  |  Reasoning: {}",
             provider,
             turn.model.as_deref().unwrap_or("model unavailable"),
             turn.reasoning_effort.as_deref().unwrap_or("unavailable")

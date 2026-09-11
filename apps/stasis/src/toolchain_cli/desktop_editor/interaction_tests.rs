@@ -658,7 +658,7 @@ fn ai_message_shows_its_provider_model_and_reasoning_selection() {
         assert_eq!(
             text_rects(
                 &output,
-                "Provider: openrouter  ·  Model: openai/gpt-oss-120b  ·  Reasoning: low"
+                "Provider: openrouter  |  Model: openai/gpt-oss-120b  |  Reasoning: low"
             )
             .len(),
             1,
