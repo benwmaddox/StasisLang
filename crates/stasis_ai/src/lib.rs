@@ -10,34 +10,48 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod openrouter;
+pub mod session_store;
 pub mod task_controller;
 pub mod task_session;
 
 pub use openrouter::{
-    ConfiguredProvider, OpenRouterConfig, OpenRouterProvider, PreferredThroughputPolicy,
-    ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+    ConfiguredProvider, ImageInputCapability, OpenRouterConfig, OpenRouterImageInput,
+    OpenRouterProvider, PreferredThroughputPolicy, ProjectAiConfig, ProjectEditorConfig,
+    ProjectOpenRouterConfig, ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+    APPROVED_OPENROUTER_MODELS, DEFAULT_OPENROUTER_MAX_LATENCY_SECONDS,
+    DEFAULT_OPENROUTER_MIN_THROUGHPUT, DEFAULT_OPENROUTER_MODEL, MAX_OPENROUTER_IMAGES,
+    MAX_OPENROUTER_IMAGE_BYTES,
+};
+
+pub use session_store::{
+    ExecutionReceipt, LoadOutcome, RecoveryDiagnostic, SessionSnapshot, SessionStore, StoreError,
+    WindowPreferences,
 };
 
 pub use task_controller::{
-    ProviderActionContext, ProviderActionProposal, ProviderReply, ProviderRequest, ProviderUsage,
-    RequestId, TaskController, TaskControllerConfig, TaskControllerError, TaskControllerEvent,
-    TaskRequestSnapshot, TaskRequestState,
+    ProgressEvent, ProgressReporter, ProgressStage, ProviderActionContext, ProviderActionProposal,
+    ProviderReply, ProviderRequest, ProviderUsage, RequestId, TaskController, TaskControllerConfig,
+    TaskControllerError, TaskControllerEvent, TaskRequestSnapshot, TaskRequestState,
 };
 
 pub use task_session::{
     ActionId, ActionKind, ActionRevision, ActionState, ConnectionState, FallbackState,
     FocusedTestResult, GeneratedImageArtifact, GeneratedImageId, ImageAttribution,
-    ImageHandoffState, ImageReviewState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
-    ScreenshotAnalysisState, ScreenshotAttachment, ScreenshotId, ShortcutBinding, ShortcutMapper,
-    Task, TaskAction, TaskId, TaskLifecycle, TaskMetrics, TaskProvenance, TaskSession,
-    TaskSessionCommand, TaskSessionError, ThreadEntry, ThreadEntryKind, UploadState,
-    ValidationStatus, VisionCapability,
+    ImageHandoffState, ImageReviewState, Key, KeyChord, Modifiers, ProviderState,
+    ProviderTurnMetrics, RoutingState, ScreenshotAnalysisState, ScreenshotAttachment, ScreenshotId,
+    ShortcutBinding, ShortcutMapper, Task, TaskAction, TaskId, TaskLifecycle, TaskMetrics,
+    TaskProvenance, TaskSession, TaskSessionCommand, TaskSessionError, ThreadEntry,
+    ThreadEntryKind, UploadState, ValidationStatus, VisionCapability,
 };
 
 pub const DEFAULT_AGENT_TURNS: usize = 50;
 pub const MAX_AGENT_TURNS: usize = 50;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 50;
+pub const MAX_SEMANTIC_EDITS_PER_BATCH: usize = 64;
+const MAX_SYMBOL_QUERY_FILES: usize = 16;
+const MAX_PNG_SHAPES: usize = 512;
 pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
+pub const MAX_SUMMARY_CHARS: usize = task_session::MAX_THREAD_TEXT_CHARS;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_REASONING_EFFORT: &str = "medium";
 pub const MAX_OBSERVATION_BYTES: usize = 1024 * 1024;
@@ -169,6 +183,7 @@ pub enum AgentEvent {
         current: usize,
         maximum: usize,
     },
+    ProviderProgress(ProviderProgress),
     ProviderUsage(Value),
     WorkingNotes(String),
     ToolBatch(Vec<ToolCall>),
@@ -179,6 +194,15 @@ pub enum AgentEvent {
         after_bytes: usize,
     },
     Completed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProviderProgress {
+    ContactingProvider,
+    FirstResponse { elapsed_ms: u64 },
+    FirstAction { elapsed_ms: u64 },
+    Fallback,
 }
 
 #[derive(Serialize)]
@@ -195,6 +219,21 @@ struct ModelRequestHeader<'a> {
 
 pub trait ModelProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String>;
+
+    fn respond_with_progress(
+        &mut self,
+        request: &str,
+        canceled: &AtomicBool,
+        progress: &mut dyn FnMut(ProviderProgress),
+    ) -> Result<ModelResponse, String> {
+        let started = std::time::Instant::now();
+        progress(ProviderProgress::ContactingProvider);
+        let response = self.respond(request, canceled)?;
+        progress(ProviderProgress::FirstResponse {
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
+        Ok(response)
+    }
 
     fn take_usage(&mut self) -> Option<Value> {
         None
@@ -333,7 +372,9 @@ where
             maximum: profile.max_turns,
         });
         let request = transcript.render()?;
-        let response = provider.respond(&request, canceled);
+        let response = provider.respond_with_progress(&request, canceled, &mut |progress| {
+            emit(AgentEvent::ProviderProgress(progress));
+        });
         if let Some(usage) = provider.take_usage() {
             emit(AgentEvent::ProviderUsage(usage));
         }
@@ -766,6 +807,12 @@ fn validate_working_notes(notes: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn truncate_summary(summary: &mut String) {
+    if summary.chars().count() > MAX_SUMMARY_CHARS {
+        *summary = summary.chars().take(MAX_SUMMARY_CHARS).collect();
+    }
+}
+
 fn resolve_tool_spec<'a>(
     call: &ToolCall,
     specs: &'a [ToolSpec],
@@ -839,6 +886,28 @@ fn validate_tool_call(
             "AI action {} does not accept arg: {unknown}",
             call.tool
         ));
+    }
+    // Provider grammars may omit upper array bounds; admission still enforces them.
+    let bound = match spec.tool.as_str() {
+        "propose_semantic_edit" | "repair_semantic_edit" => {
+            Some(("/batch/edits", MAX_SEMANTIC_EDITS_PER_BATCH))
+        }
+        "list_symbols" => Some(("/files", MAX_SYMBOL_QUERY_FILES)),
+        "write_png_asset" => Some(("/shapes", MAX_PNG_SHAPES)),
+        _ => None,
+    };
+    if let Some((path, limit)) = bound {
+        if call
+            .args
+            .pointer(path)
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.len() > limit)
+        {
+            return Err(format!(
+                "AI action {} exceeds {path} limit of {limit}",
+                spec.tool
+            ));
+        }
     }
     Ok(())
 }
@@ -1003,15 +1072,24 @@ fn full_tool_args_schema(spec: &ToolSpec) -> Value {
         ),
         "propose_semantic_edit" | "repair_semantic_edit" => object_schema(
             &[
-                ("proposal_id", string_schema()),
-                ("description", string_schema()),
+                (
+                    "proposal_id",
+                    bounded_string_schema(1, task_session::MAX_ID_CHARS),
+                ),
+                (
+                    "description",
+                    bounded_string_schema(1, task_session::MAX_ACTION_TEXT_CHARS),
+                ),
                 ("batch", semantic_edit_batch_schema()),
             ],
             &["proposal_id", "description", "batch"],
         ),
         "list_symbols" => object_schema(
             &[
-                ("files", array_schema(string_schema(), Some(16))),
+                (
+                    "files",
+                    array_schema(string_schema(), Some(MAX_SYMBOL_QUERY_FILES)),
+                ),
                 ("query", string_schema()),
                 ("kind", string_schema()),
                 ("owner", string_schema()),
@@ -1134,7 +1212,10 @@ fn full_tool_args_schema(spec: &ToolSpec) -> Value {
                 ("width", integer_schema(Some(1), Some(2048))),
                 ("height", integer_schema(Some(1), Some(2048))),
                 ("background", string_schema()),
-                ("shapes", array_schema(png_shape_schema(), Some(512))),
+                (
+                    "shapes",
+                    array_schema(png_shape_schema(), Some(MAX_PNG_SHAPES)),
+                ),
             ],
             &["id", "path", "width", "height", "background", "shapes"],
         ),
@@ -1228,7 +1309,10 @@ fn semantic_edit_batch_schema() -> Value {
     object_schema(
         &[
             ("schema_version", integer_schema(Some(1), Some(2))),
-            ("edits", array_schema(edit, Some(64))),
+            (
+                "edits",
+                array_schema(edit, Some(MAX_SEMANTIC_EDITS_PER_BATCH)),
+            ),
         ],
         &["schema_version", "edits"],
     )
@@ -1236,6 +1320,10 @@ fn semantic_edit_batch_schema() -> Value {
 
 fn string_schema() -> Value {
     json!({"type": "string"})
+}
+
+fn bounded_string_schema(min_length: usize, max_length: usize) -> Value {
+    json!({"type": "string", "minLength": min_length, "maxLength": max_length})
 }
 
 fn number_schema() -> Value {
@@ -1340,7 +1428,7 @@ pub fn model_response_schema() -> Value {
         "properties": {
             "mode": {"type": "string", "enum": ["tool_calls", "done"]},
             "working_notes": {"type": "string", "minLength": 1, "maxLength": MAX_WORKING_NOTES_CHARS},
-            "summary": {"type": "string"},
+            "summary": {"type": "string", "maxLength": MAX_SUMMARY_CHARS},
             "tool_calls": {
                 "type": "array",
                 "maxItems": MAX_TOOL_CALLS_PER_TURN,
@@ -1861,6 +1949,10 @@ fn decode_model_response(source: &str, provider: &str) -> Result<ModelResponse, 
     };
     let mut response: ModelResponse = serde_json::from_value(value)
         .map_err(|error| format!("{provider} returned invalid agent response: {error}"))?;
+    let summary = match &mut response {
+        ModelResponse::ToolCalls { summary, .. } | ModelResponse::Done { summary, .. } => summary,
+    };
+    truncate_summary(summary);
     if complete {
         if let ModelResponse::Done {
             working_notes,
@@ -1973,6 +2065,14 @@ mod tests {
                 optional_args: Vec::new(),
             };
             let schema = tool_args_schema(&spec);
+            assert_eq!(
+                schema["properties"]["proposal_id"]["maxLength"],
+                task_session::MAX_ID_CHARS
+            );
+            assert_eq!(
+                schema["properties"]["description"]["maxLength"],
+                task_session::MAX_ACTION_TEXT_CHARS
+            );
             let batch = &schema["properties"]["batch"];
             assert_eq!(batch["type"], "object");
             let edit = &batch["properties"]["edits"]["items"];
@@ -2024,6 +2124,31 @@ mod tests {
         ) -> Result<ModelResponse, String> {
             Ok(self.0.remove(0))
         }
+    }
+
+    #[test]
+    fn default_provider_progress_reports_only_observable_boundaries() {
+        let mut provider = Responses(vec![ModelResponse::Done {
+            working_notes: "done".to_string(),
+            summary: "done".to_string(),
+        }]);
+        let mut progress = Vec::new();
+        provider
+            .respond_with_progress("request", &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
+            .expect("response");
+
+        assert!(matches!(
+            progress.as_slice(),
+            [
+                ProviderProgress::ContactingProvider,
+                ProviderProgress::FirstResponse { .. }
+            ]
+        ));
+        assert!(!progress
+            .iter()
+            .any(|event| matches!(event, ProviderProgress::FirstAction { .. })));
     }
 
     #[derive(Default)]
@@ -3480,6 +3605,49 @@ mod tests {
     }
 
     #[test]
+    fn host_enforces_array_caps_without_provider_grammar_bounds() {
+        for (tool, arg, path, limit) in [
+            (
+                "propose_semantic_edit",
+                "batch",
+                "/batch/edits",
+                MAX_SEMANTIC_EDITS_PER_BATCH,
+            ),
+            (
+                "repair_semantic_edit",
+                "batch",
+                "/batch/edits",
+                MAX_SEMANTIC_EDITS_PER_BATCH,
+            ),
+            ("list_symbols", "files", "/files", MAX_SYMBOL_QUERY_FILES),
+            ("write_png_asset", "shapes", "/shapes", MAX_PNG_SHAPES),
+        ] {
+            let specs = vec![spec(tool, "bounded request", &[arg], &[])];
+            let known = BTreeSet::from([tool.to_string()]);
+            let mut args = if arg == "batch" {
+                json!({"batch":{"edits":[]}})
+            } else {
+                json!({arg:[]})
+            };
+            *args.pointer_mut(path).unwrap() = json!(vec![Value::Null; limit]);
+            let mut call = ToolCall {
+                tool: tool.into(),
+                args,
+            };
+            validate_tool_call(&call, &specs, &known, false).unwrap();
+            call.args
+                .pointer_mut(path)
+                .unwrap()
+                .as_array_mut()
+                .unwrap()
+                .push(Value::Null);
+            assert!(validate_tool_call(&call, &specs, &known, false)
+                .unwrap_err()
+                .contains("limit of"));
+        }
+    }
+
+    #[test]
     fn host_rejects_unknown_tool_arguments() {
         let specs = workshop_tool_specs();
         let known = specs
@@ -3554,6 +3722,28 @@ mod tests {
         .expect_err("unknown call field");
         assert!(error.contains("unknown field"));
     }
+
+    #[test]
+    fn provider_summary_matches_the_task_thread_limit_and_truncates_defensively() {
+        assert_eq!(
+            model_response_schema().pointer("/properties/summary/maxLength"),
+            Some(&json!(MAX_SUMMARY_CHARS))
+        );
+        let oversized = json!({
+            "mode": "done",
+            "working_notes": "Complete.",
+            "summary": "x".repeat(MAX_SUMMARY_CHARS + 1),
+            "tool_calls": []
+        });
+        let response = decode_codex_response(&oversized.to_string()).expect("bounded summary");
+        let summary = match response {
+            ModelResponse::Done { summary, .. } => summary,
+            ModelResponse::ToolCalls { .. } => panic!("expected done response"),
+        };
+        assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS);
+        assert_eq!(MAX_SUMMARY_CHARS, 16_384);
+    }
+
     #[test]
     fn response_schema_requires_native_object_args() {
         assert_eq!(

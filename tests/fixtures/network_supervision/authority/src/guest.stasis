@@ -1,0 +1,19 @@
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+function main(): i32 {
+    return 0;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    clear(0.02, 0.04, 0.08, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { encodeVideo } from "./network_browser_video.mjs";
+import { startBrowserWithRetry } from "./network_browser_startup.mjs";
 
 class Cdp {
   constructor(url) {
@@ -49,7 +50,6 @@ const scratchRoot = path.resolve("target/network-browser-scratch");
 await mkdir(scratchRoot, { recursive: true });
 const scratch = await mkdtemp(path.join(scratchRoot, "run-"));
 const readyFile = path.join(scratch, "ready.txt");
-const profile = path.join(scratch, "chrome-profile");
 
 const host = spawn(hostExecutable, ["--ready-file", readyFile], { stdio: ["ignore", "pipe", "pipe"] });
 let hostStdout = "";
@@ -64,15 +64,19 @@ let frame = 0;
 try {
   const port = Number(await waitForFile(readyFile, 15_000));
   assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, "host returned an invalid port");
-  const debugPort = await reserveDebugPort();
-  browser = spawn(browserExecutable, [
-    "--headless=new", "--no-sandbox", "--disable-gpu-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
-    "--no-first-run", "--no-default-browser-check",
-    "--remote-allow-origins=*",
-    `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`, "about:blank",
-  ], { stdio: ["ignore", "pipe", "pipe"] });
-  browser.stderr.on("data", chunk => { browserStderr += chunk; });
-  const version = await waitForJson(`http://127.0.0.1:${debugPort}/json/version`, 15_000);
+  const started = await startBrowserWithRetry(attempt => {
+    const profile = path.join(scratch, `chrome-profile-${attempt}`);
+    const candidate = spawn(browserExecutable, [
+      "--headless=new", "--no-sandbox", "--disable-gpu-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+      "--no-first-run", "--no-default-browser-check",
+      "--remote-allow-origins=*",
+      "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    candidate.stderr.on("data", chunk => { browserStderr += chunk; });
+    return { browser: candidate, profile };
+  }, terminate, { attempts: 2, timeout: 60_000 });
+  browser = started.browser;
+  const { port: debugPort, version } = started;
   const pageInfo = await fetch(`http://127.0.0.1:${debugPort}/json/new?about%3Ablank`, { method: "PUT" }).then(checkResponse).then(r => r.json());
   cdp = new Cdp(pageInfo.webSocketDebuggerUrl);
   await cdp.ready;
@@ -163,32 +167,12 @@ function requireStat(candidate) {
   return process.getBuiltinModule("node:fs").statSync(candidate).isFile();
 }
 
-async function reserveDebugPort() {
-  const net = await import("node:net");
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const port = server.address().port;
-      server.close(error => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
 async function waitForFile(file, timeout) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     try { return await readFile(file, "utf8"); } catch { await delay(25); }
   }
   throw new Error("native host did not become ready");
-}
-
-async function waitForJson(url, timeout) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    try { return await fetch(url).then(checkResponse).then(r => r.json()); } catch { await delay(50); }
-  }
-  throw new Error("browser debugging endpoint did not become ready");
 }
 
 function checkResponse(response) {

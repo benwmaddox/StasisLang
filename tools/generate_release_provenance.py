@@ -52,10 +52,14 @@ RUNTIME_FILES = (
     "stb_truetype.h",
 )
 RUNTIME_DIRS = ("third_party/thorvg",)
-DESKTOP_NETWORK_ARTIFACTS = (
+DESKTOP_NETWORK_LIBRARIES = (
     "desktop/network/windows-x86_64/stasis_network.lib",
-    "desktop/network/include/stasis_network.h",
+    "desktop/network/linux-x86_64/libstasis_network.a",
+    "desktop/network/linux-arm64/libstasis_network.a",
+    "desktop/network/macos-arm64/libstasis_network.a",
+    "desktop/network/macos-x86_64/libstasis_network.a",
 )
+DESKTOP_NETWORK_HEADER = "desktop/network/include/stasis_network.h"
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -67,25 +71,21 @@ def sha256(path: pathlib.Path) -> str:
 
 
 def desktop_network_artifact_hashes(root: pathlib.Path) -> dict[str, str]:
-    paths = [
-        root / pathlib.Path(*pathlib.PurePosixPath(name).parts)
-        for name in DESKTOP_NETWORK_ARTIFACTS
-    ]
-    present = [path.is_file() for path in paths]
-    if not any(present):
+    directory = root / "desktop/network"
+    if not directory.exists():
         return {}
-    if not all(present):
-        missing = [
-            name
-            for name, exists in zip(DESKTOP_NETWORK_ARTIFACTS, present)
-            if not exists
-        ]
-        raise ValueError(
-            f"desktop network release artifacts are incomplete: missing {missing}"
-        )
-    return {
-        name: sha256(path) for name, path in zip(DESKTOP_NETWORK_ARTIFACTS, paths)
+    present = {
+        path.relative_to(root).as_posix()
+        for path in directory.rglob("*")
+        if path.is_file()
     }
+    libraries = present.intersection(DESKTOP_NETWORK_LIBRARIES)
+    if len(libraries) != 1 or present != libraries | {DESKTOP_NETWORK_HEADER}:
+        raise ValueError(
+            "desktop network release artifacts are incomplete or unsupported: "
+            "expected exactly one target-native library and the ABI header"
+        )
+    return {name: sha256(root / name) for name in sorted(present)}
 
 
 def render_contract_version(root: pathlib.Path) -> int:

@@ -140,6 +140,9 @@ int32_t stasis_network_host_copy_join_url(
     *out_length = length;
     return 0;
 }
+int32_t stasis_network_host_publish_supervision_join_url(StasisNetworkHost *host) {
+    return host != NULL && host->active ? 0 : -1;
+}
 void stasis_network_host_stop(StasisNetworkHost *host) {
     assert(host == &network_host && host->active);
     network_stop_calls += 1;

@@ -13,6 +13,8 @@ public final class WorkshopTemplateCatalogTest {
     public void desktopHostFilesBelongOnlyToExplorationTemplate() {
         WorkshopTemplateCatalog.Template exploration = WorkshopTemplateCatalog.require("exploration");
         WorkshopTemplateCatalog.Template pong = WorkshopTemplateCatalog.require("pong");
+        assertFalse(exploration.replaceExistingFiles);
+        assertFalse(pong.replaceExistingFiles);
 
         for (String hostFile : new String[] {
                 "src/host.stasis",
@@ -34,12 +36,15 @@ public final class WorkshopTemplateCatalogTest {
             assertEquals("stasis_stdlib", template.directoryMounts[0].assetDirectory);
             assertEquals("vendor/stasis/src/stdlib",
                     template.directoryMounts[0].projectDirectory);
+            assertFalse(template.directoryMounts[0].replaceExisting);
         }
 
         WorkshopTemplateCatalog.Template parity = WorkshopTemplateCatalog.require("render-parity");
+        assertTrue(parity.replaceExistingFiles);
         assertEquals(1, parity.directoryMounts.length);
         assertEquals("stasis_stdlib", parity.directoryMounts[0].assetDirectory);
         assertEquals(".stasis_cache/toolchain/src/stdlib",
                 parity.directoryMounts[0].projectDirectory);
+        assertTrue(parity.directoryMounts[0].replaceExisting);
     }
 }

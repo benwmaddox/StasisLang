@@ -16,6 +16,10 @@ runtime with the `STASIS_RELEASE_ID` CMake setting. It stamps the same
 `STASIS_BUILD_FINGERPRINT` into both builds. `stasis --json editor-info` validates the sibling
 runtime ABI, release identity, and exact fingerprint and reports hashes for both files. VSIX
 packaging records that response and the hashes in `dist/toolchain-manifest.json`.
+The extension packaging command runs Secretlint over the complete extension tree while excluding
+only native executable/library formats under that hash-bound toolchain directory. VSCE's own
+unbounded binary scan is bypassed after this scoped scan because large stripped editor binaries can
+exhaust the scanner; source, manifests, configuration, and dotenv files remain fail-closed.
 
 At activation the extension:
 
@@ -47,6 +51,10 @@ archive, the matching VSIX, and `stasis-editor-release.json` with hashes for bot
 Authenticode signing protects Windows provenance and reputation but is not the compatibility
 mechanism. Signing should occur before archive and VSIX manifests are generated; the shared release
 identity and post-signing hashes are what prove the files belong together.
+Nightly publication requires the production signing inputs owned by Maddox task #525 and verifies
+Authenticode both before assembly and from the extracted Windows archive. A separate daily freshness
+workflow fails when an actual Windows nightly release and editor bundle have not incorporated main's
+oldest unreleased change within 36 hours.
 
 ## Extension packaging
 
@@ -78,4 +86,6 @@ The command requires a clean Git revision, derives one fingerprint from that rev
 identity, builds the CLI and dynamic graphics DLL with the same values through the repository Cargo
 cache wrapper, stages a fresh complete directory, validates `editor-info`, and runs one bounded
 `windows_launch_smoke` record frame. Only after all checks pass does it promote the staged directory
-to `bin`. A failed promotion restores the prior `bin` directory.
+to `bin`. Mobile toolchain inputs are copied from the clean revision's tracked files rather than
+recursively copying ignored Android build caches. A failed promotion restores the prior `bin`
+directory.

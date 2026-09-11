@@ -34,7 +34,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.04, 0.06, 0.10, 1.0);
     state.sprite.draw(100.0, 50.0, 255, 0);
     state.text.draw(103.0, 168.0, 1.0, 0.85, 0.25, 1.0);

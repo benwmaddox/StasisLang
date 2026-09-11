@@ -50,7 +50,7 @@ option(
     ${STASIS_MOBILE_PLATFORM}
 )
 option(STASIS_MOBILE_RUNTIME_BUILD_TESTS "Build mobile runtime lifecycle tests" OFF)
-option(STASIS_SVG_BUILD_TESTS "Build the ThorVG SVG bridge smoke tests" OFF)
+option(STASIS_SVG_BUILD_TESTS "Build the ThorVG SVG bridge smoke and evaluation tests" OFF)
 option(STASIS_GRAPHICS_BUILD_TESTS "Build native renderer contract tests" OFF)
 
 if(STASIS_BUILD_MONOLITH)
@@ -74,6 +74,15 @@ if(STASIS_SVG_BUILD_TESTS)
     add_test(
         NAME stasis_svg_smoke
         COMMAND stasis_svg_smoke "${CMAKE_CURRENT_LIST_DIR}/tests/fixtures/viewport-clip.svg"
+    )
+    add_executable(stasis_svg_bench tests/stasis_svg_bench.cpp stasis_svg.cpp)
+    target_compile_features(stasis_svg_bench PRIVATE cxx_std_14)
+    target_link_libraries(stasis_svg_bench PRIVATE stasis_thorvg)
+    add_test(
+        NAME stasis_svg_bench
+        COMMAND stasis_svg_bench
+            "${CMAKE_CURRENT_LIST_DIR}/tests/fixtures/viewport-clip.svg"
+            40 20 "${CMAKE_CURRENT_BINARY_DIR}/stasis_svg_bench.rgba" 2
     )
 endif()
 
@@ -160,7 +169,7 @@ if(STASIS_GRAPHICS_BUILD_TESTS)
 endif()
 
 function(configure_stasis_target target is_static)
-    target_sources(${target} PRIVATE stasis_graphics.c stasis_image_writer.c stasis_audio_assets.c stasis_svg.cpp)
+    target_sources(${target} PRIVATE stasis_graphics.c stasis_image_writer.c stasis_audio_assets.c stasis_platform_services.c stasis_svg.cpp)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     target_compile_definitions(${target} PRIVATE STASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}")
     target_link_libraries(${target} PRIVATE
@@ -220,12 +229,31 @@ if(STASIS_GRAPHICS_BUILD_STATIC)
     )
 endif()
 
+if(STASIS_GRAPHICS_BUILD_TESTS AND TARGET stasis_graphics_static)
+    add_executable(
+        stasis_window_placement_test
+        tests/stasis_window_placement_test.c
+    )
+    target_link_libraries(stasis_window_placement_test PRIVATE stasis_graphics_static)
+    add_test(NAME stasis_window_placement_contract COMMAND stasis_window_placement_test)
+    if(WIN32)
+        set_tests_properties(
+            stasis_window_placement_contract
+            PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=windows;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy"
+        )
+    else()
+        set_tests_properties(
+            stasis_window_placement_contract
+            PROPERTIES ENVIRONMENT "SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy"
+        )
+    endif()
+endif()
+
 if(STASIS_BUILD_MOBILE_RUNTIME)
     add_library(
         stasis_mobile_runtime STATIC
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
-        stasis_platform_services.c
     )
     configure_stasis_target(stasis_mobile_runtime ON)
     set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD 11)
@@ -246,9 +274,37 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     )
 endif()
 
+if(STASIS_GRAPHICS_BUILD_TESTS AND (TARGET stasis_graphics_static OR TARGET stasis_graphics))
+    add_executable(stasis_sprite_atlas_reservation_test tests/stasis_sprite_atlas_reservation_test.c)
+    if(TARGET stasis_graphics_static)
+        target_link_libraries(stasis_sprite_atlas_reservation_test PRIVATE stasis_graphics_static)
+    else()
+        target_link_libraries(stasis_sprite_atlas_reservation_test PRIVATE stasis_graphics)
+        set_target_properties(stasis_sprite_atlas_reservation_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    endif()
+    target_compile_definitions(stasis_sprite_atlas_reservation_test PRIVATE
+        STASIS_TEST_SPRITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../samples/sprite_sheet_animation/assets/sprite_sheet_2x2.png")
+    add_test(NAME stasis_sprite_atlas_reservation_test COMMAND stasis_sprite_atlas_reservation_test)
+    set_tests_properties(stasis_sprite_atlas_reservation_test PROPERTIES
+        ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy")
+    if(WIN32)
+        add_executable(stasis_console_launch_test tests/stasis_console_launch_test.c)
+        if(TARGET stasis_graphics_static)
+            target_link_libraries(stasis_console_launch_test PRIVATE stasis_graphics_static user32)
+        else()
+            target_link_libraries(stasis_console_launch_test PRIVATE stasis_graphics user32)
+            set_target_properties(stasis_console_launch_test PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        endif()
+        add_test(NAME stasis_console_launch_contract COMMAND stasis_console_launch_test)
+        set_tests_properties(stasis_console_launch_contract PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+    endif()
+endif()
+
 if(STASIS_BUILD_MONOLITH)
-    if(NOT WIN32)
-        message(FATAL_ERROR "The desktop production monolith currently targets Windows")
+    if(NOT WIN32 AND NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "The desktop production monolith supports Windows, Linux, and macOS")
     endif()
     if(NOT STASIS_MONOLITH_AOT_DIR OR NOT EXISTS "${STASIS_MONOLITH_AOT_DIR}/published_aot_objects.cmake")
         message(FATAL_ERROR "STASIS_MONOLITH_AOT_DIR must contain published_aot_objects.cmake")
@@ -264,7 +320,7 @@ if(STASIS_BUILD_MONOLITH)
         ${STASIS_PUBLISHED_AOT_OBJECTS}
         stasis_runner.manifest
     )
-    target_compile_definitions(stasis_monolith PRIVATE STASIS_WINDOWS_MONOLITH=1)
+    target_compile_definitions(stasis_monolith PRIVATE STASIS_DESKTOP_MONOLITH=1)
     target_include_directories(
         stasis_monolith
         PRIVATE "${STASIS_MONOLITH_AOT_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -296,12 +352,31 @@ if(STASIS_BUILD_MONOLITH)
         target_include_directories(stasis_monolith PRIVATE "${STASIS_MONOLITH_NETWORK_INCLUDE_DIR}")
         target_link_libraries(stasis_monolith PRIVATE "${STASIS_MONOLITH_NETWORK_LIBRARY}")
         if(WIN32)
-            target_link_libraries(stasis_monolith PRIVATE ws2_32 bcrypt userenv ntdll)
+            target_link_libraries(stasis_monolith PRIVATE ws2_32 iphlpapi bcrypt userenv ntdll)
+        elseif(APPLE)
+            target_link_libraries(
+                stasis_monolith PRIVATE
+                "-framework Security"
+                "-framework CoreFoundation"
+                resolv
+            )
+        else()
+            find_package(Threads REQUIRED)
+            target_link_libraries(stasis_monolith PRIVATE ${CMAKE_DL_LIBS} Threads::Threads m)
         endif()
     endif()
     set_property(TARGET stasis_monolith PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    target_compile_options(stasis_monolith PRIVATE /O1 /Gy /Gw)
-    target_link_options(stasis_monolith PRIVATE /OPT:REF /OPT:ICF)
+    if(MSVC)
+        target_compile_options(stasis_monolith PRIVATE /O1 /Gy /Gw)
+        target_link_options(stasis_monolith PRIVATE /OPT:REF /OPT:ICF)
+    else()
+        target_compile_options(stasis_monolith PRIVATE -Os -ffunction-sections -fdata-sections)
+        if(APPLE)
+            target_link_options(stasis_monolith PRIVATE -Wl,-dead_strip)
+        else()
+            target_link_options(stasis_monolith PRIVATE -Wl,--gc-sections)
+        endif()
+    endif()
     set_target_properties(stasis_monolith PROPERTIES
         OUTPUT_NAME "${STASIS_MONOLITH_OUTPUT_NAME}"
         RUNTIME_OUTPUT_DIRECTORY "${STASIS_MONOLITH_OUTPUT_DIR}"

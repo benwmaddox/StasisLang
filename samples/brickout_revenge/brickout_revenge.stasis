@@ -131,7 +131,6 @@ function tick(): i32 {
     render_push_line(w_f, h_f, 0.0, h_f, 0.2, 0.2, 0.5, 1.0);
     render_push_line(0.0, h_f, 0.0, 0.0, 0.2, 0.2, 0.5, 1.0);
 
-    begin_frame();
     clear(0.05, 0.05, 0.15, 1.0);
 
     //update_game(dt, delta_ms);

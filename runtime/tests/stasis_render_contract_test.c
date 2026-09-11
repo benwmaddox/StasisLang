@@ -118,6 +118,9 @@ int main(void) {
         CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_BAD_VERSION);
         CHECK(stasis_render_trace(second_i32, second_f32, second_u8) == 0);
     }
+    second_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_LEGACY_VERSION;
+    CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_VALID);
+    CHECK(stasis_render_trace(second_i32, second_f32, second_u8) != 0);
     second_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
     CHECK(stasis_render_validate(second_i32, second_f32) == STASIS_RENDER_VALID);
     CHECK(stasis_render_trace(second_i32, second_f32, second_u8) != 0);

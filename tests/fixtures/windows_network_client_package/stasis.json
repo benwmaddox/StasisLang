@@ -1,0 +1,9 @@
+{
+  "manifest_version": 1,
+  "name": "windows_network_client_package",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain",
+  "capabilities": { "network_client": true }
+}
