@@ -635,6 +635,39 @@ fn wide_header_usage_never_overlaps_provider() {
 }
 
 #[test]
+fn ai_message_shows_its_provider_model_and_reasoning_selection() {
+    for width in [620.0, 900.0] {
+        let mut editor = editor();
+        let task = editor.state.session.active_task_mut().unwrap();
+        task.append_result("I prepared a semantic change for review.")
+            .unwrap();
+        task.set_provider_state(ProviderState {
+            provider: Some("openrouter".into()),
+            model: Some("openai/gpt-oss-120b".into()),
+            reasoning_effort: Some("low".into()),
+            ..ProviderState::default()
+        })
+        .unwrap();
+        task.record_turn(1840, 2410, 386, 1200).unwrap();
+
+        let context = egui::Context::default();
+        let size = egui::vec2(width, 900.0);
+        frame(&mut editor, &context, size, vec![]);
+        let output = frame(&mut editor, &context, size, vec![]);
+
+        assert_eq!(
+            text_rects(
+                &output,
+                "Provider: openrouter  |  Model: openai/gpt-oss-120b  |  Reasoning: low"
+            )
+            .len(),
+            1,
+            "message metadata was missing at {width}px"
+        );
+    }
+}
+
+#[test]
 fn compact_chrome_reserves_space_for_notices_task_creation_and_status() {
     let notice = "AI reply completed for task-1; 1 action(s) proposed";
     let objective = "Make the paddle slightly wider without changing collision timing";
