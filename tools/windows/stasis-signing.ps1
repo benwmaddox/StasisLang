@@ -86,19 +86,76 @@ function Get-CertificateArguments {
     throw "Windows signing requires STASIS_SIGNING_CERTIFICATE or STASIS_SIGNING_CERT_THUMBPRINT; run 'stasis signing provision' only for explicit local development signing."
 }
 
+function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments) {
+    $timeoutText = $env:STASIS_SIGNING_TIMEOUT_SECONDS
+    if (-not $timeoutText) {
+        & $Executable @Arguments
+        if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+        return
+    }
+    $timeoutSeconds = 0
+    $validTimeout = [int]::TryParse($timeoutText, [ref]$timeoutSeconds)
+    if (-not $validTimeout -or $timeoutSeconds -lt 1 -or $timeoutSeconds -gt 600) {
+        throw 'STASIS_SIGNING_TIMEOUT_SECONDS must be an integer from 1 through 600'
+    }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Executable
+    $startInfo.UseShellExecute = $false
+    if ($null -eq $startInfo.ArgumentList) {
+        throw 'bounded signing requires PowerShell 7 or newer'
+    }
+    foreach ($argument in $Arguments) { $startInfo.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'signtool process did not start' }
+        if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
+            try { $process.Kill($true) } catch { $process.Kill() }
+            $process.WaitForExit()
+            throw "signtool timed out after $timeoutSeconds seconds"
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "signtool failed with exit code $($process.ExitCode)"
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-SignArtifact([string] $Path) {
     $signer = Resolve-SignTool
     if (-not $signer) { throw 'signtool.exe was not found. Set STASIS_AOT_SIGN_TOOL, add it to PATH, or install the Windows SDK.' }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "signing input does not exist: $Path" }
     if ([IO.Path]::GetFileNameWithoutExtension($signer.Path) -ne 'signtool') {
         & $signer.Path $Path
+        if ($LASTEXITCODE -ne 0) { throw "signer failed for $Path with exit code $LASTEXITCODE" }
     } else {
-        $arguments = @('sign', '/fd', 'SHA256', '/ph') + (Get-CertificateArguments)
-        $timestamp = if ($TimestampUrl) { $TimestampUrl } else { $env:STASIS_SIGNING_TIMESTAMP_URL }
-        if ($timestamp) { $arguments += @('/tr', $timestamp, '/td', 'SHA256') }
-        & $signer.Path @arguments $Path
+        $timestamps = if ($TimestampUrl) {
+            @($TimestampUrl)
+        } elseif ($env:STASIS_SIGNING_TIMESTAMP_URLS) {
+            @($env:STASIS_SIGNING_TIMESTAMP_URLS -split ';' | Where-Object { $_ })
+        } elseif ($env:STASIS_SIGNING_TIMESTAMP_URL) {
+            @($env:STASIS_SIGNING_TIMESTAMP_URL)
+        } else {
+            @('')
+        }
+        $errors = @()
+        foreach ($timestamp in $timestamps) {
+            $arguments = @('sign', '/fd', 'SHA256', '/ph') + (Get-CertificateArguments)
+            if ($timestamp) { $arguments += @('/tr', $timestamp, '/td', 'SHA256') }
+            try {
+                Invoke-BoundedSignTool $signer.Path ($arguments + $Path)
+                return
+            } catch {
+                $errors += if ($timestamp) {
+                    "$timestamp`: $($_.Exception.Message)"
+                } else {
+                    $_.Exception.Message
+                }
+            }
+        }
+        throw "signer failed for $Path ($($errors -join '; '))"
     }
-    if ($LASTEXITCODE -ne 0) { throw "signer failed for $Path with exit code $LASTEXITCODE" }
 }
 
 switch ($Command) {

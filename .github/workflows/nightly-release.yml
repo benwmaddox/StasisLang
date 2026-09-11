@@ -316,7 +316,8 @@ jobs:
             }
             $env:STASIS_SIGNING_CERTIFICATE = $certificate
             $env:STASIS_SIGNING_PROFILE = "production"
-            $env:STASIS_SIGNING_TIMESTAMP_URL = "http://timestamp.digicert.com"
+            $env:STASIS_SIGNING_TIMESTAMP_URLS = "http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com"
+            $env:STASIS_SIGNING_TIMEOUT_SECONDS = "30"
             @(
               "target/${{ matrix.rust_target }}/release/stasis.exe",
               "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe",
@@ -324,9 +325,9 @@ jobs:
               "runtime/build_ci/bin/Release/stasis_graphics.dll",
               "runtime/build_ci/bin/Release/stasis_runner.exe"
             ) | ForEach-Object {
-              & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/windows/stasis-signing.ps1 sign -Artifact $_
+              & pwsh -NoProfile -File tools/windows/stasis-signing.ps1 sign -Artifact $_
               if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $_" }
-              & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/windows/stasis-signing.ps1 verify -Artifact $_
+              & pwsh -NoProfile -File tools/windows/stasis-signing.ps1 verify -Artifact $_
               if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $_" }
             }
           } finally {
