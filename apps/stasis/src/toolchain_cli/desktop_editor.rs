@@ -342,6 +342,7 @@ fn configured_provider_state(config: &ProviderConfig) -> ProviderState {
     ProviderState {
         provider: Some(config.provider_name().to_string()),
         model: Some(bounded_provider_label(Some(&config.model()), "configured")),
+        reasoning_effort: Some(effective_reasoning_effort(config)),
         routing: RoutingState::Assigned {
             route: bounded_provider_label(Some(&route), "direct"),
         },
@@ -350,22 +351,18 @@ fn configured_provider_state(config: &ProviderConfig) -> ProviderState {
 }
 
 fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> ProviderState {
-    let provider = bounded_provider_label(
+    let resolved_provider = bounded_provider_label(
         usage
             .and_then(|value| value.get("resolved_provider"))
             .and_then(Value::as_str),
         config.provider_name(),
     );
-    let model = bounded_provider_label(
-        usage
-            .and_then(|value| value.get("resolved_model"))
-            .and_then(Value::as_str),
-        &config.model(),
-    );
+    let provider = bounded_provider_label(Some(config.provider_name()), "configured");
+    let model = bounded_provider_label(Some(&config.model()), "configured");
     let route = match usage.and_then(|value| value.get("route")) {
         Some(Value::String(route)) => bounded_provider_label(Some(route), "direct"),
         Some(Value::Object(_)) => bounded_provider_label(
-            Some(&format!("{}:{provider}", config.provider_name())),
+            Some(&format!("{}:{resolved_provider}", config.provider_name())),
             "direct",
         ),
         _ => {
@@ -381,8 +378,11 @@ fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> Provi
         .unwrap_or(false)
     {
         FallbackState::Active {
-            provider: provider.clone(),
-            model: Some(model.clone()),
+            provider: resolved_provider,
+            model: usage
+                .and_then(|value| value.get("resolved_model"))
+                .and_then(Value::as_str)
+                .map(|model| bounded_provider_label(Some(model), "resolved model")),
             route: Some(route.clone()),
         }
     } else {
@@ -391,8 +391,20 @@ fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> Provi
     ProviderState {
         provider: Some(provider),
         model: Some(model),
+        reasoning_effort: Some(effective_reasoning_effort(config)),
         routing: RoutingState::Assigned { route },
         fallback,
+    }
+}
+
+fn effective_reasoning_effort(config: &ProviderConfig) -> String {
+    if matches!(config, ProviderConfig::OpenRouter(_)) {
+        "low".to_string()
+    } else {
+        std::env::var("STASIS_AI_REASONING_EFFORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| stasis_ai::DEFAULT_REASONING_EFFORT.to_string())
     }
 }
 
@@ -508,7 +520,7 @@ fn run_reply_provider_observed_with_progress(
     mut observe_usage: impl FnMut(&Value),
 ) -> Result<ProviderReply, String> {
     let config = selected_provider_config(request.selected_provider, &project_root)?;
-    let effective_reasoning_effort = (config.provider_name() == "openrouter").then_some("low");
+    let reasoning_effort = effective_reasoning_effort(&config);
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
     if canceled.load(Ordering::Acquire) {
         return Err("AI request canceled".into());
@@ -540,9 +552,7 @@ fn run_reply_provider_observed_with_progress(
     } else {
         provider.with_images(image_paths)?
     };
-    if let Some(reasoning_effort) = effective_reasoning_effort {
-        provider = provider.with_reasoning_effort(reasoning_effort);
-    }
+    provider = provider.with_reasoning_effort(reasoning_effort);
     let prompt = request
         .context
         .last()
@@ -3093,6 +3103,36 @@ fn status_chip(ui: &mut egui::Ui, label: &str, color: Color32) {
         });
 }
 
+fn render_message_provider(
+    ui: &mut egui::Ui,
+    turn: Option<&stasis_ai::task_session::ProviderTurnMetrics>,
+) {
+    let Some(turn) = turn else {
+        ui.label(
+            RichText::new("Provider details unavailable for this restored message")
+                .size(10.0)
+                .color(muted_text()),
+        );
+        return;
+    };
+    let provider = turn.provider.as_deref().unwrap_or("provider unavailable");
+    let provider = if provider == "installed_codex_subscription" {
+        "Codex"
+    } else {
+        provider
+    };
+    ui.label(
+        RichText::new(format!(
+            "Provider: {}  ·  Model: {}  ·  Reasoning: {}",
+            provider,
+            turn.model.as_deref().unwrap_or("model unavailable"),
+            turn.reasoning_effort.as_deref().unwrap_or("unavailable")
+        ))
+        .size(10.0)
+        .color(muted_text()),
+    );
+}
+
 fn validation_label_ui(status: &ValidationStatus) -> &'static str {
     match status {
         ValidationStatus::NotRun => "not tested",
@@ -4854,6 +4894,9 @@ impl DesktopEditor {
                         ui.add(
                             egui::Label::new(RichText::new(&message.text).size(13.0)).wrap(true),
                         );
+                        if matches!(&entry.kind, ActivityKind::AiReply { .. }) {
+                            render_message_provider(ui, entry.provider_turn.as_ref());
+                        }
                         ui.add_space(2.0);
                     }
                     return None;
@@ -5038,6 +5081,9 @@ impl DesktopEditor {
                                 egui::Label::new(RichText::new(&message.text).size(14.0))
                                     .wrap(true),
                             );
+                            if matches!(message.kind, ThreadEntryKind::Result) {
+                                render_message_provider(ui, entry.provider_turn.as_ref());
+                            }
                         }
                     }
                     ActivityKind::Attachment {
@@ -7580,7 +7626,9 @@ mod tests {
 
         let state = provider_reply_state(&config, Some(&usage));
 
-        assert_eq!(state.provider.as_deref(), Some("cerebras"));
+        assert_eq!(state.provider.as_deref(), Some("openrouter"));
+        assert_eq!(state.model.as_deref(), Some("example/model"));
+        assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
         assert!(matches!(
             state.routing,
             RoutingState::Assigned { route } if route == "openrouter:cerebras"
