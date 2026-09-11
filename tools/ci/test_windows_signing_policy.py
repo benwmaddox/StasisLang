@@ -205,6 +205,10 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("$process.Kill($true)", source)
         self.assertIn("$env:STASIS_SIGNING_TIMESTAMP_URLS -split ';'", source)
         self.assertIn("foreach ($timestamp in $timestamps)", source)
+        self.assertIn(
+            "Invoke-BoundedSignTool $signer.Path @('verify', '/pa', '/all', $path)",
+            source,
+        )
 
     @unittest.skipUnless(os.name == "nt", "PowerShell timestamp retry test")
     def test_powershell_retries_the_next_timestamp_authority(self):

@@ -197,8 +197,11 @@ switch ($Command) {
         if ([IO.Path]::GetFileNameWithoutExtension($signer.Path) -ne 'signtool') { throw "verification requires a real signtool.exe; configured legacy hook $($signer.Path) only supports signing" }
         foreach ($path in $Artifact) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "verification input does not exist: $path" }
-            & $signer.Path verify /pa /all $path
-            if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $path" }
+            try {
+                Invoke-BoundedSignTool $signer.Path @('verify', '/pa', '/all', $path)
+            } catch {
+                throw "signature verification failed for $path`: $($_.Exception.Message)"
+            }
         }
     }
 }
