@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
+#[cfg(test)]
+mod jit_test_support;
 mod release_assets;
 mod toolchain_cli;
 

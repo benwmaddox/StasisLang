@@ -826,6 +826,7 @@ mod tests {
 
     #[test]
     fn headless_tick_hashes_nominal_enum_struct_array_fields() {
+        let _global_guard = crate::jit_test_support::lock();
         let mut jit = JitProcess::new();
         jit.set_required_emit_roots(&["main".to_string(), "tick".to_string()]);
         jit.upsert_file(
