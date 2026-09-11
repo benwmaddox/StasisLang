@@ -122,6 +122,11 @@ jobs:
         timeout-minutes: 15
         run: python tools/cargo_cache.py run -- cargo test --workspace --exclude stasis --all-targets -- --test-threads=1
 
+      - name: Build Stasis test executable
+        # Some isolated app tests launch the sibling CLI; make that prerequisite explicit.
+        timeout-minutes: 15
+        run: python tools/cargo_cache.py run -- cargo build -p stasis --bin stasis
+
       - name: Run Stasis unit Cargo tests
         # Keep the large app unit target separate from its integration binaries so every command stays bounded.
         timeout-minutes: 15

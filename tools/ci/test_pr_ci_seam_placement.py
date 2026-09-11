@@ -61,13 +61,14 @@ class PrCiSeamPlacementTests(unittest.TestCase):
     def test_linux_ordinary_rust_seams_run_once_in_bounded_shards(self):
         commands = (
             "cargo test --workspace --exclude stasis --all-targets -- --test-threads=1",
+            "cargo build -p stasis --bin stasis",
             "cargo test -p stasis --lib --bins -- --test-threads=1",
             'cargo test -p stasis "${test_args[@]}" -- --test-threads=1',
         )
         for command in commands:
             with self.subTest(command=command):
                 self.assertEqual(self.linux.count(command), 1)
-        self.assertEqual(self.linux.count("timeout-minutes: 15"), 3)
+        self.assertEqual(self.linux.count("timeout-minutes: 15"), 4)
         self.assertIn("find apps/stasis/tests", self.linux)
         redundant_commands = (
             "--test host_frame_jit_seam",
