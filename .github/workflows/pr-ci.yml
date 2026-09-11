@@ -117,9 +117,26 @@ jobs:
           python -m unittest tools.ci.test_run_architecture_characterization
           python tools/ci/run_architecture_characterization.py --run-fast
 
-      - name: Run Cargo Test
+      - name: Run workspace Cargo tests
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
-        run: python tools/cargo_cache.py run -- cargo test --workspace --all-targets -- --test-threads=1
+        timeout-minutes: 15
+        run: python tools/cargo_cache.py run -- cargo test --workspace --exclude stasis --all-targets -- --test-threads=1
+
+      - name: Run Stasis unit Cargo tests
+        # Keep the large app unit target separate from its integration binaries so every command stays bounded.
+        timeout-minutes: 15
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --lib --bins -- --test-threads=1
+
+      - name: Run Stasis integration Cargo tests
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          test_args=()
+          while IFS= read -r test_file; do
+            test_args+=(--test "$(basename "${test_file}" .rs)")
+          done < <(find apps/stasis/tests -maxdepth 1 -type f -name '*.rs' | sort)
+          test "${#test_args[@]}" -gt 0
+          python tools/cargo_cache.py run -- cargo test -p stasis "${test_args[@]}" -- --test-threads=1
 
   bootstrap-smoke-windows:
     if: ${{ inputs.run_slow_seams }}
