@@ -37,6 +37,43 @@ The additive live commands do not change the live envelope schema version.
 The native editor enables AccessKit, names task navigation and editing controls,
 uses a visible focus outline, and disables transition animation for reduced
 motion. Compact layouts keep task creation and the reply composer reachable.
+The composer keeps one text entry above four stable buttons: **Attach image**,
+**Send (Ctrl+Enter)**, **Success (Ctrl+Shift+D)**, and **Reject (Ctrl+Esc)**.
+Contextual edit review and testing controls stay with their timeline cards or in
+the command palette instead of competing with these task-level outcomes.
+
+## Serial task queue
+
+The desktop editor runs one task at a time. Creating another task while work is
+active stores only its objective in a durable FIFO queue; it does not contact an
+AI provider or create conversation history. Provider completion never advances
+the queue. The active task remains open until the user explicitly completes it
+after approval and validation, or confirms cancellation. Completion first shows
+the exact task-time paths that will be saved in a Git commit. Applied
+compiler-plan paths are labeled **Stasis edit**; other paths created or changed
+after the task started, such as an image written by an external generator, are
+labeled **External edit**. **Success** opens this review; the user can **Keep
+working (Esc)** or **Commit and mark accomplished (Enter)**.
+
+A task with no project changes can still be explicitly completed; the review
+states that no commit will be created.
+
+Each active task records the starting Git `HEAD` and fingerprints every path
+that was already dirty. Unchanged pre-existing dirt is excluded. A pre-existing
+path changed again during the task is ambiguous and blocks completion, as does
+a changed `HEAD`. Stasis builds the task commit with an isolated Git index so
+unrelated staged changes are not swept in. The task history records the commit
+and path provenance.
+
+After that resolution, the next queued objective is shown at a queue gate. The
+user can **Start task (Enter)**, **Move to back (B)**, **Reject (Del)** it, or
+**Roll back previous (R)** when the preceding task has a completion commit.
+Rejection and rollback require confirmation. Rollback uses `git revert` and is
+allowed automatically only while that task commit is still `HEAD`; it never
+resets or discards later work. Starting is the point where a fresh conversation
+and first provider request are created. Queue order, Git baselines, completion
+receipts, and lifecycle survive editor restart, and legacy sessions with
+multiple active tasks are normalized to one active task plus an ordered queue.
 
 Activity belongs to the task session, not to a rendered frame. Successful user,
 provider, attachment, semantic-action, generated-asset, host, and focused-test
@@ -117,6 +154,8 @@ python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis capture_nat
 
 Set width to `680` for compact layout, or scale to `1.5` for high-DPI layout.
 Set `STASIS_EDITOR_EVIDENCE_REPAIR=1` to show failed validation and repair.
+Set `STASIS_EDITOR_EVIDENCE_OUTCOMES=1` to show the simplified composer with a
+current passing validation and enabled **Success** action.
 Set `STASIS_EDITOR_EVIDENCE_ATTACHMENTS=1` to show attachment and generated-asset
 review using the repository's arena artwork as an explicitly labeled fixture.
 Use `reference` instead of `1` for the shorter message/attachment/reply overview.
@@ -158,10 +197,13 @@ distinction; the same rule applies to generated-asset review and future cards.
 
 ## Review corrections
 
-The busy primary action says `Cancel task` and opens a confirmation identifying
-its original task. `Keep task open` dismisses it without stopping work;
-`Permanently cancel task` uses the existing task cancellation path. Task switching
-does not redirect a pending confirmation.
+Every active task exposes `Reject... (Ctrl+Esc)`, including failed or disconnected tasks.
+While work is busy, rejection becomes the primary action. The confirmation identifies its
+original task; `Keep task (Esc)` dismisses it without stopping work and `Reject task (Enter)`
+uses the existing permanent cancellation path. Task switching does not redirect a pending
+confirmation. A successful rejection advances to the next queued-task gate, or leaves the
+editor ready for a new objective when the queue is empty. Rejection does not silently roll back
+source changes that the user already accepted and applied.
 
 Image generation and import are explicitly unavailable in this desktop shell.
 Their buttons are disabled with explanatory tooltips, and command-palette intents

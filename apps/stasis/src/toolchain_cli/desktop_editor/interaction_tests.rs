@@ -26,6 +26,16 @@ fn frame(
     )
 }
 
+fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
 fn text_rects(output: &egui::FullOutput, wanted: &str) -> Vec<egui::Rect> {
     fn collect(shape: &egui::epaint::Shape, wanted: &str, found: &mut Vec<egui::Rect>) {
         match shape {
@@ -256,7 +266,13 @@ fn composer_stays_visible_at_narrow_wide_and_high_dpi_sizes() {
         let size = egui::vec2(width, height);
         frame(&mut editor, &context, size, vec![]);
         let output = frame(&mut editor, &context, size, vec![]);
-        for label in ["Reply to Stasis AI...", "Send to AI"] {
+        for label in [
+            "Reply to Stasis AI...",
+            "Attach image",
+            "Send (Ctrl+Enter)",
+            "Success (Ctrl+Shift+D)",
+            "Reject (Ctrl+Esc)",
+        ] {
             let rects = text_rects(&output, label);
             assert_eq!(rects.len(), 1, "{width}x{height}@{scale}: {label}");
             assert!(
@@ -350,6 +366,13 @@ fn compact_layout_honors_new_task_focus_before_typing() {
 #[test]
 fn compact_layout_scrolls_the_active_task_into_view() {
     let mut editor = editor();
+    let active_objective = editor
+        .state
+        .session
+        .active_task()
+        .unwrap()
+        .objective
+        .clone();
     for objective in [
         "Add an arena tileset",
         "Polish the pause menu",
@@ -365,7 +388,7 @@ fn compact_layout_scrolls_the_active_task_into_view() {
         frame(&mut editor, &context, size, vec![]);
     }
     let output = frame(&mut editor, &context, size, vec![]);
-    let active = text_rects(&output, "Add dash ability")
+    let active = text_rects(&output, &active_objective)
         .into_iter()
         .find(|rect| rect.max.y < 130.0)
         .expect("active compact task selector");
@@ -419,7 +442,7 @@ fn disabled_send_ignores_pointer_and_focus_command_allows_typing() {
     let size = egui::vec2(1100.0, 900.0);
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    let send = text_rects(&output, "Send to AI")[0].center();
+    let send = text_rects(&output, "Send (Ctrl+Enter)")[0].center();
     click(&mut editor, &context, size, send);
     assert!(editor.controller.snapshot(&TaskId::new("task-1")).is_none());
     assert!(editor
@@ -445,6 +468,48 @@ fn disabled_send_ignores_pointer_and_focus_command_allows_typing() {
         vec![egui::Event::Text("Keep the draft task-local".into())],
     );
     assert_eq!(editor.state.reply, "Keep the draft task-local");
+}
+
+#[test]
+fn ready_task_keeps_send_success_and_reject_choices_visible() {
+    let mut editor = editor();
+    editor.controller = TaskController::new(|_, _| Ok(ProviderReply::new("acknowledged")));
+    editor.state.session.begin_focused_tests().unwrap();
+    editor
+        .state
+        .session
+        .finish_focused_tests(stasis_ai::FocusedTestResult::passed("ready"))
+        .unwrap();
+    editor.validation_fingerprints.insert(
+        "task-1".into(),
+        ("fixture-source".into(), vec!["focused".into()]),
+    );
+    editor.state.reply = "Please make one last small adjustment".into();
+
+    let context = egui::Context::default();
+    let size = egui::vec2(940.0, 900.0);
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+
+    assert_eq!(text_rects(&output, "Attach image").len(), 1);
+    assert_eq!(text_rects(&output, "Send (Ctrl+Enter)").len(), 1);
+    assert_eq!(text_rects(&output, "Success (Ctrl+Shift+D)").len(), 1);
+    assert_eq!(text_rects(&output, "Reject (Ctrl+Esc)").len(), 1);
+
+    let send = text_rects(&output, "Send (Ctrl+Enter)")[0].center();
+    click(&mut editor, &context, size, send);
+    assert!(editor
+        .state
+        .session
+        .active_task()
+        .unwrap()
+        .thread
+        .iter()
+        .any(|message| message.text == "Please make one last small adjustment"));
+    assert_eq!(
+        editor.state.session.active_task().unwrap().lifecycle,
+        TaskLifecycle::Active
+    );
 }
 
 #[test]
@@ -515,8 +580,12 @@ fn compact_chrome_reserves_space_for_notices_task_creation_and_status() {
         editor.state.objective = "Create from the compact header".into();
         click(&mut editor, &context, size, create.center());
         assert_eq!(
-            editor.state.session.active_task().unwrap().objective,
+            editor.state.session.task("task-2").unwrap().objective,
             "Create from the compact header"
+        );
+        assert_eq!(
+            editor.state.session.task("task-2").unwrap().lifecycle,
+            TaskLifecycle::Queued
         );
     }
 }
@@ -543,11 +612,12 @@ fn provider_request_disables_new_work_only_on_its_own_task() {
     let size = egui::vec2(1100.0, 900.0);
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    assert_eq!(text_rects(&output, "Cancel task").len(), 1);
-    assert!(text_rects(&output, "Send to AI").is_empty());
+    assert_eq!(text_rects(&output, "Reject (Ctrl+Esc)").len(), 1);
+    assert_eq!(text_rects(&output, "Send (Ctrl+Enter)").len(), 1);
     editor.state.objective = "Independent task".into();
     editor.state.create_task().unwrap();
-    assert!(!editor.ui_busy(editor.state.session.active_task().unwrap()));
+    assert!(editor.ui_busy(editor.state.session.active_task().unwrap()));
+    assert!(!editor.ui_busy(editor.state.session.task("task-2").unwrap()));
     release.send(()).unwrap();
 }
 
@@ -568,7 +638,7 @@ fn cancel_requires_confirmation_and_keeps_originating_task_identity() {
         &mut editor,
         &context,
         size,
-        text_rects(&output, "Keep task open")[0].center(),
+        text_rects(&output, "Keep task (Esc)")[0].center(),
     );
     assert!(editor.state.cancel_confirmation.is_none());
     assert_eq!(
@@ -580,19 +650,160 @@ fn cancel_requires_confirmation_and_keeps_originating_task_identity() {
     editor.state.create_task().unwrap();
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
-    click(
+    assert_eq!(text_rects(&output, "Reject task (Enter)").len(), 1);
+    frame(
         &mut editor,
         &context,
         size,
-        text_rects(&output, "Permanently cancel task")[0].center(),
+        vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
     );
+    editor.flush_intents();
     assert_eq!(
         editor.state.session.task("task-1").unwrap().lifecycle,
         TaskLifecycle::Canceled
     );
     assert_eq!(
         editor.state.session.active_task().unwrap().lifecycle,
+        TaskLifecycle::Queued
+    );
+}
+
+#[test]
+fn disconnected_active_task_keeps_simple_outcomes_visible() {
+    let mut editor = editor();
+    editor.state.session.disconnect().unwrap();
+    let context = egui::Context::default();
+    let size = egui::vec2(680.0, 900.0);
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+    assert!(text_rects(&output, "Reconnect").is_empty());
+    assert_eq!(text_rects(&output, "Send (Ctrl+Enter)").len(), 1);
+    assert_eq!(text_rects(&output, "Success (Ctrl+Shift+D)").len(), 1);
+    assert_eq!(text_rects(&output, "Reject (Ctrl+Esc)").len(), 1);
+
+    frame(
+        &mut editor,
+        &context,
+        size,
+        vec![key_event(egui::Key::Escape, egui::Modifiers::CTRL)],
+    );
+    assert_eq!(editor.state.cancel_confirmation.as_deref(), Some("task-1"));
+}
+
+#[test]
+fn queue_gate_moves_and_starts_only_the_next_task() {
+    let mut editor = editor();
+    for objective in ["Second task", "Third task"] {
+        editor.state.objective = objective.into();
+        editor.state.create_task().unwrap();
+    }
+    editor
+        .state
+        .session
+        .task_mut("task-1")
+        .unwrap()
+        .cancel()
+        .unwrap();
+    editor
+        .state
+        .session
+        .select_queue_gate_after(&TaskId::new("task-1"));
+
+    let context = egui::Context::default();
+    let size = egui::vec2(1100.0, 900.0);
+    let output = frame(&mut editor, &context, size, vec![]);
+    assert_eq!(text_rects(&output, "Start task (Enter)").len(), 1);
+    assert_eq!(text_rects(&output, "Move to back (B)").len(), 1);
+    assert_eq!(text_rects(&output, "Reject... (Del)").len(), 1);
+    frame(
+        &mut editor,
+        &context,
+        size,
+        vec![key_event(egui::Key::B, egui::Modifiers::NONE)],
+    );
+    assert_eq!(editor.state.active_id().unwrap(), "task-3");
+
+    frame(
+        &mut editor,
+        &context,
+        size,
+        vec![key_event(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    assert_eq!(
+        editor.state.session.task("task-3").unwrap().lifecycle,
         TaskLifecycle::Active
+    );
+    let started = editor.state.session.task("task-3").unwrap();
+    assert_eq!(started.thread.len(), 1);
+    assert_eq!(started.thread[0].text, "Third task");
+}
+
+#[test]
+fn queue_reject_shortcut_still_requires_confirmation() {
+    let mut editor = editor();
+    editor.state.objective = "Queued task".into();
+    editor.state.create_task().unwrap();
+    editor
+        .state
+        .session
+        .task_mut("task-1")
+        .unwrap()
+        .cancel()
+        .unwrap();
+    editor
+        .state
+        .session
+        .select_queue_gate_after(&TaskId::new("task-1"));
+
+    let context = egui::Context::default();
+    frame(
+        &mut editor,
+        &context,
+        egui::vec2(680.0, 900.0),
+        vec![key_event(egui::Key::Delete, egui::Modifiers::NONE)],
+    );
+    assert_eq!(editor.state.cancel_confirmation.as_deref(), Some("task-2"));
+    assert_eq!(
+        editor.state.session.task("task-2").unwrap().lifecycle,
+        TaskLifecycle::Queued
+    );
+}
+
+#[test]
+fn queue_rollback_shortcut_requires_confirmation_and_keeps_task_queued() {
+    let mut editor = editor();
+    editor.state.objective = "Queued task".into();
+    editor.state.create_task().unwrap();
+    let completed = editor.state.session.task_mut("task-1").unwrap();
+    completed.cancel().unwrap();
+    completed.lifecycle = TaskLifecycle::Completed;
+    editor.completion_commits.insert(
+        "task-1".into(),
+        stasis_ai::session_store::TaskCompletionCommit {
+            commit: "0123456789012345678901234567890123456789".into(),
+            paths: Vec::new(),
+            reverted_by: None,
+        },
+    );
+    editor
+        .state
+        .session
+        .select_queue_gate_after(&TaskId::new("task-1"));
+
+    let context = egui::Context::default();
+    frame(
+        &mut editor,
+        &context,
+        egui::vec2(680.0, 900.0),
+        vec![key_event(egui::Key::R, egui::Modifiers::NONE)],
+    );
+    assert_eq!(
+        editor.rollback_confirmation,
+        Some(("task-2".into(), "task-1".into()))
+    );
+    assert_eq!(
+        editor.state.session.task("task-2").unwrap().lifecycle,
+        TaskLifecycle::Queued
     );
 }
 

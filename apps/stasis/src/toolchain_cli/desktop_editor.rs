@@ -1,4 +1,5 @@
 mod chat_export;
+mod git_completion;
 mod host_progress;
 mod image_attachments;
 mod persistence;
@@ -9,7 +10,7 @@ mod semantic_diff;
 mod source_context_tests;
 
 use host_progress::{HostProgress, HostProgressState};
-use stasis_ai::task_controller::{ProgressReporter, ProgressStage};
+use stasis_ai::task_controller::{ProgressReporter, ProgressStage, TaskControllerConfig};
 mod semantic_revisions;
 mod window_layout;
 
@@ -19,7 +20,10 @@ use semantic_revisions::proposal_revisions;
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use stasis_ai::session_store::{SessionSnapshot, SessionStore, WindowPreferences};
+use stasis_ai::session_store::{
+    CompletionPathProvenance, SessionSnapshot, SessionStore, TaskCompletionCommit, TaskGitBaseline,
+    WindowPreferences,
+};
 use stasis_ai::task_session::{
     ActionState, ActivityKind, ConnectionState, FallbackState, ImageHandoffState, ImageReviewState,
     Key, KeyChord, Modifiers, ProviderSelection, ProviderState, RoutingState,
@@ -1042,6 +1046,11 @@ struct DesktopEditor {
     window_preferences: Option<WindowPreferences>,
     media_hashes: BTreeMap<String, String>,
     unavailable_media: BTreeSet<String>,
+    task_git_baselines: BTreeMap<String, TaskGitBaseline>,
+    task_git_baseline_errors: BTreeMap<String, String>,
+    completion_commits: BTreeMap<String, TaskCompletionCommit>,
+    completion_confirmation: Option<git_completion::CompletionPlan>,
+    rollback_confirmation: Option<(String, String)>,
     erase_confirmation: bool,
     recovery_error: bool,
     recovered_previews: BTreeMap<SemanticPreviewKey, String>,
@@ -1410,9 +1419,16 @@ impl DesktopEditor {
                 project_root: Some(project_root.clone()),
                 ..EditorState::default()
             },
-            controller: TaskController::new_with_progress(move |request, canceled, progress| {
-                run_reply_provider(request, canceled, provider_root.clone(), progress)
-            }),
+            controller: TaskController::with_config_and_progress(
+                move |request, canceled, progress| {
+                    run_reply_provider(request, canceled, provider_root.clone(), progress)
+                },
+                TaskControllerConfig {
+                    workers: 1,
+                    ..TaskControllerConfig::default()
+                },
+            )
+            .expect("desktop AI controller configuration is valid"),
             client,
             project_root,
             shutdown,
@@ -1454,6 +1470,11 @@ impl DesktopEditor {
             window_preferences: None,
             media_hashes: BTreeMap::new(),
             unavailable_media: BTreeSet::new(),
+            task_git_baselines: BTreeMap::new(),
+            task_git_baseline_errors: BTreeMap::new(),
+            completion_commits: BTreeMap::new(),
+            completion_confirmation: None,
+            rollback_confirmation: None,
             erase_confirmation: false,
             recovery_error: false,
             recovered_previews: BTreeMap::new(),
@@ -1699,6 +1720,11 @@ impl DesktopEditor {
         self.expanded.clear();
         self.media_hashes.clear();
         self.unavailable_media.clear();
+        self.task_git_baselines.clear();
+        self.task_git_baseline_errors.clear();
+        self.completion_commits.clear();
+        self.completion_confirmation = None;
+        self.rollback_confirmation = None;
         self.asset_textures.clear();
         self.attachment_textures.clear();
         self.attachment_preview = None;
@@ -1852,9 +1878,28 @@ impl DesktopEditor {
                     let task = TaskId::new(task);
                     self.host.cancel(task.as_str());
                     let canceled_capture = self.cancel_capture_for(&task);
-                    if let Err(error) = self.controller.cancel(&mut self.state.session, &task) {
+                    let queued = self
+                        .state
+                        .session
+                        .task(&task)
+                        .is_ok_and(|value| value.lifecycle == TaskLifecycle::Queued);
+                    let result: Result<(), String> = if queued {
+                        self.state
+                            .session
+                            .reject_queued_task(&task)
+                            .map_err(|error| error.to_string())
+                    } else {
+                        self.controller
+                            .cancel(&mut self.state.session, &task)
+                            .map_err(|error| error.to_string())
+                    };
+                    if result.is_ok() {
+                        self.task_git_baselines.remove(task.as_str());
+                        self.task_git_baseline_errors.remove(task.as_str());
+                        self.state.session.select_queue_gate_after(&task);
+                    } else if let Err(error) = result {
                         if !canceled_capture {
-                            self.state.notice = Some(error.to_string());
+                            self.state.notice = Some(error);
                         }
                     }
                 }
@@ -1978,14 +2023,7 @@ impl DesktopEditor {
                         .map(|(fingerprint, _)| fingerprint);
                     match current {
                         Ok(current) if expected == Some(&current) => {
-                            if let Err(error) = self
-                                .state
-                                .session
-                                .task_mut(task.as_str())
-                                .and_then(|task| task.mark_done())
-                            {
-                                self.state.notice = Some(error.to_string());
-                            }
+                            self.prepare_completion(&task);
                         }
                         Ok(_) => {
                             self.state.notice = Some(
@@ -2707,7 +2745,10 @@ impl DesktopEditor {
                 )
             })
             .collect::<Vec<_>>();
-        let queued = cards.len().saturating_sub(usize::from(active.is_some()));
+        let queued = cards
+            .iter()
+            .filter(|(_, _, lifecycle, _, _, _, _)| *lifecycle == TaskLifecycle::Queued)
+            .count();
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("TASKS")
@@ -2793,11 +2834,12 @@ fn project_name(root: &std::path::Path) -> String {
 }
 
 fn task_state_label(lifecycle: TaskLifecycle, connection: ConnectionState) -> String {
-    if connection == ConnectionState::Disconnected {
+    if connection == ConnectionState::Disconnected && lifecycle != TaskLifecycle::Queued {
         return "disconnected".into();
     }
     match lifecycle {
         TaskLifecycle::Active => "current".into(),
+        TaskLifecycle::Queued => "queued".into(),
         TaskLifecycle::Canceled => "canceled".into(),
         TaskLifecycle::Completed => "done".into(),
     }
@@ -2891,6 +2933,7 @@ fn validation_color(status: &ValidationStatus) -> Color32 {
 
 fn task_header_status(task: &stasis_ai::Task) -> (&'static str, Color32) {
     match task.lifecycle {
+        TaskLifecycle::Queued => return ("queued", warning()),
         TaskLifecycle::Canceled => return ("canceled", failure()),
         TaskLifecycle::Completed => return ("done", accent()),
         TaskLifecycle::Active => {}
@@ -2968,6 +3011,32 @@ fn image_handoff_color(status: &ImageHandoffState) -> Color32 {
         ImageHandoffState::Rejected { .. } => failure(),
         ImageHandoffState::Pending => warning(),
     }
+}
+
+fn short_commit(commit: &str) -> &str {
+    commit.get(..8).unwrap_or(commit)
+}
+
+fn completion_summary(receipt: &TaskCompletionCommit) -> String {
+    let paths = receipt
+        .paths
+        .iter()
+        .map(|path| {
+            let provenance = match path.provenance {
+                CompletionPathProvenance::StasisEdit => "Stasis edit",
+                CompletionPathProvenance::ExternalEdit => "external edit",
+            };
+            format!("- {} ({provenance})", path.path)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    bounded_failure(
+        &format!(
+            "Task completed and saved as Git commit {}.\nCommitted paths:\n{paths}",
+            receipt.commit
+        ),
+        15_000,
+    )
 }
 
 fn render_compiler_changes(ui: &mut egui::Ui, receipt: &Value) {
@@ -3079,6 +3148,28 @@ impl Default for EditorState {
 }
 
 impl EditorState {
+    fn start_queued_task(&mut self, id: &str) -> Result<(), String> {
+        self.session
+            .start_task(id)
+            .map_err(|error| error.to_string())?;
+        let task = self.session.task(id).map_err(|error| error.to_string())?;
+        let first_message = task.thread.is_empty().then(|| task.objective.clone());
+        self.reply.clear();
+        self.focus = FocusArea::Reply;
+        self.focus_pending = true;
+        if let Some(first_message) = first_message {
+            self.intents
+                .push(EditorIntent::SendReply(id.to_string(), first_message));
+        }
+        Ok(())
+    }
+
+    fn move_queued_task_to_back(&mut self, id: &str) -> Result<(), String> {
+        self.session
+            .move_queued_task_to_back(id)
+            .map_err(|error| error.to_string())
+    }
+
     fn reviewed_preview(
         &self,
         task: &str,
@@ -3140,30 +3231,6 @@ impl EditorState {
         Ok(preview)
     }
 
-    fn review_command_enabled(&self, command: &TaskSessionCommand) -> bool {
-        let accepted = match command {
-            TaskSessionCommand::AcceptAction => false,
-            TaskSessionCommand::ApplyAction => true,
-            _ => return true,
-        };
-        let Ok(task) = self.session.active_task() else {
-            return false;
-        };
-        task.actions
-            .values()
-            .find(|action| {
-                if accepted {
-                    matches!(action.state, ActionState::Accepted)
-                } else {
-                    matches!(action.state, ActionState::Proposed)
-                }
-            })
-            .is_some_and(|action| {
-                self.check_preview(task.id.as_str(), action.id.as_str(), false)
-                    .is_ok()
-            })
-    }
-
     fn primary_action(&self, busy: bool) -> PrimaryAction {
         let Ok(task) = self.session.active_task() else {
             return PrimaryAction {
@@ -3188,6 +3255,9 @@ impl EditorState {
                 enabled: false,
                 disabled_reason: Some(
                     match task.lifecycle {
+                        TaskLifecycle::Queued => {
+                            "Start this queued task to create its conversation."
+                        }
                         TaskLifecycle::Canceled => "Canceled tasks are read-only.",
                         TaskLifecycle::Completed => "This task is complete.",
                         TaskLifecycle::Active => unreachable!(),
@@ -3198,7 +3268,7 @@ impl EditorState {
         }
         if busy {
             return PrimaryAction {
-                label: "Cancel task",
+                label: "Reject task (Ctrl+Esc)",
                 command: TaskSessionCommand::Cancel,
                 enabled: true,
                 disabled_reason: None,
@@ -3272,7 +3342,7 @@ impl EditorState {
             })
         {
             return PrimaryAction {
-                label: "Mark done",
+                label: "Success (Ctrl+Shift+D)",
                 command: TaskSessionCommand::MarkDone,
                 enabled: true,
                 disabled_reason: None,
@@ -3280,7 +3350,7 @@ impl EditorState {
         }
         let enabled = !self.reply.trim().is_empty();
         PrimaryAction {
-            label: "Send to AI",
+            label: "Send (Ctrl+Enter)",
             command: TaskSessionCommand::SendReply,
             enabled,
             disabled_reason: (!enabled).then(|| "Write a task-scoped message first.".into()),
@@ -3295,45 +3365,63 @@ impl EditorState {
     }
 
     fn create_and_send_task(&mut self) -> Result<(), String> {
-        self.create_task()?;
-        let task = self
-            .session
-            .active_task()
-            .map_err(|error| error.to_string())?;
-        self.intents.push(EditorIntent::SendReply(
-            task.id.to_string(),
-            task.objective.clone(),
-        ));
+        let id = self.create_task()?;
+        let task = self.session.task(&id).map_err(|error| error.to_string())?;
+        if task.lifecycle == TaskLifecycle::Active {
+            self.intents.push(EditorIntent::SendReply(
+                task.id.to_string(),
+                task.objective.clone(),
+            ));
+        }
         Ok(())
     }
 
-    fn create_task(&mut self) -> Result<(), String> {
+    fn create_task(&mut self) -> Result<TaskId, String> {
         let objective = self.objective.trim().to_string();
         if objective.is_empty() {
             self.focus = FocusArea::Tasks;
             self.focus_pending = true;
             return Err("Enter a task objective first.".into());
         }
+        let should_queue = self.session.running_task_id().is_some()
+            || self.session.next_queued_task_id().is_some();
         let id = format!("task-{}", self.next_task);
-        let previous = self.session.active_task_id().map(ToString::to_string);
-        self.session
+        let id = self
+            .session
             .new_task(
                 id.as_str(),
                 &objective,
                 "Stasis project; fresh task-scoped context",
             )
             .map_err(|e| e.to_string())?;
+        if should_queue {
+            self.session
+                .queue_task(&id)
+                .map_err(|error| error.to_string())?;
+            if let Some(running) = self.session.running_task_id().cloned() {
+                self.session
+                    .switch_task(&running)
+                    .map_err(|error| error.to_string())?;
+            } else if let Some(next) = self.session.next_queued_task_id().cloned() {
+                self.session
+                    .switch_task(&next)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         self.next_task = self.next_task.saturating_add(1);
         self.objective.clear();
-        if let Some(previous) = previous {
-            self.drafts
-                .insert(previous, (String::new(), std::mem::take(&mut self.reply)));
-        } else {
+        if self
+            .session
+            .task(&id)
+            .map_err(|error| error.to_string())?
+            .lifecycle
+            == TaskLifecycle::Active
+        {
             self.reply.clear();
+            self.focus = FocusArea::Reply;
+            self.focus_pending = true;
         }
-        self.focus = FocusArea::Reply;
-        self.focus_pending = true;
-        Ok(())
+        Ok(id)
     }
 
     fn switch_relative(&mut self, offset: isize) -> Result<(), String> {
@@ -3599,6 +3687,178 @@ impl EditorState {
 }
 
 impl DesktopEditor {
+    fn ensure_active_git_baseline(&mut self) {
+        let Some(task_id) = self
+            .state
+            .session
+            .running_task_id()
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+        if self.task_git_baselines.contains_key(&task_id) {
+            return;
+        }
+        if self.task_git_baseline_errors.contains_key(&task_id) {
+            return;
+        }
+        match git_completion::capture_baseline(&self.project_root) {
+            Ok(Some(baseline)) => {
+                self.task_git_baselines.insert(task_id, baseline);
+            }
+            Ok(None) => {
+                self.task_git_baseline_errors.insert(
+                    task_id,
+                    "Task completion commits require this workspace to be a Git repository.".into(),
+                );
+            }
+            Err(error) => {
+                self.task_git_baseline_errors.insert(task_id, error);
+            }
+        }
+    }
+
+    fn stasis_paths_for(&self, task_id: &str) -> BTreeSet<String> {
+        self.execution_receipts
+            .iter()
+            .filter(|((receipt_task, _), _)| receipt_task == task_id)
+            .flat_map(|(_, receipt)| git_completion::receipt_paths(receipt))
+            .collect()
+    }
+
+    fn prepare_completion(&mut self, task_id: &str) {
+        let can_complete = self
+            .state
+            .session
+            .task(task_id)
+            .cloned()
+            .and_then(|mut task| task.mark_done());
+        if let Err(error) = can_complete {
+            self.state.notice = Some(error.to_string());
+            return;
+        }
+        let Some(baseline) = self.task_git_baselines.get(task_id) else {
+            self.state.notice = Some(self.task_git_baseline_errors.get(task_id).cloned().unwrap_or_else(|| {
+                "No Git baseline is available for this task. Restart it from a clean task boundary before completing it."
+                    .into()
+            }));
+            return;
+        };
+        match git_completion::plan(
+            &self.project_root,
+            task_id,
+            baseline,
+            &self.stasis_paths_for(task_id),
+        ) {
+            Ok(plan) => self.completion_confirmation = Some(plan),
+            Err(error) => self.state.notice = Some(error),
+        }
+    }
+
+    fn confirm_completion(&mut self, plan: git_completion::CompletionPlan) {
+        let objective = match self.state.session.task(&plan.task_id) {
+            Ok(task) => {
+                let mut candidate = task.clone();
+                if let Err(error) = candidate
+                    .append_host_result("Task completion Git commit recorded.")
+                    .and_then(|()| candidate.mark_done())
+                {
+                    self.state.notice = Some(error.to_string());
+                    return;
+                }
+                task.objective.clone()
+            }
+            Err(error) => {
+                self.state.notice = Some(error.to_string());
+                return;
+            }
+        };
+        if plan.paths.is_empty() {
+            let result = self.state.session.task_mut(&plan.task_id).and_then(|task| {
+                task.append_host_result(
+                    "Task completed with no task-time project changes; no Git commit was created.",
+                )?;
+                task.mark_done()
+            });
+            match result {
+                Ok(()) => {
+                    self.task_git_baselines.remove(&plan.task_id);
+                    self.task_git_baseline_errors.remove(&plan.task_id);
+                    self.state
+                        .session
+                        .select_queue_gate_after(&TaskId::new(&plan.task_id));
+                    self.state.notice = Some("Task completed without project changes.".into());
+                }
+                Err(error) => self.state.notice = Some(error.to_string()),
+            }
+            return;
+        }
+        match git_completion::commit(&self.project_root, &plan, &objective) {
+            Ok(receipt) => {
+                let summary = completion_summary(&receipt);
+                let result = self
+                    .state
+                    .session
+                    .task_mut(&plan.task_id)
+                    .and_then(|task| task.append_host_result(summary))
+                    .and_then(|()| self.state.session.task_mut(&plan.task_id)?.mark_done());
+                if let Err(error) = result {
+                    self.state.notice = Some(format!(
+                        "Task commit {} was created, but the task could not be closed: {error}",
+                        short_commit(&receipt.commit)
+                    ));
+                    self.completion_commits.insert(plan.task_id, receipt);
+                    return;
+                }
+                self.completion_commits
+                    .insert(plan.task_id.clone(), receipt.clone());
+                self.task_git_baselines.remove(&plan.task_id);
+                self.task_git_baseline_errors.remove(&plan.task_id);
+                self.state
+                    .session
+                    .select_queue_gate_after(&TaskId::new(&plan.task_id));
+                self.state.notice = Some(format!(
+                    "Task completed in commit {}.",
+                    short_commit(&receipt.commit)
+                ));
+            }
+            Err(error) => self.state.notice = Some(error),
+        }
+    }
+
+    fn rollback_candidate(&self) -> Option<String> {
+        self.completion_commits
+            .iter()
+            .filter(|(_, commit)| commit.reverted_by.is_none())
+            .max_by_key(|(task_id, _)| {
+                task_id
+                    .strip_prefix("task-")
+                    .and_then(|number| number.parse::<u64>().ok())
+                    .unwrap_or(0)
+            })
+            .map(|(task_id, _)| task_id.clone())
+    }
+
+    fn confirm_rollback(&mut self, queued_task: String, completed_task: String) {
+        let Some(commit) = self.completion_commits.get(&completed_task).cloned() else {
+            self.state.notice = Some("The previous task has no completion commit.".into());
+            return;
+        };
+        match git_completion::revert(&self.project_root, &commit.commit) {
+            Ok(reverted_by) => {
+                if let Some(saved) = self.completion_commits.get_mut(&completed_task) {
+                    saved.reverted_by = Some(reverted_by.clone());
+                }
+                self.validation_fingerprints.clear();
+                self.state.notice = Some(format!(
+                    "Rolled back {completed_task} in commit {}. {queued_task} remains queued.",
+                    short_commit(&reverted_by)
+                ));
+            }
+            Err(error) => self.state.notice = Some(error),
+        }
+    }
+
     fn ui_busy(&self, task: &stasis_ai::Task) -> bool {
         self.busy_tasks.contains(task.id.as_str())
             || self
@@ -3623,6 +3883,10 @@ impl DesktopEditor {
             return;
         };
         let task = task.clone();
+        if task.lifecycle == TaskLifecycle::Queued {
+            self.queue_gate(ui, &task);
+            return;
+        }
         egui::TopBottomPanel::bottom("task-composer")
             .resizable(false)
             .frame(
@@ -3644,11 +3908,61 @@ impl DesktopEditor {
             });
     }
 
+    fn queue_gate(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        let start_shortcut =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let move_shortcut =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::B));
+        let reject_shortcut =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Delete));
+        let rollback_shortcut =
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::R));
+        let rollback_task = self.rollback_candidate();
+        egui::Frame::none().inner_margin(32.0).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(72.0);
+                ui.label(RichText::new("Ready when you are").size(24.0).strong());
+                ui.add_space(8.0);
+                ui.label(RichText::new(&task.objective).size(17.0));
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Starting creates a fresh AI conversation. No queued task contacts a provider.",
+                    )
+                    .size(13.0)
+                    .color(muted_text()),
+                );
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Start task (Enter)").clicked() || start_shortcut {
+                        self.state.notice = self.state.start_queued_task(task.id.as_str()).err();
+                    }
+                    if ui.button("Move to back (B)").clicked() || move_shortcut {
+                        self.state.notice = self
+                            .state
+                            .move_queued_task_to_back(task.id.as_str())
+                            .err();
+                    }
+                    if ui.button("Reject... (Del)").clicked() || reject_shortcut {
+                        self.state.cancel_confirmation = Some(task.id.to_string());
+                    }
+                    if let Some(completed_task) = &rollback_task {
+                        if ui.button("Roll back previous... (R)").clicked() || rollback_shortcut {
+                            self.rollback_confirmation =
+                                Some((task.id.to_string(), completed_task.clone()));
+                        }
+                    }
+                });
+            });
+        });
+    }
+
     fn task_header(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
         if self.uncertain_calls.contains(task.id.as_str()) && !self.ui_busy(task) {
             ui.colored_label(warning(), "Previous AI request outcome is uncertain. It may already have incurred a charge; review before sending again.");
         }
         let mut provider_choice = None;
+        let mut refresh_image_support = false;
         let openrouter = stasis_ai::OpenRouterConfig::from_workspace(&self.project_root).ok();
         egui::Frame::none()
             .fill(Color32::from_rgb(28, 33, 41))
@@ -3739,6 +4053,12 @@ impl DesktopEditor {
                                     .small()
                                     .color(muted_text()),
                                 );
+                                if provider != "installed_codex_subscription"
+                                    && ui.button("Refresh image support").clicked()
+                                {
+                                    refresh_image_support = true;
+                                    ui.close_menu();
+                                }
                         });
                         provider_menu.response.widget_info(|| {
                             egui::WidgetInfo::labeled(
@@ -3804,6 +4124,9 @@ impl DesktopEditor {
                 })
                 .err()
                 .map(|error| error.to_string());
+        }
+        if refresh_image_support {
+            self.refresh_active_image_capability();
         }
     }
 
@@ -4570,7 +4893,6 @@ impl DesktopEditor {
             if reply.has_focus() {
                 self.state.focus = FocusArea::Reply;
             }
-            let show_shortcut_hint = ui.available_width() >= 620.0;
             ui.horizontal_wrapped(|ui| {
                 let busy = self.ui_busy(task);
                 let interactive = task.lifecycle == TaskLifecycle::Active
@@ -4579,49 +4901,52 @@ impl DesktopEditor {
                 let image_capability = self.image_attachment_capability(&task.id);
                 let can_attach = interactive && image_capability.is_ok();
                 let disabled_reason = image_capability.as_ref().err().map(String::as_str).unwrap_or("Attachments are unavailable while this task is closed, disconnected, or busy.");
-                if ui.add_enabled(can_attach, egui::Button::new("Attach frame")).on_hover_text("Capture a verified frame from the running native game; pixels remain local until Include once").on_disabled_hover_text(disabled_reason).clicked() {
-                    self.state.dispatch(TaskSessionCommand::AttachScreenshot);
-                }
                 if ui.add_enabled(can_attach, egui::Button::new("Attach image")).on_hover_text("Select up to eight bounded PNG or JPEG files").on_disabled_hover_text(disabled_reason).clicked() {
                     self.select_image_files(&task.id);
                 }
-                if ui.add_enabled(can_attach, egui::Button::new("Paste image")).on_hover_text("Copy clipboard image pixels into this task's session-only attachment storage").on_disabled_hover_text(disabled_reason).clicked() {
-                    self.paste_clipboard_image(&task.id);
-                }
-                if matches!(selected_provider_config(task.selected_provider, &self.project_root), Ok(ProviderConfig::OpenRouter(_)))
-                    && ui.small_button("Refresh image support").clicked()
+
+                let can_send = interactive && !self.state.reply.trim().is_empty();
+                if ui
+                    .add_enabled(can_send, egui::Button::new("Send (Ctrl+Enter)"))
+                    .on_hover_text(if can_send {
+                        "Send this message and keep the task active"
+                    } else {
+                        "Write a message before sending."
+                    })
+                    .clicked()
                 {
-                    self.refresh_active_image_capability();
+                    self.state.dispatch(TaskSessionCommand::SendReply);
                 }
-                if ui.add_enabled(false, egui::Button::new("Generate image")).on_disabled_hover_text("Image generation is unavailable in the desktop editor.").clicked() {
-                    self.state.dispatch(TaskSessionCommand::GenerateImage);
+
+                let primary = self.state.primary_action(busy);
+                let success_ready = primary.command == TaskSessionCommand::MarkDone
+                    && primary.enabled
+                    && self.validation_fingerprints.contains_key(task.id.as_str());
+                if ui
+                    .add_enabled(
+                        success_ready,
+                        egui::Button::new("Success (Ctrl+Shift+D)"),
+                    )
+                    .on_hover_text(if success_ready {
+                        "Review task-time files, commit them, and mark this task accomplished"
+                    } else {
+                        "Resolve pending changes and pass focused tests before marking success."
+                    })
+                    .clicked()
+                {
+                    self.state.dispatch(TaskSessionCommand::MarkDone);
                 }
-                if show_shortcut_hint {
-                    ui.label(
-                        RichText::new("Ctrl+Enter sends | Ctrl+Shift+V pastes image")
-                            .size(10.0)
-                            .color(muted_text()),
-                    );
+
+                if ui
+                    .add_enabled(
+                        task.lifecycle == TaskLifecycle::Active,
+                        egui::Button::new("Reject (Ctrl+Esc)"),
+                    )
+                    .on_hover_text("Close this task after confirmation")
+                    .clicked()
+                {
+                    self.state.dispatch(TaskSessionCommand::Cancel);
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut primary = self.state.primary_action(busy);
-                    if !self.state.review_command_enabled(&primary.command) {
-                        primary.enabled = false;
-                        primary.disabled_reason = Some("Review a current compiler-owned preview before accepting or applying.".into());
-                    }
-                    if primary.command == TaskSessionCommand::MarkDone && !self.validation_fingerprints.contains_key(task.id.as_str()) {
-                        primary.enabled = false;
-                        primary.disabled_reason = Some("Run focused tests against the current sources before marking done.".into());
-                    }
-                    let response = ui.add_enabled(primary.enabled, egui::Button::new(RichText::new(primary.label).strong().color(if primary.enabled { Color32::BLACK } else { muted_text() })).fill(if primary.enabled { accent() } else { raised_fill() }));
-                    let clicked = response.clicked();
-                    if let Some(reason) = primary.disabled_reason { response.on_hover_text(reason); }
-                    let is_test = primary.command == TaskSessionCommand::RunFocusedTests;
-                    if clicked { self.state.dispatch(primary.command); }
-                    if task.lifecycle == TaskLifecycle::Active && task.validation.is_passing() && !is_test {
-                        if ui.add_enabled(interactive, egui::Button::new("Run focused tests")).on_hover_text(if interactive { "Validate the current project sources" } else { "Tests are unavailable while disconnected or busy." }).clicked() { self.state.dispatch(TaskSessionCommand::RunFocusedTests); }
-                    }
-                });
             });
         });
     }
@@ -4651,8 +4976,8 @@ impl DesktopEditor {
             ),
             ("Generate image", TaskSessionCommand::GenerateImage),
             ("Reconnect", TaskSessionCommand::Reconnect),
-            ("Cancel task", TaskSessionCommand::Cancel),
-            ("Mark done", TaskSessionCommand::MarkDone),
+            ("Reject active task", TaskSessionCommand::Cancel),
+            ("Task accomplished and commit", TaskSessionCommand::MarkDone),
             ("Focus game", TaskSessionCommand::FocusGame),
             ("Export chat as HTML", TaskSessionCommand::ExportChat),
         ];
@@ -4959,6 +5284,9 @@ impl DesktopEditor {
                     });
             }
         }
+        self.ensure_active_git_baseline();
+        self.completion_confirmation(context);
+        self.rollback_confirmation(context);
         self.cancel_confirmation(context);
         if self.erase_confirmation {
             egui::Window::new("Erase saved history?").collapsible(false).resizable(false)
@@ -5014,24 +5342,117 @@ impl DesktopEditor {
         }
     }
 
+    fn completion_confirmation(&mut self, context: &egui::Context) {
+        let Some(plan) = self.completion_confirmation.clone() else {
+            return;
+        };
+        let confirm =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let keep =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        egui::Window::new("Task accomplished - commit changes?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                if plan.paths.is_empty() {
+                    ui.label("No project files changed during this task. Completing it will not create a Git commit.");
+                } else {
+                    ui.label("Only these task-time changes will be committed:");
+                    for path in &plan.paths {
+                        let provenance = match path.provenance {
+                            CompletionPathProvenance::StasisEdit => "Stasis edit",
+                            CompletionPathProvenance::ExternalEdit => "External edit",
+                        };
+                        ui.label(format!("- {} ({provenance})", path.path));
+                    }
+                    ui.label("Pre-existing project changes are excluded. The next queued task can roll this commit back before it starts.");
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Keep working (Esc)").clicked() || keep {
+                        self.completion_confirmation = None;
+                    }
+                    let complete_label = if plan.paths.is_empty() {
+                        "Mark accomplished (Enter)"
+                    } else {
+                        "Commit and mark accomplished (Enter)"
+                    };
+                    if ui.button(complete_label).clicked() || confirm {
+                        self.completion_confirmation = None;
+                        self.confirm_completion(plan.clone());
+                    }
+                });
+            });
+    }
+
+    fn rollback_confirmation(&mut self, context: &egui::Context) {
+        let Some((queued_task, completed_task)) = self.rollback_confirmation.clone() else {
+            return;
+        };
+        let confirm =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let keep =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let commit = self
+            .completion_commits
+            .get(&completed_task)
+            .map(|value| short_commit(&value.commit))
+            .unwrap_or("unknown")
+            .to_string();
+        egui::Window::new("Roll back previous task?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                ui.label(format!(
+                    "Create a Git revert of {completed_task} commit {commit}?"
+                ));
+                ui.label(format!(
+                    "{queued_task} stays queued. Rollback is blocked if later commits or conflicting changes make it unsafe."
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Keep changes (Esc)").clicked() || keep {
+                        self.rollback_confirmation = None;
+                    }
+                    if ui.button("Roll back (Enter)").clicked() || confirm {
+                        self.rollback_confirmation = None;
+                        self.confirm_rollback(queued_task.clone(), completed_task.clone());
+                    }
+                });
+            });
+    }
+
     fn cancel_confirmation(&mut self, context: &egui::Context) {
         let Some(task_id) = self.state.cancel_confirmation.clone() else {
             return;
         };
-        egui::Window::new("Cancel task?")
+        let confirm =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let keep =
+            context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let queued = self
+            .state
+            .session
+            .task(task_id.as_str())
+            .is_ok_and(|task| task.lifecycle == TaskLifecycle::Queued);
+        egui::Window::new(if queued { "Reject queued task?" } else { "Reject active task?" })
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(context, |ui| {
                 let objective = self.state.session.task(task_id.as_str())
                     .map(|task| task.objective.as_str()).unwrap_or(&task_id);
-                ui.label(format!("Cancel {objective}?"));
-                ui.label("This stops its work and permanently closes the task. You cannot continue it afterward.");
+                ui.label(format!("Reject {objective}?"));
+                ui.label(if queued {
+                    "This removes it from the queue. No AI conversation will be started."
+                } else {
+                    "This stops its work and permanently closes the task. Applied source changes stay in the project; you cannot continue the conversation afterward."
+                });
                 ui.horizontal(|ui| {
-                    if ui.button("Keep task open").clicked() {
+                    if ui.button(if queued { "Keep queued (Esc)" } else { "Keep task (Esc)" }).clicked() || keep {
                         self.state.cancel_confirmation = None;
                     }
-                    if ui.button("Permanently cancel task").clicked() {
+                    if ui.button("Reject task (Enter)").clicked() || confirm {
                         self.state.intents.push(EditorIntent::Cancel(task_id.clone()));
                         self.state.cancel_confirmation = None;
                     }
@@ -5258,9 +5679,7 @@ mod tests {
             .handle(TaskSessionCommand::AcceptAction)
             .is_err());
         finish_preview(&mut editor);
-        assert!(editor
-            .state
-            .review_command_enabled(&TaskSessionCommand::AcceptAction));
+        assert!(editor.state.check_preview("task-1", "value", false).is_ok());
         editor
             .state
             .handle(TaskSessionCommand::AcceptAction)
@@ -5275,9 +5694,10 @@ mod tests {
             .contains("Stale"));
         editor.next_semantic_check = Instant::now();
         editor.poll_semantic_previews();
-        assert!(!editor
+        assert!(editor
             .state
-            .review_command_enabled(&TaskSessionCommand::ApplyAction));
+            .check_preview("task-1", "value", false)
+            .is_err());
         std::fs::write(&entry, old).unwrap();
         assert!(
             editor.state.reviewed_preview("task-1", "value").is_err(),
@@ -5617,12 +6037,13 @@ mod tests {
         state.reply = "unsent first".into();
         state.objective = "second".into();
         state.create_task().unwrap();
+        assert_eq!(state.session.active_task_id().unwrap().as_str(), "task-1");
+        assert_eq!(state.reply, "unsent first");
+        state.switch_task("task-2").unwrap();
         assert!(state.reply.is_empty());
         state.reply = "unsent second".into();
         state.objective = "future second objective".into();
-        state
-            .handle(TaskSessionCommand::SwitchPreviousTask)
-            .unwrap();
+        state.switch_task("task-1").unwrap();
         assert_eq!(state.reply, "unsent first");
         assert!(state.objective.is_empty());
         state.objective = "future first objective".into();
@@ -5816,6 +6237,7 @@ mod tests {
         }
         editor.state.objective = "second".into();
         editor.state.create_task().unwrap();
+        editor.state.switch_task("task-2").unwrap();
         for (query, expected) in [
             ("previous task", "task-1"),
             ("next task", "task-2"),
@@ -5877,6 +6299,7 @@ mod tests {
             state.primary_action(true).command,
             TaskSessionCommand::Cancel
         );
+        assert_eq!(state.primary_action(true).label, "Reject task (Ctrl+Esc)");
     }
 
     #[test]
@@ -5902,11 +6325,13 @@ mod tests {
         state.objective = "Independent objective".into();
         state.handle(TaskSessionCommand::NewTask).unwrap();
         assert_eq!(state.session.task_count(), 2);
-        assert!(state.session.active_task().unwrap().thread.is_empty());
-        assert!(
-            matches!(state.intents.as_slice(), [EditorIntent::SendReply(task, text)]
-            if task == "task-2" && text == "Independent objective")
+        assert_eq!(state.session.active_task_id().unwrap().as_str(), "task-1");
+        assert_eq!(
+            state.session.task("task-2").unwrap().lifecycle,
+            TaskLifecycle::Queued
         );
+        assert!(state.session.task("task-2").unwrap().thread.is_empty());
+        assert!(state.intents.is_empty());
     }
 
     #[test]
@@ -5939,18 +6364,25 @@ mod tests {
     }
 
     #[test]
-    fn independent_tasks_keep_queued_replies_scoped() {
+    fn queued_task_starts_a_fresh_scoped_conversation_after_resolution() {
         let mut state = task_state();
         state.reply = "First reply".into();
         state.handle(TaskSessionCommand::SendReply).unwrap();
         state.objective = "Change enemy art".into();
         state.create_task().unwrap();
+        assert!(state.session.task("task-2").unwrap().thread.is_empty());
+        state.session.task_mut("task-1").unwrap().cancel().unwrap();
+        state
+            .session
+            .select_queue_gate_after(&TaskId::new("task-1"));
+        state.start_queued_task("task-2").unwrap();
         state.reply = "Second reply".into();
         state.handle(TaskSessionCommand::SendReply).unwrap();
         assert!(matches!(
             state.intents.as_slice(),
-            [EditorIntent::SendReply(first, first_text), EditorIntent::SendReply(second, second_text)]
+            [EditorIntent::SendReply(first, first_text), EditorIntent::SendReply(objective_task, objective), EditorIntent::SendReply(second, second_text)]
                 if first == "task-1" && first_text == "First reply"
+                    && objective_task == "task-2" && objective == "Change enemy art"
                     && second == "task-2" && second_text == "Second reply"
         ));
     }
@@ -6000,6 +6432,9 @@ mod tests {
     fn reconnect_and_cancel_commands_target_the_active_task() {
         let mut state = task_state();
         state.session.disconnect().unwrap();
+        state.handle(TaskSessionCommand::Cancel).unwrap();
+        assert_eq!(state.cancel_confirmation.as_deref(), Some("task-1"));
+        state.cancel_confirmation = None;
         state.handle(TaskSessionCommand::Reconnect).unwrap();
         assert!(matches!(
             state.intents.last(),
@@ -6017,11 +6452,12 @@ mod tests {
         ));
         state.objective = "Cancelable task".into();
         state.create_task().unwrap();
+        state.switch_task("task-2").unwrap();
         state.handle(TaskSessionCommand::Cancel).unwrap();
         assert_eq!(state.cancel_confirmation.as_deref(), Some("task-2"));
         assert_eq!(
             state.session.active_task().unwrap().lifecycle,
-            TaskLifecycle::Active
+            TaskLifecycle::Queued
         );
     }
 
@@ -6038,6 +6474,7 @@ mod tests {
             .unwrap();
         editor.state.objective = "Unrelated task".into();
         editor.state.create_task().unwrap();
+        editor.state.session.switch_task("task-2").unwrap();
 
         editor.flush_intents();
 
@@ -6171,6 +6608,7 @@ mod tests {
         });
         editor.state.objective = "Second task".into();
         editor.state.create_task().unwrap();
+        editor.state.session.switch_task("task-2").unwrap();
         editor
             .capture_result_tx
             .send(CaptureResult {
@@ -6578,6 +7016,7 @@ mod tests {
             .validation_run_id;
         editor.state.objective = "Second task".into();
         editor.state.create_task().unwrap();
+        editor.state.session.switch_task("task-2").unwrap();
 
         let (request_tx, _request_rx) = mpsc::sync_channel(8);
         let (result_tx, result_rx) = mpsc::channel();
@@ -6790,6 +7229,21 @@ mod tests {
     #[test]
     fn accepted_action_executes_and_completes_its_originating_task() {
         let root = super::super::tests::desktop_editor_fixture("editor_host_execution");
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.name", "Stasis Test"][..],
+            &["config", "user.email", "stasis@example.invalid"][..],
+            &["config", "commit.gpgsign", "false"][..],
+            &["add", "."][..],
+            &["commit", "-q", "-m", "initial"][..],
+        ] {
+            assert!(std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
         let item = super::super::desktop_source_context(&root)
             .unwrap()
             .into_iter()
@@ -6804,6 +7258,7 @@ mod tests {
         let mut editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
         editor.state.objective = "Change value".into();
         editor.state.create_task().unwrap();
+        editor.ensure_active_git_baseline();
         editor
             .state
             .session
@@ -6837,6 +7292,7 @@ mod tests {
         editor.flush_intents();
         editor.state.objective = "Unrelated task".into();
         editor.state.create_task().unwrap();
+        editor.state.session.switch_task("task-2").unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while editor.busy_tasks.contains("task-1") && std::time::Instant::now() < deadline {
@@ -6888,6 +7344,8 @@ mod tests {
         assert!(editor.validation_receipts.contains_key("task-1"));
         editor.state.handle(TaskSessionCommand::MarkDone).unwrap();
         editor.flush_intents();
+        let completion = editor.completion_confirmation.take().unwrap();
+        editor.confirm_completion(completion);
         assert!(matches!(
             editor.state.session.task("task-1").unwrap().lifecycle,
             stasis_ai::TaskLifecycle::Completed

@@ -64,6 +64,8 @@ pub(super) fn snapshot(editor: &DesktopEditor) -> SessionSnapshot {
         window_preferences: editor.window_preferences.clone(),
         media_hashes: editor.media_hashes.clone(),
         unavailable_media: editor.unavailable_media.clone(),
+        task_git_baselines: editor.task_git_baselines.clone(),
+        completion_commits: editor.completion_commits.clone(),
     }
 }
 
@@ -74,6 +76,7 @@ pub(super) fn restore(editor: &mut DesktopEditor, loaded: LoadOutcome) {
         }
         return;
     };
+    saved.session.normalize_serial_queue(&saved.task_order);
     let mut stale = Vec::new();
     for task in saved.session.tasks.values_mut() {
         if task.validation.is_running()
@@ -129,6 +132,8 @@ pub(super) fn restore(editor: &mut DesktopEditor, loaded: LoadOutcome) {
         .map(|value| bounded_window(value.size));
     editor.media_hashes = saved.media_hashes.clone();
     editor.unavailable_media = saved.unavailable_media.clone();
+    editor.task_git_baselines = saved.task_git_baselines.clone();
+    editor.completion_commits = saved.completion_commits.clone();
     // Previews include source-derived plans and are deliberately rebuilt after restart.
     editor.state.semantic_previews.clear();
     let current_source = super::super::desktop_source_fingerprint(&editor.project_root, &[]);
@@ -356,6 +361,7 @@ mod tests {
             .session
             .new_task("task-2", "Another task", "Sample")
             .unwrap();
+        editor.state.session.queue_task("task-2").unwrap();
         editor.state.session.switch_task(&active).unwrap();
         editor.state.drafts.insert(
             "task-2".into(),
@@ -393,6 +399,41 @@ mod tests {
             .semantic_previews
             .values()
             .all(|record| matches!(record.result, Some(Ok(_)))));
+        drop(recovered);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_preserves_serial_queue_order_without_starting_conversations() {
+        let (mut editor, root, _) = super::super::tests::review_fixture("serial_queue_restart");
+        editor.store = Some(SessionStore::open(&root).unwrap());
+        editor.state.objective = "Second task".into();
+        editor.state.create_task().unwrap();
+        editor.state.objective = "Third task".into();
+        editor.state.create_task().unwrap();
+        editor
+            .state
+            .session
+            .move_queued_task_to_back("task-2")
+            .unwrap();
+        editor.persist_if_changed();
+        drop(editor);
+
+        let recovered = reopen(&root);
+        assert_eq!(
+            recovered
+                .state
+                .session
+                .next_queued_task_id()
+                .unwrap()
+                .as_str(),
+            "task-3"
+        );
+        for id in ["task-2", "task-3"] {
+            let task = recovered.state.session.task(id).unwrap();
+            assert_eq!(task.lifecycle, TaskLifecycle::Queued);
+            assert!(task.thread.is_empty());
+        }
         drop(recovered);
         std::fs::remove_dir_all(root).unwrap();
     }

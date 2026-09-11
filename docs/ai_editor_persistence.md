@@ -5,9 +5,11 @@ directory is ignored by Git. The canonical project directory is part of the
 versioned envelope: copying history into another project does not authorize that
 project to load it.
 
-The snapshot contains task chronology and semantic revisions, drafts, the active
-task, provider display summaries, validation evidence, attachment references and
-hashes, generated-image review state, and explicitly selected UI preferences.
+The snapshot contains task chronology and semantic revisions, drafts, the
+selected task, the serial queue order and lifecycle, provider display summaries,
+validation evidence, attachment references and hashes, generated-image review
+state, task-start Git baselines, completion commit/path provenance, and
+explicitly selected UI preferences.
 Provider configuration, authorization headers, transport envelopes, and hidden
 reasoning are outside the persistence model. User-authored messages and source
 code are private content, not credentials storage; do not put secrets in them.
@@ -18,11 +20,12 @@ empty successful restore. Schema migration supplies defaults for older optional
 fields. Retention is bounded; overflow is reported rather than silently losing
 semantic revisions or changing timeline positions.
 
-The current schema is version 2; version 1 is migrated explicitly. Snapshots are
-limited to 16 MiB, 32 tasks, and 1,024 distinct media sources, with additional
-per-task limits inherited from the task model. Capacity errors leave the last
-committed snapshot intact. Recovery errors prevent autosave from overwriting the
-unreadable history; the user can inspect the state file or explicitly erase it.
+The current schema is version 3; versions 1 and 2 are migrated explicitly.
+Snapshots are limited to 16 MiB, 32 tasks, and 1,024 distinct media sources,
+with additional per-task limits inherited from the task model. Capacity errors
+leave the last committed snapshot intact. Recovery errors prevent autosave from
+overwriting the unreadable history; the user can inspect the state file or
+explicitly erase it.
 
 Before admitting a provider request the editor saves an in-flight marker. A
 restart treats such a marker as an uncertain outcome. Recovery never submits a

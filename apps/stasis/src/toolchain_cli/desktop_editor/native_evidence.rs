@@ -20,6 +20,7 @@ fn capture_native_task_timeline() {
         .parse()
         .unwrap();
     let repair = std::env::var_os("STASIS_EDITOR_EVIDENCE_REPAIR").is_some();
+    let outcomes = std::env::var_os("STASIS_EDITOR_EVIDENCE_OUTCOMES").is_some();
     let (client, _server) = stasis_runner::live::live_session(16);
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -49,6 +50,9 @@ fn capture_native_task_timeline() {
     let pixels = image::load_from_memory(&bytes).unwrap().to_rgba8();
     task.attach_screenshot_with_sha256("arena-reference", asset.display().to_string(), &sha256)
         .unwrap();
+    if outcomes {
+        task.mark_screenshot_uploaded("arena-reference").unwrap();
+    }
     let task_id = task.id.clone();
     task.append_result("I will update player movement and add focused coverage for the cooldown and collision behavior.").unwrap();
     let attachment_mode = std::env::var("STASIS_EDITOR_EVIDENCE_ATTACHMENTS").ok();
@@ -94,6 +98,15 @@ fn capture_native_task_timeline() {
         .unwrap();
     }
     task.record_turn(1840, 2410, 386, 1200).unwrap();
+    if outcomes && !repair && attachment_mode.is_none() {
+        editor.validation_fingerprints.insert(
+            task_id.to_string(),
+            (
+                "native-evidence-current-sources".into(),
+                vec!["focused".into()],
+            ),
+        );
+    }
     editor.state.preview = Some(ScreenshotPreview {
         task_id,
         screenshot_id: "arena-reference".into(),
@@ -176,8 +189,34 @@ fn capture_native_task_timeline() {
         None
     };
     editor.state.focus = FocusArea::Game;
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_QUEUE").is_some() {
+        let current = editor.state.session.running_task_id().unwrap().clone();
+        editor
+            .state
+            .session
+            .task_mut(&current)
+            .unwrap()
+            .cancel()
+            .unwrap();
+        editor.state.session.select_queue_gate_after(&current);
+    }
     if std::env::var_os("STASIS_EDITOR_EVIDENCE_CANCEL").is_some() {
         editor.state.handle(TaskSessionCommand::Cancel).unwrap();
+    }
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_COMPLETION").is_some() {
+        let task_id = editor.state.session.running_task_id().unwrap().to_string();
+        editor.completion_confirmation = Some(git_completion::evidence_plan(&task_id));
+    }
+    if std::env::var_os("STASIS_EDITOR_EVIDENCE_ROLLBACK").is_some() {
+        let completed_task = "task-1".to_string();
+        editor.completion_commits.insert(
+            completed_task.clone(),
+            TaskCompletionCommit {
+                commit: "0123456789012345678901234567890123456789".into(),
+                paths: git_completion::evidence_plan(&completed_task).paths,
+                reverted_by: None,
+            },
+        );
     }
 
     if let Ok(phase) = std::env::var("STASIS_EDITOR_EVIDENCE_PROGRESS") {

@@ -1,7 +1,7 @@
 use serde_json::json;
 use stasis_ai::{
     ActionKind, ActionState, ProviderActionProposal, ProviderReply, TaskController,
-    TaskControllerEvent, TaskId, TaskSession,
+    TaskControllerEvent, TaskId, TaskSession, ThreadEntryKind,
 };
 use std::time::{Duration, Instant};
 
@@ -119,7 +119,21 @@ fn provider_cannot_replace_accepted_work_even_in_a_mixed_reply() {
         drain(&controller, &mut session)[0],
         TaskControllerEvent::Failed { .. }
     ));
-    assert_eq!(session.task("origin").unwrap(), &before);
+    let task = session.task("origin").unwrap();
+    assert_eq!(task.actions, before.actions);
+    assert!(!task.actions.contains_key("new"));
+    assert_eq!(task.thread.len(), before.thread.len() + 1);
+    assert_eq!(task.thread[..before.thread.len()], before.thread);
+    let audit = task.thread.last().unwrap();
+    assert_eq!(audit.kind, ThreadEntryKind::HostResult);
+    assert!(audit.text.contains("AI reply discarded"));
+    assert!(audit
+        .text
+        .contains("no longer matched the task action state"));
+    assert!(!task
+        .thread
+        .iter()
+        .any(|entry| entry.text == "Replace accepted work."));
 }
 
 #[test]

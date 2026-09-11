@@ -17,13 +17,14 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 const SCHEMA_NAME: &str = "stasis-ai-editor-session";
-const CURRENT_VERSION: u32 = 2;
+const CURRENT_VERSION: u32 = 3;
 const STATE_FILE: &str = "session.json";
 const PENDING_FILE: &str = "session.pending";
 const MAX_STATE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RECEIPTS: usize = 2_048;
 const MAX_FINGERPRINTS: usize = 2_048;
 const MAX_EXPANDED: usize = 4_096;
+const MAX_COMPLETION_PATHS: usize = 4_096;
 const MAX_MEDIA: usize = MAX_TASKS * (MAX_SCREENSHOTS + MAX_IMAGES);
 const MAX_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -49,6 +50,10 @@ pub struct SessionSnapshot {
     pub media_hashes: BTreeMap<String, String>,
     /// Media source paths that could not be verified during the latest load.
     pub unavailable_media: BTreeSet<String>,
+    /// Git state captured before an active task can change project files.
+    pub task_git_baselines: BTreeMap<String, TaskGitBaseline>,
+    /// Commits created by explicit task completion, keyed by task id.
+    pub completion_commits: BTreeMap<String, TaskCompletionCommit>,
 }
 
 impl Default for SessionSnapshot {
@@ -71,8 +76,40 @@ impl Default for SessionSnapshot {
             window_preferences: None,
             media_hashes: BTreeMap::new(),
             unavailable_media: BTreeSet::new(),
+            task_git_baselines: BTreeMap::new(),
+            completion_commits: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskGitBaseline {
+    pub head: String,
+    /// SHA-256 worktree fingerprints for paths that were already dirty.
+    pub dirty_paths: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionPathProvenance {
+    StasisEdit,
+    ExternalEdit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionPath {
+    pub path: String,
+    pub provenance: CompletionPathProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCompletionCommit {
+    pub commit: String,
+    pub paths: Vec<CompletionPath>,
+    pub reverted_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -182,6 +219,53 @@ struct SnapshotV1 {
     window_preferences: Option<WindowPreferences>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SnapshotV2 {
+    session: TaskSession,
+    task_order: Vec<String>,
+    drafts: BTreeMap<String, (String, String)>,
+    objective: String,
+    reply: String,
+    next_task_number: u64,
+    next_capture_number: u64,
+    execution_receipts: Vec<ExecutionReceipt>,
+    validation_receipts: BTreeMap<String, Value>,
+    validation_fingerprints: BTreeMap<String, (String, Vec<String>)>,
+    preview_fingerprints: BTreeMap<String, (String, bool)>,
+    in_flight: BTreeSet<String>,
+    uncertain_calls: BTreeSet<String>,
+    expanded: BTreeSet<String>,
+    window_preferences: Option<WindowPreferences>,
+    media_hashes: BTreeMap<String, String>,
+    unavailable_media: BTreeSet<String>,
+}
+
+impl From<SnapshotV2> for SessionSnapshot {
+    fn from(old: SnapshotV2) -> Self {
+        Self {
+            session: old.session,
+            task_order: old.task_order,
+            drafts: old.drafts,
+            objective: old.objective,
+            reply: old.reply,
+            next_task_number: old.next_task_number.max(1),
+            next_capture_number: old.next_capture_number.max(1),
+            execution_receipts: old.execution_receipts,
+            validation_receipts: old.validation_receipts,
+            validation_fingerprints: old.validation_fingerprints,
+            preview_fingerprints: old.preview_fingerprints,
+            in_flight: old.in_flight,
+            uncertain_calls: old.uncertain_calls,
+            expanded: old.expanded,
+            window_preferences: old.window_preferences,
+            media_hashes: old.media_hashes,
+            unavailable_media: old.unavailable_media,
+            ..Self::default()
+        }
+    }
+}
+
 impl From<SnapshotV1> for SessionSnapshot {
     fn from(old: SnapshotV1) -> Self {
         Self {
@@ -282,6 +366,13 @@ impl SessionStore {
                     to: CURRENT_VERSION,
                 });
                 serde_json::from_value::<SnapshotV1>(document.snapshot).map(SessionSnapshot::from)
+            }
+            2 => {
+                diagnostics.push(RecoveryDiagnostic::Migrated {
+                    from: 2,
+                    to: CURRENT_VERSION,
+                });
+                serde_json::from_value::<SnapshotV2>(document.snapshot).map(SessionSnapshot::from)
             }
             CURRENT_VERSION => serde_json::from_value(document.snapshot),
             version => return Err(StoreError::UnsupportedVersion(version)),
@@ -475,6 +566,24 @@ fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), StoreError> {
     {
         return Err(corrupt_identity());
     }
+    let queued_ids = snapshot
+        .session
+        .queued_task_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if queued_ids.len() != snapshot.session.queued_task_ids.len()
+        || snapshot.session.queued_task_ids.iter().any(|id| {
+            !snapshot.session.tasks.contains_key(id)
+                || snapshot
+                    .session
+                    .tasks
+                    .get(id)
+                    .is_some_and(|task| task.lifecycle != crate::TaskLifecycle::Queued)
+        })
+    {
+        return Err(corrupt_identity());
+    }
     for (id, task) in &snapshot.session.tasks {
         if id != &task.id
             || task.actions.iter().any(|(id, action)| id != &action.id)
@@ -488,6 +597,11 @@ fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), StoreError> {
         }
     }
     check_limit("tasks", snapshot.session.tasks.len(), MAX_TASKS)?;
+    check_limit(
+        "queued tasks",
+        snapshot.session.queued_task_ids.len(),
+        MAX_TASKS,
+    )?;
     check_limit("task order", snapshot.task_order.len(), MAX_TASKS)?;
     check_limit("drafts", snapshot.drafts.len(), MAX_TASKS)?;
     check_limit(
@@ -515,6 +629,16 @@ fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), StoreError> {
     check_limit("in-flight calls", snapshot.in_flight.len(), MAX_TASKS)?;
     check_limit("uncertain calls", snapshot.uncertain_calls.len(), MAX_TASKS)?;
     check_limit(
+        "task Git baselines",
+        snapshot.task_git_baselines.len(),
+        MAX_TASKS,
+    )?;
+    check_limit(
+        "task completion commits",
+        snapshot.completion_commits.len(),
+        MAX_TASKS,
+    )?;
+    check_limit(
         "unavailable media",
         snapshot.unavailable_media.len(),
         MAX_MEDIA,
@@ -528,6 +652,48 @@ fn validate_snapshot(snapshot: &SessionSnapshot) -> Result<(), StoreError> {
             return Err(StoreError::Corrupt {
                 path: PathBuf::from(STATE_FILE),
                 message: "media fingerprint is not a lowercase SHA-256 value".to_string(),
+            });
+        }
+    }
+    for (task_id, baseline) in &snapshot.task_git_baselines {
+        if !snapshot.session.tasks.contains_key(task_id.as_str()) || !is_git_oid(&baseline.head) {
+            return Err(corrupt_identity());
+        }
+        check_limit(
+            "baseline dirty paths",
+            baseline.dirty_paths.len(),
+            MAX_COMPLETION_PATHS,
+        )?;
+        if baseline
+            .dirty_paths
+            .iter()
+            .any(|(path, state)| path.len() > 4_096 || state.len() > 80)
+        {
+            return Err(StoreError::Corrupt {
+                path: PathBuf::from(STATE_FILE),
+                message: "task Git baseline contains an invalid path or fingerprint".into(),
+            });
+        }
+    }
+    for (task_id, commit) in &snapshot.completion_commits {
+        if !snapshot.session.tasks.contains_key(task_id.as_str())
+            || !is_git_oid(&commit.commit)
+            || commit
+                .reverted_by
+                .as_deref()
+                .is_some_and(|oid| !is_git_oid(oid))
+        {
+            return Err(corrupt_identity());
+        }
+        check_limit(
+            "completion commit paths",
+            commit.paths.len(),
+            MAX_COMPLETION_PATHS,
+        )?;
+        if commit.paths.iter().any(|path| path.path.len() > 4_096) {
+            return Err(StoreError::Corrupt {
+                path: PathBuf::from(STATE_FILE),
+                message: "task completion commit contains an invalid path".into(),
             });
         }
     }
@@ -581,6 +747,10 @@ fn is_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_git_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn is_session_atomic_temporary_file(name: &std::ffi::OsStr) -> bool {
@@ -706,7 +876,7 @@ fn reject_private_fields(value: &Value) -> Result<(), StoreError> {
 
 fn write_pending_marker(path: &Path) -> io::Result<()> {
     let mut marker = File::create(path)?;
-    marker.write_all(b"pending schema 2\n")?;
+    marker.write_all(format!("pending schema {CURRENT_VERSION}\n").as_bytes())?;
     marker.sync_all()
 }
 
@@ -802,6 +972,27 @@ mod tests {
             action_id: "action-1".into(),
             receipt: serde_json::json!({"passed": true}),
         });
+        snapshot.task_git_baselines.insert(
+            "task-1".into(),
+            TaskGitBaseline {
+                head: "0123456789012345678901234567890123456789".into(),
+                dirty_paths: BTreeMap::from([(
+                    "notes.txt".into(),
+                    format!("file:{}", "a".repeat(64)),
+                )]),
+            },
+        );
+        snapshot.completion_commits.insert(
+            "task-1".into(),
+            TaskCompletionCommit {
+                commit: "1234567890123456789012345678901234567890".into(),
+                paths: vec![CompletionPath {
+                    path: "assets/background.png".into(),
+                    provenance: CompletionPathProvenance::ExternalEdit,
+                }],
+                reverted_by: None,
+            },
+        );
         fs::write(project.0.join("generated.png"), b"generated pixels").unwrap();
         let task = snapshot.session.active_task_mut().unwrap();
         task.add_generated_image(
@@ -842,9 +1033,46 @@ mod tests {
         assert_eq!(snapshot.next_task_number, 1);
         assert!(snapshot.in_flight.is_empty());
         assert!(snapshot.uncertain_calls.contains("task-4"));
-        assert!(loaded
-            .diagnostics
-            .contains(&RecoveryDiagnostic::Migrated { from: 1, to: 2 }));
+        assert!(loaded.diagnostics.contains(&RecoveryDiagnostic::Migrated {
+            from: 1,
+            to: CURRENT_VERSION
+        }));
+        assert!(snapshot.task_git_baselines.is_empty());
+        assert!(snapshot.completion_commits.is_empty());
+    }
+
+    #[test]
+    fn migrates_v2_and_supplies_git_completion_fields() {
+        let project = TestProject::new("migration-v2");
+        let store = project.store();
+        store
+            .save(&SessionSnapshot {
+                objective: "v2 draft".into(),
+                ..SessionSnapshot::default()
+            })
+            .unwrap();
+        let path = store.state_dir.join(STATE_FILE);
+        let mut document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        document["version"] = Value::from(2);
+        document["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("task_git_baselines");
+        document["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("completion_commits");
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+        let loaded = store.load().expect("migrate v2");
+        let snapshot = loaded.snapshot.unwrap();
+        assert_eq!(snapshot.objective, "v2 draft");
+        assert!(snapshot.task_git_baselines.is_empty());
+        assert!(snapshot.completion_commits.is_empty());
+        assert!(loaded.diagnostics.contains(&RecoveryDiagnostic::Migrated {
+            from: 2,
+            to: CURRENT_VERSION
+        }));
     }
 
     #[test]
@@ -913,7 +1141,7 @@ mod tests {
 
         assert!(matches!(
             store.load(),
-            Err(StoreError::UnsupportedVersion(3))
+            Err(StoreError::UnsupportedVersion(version)) if version == CURRENT_VERSION + 1
         ));
         assert_eq!(fs::read(path).unwrap(), bytes);
     }

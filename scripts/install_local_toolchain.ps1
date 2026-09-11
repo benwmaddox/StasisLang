@@ -156,6 +156,34 @@ function Copy-RuntimeSources {
   }
 }
 
+function Copy-TrackedTree {
+  param(
+    [Parameter(Mandatory)] [string]$SourceRoot,
+    [Parameter(Mandatory)] [string]$Destination,
+    [Parameter(Mandatory)] [string]$RelativeRoot
+  )
+  $normalizedRoot = $RelativeRoot.Trim('/').Replace('\', '/')
+  $listed = Invoke-Bounded -FilePath "git" -Arguments @(
+    "-C", $SourceRoot, "-c", "core.quotepath=false", "ls-files", "--", $normalizedRoot
+  )
+  $destinationRoot = Join-Path $Destination $normalizedRoot
+  New-Item -ItemType Directory -Force -Path $destinationRoot | Out-Null
+  foreach ($relative in ($listed -split "`r?`n")) {
+    if (-not $relative) { continue }
+    $normalized = $relative.Replace('\', '/')
+    if (-not $normalized.StartsWith("$normalizedRoot/", [StringComparison]::Ordinal)) {
+      throw "tracked staging path escaped ${normalizedRoot}: $relative"
+    }
+    $source = Join-Path $SourceRoot $normalized
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+      throw "tracked staging input is missing: $normalized"
+    }
+    $target = Join-Path $Destination $normalized
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+    Copy-Item -LiteralPath $source -Destination $target -Force
+  }
+}
+
 function Assert-CompleteToolchainStaging {
   param([Parameter(Mandatory)] [string]$Root)
   $required = @(
@@ -353,7 +381,7 @@ try {
   Copy-Item -LiteralPath $runner -Destination (Join-Path $staging "stasis_runner.exe")
   Copy-Item -LiteralPath (Join-Path $repoRoot "src") -Destination (Join-Path $staging "src") -Recurse
   Copy-RuntimeSources -SourceRoot $repoRoot -Destination $staging
-  Copy-Item -LiteralPath (Join-Path $repoRoot "mobile") -Destination (Join-Path $staging "mobile") -Recurse
+  Copy-TrackedTree -SourceRoot $repoRoot -Destination $staging -RelativeRoot "mobile"
   Copy-Item -LiteralPath (Join-Path $repoRoot "tools/windows") -Destination (Join-Path $staging "tools/windows") -Recurse
   Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination (Join-Path $staging "README.md")
   Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination (Join-Path $staging "LICENSE")
