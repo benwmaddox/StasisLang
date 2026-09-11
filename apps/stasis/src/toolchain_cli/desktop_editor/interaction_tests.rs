@@ -261,18 +261,34 @@ fn composer_stays_visible_at_narrow_wide_and_high_dpi_sizes() {
                 ))
                 .unwrap();
         }
+        editor
+            .state
+            .session
+            .append_result("Ready for review")
+            .unwrap();
         let context = egui::Context::default();
         context.set_pixels_per_point(scale);
         let size = egui::vec2(width, height);
         frame(&mut editor, &context, size, vec![]);
         let output = frame(&mut editor, &context, size, vec![]);
-        for label in [
-            "Reply to Stasis AI...",
-            "Attach image",
-            "Send (Ctrl+Enter)",
-            "Success (Ctrl+Shift+D)",
-            "Reject (Ctrl+Esc)",
-        ] {
+        let labels: &[&str] = if width < 760.0 {
+            &[
+                "Reply to Stasis AI...",
+                "Attach",
+                "Send",
+                "Success",
+                "Reject",
+            ]
+        } else {
+            &[
+                "Reply to Stasis AI...",
+                "Attach image",
+                "Send (Ctrl+Enter)",
+                "Success (Ctrl+Shift+D)",
+                "Reject (Ctrl+Esc)",
+            ]
+        };
+        for label in labels {
             let rects = text_rects(&output, label);
             assert_eq!(rects.len(), 1, "{width}x{height}@{scale}: {label}");
             assert!(
@@ -295,50 +311,48 @@ fn compact_and_wide_layouts_expose_named_accessible_controls() {
         let nodes = accesskit_nodes(&output);
 
         assert_eq!(
-            accesskit_node_named(&nodes, "New task objective").role(),
-            egui::accesskit::Role::TextInput
-        );
-        assert_eq!(
             accesskit_node_named(&nodes, "Reply to Stasis AI about Improve player movement").role(),
             egui::accesskit::Role::MultilineTextInput
         );
-        let task_name = if width < 760.0 {
-            "Task: Improve player movement"
-        } else {
-            "Task: Improve player movement. Status: current"
-        };
-        assert_eq!(
-            accesskit_node_named(&nodes, task_name).role(),
-            egui::accesskit::Role::ToggleButton
-        );
-        assert_eq!(
-            accesskit_node_named(
-                &nodes,
+        if width < 760.0 {
+            let node_names = nodes.iter().map(|node| node.name()).collect::<Vec<_>>();
+            assert!(!node_names.contains(&Some("New task objective")));
+            assert!(!node_names.contains(&Some(
                 "Provider and model. Current selection: Provider pending, model pending"
-            )
-            .role(),
-            egui::accesskit::Role::ComboBox
-        );
-
-        let node_names = nodes.iter().map(|node| node.name()).collect::<Vec<_>>();
-        let objective_index = node_names
-            .iter()
-            .position(|name| *name == Some("New task objective"))
-            .unwrap();
-        let create_label = if width < 760.0 {
-            "+ Task"
+            )));
+            assert_eq!(
+                accesskit_node_named(&nodes, "Ctrl+K").role(),
+                egui::accesskit::Role::Button
+            );
+            let mut new_task_editor = self::editor();
+            new_task_editor.state.dispatch(TaskSessionCommand::NewTask);
+            let new_task_context = egui::Context::default();
+            new_task_context.enable_accesskit();
+            let output = frame(&mut new_task_editor, &new_task_context, size, vec![]);
+            let nodes = accesskit_nodes(&output);
+            assert_eq!(
+                accesskit_node_named(&nodes, "New task objective").role(),
+                egui::accesskit::Role::TextInput
+            );
         } else {
-            "+  Create task"
-        };
-        let create_index = node_names
-            .iter()
-            .position(|name| *name == Some(create_label))
-            .unwrap();
-        let task_index = node_names
-            .iter()
-            .position(|name| *name == Some(task_name))
-            .unwrap();
-        assert!(objective_index < create_index && create_index < task_index);
+            let task_name = "Task: Improve player movement. Status: current";
+            assert_eq!(
+                accesskit_node_named(&nodes, "New task objective").role(),
+                egui::accesskit::Role::TextInput
+            );
+            assert_eq!(
+                accesskit_node_named(&nodes, task_name).role(),
+                egui::accesskit::Role::ToggleButton
+            );
+            assert_eq!(
+                accesskit_node_named(
+                    &nodes,
+                    "Provider and model. Current selection: Provider pending, model pending"
+                )
+                .role(),
+                egui::accesskit::Role::ComboBox
+            );
+        }
     }
 }
 
@@ -364,7 +378,7 @@ fn compact_layout_honors_new_task_focus_before_typing() {
 }
 
 #[test]
-fn compact_layout_scrolls_the_active_task_into_view() {
+fn compact_layout_hides_queued_task_chrome_behind_the_task_menu() {
     let mut editor = editor();
     let active_objective = editor
         .state
@@ -384,19 +398,27 @@ fn compact_layout_scrolls_the_active_task_into_view() {
     let context = egui::Context::default();
     let size = egui::vec2(520.0, 700.0);
 
-    for _ in 0..10 {
-        frame(&mut editor, &context, size, vec![]);
-    }
+    frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
     let active = text_rects(&output, &active_objective)
         .into_iter()
-        .find(|rect| rect.max.y < 130.0)
-        .expect("active compact task selector");
+        .find(|rect| rect.max.y < 150.0)
+        .expect("active compact task header");
 
     assert!(
         egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains_rect(active),
-        "active compact selector remains clipped: {active:?}"
+        "active compact header remains clipped: {active:?}"
     );
+    for queued in [
+        "Add an arena tileset",
+        "Polish the pause menu",
+        "Add dash ability",
+    ] {
+        assert!(
+            text_rects(&output, queued).is_empty(),
+            "showed queued task {queued}"
+        );
+    }
 }
 
 #[test]
@@ -513,8 +535,106 @@ fn ready_task_keeps_send_success_and_reject_choices_visible() {
 }
 
 #[test]
-fn header_usage_never_overlaps_provider_at_compact_widths() {
-    for width in [520.0, 680.0, 900.0] {
+fn compact_reply_shows_only_the_transcript_and_four_outcomes() {
+    let mut editor = editor();
+    let reply = "Implemented dash movement and verified cooldown boundaries without changing deterministic collision behavior.";
+    let task = editor.state.session.active_task_mut().unwrap();
+    task.append_result(reply).unwrap();
+    task.begin_focused_tests().unwrap();
+    task.finish_focused_tests(stasis_ai::FocusedTestResult::passed(
+        "Dash distance and cooldown boundaries passed.",
+    ))
+    .unwrap();
+    editor.validation_fingerprints.insert(
+        "task-1".into(),
+        ("fixture-source".into(), vec!["focused".into()]),
+    );
+
+    let context = egui::Context::default();
+    let size = egui::vec2(366.0, 900.0);
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+
+    for label in ["Attach", "Send", "Success", "Reject"] {
+        assert_eq!(text_rects(&output, label).len(), 1, "missing {label}");
+    }
+    for hidden in [
+        "New task objective",
+        "Tile Editor + Game",
+        "Export chat as HTML",
+        "Usage  0 tokens",
+        "Success (Ctrl+Shift+D)",
+    ] {
+        assert!(text_rects(&output, hidden).is_empty(), "showed {hidden}");
+    }
+    assert_eq!(text_rects(&output, "Stasis AI").len(), 1);
+    assert_eq!(text_rects(&output, "Applied / tests passed").len(), 1);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+    assert!(
+        screen.contains_rect(text_rects(&output, reply)[0]),
+        "compact transcript text must wrap inside the viewport"
+    );
+    let buttons =
+        ["Attach", "Send", "Success", "Reject"].map(|label| text_rects(&output, label)[0]);
+    for pair in buttons.windows(2) {
+        assert!(
+            pair[0].max.x <= pair[1].min.x,
+            "compact outcome buttons overlap"
+        );
+    }
+}
+
+#[test]
+fn compact_running_request_replaces_outcomes_with_stop() {
+    let mut editor = editor();
+    let (release, waiting) = mpsc::channel();
+    let waiting = Mutex::new(waiting);
+    editor.controller = TaskController::new(move |_, _| {
+        waiting
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        Ok(ProviderReply::new("late"))
+    });
+    editor
+        .controller
+        .send(&mut editor.state.session, &TaskId::new("task-1"))
+        .unwrap();
+
+    let context = egui::Context::default();
+    let size = egui::vec2(366.0, 900.0);
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+    assert_eq!(text_rects(&output, "Stop (Esc)").len(), 1);
+    for hidden in ["Attach", "Send", "Success", "Reject"] {
+        assert!(text_rects(&output, hidden).is_empty(), "showed {hidden}");
+    }
+
+    frame(
+        &mut editor,
+        &context,
+        size,
+        vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)],
+    );
+    assert_eq!(
+        editor.state.session.active_task().unwrap().lifecycle,
+        TaskLifecycle::Active
+    );
+    assert_eq!(
+        editor
+            .controller
+            .snapshot(&TaskId::new("task-1"))
+            .unwrap()
+            .state,
+        stasis_ai::TaskRequestState::Canceled
+    );
+    release.send(()).unwrap();
+}
+
+#[test]
+fn wide_header_usage_never_overlaps_provider() {
+    for width in [800.0, 900.0] {
         let mut editor = editor();
         let task = editor.state.session.active_task_mut().unwrap();
         task.set_provider_state(ProviderState {
@@ -554,29 +674,30 @@ fn compact_chrome_reserves_space_for_notices_task_creation_and_status() {
         frame(&mut editor, &context, size, vec![]);
         let output = frame(&mut editor, &context, size, vec![]);
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        let tile = text_rects(&output, "Tile Editor + Game")[0];
+        let stasis = text_rects(&output, "Stasis")[0];
         let notice_rect = text_rects(&output, notice)[0];
-        let objective_input = text_rects(&output, "New task objective")[0];
-        let create = text_rects(&output, "+ Task")[0];
-        let status = text_rects(&output, "not tested")[0];
         let title = visible_text_starting_with(&output, "Make the paddle")
             .into_iter()
             .map(|(_, rect)| rect)
-            .find(|rect| (rect.center().y - status.center().y).abs() < 20.0)
-            .expect("truncated task header title");
+            .next()
+            .expect("compact task header title");
 
         assert!(
-            notice_rect.min.y >= tile.max.y,
+            notice_rect.min.y >= stasis.max.y,
             "top rows overlap at {width}"
         );
+        assert!(screen.contains_rect(title));
+        assert!(text_rects(&output, "New task objective").is_empty());
+        assert!(text_rects(&output, "Provider: Codex / gpt-5.6-sol  v").is_empty());
+
+        editor.state.dispatch(TaskSessionCommand::NewTask);
+        frame(&mut editor, &context, size, vec![]);
+        let output = frame(&mut editor, &context, size, vec![]);
+        let objective_input = text_rects(&output, "New task objective")[0];
+        let create = text_rects(&output, "+ Task")[0];
         assert!(screen.contains_rect(objective_input));
         assert!(screen.contains_rect(create));
         assert!(objective_input.max.x < create.min.x);
-        assert!(
-            title.max.x < status.min.x,
-            "header overlaps at {width}: {title:?} / {status:?}"
-        );
-        assert!(screen.contains_rect(status));
         editor.state.objective = "Create from the compact header".into();
         click(&mut editor, &context, size, create.center());
         assert_eq!(
@@ -677,9 +798,9 @@ fn disconnected_active_task_keeps_simple_outcomes_visible() {
     frame(&mut editor, &context, size, vec![]);
     let output = frame(&mut editor, &context, size, vec![]);
     assert!(text_rects(&output, "Reconnect").is_empty());
-    assert_eq!(text_rects(&output, "Send (Ctrl+Enter)").len(), 1);
-    assert_eq!(text_rects(&output, "Success (Ctrl+Shift+D)").len(), 1);
-    assert_eq!(text_rects(&output, "Reject (Ctrl+Esc)").len(), 1);
+    assert_eq!(text_rects(&output, "Send").len(), 1);
+    assert!(text_rects(&output, "Success").is_empty());
+    assert_eq!(text_rects(&output, "Reject").len(), 1);
 
     frame(
         &mut editor,
@@ -736,6 +857,42 @@ fn queue_gate_moves_and_starts_only_the_next_task() {
     let started = editor.state.session.task("task-3").unwrap();
     assert_eq!(started.thread.len(), 1);
     assert_eq!(started.thread[0].text, "Third task");
+}
+
+#[test]
+fn compact_queue_gate_shows_only_the_next_decision() {
+    let mut editor = editor();
+    for objective in ["Add an arena tileset", "Polish the pause menu"] {
+        editor.state.objective = objective.into();
+        editor.state.create_task().unwrap();
+    }
+    editor
+        .state
+        .session
+        .task_mut("task-1")
+        .unwrap()
+        .cancel()
+        .unwrap();
+    editor
+        .state
+        .session
+        .select_queue_gate_after(&TaskId::new("task-1"));
+
+    let context = egui::Context::default();
+    let size = egui::vec2(366.0, 900.0);
+    frame(&mut editor, &context, size, vec![]);
+    let output = frame(&mut editor, &context, size, vec![]);
+    assert_eq!(text_rects(&output, "Next task").len(), 1);
+    assert_eq!(text_rects(&output, "Start (Enter)").len(), 1);
+    assert_eq!(text_rects(&output, "Back (B)").len(), 1);
+    assert_eq!(text_rects(&output, "Reject (Del)").len(), 1);
+    assert_eq!(
+        text_rects(&output, "After this: Polish the pause menu").len(),
+        1
+    );
+    for hidden in ["New task objective", "Reply to Stasis AI...", "Provider"] {
+        assert!(text_rects(&output, hidden).is_empty(), "showed {hidden}");
+    }
 }
 
 #[test]
