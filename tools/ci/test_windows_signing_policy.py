@@ -257,7 +257,8 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             artifact = root / "artifact.exe"
             artifact.write_bytes(b"fixture")
             expected_output = (
-                "SignTool Error: A certificate chain processed, but terminated in a root certificate "
+                "SignTool Error: A certificate chain processed, but terminated in a root\r\n"
+                "certificate "
                 "which is not trusted by the trust provider. (0x800B0109)\r\n"
                 "Number of warnings: 0\r\n"
                 "Number of errors: 1\r\n"

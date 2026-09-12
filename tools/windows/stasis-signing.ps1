@@ -90,7 +90,7 @@ function Test-PinnedSelfSignedVerificationFailure([int] $ExitCode, [string] $Out
     if (-not (Test-ProductionMode) -or $env:STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY -ne '1') { return $false }
     if ($ExitCode -ne 1) { return $false }
     if ($Output -match '(?i)No signature found|TRUST_E_BAD_DIGEST|0x80096010|digital signature[^\r\n]*not valid') { return $false }
-    if ($Output -notmatch '(?i)0x800B0109|terminated in a root certificate which is not trusted by the trust provider') { return $false }
+    if ($Output -notmatch '(?i)0x800B0109|terminated in a root\s+certificate which is not trusted by the trust provider') { return $false }
     if ($Output -notmatch '(?im)^\s*Number of errors:\s*1\s*$') { return $false }
     if ($Output -notmatch '(?im)^\s*Number of warnings:\s*0\s*$') { return $false }
     return $true
