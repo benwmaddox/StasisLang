@@ -1,6 +1,7 @@
-# Compact graphical AI editor catalog
+# Compact AI source catalog
 
-The graphical `stasis editor` sends a byte-bounded project index as indented text.
+The graphical `stasis editor` and live TUI use one byte-bounded project index and
+selector implementation. The index is indented text.
 Every project file has a short ID and counts for imports, globals, structs,
 functions, and tests. Function and struct names use one line each. Import and
 global names, source bodies, signatures, and canonical edit targets load on request.
@@ -28,9 +29,11 @@ for duplicate names and edits.
 Declarations marked `@internal`, along with declarations from internal source files,
 are excluded from both the initial catalog and its on-demand source snapshot.
 
-The graphical editor's initial frame is line-oriented text. The OpenRouter HTTP
-envelope and response schema remain JSON. The live/TUI adapter retains its existing
-JSONL request format.
+Both AI surfaces use the compact line-oriented request frame. The OpenRouter HTTP
+envelope and response schema remain JSON. Their edit execution stays surface-specific:
+the graphical editor returns one proposal for approval, while the TUI applies one
+contiguous atomic write batch through the live runtime. Both resolve reads through
+the same catalog selectors and canonical source targets.
 
 ## Measured acceptance
 

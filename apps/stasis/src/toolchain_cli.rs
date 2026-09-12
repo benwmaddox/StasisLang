@@ -62,6 +62,7 @@ mod gauntlet;
 mod headless;
 mod live_tui;
 mod record;
+mod source_catalog;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;

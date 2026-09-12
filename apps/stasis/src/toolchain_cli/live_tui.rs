@@ -13,9 +13,8 @@ use serde_json::Value;
 use stasis_ai::action_id_for_tool;
 use stasis_ai::{
     asset_tool_specs, gauntlet_tool_specs, live_tool_specs, offered_action, project_ai_tool_specs,
-    run_agent, run_agent_with_profile, runtime_tool_specs, AgentEvent, AgentProfile,
-    ConfiguredProvider, ProviderConfig, ToolCall, ToolExecutor, ToolObservation,
-    DEFAULT_REASONING_EFFORT,
+    run_agent_with_profile, runtime_tool_specs, AgentEvent, AgentProfile, ConfiguredProvider,
+    ProviderConfig, ToolCall, ToolExecutor, ToolObservation, DEFAULT_REASONING_EFFORT,
 };
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::parser::{
@@ -78,7 +77,7 @@ pub(super) fn run_scripted_ai_with_cancel(
         client,
         project_root,
         prompt,
-        AgentProfile::default(),
+        compact_live_agent_profile(),
         Vec::new(),
         false,
         false,
@@ -101,7 +100,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
         client,
         project_root,
         prompt,
-        AgentProfile::default(),
+        compact_live_agent_profile(),
         Vec::new(),
         false,
         true,
@@ -112,6 +111,13 @@ pub(super) fn run_scripted_project_ai_with_cancel(
     )
     .map_err(|error| error.message)?;
     Ok((outcome.summary, outcome.trace, outcome.usage_trace))
+}
+
+fn compact_live_agent_profile() -> AgentProfile {
+    AgentProfile {
+        compact_request: true,
+        ..AgentProfile::default()
+    }
 }
 
 pub(super) struct ScriptedAiOutcome {
@@ -339,6 +345,17 @@ fn load_ai_initial_context(
     user_prompt: &str,
     canceled: &AtomicBool,
 ) -> Result<Value, String> {
+    let source_catalog = if project_root.join("stasis.json").is_file() {
+        let source_context = super::desktop_source_context(project_root)?;
+        let catalog = super::source_catalog::render(&source_context)?;
+        for item in &source_context {
+            tools.register_symbol(&item["target"]);
+        }
+        tools.source_context = source_context;
+        Some(catalog)
+    } else {
+        None
+    };
     let response = tools.request(
         LiveCommand::Symbols {
             query: None,
@@ -395,6 +412,9 @@ fn load_ai_initial_context(
     tools.stdlib_root = stdlib_root;
     tools.test_project_root = Some(project_root.to_path_buf());
     let mut context = ai_initial_context(project_hints);
+    if let Some(source_catalog) = source_catalog {
+        context["catalog"] = Value::String(source_catalog);
+    }
     if !resolved_targets.is_empty() {
         // Prefetched definitions replace discovery leads, not the discovery tools.
         context.as_object_mut().unwrap().remove("start");
@@ -2350,9 +2370,10 @@ impl LiveTui {
                 load_ai_initial_context(&mut tools, &project_root, &prompt, &worker_canceled)
                     .and_then(|initial_context| {
                         let _ = progress.send(AiUiEvent::InitialContext(initial_context.clone()));
-                        run_agent(
+                        run_agent_with_profile(
                             &mut provider,
                             &mut tools,
+                            &compact_live_agent_profile(),
                             &prompt,
                             initial_context,
                             live_tool_specs(),
@@ -3062,6 +3083,7 @@ struct LiveAiTools {
     imagegen_committed: bool,
     finish_requested: bool,
     current_write_passed: bool,
+    source_context: Vec<Value>,
     symbol_selectors: BTreeMap<String, LiveSymbolTarget>,
     required_completion_targets: Vec<LiveSymbolTarget>,
     completion_source_rules: Vec<CompletionSourceRule>,
@@ -3092,6 +3114,7 @@ impl LiveAiTools {
             imagegen_committed: false,
             finish_requested: false,
             current_write_passed: false,
+            source_context: Vec::new(),
             symbol_selectors: BTreeMap::new(),
             required_completion_targets: Vec::new(),
             completion_source_rules: Vec::new(),
@@ -3555,6 +3578,16 @@ impl LiveAiTools {
 
     fn execute_read(&mut self, call: &ToolCall, canceled: &AtomicBool) -> ToolObservation {
         let args = call.args.as_object().expect("validated tool args");
+        if call.tool == "inspect_source" {
+            return match super::source_catalog::inspect(
+                &self.source_context,
+                &call.args,
+                stasis_ai::MAX_OBSERVATION_BYTES,
+            ) {
+                Ok(value) => ToolObservation::result(&call.tool, value),
+                Err(error) => ToolObservation::error(&call.tool, error),
+            };
+        }
         if call.tool == "run_tests" {
             if self.current_write_passed
                 && self.last_write.as_ref().is_some_and(|response| {
@@ -6123,6 +6156,38 @@ mod tests {
                 .name,
             "update_enemies"
         );
+    }
+
+    #[test]
+    fn live_ai_uses_the_shared_compact_source_discovery_contract() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.source_context = vec![json!({
+            "target": {
+                "file": "src/main.stasis",
+                "kind": "function",
+                "name": "main",
+                "symbol_id": "canonical-main"
+            },
+            "source": "function main(): i32 { return 0; }"
+        })];
+        let observation = tools.execute_read(
+            &ToolCall {
+                tool: "inspect_source".into(),
+                args: json!({"selector":"f0:main"}),
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert!(observation.error.is_none());
+        assert_eq!(
+            observation.result.unwrap()["target"]["symbol_id"],
+            "canonical-main"
+        );
+        assert!(compact_live_agent_profile().compact_request);
+        assert!(live_tool_specs()
+            .iter()
+            .any(|spec| spec.tool == "inspect_source"));
     }
 
     #[test]

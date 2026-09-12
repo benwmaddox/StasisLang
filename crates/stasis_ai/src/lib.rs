@@ -1587,6 +1587,7 @@ pub fn live_tool_specs() -> Vec<ToolSpec> {
             tool.purpose = "Use the exact ID from read_symbol or resolved_targets. Writes replace and test atomically; additions use add_symbol.".into();
         }
     }
+    tools.push(source_inspection_tool_spec());
     tools.push(spec(
         "add_symbol",
         "Add a new symbol in the same atomic batch as related replacements and tests.",
@@ -1600,6 +1601,15 @@ pub fn live_tool_specs() -> Vec<ToolSpec> {
         &[],
     ));
     tools
+}
+
+pub fn source_inspection_tool_spec() -> ToolSpec {
+    spec(
+        "inspect_source",
+        "Read @N, fN:name, fN:i/g/t; search with ?terms or ?+terms for source. Batch independent calls.",
+        &["selector"],
+        &[],
+    )
 }
 
 pub fn action_id_for_tool(tool: &str) -> String {
@@ -3120,8 +3130,14 @@ mod tests {
         assert!(live.len() < workshop.len());
         assert!(live
             .iter()
-            .filter(|tool| !matches!(tool.tool.as_str(), "get_capability" | "add_symbol"))
+            .filter(|tool| {
+                !matches!(
+                    tool.tool.as_str(),
+                    "get_capability" | "add_symbol" | "inspect_source"
+                )
+            })
             .all(|tool| workshop.iter().any(|candidate| candidate.tool == tool.tool)));
+        assert!(live.iter().any(|tool| tool.tool == "inspect_source"));
         assert!(live.iter().any(|tool| tool.tool == "write_symbol"));
         assert!(live.iter().any(|tool| tool.tool == "find_references"));
         assert!(live.iter().any(|tool| tool.tool == "get_stdlib_api"));

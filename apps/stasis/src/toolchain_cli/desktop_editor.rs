@@ -8,10 +8,10 @@ mod persistence;
 #[cfg(test)]
 mod request_image_tests;
 mod semantic_diff;
-mod source_catalog;
 #[cfg(test)]
 mod source_context_tests;
 
+use super::source_catalog;
 use host_progress::{HostProgress, HostProgressState};
 use stasis_ai::task_controller::{ProgressReporter, ProgressStage, TaskControllerConfig};
 mod semantic_revisions;
@@ -34,9 +34,10 @@ use stasis_ai::task_session::{
     TaskSessionCommand, ThreadEntryKind, UploadState, ValidationStatus,
 };
 use stasis_ai::{
-    action_id_for_tool, run_agent_with_profile, AgentEvent, AgentProfile, ProviderActionProposal,
-    ProviderConfig, ProviderReply, ProviderRequest, ProviderUsage, TaskController,
-    TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation, ToolSpec,
+    action_id_for_tool, run_agent_with_profile, source_inspection_tool_spec, AgentEvent,
+    AgentProfile, ProviderActionProposal, ProviderConfig, ProviderReply, ProviderRequest,
+    ProviderUsage, TaskController, TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation,
+    ToolSpec,
 };
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
 use std::collections::{BTreeMap, BTreeSet};
@@ -171,90 +172,7 @@ impl ProposalTools {
     }
 
     fn inspect_source(&self, args: &Value) -> Result<Value, String> {
-        let selector = args
-            .get("selector")
-            .or_else(|| args.get("symbol_id"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| "selector must be a string".to_string())?;
-        if let Some(query) = selector.strip_prefix("?+") {
-            return source_catalog::search(&self.sources, query, true);
-        }
-        if let Some(query) = selector.strip_prefix('?') {
-            return source_catalog::search(&self.sources, query, false);
-        }
-        if let Some(rest) = selector.strip_prefix('f') {
-            if let Some((file_id, name)) = rest.split_once(':') {
-                let file_id = file_id
-                    .parse::<usize>()
-                    .map_err(|_| "invalid file selector")?;
-                let file = source_catalog::file_for_id(&self.sources, file_id)
-                    .ok_or_else(|| format!("Unknown source file: f{file_id}"))?;
-                if name == "t" {
-                    return self
-                        .sources
-                        .iter()
-                        .enumerate()
-                        .find(|(_, item)| {
-                            item["target"]["file"] == file && item["target"]["kind"] == "test"
-                        })
-                        .and_then(|(index, _)| source_catalog::test_names(&self.sources, index))
-                        .ok_or_else(|| format!("Source file f{file_id} has no tests"));
-                }
-                let kind = match name {
-                    "i" => Some("imports"),
-                    "g" => Some("globals"),
-                    _ => None,
-                };
-                let matches = if let Some(kind) = kind {
-                    self.sources
-                        .iter()
-                        .filter(|item| {
-                            item["target"]["file"] == file && item["target"]["kind"] == kind
-                        })
-                        .cloned()
-                        .collect()
-                } else {
-                    source_catalog::find_by_file_name(&self.sources, file_id, name)
-                };
-                return match matches.as_slice() {
-                    [] => Err(format!("Unknown source selector: {selector}")),
-                    [item] => Ok(item.clone()),
-                    _ => Ok(Value::Array(matches)),
-                };
-            }
-        }
-        let symbol_id = selector
-            .strip_prefix('@')
-            .map(|index| format!("s{index}"))
-            .unwrap_or_else(|| selector.to_string());
-        let test_catalog = symbol_id
-            .strip_prefix('t')
-            .and_then(|index| index.parse::<usize>().ok())
-            .filter(|index| symbol_id == format!("t{index}"))
-            .and_then(|index| source_catalog::test_names(&self.sources, index));
-        let item = self
-            .sources
-            .iter()
-            .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id.as_str()))
-            .or(test_catalog.as_ref())
-            .or_else(|| {
-                let index = symbol_id.strip_prefix('s')?.parse::<usize>().ok()?;
-                if symbol_id != format!("s{index}") {
-                    return None;
-                }
-                self.sources.get(index)
-            })
-            .ok_or_else(|| format!("Unknown source symbol: {symbol_id}"))?;
-        if serde_json::to_vec(item)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_SOURCE_CONTEXT_BYTES
-        {
-            return Err(format!(
-                "Source symbol {symbol_id} exceeds the 256 KiB read limit."
-            ));
-        }
-        Ok(item.clone())
+        source_catalog::inspect(&self.sources, args, MAX_SOURCE_CONTEXT_BYTES)
     }
 
     #[cfg(test)]
@@ -349,13 +267,7 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
         optional_args: Vec::new(),
     })
     .collect();
-    specs.push(ToolSpec {
-        tool: "inspect_source".to_string(),
-        action_id: action_id_for_tool("inspect_source"),
-        purpose: "Read @N, fN:name, fN:i/g/t; search with ?terms or ?+terms for source. Batch independent calls.".to_string(),
-        required_args: vec!["selector".to_string()],
-        optional_args: Vec::new(),
-    });
+    specs.push(source_inspection_tool_spec());
     specs
 }
 
