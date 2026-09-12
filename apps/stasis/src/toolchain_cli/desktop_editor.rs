@@ -2411,7 +2411,7 @@ impl DesktopEditor {
         }
         let Some(artifact) = self.generated_images.get(&task_id) else {
             self.state.notice =
-                Some("Generated image bytes are no longer available; generate again.".into());
+                Some("Generated image bytes are unavailable; generate again.".into());
             return;
         };
         if artifact.id != image_id {
