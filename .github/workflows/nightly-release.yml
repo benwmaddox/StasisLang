@@ -184,6 +184,8 @@ jobs:
       STASIS_BUILD_TARGET: ${{ matrix.rust_target }}
       STASIS_SIGNING_PFX_BASE64: ${{ secrets.STASIS_SIGNING_PFX_BASE64 }}
       STASIS_SIGNING_PFX_PASSWORD: ${{ secrets.STASIS_SIGNING_PFX_PASSWORD }}
+      STASIS_SIGNING_PROFILE: production
+      STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY: '1'
     steps:
       - uses: actions/checkout@v7
 
@@ -290,7 +292,6 @@ jobs:
           try {
             [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:STASIS_SIGNING_PFX_BASE64))
             $env:STASIS_SIGNING_CERTIFICATE = $certificate
-            $env:STASIS_SIGNING_PROFILE = "production"
             $env:STASIS_SIGNING_TIMESTAMP_URLS = "http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com"
             $env:STASIS_SIGNING_TIMEOUT_SECONDS = "30"
             function Invoke-BoundedPowerShellCommand([string] $label, [string] $script, [string[]] $arguments) {
@@ -335,12 +336,10 @@ jobs:
               "runtime/build_ci/bin/Release/stasis_graphics.dll",
               "runtime/build_ci/bin/Release/stasis_runner.exe"
             )
-            Invoke-BoundedSigningCommand sign $artifacts[0]
-            Invoke-BoundedPowerShellCommand "temporary signer trust for $($artifacts[0])" 'tools/windows/stasis-signing-trust.ps1' @(
+            Invoke-BoundedPowerShellCommand "pinned signer identity validation" 'tools/windows/stasis-signing-identity.ps1' @(
               '-Certificate', $certificate, '-ExpectedThumbprint', $expectedThumbprint
             )
-            Invoke-BoundedSigningCommand verify $artifacts[0]
-            $artifacts | Select-Object -Skip 1 | ForEach-Object {
+            $artifacts | ForEach-Object {
               Invoke-BoundedSigningCommand sign $_
               Invoke-BoundedSigningCommand verify $_
             }
@@ -691,14 +690,6 @@ jobs:
           python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ios" --expect-runtime-sources
           python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-android" --expect-runtime-sources
           if [[ "${RUNNER_OS}" == "macOS" ]]; then python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-ios" --expect-runtime-sources; fi
-
-      - name: Remove nightly signing root trust
-        if: always() && runner.os == 'Windows'
-        timeout-minutes: 2
-        shell: pwsh
-        run: |
-          $thumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"
-          & 'tools/windows/stasis-signing-trust.ps1' -Mode remove -ExpectedThumbprint $thumbprint
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
