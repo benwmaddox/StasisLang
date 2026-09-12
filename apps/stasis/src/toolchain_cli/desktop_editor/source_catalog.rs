@@ -15,6 +15,7 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
     let mut catalog = String::new();
     for (file, items) in files {
         writeln!(catalog, "{}", file.escape_debug()).unwrap();
+        let mut last_kind = None;
         let tests = items
             .iter()
             .filter(|(_, item)| item["target"]["kind"] == "test")
@@ -30,7 +31,7 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
                     if imports.is_empty() {
                         continue;
                     }
-                    writeln!(catalog, "  s{index} imports").unwrap();
+                    writeln!(catalog, "  imports s{index}").unwrap();
                     for import in imports {
                         writeln!(catalog, "    {}", import.path.escape_debug()).unwrap();
                     }
@@ -46,14 +47,21 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
                         .map(|name| name.escape_debug().to_string())
                         .collect::<Vec<_>>();
                     if !names.is_empty() {
-                        writeln!(catalog, "  s{index} globals/constants {}", names.join(", "))
-                            .unwrap();
+                        writeln!(catalog, "  globals/constants s{index}").unwrap();
+                        for name in names {
+                            writeln!(catalog, "    {name}").unwrap();
+                        }
                     }
                 }
-                _ => {
+                "struct" | "function" => {
                     let name = target["name"].as_str().ok_or("Missing source name")?;
-                    writeln!(catalog, "  s{index} {kind} {}", name.escape_debug()).unwrap();
+                    if last_kind != Some(kind) {
+                        writeln!(catalog, "  {kind}s").unwrap();
+                        last_kind = Some(kind);
+                    }
+                    writeln!(catalog, "    s{index} {}", name.escape_debug()).unwrap();
                 }
+                _ => return Err(format!("Unsupported source kind: {kind}")),
             }
             if catalog.len() > MAX_SOURCE_CONTEXT_BYTES {
                 return Err("Project symbol catalog exceeds 256 KiB; narrow the project before requesting edits.".into());
@@ -62,7 +70,7 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
         if let Some((index, _)) = tests.first() {
             writeln!(
                 catalog,
-                "  t{index} tests ({}; read to list names)",
+                "  tests t{index} ({}; read to list names)",
                 tests.len()
             )
             .unwrap();

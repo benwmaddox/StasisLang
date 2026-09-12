@@ -42,10 +42,14 @@ fn compact_catalog_lists_imports_and_names_but_loads_details_on_demand() {
     };
     let catalog = tools.source_catalog().unwrap();
     let text = catalog.as_str().unwrap();
-    assert!(text.contains("imports\n    helper.stasis\n"));
-    assert!(text.contains("globals/constants player, LIMIT\n"));
-    assert!(text.contains("struct Player\n"));
-    assert!(text.contains("function main\n"));
+    assert!(text.contains("  imports s"));
+    assert!(text.contains("    helper.stasis\n"));
+    assert!(text.contains("  globals/constants s"));
+    assert!(text.contains("    player\n    LIMIT\n"));
+    assert!(text.contains("  structs\n    s"));
+    assert!(text.contains(" Player\n"));
+    assert!(text.contains("  functions\n    s"));
+    assert!(text.contains(" main\n"));
     assert!(!text.contains("hp"));
     assert!(!text.contains("signature"));
     assert!(!text.contains("symbol_id"));
@@ -74,7 +78,7 @@ fn compact_read_ids_disambiguate_duplicate_names_and_reject_invalid_ids() {
     };
     assert_eq!(
         tools.source_catalog().unwrap(),
-        "src/main.stasis\n  s0 function same\n  s1 function same\n"
+        "src/main.stasis\n  functions\n    s0 same\n    s1 same\n"
     );
     assert_eq!(
         tools
@@ -102,7 +106,7 @@ fn compact_catalog_escapes_newlines_in_names_without_creating_entries() {
         ..ProposalTools::default()
     };
     let catalog = tools.source_catalog().unwrap();
-    assert_eq!(catalog.as_str().unwrap().lines().count(), 2);
+    assert_eq!(catalog.as_str().unwrap().lines().count(), 3);
     assert!(catalog.as_str().unwrap().contains("first\\n"));
 }
 
@@ -126,7 +130,7 @@ fn compact_catalog_defers_test_names_and_preserves_exact_read_targets() {
     };
     assert_eq!(
         tools.source_catalog().unwrap(),
-        "src/main.stasis\n  t0 tests (2; read to list names)\n"
+        "src/main.stasis\n  tests t0 (2; read to list names)\n"
     );
     let names = tools
         .read_source_symbol(&json!({"symbol_id":"t0"}))
@@ -158,7 +162,7 @@ fn source_context_catalog_bounds_large_snapshot_without_discarding_source() {
     let catalog = tools.source_catalog().unwrap();
     assert_eq!(
         catalog,
-        "src/main.stasis\n  s0 function first\n  s1 function second\n"
+        "src/main.stasis\n  functions\n    s0 first\n    s1 second\n"
     );
     assert!(serde_json::to_vec(&catalog).unwrap().len() < 1024);
     let observations = tools.execute(

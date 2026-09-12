@@ -1,21 +1,25 @@
 # Compact graphical AI editor catalog
 
 The graphical `stasis editor` sends its initial project catalog as indented text,
-not an array of repeated JSON objects. Files contain import paths, global and
-constant names, struct names, and function names. Signatures, source bodies, and
+not an array of repeated JSON objects. Each import, global, constant, struct, and
+function name occupies its own line beneath its file and category. Signatures, source bodies, and
 canonical edit targets are loaded on request. Test descriptions are represented
 by a per-file count until requested.
 
 ```text
 src/main.stasis
-  s0 imports
+  imports s0
     maze.stasis
-  s1 globals/constants phase, level_index
-  s2 struct Player
-  s3 function main
-  s4 function tick
+  globals/constants s1
+    phase
+    level_index
+  structs
+    s2 Player
+  functions
+    s3 main
+    s4 tick
 tests/maze.test.stasis
-  t7 tests (88; read to list names)
+  tests t7 (88; read to list names)
 ```
 
 The labels are local to the immutable source snapshot for one editor request.
@@ -38,9 +42,9 @@ snapshot. No external AI call or project mutation occurred.
 
 | UTF-8 bytes | Previous | Compact |
 | --- | ---: | ---: |
-| Project catalog | 73,200 | 14,973 |
-| Initial model message | 75,813 | 18,195 |
-| Complete HTTP body, including response schema | 86,442 | 22,275 |
+| Project catalog | 73,200 | 14,551 |
+| Initial model message | 75,813 | 18,071 |
+| Complete HTTP body, including response schema | 86,442 | 22,449 |
 
 The complete request passes a strict **25,000-byte** budget. These are byte counts,
 not token estimates. All 300 source items remain available for on-demand reads;

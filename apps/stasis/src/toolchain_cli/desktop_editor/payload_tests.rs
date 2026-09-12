@@ -139,6 +139,13 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
         std::fs::create_dir_all(&output).unwrap();
         std::fs::write(output.join("http-body.exact.json"), &bytes).unwrap();
         std::fs::write(output.join("model-message.exact.jsonl"), content).unwrap();
+        std::fs::write(
+            output.join("catalog.txt"),
+            header["initial_context"]["editable_symbols"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
     }
     eprintln!(
         "desktop HTTP body={} bytes; model message={} bytes; symbols={}",
