@@ -2,10 +2,13 @@ mod chat_export;
 mod git_completion;
 mod host_progress;
 mod image_attachments;
+#[cfg(test)]
+mod payload_tests;
 mod persistence;
 #[cfg(test)]
 mod request_image_tests;
 mod semantic_diff;
+mod source_catalog;
 #[cfg(test)]
 mod source_context_tests;
 
@@ -164,20 +167,7 @@ impl ProposalTools {
     }
 
     fn source_catalog(&self) -> Result<Value, String> {
-        let catalog = Value::Array(
-            self.sources
-                .iter()
-                .map(|item| item["target"].clone())
-                .collect(),
-        );
-        if serde_json::to_vec(&catalog)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_SOURCE_CONTEXT_BYTES
-        {
-            return Err("Project symbol catalog exceeds 256 KiB; narrow the project before requesting edits.".into());
-        }
-        Ok(catalog)
+        source_catalog::render(&self.sources).map(Value::String)
     }
 
     fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
@@ -185,10 +175,23 @@ impl ProposalTools {
             .get("symbol_id")
             .and_then(Value::as_str)
             .ok_or_else(|| "symbol_id must be a string".to_string())?;
+        let test_catalog = symbol_id
+            .strip_prefix('t')
+            .and_then(|index| index.parse::<usize>().ok())
+            .filter(|index| symbol_id == format!("t{index}"))
+            .and_then(|index| source_catalog::test_names(&self.sources, index));
         let item = self
             .sources
             .iter()
             .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id))
+            .or(test_catalog.as_ref())
+            .or_else(|| {
+                let index = symbol_id.strip_prefix('s')?.parse::<usize>().ok()?;
+                if symbol_id != format!("s{index}") {
+                    return None;
+                }
+                self.sources.get(index)
+            })
             .ok_or_else(|| format!("Unknown source symbol: {symbol_id}"))?;
         if serde_json::to_vec(item)
             .map_err(|error| error.to_string())?
@@ -290,7 +293,7 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
     specs.push(ToolSpec {
         tool: "read_source_symbol".to_string(),
         action_id: action_id_for_tool("read_source_symbol"),
-        purpose: "Read exact source and target metadata from the request's immutable source snapshot before proposing edits. Calls for multiple symbols can be batched.".to_string(),
+        purpose: "Read an sN ID for full source and canonical edit targets, or a tN ID for test names/read IDs. Canonical symbol_id also accepted. Batch independent reads.".to_string(),
         required_args: vec!["symbol_id".to_string()],
         optional_args: Vec::new(),
     });
@@ -517,9 +520,27 @@ fn run_reply_provider_observed_with_progress(
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
     progress: Option<ProgressReporter>,
-    mut observe_usage: impl FnMut(&Value),
+    observe_usage: impl FnMut(&Value),
 ) -> Result<ProviderReply, String> {
     let config = selected_provider_config(request.selected_provider, &project_root)?;
+    run_reply_provider_with_config(
+        request,
+        canceled,
+        project_root,
+        progress,
+        config,
+        observe_usage,
+    )
+}
+
+fn run_reply_provider_with_config(
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    project_root: PathBuf,
+    progress: Option<ProgressReporter>,
+    config: ProviderConfig,
+    mut observe_usage: impl FnMut(&Value),
+) -> Result<ProviderReply, String> {
     let reasoning_effort = effective_reasoning_effort(&config);
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
     if canceled.load(Ordering::Acquire) {
@@ -588,7 +609,7 @@ fn run_reply_provider_observed_with_progress(
     });
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Return at most one semantic edit proposal, containing related source and behavioral tests together as one atomic batch. The editor validates and applies that batch immediately after this response, then requests a live hot swap and runs focused tests; do not ask the user to apply it. The editable_symbols catalog identifies project source. Use read_source_symbol to inspect exact source before proposing changes; minimize provider turns by batching all useful independent symbol reads in one tool_calls response, up to the advertised limit. Include other ready tool calls in the same response when their arguments are already known. Wait for prerequisite results before constructing dependent calls; never guess missing source, IDs, or arguments. Once the required source is known, include all related symbol/file changes and tests in the single semantic edit proposal instead of splitting them across turns. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Keep the response concise and self-contained.".to_string(),
+        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Return at most one semantic edit proposal, containing related source and behavioral tests together as one atomic batch. The editor validates and applies that batch immediately after this response, then requests a live hot swap and runs focused tests; do not ask the user to apply it. The editable_symbols text lists names nested under files. sN labels are snapshot-local read IDs: pass one as symbol_id to read_source_symbol for full source, signatures, and canonical target metadata. tN IDs list a file's test names and their sN read IDs on request. Use the returned canonical target for edits, never the short read ID. Inspect required source before proposing changes; minimize provider turns by batching all useful independent symbol reads in one tool_calls response, up to the advertised limit. Include other ready tool calls in the same response when their arguments are already known. Wait for prerequisite results before constructing dependent calls; never guess missing source, IDs, or arguments. Once the required source is known, include all related symbol/file changes and tests in the single semantic edit proposal instead of splitting them across turns. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Keep the response concise and self-contained.".to_string(),
         max_turns: 4,
         ..AgentProfile::default()
     };
