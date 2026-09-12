@@ -6174,7 +6174,7 @@ mod tests {
         let observation = tools.execute_read(
             &ToolCall {
                 tool: "inspect_source".into(),
-                args: json!({"selector":"f0:main"}),
+                args: json!({"selector":"file 0 function main"}),
             },
             &AtomicBool::new(false),
         );
@@ -6185,9 +6185,13 @@ mod tests {
             "canonical-main"
         );
         assert!(compact_live_agent_profile().compact_request);
-        assert!(live_tool_specs()
+        let inspect = live_tool_specs()
             .iter()
-            .any(|spec| spec.tool == "inspect_source"));
+            .find(|spec| spec.tool == "inspect_source")
+            .unwrap()
+            .purpose
+            .clone();
+        assert!(inspect.contains("canonical targets"));
     }
 
     #[test]

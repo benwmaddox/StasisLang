@@ -7,25 +7,32 @@ functions, and tests. Function and struct names use one line each. Import and
 global names, source bodies, signatures, and canonical edit targets load on request.
 
 ```text
-files
-  f0 src/main.stasis i3@0 g2@1 s1 f2 t0
-  f1 tests/maze.test.stasis i2@5 g0 s0 f0 t88
+files [id path imports(count@source) globals(count@source) structs functions tests]
+  0 src/main.stasis 3@0 2@1 1 2 0
+  1 tests/maze.test.stasis 2@5 0 0 0 88
 vendor
   stasis/stdlib/graphics.stasis
-symbols
-  f0 structs
+symbols [file kind optional-prefix]
+  0 structs
     Player
-  f0 functions
+  0 functions
     main
     tick
 ```
 
-An `@N` selector reads the import or global group advertised beside its count.
-`fN:name` reads a displayed function or struct. A category may declare a shared
-prefix once; the host restores it when resolving the nested name. `?terms` searches
-all symbol and global names, while `?+terms` includes source for the best matches.
-Independent calls can be batched. Returned canonical targets retain exact identity
-for duplicate names and edits.
+Catalog IDs are hypermedia links, not semantic identity. `source N` follows an
+import or global link whose count ends in `@N`.
+`file N function name` and `file N struct name` read displayed declarations;
+`file N imports`, `file N globals`, and `file N tests` read file groups. A category
+may declare `prefix=value` once; the host restores it when resolving nested names.
+`search terms` searches all symbol and global names, while `search-source terms`
+includes source for the best matches. Older `@N`, `fN:*`, `?terms`, and `?+terms`
+forms remain accepted for compatibility but are not advertised as the primary syntax.
+Each result supplies current source and a canonical target. That result is a stepping
+stone to additional linked lookups or to a file change; it is not expected to contain
+all information needed to finish every task. Independent visible links should still
+be followed together in one batched response.
+Returned canonical targets retain exact identity for duplicate names and edits.
 Declarations marked `@internal`, along with declarations from internal source files,
 are excluded from both the initial catalog and its on-demand source snapshot.
 
@@ -43,9 +50,9 @@ snapshot. No external AI call or project mutation occurred.
 
 | UTF-8 bytes | Previous | Compact |
 | --- | ---: | ---: |
-| Project catalog | 14,551 | 4,684 |
-| Initial model message | 18,433 | 6,056 |
-| Complete HTTP body, including response schema | 22,811 | 8,746 |
+| Project catalog | 14,551 | 4,783 |
+| Initial model message | 18,433 | 6,427 |
+| Complete HTTP body, including response schema | 22,811 | 9,117 |
 
 The complete request passes a strict **10,000-byte** budget and the catalog passes
 a **5,000-byte** budget. These are byte counts,

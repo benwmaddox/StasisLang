@@ -121,7 +121,13 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
     assert!(content.starts_with("request:1\nrole:Stasis desktop task assistant\n"));
     assert!(content.contains("\ntools:\n"));
     assert!(content.contains("\tinspect_source\tselector\t"));
+    assert!(content.contains("Catalog IDs are hypermedia leads"));
+    assert!(content.contains("file N function/struct name"));
     assert!(content.ends_with(expected_catalog.as_str().unwrap()));
+    assert!(expected_catalog
+        .as_str()
+        .unwrap()
+        .starts_with("files [id path imports(count@source)"));
     assert!(expected_catalog.as_str().unwrap().len() <= 5_000);
     assert_eq!(body["response_format"]["type"], "json_schema");
     if let Some(output) = std::env::var_os("STASIS_EDITOR_PAYLOAD_OUTPUT") {

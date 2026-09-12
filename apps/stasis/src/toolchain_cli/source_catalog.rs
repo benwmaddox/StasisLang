@@ -64,7 +64,9 @@ fn push(catalog: &mut String, line: &str) -> bool {
 
 pub(super) fn render(sources: &[Value]) -> Result<String, String> {
     let files = files(sources)?;
-    let mut catalog = String::from("files\n");
+    let mut catalog = String::from(
+        "files [id path imports(count@source) globals(count@source) structs functions tests]\n",
+    );
     let mut vendor = BTreeSet::new();
     for (file_id, (file, items)) in files.iter().enumerate() {
         let (mut imports, mut globals, mut structs, mut functions, mut tests) = (0, 0, 0, 0, 0);
@@ -98,15 +100,15 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
                 kind => return Err(format!("Unsupported source kind: {kind}")),
             }
         }
-        let group = |count: usize, id: Option<usize>, kind: char| match id {
-            Some(id) if count > 0 => format!(" {kind}{count}@{id}"),
-            _ => format!(" {kind}{count}"),
+        let group = |count: usize, id: Option<usize>| match id {
+            Some(id) if count > 0 => format!(" {count}@{id}"),
+            _ => format!(" {count}"),
         };
         let line = format!(
-            "  f{file_id} {}{}{} s{structs} f{functions} t{tests}",
+            "  {file_id} {}{}{} {structs} {functions} {tests}",
             file.escape_debug(),
-            group(imports, import_id, 'i'),
-            group(globals, global_id, 'g')
+            group(imports, import_id),
+            group(globals, global_id)
         );
         if !push(&mut catalog, &line) {
             push(&mut catalog, &format!("  +{} files", files.len() - file_id));
@@ -121,7 +123,7 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
             }
         }
     }
-    push(&mut catalog, "symbols");
+    push(&mut catalog, "symbols [file kind optional-prefix]");
     'details: for (file_id, (_, items)) in files.iter().enumerate() {
         for kind in ["struct", "function"] {
             let entries = items
@@ -139,9 +141,9 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
             let suffix = if prefix.is_empty() {
                 String::new()
             } else {
-                format!(" {prefix}")
+                format!(" prefix={prefix}")
             };
-            if !push(&mut catalog, &format!("  f{file_id} {kind}s{suffix}")) {
+            if !push(&mut catalog, &format!("  {file_id} {kind}s{suffix}")) {
                 break 'details;
             }
             for (position, name) in entry_names.iter().enumerate() {
@@ -222,7 +224,7 @@ pub(super) fn search(
             if score == 0 {
                 continue;
             }
-            let mut result = serde_json::json!({"id":format!("@{index}"), "file_id":format!("f{file_id}"),
+            let mut result = serde_json::json!({"selector":format!("source {index}"), "file_id":file_id,
                 "file":file, "kind":item["target"]["kind"], "name":item["target"]["name"]});
             if include_source {
                 result["item"] = (*item).clone();
@@ -257,7 +259,7 @@ pub(super) fn test_names(sources: &[Value], index: usize) -> Option<Value> {
     {
         writeln!(
             names,
-            "  s{index} {}",
+            "  source {index} {}",
             item["target"]["name"].as_str()?.escape_debug()
         )
         .unwrap();
@@ -275,11 +277,62 @@ pub(super) fn inspect(
         .or_else(|| args.get("symbol_id"))
         .and_then(Value::as_str)
         .ok_or_else(|| "selector must be a string".to_string())?;
+    if let Some(query) = selector.strip_prefix("search-source ") {
+        return search(sources, query, true);
+    }
+    if let Some(query) = selector.strip_prefix("search ") {
+        return search(sources, query, false);
+    }
     if let Some(query) = selector.strip_prefix("?+") {
         return search(sources, query, true);
     }
     if let Some(query) = selector.strip_prefix('?') {
         return search(sources, query, false);
+    }
+    if let Some(rest) = selector.strip_prefix("file ") {
+        let (file_id, rest) = rest
+            .split_once(' ')
+            .ok_or_else(|| format!("Unknown source selector: {selector}"))?;
+        let file_id = file_id
+            .parse::<usize>()
+            .map_err(|_| "invalid file selector")?;
+        let file = file_for_id(sources, file_id)
+            .ok_or_else(|| format!("Unknown source file: {file_id}"))?;
+        let (kind, name) = rest.split_once(' ').unwrap_or((rest, ""));
+        if kind == "tests" && name.is_empty() {
+            return sources
+                .iter()
+                .enumerate()
+                .find(|(_, item)| {
+                    item["target"]["file"] == file && item["target"]["kind"] == "test"
+                })
+                .and_then(|(index, _)| test_names(sources, index))
+                .ok_or_else(|| format!("Source file {file_id} has no tests"));
+        }
+        let group_kind = match (kind, name) {
+            ("imports", "") => Some("imports"),
+            ("globals", "") => Some("globals"),
+            _ => None,
+        };
+        let matches: Vec<Value> = if let Some(kind) = group_kind {
+            sources
+                .iter()
+                .filter(|item| item["target"]["file"] == file && item["target"]["kind"] == kind)
+                .cloned()
+                .collect()
+        } else if matches!(kind, "function" | "struct") && !name.is_empty() {
+            find_by_file_name(sources, file_id, name)
+                .into_iter()
+                .filter(|item| item["target"]["kind"] == kind)
+                .collect()
+        } else {
+            return Err(format!("Unknown source selector: {selector}"));
+        };
+        return match matches.as_slice() {
+            [] => Err(format!("Unknown source selector: {selector}")),
+            [item] => Ok(item.clone()),
+            _ => Ok(Value::Array(matches)),
+        };
     }
     if let Some((file_id, name)) = selector
         .strip_prefix('f')
@@ -321,9 +374,13 @@ pub(super) fn inspect(
         };
     }
     let symbol_id = selector
-        .strip_prefix('@')
+        .strip_prefix("source ")
         .map(|index| format!("s{index}"))
         .unwrap_or_else(|| selector.to_string());
+    let symbol_id = symbol_id
+        .strip_prefix('@')
+        .map(|index| format!("s{index}"))
+        .unwrap_or(symbol_id);
     let test_catalog = symbol_id
         .strip_prefix('t')
         .and_then(|index| index.parse::<usize>().ok())
