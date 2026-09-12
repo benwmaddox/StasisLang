@@ -479,8 +479,9 @@ jobs:
           if ($editorInfo.result.build_fingerprint -ne $editorInfo.result.graphics_runtime.build_fingerprint) { throw "extracted editor fingerprint mismatch" }
           & "$validationRoot/stasis.exe" editor --help
           if ($LASTEXITCODE -ne 0) { throw "extracted editor help probe failed" }
+          $env:STASIS_SIGNING_TIMEOUT_SECONDS = "30"
           @("stasis.exe", "stasis-network-supervise.exe", "stasis_dynload.dll", "stasis_graphics.dll", "stasis_runner.exe") | ForEach-Object {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/windows/stasis-signing.ps1 verify -Artifact "$validationRoot/$_"
+            & pwsh -NoProfile -File tools/windows/stasis-signing.ps1 verify -Artifact "$validationRoot/$_"
             if ($LASTEXITCODE -ne 0) { throw "extracted Authenticode verification failed for $_" }
           }
           powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_network_supervision.ps1 `
