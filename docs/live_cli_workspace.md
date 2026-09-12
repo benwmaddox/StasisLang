@@ -138,6 +138,7 @@ Human commands intentionally cover every useful live AI capability:
 | `list_symbols` | `stasis symbol list` / `:symbols` |
 | `find_references` | `stasis symbol references SYMBOL` / `:references SYMBOL` |
 | `read_symbol` | `stasis symbol read SYMBOL` / `:read SYMBOL` |
+| `inspect_source` | `stasis symbol list|read` / `:symbols`, `:read`; compact IDs combine those existing discovery and read operations |
 | `read_imports`, `write_imports` | `stasis symbol read|update imports` / `:read imports`, `:update imports` |
 | `write_symbol`, `delete_symbol` | `stasis symbol add|update|delete` / `:add`, `:update`, `:delete` |
 | `write_svg_asset`, `write_png_asset`, `import_png_asset`, `delete_asset` | controlled `assets/generated/` transaction (`stasis ai` and Gauntlet) |
@@ -182,7 +183,11 @@ metadata is not expanded for result files, so unloaded imports outside the reque
 scope cannot make the listing fail. `read_symbol` returns the selected full source and its hash as
 `expected_source_hash`, ready for use solely as a stale-write guard.
 An AI request may use up to 50 provider turns. The agent may batch up to 50 deliberate tool calls
-in each turn, such as reading a related set of functions after targeted discovery. Combined
+in each turn. The default instructions prioritize minimizing provider turns by batching useful
+independent symbol/reference/file reads and ready writes whose arguments are already known.
+Calls that need earlier results wait for the next turn; related writes remain one contiguous
+atomic tested batch. The desktop editor likewise batches source reads and puts related changes
+and tests in a single semantic edit proposal after inspecting the required source. Combined
 observations are bounded to 1 MiB; this supports substantial explicit source reads without making
 whole-project enumeration the default behavior.
 
@@ -464,8 +469,14 @@ Gauntlet adds two schema-v1 JSON commands without changing the human TUI:
 `set_input_state` accepts at most eight logical pointers and overrides physical
 pointer data until replaced (an empty array clears the simulated pointers).
 Edge flags clear after one deterministic tick. `capture_frame` accepts only a
-bounded artifact identity and schedules a PNG for the next presented frame;
-the runtime chooses the path under the configured project output. Gauntlet
+bounded artifact identity and captures a PNG from the next presented frame;
+the runtime chooses the path under the configured project output. Its final
+`capture_completed` response is deferred until the PNG decodes successfully,
+with path, dimensions, byte length, SHA-256, scheduling/completion ticks, and
+runtime identity. A scheduled capture alone is not success. Verification has a
+five-second deadline, supports cancellation, and abandons disconnected callers.
+Rendering continues while paused, so capture does not require a gameplay step.
+Gauntlet
 combines these commands with pause, step, validation snapshot/restore, and
 state inspection to run repeatable scenarios. Callers cannot supply a capture
 filesystem path.

@@ -26,5 +26,6 @@ atomic-write-file.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+cc = "1.2"
 object = "0.36"
 serde_json.workspace = true

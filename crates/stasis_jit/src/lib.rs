@@ -305,8 +305,8 @@ pub fn link_objects_to_dynamic_library(
     for runtime_lib in &config.runtime_lib_paths {
         args.push(runtime_lib.display().to_string());
     }
-    if matches!(config.target, AotTarget::Native) && !cfg!(windows) {
-        args.push("-lm".to_string());
+    if matches!(config.target, AotTarget::Native) {
+        args.extend(native_system_link_args());
     }
 
     run_link_command_with_args(
@@ -394,8 +394,8 @@ pub fn link_objects_to_executable(
     for runtime_lib in &config.runtime_lib_paths {
         args.push(runtime_lib.display().to_string());
     }
-    if matches!(config.target, AotTarget::Native) && !cfg!(windows) {
-        args.push("-lm".to_string());
+    if matches!(config.target, AotTarget::Native) {
+        args.extend(native_system_link_args());
     }
 
     let link_result = run_link_command_with_args(
@@ -479,6 +479,27 @@ fn resolve_linker_path(config: &AotLinkConfig) -> PathBuf {
         PathBuf::from("lld-link.exe")
     } else {
         PathBuf::from("cc")
+    }
+}
+
+fn native_system_link_args() -> Vec<String> {
+    if cfg!(target_os = "macos") {
+        vec![
+            "-framework".to_string(),
+            "Security".to_string(),
+            "-framework".to_string(),
+            "CoreFoundation".to_string(),
+            "-lresolv".to_string(),
+            "-lm".to_string(),
+        ]
+    } else if cfg!(target_os = "linux") {
+        vec![
+            "-ldl".to_string(),
+            "-lpthread".to_string(),
+            "-lm".to_string(),
+        ]
+    } else {
+        Vec::new()
     }
 }
 

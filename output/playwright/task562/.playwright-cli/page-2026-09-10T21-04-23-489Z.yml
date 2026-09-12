@@ -1,0 +1,3 @@
+- main [ref=e2]:
+  - generic "task562_no_clear game canvas" [ref=e3]
+  - status: Starting Wasm...

@@ -1,0 +1,16 @@
+{
+  "command": [
+    "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\toolchain-299\\toolchain\\stasis.exe",
+    "--json",
+    "build",
+    "--mode",
+    "release"
+  ],
+  "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\BannerfallTactics",
+  "environment": {
+    "CMAKE_GENERATOR": "Ninja Multi-Config",
+    "CMAKE_BUILD_PARALLEL_LEVEL": "2"
+  },
+  "exit": 0,
+  "duration_seconds": 59.078
+}

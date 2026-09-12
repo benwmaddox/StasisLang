@@ -58,6 +58,16 @@ Commands discover
 `stasis.json` by walking from the selected path toward the filesystem root, so they work from the
 project root and nested directories. `--workspace PATH` selects a project explicitly.
 
+On Windows, opening a visible game window minimizes the attached console once by default.
+This applies to development/editor sessions and packaged release games. The game and editor
+remain visible; restore the console from the taskbar whenever you need its output. Resizing or
+reopening the game window does not minimize a console you restored. Windows Terminal may
+share one host window across tabs, so minimizing that host also minimizes its other tabs.
+Set `STASIS_CONSOLE_START_MINIMIZED=0` before launching to keep the console visible, including
+when using a console-based frontend. Headless recording and commands that do not open a visible
+game window leave the console alone. `STASIS_WINDOW_START_MINIMIZED` separately controls the
+game window.
+
 ## Workspace contract
 
 `stasis.json` is versioned and deterministic:
@@ -69,6 +79,14 @@ project root and nested directories. `--workspace PATH` selects a project explic
   "entry": "src/main.stasis",
   "tests": "tests",
   "output": "build",
+  "ai": {
+    "provider": "openrouter",
+    "openrouter": {
+      "approved_models": ["openai/gpt-oss-120b"],
+      "min_throughput_tokens_per_second": 400,
+      "max_p50_latency_seconds": 2.0
+    }
+  },
   "web": {
     "loading_font": "/assets/fonts/display.ttf",
     "viewport": { "width": 1600, "height": 900 }
@@ -122,8 +140,8 @@ archive into the project.
 The project `name` may contain internal ASCII spaces, so display names such as `Chess TD` are
 valid; leading or trailing spaces are rejected. Manifest paths must be project-relative and cannot
 contain `..`. Generated projects include a
-runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building and semantic-edit
-guide, a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
+runnable `main()`, a real `.test.stasis` test, an `AGENTS.md` theory-building, semantic-edit, and container-derived UI geometry
+guide (sourced from `docs/agent_workflow.md`), a minimal `CLAUDE.md` that points to `AGENTS.md`, and a version-matched
 `PROJECT_ARCHITECTURE.md` with practical input, tick, state, and rendering guidance.
 Both `new` and `init` also add language-scoped VS Code settings that recommend the Stasis extension
 and enable its canonical formatter on save without changing the formatter for other languages.
@@ -135,6 +153,12 @@ staged Stasis changes. A retry then commits the canonical source. Git must be av
 `stasis new`; `stasis init` does not alter an existing repository's hook configuration. After
 cloning a generated repository, reactivate the checked-in hook with
 `git config --local core.hooksPath .githooks`.
+
+Release archives ship the offline knowledge page
+[`docs/knowledge/loading-screens.md`](knowledge/loading-screens.md). `stasis new` and
+`stasis vendor update` install the matching copy at
+`vendor/stasis/docs/loading-screens.md`, so generated projects can discover the asset-IO
+loading-state guidance without network access.
 
 ### Generated GitHub Actions
 
@@ -230,8 +254,9 @@ restore release assets.
 - `signing status|provision|sign|verify`: inspect Windows signer discovery, explicitly provision a
   CurrentUser-only development certificate, sign explicit executable/toolchain paths, or verify
   Authenticode signatures. These commands do not require `stasis.json`; `provision` is never a
-  production credential path. Stasis-controlled signing requests SHA-256 file digests and page
-  hashes. The explicit sign/verify operations require a Windows host; `STASIS_AOT_SIGN_TOOL`
+  production credential path. Local provisioning trusts the public certificate only in CurrentUser Root.
+  Stasis-controlled signing requests SHA-256 digests with page hashes for EXEs and without them
+  for DLLs, then verifies Authenticode and signer identity. See [Windows test signing](windows-app-control.md). The explicit sign/verify operations require a Windows host; `STASIS_AOT_SIGN_TOOL`
   remains supported as a one-argument external hook for existing cross-platform build flows.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
   assets, graphics runtime when present, and verified release provenance. Windows packages keep
@@ -266,6 +291,11 @@ restore release assets.
 
 `verify` remains reserved for a future non-presenting batch verifier. `replay` performs verification
 while presenting every reconstructed tick.
+
+Formatting checks and formatting writes leave `stasis.json` and `vendor/stasis` unchanged,
+even when the selected toolchain differs from the project's vendor pin. Generated commit hooks
+format explicit `src` and `tests` paths so older formatters also avoid workspace synchronization.
+Release changes remain separate from formatting.
 
 ### Headless scenarios
 
@@ -393,9 +423,9 @@ function update_player(player: Player, damage: i32): void {
 ```
 
 Use `stasis fmt --check` in CI when formatting differences should fail without modifying files. A
-project generated by `stasis new` runs this check before every commit. When it fails, the hook runs
-`stasis format` for convenience and still blocks the commit until those changes are reviewed and
-staged.
+project generated by `stasis new` runs `stasis format` before every commit so canonical formatting
+is enforced instead of merely reported. The hook still blocks the commit until any formatter changes
+are reviewed and staged.
 
 ## Cache and offline behavior
 
@@ -423,3 +453,66 @@ Windows graphical launch coverage is defined in
 [Windows game launch integration testing](windows_game_launch_testing.md). It exercises `play`,
 `run --watch`, `tui`, generated release executables, and packaged desktop executables with real
 PNG, SVG, font, tick, and framebuffer assertions.
+
+### AI desktop editor keyboard commands
+
+Creating a task sends its objective as the first message. The editor starts with a bounded
+symbol catalog and reads exact source symbols as needed, so a project does not have to fit
+all its source into the initial AI prompt. A returned semantic edit is compiler-validated,
+atomically published, and made available to the live watcher immediately. Focused tests start
+after publication. A failed test restores the prior sources from the hash-bound edit receipt;
+passing tests leave the live result available for user feedback, Success, or Reject.
+
+The desktop editor reads secrets and optional local transport selection from the selected project's `.env`
+(not the launcher's working directory). Process environment values take precedence for those
+operational settings. An `OPENROUTER_API_KEY` selects OpenRouter when `STASIS_AI_PROVIDER` and
+`ai.provider` are unset; a per-task provider selection wins. Keep `.env` ignored by Git. The key is not included
+in task history or AI context.
+
+Approved models and their performance preferences have one source of truth: `stasis.json`. The
+`ai.openrouter.approved_models` list defaults to `openai/gpt-oss-120b`, the current approved
+editor model. The defaults ask OpenRouter for at least 400 output tokens/second p50 throughput and
+at most 2.0 seconds p50 latency. These values are OpenRouter routing preferences, not hard endpoint
+exclusions or a guarantee that every edit completes in the 3-10 second product target.
+
+Normal generation is one request: Stasis sends the approved `models`, the two preferences, global
+lowest-price sorting, and a stable task `session_id` with the chat completion. There is no local
+metadata preflight or route cache. OpenRouter applies its current price, performance, and health
+view and owns server-side route and prompt-cache locality. All turns in a task reuse the same
+session ID; a new task gets a new ID. Manifest changes, provider reconnect, and editor restart
+reconstruct the request policy, while OpenRouter controls the lifetime and invalidation of its
+server-side caches.
+
+Failed requests show a credential-safe diagnostic in the task. Reconnect retries the saved
+request without duplicating its message during the current editor session. Reopening an
+editor never automatically replays an unfinished request. OpenRouter chat calls retry an
+HTTP 429 response up to two times before requiring a manual reconnect. Each retry remains
+inside the original request deadline and use the same models, preferences, and session ID; a provider delay
+is capped at two seconds to keep the editor responsive. AI prose longer than the 16,384-character
+task-message limit is retained up to that boundary with an explicit truncation marker; malformed
+proposal or routing metadata continues to fail closed with a specific safe category. When a
+generated reply is discarded during admission, a host-authored timeline entry records that safe
+reason and confirms that no AI text or proposals were saved; the rejected provider text is not logged.
+
+In the AI desktop editor, Ctrl+K or Ctrl+F opens the command palette. Type to
+filter commands, use Up/Down to select, Enter to invoke, and Escape to dismiss
+and restore the previous focus. Selection stays within the filtered results;
+Enter does nothing when there are no matches. Palette input is consumed before
+underlying task fields and global shortcuts, including Ctrl+Enter and Escape.
+
+The palette exposes new task, next/previous task and individual task switching,
+focus reply/game, send reply, focused tests, retry,
+attach screenshot, generate/import image, reconnect, active-task rejection, and mark done.
+Every active task also exposes `Reject... (Ctrl+Esc)`, including after a provider failure.
+The confirmation uses Enter to reject or Escape to keep the task. Rejecting restores source
+changes owned by that task from their edit receipts, logs that they were discarded, permanently
+closes the conversation, and advances to the queued-task gate when another task is waiting. A
+conflicting later edit blocks automatic rejection instead of being overwritten.
+It also exposes **Export chat as HTML**, which writes a user-selected, self-contained
+snapshot of the active task without contacting the configured AI provider.
+Set `ai.editor.auto_persist_html_transcripts` to `true` in `stasis.json` to
+atomically keep task transcripts current in the Git-ignored
+`.stasis_cache/logs/ai-transcripts/` folder. The default is `false`.
+Unsent objective and reply drafts are kept separately for each task across both
+mouse and keyboard switching. Creating a task consumes the objective, starts
+with an empty reply, and preserves the previous task's unsent reply.

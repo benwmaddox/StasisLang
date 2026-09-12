@@ -1,0 +1,15 @@
+cache_cleanup_removed_files=0
+cache_cleanup_removed_dirs=1
+cache_cleanup_ttl_days=7
+gfx_load_sprite failed for assets/generated/bannerfall_dawn_infantry_rescue_v4.png
+gfx_load_sprite failed for assets/generated/bannerfall_unit_crest.png
+gfx_load_sprite failed for assets/generated/bannerfall_dawn_archer_v1.png
+gfx_load_sprite failed for assets/generated/bannerfall_dawn_cavalry_v1.png
+gfx_load_sprite failed for assets/generated/bannerfall_dawn_ram_v1.png
+gfx_load_sprite failed for assets/generated/bannerfall_dawn_commander_v1.png
+gfx_load_sprite failed for assets/generated/bannerfall_ash_infantry_v1.png
+gfx_load_sprite failed for assets/generated/bannerfall_ash_archer_v1.png
+gfx_load_sprite failed for assets/generated/bannerfall_ash_cavalry_v1.png
+gfx_load_sprite failed for assets/generated/bannerfall_ash_ram_v1.png
+gfx_load_sprite failed for assets/generated/bannerfall_ash_commander_v1.png
+{"command":"run","ok":true,"result":{"backend":"jit","exit_code":0,"fast_forward":true,"headless":true,"state_hash":"644cfe83742d8940b369e407e38b6cd1e1f2ef92e76c194b3151ac697a2d83ba","ticks_executed":120}}

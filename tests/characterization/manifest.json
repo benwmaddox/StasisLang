@@ -108,6 +108,8 @@
       "boundary": "HostFrame/render layouts",
       "fixture": [
         "crates/stasis_compiler/tests/host_frame_jit_seam.rs",
+        "runtime/tests/host_frame_fixture.c",
+        "runtime/stasis_graphics.c",
         "src/stdlib/internal/host_frame_raw.stasis",
         "runtime/stasis_render_contract.h"
       ],
@@ -116,7 +118,7 @@
       "lane": "platform-host",
       "default_gate": false,
       "command": "python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test host_frame_jit_seam -- --test-threads=1",
-      "expected_evidence": "Every HostFrame lane round-trips through compiled Stasis accessors and the render contract remains aligned."
+      "expected_evidence": "The native desktop writer is compiled with deterministic host inputs (requires a C compiler); every HostFrame lane round-trips through JIT accessors, and independent writer/reader offset mutations fail."
     },
     {
       "id": "host.cross-host-contract",

@@ -133,6 +133,15 @@ LEGACY_RENDER_PATTERNS = (
     re.compile(r"\b(?:34608|108676|96388)\b"),
 )
 
+# Version 8 changes publication semantics, so these exact version-7 names are
+# the audited compatibility boundary. Other legacy spellings remain forbidden.
+ALLOWED_RENDER_LEGACY_TOKENS = {
+    DYNLOAD: {"STASIS_RENDER_LEGACY_VERSION"},
+    TOOLCHAIN: {"GFX_CMD_LEGACY_VERSION"},
+    JAVA_RENDERER: {"LEGACY_RENDER_VERSION"},
+    WEB: {"GFX_CMD_LEGACY_VERSION"},
+}
+
 
 def repository_stasis_sources(directory: Path) -> list[Path]:
     sources: list[Path] = []
@@ -325,6 +334,7 @@ RENDER_TO_RUST = {
     "STASIS_RENDER_U8_COUNT": "STASIS_RENDER_U8_COUNT",
     "STASIS_RENDER_MAGIC": "STASIS_RENDER_MAGIC",
     "STASIS_RENDER_VERSION": "STASIS_RENDER_VERSION",
+    "STASIS_RENDER_LEGACY_VERSION": "STASIS_RENDER_LEGACY_VERSION",
     "STASIS_RENDER_I_ORDER_COUNT": "STASIS_RENDER_ORDER_COUNT_INDEX",
     "STASIS_RENDER_I_RECT_COUNT": "STASIS_RENDER_RECT_COUNT_INDEX",
     "STASIS_RENDER_I_CLIP_COUNT": "STASIS_RENDER_CLIP_COUNT_INDEX",
@@ -360,6 +370,7 @@ RENDER_TO_RUST = {
 RENDER_TO_WEB = {
     "STASIS_RENDER_MAGIC": "GFX_CMD_MAGIC",
     "STASIS_RENDER_VERSION": "GFX_CMD_VERSION",
+    "STASIS_RENDER_LEGACY_VERSION": "GFX_CMD_LEGACY_VERSION",
     "STASIS_RENDER_FLAG_CLEAR": "GFX_FLAG_CLEAR",
     "STASIS_RENDER_FLAG_PRESENT": "GFX_FLAG_PRESENT",
     "STASIS_RENDER_I_MAGIC": "GFX_I_MAGIC",
@@ -409,6 +420,7 @@ RENDER_TO_WEB = {
 
 RENDER_TO_TOOLCHAIN_PROVENANCE = {
     "STASIS_RENDER_VERSION": "GFX_CMD_VERSION",
+    "STASIS_RENDER_LEGACY_VERSION": "GFX_CMD_LEGACY_VERSION",
 }
 
 RENDER_TO_PACKAGE_PROVENANCE = {
@@ -418,6 +430,7 @@ RENDER_TO_PACKAGE_PROVENANCE = {
 RENDER_TO_JAVA = {
     "STASIS_RENDER_MAGIC": "RENDER_MAGIC",
     "STASIS_RENDER_VERSION": "RENDER_VERSION",
+    "STASIS_RENDER_LEGACY_VERSION": "LEGACY_RENDER_VERSION",
     "STASIS_RENDER_FLAG_CLEAR": "FLAG_CLEAR",
     "STASIS_RENDER_FLAG_PRESENT": "FLAG_PRESENT",
     **{source: target.removeprefix("GFX_") for source, target in RENDER_TO_GFX.items()
@@ -517,8 +530,16 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
     checks = 0
     for consumer in RENDER_DOWNSTREAM:
         text = sources[consumer]
+        allowed_legacy_tokens = ALLOWED_RENDER_LEGACY_TOKENS.get(consumer, set())
         for pattern in LEGACY_RENDER_PATTERNS:
-            match = pattern.search(text)
+            match = next(
+                (
+                    candidate
+                    for candidate in pattern.finditer(text)
+                    if candidate.group(0) not in allowed_legacy_tokens
+                ),
+                None,
+            )
             checks += 1
             if match:
                 failures.append(Mismatch(
@@ -825,7 +846,6 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         if hot_swap_public_import not in fixture_text or any(
             not re.search(pattern, fixture_text)
             for pattern in (
-                r"\bbegin_frame\(\)\s*;",
                 r"\bclear\(",
                 r"\bend_frame\(\)\s*;",
             )
@@ -833,7 +853,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             failures.append(Mismatch(
                 label(RENDER_HEADER), label(fixture),
                 "hot_swap.public_graphics_path",
-                "rooted graphics import and begin/clear/end calls", "missing",
+                "rooted graphics import and clear/end calls", "missing",
             ))
         checks += 1
         if re.search(r"\b(?:gfx_cmd_|gfx_sprite_writer_|GFX_)", fixture_text):
@@ -844,22 +864,20 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             ))
 
     public_render_fixtures = {
-        VSCODE_RENDER_FIXTURE: ("begin_frame();", "draw_line("),
+        VSCODE_RENDER_FIXTURE: ("draw_line(", "end_frame();"),
         WINDOWS_LAUNCH_FIXTURE: (
-            "begin_frame();",
             "windows_smoke_host_frame.pointer_count > 0 && windows_smoke_host_frame.pointers[0].is_down",
             "smoke_writer.reserve(2,",
             "smoke_writer.finalize(2);",
             "smoke_label.draw(",
         ),
         WORKSHOP_PREVIEW_ADAPTER: (
-            "begin_frame();",
             "PongHost.writer.reserve(4,",
             "PongHost.writer.finalize(4);",
+            "end_frame();",
         ),
         GENERATED_MOBILE_AOT_FIXTURE: (
             'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
-            "begin_frame();",
             "clear(",
             "fill_rect(",
             "draw_text(",
@@ -870,7 +888,6 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             ".load_sprite_from(",
             ".load_text_from(",
             "measure_text(",
-            "begin_frame();",
             "clear(",
             "seam_sprite.draw(",
             "draw_text(",

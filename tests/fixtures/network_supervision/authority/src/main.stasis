@@ -1,0 +1,57 @@
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+global supervision_fields: i32[3];
+global supervision_payload: i32[65536];
+global supervision_projection: i32[3];
+global supervision_state: i32;
+
+function @internal @extern("stasis_jit_network_host_poll") supervision_poll(
+    fields: i32[],
+    field_capacity: i32,
+    payload: i32[],
+    payload_capacity: i32
+): i32;
+function @internal @extern("stasis_jit_network_host_send") supervision_send(connection: i32, payload: i32[], payload_length: i32): i32;
+
+function main(): i32 {
+    supervision_state = 0;
+    supervision_projection[0] = 1;
+    supervision_projection[1] = 2;
+    return 0;
+}
+
+function tick(): i32 {
+    let result: i32 = supervision_poll(supervision_fields, supervision_fields.max_length, supervision_payload, supervision_payload.max_length);
+    if (result < 0) {
+        return 40;
+    }
+    if (result == 0 || supervision_fields[0] != 3) {
+        return 0;
+    }
+    // Version 1, action 1, positive bounded delta.
+    if (
+        supervision_fields[2] != 3
+        || supervision_payload[0] != 1
+        || supervision_payload[1] != 1
+        || supervision_payload[2] <= 0
+        || supervision_payload[2] > 10
+    ) {
+        return 41;
+    }
+    supervision_state += supervision_payload[2];
+    supervision_projection[2] = supervision_state;
+    if (supervision_send(supervision_fields[1], supervision_projection, supervision_projection.max_length) != 0) {
+        return 42;
+    }
+    return 0;
+}
+
+function render(): i32 {
+    clear(0.02, 0.04, 0.08, 1.0);
+    end_frame();
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

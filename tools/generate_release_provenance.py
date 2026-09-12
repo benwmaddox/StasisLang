@@ -44,11 +44,22 @@ RUNTIME_FILES = (
     "stasis_mobile_aot_runtime.h",
     "stasis_mobile_runtime.c",
     "stasis_mobile_runtime.h",
+    "stasis_network_join_card.h",
     "stasis_platform_storage.c",
     "stasis_platform_storage.h",
+    "stasis_platform_services.c",
+    "stasis_platform_services.h",
     "stb_truetype.h",
 )
 RUNTIME_DIRS = ("third_party/thorvg",)
+DESKTOP_NETWORK_LIBRARIES = (
+    "desktop/network/windows-x86_64/stasis_network.lib",
+    "desktop/network/linux-x86_64/libstasis_network.a",
+    "desktop/network/linux-arm64/libstasis_network.a",
+    "desktop/network/macos-arm64/libstasis_network.a",
+    "desktop/network/macos-x86_64/libstasis_network.a",
+)
+DESKTOP_NETWORK_HEADER = "desktop/network/include/stasis_network.h"
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -57,6 +68,24 @@ def sha256(path: pathlib.Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def desktop_network_artifact_hashes(root: pathlib.Path) -> dict[str, str]:
+    directory = root / "desktop/network"
+    if not directory.exists():
+        return {}
+    present = {
+        path.relative_to(root).as_posix()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+    libraries = present.intersection(DESKTOP_NETWORK_LIBRARIES)
+    if len(libraries) != 1 or present != libraries | {DESKTOP_NETWORK_HEADER}:
+        raise ValueError(
+            "desktop network release artifacts are incomplete or unsupported: "
+            "expected exactly one target-native library and the ABI header"
+        )
+    return {name: sha256(root / name) for name in sorted(present)}
 
 
 def render_contract_version(root: pathlib.Path) -> int:
@@ -150,6 +179,10 @@ def main() -> int:
     }
     if not mobile_shell_sources:
         parser.error("release mobile shell templates are missing")
+    try:
+        desktop_network_artifacts = desktop_network_artifact_hashes(root)
+    except ValueError as error:
+        parser.error(str(error))
 
     rustc = subprocess.run(
         ["rustc", "--version"], check=True, capture_output=True, text=True
@@ -187,6 +220,7 @@ def main() -> int:
         },
         "runtime_sources": runtime_sources,
         "mobile_shell_sources": mobile_shell_sources,
+        "desktop_network_artifacts": desktop_network_artifacts,
         "command_buffer": {
             "name": COMMAND_BUFFER_NAME,
             "version": command_buffer_version,

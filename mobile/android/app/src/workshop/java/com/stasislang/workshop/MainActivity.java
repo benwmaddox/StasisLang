@@ -6,6 +6,7 @@ import android.Manifest;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.BroadcastReceiver;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
@@ -329,6 +330,7 @@ public final class MainActivity extends Activity {
     private boolean workshopResourceScopeAcceptanceRun;
     private boolean workshopTestRunnerAcceptanceRun;
     private boolean workshopDiagnosticSeamAcceptanceRun;
+    private boolean workshopSoakAcceptanceRun;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private int aiSimTouchX;
@@ -345,6 +347,7 @@ public final class MainActivity extends Activity {
     private String lastPersistedAiPhase = "";
     private String aiVerificationSummary = "verify --";
     private SymbolEntry selectedSymbol;
+    private static volatile MainActivity externalUrlActivity;
 
     static {
         System.loadLibrary("stasis_mobile_smoke");
@@ -362,6 +365,8 @@ public final class MainActivity extends Activity {
     private static native String nativeSemanticEdit(String projectRoot, String requestJson,
                                                     boolean dryRun, boolean validate, boolean runTests);
     private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight);
+    private static native void nativeArmExternalUrlAction();
+    private static native void nativeClearExternalUrlAction();
     static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
             int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
             ByteBuffer frameF32, ByteBuffer frameU8);
@@ -483,6 +488,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        externalUrlActivity = this;
         nativeAudioSetPaused(false);
         if (gamePreview != null) gamePreview.onHostResume();
         codexLoginLifecycle.onResume();
@@ -495,6 +501,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (externalUrlActivity == this) externalUrlActivity = null;
+        nativeClearExternalUrlAction();
         if (audioFocus != null) audioFocus.pause();
         nativeAudioSetPaused(true);
         if (gamePreview != null) gamePreview.onHostPause();
@@ -507,6 +515,12 @@ public final class MainActivity extends Activity {
         stopAudioPreview();
         cancelAudioRecording(false);
         super.onPause();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus) nativeClearExternalUrlAction();
     }
 
     @Override
@@ -550,6 +564,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (externalUrlActivity == this) externalUrlActivity = null;
+        nativeClearExternalUrlAction();
         activityDestroyed = true;
         shutdownGameAudio();
         stopVoiceRecognition();
@@ -1480,6 +1496,25 @@ public final class MainActivity extends Activity {
                         gameRuntimeActive = false;
                         setStatusText("IT-031 diagnostic seam acceptance failed: "
                                 + diagnosticResult);
+                    }
+                }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && workshopDiagnosticSeamAcceptanceRun
+                        && !workshopSoakAcceptanceRun) {
+                    String soakResult = WorkshopSoakAcceptance.run(
+                            MainActivity.this, projectRootPath());
+                    workshopSoakAcceptanceRun = true;
+                    boolean soakPassed = false;
+                    try {
+                        soakPassed = "passed".equals(
+                                new JSONObject(soakResult).optString("status"));
+                    } catch (Exception ignored) {
+                        // The acceptance runner reports its own structured failure marker.
+                    }
+                    if (!soakPassed) {
+                        compileReady = false;
+                        gameRuntimeActive = false;
+                        setStatusText("IT-032 Workshop soak acceptance failed: " + soakResult);
                     }
                 }
                 if (compileReady || gameRuntimeActive) {
@@ -5352,6 +5387,15 @@ public final class MainActivity extends Activity {
         return nativeRunTests(projectRoot);
     }
 
+    void materializeIt029Project(WorkshopProjectRegistry.ProjectInfo project) throws IOException {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+            throw new IllegalStateException("IT-029 project materialization is acceptance-only");
+        }
+        WorkshopTemplateCatalog.Template template = WorkshopTemplateCatalog.require(
+                project.templateId);
+        materializeTemplateProject(getAssets(), template, project.root, false);
+    }
+
     WorkshopAiProjectTransaction.Snapshot acceptanceCaptureProject(String projectRoot)
             throws Exception {
         return WorkshopAiProjectTransaction.capture(new File(projectRoot));
@@ -5386,6 +5430,11 @@ public final class MainActivity extends Activity {
         return nativeSetRuntimeI32(projectRoot, path, value);
     }
 
+    int acceptanceRuntimeI32(String projectRoot, String path) {
+        return extractIntField(nativeGetRuntimeI32(projectRoot, path),
+                "value", Integer.MIN_VALUE);
+    }
+
     JSONObject acceptanceCompileDiagnostic(String compileResult) throws Exception {
         return compileResultToJson(compileResult);
     }
@@ -5412,6 +5461,44 @@ public final class MainActivity extends Activity {
                 nativeFrameValues);
         if (status != 0) return "RunError: " + nativeLastFrameError();
         return "passed";
+    }
+
+    JSONObject runIt032Frame(String projectRoot, int sequence) throws Exception {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || gamePreview == null) {
+            throw new IllegalStateException("IT-032 preview unavailable");
+        }
+        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
+                Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
+                nativeFrameValues);
+        if (status != 0) throw new IllegalStateException(nativeLastFrameError());
+        int token = gamePreview.frameToken();
+        long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
+        if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
+            throw new IllegalStateException("IT-032 GLES token timeout at frame " + sequence);
+        }
+        JSONObject guest = new JSONObject();
+        String[] names = {"tick_revision", "render_revision", "state_counter"};
+        String[] paths = {"seam_it028_tick_marker", "seam_it028_render_marker",
+                "seam_it028_state_counter"};
+        for (int index = 0; index < names.length; index += 1) {
+            String state = nativeGetRuntimeI32(projectRoot, paths[index]);
+            guest.put(names[index], extractIntField(state, "value", Integer.MIN_VALUE));
+        }
+        return new JSONObject().put("sequence", sequence).put("frame_token", token)
+                .put("command_trace", trace).put("runtime", acceptanceRuntimeState(projectRoot))
+                .put("guest", guest).put("buffers", gamePreview.acceptanceBufferSnapshot())
+                .put("resources", gamePreview.resourceScopeSnapshot())
+                .put("presentation", gamePreview.workshopSoakPresentationSnapshot())
+                .put("gles_presented", true).put("java_only", false)
+                .put("fallback", 0).put("stub", 0);
+    }
+
+    boolean recreateIt032Surface() {
+        return gamePreview != null && gamePreview.recreateEglContextForAcceptance(5_000L);
+    }
+
+    void setIt032Active(boolean active) {
+        if (gamePreview != null) gamePreview.setWorkshopSoakAcceptanceActive(active);
     }
 
     JSONObject acceptanceRecoverAfterHealthyFrame(String compileResult) throws Exception {
@@ -11099,35 +11186,7 @@ public final class MainActivity extends Activity {
         if (sampleProject) {
             try {
                 WorkshopTemplateCatalog.Template template = activeWorkshopTemplate();
-                for (String file : template.sourceFiles) {
-                    try {
-                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
-                    } catch (IOException ignored) {
-                        // The recursive load below includes files that were seeded successfully.
-                    }
-                }
-                for (String file : template.testFiles) {
-                    try {
-                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
-                    } catch (IOException ignored) {
-                        // The recursive load below includes files that were seeded successfully.
-                    }
-                }
-                for (WorkshopTemplateCatalog.DirectoryMount mount : template.directoryMounts) {
-                    try {
-                        ensureProjectDirectory(assets, mount.assetDirectory,
-                                new File(projectRoot, mount.projectDirectory));
-                    } catch (IOException ignored) {
-                        // The recursive load below includes directory files that were seeded successfully.
-                    }
-                }
-                for (String file : template.auxiliaryFiles) {
-                    try {
-                        ensureProjectFile(assets, template.assetRoot + file, new File(projectRoot, file));
-                    } catch (IOException ignored) {
-                        // Optional template support files do not prevent source discovery.
-                    }
-                }
+                materializeTemplateProject(assets, template, projectRoot, true);
             } catch (IOException ignored) {
                 // Registry validation normally prevents an unknown template from reaching this path.
             }
@@ -11140,6 +11199,40 @@ public final class MainActivity extends Activity {
         }
 
         return enrichCanonicalSymbolIds(ProjectSnapshot.from(files), projectRootPath());
+    }
+
+    private void materializeTemplateProject(AssetManager assets,
+            WorkshopTemplateCatalog.Template template, File root, boolean bestEffort)
+            throws IOException {
+        for (String file : template.sourceFiles) {
+            materializeTemplateFile(assets, template.assetRoot + file, new File(root, file),
+                    template.replaceExistingFiles, bestEffort);
+        }
+        for (String file : template.testFiles) {
+            materializeTemplateFile(assets, template.assetRoot + file, new File(root, file),
+                    template.replaceExistingFiles, bestEffort);
+        }
+        for (WorkshopTemplateCatalog.DirectoryMount mount : template.directoryMounts) {
+            try {
+                ensureProjectDirectory(assets, mount.assetDirectory,
+                        new File(root, mount.projectDirectory), mount.replaceExisting);
+            } catch (IOException error) {
+                if (!bestEffort) throw error;
+            }
+        }
+        for (String file : template.auxiliaryFiles) {
+            materializeTemplateFile(assets, template.assetRoot + file, new File(root, file),
+                    template.replaceExistingFiles, bestEffort);
+        }
+    }
+
+    private void materializeTemplateFile(AssetManager assets, String assetPath, File file,
+            boolean replaceExisting, boolean bestEffort) throws IOException {
+        try {
+            ensureProjectFile(assets, assetPath, file, replaceExisting);
+        } catch (IOException error) {
+            if (!bestEffort) throw error;
+        }
     }
 
     private AiApiResponse callCodexResponses(String requestJson) throws Exception {
@@ -11297,7 +11390,12 @@ public final class MainActivity extends Activity {
     }
 
     private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile) throws IOException {
-        if (diskFile.isFile()) {
+        ensureProjectFile(assets, assetPath, diskFile, false);
+    }
+
+    private void ensureProjectFile(AssetManager assets, String assetPath, File diskFile,
+            boolean replaceExisting) throws IOException {
+        if (!replaceExisting && diskFile.isFile()) {
             return;
         }
         File parent = diskFile.getParentFile();
@@ -11314,9 +11412,10 @@ public final class MainActivity extends Activity {
         }
         try {
             try {
-                Files.move(temporary.toPath(), diskFile.toPath(), StandardCopyOption.ATOMIC_MOVE);
+                Files.move(temporary.toPath(), diskFile.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException unsupported) {
-                Files.move(temporary.toPath(), diskFile.toPath());
+                Files.move(temporary.toPath(), diskFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
             }
         } finally {
             if (temporary.exists()) temporary.delete();
@@ -11325,6 +11424,11 @@ public final class MainActivity extends Activity {
 
     private void ensureProjectDirectory(AssetManager assets, String assetPath, File diskDirectory)
             throws IOException {
+        ensureProjectDirectory(assets, assetPath, diskDirectory, false);
+    }
+
+    private void ensureProjectDirectory(AssetManager assets, String assetPath, File diskDirectory,
+            boolean replaceExisting) throws IOException {
         if (diskDirectory.exists() && !diskDirectory.isDirectory()) {
             throw new IOException("project directory path is a file: "
                     + diskDirectory.getAbsolutePath());
@@ -11342,9 +11446,9 @@ public final class MainActivity extends Activity {
             File childDiskPath = new File(diskDirectory, child);
             String[] grandchildren = assets.list(childAssetPath);
             if (grandchildren != null && grandchildren.length > 0) {
-                ensureProjectDirectory(assets, childAssetPath, childDiskPath);
+                ensureProjectDirectory(assets, childAssetPath, childDiskPath, replaceExisting);
             } else {
-                ensureProjectFile(assets, childAssetPath, childDiskPath);
+                ensureProjectFile(assets, childAssetPath, childDiskPath, replaceExisting);
             }
         }
     }
@@ -12298,11 +12402,13 @@ public final class MainActivity extends Activity {
 
         private final MainActivity activity;
         private final StasisPreviewRenderer renderer;
+        private final Runnable performanceRenderPump;
         private final WorkshopTextureProvider textureProvider;
         private static final long ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS = 100L;
         private int touchX;
         private int touchY;
         private boolean touchActive;
+        private boolean acceptanceTouchDispatch;
         private long lastNativeFrameDurationNanos;
         private long lastRendererSyncWaitNanos;
 
@@ -12314,6 +12420,13 @@ public final class MainActivity extends Activity {
             textureProvider = new WorkshopTextureProvider(activity);
             renderer = new StasisPreviewRenderer(textureProvider,
                     activity::recordRenderTimeNanos);
+            performanceRenderPump = new Runnable() {
+                @Override public void run() {
+                    if (!renderer.isPerformanceSamplingForAcceptanceActive()) return;
+                    requestRender();
+                    postOnAnimation(this);
+                }
+            };
             setRenderer(renderer);
             setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
             setFocusable(true);
@@ -12335,8 +12448,10 @@ public final class MainActivity extends Activity {
             long now = SystemClock.uptimeMillis();
             MotionEvent event = MotionEvent.obtain(now, now, action, x, y, 0);
             try {
+                acceptanceTouchDispatch = true;
                 onTouchEvent(event);
             } finally {
+                acceptanceTouchDispatch = false;
                 event.recycle();
             }
         }
@@ -12367,8 +12482,10 @@ public final class MainActivity extends Activity {
 
         void startPerformanceSamplingForAcceptance() {
             if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
+            removeCallbacks(performanceRenderPump);
             queueEvent(renderer::startPerformanceSamplingForAcceptance);
-            requestRender();
+            queueEvent(() -> activity.runOnUiThread(
+                    () -> postOnAnimation(performanceRenderPump)));
         }
 
         JSONObject resourceScopeSnapshot() throws Exception {
@@ -12378,6 +12495,24 @@ public final class MainActivity extends Activity {
                 snapshot.put("lifecycle_renderer_generation", renderer.rendererGeneration());
                 snapshot.put("resources_ready", renderer.resourcesReady());
                 return snapshot;
+            }
+        }
+
+        JSONObject acceptanceBufferSnapshot() throws Exception {
+            synchronized (renderer) {
+                return renderer.acceptanceBufferSnapshot();
+            }
+        }
+
+        void setWorkshopSoakAcceptanceActive(boolean active) {
+            synchronized (renderer) {
+                renderer.setWorkshopSoakAcceptanceActive(active);
+            }
+        }
+
+        JSONObject workshopSoakPresentationSnapshot() throws Exception {
+            synchronized (renderer) {
+                return renderer.workshopSoakPresentationSnapshot();
             }
         }
 
@@ -12433,6 +12568,7 @@ public final class MainActivity extends Activity {
         }
 
         void onHostPause() {
+            removeCallbacks(performanceRenderPump);
             renderer.onHostPaused();
             onPause();
         }
@@ -12441,6 +12577,9 @@ public final class MainActivity extends Activity {
             onResume();
             queueEvent(renderer::onHostResumed);
             requestRender();
+            if (renderer.isPerformanceSamplingForAcceptanceActive()) {
+                postOnAnimation(performanceRenderPump);
+            }
         }
 
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
@@ -12513,12 +12652,41 @@ public final class MainActivity extends Activity {
             touchX = Math.round(event.getX());
             touchY = Math.round(event.getY());
             int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN && !acceptanceTouchDispatch) {
+                nativeArmExternalUrlAction();
+            }
+            if (action == MotionEvent.ACTION_CANCEL) nativeClearExternalUrlAction();
             if (action == MotionEvent.ACTION_POINTER_DOWN && event.getPointerCount() >= 3) {
                 activity.toggleBenchmarkHudFromPreview();
             }
             touchActive = action != MotionEvent.ACTION_UP && action != MotionEvent.ACTION_CANCEL;
             return true;
         }
+    }
+
+    public static boolean openExternalUrlFromNative(byte[] utf8Url) {
+        MainActivity activity = externalUrlActivity;
+        if (activity == null || utf8Url == null || utf8Url.length == 0
+                || utf8Url.length > 2048 || activity.activityDestroyed
+                || activity.isFinishing()) return false;
+        final String url = new String(utf8Url, StandardCharsets.UTF_8);
+        final Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        intent.addCategory(Intent.CATEGORY_BROWSABLE);
+        try {
+            if (intent.resolveActivity(activity.getPackageManager()) == null) return false;
+        } catch (RuntimeException error) {
+            return false;
+        }
+        activity.runOnUiThread(() -> {
+            MainActivity current = externalUrlActivity;
+            if (current != activity || activity.activityDestroyed || activity.isFinishing()) return;
+            try {
+                activity.startActivity(intent);
+            } catch (ActivityNotFoundException | SecurityException error) {
+                android.util.Log.w("StasisWorkshop", "External URL request was blocked", error);
+            }
+        });
+        return true;
     }
 
     private static final class AiCancelledException extends Exception {

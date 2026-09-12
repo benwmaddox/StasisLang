@@ -68,8 +68,9 @@ static inline uint64_t stasis_mobile_frame_pacer_wait_ns(
         return deadline_ns - now_ns;
     }
     if (now_ns - deadline_ns >= STASIS_MOBILE_FRAME_INTERVAL_NS) {
-        /* A suspended or overloaded app resumes without catch-up ticks. */
-        pacer->next_deadline_ns = now_ns + STASIS_MOBILE_FRAME_INTERVAL_NS;
+        /* The completed step owns this interval; delay the following tick. */
+        pacer->next_deadline_ns = now_ns + (2 * STASIS_MOBILE_FRAME_INTERVAL_NS);
+        return STASIS_MOBILE_FRAME_INTERVAL_NS;
     } else {
         pacer->next_deadline_ns = deadline_ns + STASIS_MOBILE_FRAME_INTERVAL_NS;
     }

@@ -1,0 +1,39 @@
+import "../../../src/stdlib/rig2d.stasis";
+
+global rig2d_probe_left: Rig2D;
+global rig2d_probe_right: Rig2D;
+
+function rig2d_probe_near(actual: f32, expected: f32): bool {
+    let difference: f32 = actual - expected;
+    return difference > -0.001 && difference < 0.001;
+}
+
+function rig2d_probe(): i32 {
+    rig2d_probe_left.clear();
+    rig2d_probe_right.clear();
+    if (rig2d_probe_left.add_bone(-1, 10.0, 0.0, 0.0) != 0) {
+        return 1;
+    }
+    if (rig2d_probe_left.add_bone(0, 5.0, 0.0, 45.0) != 1) {
+        return 2;
+    }
+    if (rig2d_probe_right.add_bone(-1, 3.0, 4.0, 0.0) != 0) {
+        return 3;
+    }
+    if (!rig2d_probe_left.solve(2.0, 3.0, 90.0) || !rig2d_probe_right.solve(0.0, 0.0, 0.0)) {
+        return 4;
+    }
+    if (!rig2d_probe_near(rig2d_probe_left.world_x(1), 2.0)) {
+        return 5;
+    }
+    if (!rig2d_probe_near(rig2d_probe_left.world_y(1), 18.0)) {
+        return 6;
+    }
+    if (!rig2d_probe_near(rig2d_probe_left.world_angle(1), 135.0)) {
+        return 7;
+    }
+    if (!rig2d_probe_near(rig2d_probe_right.world_x(0), 3.0) || !rig2d_probe_near(rig2d_probe_right.world_y(0), 4.0)) {
+        return 8;
+    }
+    return 0;
+}

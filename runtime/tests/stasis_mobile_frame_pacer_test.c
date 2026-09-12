@@ -42,22 +42,26 @@ static void test_small_overrun_preserves_the_next_absolute_deadline(void) {
     check(pacer.next_deadline_ns == 3000 + (2 * STASIS_MOBILE_FRAME_INTERVAL_NS));
 }
 
-static void test_long_pause_resets_without_a_catch_up_burst(void) {
+static void check_missed_interval_resets_without_a_catch_up_burst(uint64_t elapsed_ns) {
     StasisMobileFramePacer pacer;
     stasis_mobile_frame_pacer_reset(&pacer, 4000);
 
-    uint64_t resumed_ns = 4000 + 1000000000ULL;
-    check(stasis_mobile_frame_pacer_wait_ns(&pacer, resumed_ns) == 0);
-    check(pacer.next_deadline_ns == resumed_ns + STASIS_MOBILE_FRAME_INTERVAL_NS);
-    check(stasis_mobile_frame_pacer_wait_ns(&pacer, resumed_ns + 1000000) ==
+    uint64_t resumed_ns = 4000 + elapsed_ns;
+    uint64_t wait_ns = stasis_mobile_frame_pacer_wait_ns(&pacer, resumed_ns);
+    check(wait_ns == STASIS_MOBILE_FRAME_INTERVAL_NS);
+    check(pacer.next_deadline_ns == resumed_ns + (2 * STASIS_MOBILE_FRAME_INTERVAL_NS));
+    /* The shell sleeps before the next step, which takes one millisecond. */
+    check(stasis_mobile_frame_pacer_wait_ns(&pacer, resumed_ns + wait_ns + 1000000) ==
         STASIS_MOBILE_FRAME_INTERVAL_NS - 1000000);
+    check(pacer.next_deadline_ns == resumed_ns + (3 * STASIS_MOBILE_FRAME_INTERVAL_NS));
 }
 
 int main(void) {
     test_fills_the_remainder_of_a_high_refresh_frame();
     test_vsync_at_sixty_hz_needs_no_extra_sleep();
     test_small_overrun_preserves_the_next_absolute_deadline();
-    test_long_pause_resets_without_a_catch_up_burst();
+    check_missed_interval_resets_without_a_catch_up_burst(1000000000ULL);
+    check_missed_interval_resets_without_a_catch_up_burst(2 * STASIS_MOBILE_FRAME_INTERVAL_NS);
     puts("stasis_mobile_frame_pacer_test: ok");
     return 0;
 }

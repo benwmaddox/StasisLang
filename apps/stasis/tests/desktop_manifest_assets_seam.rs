@@ -85,9 +85,12 @@ fn repository_root() -> PathBuf {
 }
 
 fn evidence_root() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repository_root().join("target"))
+        .unwrap_or_else(|| repository_root().join("target"));
+    std::env::current_dir()
+        .expect("resolve evidence directory before changing working directory")
+        .join(target)
         .join("seam-tests")
 }
 
@@ -152,9 +155,11 @@ fn manifest_assets_survive_wrong_cwd_and_render_sprite_direct_and_cached_text() 
     let _cwd_guard = WorkingDirectoryGuard(original_cwd);
     std::env::set_current_dir(&wrong_cwd).expect("enter wrong working directory");
 
-    let runtime_path = PathBuf::from(
-        std::env::var_os("STASIS_RUNTIME_DLL_PATH")
-            .expect("STASIS_RUNTIME_DLL_PATH must name the CI-built SDL runtime"),
+    let runtime_path = std::env::var_os("STASIS_RUNTIME_LIBRARY_PATH")
+        .or_else(|| std::env::var_os("STASIS_RUNTIME_DLL_PATH"))
+        .map(PathBuf::from)
+        .expect(
+        "STASIS_RUNTIME_LIBRARY_PATH (or legacy STASIS_RUNTIME_DLL_PATH) must name the CI-built SDL runtime",
     );
     let selected_runtime = runtime_library_candidate_paths()
         .into_iter()

@@ -12,7 +12,7 @@ except ImportError:
     from verify_android_workshop_seam import SeamError, _read_json, verify_files, verify_log
 
 
-MANIFEST = {"state_checksum": 2500, "render_contract_version": 7}
+MANIFEST = {"state_checksum": 2500, "render_contract_version": 8}
 
 
 def _png_rgba(width: int, height: int, pixels: bytes) -> bytes:
@@ -88,9 +88,9 @@ def _verify_files_fixture(root: Path, alpha_png: bytes, beta_png: bytes,
 
 
 GOOD = """CompileReady: backend=cranelift-jit reload=InitialCompile status=0 functions=7 compile_us=12 manifest=x
-Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":7,"state_checksum":2500,"command_trace":919191,"frame_token":1,"fallback":0,"stub":0}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":8,"state_checksum":2500,"command_trace":919191,"frame_token":1,"fallback":0,"stub":0}
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":1,"frame_token":1}
-Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":7,"state_checksum":2500,"command_trace":424242,"frame_token":50,"fallback":0,"stub":0}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":8,"state_checksum":2500,"command_trace":424242,"frame_token":50,"fallback":0,"stub":0}
 RenderAcceptanceFrame: count=1 frame_token=1
 Stasis Workshop IT-026: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"buffer_abi","status":"passed","descriptor":{"lanes":[{"lane":"i32","bytes":271552,"alignment":4},{"lane":"f32","bytes":586256,"alignment":4},{"lane":"u8","bytes":65536,"alignment":1}]},"valid_guards_intact":true,"all_invalid_unchanged":true,"valid_calls":1,"invalid_calls":18}
 	Stasis Workshop IT-026 case: {"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"case","name":"short_i32","unchanged":true,"error":{"schema":"stasis.workshop_jni_frame_abi.v1","test_id":"IT-026","event":"error","lane":"i32","reason":"capacity","expected":271552,"actual":271551}}
@@ -127,25 +127,33 @@ Stasis Workshop IT-028 GLES: {"schema":"stasis.workshop_hot_edit.v1","test_id":"
 Stasis Workshop IT-028 case: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"case","status":"passed","phase":"post_invalid","sequence":3,"runtime":{"status":"RuntimeStateReady","generation":2,"source_fingerprint":"2222222222222222"},"guest":{"tick_revision":2,"render_revision":2,"state_counter":3},"render":{"trace":115,"frame_token":83,"rect_count":2,"marker":{"active":true,"x":176.0,"y":48.0,"w":24.0,"h":24.0,"r":0.2,"g":0.9,"b":0.95,"a":1.0}},"gles_presented":true,"gles_frame_token":83,"java_only":false,"fallback":0,"stub":0}
 Stasis Workshop IT-028: {"schema":"stasis.workshop_hot_edit.v1","test_id":"IT-028","event":"hot_edit","status":"passed","ordered":true,"unique":true,"atomic":true,"hook_source_line":40,"invalid_compile":{"ok":false,"kind":"compile_error","diagnostic":{"file":"src/main.stasis","line":40,"column":31,"end_line":42,"end_column":2,"symbol":"on_code_swap","message":"cannot resolve call 'IT028_missing_target'"}},"restore_receipt":{"status":"NoChange","compile":"CompileReady: backend=cranelift-jit reload=NoChange status=0 functions=10 compile_us=12 manifest=build/native_compile_manifest.txt"},"cleanup_receipt":{"status":"Restored","compile":"CompileReady: backend=cranelift-jit reload=FastReload status=0 functions=10 compile_us=13 manifest=build/native_compile_manifest.txt","frame":{"status":"passed","runtime":{"generation":3,"source_fingerprint":"1111111111111111"},"render":{"marker":{"active":false}},"java_only":false,"fallback":0,"stub":0}}}
 Stasis Workshop IT-031: {"schema":"stasis.workshop_diagnostic_seam.v1","test_id":"IT-031","event":"diagnostic_seam","status":"passed","ordered":true,"cases":[{"name":"parse","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"parse","code":"stasis.parse","context":{"file":"src/main.stasis"},"detail":"parse detail","causes":["parse phase","parse detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"parse","code":"stasis.parse","context":{"file":"src/main.stasis"},"detail":"parse detail","causes":["parse phase","parse detail"]}},{"name":"extern_resolution","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"extern_resolution","code":"stasis.unresolvedExtern","context":{"file":"src/main.stasis","symbol":"IT031_missing_extern"},"detail":"extern detail","causes":["extern_resolution phase","extern detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"extern_resolution","code":"stasis.unresolvedExtern","context":{"file":"src/main.stasis","symbol":"IT031_missing_extern"},"detail":"extern detail","causes":["extern_resolution phase","extern detail"]}},{"name":"runtime_entry","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"runtime_entry","code":"stasis.runtimeEntry","context":{"symbol":"tick"},"detail":"runtime detail","causes":["runtime_entry phase","runtime detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"runtime_entry","code":"stasis.runtimeEntry","context":{"symbol":"tick"},"detail":"runtime detail","causes":["runtime_entry phase","runtime detail"]}},{"name":"render_schema","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"render_schema","code":"stasis.renderSchema","context":{"symbol":"render"},"detail":"render detail","causes":["render_schema phase","render detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"render_schema","code":"stasis.renderSchema","context":{"symbol":"render"},"detail":"render detail","causes":["render_schema phase","render detail"]}},{"name":"missing_resource","equal":true,"native":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"resource","code":"stasis.missingResource","context":{"resource":"assets/IT031_missing.svg"},"detail":"resource detail","causes":["resource phase","resource detail"]},"ui":{"schema":"stasis.native_diagnostic.v1","version":1,"stage":"resource","code":"stasis.missingResource","context":{"resource":"assets/IT031_missing.svg"},"detail":"resource detail","causes":["resource phase","resource detail"]}}],"cleanup_receipt":{"status":"Restored","compile":"CompileReady: status=0","frame":"passed","source_fingerprint":"1111111111111111","baseline_source_fingerprint":"1111111111111111","generation":3,"baseline_generation":3,"ui":{"blocking_error_visible":false,"status_healthy":true,"compile_ready":true,"compile_attempted":true,"game_runtime_active":true,"displayed_status":"Game updated - hot swapped"}}}
-Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":7,"state_checksum":2500,"command_trace":3533510058,"frame_token":76,"fallback":0,"stub":0}
-Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":7,"state_checksum":2500,"command_trace":3533510058,"frame_token":77,"fallback":0,"stub":0}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":8,"state_checksum":2500,"command_trace":3533510058,"frame_token":76,"fallback":0,"stub":0}
+Stasis Workshop IT-025: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"frame","jni_version":65542,"rust_bridge_version":"0.1.0","render_version":8,"state_checksum":2500,"command_trace":3533510058,"frame_token":77,"fallback":0,"stub":0}
 RenderAcceptanceFrame: count=30 frame_token=77
 Stasis Workshop IT-025 GLES: {"schema":"stasis.workshop_seam.v1","test_id":"IT-025","event":"present","count":30,"frame_token":77}
 """
+GOOD = GOOD.replace('"name":"render_schema"', '"name":"render_construction"')
+GOOD = GOOD.replace(
+    '"stage":"render_schema","code":"stasis.renderSchema"',
+    '"stage":"runtime_entry","code":"stasis.runtimeEntry"')
+GOOD = GOOD.replace(
+    '"causes":["render_schema phase","render detail"]',
+    '"causes":["runtime_entry phase","render detail"]')
 # Keep the fixture's IT-031 case evidence in separate bounded log records, as
 # the Android logcat line limit cannot carry five duplicated full cases.
 def _it029_case(phase, sequence, root, text_hash, capture_hash, command_trace,
                 generation, stale_rejections, uploads):
     resources = {
         "project_root": root,
-        "surface_generation": generation,
+        "surface_generation": generation * 2 - 1,
         "renderer_generation": generation,
-        "lifecycle_surface_generation": generation + 1,
+        "lifecycle_surface_generation": generation * 2,
         "lifecycle_renderer_generation": generation,
         "resources_ready": True,
         "sprite_handles": [101, 102, 103],
         "identities": [
-            "sprite:101:" + root + ":sprite-hash",
+            "sprite:101:" + root + ":sprite-hash:640x360:density=1065353216"
+            + f":surface={generation * 2 - 1}:renderer={generation}",
             "font:201:" + root + ":font-hash:24",
             "cached_text:301:" + root + ":" + text_hash,
             "text:201:" + root + ":" + text_hash,
@@ -333,7 +341,8 @@ GOOD = GOOD.replace('"causes":["parse phase","parse detail"]}},',
                     '"actual":{"line":3,"column":1,"end_line":4,"end_column":1}}},', 1)
 
 for _name, _detail in (("parse", "parse detail"), ("extern_resolution", "extern detail"),
-                       ("runtime_entry", "runtime detail"), ("render_schema", "render detail"),
+                       ("runtime_entry", "runtime detail"),
+                       ("render_construction", "render detail"),
                        ("missing_resource", "resource detail")):
     GOOD = GOOD.replace(
         '{"name":"' + _name + '","equal":true,',
@@ -341,7 +350,126 @@ for _name, _detail in (("parse", "parse detail"), ("extern_resolution", "extern 
         1)
 
 
+_it032_milestones = [
+    {"frame": 1, "revision": 1, "frame_token": 101, "generation": 20,
+     "source_fingerprint": "a1", "command_trace": 1001,
+     "surface_generation": 2, "renderer_generation": 1,
+     "resource_surface_generation": 1, "resource_renderer_generation": 1},
+    {"frame": 75, "revision": 2, "frame_token": 175, "generation": 21,
+     "source_fingerprint": "a2", "command_trace": 1002,
+     "surface_generation": 2, "renderer_generation": 1,
+     "resource_surface_generation": 1, "resource_renderer_generation": 1},
+    {"frame": 100, "revision": 2, "frame_token": 200, "generation": 21,
+     "source_fingerprint": "a2", "command_trace": 1002,
+     "surface_generation": 4, "renderer_generation": 2,
+     "resource_surface_generation": 3, "resource_renderer_generation": 2},
+    {"frame": 150, "revision": 3, "frame_token": 250, "generation": 22,
+     "source_fingerprint": "a3", "command_trace": 1003,
+     "surface_generation": 4, "renderer_generation": 2,
+     "resource_surface_generation": 3, "resource_renderer_generation": 2},
+    {"frame": 200, "revision": 3, "frame_token": 300, "generation": 22,
+     "source_fingerprint": "a3", "command_trace": 1003,
+     "surface_generation": 6, "renderer_generation": 3,
+     "resource_surface_generation": 5, "resource_renderer_generation": 3},
+    {"frame": 225, "revision": 4, "frame_token": 325, "generation": 23,
+     "source_fingerprint": "a4", "command_trace": 1004,
+     "surface_generation": 6, "renderer_generation": 3,
+     "resource_surface_generation": 5, "resource_renderer_generation": 3},
+    {"frame": 300, "revision": 1, "frame_token": 400, "generation": 24,
+     "source_fingerprint": "a1", "command_trace": 1000,
+     "surface_generation": 6, "renderer_generation": 3,
+     "resource_surface_generation": 5, "resource_renderer_generation": 3},
+]
+_it032_summary = {
+    "schema": "stasis.workshop_soak.v1", "test_id": "IT-032",
+    "event": "bounded_soak", "status": "passed", "frame_count": 300,
+    "gles_presented_count": 300,
+    "edit_frames": [75, 150, 225, 300], "surface_frames": [100, 200],
+    "milestone_count": 7, "milestones": _it032_milestones,
+    "revision_traces": [1001, 1002, 1003, 1004],
+    "revision_sources": ["a1", "a2", "a3", "a4"],
+    "final_packaged_trace": 1000, "final_packaged_source": "a1",
+    "buffer_contract": {"direct": True, "stable_identity": True,
+                        "i32_capacity": 67888, "f32_capacity": 146564,
+                        "u8_capacity": 65536, "zero_dropped_frames": 300},
+    "peaks": {"lines": 8, "rects": 2, "sprites": 3, "text": 2,
+              "text_bytes": 32, "order": 8, "clips": 0, "sprite_runs": 2,
+              "atlas_pages": 1, "live_regions": 3, "text_textures": 2,
+              "font_entries": 1},
+    "cleanup_receipt": {"status": "Restored", "source": "packaged",
+                        "runtime_generation": 24, "pending_candidate": False,
+                        "guest_state": "restored"},
+    "ordered_unique_tokens": True, "one_generation_per_frame": True,
+    "java_only": False, "fallback": 0, "stub": 0,
+}
+_it032_lines = "\n".join(
+    "Stasis Workshop IT-032 milestone: " + json.dumps(item, separators=(",", ":"))
+    for item in _it032_milestones
+) + "\nStasis Workshop IT-032: " + json.dumps(_it032_summary, separators=(",", ":"))
+_it031_summary_line = next(
+    line for line in GOOD.splitlines() if line.startswith("Stasis Workshop IT-031: ")
+)
+GOOD = GOOD.replace(_it031_summary_line,
+                    _it031_summary_line + "\n" + _it032_lines, 1)
+
+
 class WorkshopSeamTests(unittest.TestCase):
+    def test_accepts_exact_it032_schedule(self):
+        result = verify_log(GOOD, MANIFEST)
+        self.assertEqual(300, result["it032"]["frame_count"])
+        self.assertEqual([1, 75, 100, 150, 200, 225, 300],
+                         [item["frame"] for item in result["it032_milestones"]])
+
+    def test_rejects_it032_wrong_frame_count_and_surface_generation(self):
+        with self.assertRaisesRegex(SeamError, "300-frame soak"):
+            verify_log(GOOD.replace('"frame_count":300', '"frame_count":299', 1),
+                       MANIFEST)
+        bad = GOOD.replace(
+            '"surface_generation":4,"renderer_generation":2',
+            '"surface_generation":3,"renderer_generation":2', 1)
+        with self.assertRaisesRegex(SeamError, "surface recreations"):
+            verify_log(bad, MANIFEST)
+
+    def test_rejects_it032_generation_or_source_change_without_edit(self):
+        bad_generation = GOOD.replace(
+            '"frame":100,"revision":2,"frame_token":200,"generation":21',
+            '"frame":100,"revision":2,"frame_token":200,"generation":22', 1)
+        with self.assertRaisesRegex(SeamError, "runtime generation|surface recreation|edit"):
+            verify_log(bad_generation, MANIFEST)
+        bad_source = GOOD.replace(
+            '"frame":100,"revision":2,"frame_token":200,"generation":21,'
+            '"source_fingerprint":"a2"',
+            '"frame":100,"revision":2,"frame_token":200,"generation":21,'
+            '"source_fingerprint":"changed"', 1)
+        with self.assertRaisesRegex(SeamError, "source fingerprints"):
+            verify_log(bad_source, MANIFEST)
+
+    def test_rejects_it032_stale_resource_epoch_or_final_trace(self):
+        stale = GOOD.replace('"resource_surface_generation":3',
+                             '"resource_surface_generation":2', 1)
+        with self.assertRaisesRegex(SeamError, "resource generation"):
+            verify_log(stale, MANIFEST)
+        with self.assertRaisesRegex(SeamError, "final packaged state/trace"):
+            verify_log(GOOD.replace('"final_packaged_trace":1000',
+                                    '"final_packaged_trace":1004', 1), MANIFEST)
+
+    def test_rejects_it032_peak_or_cleanup_failure(self):
+        with self.assertRaisesRegex(SeamError, "peaks"):
+            verify_log(GOOD.replace('"text_bytes":32', '"text_bytes":65537', 1),
+                       MANIFEST)
+        with self.assertRaisesRegex(SeamError, "cleanup"):
+            verify_log(GOOD.replace('"status":"Restored","source":"packaged"',
+                                    '"status":"failed","source":"packaged"', 1),
+                       MANIFEST)
+
+    def test_rejects_it032_unstable_or_wrong_capacity_buffers(self):
+        with self.assertRaisesRegex(SeamError, "direct-buffer"):
+            verify_log(GOOD.replace('"stable_identity":true',
+                                    '"stable_identity":false', 1), MANIFEST)
+        with self.assertRaisesRegex(SeamError, "direct-buffer"):
+            verify_log(GOOD.replace('"i32_capacity":67888',
+                                    '"i32_capacity":67887', 1), MANIFEST)
+
     def test_non_acceptance_text_uploads_do_not_compute_acceptance_hashes(self):
         source = (Path(__file__).resolve().parents[2]
                   / "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java").read_text()
@@ -359,7 +487,7 @@ class WorkshopSeamTests(unittest.TestCase):
                 ("parse", "parse", "stasis.parse"),
                 ("extern_resolution", "extern_resolution", "stasis.unresolvedExtern"),
                 ("runtime_entry", "runtime_entry", "stasis.runtimeEntry"),
-                ("render_schema", "render_schema", "stasis.renderSchema"),
+                ("render_construction", "runtime_entry", "stasis.runtimeEntry"),
                 ("missing_resource", "resource", "stasis.missingResource")]:
             diagnostic = {"schema": "stasis.native_diagnostic.v1", "version": 1,
                           "stage": stage, "code": code, "context": {},
@@ -375,7 +503,7 @@ class WorkshopSeamTests(unittest.TestCase):
                 diagnostic["context"]["resource"] = "assets/IT031_missing.svg"
             if name == "runtime_entry":
                 diagnostic["context"]["symbol"] = "tick"
-            if name == "render_schema":
+            if name == "render_construction":
                 diagnostic["context"]["symbol"] = "render"
             case = {"name": name, "native": diagnostic, "ui": diagnostic,
                     "displayed_text": diagnostic["detail"], "equal": True}
@@ -396,7 +524,7 @@ class WorkshopSeamTests(unittest.TestCase):
                 ("parse", "parse", "stasis.parse"),
                 ("extern_resolution", "extern_resolution", "stasis.unresolvedExtern"),
                 ("runtime_entry", "runtime_entry", "stasis.runtimeEntry"),
-                ("render_schema", "render_schema", "stasis.renderSchema"),
+                ("render_construction", "runtime_entry", "stasis.runtimeEntry"),
                 ("missing_resource", "resource", "stasis.missingResource")]:
             diagnostic = {"schema": "stasis.native_diagnostic.v1", "version": 1,
                           "stage": stage, "code": code, "context": {},
@@ -411,7 +539,7 @@ class WorkshopSeamTests(unittest.TestCase):
                 diagnostic["context"]["resource"] = "assets/IT031_missing.svg"
             if name == "runtime_entry":
                 diagnostic["context"]["symbol"] = "tick"
-            if name == "render_schema":
+            if name == "render_construction":
                 diagnostic["context"]["symbol"] = "render"
             ui = dict(diagnostic)
             ui["detail"] = "changed"
@@ -466,8 +594,11 @@ class WorkshopSeamTests(unittest.TestCase):
             verify_log(generic_detail, MANIFEST)
 
     def test_rejects_wrong_it031_case_order_context_and_cleanup(self):
-        wrong_code = GOOD.replace('"code":"stasis.renderSchema"',
-                                  '"code":"stasis.parse"')
+        wrong_code = GOOD.replace(
+            '"stage":"runtime_entry","code":"stasis.runtimeEntry",'
+            '"context":{"symbol":"render"}',
+            '"stage":"runtime_entry","code":"stasis.parse",'
+            '"context":{"symbol":"render"}')
         with self.assertRaisesRegex(SeamError, "stage, code"):
             verify_log(wrong_code, MANIFEST)
         wrong_context = GOOD.replace('"symbol":"tick"', '"symbol":"main"')
@@ -613,6 +744,36 @@ class WorkshopSeamTests(unittest.TestCase):
         with self.assertRaisesRegex(SeamError, "identity was reused"):
             verify_log(GOOD.replace('"capture_sha256":"b' + 'b' * 63 + '"',
                                     '"capture_sha256":"a' + 'a' * 63 + '"'), MANIFEST)
+
+    def test_rejects_it029_stale_identity_epoch_or_changed_content(self):
+        for old, new, error in (
+            (":surface=3:renderer=2", ":surface=1:renderer=1", "stale generation"),
+            (":surface=3:renderer=2", "", "stale generation"),
+            ("sprite-hash:640x360", "wrong-hash:640x360", "identities crossed"),
+            ("sprite-hash:640x360", "sprite-hash:320x180", "identities crossed"),
+            (":font-hash:24", ":wrong-font:24", "identities crossed"),
+            (f"cached_text:301:{_alpha_root}:" + "1" * 64,
+             f"cached_text:301:{_alpha_root}:" + "2" * 64, "identities crossed"),
+            (f"text:201:{_alpha_root}:" + "1" * 64,
+             f"text:201:{_alpha_root}:" + "2" * 64, "identities crossed"),
+            ('"lifecycle_surface_generation":4',
+             '"lifecycle_surface_generation":3', "stale generation"),
+            ('"lifecycle_renderer_generation":2',
+             '"lifecycle_renderer_generation":1', "stale generation"),
+        ):
+            with self.subTest(new=new), self.assertRaisesRegex(SeamError, error):
+                verify_log(GOOD.replace(old, new, 1), MANIFEST)
+
+    def test_rejects_it029_non_integer_lifecycle_epochs(self):
+        for field, value in (("lifecycle_surface_generation", 2),
+                             ("lifecycle_renderer_generation", 1)):
+            for invalid in (True, False, float(value)):
+                with self.subTest(field=field, invalid=invalid):
+                    old = f'"{field}":{value}'
+                    mutated = GOOD.replace(old, f'"{field}":{json.dumps(invalid)}')
+                    self.assertNotEqual(GOOD, mutated)
+                    with self.assertRaisesRegex(SeamError, "stale generation"):
+                        verify_log(mutated, MANIFEST)
 
     def test_rejects_it029_stale_generation_or_duplicate_restore(self):
         stale = GOOD.replace('"stale_generation_rejections":6',

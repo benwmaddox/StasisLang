@@ -93,6 +93,20 @@ fn json_stderr(output: &Output) -> Value {
     serde_json::from_slice(&output.stderr).expect("single JSON stderr object")
 }
 
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create copied tree directory");
+    for entry in fs::read_dir(source).expect("read copied tree directory") {
+        let entry = entry.expect("read copied tree entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).expect("copy tree file");
+        }
+    }
+}
+
 #[test]
 fn help_explains_how_to_build_each_supported_target() {
     let output = stasis(&["help"], Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -522,6 +536,242 @@ fn lsp_stdio_publishes_and_clears_compiler_diagnostics() {
     fs::remove_dir_all(project).ok();
 }
 
+fn assert_generated_knowledge(project: &Path) {
+    let knowledge_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/knowledge");
+    let knowledge_documents = [
+        "README.md",
+        "a-little-stasis/01-three-entry-points.md",
+        "a-little-stasis/02-state-has-owners.md",
+        "a-little-stasis/03-a-tick-is-an-ordered-recipe.md",
+        "a-little-stasis/04-input-crosses-a-boundary.md",
+        "a-little-stasis/05-bounded-storage-is-policy.md",
+        "a-little-stasis/06-query-materialize-commit.md",
+        "a-little-stasis/07-test-systems-not-balance-numbers.md",
+        "a-little-stasis/08-projection-is-not-authority.md",
+        "practical-examples/breakout-remove-one-brick-per-collision.md",
+        "practical-examples/platformer-land-in-the-crossing-tick.md",
+        "practical-examples/pong-score-after-the-ball-crosses-the-goal.md",
+        "practical-examples/snake-reject-a-reverse-turn.md",
+        "geometry-and-collision.md",
+        "loading-screens.md",
+        "semantic-edit-and-validation.md",
+    ];
+    for document in knowledge_documents.iter().copied() {
+        assert_eq!(
+            fs::read(project.join("vendor/stasis/docs").join(document))
+                .expect("read generated knowledge document"),
+            fs::read(knowledge_source.join(document)).expect("read source knowledge document"),
+            "generated knowledge document differs: {document}"
+        );
+    }
+    let knowledge_examples = [
+        "examples/src/breakout_brick.stasis",
+        "examples/src/game_patterns.stasis",
+        "examples/src/platformer_landing.stasis",
+        "examples/src/pong_goal.stasis",
+        "examples/src/snake_turn.stasis",
+        "examples/src/loading_screen.stasis",
+        "examples/assets/hero.svg",
+        "examples/assets/music.wav",
+        "media/loading-screen/success.mp4",
+        "media/loading-screen/failure.mp4",
+        "media/loading-screen/loading.png",
+        "media/loading-screen/progress.png",
+        "media/loading-screen/gameplay.png",
+        "media/loading-screen/error.png",
+        "examples/stasis.json",
+        "examples/tests/breakout_brick.test.stasis",
+        "examples/tests/game_patterns.test.stasis",
+        "examples/tests/platformer_landing.test.stasis",
+        "examples/tests/pong_goal.test.stasis",
+        "examples/tests/snake_turn.test.stasis",
+        "examples/tests/loading_screen.test.stasis",
+    ];
+    for example in knowledge_examples.iter().copied() {
+        assert_eq!(
+            fs::read(project.join("vendor/stasis/docs").join(example))
+                .expect("read generated knowledge example"),
+            fs::read(knowledge_source.join(example)).expect("read source knowledge example"),
+            "generated knowledge example differs: {example}"
+        );
+    }
+
+    let compiled_examples = knowledge_examples
+        .iter()
+        .filter(|path| path.ends_with(".stasis"))
+        .map(|path| {
+            fs::read_to_string(knowledge_source.join(path))
+                .expect("read knowledge example Stasis source")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("\r\n", "\n");
+    let mut checked_stasis_blocks = 0;
+    for document in knowledge_documents.iter().copied() {
+        let path = knowledge_source.join(document);
+        let markdown = fs::read_to_string(&path)
+            .expect("read knowledge Markdown")
+            .replace("\r\n", "\n");
+        let mut remaining = markdown.as_str();
+        while let Some(start) = remaining.find("```stasis\n") {
+            let block_start = start + "```stasis\n".len();
+            let after_start = &remaining[block_start..];
+            let end = after_start
+                .find("\n```")
+                .expect("close Stasis Markdown fence");
+            let block = &after_start[..end];
+            assert!(
+                compiled_examples.contains(block),
+                "Stasis block in {} is not an exact compiler-checked excerpt:\n{block}",
+                path.display()
+            );
+            checked_stasis_blocks += 1;
+            remaining = &after_start[end + "\n```".len()..];
+        }
+    }
+    assert!(
+        checked_stasis_blocks > 0,
+        "no Stasis Markdown blocks checked"
+    );
+
+    let generated_examples = project.join("vendor/stasis/docs/examples");
+    let vendor_before = snapshot_project_bytes(&project.join("vendor/stasis"));
+    let runnable_examples = project.join("build/knowledge-examples");
+    copy_tree(&generated_examples, &runnable_examples);
+    let examples_prepared = stasis(
+        &[
+            "--json",
+            "--workspace",
+            "build/knowledge-examples",
+            "vendor",
+            "update",
+        ],
+        project,
+    );
+    assert_eq!(
+        examples_prepared.status.code(),
+        Some(0),
+        "copied knowledge vendor update failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&examples_prepared.stdout),
+        String::from_utf8_lossy(&examples_prepared.stderr)
+    );
+
+    let examples_checked = stasis(
+        &["--json", "--workspace", "build/knowledge-examples", "check"],
+        project,
+    );
+    assert_eq!(
+        examples_checked.status.code(),
+        Some(0),
+        "generated knowledge examples check failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&examples_checked.stdout),
+        String::from_utf8_lossy(&examples_checked.stderr)
+    );
+    let examples_tested = stasis(
+        &["--json", "--workspace", "build/knowledge-examples", "test"],
+        project,
+    );
+    assert_eq!(
+        examples_tested.status.code(),
+        Some(0),
+        "generated knowledge examples test failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&examples_tested.stdout),
+        String::from_utf8_lossy(&examples_tested.stderr)
+    );
+    let examples_test_result = json_stdout(&examples_tested);
+    assert!(
+        examples_test_result["result"]["tests_passed"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "generated knowledge examples discovered no tests"
+    );
+    assert_eq!(examples_test_result["result"]["tests_failed"], 0);
+
+    assert!(
+        !generated_examples.join(".stasis_cache").exists(),
+        "running the knowledge examples changed the vendored package"
+    );
+    assert_eq!(
+        snapshot_project_bytes(&project.join("vendor/stasis")),
+        vendor_before,
+        "running the knowledge examples changed the vendor fingerprint inputs"
+    );
+    let symbols = stasis(&["--json", "symbol", "list", "--limit", "1"], project);
+    assert_eq!(
+        symbols.status.code(),
+        Some(0),
+        "parent read-only symbol query rejected vendor snapshot: stdout={} stderr={}",
+        String::from_utf8_lossy(&symbols.stdout),
+        String::from_utf8_lossy(&symbols.stderr)
+    );
+}
+
+#[test]
+fn generated_knowledge_examples_compile_and_test() {
+    let parent = temp_dir("knowledge_examples");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+
+    let created = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(
+        created.status.code(),
+        Some(0),
+        "generated knowledge project creation failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert_generated_knowledge(&project);
+
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
+fn generated_project_contains_container_geometry_guidance() {
+    let parent = temp_dir("geometry_guidance");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let created = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(
+        created.status.code(),
+        Some(0),
+        "project creation failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let agent_guide = fs::read_to_string(parent.join("demo/AGENTS.md")).expect("read agent guide");
+    assert_eq!(agent_guide, include_str!("../../../docs/agent_workflow.md"));
+    for rule in [
+        "## Container-derived UI geometry",
+        "real safe/current container",
+        "`ui_begin_frame`",
+        "`ui_vstack_begin`/`ui_hstack_begin` with matching ends",
+        "fixed/rest children",
+        "`ui_inset`",
+        "`ui_anchor`/`ui_anchor_current`",
+        "`ui_current_x`, `ui_current_y`, `ui_current_width`, and `ui_current_height`",
+        "same resolved rectangle for drawing and hit testing",
+        "Recompute ephemeral rectangles each frame",
+        "retain only semantic interaction state",
+        "do not add a measurement pass or retained widget tree",
+        "`ui_place_x`/`ui_place_y` with `UiHorizontal`/`UiVertical`",
+        "repeated hand-derived offsets",
+        "measured or intentionally cached text width",
+        "actual inner content box after icon/padding allocation",
+        "expensive measurement outside render hot paths",
+        "nominal display bounds with aspect/alpha-safe padding",
+        "container-derived origins",
+        "source bitmap dimensions or opaque-trim guesses",
+        "Allow direct offsets only for deliberate local decoration, fixed spacing inside an",
+        "authored world coordinates, or a tested pixel adjustment",
+        "deterministic geometry/hit tests",
+        "inspected desktop and phone evidence",
+    ] {
+        assert!(
+            agent_guide.contains(rule),
+            "generated guidance missing: {rule}"
+        );
+    }
+    fs::remove_dir_all(parent).ok();
+}
+
 #[test]
 fn project_commands_emit_stable_json_from_nested_directories() {
     let parent = temp_dir("success");
@@ -593,27 +843,31 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     );
     let pre_commit = fs::read_to_string(project.join(".githooks/pre-commit"))
         .expect("read generated pre-commit hook");
-    assert!(pre_commit.contains("stasis format --check"));
+    assert!(pre_commit.contains("stasis format"));
+    assert!(!pre_commit.contains("stasis format --check"));
     assert_eq!(
         fs::read(project.join(".gitattributes")).expect("read generated Git attributes"),
         b"*.[sS][vV][gG] text eol=lf\n"
     );
     assert_eq!(
         fs::read(project.join(".gitignore")).expect("read generated Git ignore"),
-        b"/vendor/stasis/docs/\n"
+        b"# Track vendor/stasis/stdlib and vendor/stasis/docs together.\n"
     );
-    assert!(git(
-        &[
-            "check-ignore",
-            "--quiet",
-            "--no-index",
-            "--",
-            "vendor/stasis/docs/README.md",
-        ],
-        &project
-    )
-    .status
-    .success());
+    assert_eq!(
+        git(
+            &[
+                "check-ignore",
+                "--quiet",
+                "--no-index",
+                "--",
+                "vendor/stasis/docs/README.md",
+            ],
+            &project
+        )
+        .status
+        .code(),
+        Some(1)
+    );
     assert!(!git(
         &[
             "check-ignore",
@@ -654,105 +908,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert!(project
         .join("vendor/stasis/stdlib/internal/gfx_cmd.stasis")
         .is_file());
-    let knowledge_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/knowledge");
-    let knowledge_documents = [
-        "README.md",
-        "a-little-stasis/01-three-entry-points.md",
-        "a-little-stasis/02-state-has-owners.md",
-        "a-little-stasis/03-a-tick-is-an-ordered-recipe.md",
-        "a-little-stasis/04-input-crosses-a-boundary.md",
-        "a-little-stasis/05-bounded-storage-is-policy.md",
-        "a-little-stasis/06-query-materialize-commit.md",
-        "a-little-stasis/07-test-systems-not-balance-numbers.md",
-        "a-little-stasis/08-projection-is-not-authority.md",
-        "practical-examples/breakout-remove-one-brick-per-collision.md",
-        "practical-examples/platformer-land-in-the-crossing-tick.md",
-        "practical-examples/pong-score-after-the-ball-crosses-the-goal.md",
-        "practical-examples/snake-reject-a-reverse-turn.md",
-        "geometry-and-collision.md",
-        "semantic-edit-and-validation.md",
-    ];
-    for document in knowledge_documents.iter().copied() {
-        assert_eq!(
-            fs::read(project.join("vendor/stasis/docs").join(document))
-                .expect("read generated knowledge document"),
-            fs::read(knowledge_source.join(document)).expect("read source knowledge document"),
-            "generated knowledge document differs: {document}"
-        );
-    }
-    let knowledge_examples = [
-        "examples/src/breakout_brick.stasis",
-        "examples/src/game_patterns.stasis",
-        "examples/src/platformer_landing.stasis",
-        "examples/src/pong_goal.stasis",
-        "examples/src/snake_turn.stasis",
-        "examples/stasis.json",
-        "examples/tests/breakout_brick.test.stasis",
-        "examples/tests/game_patterns.test.stasis",
-        "examples/tests/platformer_landing.test.stasis",
-        "examples/tests/pong_goal.test.stasis",
-        "examples/tests/snake_turn.test.stasis",
-    ];
-    for example in knowledge_examples.iter().copied() {
-        assert_eq!(
-            fs::read(project.join("vendor/stasis/docs").join(example))
-                .expect("read generated knowledge example"),
-            fs::read(knowledge_source.join(example)).expect("read source knowledge example"),
-            "generated knowledge example differs: {example}"
-        );
-    }
-
-    let compiled_examples = knowledge_examples
-        .iter()
-        .filter(|path| path.ends_with(".stasis"))
-        .map(|path| {
-            fs::read_to_string(knowledge_source.join(path))
-                .expect("read knowledge example Stasis source")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .replace("\r\n", "\n");
-    let mut checked_stasis_blocks = 0;
-    for document in knowledge_documents.iter().copied() {
-        let path = knowledge_source.join(document);
-        let markdown = fs::read_to_string(&path)
-            .expect("read knowledge Markdown")
-            .replace("\r\n", "\n");
-        let mut remaining = markdown.as_str();
-        while let Some(start) = remaining.find("```stasis\n") {
-            let block_start = start + "```stasis\n".len();
-            let after_start = &remaining[block_start..];
-            let end = after_start
-                .find("\n```")
-                .expect("close Stasis Markdown fence");
-            let block = &after_start[..end];
-            assert!(
-                compiled_examples.contains(block),
-                "Stasis block in {} is not an exact compiler-checked excerpt:\n{block}",
-                path.display()
-            );
-            checked_stasis_blocks += 1;
-            remaining = &after_start[end + "\n```".len()..];
-        }
-    }
-    assert!(
-        checked_stasis_blocks > 0,
-        "no Stasis Markdown blocks checked"
-    );
-
-    let generated_examples = project.join("vendor/stasis/docs/examples");
-    let examples_checked = stasis(&["--json", "check"], &generated_examples);
-    assert_eq!(examples_checked.status.code(), Some(0));
-    let examples_tested = stasis(&["--json", "test"], &generated_examples);
-    assert_eq!(examples_tested.status.code(), Some(0));
-    let examples_test_result = json_stdout(&examples_tested);
-    assert!(
-        examples_test_result["result"]["tests_passed"]
-            .as_u64()
-            .is_some_and(|count| count > 0),
-        "generated knowledge examples discovered no tests"
-    );
-    assert_eq!(examples_test_result["result"]["tests_failed"], 0);
+    assert_generated_knowledge(&project);
     assert!(!project.join("vendor/stasis/src").exists());
     assert!(!project.join("vendor/stasis/runtime").exists());
     assert!(!project.join("vendor/stasis/stdlib/gfx_cmd.stasis").exists());
@@ -929,7 +1085,7 @@ fn new_refuses_to_overwrite_existing_git_ignore_policy() {
 }
 
 #[test]
-fn new_project_blocks_unformatted_commits() {
+fn new_project_enforces_formatting_before_commits() {
     let parent = temp_dir("format_hook");
     fs::create_dir_all(&parent).expect("create temp parent");
     let project = parent.join("demo");
@@ -961,7 +1117,7 @@ fn new_project_blocks_unformatted_commits() {
     let blocked = git_with_stasis_on_path(&["commit", "-m", "unformatted"], &project);
     assert!(!blocked.status.success());
     assert!(
-        String::from_utf8_lossy(&blocked.stderr).contains("formatting required"),
+        String::from_utf8_lossy(&blocked.stderr).contains("stage the enforced formatting"),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&blocked.stdout),
         String::from_utf8_lossy(&blocked.stderr)
@@ -972,7 +1128,9 @@ fn new_project_blocks_unformatted_commits() {
     );
     let still_blocked = git_with_stasis_on_path(&["commit", "-m", "still unformatted"], &project);
     assert!(!still_blocked.status.success());
-    assert!(String::from_utf8_lossy(&still_blocked.stderr).contains("stage the formatted"));
+    assert!(
+        String::from_utf8_lossy(&still_blocked.stderr).contains("stage the enforced formatting")
+    );
 
     assert!(git(&["add", "-A"], &project).status.success());
     let committed = git_with_stasis_on_path(&["commit", "-m", "formatted"], &project);
@@ -1588,6 +1746,100 @@ fn headless_ticks_and_seeded_scenarios_are_deterministic_and_reproducible() {
     );
 
     fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn semantic_symbol_queries_ignore_quoted_keywords() {
+    let parent = temp_dir("quoted_symbols");
+    fs::create_dir_all(&parent).unwrap();
+    let project = parent.join("demo");
+    assert!(stasis(&["new", "demo", "--dir", "demo"], &parent)
+        .status
+        .success());
+    let source = r#"
+/* invokes `update */
+/* " global const struct enum function test import { //
+ actual */
+const words: string = "global const struct enum function test import from as { } ` actual";
+struct Real { value: i32; }
+enum Choice { One, Two }
+global state: Real;
+function actual(): i32 { return 1; }
+test `checkers mandatory capture is global and removes one piece`(): bool { return actual() == 1; }
+test `const struct enum function test import from as " // { } actual`(): bool { return true; }
+"#;
+    let file = "tests/checkers.test.stasis";
+    fs::write(project.join(file), source).unwrap();
+    let listed = stasis(&["--json", "symbol", "list", "--file", file], &project);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listing = json_stdout(&listed);
+    let items = listing["result"]["items"].as_array().unwrap();
+    for name in [
+        "globals",
+        "Real",
+        "actual",
+        "checkers mandatory capture is global and removes one piece",
+    ] {
+        assert!(
+            items.iter().any(|item| item["name"] == name),
+            "missing {name}: {listing}"
+        );
+    }
+    assert_eq!(items.len(), 5, "{listing}");
+    let read = stasis(
+        &["--json", "symbol", "read", "actual", "--file", file],
+        &project,
+    );
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(json_stdout(&read).to_string().contains("return 1;"));
+    let references = stasis(&["--json", "symbol", "references", "actual"], &project);
+    assert!(
+        references.status.success(),
+        "{}",
+        String::from_utf8_lossy(&references.stderr)
+    );
+    assert_eq!(
+        json_stdout(&references)["result"]["references"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let executed = stasis(&["--json", "test", file], &project);
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert_eq!(json_stdout(&executed)["result"]["tests_passed"], 2);
+    for (invalid, message) in [
+        ("/* invokes `update", "unterminated block comment"),
+        (
+            "test `global const function",
+            "unterminated test name (missing closing backtick)",
+        ),
+        (
+            "const words: string = \"global",
+            "unterminated string literal",
+        ),
+    ] {
+        fs::write(project.join(file), invalid).unwrap();
+        let output = stasis(&["--json", "symbol", "list", "--file", file], &project);
+        assert!(!output.status.success());
+        assert!(json_stderr(&output)["message"]
+            .as_str()
+            .unwrap()
+            .contains(message));
+    }
+    fs::remove_dir_all(parent).ok();
 }
 
 #[test]
@@ -3469,7 +3721,7 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     }
     fs::write(
         project.join("stasis.json"),
-        "{\n  \"manifest_version\": 1,\n  \"name\": \"TUI Asset Root\",\n  \"entry\": \"src/main.stasis\",\n  \"tests\": \"tests\",\n  \"output\": \"build\"\n}\n",
+        "{\n  \"manifest_version\": 1,\n  \"name\": \"TUI Asset Root\",\n  \"stdlib\": \"toolchain\",\n  \"entry\": \"src/main.stasis\",\n  \"tests\": \"tests\",\n  \"output\": \"build\"\n}\n",
     )
     .expect("write manifest");
     fs::write(project.join("live.commands"), ":quit\n").expect("write live script");

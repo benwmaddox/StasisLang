@@ -18,6 +18,7 @@ REQUIRED_FILES = [
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopJniFrameAbiAcceptance.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java",
+    "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopSoakAcceptance.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidSecretStore.java",
     "mobile/android/app/src/workshop/java/com/stasislang/workshop/AndroidEditRecoveryStore.java",
@@ -132,6 +133,26 @@ STASIS_SAMPLE_FILES = [
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8-sig")
+
+
+def check_agent_guidance():
+    pong_agents = read("mobile/android/app/src/main/assets/workshop_sample/AGENTS.md")
+    exploration_agents = read("mobile/android/app/src/main/assets/exploration_sample/AGENTS.md")
+    canonical_agents = read("docs/agent_workflow.md")
+    heading = "## Container-derived UI geometry"
+    canonical_geometry = canonical_agents.split(heading, 1)[1].split("\n## ", 1)[0].strip()
+    for agents in (pong_agents, exploration_agents):
+        geometry = agents.split(heading, 1)[1].split("\n## ", 1)[0].strip()
+        assert geometry == canonical_geometry
+        for instruction in (
+            "## Theory-Building Practice", "Mapping:", "Rationale:", "Extension:",
+            "Theory gained:", "## Stasis Practice",
+            "Preserve deterministic, tick-based gameplay semantics",
+            "Keep simulation state explicit and render as a projection of current state",
+            "Trace feature changes through state definition, initialization/reset, tick/update, render, and tests",
+            "Prefer representative `.test.stasis` behavior tests and keep failure paths explicit",
+        ):
+            assert instruction in agents, instruction
 
 
 def main() -> int:
@@ -933,14 +954,7 @@ def main() -> int:
     assert template_catalog.count('"AGENTS.md"') == 2
     assert template_catalog.count('"CLAUDE.md"') == 2
     assert "for (String file : template.auxiliaryFiles)" in activity
-    pong_agents = read("mobile/android/app/src/main/assets/workshop_sample/AGENTS.md")
-    exploration_agents = read("mobile/android/app/src/main/assets/exploration_sample/AGENTS.md")
-    assert pong_agents == exploration_agents
-    assert "## Theory-Building Practice" in exploration_agents
-    assert "Mapping:" in exploration_agents
-    assert "Rationale:" in exploration_agents
-    assert "Extension:" in exploration_agents
-    assert "Theory gained:" in exploration_agents
+    check_agent_guidance()
     pong_claude = read("mobile/android/app/src/main/assets/workshop_sample/CLAUDE.md")
     exploration_claude = read("mobile/android/app/src/main/assets/exploration_sample/CLAUDE.md")
     assert pong_claude == exploration_claude
@@ -1520,6 +1534,12 @@ def main() -> int:
     assert "MISSING_EXTERN" in diagnostic_acceptance
     assert "runIt031Frame" in activity
     assert "WorkshopDiagnosticSeamAcceptance.run" in activity
+    soak_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopSoakAcceptance.java")
+    assert "FRAME_COUNT = 300" in soak_acceptance
+    assert "EDIT_FRAMES = {75, 150, 225, 300}" in soak_acceptance
+    assert "SURFACE_FRAMES = {100, 200}" in soak_acceptance
+    assert "WorkshopSoakAcceptance.run" in activity
+    assert "recreateIt032Surface" in activity
     touch_acceptance = read("mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTouchAcceptance.java")
     assert "Stasis Workshop IT-027" in touch_acceptance
     assert "ACTION_DOWN" in touch_acceptance and "ACTION_MOVE" in touch_acceptance
@@ -1670,7 +1690,8 @@ def main() -> int:
     assert '"orientation": "sensorLandscape"' in pong_project
     preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
     assert 'import "/vendor/stasis/src/stdlib/graphics.stasis";' in preview_adapter
-    assert "begin_frame();" in preview_adapter
+    assert "begin_frame();" not in preview_adapter
+    assert "end_frame();" in preview_adapter
     assert "PongHost.writer.reserve(4," in preview_adapter
     assert "PongHost.writer.finalize(4);" in preview_adapter
     assert "gfx_cmd_i32" not in preview_adapter

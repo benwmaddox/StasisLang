@@ -16,7 +16,6 @@ use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 
@@ -319,6 +318,29 @@ struct DirectAotArtifactBundle {
 pub struct SelfHostedAotCliOptions {
     summary_file_path: Option<PathBuf>,
     entry_file: Option<PathBuf>,
+    desktop_network: Option<DesktopNetworkLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopNetworkLink {
+    library: PathBuf,
+    include_dir: PathBuf,
+    mode: DesktopNetworkMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopNetworkMode {
+    Host,
+    Client,
+}
+
+impl DesktopNetworkMode {
+    fn cmake_value(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Client => "client",
+        }
+    }
 }
 
 impl SelfHostedAotCliOptions {
@@ -326,7 +348,22 @@ impl SelfHostedAotCliOptions {
         Self {
             summary_file_path,
             entry_file,
+            desktop_network: None,
         }
+    }
+
+    fn with_desktop_network(
+        mut self,
+        library: PathBuf,
+        include_dir: PathBuf,
+        mode: DesktopNetworkMode,
+    ) -> Self {
+        self.desktop_network = Some(DesktopNetworkLink {
+            library,
+            include_dir,
+            mode,
+        });
+        self
     }
 }
 
@@ -3365,27 +3402,22 @@ fn resolve_engine_bundle_symbol(
         .ok_or_else(|| format!("engine bundle manifest is missing required symbol {name}"))
 }
 
-#[cfg(windows)]
 fn cmake_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-#[cfg(windows)]
 static MONOLITH_CMAKE_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(windows)]
 struct MonolithCmakeBuildDir {
     path: PathBuf,
 }
 
-#[cfg(windows)]
 impl Drop for MonolithCmakeBuildDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
-#[cfg(windows)]
 fn create_monolith_cmake_build_dir(
     aot_root: &Path,
     output_exe: &Path,
@@ -3503,7 +3535,7 @@ fn resolve_vcvars64() -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn run_cmake_in_msvc_environment(arguments: &[String]) -> Result<std::process::Output, String> {
+fn run_monolith_cmake(arguments: &[String]) -> Result<std::process::Output, String> {
     let vcvars = resolve_vcvars64()?;
     let quoted_arguments = arguments
         .iter()
@@ -3535,18 +3567,64 @@ fn run_cmake_in_msvc_environment(arguments: &[String]) -> Result<std::process::O
     output
 }
 
-#[cfg(windows)]
-fn package_engine_bundle_monolithic_windows(
+#[cfg(not(windows))]
+fn run_monolith_cmake(arguments: &[String]) -> Result<std::process::Output, String> {
+    std::process::Command::new("cmake")
+        .args(arguments)
+        .output()
+        .map_err(|error| format!("failed to launch CMake: {error}"))
+}
+
+fn monolith_configure_arguments(
+    runtime_root: &Path,
+    build_dir: &Path,
+    aot_root: &Path,
+    shell_source: &Path,
+    output_dir: &Path,
+    output_name: &str,
+    desktop_network: Option<&DesktopNetworkLink>,
+) -> Vec<String> {
+    let mut arguments = vec![
+        "-S".to_string(),
+        cmake_path(runtime_root),
+        "-B".to_string(),
+        cmake_path(build_dir),
+        "-DSTASIS_BUILD_MONOLITH=ON".to_string(),
+        "-DCMAKE_BUILD_TYPE=Release".to_string(),
+        format!("-DSTASIS_MONOLITH_AOT_DIR={}", cmake_path(aot_root)),
+        format!("-DSTASIS_MONOLITH_MAIN_SOURCE={}", cmake_path(shell_source)),
+        format!("-DSTASIS_MONOLITH_OUTPUT_DIR={}", cmake_path(output_dir)),
+        format!("-DSTASIS_MONOLITH_OUTPUT_NAME={output_name}"),
+    ];
+    if let Some(network) = desktop_network {
+        arguments.push(format!(
+            "-DSTASIS_MONOLITH_NETWORK_LIBRARY={}",
+            cmake_path(&network.library)
+        ));
+        arguments.push(format!(
+            "-DSTASIS_MONOLITH_NETWORK_INCLUDE_DIR={}",
+            cmake_path(&network.include_dir)
+        ));
+        arguments.push(format!(
+            "-DSTASIS_MONOLITH_NETWORK_MODE={}",
+            network.mode.cmake_value()
+        ));
+    }
+    arguments
+}
+
+fn package_engine_bundle_monolithic_desktop(
     backend: &IncrementalCompilerBackend,
     bundle: &AotEngineBundle,
     output_exe: &Path,
     project_dir: &Path,
+    desktop_network: Option<&DesktopNetworkLink>,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let repo_root = self_host_repo_root()?;
-    let aot_root = backend.aot_artifact_root.join("windows_monolith");
+    let aot_root = backend.aot_artifact_root.join("desktop_monolith");
     std::fs::create_dir_all(&aot_root).map_err(|error| {
         format!(
-            "failed to create Windows monolith directory {}: {error}",
+            "failed to create desktop monolith directory {}: {error}",
             aot_root.display()
         )
     })?;
@@ -3610,7 +3688,7 @@ fn package_engine_bundle_monolithic_windows(
             &crate::escape_mobile_c_string_literal(app_name),
         )
         .replace("@STASIS_ASSET_BASE@", ".");
-    let shell_source_path = aot_root.join("stasis_windows_main.c");
+    let shell_source_path = aot_root.join("stasis_desktop_main.c");
     std::fs::write(&shell_source_path, shell_source)
         .map_err(|error| format!("failed to write {}: {error}", shell_source_path.display()))?;
 
@@ -3620,29 +3698,24 @@ fn package_engine_bundle_monolithic_windows(
         .and_then(|value| value.to_str())
         .ok_or_else(|| format!("invalid monolith output name {}", output_exe.display()))?;
     let build_dir = create_monolith_cmake_build_dir(&aot_root, output_exe)?;
-    let configure_arguments = vec![
-        "-S".to_string(),
-        cmake_path(&repo_root.join("runtime")),
-        "-B".to_string(),
-        cmake_path(&build_dir.path),
-        "-DSTASIS_BUILD_MONOLITH=ON".to_string(),
-        format!("-DSTASIS_MONOLITH_AOT_DIR={}", cmake_path(&aot_root)),
-        format!(
-            "-DSTASIS_MONOLITH_MAIN_SOURCE={}",
-            cmake_path(&shell_source_path)
-        ),
-        format!("-DSTASIS_MONOLITH_OUTPUT_DIR={}", cmake_path(output_dir)),
-        format!("-DSTASIS_MONOLITH_OUTPUT_NAME={output_name}"),
-    ];
-    let configure = run_cmake_in_msvc_environment(&configure_arguments)?;
+    let configure_arguments = monolith_configure_arguments(
+        &repo_root.join("runtime"),
+        &build_dir.path,
+        &aot_root,
+        &shell_source_path,
+        output_dir,
+        output_name,
+        desktop_network,
+    );
+    let configure = run_monolith_cmake(&configure_arguments)?;
     if !configure.status.success() {
         return Err(format!(
-            "Windows monolith configure failed\nstdout:\n{}\nstderr:\n{}",
+            "desktop monolith configure failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&configure.stdout),
             String::from_utf8_lossy(&configure.stderr)
         ));
     }
-    let build = run_cmake_in_msvc_environment(&[
+    let build = run_monolith_cmake(&[
         "--build".to_string(),
         cmake_path(&build_dir.path),
         "--config".to_string(),
@@ -3652,18 +3725,48 @@ fn package_engine_bundle_monolithic_windows(
     ])?;
     if !build.status.success() {
         return Err(format!(
-            "Windows monolith build failed\nstdout:\n{}\nstderr:\n{}",
+            "desktop monolith build failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&build.stdout),
             String::from_utf8_lossy(&build.stderr)
         ));
     }
     if !output_exe.is_file() {
         return Err(format!(
-            "Windows monolith build did not produce {}",
+            "desktop monolith build did not produce {}",
             output_exe.display()
         ));
     }
+    if cfg!(target_os = "macos") {
+        let contents = output_exe
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| format!("invalid macOS monolith path {}", output_exe.display()))?;
+        std::fs::create_dir_all(contents.join("Resources")).map_err(|error| {
+            format!(
+                "failed to create macOS app resources directory {}: {error}",
+                contents.join("Resources").display()
+            )
+        })?;
+        let executable_name = output_exe
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| format!("invalid macOS monolith name {}", output_exe.display()))?;
+        write_macos_runner_info_plist(
+            &contents.join("Info.plist"),
+            executable_name,
+            desktop_network.is_some_and(|network| network.mode == DesktopNetworkMode::Host),
+        )?;
+    }
     sign_output_artifact_if_configured(output_exe)?;
+    if cfg!(target_os = "macos") {
+        if let Some(app_bundle) = output_exe
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        {
+            sign_output_artifact_if_configured(app_bundle)?;
+        }
+    }
     Ok(SelfHostedAotCliSummary {
         source_file_count: bundle.object_paths().count() + 1,
         linked_image_path: output_exe.to_path_buf(),
@@ -3741,7 +3844,11 @@ fn xml_text(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn write_macos_runner_info_plist(path: &Path, executable_name: &str) -> Result<(), String> {
+fn write_macos_runner_info_plist(
+    path: &Path,
+    executable_name: &str,
+    local_network_host: bool,
+) -> Result<(), String> {
     let mut bundle_component = String::new();
     for ch in executable_name.chars() {
         if ch.is_ascii_alphanumeric() {
@@ -3757,6 +3864,11 @@ fn write_macos_runner_info_plist(path: &Path, executable_name: &str) -> Result<(
         bundle_component
     };
     let executable_name = xml_text(executable_name);
+    let local_network_usage = if local_network_host {
+        "    <key>NSLocalNetworkUsageDescription</key>\n    <string>Host browser guests on your local network.</string>\n"
+    } else {
+        ""
+    };
     let contents = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -3780,6 +3892,7 @@ fn write_macos_runner_info_plist(path: &Path, executable_name: &str) -> Result<(
     <string>1</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+{local_network_usage}
 </dict>
 </plist>
 "#
@@ -3798,6 +3911,7 @@ fn package_engine_bundle_release(
     output_exe: &Path,
     project_dir: &Path,
     entry_file_override: Option<&Path>,
+    desktop_network: Option<&DesktopNetworkLink>,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let manifest = backend.read_engine_bundle_manifest(&bundle.manifest_path)?;
     let entry_symbol = resolve_engine_bundle_symbol(&manifest, "main")?;
@@ -3829,24 +3943,30 @@ fn package_engine_bundle_release(
         )
     })?;
 
+    let monolithic_desktop = matches!(
+        backend.aot_compile_config.target,
+        stasis_jit::AotTarget::Native
+    ) && (cfg!(windows) || desktop_network.is_some());
+    let support_root = if monolithic_desktop {
+        output_exe.parent().unwrap_or_else(|| Path::new("."))
+    } else {
+        output_root
+    };
     let entry_file = resolve_self_host_aot_entry_file(project_dir, entry_file_override)?;
-    let support = stage_entry_support_files(project_dir, entry_file.as_deref(), output_root)?;
+    let support = stage_entry_support_files(project_dir, entry_file.as_deref(), support_root)?;
     let state_layout = backend
         .last_program_snapshot
         .as_ref()
         .map(ProgramSnapshot::state_layout)
         .ok_or_else(|| "AOT program snapshot missing during packaging".to_string())?;
     let runtime_fields = merge_runtime_fields(state_layout, &support.runtime_fields)?;
-    #[cfg(windows)]
-    if matches!(
-        backend.aot_compile_config.target,
-        stasis_jit::AotTarget::Native
-    ) {
-        return package_engine_bundle_monolithic_windows(
+    if monolithic_desktop {
+        return package_engine_bundle_monolithic_desktop(
             backend,
             bundle,
             packaged_output_exe,
             project_dir,
+            desktop_network,
         );
     }
     let mut function_aliases = vec![PackagedFunctionAlias {
@@ -4057,7 +4177,7 @@ fn package_engine_bundle_release(
                     packaged_output_exe.display()
                 )
             })?;
-        write_macos_runner_info_plist(info_plist, executable_name)?;
+        write_macos_runner_info_plist(info_plist, executable_name, false)?;
     }
     sign_output_artifact_if_configured(packaged_output_exe)?;
     sign_output_artifact_if_configured(&linked_library_path)?;
@@ -4088,6 +4208,83 @@ fn package_engine_bundle_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_monolith_network_configuration_is_explicit_and_optional() {
+        let base = monolith_configure_arguments(
+            Path::new("runtime"),
+            Path::new("build"),
+            Path::new("aot"),
+            Path::new("main.c"),
+            Path::new("dist"),
+            "game",
+            None,
+        );
+        assert!(!base.iter().any(|arg| arg.contains("NETWORK")));
+        assert!(base.iter().any(|arg| arg == "-DCMAKE_BUILD_TYPE=Release"));
+
+        let network = DesktopNetworkLink {
+            library: PathBuf::from("network/stasis_network.lib"),
+            include_dir: PathBuf::from("network/include"),
+            mode: DesktopNetworkMode::Host,
+        };
+        let configured = monolith_configure_arguments(
+            Path::new("runtime"),
+            Path::new("build"),
+            Path::new("aot"),
+            Path::new("main.c"),
+            Path::new("dist"),
+            "game",
+            Some(&network),
+        );
+        assert!(configured
+            .iter()
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_LIBRARY=network/stasis_network.lib"));
+        assert!(configured
+            .iter()
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_INCLUDE_DIR=network/include"));
+        assert!(configured
+            .iter()
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_MODE=host"));
+
+        let client = DesktopNetworkLink {
+            library: PathBuf::from("network/stasis_network.lib"),
+            include_dir: PathBuf::from("network/include"),
+            mode: DesktopNetworkMode::Client,
+        };
+        let configured = monolith_configure_arguments(
+            Path::new("runtime"),
+            Path::new("build"),
+            Path::new("aot"),
+            Path::new("main.c"),
+            Path::new("dist"),
+            "game",
+            Some(&client),
+        );
+        assert!(configured
+            .iter()
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_MODE=client"));
+    }
+
+    #[test]
+    fn desktop_network_shell_keeps_private_join_links_behind_explicit_copy() {
+        let source = include_str!("../../../mobile/shells/common/stasis_mobile_main.c")
+            .replace("\r\n", "\n");
+        assert!(
+            source.contains("defined(STASIS_DESKTOP_MONOLITH) && defined(STASIS_NETWORK_ENABLED)")
+        );
+        let explicit_copy = source
+            .find("if (SDL_ShowMessageBox(&card, &button) && button == 1)")
+            .expect("private URL copy must require the native copy button");
+        let private_url = source[explicit_copy..]
+            .find("stasis_network_copy_private_join_url(")
+            .expect("explicit action must copy through the wiping helper");
+        assert!(private_url > 0);
+        assert!(source.contains("#if defined(STASIS_DESKTOP_MONOLITH)\nint main("));
+        assert!(source.contains("SDL_SetMainReady();"));
+        assert!(source.contains("network_join_shortcut_down"));
+        assert!(source.contains("snprintf(path, sizeof(path), \"%s../../../\", base)"));
+    }
 
     #[test]
     fn engine_manifest_accepts_versioned_hot_render_metadata() {
@@ -4127,11 +4324,17 @@ mod tests {
         let temp_root = std::env::temp_dir().join(format!("stasis_macos_runner_plist_{stamp}"));
         fs::create_dir_all(&temp_root).expect("create plist test directory");
         let plist = temp_root.join("Info.plist");
-        write_macos_runner_info_plist(&plist, "Chess & TD").expect("write macOS app plist");
+        write_macos_runner_info_plist(&plist, "Chess & TD", true).expect("write macOS app plist");
         let contents = fs::read_to_string(&plist).expect("read macOS app plist");
         assert!(contents.contains("<key>NSHighResolutionCapable</key>\n    <true/>"));
         assert!(contents.contains("<string>Chess &amp; TD</string>"));
         assert!(contents.contains("<string>org.stasislang.game.chess-td</string>"));
+        assert!(contents.contains("<key>NSLocalNetworkUsageDescription</key>"));
+        let client_plist = temp_root.join("ClientInfo.plist");
+        write_macos_runner_info_plist(&client_plist, "Chess & TD", false)
+            .expect("write macOS client app plist");
+        let client_contents = fs::read_to_string(&client_plist).expect("read client app plist");
+        assert!(!client_contents.contains("NSLocalNetworkUsageDescription"));
         fs::remove_dir_all(&temp_root).ok();
     }
 
@@ -4161,6 +4364,7 @@ mod tests {
 
     #[test]
     fn runner_diagnostic_uses_second_file_source_span() {
+        let _global_guard = crate::jit_test_support::lock();
         let mut backend = IncrementalCompilerBackend::new();
         backend.source_by_path.insert(
             "main.stasis".to_string(),
@@ -4223,11 +4427,13 @@ mod tests {
 
     #[test]
     fn jit_rejection_reports_imported_file_source_span() {
+        let _global_guard = crate::jit_test_support::lock();
         assert_second_file_diagnostic(TargetMode::JitDev);
     }
 
     #[test]
     fn explicit_project_root_keeps_identity_stable_when_new_directory_is_added() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4321,11 +4527,13 @@ mod tests {
 
     #[test]
     fn aot_rejection_reports_imported_file_source_span() {
+        let _global_guard = crate::jit_test_support::lock();
         assert_second_file_diagnostic(TargetMode::AotProd);
     }
 
     #[test]
     fn rejected_jit_parse_preserves_accepted_snapshot() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4376,6 +4584,7 @@ mod tests {
 
     #[test]
     fn failed_prepared_jit_send_preserves_accepted_snapshot() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4433,6 +4642,7 @@ mod tests {
 
     #[test]
     fn prepared_jit_rejection_reports_second_file_candidate_diagnostic() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4481,6 +4691,7 @@ mod tests {
 
     #[test]
     fn aot_write_fault_preserves_accepted_snapshot_and_bundle() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4556,6 +4767,7 @@ mod tests {
 
     #[test]
     fn successful_aot_snapshot_mappings_reference_existing_objects() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -4635,11 +4847,21 @@ mod tests {
         }
     }
 
-    fn disable_ambient_signing() -> (RemovedEnvironmentVariable, RemovedEnvironmentVariable) {
-        (
-            RemovedEnvironmentVariable::new("STASIS_AOT_SIGN_TOOL"),
-            RemovedEnvironmentVariable::new("STASIS_REQUIRE_SIGNED_EXECUTION"),
-        )
+    fn disable_ambient_signing() -> Vec<RemovedEnvironmentVariable> {
+        // Fake-linker fixtures emit text, never executable images.
+        [
+            "STASIS_AOT_SIGN_TOOL",
+            "STASIS_REQUIRE_SIGNED_EXECUTION",
+            "STASIS_SIGNING_MODE",
+            "STASIS_SIGNING_PROFILE",
+            "STASIS_SIGNING_CERTIFICATE",
+            "STASIS_SIGNING_CERT_THUMBPRINT",
+            "STASIS_SIGNING_LOCAL_RECORD",
+            "LOCALAPPDATA",
+        ]
+        .into_iter()
+        .map(RemovedEnvironmentVariable::new)
+        .collect()
     }
 
     #[test]
@@ -4965,6 +5187,7 @@ mod tests {
 
     #[test]
     fn jit_dev_with_engine_entrypoints_builds_jit_engine_package_contract() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5014,6 +5237,7 @@ mod tests {
 
     #[test]
     fn jit_dev_rejects_on_code_swap_with_non_void_return_type() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5048,6 +5272,7 @@ mod tests {
 
     #[test]
     fn jit_dev_rejects_on_code_swap_with_parameters() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5083,6 +5308,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn jit_dev_brickout_v1_builds_engine_package_with_render_pointer() {
+        let _global_guard = crate::jit_test_support::lock();
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -5115,6 +5341,7 @@ mod tests {
 
     #[test]
     fn aot_brickout_revenge_v1_compiles_full_engine_bundle() {
+        let _global_guard = crate::jit_test_support::lock();
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -5203,6 +5430,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn aot_brickout_revenge_v1_engine_bundle_executes_two_ticks() {
+        let _global_guard = crate::jit_test_support::lock();
         fn hash_global_path(path: &str) -> i32 {
             let mut hash: u32 = 2_166_136_261;
             for byte in path.bytes() {
@@ -5378,6 +5606,7 @@ mod tests {
 
     #[test]
     fn jit_dev_engine_mode_rebuilds_one_complete_generation_between_compiles() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5448,6 +5677,7 @@ mod tests {
 
     #[test]
     fn jit_layout_hash_ignores_function_body_only_edits() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5490,6 +5720,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_source_exposes_canonical_jit_code_ptr_overrides() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5543,6 +5774,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_accepts_for_loop_decrement_step() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5581,6 +5813,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_accepts_if_else_if_else_shape() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5620,6 +5853,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_accepts_logical_condition_shape() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5659,6 +5893,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_accepts_for_loop_logical_condition_shape() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5699,6 +5934,7 @@ mod tests {
 
     #[test]
     fn jit_dev_non_engine_rejects_duplicate_function_names_without_legacy_fallback() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5732,6 +5968,7 @@ mod tests {
 
     #[test]
     fn aot_prod_with_engine_entrypoints_builds_aot_engine_bundle_contract() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5770,6 +6007,7 @@ mod tests {
 
     #[test]
     fn aot_compile_rejects_unresolved_direct_call_target() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5799,6 +6037,7 @@ mod tests {
 
     #[test]
     fn aot_compile_accepts_known_host_direct_call_target_without_fallback() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5834,6 +6073,7 @@ mod tests {
 
     #[test]
     fn aot_compile_writes_manifest_with_artifacts_on_success() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5870,6 +6110,7 @@ mod tests {
 
     #[test]
     fn aot_compile_emits_hook_fn_symbol_mapping_and_patch_coverage() {
+        let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -5929,6 +6170,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn aot_compile_with_real_linker_exports_emitted_symbols_when_available() {
+        let _global_guard = crate::jit_test_support::lock();
         let Some(linker_path) = find_lld_link() else {
             return;
         };
@@ -5992,6 +6234,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn aot_emitted_symbol_executes_direct_call_semantics_if_real_link_available() {
+        let _global_guard = crate::jit_test_support::lock();
         let Some(linker_path) = find_lld_link() else {
             return;
         };
@@ -6077,6 +6320,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn aot_bundle_executes_direct_global_storage_if_real_link_available() {
+        let _global_guard = crate::jit_test_support::lock();
         let Some(linker_path) = find_lld_link() else {
             return;
         };
@@ -6184,6 +6428,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn bounded_performance_sample_links_and_executes_aot_if_real_link_available() {
+        let _global_guard = crate::jit_test_support::lock();
         let Some(linker_path) = find_lld_link() else {
             return;
         };
@@ -6389,6 +6634,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_links_runnable_executable_with_main_entry_symbol() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
@@ -6434,6 +6680,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_links_standalone_storage_for_non_engine_globals() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
@@ -6476,8 +6723,10 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_invokes_signer_when_configured() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
+        let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -6513,7 +6762,13 @@ echo "signed" > "$1.signed"
             std::env::remove_var("STASIS_AOT_SIGN_TOOL");
         }
 
-        result.expect("self-host signing run should succeed");
+        if cfg!(windows) {
+            assert!(result
+                .expect_err("a marker-only hook must not pass Authenticode verification")
+                .contains("Authenticode verification failed"));
+        } else {
+            result.expect("self-host signing run should succeed");
+        }
         let signed_marker = output_exe.with_file_name(format!(
             "{}.signed",
             output_exe
@@ -6530,6 +6785,7 @@ echo "signed" > "$1.signed"
     fn missing_optional_signer_does_not_block_unsigned_local_artifacts() {
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
+        let _signing_environment = disable_ambient_signing();
         let old_signer = std::env::var_os("STASIS_AOT_SIGN_TOOL");
         let old_required = std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION");
         let missing_signer = std::env::temp_dir().join("stasis-missing-sign-tool");
@@ -6580,6 +6836,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_writes_default_summary_sidecar() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
@@ -6622,6 +6879,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_writes_summary_to_configured_path() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
@@ -6665,6 +6923,7 @@ echo "signed" > "$1.signed"
 
     #[test]
     fn self_host_aot_cli_is_deterministic_across_repeated_runs_with_same_source() {
+        let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
@@ -6906,6 +7165,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
             output_exe,
             project_dir,
             options.entry_file.as_deref(),
+            options.desktop_network.as_ref(),
         )?
     } else {
         let main_entries: Vec<_> = function_entries
@@ -6998,6 +7258,21 @@ pub fn run_self_host_aot_cli_with_options(
     summary_file_path: Option<&Path>,
     entry_file: Option<&Path>,
 ) -> Result<SelfHostedAotCliSummary, String> {
+    run_self_host_aot_cli_with_cli_options(
+        project_dir,
+        output_exe,
+        SelfHostedAotCliOptions::new(
+            summary_file_path.map(PathBuf::from),
+            entry_file.map(PathBuf::from),
+        ),
+    )
+}
+
+fn run_self_host_aot_cli_with_cli_options(
+    project_dir: &Path,
+    output_exe: &Path,
+    options: SelfHostedAotCliOptions,
+) -> Result<SelfHostedAotCliSummary, String> {
     let output_key = output_exe
         .file_stem()
         .and_then(|value| value.to_str())
@@ -7008,10 +7283,6 @@ pub fn run_self_host_aot_cli_with_options(
         .join("aot_cli")
         .join(output_key);
     let mut backend = IncrementalCompilerBackend::new_self_host_aot_cli(artifact_root);
-    let options = SelfHostedAotCliOptions::new(
-        summary_file_path.map(PathBuf::from),
-        entry_file.map(PathBuf::from),
-    );
     let mut summary = run_self_host_aot_cli_with_backend_and_options(
         &mut backend,
         project_dir,
@@ -7020,6 +7291,19 @@ pub fn run_self_host_aot_cli_with_options(
     )?;
     summary.program_snapshot = backend.last_program_snapshot.clone();
     Ok(summary)
+}
+
+pub fn run_self_host_aot_cli_with_desktop_network(
+    project_dir: &Path,
+    output_exe: &Path,
+    entry_file: &Path,
+    library: &Path,
+    include_dir: &Path,
+    mode: DesktopNetworkMode,
+) -> Result<SelfHostedAotCliSummary, String> {
+    let options = SelfHostedAotCliOptions::new(None, Some(entry_file.to_path_buf()))
+        .with_desktop_network(library.to_path_buf(), include_dir.to_path_buf(), mode);
+    run_self_host_aot_cli_with_cli_options(project_dir, output_exe, options)
 }
 
 pub fn run_self_host_aot_cli(

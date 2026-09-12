@@ -1,0 +1,42 @@
+import "../../../src/stdlib/external_url.stasis";
+import "../../../src/stdlib/host_frame.stasis";
+import "../../../src/stdlib/testing/input_testkit.stasis";
+
+global external_url_frame: HostFrame;
+global external_url_activation_count: i32;
+global external_url_last_result: i32;
+
+function main(): i32 {
+    input_testkit_reset();
+    input_testkit_set_pointer_count(1);
+    external_url_activation_count = 0;
+    external_url_last_result = EXTERNAL_URL_INVALID;
+    return 0;
+}
+
+function tick(): i32 {
+    external_url_frame.refresh();
+    if (external_url_frame.pointers[0].went_down) {
+        external_url_activation_count += 1;
+        external_url_last_result = open_external_url("https://www.maddoxlabs.com/");
+    }
+    return external_url_activation_count;
+}
+
+function on_code_swap(): void {
+    external_url_last_result = open_external_url("https://www.maddoxlabs.com/");
+}
+
+function simulate_pointer(is_down: bool, went_down: bool): void {
+    input_testkit_set_pointer(0, 1, is_down, went_down, false, 24.0, 12.0);
+}
+
+function run_edge_probe(): i32 {
+    main();
+    simulate_pointer(true, true);
+    tick();
+    simulate_pointer(true, false);
+    tick();
+    tick();
+    return external_url_activation_count * 10 + external_url_last_result;
+}

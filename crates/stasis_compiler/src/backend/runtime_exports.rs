@@ -65,6 +65,8 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_global_i32_store",
     "stasis_jit_load_font",
     "stasis_jit_measure_text",
+    "stasis_jit_platform_service_poll",
+    "stasis_jit_platform_service_submit",
     "stasis_jit_print_i32",
     "stasis_jit_print_string",
     "stasis_jit_reject_code_swap",
@@ -94,6 +96,15 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_network_host_overflow_count",
     "stasis_jit_network_host_port",
     "stasis_jit_network_host_stop",
+    "stasis_jit_open_external_url",
+    "stasis_web_network_supported",
+    "stasis_web_network_connect",
+    "stasis_web_network_status",
+    "stasis_web_network_poll",
+    "stasis_web_network_send",
+    "stasis_web_network_resume_seat",
+    "stasis_web_network_last_sequence",
+    "stasis_web_network_checkpoint",
 ];
 
 pub(crate) fn is_aot_runtime_export_symbol(symbol: &str) -> bool {
@@ -121,8 +132,30 @@ mod tests {
         assert!(is_aot_runtime_export_symbol(
             "stasis_jit_audio_set_music_volume"
         ));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_platform_service_submit"
+        ));
+        assert!(is_aot_runtime_export_symbol(
+            "stasis_jit_platform_service_poll"
+        ));
+        assert!(is_aot_runtime_export_symbol("stasis_jit_open_external_url"));
+        for symbol in [
+            "stasis_web_network_supported",
+            "stasis_web_network_connect",
+            "stasis_web_network_status",
+            "stasis_web_network_poll",
+            "stasis_web_network_send",
+            "stasis_web_network_resume_seat",
+            "stasis_web_network_last_sequence",
+            "stasis_web_network_checkpoint",
+        ] {
+            assert!(is_aot_runtime_export_symbol(symbol), "missing {symbol}");
+        }
         assert!(!is_aot_runtime_export_symbol(
             "stasis_jit_gfx_totally_missing"
+        ));
+        assert!(!is_aot_runtime_export_symbol(
+            "stasis_web_network_totally_missing"
         ));
     }
 }

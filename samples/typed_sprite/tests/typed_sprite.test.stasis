@@ -2,6 +2,7 @@ import "../../../src/stdlib/graphics.stasis";
 
 global tested_sprite: Sprite;
 global tested_text: TextRun;
+global tested_runtime_text: utf8[16];
 
 test `invalid sprite replacement preserves receiver atomically`(): bool {
     tested_sprite.width = 16;
@@ -57,6 +58,27 @@ test `invalid cached text replacement preserves receiver atomically`(): bool {
     tested_text.width = 72.5;
     tested_text.height = 18.0;
     if (tested_text.load_text_from(0, "unused")) {
+        return false;
+    }
+    if (tested_text.font != 4 || tested_text.handle != 12) {
+        return false;
+    }
+    return tested_text.width == 72.5 && tested_text.height == 18.0;
+}
+
+test `runtime utf8 text uses the cached text receiver contract`(): bool {
+    tested_runtime_text[0] = 36;
+    tested_runtime_text[1] = 50;
+    tested_runtime_text[2] = 46;
+    tested_runtime_text[3] = 57;
+    tested_runtime_text[4] = 57;
+    utf8_set_len_ascii(tested_runtime_text, 5);
+
+    tested_text.font = 4;
+    tested_text.handle = 12;
+    tested_text.width = 72.5;
+    tested_text.height = 18.0;
+    if (tested_text.load_utf8_from(0, tested_runtime_text)) {
         return false;
     }
     if (tested_text.font != 4 || tested_text.handle != 12) {
