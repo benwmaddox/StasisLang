@@ -8,10 +8,10 @@ mod persistence;
 #[cfg(test)]
 mod request_image_tests;
 mod semantic_diff;
-mod source_catalog;
 #[cfg(test)]
 mod source_context_tests;
 
+use super::source_catalog;
 use host_progress::{HostProgress, HostProgressState};
 use stasis_ai::task_controller::{ProgressReporter, ProgressStage, TaskControllerConfig};
 mod semantic_revisions;
@@ -34,9 +34,10 @@ use stasis_ai::task_session::{
     TaskSessionCommand, ThreadEntryKind, UploadState, ValidationStatus,
 };
 use stasis_ai::{
-    action_id_for_tool, run_agent_with_profile, AgentEvent, AgentProfile, ProviderActionProposal,
-    ProviderConfig, ProviderReply, ProviderRequest, ProviderUsage, TaskController,
-    TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation, ToolSpec,
+    action_id_for_tool, run_agent_with_profile, source_inspection_tool_spec, AgentEvent,
+    AgentProfile, ProviderActionProposal, ProviderConfig, ProviderReply, ProviderRequest,
+    ProviderUsage, TaskController, TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation,
+    ToolSpec,
 };
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
 use std::collections::{BTreeMap, BTreeSet};
@@ -103,9 +104,26 @@ struct ProposalTools {
     proposals: Vec<ProviderActionProposal>,
     sources: Vec<Value>,
     existing_actions: BTreeMap<String, String>,
+    project_root: Option<PathBuf>,
 }
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 256 * 1024;
+
+fn canonicalize_proposal_payload(payload: &mut Value) {
+    let Some(edits) = payload.get_mut("edits").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for edit in edits {
+        if edit.get("operation").and_then(Value::as_str) != Some("add") {
+            continue;
+        }
+        if let Some(target) = edit.get_mut("target").and_then(Value::as_object_mut) {
+            target.remove("symbol_id");
+            target.remove("owner");
+            target.remove("signature");
+        }
+    }
+}
 
 impl ProposalTools {
     fn validate_proposal(
@@ -163,46 +181,27 @@ impl ProposalTools {
                 description,
                 payload.clone(),
             )
-            .map_err(|error| format!("invalid proposal: {error}"))
+            .map_err(|error| format!("invalid proposal: {error}"))?;
+        if let Some(root) = &self.project_root {
+            let preview = super::desktop_preview_semantic_batch(root, payload.clone())
+                .map_err(|error| format!("proposal does not parse or resolve: {error}"))?;
+            super::desktop_validate_semantic_preview(root, &preview)
+                .map_err(|error| format!("proposal does not compile and pass tests: {error}"))?;
+        }
+        Ok(())
     }
 
     fn source_catalog(&self) -> Result<Value, String> {
         source_catalog::render(&self.sources).map(Value::String)
     }
 
+    fn inspect_source(&self, args: &Value) -> Result<Value, String> {
+        source_catalog::inspect(&self.sources, args, MAX_SOURCE_CONTEXT_BYTES)
+    }
+
+    #[cfg(test)]
     fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
-        let symbol_id = args
-            .get("symbol_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "symbol_id must be a string".to_string())?;
-        let test_catalog = symbol_id
-            .strip_prefix('t')
-            .and_then(|index| index.parse::<usize>().ok())
-            .filter(|index| symbol_id == format!("t{index}"))
-            .and_then(|index| source_catalog::test_names(&self.sources, index));
-        let item = self
-            .sources
-            .iter()
-            .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id))
-            .or(test_catalog.as_ref())
-            .or_else(|| {
-                let index = symbol_id.strip_prefix('s')?.parse::<usize>().ok()?;
-                if symbol_id != format!("s{index}") {
-                    return None;
-                }
-                self.sources.get(index)
-            })
-            .ok_or_else(|| format!("Unknown source symbol: {symbol_id}"))?;
-        if serde_json::to_vec(item)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_SOURCE_CONTEXT_BYTES
-        {
-            return Err(format!(
-                "Source symbol {symbol_id} exceeds the 256 KiB read limit."
-            ));
-        }
-        Ok(item.clone())
+        self.inspect_source(args)
     }
 }
 
@@ -217,7 +216,9 @@ impl ToolExecutor for ProposalTools {
                 let repair = call.tool == "repair_semantic_edit";
                 let result: Result<Value, String> = (|| {
                     match call.tool.as_str() {
-                        "read_source_symbol" => return self.read_source_symbol(&call.args),
+                        "inspect_source" | "read_source_symbol" => {
+                            return self.inspect_source(&call.args)
+                        }
                         "propose_semantic_edit" | "repair_semantic_edit" => {}
                         _ => return Err(format!("Unknown desktop editor tool: {}", call.tool)),
                     }
@@ -231,11 +232,12 @@ impl ToolExecutor for ProposalTools {
                         .get("description")
                         .and_then(Value::as_str)
                         .ok_or_else(|| "description must be a string".to_string())?;
-                    let payload = call
+                    let mut payload = call
                         .args
                         .get("batch")
                         .cloned()
                         .ok_or_else(|| "batch is required".to_string())?;
+                    canonicalize_proposal_payload(&mut payload);
                     if payload
                         .get("edits")
                         .and_then(Value::as_array)
@@ -264,6 +266,12 @@ impl ToolExecutor for ProposalTools {
             })
             .collect()
     }
+
+    fn terminal_success(&self) -> Option<String> {
+        self.proposals
+            .last()
+            .map(|proposal| proposal.description.clone())
+    }
 }
 
 fn proposal_tool_specs() -> Vec<ToolSpec> {
@@ -290,13 +298,7 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
         optional_args: Vec::new(),
     })
     .collect();
-    specs.push(ToolSpec {
-        tool: "read_source_symbol".to_string(),
-        action_id: action_id_for_tool("read_source_symbol"),
-        purpose: "Read an sN ID for full source and canonical edit targets, or a tN ID for test names/read IDs. Canonical symbol_id also accepted. Batch independent reads.".to_string(),
-        required_args: vec!["symbol_id".to_string()],
-        optional_args: Vec::new(),
-    });
+    specs.push(source_inspection_tool_spec());
     specs
 }
 
@@ -402,7 +404,7 @@ fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> Provi
 
 fn effective_reasoning_effort(config: &ProviderConfig) -> String {
     if matches!(config, ProviderConfig::OpenRouter(_)) {
-        "low".to_string()
+        "medium".to_string()
     } else {
         std::env::var("STASIS_AI_REASONING_EFFORT")
             .ok()
@@ -587,6 +589,7 @@ fn run_reply_provider_with_config(
     let source_context = super::desktop_source_context(&project_root)?;
     let mut tools = ProposalTools {
         sources: source_context,
+        project_root: Some(project_root.clone()),
         existing_actions: request
             .actions
             .iter()
@@ -595,22 +598,40 @@ fn run_reply_provider_with_config(
         ..ProposalTools::default()
     };
     let source_catalog = tools.source_catalog()?;
-    let initial_context = json!({
-        "task_id": request.task_id,
-        "objective": request.objective,
-        "project_summary": request.project_summary,
-        "relevant_files": request.relevant_files,
-        "relevant_symbols": request.relevant_symbols,
-        "relevant_tests": request.relevant_tests,
-        "screenshots": request.screenshots,
-        "thread": request.context,
-        "actions": request.actions,
-        "editable_symbols": source_catalog,
-    });
+    let mut initial_context = source_catalog.as_str().unwrap_or_default().to_string();
+    let mut append_context = |label: &str, value: &Value| -> Result<(), String> {
+        initial_context.push_str(label);
+        initial_context.push(':');
+        initial_context.push_str(&serde_json::to_string(value).map_err(|error| error.to_string())?);
+        initial_context.push('\n');
+        Ok(())
+    };
+    if request.objective.trim() != prompt.trim() {
+        append_context("goal", &json!(request.objective))?;
+    }
+    for (label, value) in [
+        ("files", json!(request.relevant_files)),
+        ("symbols", json!(request.relevant_symbols)),
+        ("tests", json!(request.relevant_tests)),
+        ("screenshots", json!(request.screenshots)),
+        ("actions", json!(request.actions)),
+    ] {
+        if value.as_array().is_some_and(|items| !items.is_empty()) {
+            append_context(label, &value)?;
+        }
+    }
+    if request.context.len() > 1 {
+        append_context(
+            "history",
+            &json!(&request.context[..request.context.len() - 1]),
+        )?;
+    }
+    let initial_context = Value::String(initial_context);
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Return at most one semantic edit proposal, containing related source and behavioral tests together as one atomic batch. The editor validates and applies that batch immediately after this response, then requests a live hot swap and runs focused tests; do not ask the user to apply it. The editable_symbols text lists names nested under files. sN labels are snapshot-local read IDs: pass one as symbol_id to read_source_symbol for full source, signatures, and canonical target metadata. tN IDs list a file's test names and their sN read IDs on request. Use the returned canonical target for edits, never the short read ID. Inspect required source before proposing changes; minimize provider turns by batching all useful independent symbol reads in one tool_calls response, up to the advertised limit. Include other ready tool calls in the same response when their arguments are already known. Wait for prerequisite results before constructing dependent calls; never guess missing source, IDs, or arguments. Once the required source is known, include all related symbol/file changes and tests in the single semantic edit proposal instead of splitting them across turns. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Keep the response concise and self-contained.".to_string(),
-        max_turns: 4,
+        instruction: "Solve the task with tools. Stasis is typed and C-like: import, struct, global, function, test `name`(): bool. No array literals or collection iteration; copy local loop forms. Follow local syntax; invent no APIs. Catalog IDs are hypermedia leads. IDs are one letter plus digits: for example, f6 lists that file's symbols and s203 returns exact source. Copy a shown ID exactly; fN and sN are not IDs. Continue with newly revealed links or file changes. search TERMS returns matching links; search-source TERMS includes top bodies. Before adding, inspect one same-kind source in the target file. Batch every independent call and all related code/tests. Wait for prerequisites; never guess. Preserve live state. Use on_code_swap when the requested change needs migration or immediate visual setup; change only the minimum state, such as player position or phase, needed to reveal it. Submit at most one atomic proposal; the editor applies, hot-swaps, and tests it. Use repair only for rejected work. Return only response-contract JSON.".to_string(),
+        max_turns: 8,
+        compact_request: true,
         ..AgentProfile::default()
     };
     let mut usage = None;
@@ -625,6 +646,15 @@ fn run_reply_provider_with_config(
         proposal_tool_specs(),
         &canceled,
         |event| {
+            #[cfg(test)]
+            if std::env::var_os("STASIS_EDITOR_OPENROUTER_TRACE").is_some()
+                && matches!(
+                    &event,
+                    AgentEvent::ToolBatch(_) | AgentEvent::Observations(_)
+                )
+            {
+                eprintln!("OpenRouter editor event: {event:?}");
+            }
             if let AgentEvent::Observations(observations) = &event {
                 last_tool_error = observations
                     .iter()
@@ -7649,7 +7679,7 @@ mod tests {
 
         assert_eq!(state.provider.as_deref(), Some("openrouter"));
         assert_eq!(state.model.as_deref(), Some("example/model"));
-        assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(state.reasoning_effort.as_deref(), Some("medium"));
         assert!(matches!(
             state.routing,
             RoutingState::Assigned { route } if route == "openrouter:cerebras"
@@ -7764,6 +7794,48 @@ mod tests {
 
         assert_eq!(tools.proposals.len(), 1);
         assert!(observations[0].error.is_none());
+    }
+
+    #[test]
+    fn proposal_tools_canonicalize_new_symbol_targets_and_finish_immediately() {
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "propose_semantic_edit".to_string(),
+                args: json!({
+                    "proposal_id": "add-test",
+                    "description": "Add a test",
+                    "batch": {
+                        "schema_version": 1,
+                        "edits": [{
+                            "operation": "add",
+                            "target": {
+                                "file": "tests/main.test.stasis",
+                                "kind": "test",
+                                "name": "new test",
+                                "owner": "Tests",
+                                "signature": "test `new test`",
+                                "symbol_id": null
+                            },
+                            "new_source": "test `new test`(): bool { return true; }"
+                        }]
+                    }
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0].error.is_none());
+        let target = &tools.proposals[0].payload["edits"][0]["target"];
+        assert_eq!(
+            target,
+            &json!({
+                "file": "tests/main.test.stasis",
+                "kind": "test",
+                "name": "new test"
+            })
+        );
+        assert_eq!(tools.terminal_success().as_deref(), Some("Add a test"));
     }
 
     #[test]

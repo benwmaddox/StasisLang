@@ -8,7 +8,6 @@ use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-#[cfg(test)]
 use stasis::run_staged_project_tests_bounded;
 use stasis::{
     load_and_apply_play_data_bindings_for_test, provision_local_certificate,
@@ -62,6 +61,7 @@ mod gauntlet;
 mod headless;
 mod live_tui;
 mod record;
+mod source_catalog;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
@@ -7316,6 +7316,37 @@ fn desktop_preview_semantic_batch(
     })
 }
 
+fn desktop_validate_semantic_preview(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+) -> Result<Value, String> {
+    let workspace = load_workspace(Some(root))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let edited_files = preview
+        .plan
+        .changed_files
+        .iter()
+        .map(|change| WorkshopSourceFile {
+            path: change.file.clone(),
+            source: change.after_source.clone(),
+        })
+        .collect::<Vec<_>>();
+    let candidate_files = overlay_workshop_files(&files, &edited_files);
+    let test_result = run_staged_project_tests_bounded(
+        &workspace.root,
+        Path::new(&workspace.manifest.entry),
+        &candidate_files,
+        &AtomicBool::new(false),
+    )
+    .map_err(|error| format!("candidate compile or tests failed: {error}"))?;
+    desktop_require_executed_tests(&test_result)?;
+    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
+        return Err("project sources changed during candidate validation".into());
+    }
+    Ok(test_result)
+}
+
 #[cfg(test)]
 fn desktop_apply_semantic_preview(
     root: &Path,
@@ -9259,6 +9290,7 @@ mod tests {
             ),
             ("find_references", "stasis symbol references / :references"),
             ("read_symbol", "stasis symbol read / :read"),
+            ("inspect_source", "stasis symbol list/read / :symbols/:read"),
             ("read_imports", "stasis symbol read imports / :read imports"),
             ("write_symbol", "stasis symbol update / :update"),
             ("add_symbol", "stasis symbol add"),
@@ -9547,6 +9579,44 @@ mod tests {
                 .map(|change| change.file.as_str())
                 .collect::<Vec<_>>(),
             ["src/main.stasis", "src/values.stasis"]
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_semantic_preview_validation_compiles_staged_candidate_without_writing() {
+        let root = desktop_editor_fixture("semantic_preview_validation");
+        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let valid = desktop_preview_semantic_batch(
+            &root,
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }"),
+        )
+        .unwrap();
+        assert!(desktop_validate_semantic_preview(&root, &valid).is_ok());
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+
+        let invalid = desktop_preview_semantic_batch(
+            &root,
+            json!({"schema_version": 1, "edits": [{
+                "operation": "add",
+                "target": {
+                    "file": "tests/main.test.stasis",
+                    "kind": "test",
+                    "name": "unsupported array"
+                },
+                "new_source": "test `unsupported array`(): bool { let values = [1, 2]; return values[0] == 1; }"
+            }]}),
+        )
+        .unwrap();
+        assert!(desktop_validate_semantic_preview(&root, &invalid)
+            .unwrap_err()
+            .contains("unexpected token LBracket"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
         );
         remove_temp(&root);
     }
