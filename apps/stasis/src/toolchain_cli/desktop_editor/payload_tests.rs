@@ -21,8 +21,6 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
         session
     };
     session.active_task_mut().unwrap().connection = ConnectionState::Connected;
-    let objective = session.active_task().unwrap().objective.clone();
-    let task_id = session.active_task_id().unwrap().clone();
     let sources = super::super::desktop_source_context(&root).unwrap();
     let symbol_count = sources.len();
     let expected_catalog = ProposalTools {
@@ -111,6 +109,7 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
         .unwrap();
     assert_eq!(reply.text, "Capture complete.");
     let bytes = server.join().unwrap();
+    assert!(bytes.len() <= 10_000, "initial HTTP body exceeds 10 KB");
     if let Ok(limit) = std::env::var("STASIS_EDITOR_PAYLOAD_MAX_BYTES") {
         assert!(
             bytes.len() < limit.parse::<usize>().unwrap(),
@@ -119,20 +118,11 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
     }
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     let content = body["messages"][0]["content"].as_str().unwrap();
-    assert_eq!(content.lines().count(), 1);
-    let header: Value = serde_json::from_str(content).unwrap();
-    assert_eq!(header["role"], "Stasis desktop task assistant");
-    assert_eq!(header["initial_context"]["task_id"], task_id.as_str());
-    assert_eq!(header["initial_context"]["objective"], objective);
-    assert_eq!(
-        header["initial_context"]["editable_symbols"],
-        expected_catalog
-    );
-    assert!(header["initial_context"].get("source").is_none());
-    assert_eq!(
-        header["tool_specs"],
-        serde_json::to_value(proposal_tool_specs()).unwrap()
-    );
+    assert!(content.starts_with("request:1\nrole:Stasis desktop task assistant\n"));
+    assert!(content.contains("\ntools:\n"));
+    assert!(content.contains("\tinspect_source\tselector\t"));
+    assert!(content.ends_with(expected_catalog.as_str().unwrap()));
+    assert!(expected_catalog.as_str().unwrap().len() <= 5_000);
     assert_eq!(body["response_format"]["type"], "json_schema");
     if let Some(output) = std::env::var_os("STASIS_EDITOR_PAYLOAD_OUTPUT") {
         let output = PathBuf::from(output);
@@ -141,9 +131,7 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
         std::fs::write(output.join("model-message.exact.jsonl"), content).unwrap();
         std::fs::write(
             output.join("catalog.txt"),
-            header["initial_context"]["editable_symbols"]
-                .as_str()
-                .unwrap(),
+            expected_catalog.as_str().unwrap(),
         )
         .unwrap();
     }

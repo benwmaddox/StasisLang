@@ -1,40 +1,36 @@
 # Compact graphical AI editor catalog
 
-The graphical `stasis editor` sends its initial project catalog as indented text,
-not an array of repeated JSON objects. Each import, global, constant, struct, and
-function name occupies its own line beneath its file and category. Signatures, source bodies, and
-canonical edit targets are loaded on request. Test descriptions are represented
-by a per-file count until requested.
+The graphical `stasis editor` sends a byte-bounded project index as indented text.
+Every project file has a short ID and counts for imports, globals, structs,
+functions, and tests. Function and struct names use one line each. Import and
+global names, source bodies, signatures, and canonical edit targets load on request.
 
 ```text
-src/main.stasis
-  imports s0
-    maze.stasis
-  globals/constants s1
-    phase
-    level_index
-  structs
-    s2 Player
-  functions
-    s3 main
-    s4 tick
-tests/maze.test.stasis
-  tests t7 (88; read to list names)
+files
+  f0 src/main.stasis i3@0 g2@1 s1 f2 t0
+  f1 tests/maze.test.stasis i2@5 g0 s0 f0 t88
+vendor
+  stasis/stdlib/graphics.stasis
+symbols
+  f0 structs
+    Player
+  f0 functions
+    main
+    tick
 ```
 
-The labels are local to the immutable source snapshot for one editor request.
-`read_source_symbol` accepts an `sN` label to retrieve the full original source
-and canonical target. Edits use that returned target, never the short read ID.
-A `tN` label returns the file's test names with their individual `sN` labels.
-Different overloads or duplicate names have different IDs. Names and paths escape
-embedded control characters so they cannot introduce extra catalog entries.
-Independent reads can be batched; related edits retain atomic validation.
+An `@N` selector reads the import or global group advertised beside its count.
+`fN:name` reads a displayed function or struct. A category may declare a shared
+prefix once; the host restores it when resolving the nested name. `?terms` searches
+all symbol and global names, while `?+terms` includes source for the best matches.
+Independent calls can be batched. Returned canonical targets retain exact identity
+for duplicate names and edits.
 Declarations marked `@internal`, along with declarations from internal source files,
 are excluded from both the initial catalog and its on-demand source snapshot.
 
-The shared request transcript remains JSONL and the OpenRouter HTTP envelope and
-response schema remain JSON. The large project catalog inside that envelope is
-plain text. This change applies to the graphical editor, not the live/TUI adapter.
+The graphical editor's initial frame is line-oriented text. The OpenRouter HTTP
+envelope and response schema remain JSON. The live/TUI adapter retains its existing
+JSONL request format.
 
 ## Measured acceptance
 
@@ -44,20 +40,21 @@ snapshot. No external AI call or project mutation occurred.
 
 | UTF-8 bytes | Previous | Compact |
 | --- | ---: | ---: |
-| Project catalog | 73,200 | 14,551 |
-| Initial model message | 75,813 | 18,071 |
-| Complete HTTP body, including response schema | 86,442 | 22,449 |
+| Project catalog | 14,551 | 4,684 |
+| Initial model message | 18,433 | 6,056 |
+| Complete HTTP body, including response schema | 22,811 | 8,746 |
 
-The complete request passes a strict **25,000-byte** budget. These are byte counts,
+The complete request passes a strict **10,000-byte** budget and the catalog passes
+a **5,000-byte** budget. These are byte counts,
 not token estimates. All 300 source items remain available for on-demand reads;
 88 test descriptions are deferred. Large existing task histories or attached
 images can add payload beyond this initial text-only case.
 
 Reproduce with the [desktop wire-capture test](reviews/desktop-editor-payload-20260912.md),
-setting `STASIS_EDITOR_PAYLOAD_MAX_BYTES=25000` in addition to its project and output
+setting `STASIS_EDITOR_PAYLOAD_MAX_BYTES=10000` in addition to its project and output
 variables. The test asserts the limit against the actual received HTTP bytes.
 
 Visual evidence: not applicable; the inspected artifact is the captured text catalog.
 
-Theory gained: omitting repeated identity metadata and deferring test descriptions
-reduces this editor's request by about 74% without changing semantic edit identity.
+Theory gained: a complete file/count manifest plus prefix-compressed function names
+keeps the project discoverable while host-side search defers its largest name groups.

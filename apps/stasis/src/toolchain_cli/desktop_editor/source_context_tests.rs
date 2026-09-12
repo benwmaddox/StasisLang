@@ -42,14 +42,12 @@ fn compact_catalog_lists_imports_and_names_but_loads_details_on_demand() {
     };
     let catalog = tools.source_catalog().unwrap();
     let text = catalog.as_str().unwrap();
-    assert!(text.contains("  imports s"));
-    assert!(text.contains("    helper.stasis\n"));
-    assert!(text.contains("  globals/constants s"));
-    assert!(text.contains("    player\n    LIMIT\n"));
-    assert!(text.contains("  structs\n    s"));
-    assert!(text.contains(" Player\n"));
-    assert!(text.contains("  functions\n    s"));
-    assert!(text.contains(" main\n"));
+    assert!(text.contains("src/main.stasis i1@"));
+    assert!(text.contains(" g2@"));
+    assert!(text.contains("  f1 structs\n    Player\n"));
+    assert!(text.contains("  f1 functions\n    main\n"));
+    assert!(!text.contains("helper.stasis\n    "));
+    assert!(!text.contains("    player\n"));
     assert!(!text.contains("hp"));
     assert!(!text.contains("signature"));
     assert!(!text.contains("symbol_id"));
@@ -92,6 +90,39 @@ fn desktop_source_context_omits_internal_declarations_from_catalog_and_reads() {
 }
 
 #[test]
+fn compact_selectors_read_prefixed_functions_and_search_deferred_globals() {
+    let sources = vec![
+        json!({"target":{"file":"src/render.stasis","kind":"globals","name":"globals","symbol_id":"globals"},"source":"global background_blue: i32;\nconst PATTERN_SIZE: i32 = 8;\n"}),
+        json!({"target":{"file":"src/render.stasis","kind":"function","name":"render_draw_background","symbol_id":"draw"},"source":"function render_draw_background(): void {}\n"}),
+        json!({"target":{"file":"src/render.stasis","kind":"function","name":"render_load_sprite","symbol_id":"load"},"source":"function render_load_sprite(): void {}\n"}),
+    ];
+    let tools = ProposalTools {
+        sources,
+        ..ProposalTools::default()
+    };
+    let catalog = tools.source_catalog().unwrap();
+    assert!(catalog
+        .as_str()
+        .unwrap()
+        .contains("functions render_\n    draw_background\n"));
+    assert!(!catalog.as_str().unwrap().contains("background_blue"));
+    assert_eq!(
+        tools
+            .inspect_source(&json!({"selector":"f0:draw_background"}))
+            .unwrap()["target"]["symbol_id"],
+        "draw"
+    );
+    let found = tools
+        .inspect_source(&json!({"selector":"?+background pattern"}))
+        .unwrap();
+    assert_eq!(found[0]["id"], "@0");
+    assert!(found[0]["item"]["source"]
+        .as_str()
+        .unwrap()
+        .contains("PATTERN_SIZE"));
+}
+
+#[test]
 fn compact_read_ids_disambiguate_duplicate_names_and_reject_invalid_ids() {
     let mut first = source("canonical-first", "function same(): void {}".into());
     let mut second = source("canonical-second", "function same(x: i32): void {}".into());
@@ -103,7 +134,7 @@ fn compact_read_ids_disambiguate_duplicate_names_and_reject_invalid_ids() {
     };
     assert_eq!(
         tools.source_catalog().unwrap(),
-        "src/main.stasis\n  functions\n    s0 same\n    s1 same\n"
+        "files\n  f0 src/main.stasis i0 g0 s0 f2 t0\nsymbols\n  f0 functions\n    same\n    same\n"
     );
     assert_eq!(
         tools
@@ -131,7 +162,7 @@ fn compact_catalog_escapes_newlines_in_names_without_creating_entries() {
         ..ProposalTools::default()
     };
     let catalog = tools.source_catalog().unwrap();
-    assert_eq!(catalog.as_str().unwrap().lines().count(), 3);
+    assert_eq!(catalog.as_str().unwrap().lines().count(), 5);
     assert!(catalog.as_str().unwrap().contains("first\\n"));
 }
 
@@ -155,13 +186,17 @@ fn compact_catalog_defers_test_names_and_preserves_exact_read_targets() {
     };
     assert_eq!(
         tools.source_catalog().unwrap(),
-        "src/main.stasis\n  tests t0 (2; read to list names)\n"
+        "files\n  f0 src/main.stasis i0 g0 s0 f0 t2\nsymbols\n"
     );
     let names = tools
         .read_source_symbol(&json!({"symbol_id":"t0"}))
         .unwrap();
     assert_eq!(names["tests"], "  s0 first case\n  s1 second case\n");
     assert!(!names.to_string().contains("return"));
+    assert_eq!(
+        tools.inspect_source(&json!({"selector":"f0:t"})).unwrap(),
+        names
+    );
     assert_eq!(
         tools
             .read_source_symbol(&json!({"symbol_id":"s1"}))
@@ -187,7 +222,7 @@ fn source_context_catalog_bounds_large_snapshot_without_discarding_source() {
     let catalog = tools.source_catalog().unwrap();
     assert_eq!(
         catalog,
-        "src/main.stasis\n  functions\n    s0 first\n    s1 second\n"
+        "files\n  f0 src/main.stasis i0 g0 s0 f2 t0\nsymbols\n  f0 functions\n    first\n    second\n"
     );
     assert!(serde_json::to_vec(&catalog).unwrap().len() < 1024);
     let observations = tools.execute(
@@ -225,11 +260,7 @@ fn source_context_reads_reject_unknown_oversized_and_canceled_calls() {
             json!({"symbol_id": "large"}),
             "256 KiB read limit",
         ),
-        (
-            "read_source_symbol",
-            json!({}),
-            "symbol_id must be a string",
-        ),
+        ("read_source_symbol", json!({}), "selector must be a string"),
         ("unknown", json!({}), "Unknown desktop editor tool"),
     ] {
         let result = tools.execute(
@@ -254,15 +285,14 @@ fn source_context_reads_reject_unknown_oversized_and_canceled_calls() {
 }
 
 #[test]
-fn source_context_catalog_rejects_oversized_metadata_explicitly() {
+fn source_context_catalog_truncates_oversized_metadata_explicitly() {
     let tools = ProposalTools {
         sources: vec![source(&"x".repeat(MAX_SOURCE_CONTEXT_BYTES), String::new())],
         ..ProposalTools::default()
     };
-    assert!(tools
-        .source_catalog()
-        .unwrap_err()
-        .contains("symbol catalog exceeds 256 KiB"));
+    let catalog = tools.source_catalog().unwrap();
+    assert!(catalog.as_str().unwrap().len() <= 5_000);
+    assert!(catalog.as_str().unwrap().contains("+1"));
 }
 
 #[test]
@@ -278,7 +308,7 @@ fn source_context_agent_reads_before_proposing_without_applying() {
                 1 => {
                     assert!(prompt.contains("editable_symbols"));
                     assert!(!prompt.contains("return 7;"));
-                    ("read_source_symbol", json!({"symbol_id": "s0"}))
+                    ("inspect_source", json!({"selector": "@0"}))
                 }
                 2 => {
                     assert!(prompt.contains("return 7;"));

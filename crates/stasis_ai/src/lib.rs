@@ -70,6 +70,7 @@ pub struct AgentProfile {
     pub reasoning_effort: Option<String>,
     pub request_timeout: Option<Duration>,
     pub compaction: Option<AgentCompactionPolicy>,
+    pub compact_request: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +90,7 @@ impl Default for AgentProfile {
             reasoning_effort: None,
             request_timeout: None,
             compaction: None,
+            compact_request: false,
         }
     }
 }
@@ -215,6 +217,42 @@ struct ModelRequestHeader<'a> {
     response_contract: &'a Value,
     user_prompt: &'a str,
     initial_context: &'a Value,
+}
+
+fn compact_request_header(
+    profile: &AgentProfile,
+    tool_specs: &[ToolSpec],
+    user_prompt: &str,
+    initial_context: &Value,
+) -> Result<String, String> {
+    let one_line = |value: &str| value.replace(['\r', '\n', '\t'], " ");
+    let mut header = format!(
+        "request:1\nrole:{}\nrules:{}\ntools:\n",
+        one_line(&profile.role),
+        one_line(&profile.instruction)
+    );
+    for spec in tool_specs {
+        header.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            spec.action_id,
+            spec.tool,
+            spec.required_args.join(","),
+            spec.optional_args.join(","),
+            one_line(&spec.purpose)
+        ));
+    }
+    header.push_str(&format!(
+        "contract:tool_calls|done; notes<=2000; calls<=50; action_id+args\nprompt:{}\ncontext:\n",
+        one_line(user_prompt)
+    ));
+    match initial_context {
+        Value::String(text) => header.push_str(text),
+        value => header.push_str(
+            &serde_json::to_string(value)
+                .map_err(|error| format!("failed encoding compact AI context: {error}"))?,
+        ),
+    }
+    Ok(header)
 }
 
 pub trait ModelProvider {
@@ -349,17 +387,21 @@ where
     if known_tools.contains("finish_task") {
         response_contract["complete"] = json!("Set true only when all requested work is covered; the host validates the receipt after all calls.");
     }
-    let header = serde_json::to_string(&ModelRequestHeader {
-        record: "request",
-        schema_version: 1,
-        role: &profile.role,
-        instruction: &profile.instruction,
-        tool_specs: &tool_specs,
-        response_contract: &response_contract,
-        user_prompt,
-        initial_context: &initial_context,
-    })
-    .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?;
+    let header = if profile.compact_request {
+        compact_request_header(profile, &tool_specs, user_prompt, &initial_context)?
+    } else {
+        serde_json::to_string(&ModelRequestHeader {
+            record: "request",
+            schema_version: 1,
+            role: &profile.role,
+            instruction: &profile.instruction,
+            tool_specs: &tool_specs,
+            response_contract: &response_contract,
+            user_prompt,
+            initial_context: &initial_context,
+        })
+        .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?
+    };
     let mut transcript = AgentTranscript::new(header);
     let mut completion_rejections = 0_usize;
     let require_action_ids = provider.requires_action_ids();
@@ -980,16 +1022,25 @@ pub fn model_response_schema_for(tool_specs: &[ToolSpec]) -> Value {
         .map(|spec| Value::String(spec.action_id.clone()))
         .collect::<Vec<_>>();
     if !action_ids.is_empty() {
-        let variants = tool_specs
-            .iter()
-            .filter(|spec| spec.tool != "finish_task")
-            .map(|spec| {
+        let mut grouped = BTreeMap::<String, (Value, Vec<Value>)>::new();
+        for spec in tool_specs.iter().filter(|spec| spec.tool != "finish_task") {
+            let args = tool_args_schema(spec);
+            let key = serde_json::to_string(&args).unwrap_or_default();
+            grouped
+                .entry(key)
+                .or_insert_with(|| (args, Vec::new()))
+                .1
+                .push(json!(spec.action_id));
+        }
+        let variants = grouped
+            .into_values()
+            .map(|(args, action_ids)| {
                 json!({
                     "type": "object",
                     "required": ["action_id", "args"],
                     "properties": {
-                        "action_id": {"type": "string", "enum": [spec.action_id]},
-                        "args": tool_args_schema(spec),
+                        "action_id": {"type": "string", "enum": action_ids},
+                        "args": args,
                     },
                     "additionalProperties": false,
                 })
@@ -1002,15 +1053,52 @@ pub fn model_response_schema_for(tool_specs: &[ToolSpec]) -> Value {
 
 fn model_response_schema_for_request(request: &str) -> Result<Value, String> {
     let mut lines = request.lines();
-    let header: Value = serde_json::from_str(lines.next().unwrap_or_default())
-        .map_err(|error| format!("AI request header is not valid JSON: {error}"))?;
-    let mut specs: Vec<ToolSpec> = serde_json::from_value(
-        header
-            .get("tool_specs")
-            .cloned()
-            .ok_or_else(|| "AI request header omitted tool_specs".to_string())?,
-    )
-    .map_err(|error| format!("AI request tool_specs are invalid: {error}"))?;
+    let first = lines.next().unwrap_or_default();
+    let mut specs: Vec<ToolSpec> = if first == "request:1" {
+        let mut specs = Vec::new();
+        let mut in_tools = false;
+        for line in request.lines().skip(1) {
+            if line == "tools:" {
+                in_tools = true;
+                continue;
+            }
+            if line.starts_with("contract:") {
+                break;
+            }
+            if !in_tools {
+                continue;
+            }
+            let fields = line.splitn(5, '\t').collect::<Vec<_>>();
+            if fields.len() != 5 {
+                return Err("compact AI request has an invalid tool line".into());
+            }
+            let args = |value: &str| {
+                if value.is_empty() {
+                    Vec::new()
+                } else {
+                    value.split(',').map(str::to_string).collect()
+                }
+            };
+            specs.push(ToolSpec {
+                action_id: fields[0].into(),
+                tool: fields[1].into(),
+                required_args: args(fields[2]),
+                optional_args: args(fields[3]),
+                purpose: fields[4].into(),
+            });
+        }
+        specs
+    } else {
+        let header: Value = serde_json::from_str(first)
+            .map_err(|error| format!("AI request header is not valid JSON: {error}"))?;
+        serde_json::from_value(
+            header
+                .get("tool_specs")
+                .cloned()
+                .ok_or_else(|| "AI request header omitted tool_specs".to_string())?,
+        )
+        .map_err(|error| format!("AI request tool_specs are invalid: {error}"))?
+    };
     for line in lines {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -2311,6 +2399,7 @@ mod tests {
                 reasoning_effort: None,
                 request_timeout: None,
                 compaction: None,
+                compact_request: false,
             },
             "extended task",
             json!({}),
@@ -2638,6 +2727,7 @@ mod tests {
                     max_request_bytes: MIN_COMPACTION_BYTES,
                     retain_recent_turns: 4,
                 }),
+                compact_request: false,
             },
             "inspect large symbols",
             json!({}),

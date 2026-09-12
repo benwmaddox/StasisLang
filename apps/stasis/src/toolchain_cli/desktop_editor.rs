@@ -170,11 +170,63 @@ impl ProposalTools {
         source_catalog::render(&self.sources).map(Value::String)
     }
 
-    fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
-        let symbol_id = args
-            .get("symbol_id")
+    fn inspect_source(&self, args: &Value) -> Result<Value, String> {
+        let selector = args
+            .get("selector")
+            .or_else(|| args.get("symbol_id"))
             .and_then(Value::as_str)
-            .ok_or_else(|| "symbol_id must be a string".to_string())?;
+            .ok_or_else(|| "selector must be a string".to_string())?;
+        if let Some(query) = selector.strip_prefix("?+") {
+            return source_catalog::search(&self.sources, query, true);
+        }
+        if let Some(query) = selector.strip_prefix('?') {
+            return source_catalog::search(&self.sources, query, false);
+        }
+        if let Some(rest) = selector.strip_prefix('f') {
+            if let Some((file_id, name)) = rest.split_once(':') {
+                let file_id = file_id
+                    .parse::<usize>()
+                    .map_err(|_| "invalid file selector")?;
+                let file = source_catalog::file_for_id(&self.sources, file_id)
+                    .ok_or_else(|| format!("Unknown source file: f{file_id}"))?;
+                if name == "t" {
+                    return self
+                        .sources
+                        .iter()
+                        .enumerate()
+                        .find(|(_, item)| {
+                            item["target"]["file"] == file && item["target"]["kind"] == "test"
+                        })
+                        .and_then(|(index, _)| source_catalog::test_names(&self.sources, index))
+                        .ok_or_else(|| format!("Source file f{file_id} has no tests"));
+                }
+                let kind = match name {
+                    "i" => Some("imports"),
+                    "g" => Some("globals"),
+                    _ => None,
+                };
+                let matches = if let Some(kind) = kind {
+                    self.sources
+                        .iter()
+                        .filter(|item| {
+                            item["target"]["file"] == file && item["target"]["kind"] == kind
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    source_catalog::find_by_file_name(&self.sources, file_id, name)
+                };
+                return match matches.as_slice() {
+                    [] => Err(format!("Unknown source selector: {selector}")),
+                    [item] => Ok(item.clone()),
+                    _ => Ok(Value::Array(matches)),
+                };
+            }
+        }
+        let symbol_id = selector
+            .strip_prefix('@')
+            .map(|index| format!("s{index}"))
+            .unwrap_or_else(|| selector.to_string());
         let test_catalog = symbol_id
             .strip_prefix('t')
             .and_then(|index| index.parse::<usize>().ok())
@@ -183,7 +235,7 @@ impl ProposalTools {
         let item = self
             .sources
             .iter()
-            .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id))
+            .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id.as_str()))
             .or(test_catalog.as_ref())
             .or_else(|| {
                 let index = symbol_id.strip_prefix('s')?.parse::<usize>().ok()?;
@@ -204,6 +256,11 @@ impl ProposalTools {
         }
         Ok(item.clone())
     }
+
+    #[cfg(test)]
+    fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
+        self.inspect_source(args)
+    }
 }
 
 impl ToolExecutor for ProposalTools {
@@ -217,7 +274,9 @@ impl ToolExecutor for ProposalTools {
                 let repair = call.tool == "repair_semantic_edit";
                 let result: Result<Value, String> = (|| {
                     match call.tool.as_str() {
-                        "read_source_symbol" => return self.read_source_symbol(&call.args),
+                        "inspect_source" | "read_source_symbol" => {
+                            return self.inspect_source(&call.args)
+                        }
                         "propose_semantic_edit" | "repair_semantic_edit" => {}
                         _ => return Err(format!("Unknown desktop editor tool: {}", call.tool)),
                     }
@@ -291,10 +350,10 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
     })
     .collect();
     specs.push(ToolSpec {
-        tool: "read_source_symbol".to_string(),
-        action_id: action_id_for_tool("read_source_symbol"),
-        purpose: "Read an sN ID for full source and canonical edit targets, or a tN ID for test names/read IDs. Canonical symbol_id also accepted. Batch independent reads.".to_string(),
-        required_args: vec!["symbol_id".to_string()],
+        tool: "inspect_source".to_string(),
+        action_id: action_id_for_tool("inspect_source"),
+        purpose: "Read @N, fN:name, fN:i/g/t; search with ?terms or ?+terms for source. Batch independent calls.".to_string(),
+        required_args: vec!["selector".to_string()],
         optional_args: Vec::new(),
     });
     specs
@@ -595,22 +654,40 @@ fn run_reply_provider_with_config(
         ..ProposalTools::default()
     };
     let source_catalog = tools.source_catalog()?;
-    let initial_context = json!({
-        "task_id": request.task_id,
-        "objective": request.objective,
-        "project_summary": request.project_summary,
-        "relevant_files": request.relevant_files,
-        "relevant_symbols": request.relevant_symbols,
-        "relevant_tests": request.relevant_tests,
-        "screenshots": request.screenshots,
-        "thread": request.context,
-        "actions": request.actions,
-        "editable_symbols": source_catalog,
-    });
+    let mut initial_context = source_catalog.as_str().unwrap_or_default().to_string();
+    let mut append_context = |label: &str, value: &Value| -> Result<(), String> {
+        initial_context.push_str(label);
+        initial_context.push(':');
+        initial_context.push_str(&serde_json::to_string(value).map_err(|error| error.to_string())?);
+        initial_context.push('\n');
+        Ok(())
+    };
+    if request.objective.trim() != prompt.trim() {
+        append_context("goal", &json!(request.objective))?;
+    }
+    for (label, value) in [
+        ("files", json!(request.relevant_files)),
+        ("symbols", json!(request.relevant_symbols)),
+        ("tests", json!(request.relevant_tests)),
+        ("screenshots", json!(request.screenshots)),
+        ("actions", json!(request.actions)),
+    ] {
+        if value.as_array().is_some_and(|items| !items.is_empty()) {
+            append_context(label, &value)?;
+        }
+    }
+    if request.context.len() > 1 {
+        append_context(
+            "history",
+            &json!(&request.context[..request.context.len() - 1]),
+        )?;
+    }
+    let initial_context = Value::String(initial_context);
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Return at most one semantic edit proposal, containing related source and behavioral tests together as one atomic batch. The editor validates and applies that batch immediately after this response, then requests a live hot swap and runs focused tests; do not ask the user to apply it. The editable_symbols text lists names nested under files. sN labels are snapshot-local read IDs: pass one as symbol_id to read_source_symbol for full source, signatures, and canonical target metadata. tN IDs list a file's test names and their sN read IDs on request. Use the returned canonical target for edits, never the short read ID. Inspect required source before proposing changes; minimize provider turns by batching all useful independent symbol reads in one tool_calls response, up to the advertised limit. Include other ready tool calls in the same response when their arguments are already known. Wait for prerequisite results before constructing dependent calls; never guess missing source, IDs, or arguments. Once the required source is known, include all related symbol/file changes and tests in the single semantic edit proposal instead of splitting them across turns. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Keep the response concise and self-contained.".to_string(),
+        instruction: "Solve the task with tools. Stasis is typed and C-like: import, struct, global, function, test `name`(): bool. Follow local syntax; invent no APIs. Catalog fN lines give file counts; @N reads import/global groups; a group prefix prepends its nested names. inspect_source accepts @N, fN:name, fN:i/g/t, ?terms, or ?+terms to include matching source. Read exact source and use returned canonical targets. Batch every independent call and all related code/tests. Wait for prerequisites; never guess. Preserve live state; use on_code_swap only for requested migration. Submit at most one atomic proposal; the editor applies, hot-swaps, and tests it. Use repair only for rejected work. Return only response-contract JSON.".to_string(),
         max_turns: 4,
+        compact_request: true,
         ..AgentProfile::default()
     };
     let mut usage = None;
