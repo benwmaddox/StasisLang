@@ -9,6 +9,8 @@ if [[ -f "$HOME/.cargo/env" ]]; then
 fi
 
 python3 tools/ci/check_stasis_src_layout.py
+python3 tools/ci/check_action_versions.py
+python3 -m unittest tools.ci.test_action_versions
 if command -v cc >/dev/null 2>&1; then
   mkdir -p target/audio-ring-test
   cc -std=c11 -Wall -Wextra -Werror -Iruntime \

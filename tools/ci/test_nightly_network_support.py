@@ -148,7 +148,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
         self.assertIn('"platforms;android-26"', self.workflow)
         self.assertIn('api_target="${target}26"', self.workflow)
         self.assertIn("xcrun --sdk iphoneos --find clang", self.workflow)
-        self.assertIn("actions/upload-artifact@v4", self.workflow)
+        self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", self.workflow)
         self.assertIn("name: mobile-network-support-${{ matrix.kind }}", self.workflow)
 
     def test_archive_layout_is_copied_before_provenance(self):
