@@ -38,9 +38,10 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("Require production Windows signing configuration", source)
         self.assertIn("owned by Maddox task #525", source)
         self.assertIn("needs: [detect, mobile_network_support, release_preconditions]", source)
-        self.assertIn('$env:STASIS_SIGNING_PROFILE = "production"', source)
+        self.assertIn("STASIS_SIGNING_PROFILE: production", source)
+        self.assertIn("STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY: '1'", source)
         self.assertIn("'tools/windows/stasis-signing.ps1'", source)
-        self.assertIn("'tools/windows/stasis-signing-trust.ps1'", source)
+        self.assertIn("'tools/windows/stasis-signing-identity.ps1'", source)
         self.assertIn('$expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"', source)
         self.assertNotIn('"TrustedPeople"', source)
         self.assertIn("STASIS_SIGNING_TIMESTAMP_URLS", source)
@@ -48,9 +49,8 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com", source)
         self.assertIn("Invoke-BoundedSigningCommand sign $_", source)
         self.assertIn("Invoke-BoundedSigningCommand verify $_", source)
-        self.assertIn("Invoke-BoundedSigningCommand sign $artifacts[0]", source)
-        self.assertIn("Invoke-BoundedSigningCommand verify $artifacts[0]", source)
-        self.assertIn("temporary signer trust for $($artifacts[0])", source)
+        self.assertIn('Invoke-BoundedPowerShellCommand "pinned signer identity validation"', source)
+        self.assertNotIn("temporary signer trust", source)
         signing_step = source.split(
             "- name: Authenticode sign Stasis Windows binaries", 1
         )[1].split("- name: Assemble bundle (unix)", 1)[0]
@@ -62,31 +62,30 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("$startInfo.UseShellExecute = $false", signing_step)
         self.assertIn("$startInfo.ArgumentList.Add($argument)", signing_step)
         self.assertIn("$process.ExitCode -ne 0", signing_step)
-        self.assertIn("Remove nightly signing root trust", source)
-        self.assertIn("if: always() && runner.os == 'Windows'", source)
-        cleanup_step = source.split("- name: Remove nightly signing root trust", 1)[1].split(
-            "- name: Upload packaged artifact", 1
-        )[0]
-        self.assertIn("timeout-minutes: 2", cleanup_step)
-        self.assertIn("-Mode remove -ExpectedThumbprint $thumbprint", cleanup_step)
-        self.assertNotIn("X509Store", cleanup_step)
+        self.assertNotIn("Remove nightly signing root trust", source)
         self.assertNotIn("runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''", source)
 
-        trust_source = (ROOT / "tools/windows/stasis-signing-trust.ps1").read_text(
+        identity_source = (ROOT / "tools/windows/stasis-signing-identity.ps1").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Get-Command openssl.exe", trust_source)
-        self.assertIn("Get-Command certutil.exe", trust_source)
-        self.assertIn("'env:STASIS_SIGNING_PFX_PASSWORD'", trust_source)
-        self.assertNotIn("'-legacy'", trust_source)
-        self.assertIn("$publicCertificate.Thumbprint -ne $ExpectedThumbprint", trust_source)
-        self.assertIn("$publicCertificate.Subject -ne $publicCertificate.Issuer", trust_source)
-        self.assertIn("'-user', '-f', '-silent', '-addstore', 'Root'", trust_source)
-        self.assertIn("'-user', '-f', '-silent', '-delstore', 'Root'", trust_source)
-        self.assertIn("$process.WaitForExit(30000)", trust_source)
-        self.assertIn("$process.Kill()", trust_source)
-        self.assertNotIn("Get-AuthenticodeSignature", trust_source)
+        self.assertIn("Get-Command openssl.exe", identity_source)
+        self.assertIn("'env:STASIS_SIGNING_PFX_PASSWORD'", identity_source)
+        self.assertNotIn("'-legacy'", identity_source)
+        self.assertIn("$publicCertificate.Thumbprint -ne $ExpectedThumbprint", identity_source)
+        self.assertIn("$publicCertificate.Subject -ne $publicCertificate.Issuer", identity_source)
+        self.assertIn("$process.WaitForExit(30000)", identity_source)
+        self.assertIn("$process.Kill()", identity_source)
+        for forbidden in ("Get-AuthenticodeSignature", "certutil", "certmgr", "X509Store", "CertAddEncodedCertificateToStore"):
+            self.assertNotIn(forbidden.lower(), identity_source.lower())
         self.assertNotIn("X509Certificate2]::new", signing_step)
+
+        signing_source = (ROOT / "tools/windows/stasis-signing.ps1").read_text(encoding="utf-8")
+        self.assertIn("STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY", signing_source)
+        self.assertIn("0x800B0109", signing_source)
+        self.assertIn("Number of errors:", signing_source)
+        self.assertIn("Number of warnings:", signing_source)
+        self.assertIn("TRUST_E_BAD_DIGEST", signing_source)
+        self.assertIn("'/tw', '/v'", signing_source)
 
     def test_cargo_runner_routes_signtool_through_policy_entrypoint(self):
         source = (ROOT / ".cargo/stasis-sign-and-run.cmd").read_text(encoding="utf-8")
@@ -208,7 +207,7 @@ class WindowsSigningPolicyTests(unittest.TestCase):
                 timeout=30,
             )
             self.assertEqual(verify.returncode, 0, verify.stderr)
-            self.assertIn("verify /pa /all", log.read_text(encoding="ascii"))
+            self.assertIn("verify /pa /all /tw /v", log.read_text(encoding="ascii"))
 
             legacy = root / "legacy-hook.cmd"
             legacy.write_text("@echo off\r\nexit /b 0\r\n", encoding="ascii")
@@ -246,9 +245,51 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("$env:STASIS_SIGNING_TIMESTAMP_URLS -split ';'", source)
         self.assertIn("foreach ($timestamp in $timestamps)", source)
         self.assertIn(
-            "Invoke-BoundedSignTool $signer.Path @('verify', '/pa', '/all', $path)",
+            "Invoke-BoundedSignTool $signer.Path @('verify', '/pa', '/all', '/tw', '/v', $path) -AllowPinnedSelfSigned",
             source,
         )
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell pinned verification bridge test")
+    def test_pinned_self_signed_bridge_accepts_only_the_expected_trust_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            tool = root / "signtool.cmd"
+            artifact = root / "artifact.exe"
+            artifact.write_bytes(b"fixture")
+            expected_output = (
+                "SignTool Error: A certificate chain processed, but terminated in a root certificate "
+                "which is not trusted by the trust provider. (0x800B0109)\r\n"
+                "Number of warnings: 0\r\n"
+                "Number of errors: 1\r\n"
+            )
+            environment = os.environ.copy()
+            environment.pop("STASIS_SIGNING_TIMEOUT_SECONDS", None)
+            environment["STASIS_SIGNING_PROFILE"] = "production"
+            environment["STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY"] = "1"
+
+            def verify(output):
+                tool.write_text(
+                    "@echo off\r\n"
+                    + "".join(f"echo {line}\r\n" for line in output.splitlines())
+                    + "exit /b 1\r\n",
+                    encoding="ascii",
+                )
+                return subprocess.run(
+                    [
+                        "powershell.exe", "-NoProfile", "-NonInteractive",
+                        "-ExecutionPolicy", "Bypass", "-File",
+                        str(ROOT / "tools/windows/stasis-signing.ps1"), "verify",
+                        "-Tool", str(tool), "-Artifact", str(artifact),
+                    ],
+                    capture_output=True, text=True, env=environment, timeout=30,
+                )
+
+            accepted = verify(expected_output)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+            rejected = verify(expected_output + "SignTool Error: TRUST_E_BAD_DIGEST (0x80096010)\r\n")
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("signature verification failed", rejected.stderr)
 
     @unittest.skipUnless(os.name == "nt", "PowerShell timestamp retry test")
     def test_powershell_retries_the_next_timestamp_authority(self):

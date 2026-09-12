@@ -86,11 +86,26 @@ function Get-CertificateArguments {
     throw "Windows signing requires STASIS_SIGNING_CERTIFICATE or STASIS_SIGNING_CERT_THUMBPRINT; run 'stasis signing provision' only for explicit local development signing."
 }
 
-function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments) {
+function Test-PinnedSelfSignedVerificationFailure([int] $ExitCode, [string] $Output) {
+    if (-not (Test-ProductionMode) -or $env:STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY -ne '1') { return $false }
+    if ($ExitCode -ne 1) { return $false }
+    if ($Output -match '(?i)No signature found|TRUST_E_BAD_DIGEST|0x80096010|digital signature[^\r\n]*not valid') { return $false }
+    if ($Output -notmatch '(?i)0x800B0109|terminated in a root certificate which is not trusted by the trust provider') { return $false }
+    if ($Output -notmatch '(?im)^\s*Number of errors:\s*1\s*$') { return $false }
+    if ($Output -notmatch '(?im)^\s*Number of warnings:\s*0\s*$') { return $false }
+    return $true
+}
+
+function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments, [switch] $AllowPinnedSelfSigned) {
     $timeoutText = $env:STASIS_SIGNING_TIMEOUT_SECONDS
     if (-not $timeoutText) {
-        & $Executable @Arguments
-        if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+        $commandOutput = @(& $Executable @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+        $commandOutput | ForEach-Object { Write-Host "$_" }
+        $outputText = $commandOutput | Out-String
+        if ($exitCode -ne 0 -and -not ($AllowPinnedSelfSigned -and (Test-PinnedSelfSignedVerificationFailure $exitCode $outputText))) {
+            throw "signtool failed with exit code $exitCode"
+        }
         return
     }
     $timeoutSeconds = 0
@@ -101,6 +116,10 @@ function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments) {
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $Executable
     $startInfo.UseShellExecute = $false
+    if ($AllowPinnedSelfSigned) {
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+    }
     if ($null -eq $startInfo.ArgumentList) {
         throw 'bounded signing requires PowerShell 7 or newer'
     }
@@ -109,6 +128,10 @@ function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments) {
     $process.StartInfo = $startInfo
     try {
         if (-not $process.Start()) { throw 'signtool process did not start' }
+        if ($AllowPinnedSelfSigned) {
+            $standardOutput = $process.StandardOutput.ReadToEndAsync()
+            $standardError = $process.StandardError.ReadToEndAsync()
+        }
         if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
             # SignTool does not launch a process tree that must be supervised. Killing the
             # direct process also avoids the Windows process-tree enumeration path hanging.
@@ -118,7 +141,12 @@ function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments) {
             }
             throw "signtool timed out after $timeoutSeconds seconds"
         }
-        if ($process.ExitCode -ne 0) {
+        $outputText = ''
+        if ($AllowPinnedSelfSigned) {
+            $outputText = "$($standardOutput.Result)$($standardError.Result)"
+            if ($outputText) { Write-Host $outputText.TrimEnd() }
+        }
+        if ($process.ExitCode -ne 0 -and -not ($AllowPinnedSelfSigned -and (Test-PinnedSelfSignedVerificationFailure $process.ExitCode $outputText))) {
             throw "signtool failed with exit code $($process.ExitCode)"
         }
     } finally {
@@ -202,7 +230,7 @@ switch ($Command) {
         foreach ($path in $Artifact) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "verification input does not exist: $path" }
             try {
-                Invoke-BoundedSignTool $signer.Path @('verify', '/pa', '/all', $path)
+                Invoke-BoundedSignTool $signer.Path @('verify', '/pa', '/all', '/tw', '/v', $path) -AllowPinnedSelfSigned
             } catch {
                 throw "signature verification failed for $path`: $($_.Exception.Message)"
             }
