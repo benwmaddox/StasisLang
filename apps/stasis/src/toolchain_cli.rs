@@ -9290,6 +9290,7 @@ mod tests {
             ),
             ("find_references", "stasis symbol references / :references"),
             ("read_symbol", "stasis symbol read / :read"),
+            ("inspect_source", "stasis symbol list/read / :symbols/:read"),
             ("read_imports", "stasis symbol read imports / :read imports"),
             ("write_symbol", "stasis symbol update / :update"),
             ("add_symbol", "stasis symbol add"),

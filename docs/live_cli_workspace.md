@@ -138,6 +138,7 @@ Human commands intentionally cover every useful live AI capability:
 | `list_symbols` | `stasis symbol list` / `:symbols` |
 | `find_references` | `stasis symbol references SYMBOL` / `:references SYMBOL` |
 | `read_symbol` | `stasis symbol read SYMBOL` / `:read SYMBOL` |
+| `inspect_source` | `stasis symbol list|read` / `:symbols`, `:read`; compact IDs combine those existing discovery and read operations |
 | `read_imports`, `write_imports` | `stasis symbol read|update imports` / `:read imports`, `:update imports` |
 | `write_symbol`, `delete_symbol` | `stasis symbol add|update|delete` / `:add`, `:update`, `:delete` |
 | `write_svg_asset`, `write_png_asset`, `import_png_asset`, `delete_asset` | controlled `assets/generated/` transaction (`stasis ai` and Gauntlet) |
