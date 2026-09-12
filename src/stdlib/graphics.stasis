@@ -29,6 +29,31 @@ struct TextRun {
     height: f32;
 }
 
+// Guest-owned one-shot invalidation for presentation that changes less often
+// than the host render cadence.
+struct RedrawGate {
+    has_presented: bool;
+    dirty: bool;
+}
+
+function @inline mark_dirty(self: RedrawGate): void {
+    self.dirty = true;
+}
+
+function @inline skip_clean_frame(self: RedrawGate): bool {
+    if (!self.has_presented) {
+        self.has_presented = true;
+        self.dirty = false;
+        return false;
+    }
+    if (self.dirty) {
+        self.dirty = false;
+        return false;
+    }
+
+    return true;
+}
+
 const ANIMATION_PLAYBACK_ONCE: i32 = 0;
 const ANIMATION_PLAYBACK_LOOP: i32 = 1;
 const ANIMATION_PLAYBACK_PING_PONG: i32 = 2;

@@ -1,0 +1,128 @@
+import "../../src/stdlib/graphics.stasis";
+
+global redraw: RedrawGate;
+global semantic_value: i32;
+global render_rebuilds: i32;
+global continuous_rebuilds: i32;
+global tick_count: i32;
+global input_checks: i32;
+
+function reset_fixture(): void {
+    redraw.has_presented = false;
+    redraw.dirty = false;
+    semantic_value = 0;
+    render_rebuilds = 0;
+    continuous_rebuilds = 0;
+    tick_count = 0;
+    input_checks = 0;
+    gfx_cmd_begin();
+}
+
+function set_semantic_value(value: i32): void {
+    semantic_value = value;
+    redraw.mark_dirty();
+}
+
+function on_code_swap(): void {
+    redraw.mark_dirty();
+}
+
+function tick(): i32 {
+    tick_count += 1;
+    let pointer_count: i32 = input_pointer_count();
+    input_checks += 1;
+    return pointer_count * 0;
+}
+
+function render(): i32 {
+    if (redraw.skip_clean_frame()) {
+        return 0;
+    }
+
+    begin_frame();
+    clear(0.03, 0.04, 0.07, 1.0);
+    draw_line(0.0, 0.0, 10.0, 10.0, 1.0, 1.0, 1.0, 1.0);
+    end_frame();
+    render_rebuilds += 1;
+    return 0;
+}
+
+function render_continuous(): i32 {
+    begin_frame();
+    clear(0.03, 0.04, 0.07, 1.0);
+    draw_line(0.0, 0.0, 10.0, 10.0, 1.0, 1.0, 1.0, 1.0);
+    end_frame();
+    continuous_rebuilds += 1;
+    return 0;
+}
+
+function frame_presented(): bool {
+    return gfx_cmd_i32[GFX_I_FLAGS] == GFX_FLAG_CLEAR + GFX_FLAG_PRESENT && gfx_cmd_i32[GFX_I_LINE_COUNT] == 1 && gfx_cmd_i32[GFX_I_ORDER_COUNT] == 1 && gfx_cmd_f32[GFX_F_LINE_BASE] == 0.0 && gfx_cmd_f32[GFX_F_LINE_BASE + 2] == 10.0;
+}
+
+test `first render builds and presents normally`(): bool {
+    reset_fixture();
+
+    render();
+
+    return render_rebuilds == 1 && frame_presented();
+}
+
+test `clean render exits without rebuilding the last frame`(): bool {
+    reset_fixture();
+    render();
+
+    render();
+    render();
+
+    return render_rebuilds == 1 && frame_presented();
+}
+
+test `semantic dirty request is consumed by exactly one render`(): bool {
+    reset_fixture();
+    render();
+    render();
+
+    set_semantic_value(7);
+    render();
+    let dirty_render_presented: bool = render_rebuilds == 2 && semantic_value == 7 && frame_presented();
+    render();
+
+    return dirty_render_presented && render_rebuilds == 2 && frame_presented();
+}
+
+test `tick and input cadence continue while clean renders skip`(): bool {
+    reset_fixture();
+
+    tick();
+    render();
+    tick();
+    render();
+    tick();
+    render();
+
+    return tick_count == 3 && input_checks == 3 && render_rebuilds == 1 && frame_presented();
+}
+
+test `code swap explicitly requests one new presentation`(): bool {
+    reset_fixture();
+    render();
+    render();
+
+    on_code_swap();
+    render();
+    let swapped_render_presented: bool = render_rebuilds == 2 && frame_presented();
+    render();
+
+    return swapped_render_presented && render_rebuilds == 2 && frame_presented();
+}
+
+test `continuous render remains unchanged without the guard`(): bool {
+    reset_fixture();
+
+    render_continuous();
+    let first_presented: bool = continuous_rebuilds == 1 && frame_presented();
+    render_continuous();
+
+    return first_presented && continuous_rebuilds == 2 && frame_presented();
+}
