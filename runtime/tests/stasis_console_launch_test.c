@@ -56,7 +56,7 @@ static int run_child(const char* mode) {
     ULONGLONG deadline = GetTickCount64() + 2000;
     while (!IsWindowVisible(terminal) && GetTickCount64() < deadline) Sleep(10);
     if (!IsWindowVisible(terminal)) return 77;
-    ShowWindowAsync(terminal, SW_RESTORE);
+    ShowWindow(terminal, SW_RESTORE);
     if (!wait_iconic(terminal, 0, 1000)) return 1;
 
     const int hidden = strcmp(mode, "hidden") == 0;
@@ -81,7 +81,7 @@ static int run_child(const char* mode) {
         if (!wait_iconic(terminal, 1, 2000)) return 6;
         if (!game_visible(title)) return 12;
     }
-    ShowWindowAsync(terminal, SW_RESTORE);
+    ShowWindow(terminal, SW_RESTORE);
     if (!wait_iconic(terminal, 0, 1000)) return 7;
     stasis_set_window_size(400, 300);
     if (!remains_restored(terminal)) return 8;

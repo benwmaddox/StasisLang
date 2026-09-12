@@ -2,6 +2,8 @@ mod chat_export;
 mod git_completion;
 mod host_progress;
 mod image_attachments;
+#[cfg(test)]
+mod payload_tests;
 mod persistence;
 #[cfg(test)]
 mod request_image_tests;
@@ -9,6 +11,7 @@ mod semantic_diff;
 #[cfg(test)]
 mod source_context_tests;
 
+use super::source_catalog;
 use host_progress::{HostProgress, HostProgressState};
 use stasis_ai::task_controller::{ProgressReporter, ProgressStage, TaskControllerConfig};
 mod semantic_revisions;
@@ -31,9 +34,10 @@ use stasis_ai::task_session::{
     TaskSessionCommand, ThreadEntryKind, UploadState, ValidationStatus,
 };
 use stasis_ai::{
-    action_id_for_tool, run_agent_with_profile, AgentEvent, AgentProfile, ProviderActionProposal,
-    ProviderConfig, ProviderReply, ProviderRequest, ProviderUsage, TaskController,
-    TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation, ToolSpec,
+    action_id_for_tool, run_agent_with_profile, source_inspection_tool_spec, AgentEvent,
+    AgentProfile, ProviderActionProposal, ProviderConfig, ProviderReply, ProviderRequest,
+    ProviderUsage, TaskController, TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation,
+    ToolSpec,
 };
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,9 +104,26 @@ struct ProposalTools {
     proposals: Vec<ProviderActionProposal>,
     sources: Vec<Value>,
     existing_actions: BTreeMap<String, String>,
+    project_root: Option<PathBuf>,
 }
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 256 * 1024;
+
+fn canonicalize_proposal_payload(payload: &mut Value) {
+    let Some(edits) = payload.get_mut("edits").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for edit in edits {
+        if edit.get("operation").and_then(Value::as_str) != Some("add") {
+            continue;
+        }
+        if let Some(target) = edit.get_mut("target").and_then(Value::as_object_mut) {
+            target.remove("symbol_id");
+            target.remove("owner");
+            target.remove("signature");
+        }
+    }
+}
 
 impl ProposalTools {
     fn validate_proposal(
@@ -160,46 +181,27 @@ impl ProposalTools {
                 description,
                 payload.clone(),
             )
-            .map_err(|error| format!("invalid proposal: {error}"))
+            .map_err(|error| format!("invalid proposal: {error}"))?;
+        if let Some(root) = &self.project_root {
+            let preview = super::desktop_preview_semantic_batch(root, payload.clone())
+                .map_err(|error| format!("proposal does not parse or resolve: {error}"))?;
+            super::desktop_validate_semantic_preview(root, &preview)
+                .map_err(|error| format!("proposal does not compile and pass tests: {error}"))?;
+        }
+        Ok(())
     }
 
     fn source_catalog(&self) -> Result<Value, String> {
-        let catalog = Value::Array(
-            self.sources
-                .iter()
-                .map(|item| item["target"].clone())
-                .collect(),
-        );
-        if serde_json::to_vec(&catalog)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_SOURCE_CONTEXT_BYTES
-        {
-            return Err("Project symbol catalog exceeds 256 KiB; narrow the project before requesting edits.".into());
-        }
-        Ok(catalog)
+        source_catalog::render(&self.sources).map(Value::String)
     }
 
+    fn inspect_source(&self, args: &Value) -> Result<Value, String> {
+        source_catalog::inspect(&self.sources, args, MAX_SOURCE_CONTEXT_BYTES)
+    }
+
+    #[cfg(test)]
     fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
-        let symbol_id = args
-            .get("symbol_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "symbol_id must be a string".to_string())?;
-        let item = self
-            .sources
-            .iter()
-            .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id))
-            .ok_or_else(|| format!("Unknown source symbol: {symbol_id}"))?;
-        if serde_json::to_vec(item)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_SOURCE_CONTEXT_BYTES
-        {
-            return Err(format!(
-                "Source symbol {symbol_id} exceeds the 256 KiB read limit."
-            ));
-        }
-        Ok(item.clone())
+        self.inspect_source(args)
     }
 }
 
@@ -214,7 +216,9 @@ impl ToolExecutor for ProposalTools {
                 let repair = call.tool == "repair_semantic_edit";
                 let result: Result<Value, String> = (|| {
                     match call.tool.as_str() {
-                        "read_source_symbol" => return self.read_source_symbol(&call.args),
+                        "inspect_source" | "read_source_symbol" => {
+                            return self.inspect_source(&call.args)
+                        }
                         "propose_semantic_edit" | "repair_semantic_edit" => {}
                         _ => return Err(format!("Unknown desktop editor tool: {}", call.tool)),
                     }
@@ -228,11 +232,12 @@ impl ToolExecutor for ProposalTools {
                         .get("description")
                         .and_then(Value::as_str)
                         .ok_or_else(|| "description must be a string".to_string())?;
-                    let payload = call
+                    let mut payload = call
                         .args
                         .get("batch")
                         .cloned()
                         .ok_or_else(|| "batch is required".to_string())?;
+                    canonicalize_proposal_payload(&mut payload);
                     if payload
                         .get("edits")
                         .and_then(Value::as_array)
@@ -261,6 +266,12 @@ impl ToolExecutor for ProposalTools {
             })
             .collect()
     }
+
+    fn terminal_success(&self) -> Option<String> {
+        self.proposals
+            .last()
+            .map(|proposal| proposal.description.clone())
+    }
 }
 
 fn proposal_tool_specs() -> Vec<ToolSpec> {
@@ -287,13 +298,7 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
         optional_args: Vec::new(),
     })
     .collect();
-    specs.push(ToolSpec {
-        tool: "read_source_symbol".to_string(),
-        action_id: action_id_for_tool("read_source_symbol"),
-        purpose: "Read exact source and target metadata from the request's immutable source snapshot before proposing edits. Calls for multiple symbols can be batched.".to_string(),
-        required_args: vec!["symbol_id".to_string()],
-        optional_args: Vec::new(),
-    });
+    specs.push(source_inspection_tool_spec());
     specs
 }
 
@@ -342,6 +347,7 @@ fn configured_provider_state(config: &ProviderConfig) -> ProviderState {
     ProviderState {
         provider: Some(config.provider_name().to_string()),
         model: Some(bounded_provider_label(Some(&config.model()), "configured")),
+        reasoning_effort: Some(effective_reasoning_effort(config)),
         routing: RoutingState::Assigned {
             route: bounded_provider_label(Some(&route), "direct"),
         },
@@ -350,22 +356,18 @@ fn configured_provider_state(config: &ProviderConfig) -> ProviderState {
 }
 
 fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> ProviderState {
-    let provider = bounded_provider_label(
+    let resolved_provider = bounded_provider_label(
         usage
             .and_then(|value| value.get("resolved_provider"))
             .and_then(Value::as_str),
         config.provider_name(),
     );
-    let model = bounded_provider_label(
-        usage
-            .and_then(|value| value.get("resolved_model"))
-            .and_then(Value::as_str),
-        &config.model(),
-    );
+    let provider = bounded_provider_label(Some(config.provider_name()), "configured");
+    let model = bounded_provider_label(Some(&config.model()), "configured");
     let route = match usage.and_then(|value| value.get("route")) {
         Some(Value::String(route)) => bounded_provider_label(Some(route), "direct"),
         Some(Value::Object(_)) => bounded_provider_label(
-            Some(&format!("{}:{provider}", config.provider_name())),
+            Some(&format!("{}:{resolved_provider}", config.provider_name())),
             "direct",
         ),
         _ => {
@@ -381,8 +383,11 @@ fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> Provi
         .unwrap_or(false)
     {
         FallbackState::Active {
-            provider: provider.clone(),
-            model: Some(model.clone()),
+            provider: resolved_provider,
+            model: usage
+                .and_then(|value| value.get("resolved_model"))
+                .and_then(Value::as_str)
+                .map(|model| bounded_provider_label(Some(model), "resolved model")),
             route: Some(route.clone()),
         }
     } else {
@@ -391,8 +396,20 @@ fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> Provi
     ProviderState {
         provider: Some(provider),
         model: Some(model),
+        reasoning_effort: Some(effective_reasoning_effort(config)),
         routing: RoutingState::Assigned { route },
         fallback,
+    }
+}
+
+fn effective_reasoning_effort(config: &ProviderConfig) -> String {
+    if matches!(config, ProviderConfig::OpenRouter(_)) {
+        "medium".to_string()
+    } else {
+        std::env::var("STASIS_AI_REASONING_EFFORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| stasis_ai::DEFAULT_REASONING_EFFORT.to_string())
     }
 }
 
@@ -505,10 +522,28 @@ fn run_reply_provider_observed_with_progress(
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
     progress: Option<ProgressReporter>,
-    mut observe_usage: impl FnMut(&Value),
+    observe_usage: impl FnMut(&Value),
 ) -> Result<ProviderReply, String> {
     let config = selected_provider_config(request.selected_provider, &project_root)?;
-    let effective_reasoning_effort = (config.provider_name() == "openrouter").then_some("low");
+    run_reply_provider_with_config(
+        request,
+        canceled,
+        project_root,
+        progress,
+        config,
+        observe_usage,
+    )
+}
+
+fn run_reply_provider_with_config(
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    project_root: PathBuf,
+    progress: Option<ProgressReporter>,
+    config: ProviderConfig,
+    mut observe_usage: impl FnMut(&Value),
+) -> Result<ProviderReply, String> {
+    let reasoning_effort = effective_reasoning_effort(&config);
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
     if canceled.load(Ordering::Acquire) {
         return Err("AI request canceled".into());
@@ -540,9 +575,7 @@ fn run_reply_provider_observed_with_progress(
     } else {
         provider.with_images(image_paths)?
     };
-    if let Some(reasoning_effort) = effective_reasoning_effort {
-        provider = provider.with_reasoning_effort(reasoning_effort);
-    }
+    provider = provider.with_reasoning_effort(reasoning_effort);
     let prompt = request
         .context
         .last()
@@ -556,6 +589,7 @@ fn run_reply_provider_observed_with_progress(
     let source_context = super::desktop_source_context(&project_root)?;
     let mut tools = ProposalTools {
         sources: source_context,
+        project_root: Some(project_root.clone()),
         existing_actions: request
             .actions
             .iter()
@@ -564,22 +598,40 @@ fn run_reply_provider_observed_with_progress(
         ..ProposalTools::default()
     };
     let source_catalog = tools.source_catalog()?;
-    let initial_context = json!({
-        "task_id": request.task_id,
-        "objective": request.objective,
-        "project_summary": request.project_summary,
-        "relevant_files": request.relevant_files,
-        "relevant_symbols": request.relevant_symbols,
-        "relevant_tests": request.relevant_tests,
-        "screenshots": request.screenshots,
-        "thread": request.context,
-        "actions": request.actions,
-        "editable_symbols": source_catalog,
-    });
+    let mut initial_context = source_catalog.as_str().unwrap_or_default().to_string();
+    let mut append_context = |label: &str, value: &Value| -> Result<(), String> {
+        initial_context.push_str(label);
+        initial_context.push(':');
+        initial_context.push_str(&serde_json::to_string(value).map_err(|error| error.to_string())?);
+        initial_context.push('\n');
+        Ok(())
+    };
+    if request.objective.trim() != prompt.trim() {
+        append_context("goal", &json!(request.objective))?;
+    }
+    for (label, value) in [
+        ("files", json!(request.relevant_files)),
+        ("symbols", json!(request.relevant_symbols)),
+        ("tests", json!(request.relevant_tests)),
+        ("screenshots", json!(request.screenshots)),
+        ("actions", json!(request.actions)),
+    ] {
+        if value.as_array().is_some_and(|items| !items.is_empty()) {
+            append_context(label, &value)?;
+        }
+    }
+    if request.context.len() > 1 {
+        append_context(
+            "history",
+            &json!(&request.context[..request.context.len() - 1]),
+        )?;
+    }
+    let initial_context = Value::String(initial_context);
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Return at most one semantic edit proposal, containing related source and behavioral tests together as one atomic batch. The editor validates and applies that batch immediately after this response, then requests a live hot swap and runs focused tests; do not ask the user to apply it. The editable_symbols catalog identifies project source. Use read_source_symbol to inspect exact source before proposing changes; batch independent symbol reads. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Keep the response concise and self-contained.".to_string(),
-        max_turns: 4,
+        instruction: "Solve the task with tools. Stasis is typed and C-like: import, struct, global, function, test `name`(): bool. No array literals or collection iteration; copy local loop forms. Follow local syntax; invent no APIs. Catalog IDs are hypermedia leads. IDs are one letter plus digits: for example, f6 lists that file's symbols and s203 returns exact source. Copy a shown ID exactly; fN and sN are not IDs. Continue with newly revealed links or file changes. search TERMS returns matching links; search-source TERMS includes top bodies. Before adding, inspect one same-kind source in the target file. Batch every independent call and all related code/tests. Wait for prerequisites; never guess. Preserve live state. Use on_code_swap when the requested change needs migration or immediate visual setup; change only the minimum state, such as player position or phase, needed to reveal it. Submit at most one atomic proposal; the editor applies, hot-swaps, and tests it. Use repair only for rejected work. Return only response-contract JSON.".to_string(),
+        max_turns: 8,
+        compact_request: true,
         ..AgentProfile::default()
     };
     let mut usage = None;
@@ -594,6 +646,15 @@ fn run_reply_provider_observed_with_progress(
         proposal_tool_specs(),
         &canceled,
         |event| {
+            #[cfg(test)]
+            if std::env::var_os("STASIS_EDITOR_OPENROUTER_TRACE").is_some()
+                && matches!(
+                    &event,
+                    AgentEvent::ToolBatch(_) | AgentEvent::Observations(_)
+                )
+            {
+                eprintln!("OpenRouter editor event: {event:?}");
+            }
             if let AgentEvent::Observations(observations) = &event {
                 last_tool_error = observations
                     .iter()
@@ -3093,6 +3154,36 @@ fn status_chip(ui: &mut egui::Ui, label: &str, color: Color32) {
         });
 }
 
+fn render_message_provider(
+    ui: &mut egui::Ui,
+    turn: Option<&stasis_ai::task_session::ProviderTurnMetrics>,
+) {
+    let Some(turn) = turn else {
+        ui.label(
+            RichText::new("Provider details unavailable for this restored message")
+                .size(10.0)
+                .color(muted_text()),
+        );
+        return;
+    };
+    let provider = turn.provider.as_deref().unwrap_or("provider unavailable");
+    let provider = if provider == "installed_codex_subscription" {
+        "Codex"
+    } else {
+        provider
+    };
+    ui.label(
+        RichText::new(format!(
+            "Provider: {}  |  Model: {}  |  Reasoning: {}",
+            provider,
+            turn.model.as_deref().unwrap_or("model unavailable"),
+            turn.reasoning_effort.as_deref().unwrap_or("unavailable")
+        ))
+        .size(10.0)
+        .color(muted_text()),
+    );
+}
+
 fn validation_label_ui(status: &ValidationStatus) -> &'static str {
     match status {
         ValidationStatus::NotRun => "not tested",
@@ -4854,6 +4945,9 @@ impl DesktopEditor {
                         ui.add(
                             egui::Label::new(RichText::new(&message.text).size(13.0)).wrap(true),
                         );
+                        if matches!(&entry.kind, ActivityKind::AiReply { .. }) {
+                            render_message_provider(ui, entry.provider_turn.as_ref());
+                        }
                         ui.add_space(2.0);
                     }
                     return None;
@@ -5038,6 +5132,9 @@ impl DesktopEditor {
                                 egui::Label::new(RichText::new(&message.text).size(14.0))
                                     .wrap(true),
                             );
+                            if matches!(message.kind, ThreadEntryKind::Result) {
+                                render_message_provider(ui, entry.provider_turn.as_ref());
+                            }
                         }
                     }
                     ActivityKind::Attachment {
@@ -7580,7 +7677,9 @@ mod tests {
 
         let state = provider_reply_state(&config, Some(&usage));
 
-        assert_eq!(state.provider.as_deref(), Some("cerebras"));
+        assert_eq!(state.provider.as_deref(), Some("openrouter"));
+        assert_eq!(state.model.as_deref(), Some("example/model"));
+        assert_eq!(state.reasoning_effort.as_deref(), Some("medium"));
         assert!(matches!(
             state.routing,
             RoutingState::Assigned { route } if route == "openrouter:cerebras"
@@ -7695,6 +7794,48 @@ mod tests {
 
         assert_eq!(tools.proposals.len(), 1);
         assert!(observations[0].error.is_none());
+    }
+
+    #[test]
+    fn proposal_tools_canonicalize_new_symbol_targets_and_finish_immediately() {
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "propose_semantic_edit".to_string(),
+                args: json!({
+                    "proposal_id": "add-test",
+                    "description": "Add a test",
+                    "batch": {
+                        "schema_version": 1,
+                        "edits": [{
+                            "operation": "add",
+                            "target": {
+                                "file": "tests/main.test.stasis",
+                                "kind": "test",
+                                "name": "new test",
+                                "owner": "Tests",
+                                "signature": "test `new test`",
+                                "symbol_id": null
+                            },
+                            "new_source": "test `new test`(): bool { return true; }"
+                        }]
+                    }
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0].error.is_none());
+        let target = &tools.proposals[0].payload["edits"][0]["target"];
+        assert_eq!(
+            target,
+            &json!({
+                "file": "tests/main.test.stasis",
+                "kind": "test",
+                "name": "new test"
+            })
+        );
+        assert_eq!(tools.terminal_success().as_deref(), Some("Add a test"));
     }
 
     #[test]

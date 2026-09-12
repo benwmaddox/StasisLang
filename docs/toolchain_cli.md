@@ -254,8 +254,9 @@ restore release assets.
 - `signing status|provision|sign|verify`: inspect Windows signer discovery, explicitly provision a
   CurrentUser-only development certificate, sign explicit executable/toolchain paths, or verify
   Authenticode signatures. These commands do not require `stasis.json`; `provision` is never a
-  production credential path. Stasis-controlled signing requests SHA-256 file digests and page
-  hashes. The explicit sign/verify operations require a Windows host; `STASIS_AOT_SIGN_TOOL`
+  production credential path. Local provisioning trusts the public certificate only in CurrentUser Root.
+  Stasis-controlled signing requests SHA-256 digests with page hashes for EXEs and without them
+  for DLLs, then verifies Authenticode and signer identity. See [Windows test signing](windows-app-control.md). The explicit sign/verify operations require a Windows host; `STASIS_AOT_SIGN_TOOL`
   remains supported as a one-argument external hook for existing cross-platform build flows.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
   assets, graphics runtime when present, and verified release provenance. Windows packages keep

@@ -29,8 +29,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Test native LAN policy and existing transport
         run: python tools/cargo_cache.py run -- cargo test -p stasis_network --lib --tests
 
@@ -75,8 +75,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Install Linux graphics and display dependencies
         if: runner.os == 'Linux'
         run: >-
@@ -108,10 +108,11 @@ jobs:
         timeout-minutes: 15
         run: bash tools/ci/test_unix_desktop_network_package.sh
       - name: Upload native package lifecycle evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-network-package-${{ matrix.os }}
           if-no-files-found: error
+          archive: true
           path: target/desktop-network-package.*/result.json
 
   windows-desktop-package:
@@ -135,9 +136,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - name: Test supervisor command bounds
         run: python tools/cargo_cache.py run -- cargo test -p stasis_network --test supervision
       - name: Test packaged authority and external socket peer
