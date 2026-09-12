@@ -190,3 +190,104 @@
 - Visual evidence: not applicable; this follow-up changes transport and component admission, with no graphical UI change.
 
 - Android admission evidence: API 35 fixture using the exact production policy and provisioning method admitted the same-signer alias caller, denied the differently signed caller with SecurityException before dispatch, and rejected direct MainActivity provisioning in onCreate and onNewIntent. Inspected target/android_admission_evidence/evidence.txt; this is a minimal admission fixture, not the packaged SDL game.
+
+
+### Task 424: focused desktop conversation layout
+
+Removed the editor's fixed task/game placeholder split in favor of a narrow
+resizable sidebar and one active conversation, matching the revised separate
+native game window direction. Anchored reply/actions below the scroll area
+and moved the verified screenshot preview into the active thread. Added a
+layout regression test for composer visibility with a long thread at 900x600
+and 1440x900. No provider, source-edit, or runtime contracts changed.
+
+Validation (2026-09-08 retry): a fresh worktree-local Cargo build passed all
+32 desktop_editor tests through tools/cargo_cache.py. The retained layout
+test exposed clipped composer actions at 900x600; reserving 180 pixels for
+the composer fixed it. The test now skips egui's invisible initial sizing
+pass and verifies both subsequent frames at 900x600 and 1440x900. rustfmt
+and git diff --check passed. No task-local test processes remained.
+
+Git Bash with its utility PATH restored and a python3-to-python shell
+function started tools/validate_repo.sh. Runtime ABI (797 comparisons),
+host contracts (953 comparisons), compiler characterization, failed-publication
+rollback, browser storage/network, and shared protocol fixtures passed.
+The entrypoint then stopped at vscode.protocol because TypeScript dependencies
+were absent. This is not a complete repository validation pass.
+
+A fresh cargo run of the editor stopped before window creation: the CLI has
+no verified build fingerprint. The installed-toolchain identity gate remains
+intact. Read-only GitHub verification found prerequisite PR #697 OPEN with
+mergedAt null; remaining child implementations are not integrated here.
+Visual evidence: unavailable; fresh runtime PNG/MP4 capture and visual review
+remain required. This bounded layout change does not complete parent acceptance:
+image generation/import, bounded-context presentation, diff rendering, routing
+policy acceptance, and full runtime workflow evidence still require follow-up.
+
+Theory gained: a bottom-anchored composer still needs enough minimum height
+for wrapped actions; the 900x600 regression demonstrated this. Additional
+actions or a narrower sidebar allocation should rerun the clipping assertions.
+
+Latest worker recheck (2026-09-08): preserved the retained layout changes.
+`git diff --check` and file-scoped `rustfmt --check --edition 2021` passed.
+A fresh worktree-local `python tools/cargo_cache.py run -- cargo test -p stasis
+desktop_editor -- --test-threads=1` failed before tests: Application Control
+blocked the glutin_egl_sys build script (OS error 4551). The repository signing
+helper, run with ExecutionPolicy Bypass, found no matching signing certificate.
+This attempt does not reproduce the earlier recorded passing tests. No
+worktree-target processes remained after the failed build.
+An authenticated `gh pr view 697 --repo benwmaddox/StasisLang --json
+state,mergedAt,headRefName` still returned OPEN and mergedAt null. The local
+GenerateImage and ImportImage intents still have no execution adapter; they
+remain queued by flush_intents. Integrating the assigned child implementations
+is still required before parent acceptance. No branches, commits, PRs, or task
+state were modified. Visual evidence: unavailable in this recheck; fresh
+desktop capture acceptance remains incomplete.
+
+Current task-424 revalidation (2026-09-08): preserved the retained layout
+implementation and rebuilt dependencies in target/task424-validation through
+`python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis desktop_editor -- --test-threads=1`.
+All 36 selected tests passed, including long-thread composer visibility at
+900x600 and 1440x900, task isolation, cancellation, screenshots, and hash-checked
+apply/test receipts. Optional signing reported no matching certificate, but
+the test executable ran successfully; the historical OS error 4551 did not recur.
+File-scoped rustfmt and git diff --check passed.
+Read-only authenticated GitHub checks show #697 still OPEN/unmerged and #699
+MERGED. Local GenerateImage/ImportImage intents still fall through to the
+pending queue without an adapter. Parent acceptance therefore remains incomplete
+pending its assigned child integration; no Git or Maddox mutations were made.
+Visual evidence: unavailable in this revalidation; headless layout assertions
+are not native desktop PNG/MP4 workflow evidence.
+
+Task-424 recheck (2026-09-10): preserved the retained layout implementation.
+Fresh worktree-local validation through `python tools/cargo_cache.py run --
+cargo test -p stasis --bin stasis desktop_editor -- --test-threads=1` passed
+all 36 tests. Optional signing found no certificate, but execution succeeded.
+File-scoped rustfmt and git diff --check passed. Live read-only GitHub evidence
+confirms PR #722 merged at 2026-09-10T12:11:33Z; earlier open-PR dependency
+claims above are historical. The supplied current task record identifies #516
+as the only unfinished child. This checkout still queues GenerateImage and
+ImportImage without execution adapters; the GitHub publication search found
+no corresponding child PR. Its retained implementation is outside the supplied
+worktree, so parent integration and generation/import acceptance remain pending.
+Visual evidence: unavailable in this recheck; headless layout tests do not
+replace the required reviewed native desktop generation/import workflow.
+
+Task-424 recheck (2026-09-12): preserved the retained layout implementation.
+Fresh worktree-local dependencies and desktop validation through
+`python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis
+ desktop_editor -- --test-threads=1` passed all 36 tests, including composer
+visibility at 900x600 and 1440x900. The initial exact short-name filter selected
+zero tests and was corrected; it is not counted as validation. Optional signing
+found no certificate, but the fresh executable ran. File-scoped rustfmt and
+`git diff --check` passed.
+Live read-only GitHub inspection now finds child PR #762 OPEN, mergedAt null,
+with no checks reported. Its description explicitly records unfinished
+current-main session-persistence integration and missing desktop PNG/MP4 review.
+GitHub main matches local origin/main at fff47841e66bf86767db6a0bbf756208ed56881e;
+that version explicitly reports image generation/import as unavailable.
+Thus checking current main does not provide an integrated fallback. Parent
+acceptance awaits the assigned child implementation and integrated evidence.
+No branches, commits, pushes, PR mutations, or Maddox operations were performed.
+Visual evidence: unavailable in this recheck; headless assertions do not prove
+the required native desktop generation/import workflow.

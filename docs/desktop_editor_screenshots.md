@@ -1,5 +1,11 @@
 # Desktop editor game screenshots
 
+The task window uses a narrow, resizable task sidebar and one conversation
+pane. The game remains in its independently movable native window; there is
+no placeholder game pane in the editor. The reply and action area stays below
+the scrolling conversation. The latest verified screenshot preview appears
+inside its originating task thread, with capture provenance retained.
+
 The editor's **Attach game screenshot** command captures the independent live
 game window, including its current rendered state while gameplay is paused.
 It waits for verified PNG completion and shows a preview. Capture does not

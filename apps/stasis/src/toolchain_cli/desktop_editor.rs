@@ -1325,7 +1325,6 @@ struct EditorState {
     session: TaskSession,
     shortcuts: ShortcutMapper,
     focus: FocusArea,
-    task_fraction: f32,
     objective: String,
     reply: String,
     palette_query: String,
@@ -1345,7 +1344,6 @@ impl Default for EditorState {
             session: TaskSession::new(),
             shortcuts: ShortcutMapper::new(),
             focus: FocusArea::Tasks,
-            task_fraction: 0.42,
             objective: String::new(),
             reply: String::new(),
             palette_query: String::new(),
@@ -1362,22 +1360,6 @@ impl Default for EditorState {
 }
 
 impl EditorState {
-    fn pane_widths(&self, available: f32) -> (f32, f32) {
-        let task = if available <= 680.0 {
-            (available * self.task_fraction).clamp(0.0, available)
-        } else {
-            (available * self.task_fraction).clamp(320.0, available - 360.0)
-        };
-        (task, available - task)
-    }
-
-    fn set_task_width(&mut self, width: f32, available: f32) {
-        if available > 0.0 {
-            self.task_fraction = width / available;
-            self.task_fraction = self.pane_widths(available).0 / available;
-        }
-    }
-
     fn active_id(&self) -> Result<String, String> {
         self.session
             .active_task_id()
@@ -1692,6 +1674,40 @@ impl DesktopEditor {
             ));
         }
         ui.separator();
+        egui::TopBottomPanel::bottom("task-composer")
+            .min_height(180.0)
+            .show_inside(ui, |ui| {
+                ui.separator();
+                let reply = ui.add_sized(
+                    [ui.available_width(), 72.0],
+                    egui::TextEdit::multiline(&mut self.state.reply)
+                        .hint_text("Reply to this task..."),
+                );
+                if self.state.focus == FocusArea::Reply {
+                    reply.request_focus();
+                }
+                ui.horizontal_wrapped(|ui| {
+                    for (label, command) in [
+                        (
+                            "Attach game screenshot",
+                            TaskSessionCommand::AttachScreenshot,
+                        ),
+                        ("Send  Ctrl+Enter", TaskSessionCommand::SendReply),
+                        ("Accept  Ctrl+Y", TaskSessionCommand::AcceptAction),
+                        ("Reject", TaskSessionCommand::RejectAction),
+                        ("Apply  Ctrl+Alt+Enter", TaskSessionCommand::ApplyAction),
+                        ("Test  Ctrl+T", TaskSessionCommand::RunFocusedTests),
+                        ("Retry  Ctrl+R", TaskSessionCommand::Retry),
+                        ("Cancel  Ctrl+Esc", TaskSessionCommand::Cancel),
+                        ("Reconnect  Ctrl+Shift+R", TaskSessionCommand::Reconnect),
+                        ("Done  Ctrl+Shift+D", TaskSessionCommand::MarkDone),
+                    ] {
+                        if ui.button(label).clicked() {
+                            self.state.dispatch(command);
+                        }
+                    }
+                });
+            });
         egui::ScrollArea::vertical()
             .id_source("task-thread")
             .stick_to_bottom(true)
@@ -1725,6 +1741,16 @@ impl DesktopEditor {
                         }
                     });
                 }
+                if self
+                    .state
+                    .preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.task_id == task.id)
+                {
+                    ui.allocate_ui(egui::vec2(ui.available_width(), 260.0), |ui| {
+                        self.screenshot_card(ui)
+                    });
+                }
                 for screenshot in task.screenshots.values() {
                     ui.group(|ui| {
                         ui.label(
@@ -1743,34 +1769,9 @@ impl DesktopEditor {
                     });
                 }
             });
-        ui.separator();
-        let reply = ui.add_sized(
-            [ui.available_width(), 72.0],
-            egui::TextEdit::multiline(&mut self.state.reply).hint_text("Reply to this task..."),
-        );
-        if self.state.focus == FocusArea::Reply {
-            reply.request_focus();
-        }
-        ui.horizontal_wrapped(|ui| {
-            for (label, command) in [
-                ("Send  Ctrl+Enter", TaskSessionCommand::SendReply),
-                ("Accept  Ctrl+Y", TaskSessionCommand::AcceptAction),
-                ("Reject", TaskSessionCommand::RejectAction),
-                ("Apply  Ctrl+Alt+Enter", TaskSessionCommand::ApplyAction),
-                ("Test  Ctrl+T", TaskSessionCommand::RunFocusedTests),
-                ("Retry  Ctrl+R", TaskSessionCommand::Retry),
-                ("Cancel  Ctrl+Esc", TaskSessionCommand::Cancel),
-                ("Reconnect  Ctrl+Shift+R", TaskSessionCommand::Reconnect),
-                ("Done  Ctrl+Shift+D", TaskSessionCommand::MarkDone),
-            ] {
-                if ui.button(label).clicked() {
-                    self.state.dispatch(command);
-                }
-            }
-        });
     }
 
-    fn game(&mut self, ui: &mut egui::Ui) {
+    fn screenshot_card(&mut self, ui: &mut egui::Ui) {
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
         if response.clicked() {
             self.state.focus = FocusArea::Game;
@@ -1833,10 +1834,6 @@ impl DesktopEditor {
                 egui::FontId::proportional(13.0),
                 color,
             );
-        } else {
-            painter.text(response.rect.center(), egui::Align2::CENTER_CENTER,
-                "LIVE GAME\n\nThe interactive game runs in its native window\nand keeps independent keyboard and mouse focus.\n\nCtrl+Alt+G focuses this surface.",
-                egui::FontId::proportional(18.0), color);
         }
         if self.state.focus == FocusArea::Game {
             painter.rect_stroke(response.rect, 6.0, egui::Stroke::new(2.0_f32, color));
@@ -1999,40 +1996,21 @@ impl DesktopEditor {
             context.input_mut(|input| input.events.clear());
         }
         egui::TopBottomPanel::top("top-bar").show(context, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.strong("STASIS EDITOR");
                 ui.separator();
-                ui.label("Ctrl+K commands | Ctrl+N new task | Ctrl+Alt+G game");
+                ui.label("Ctrl+K commands | Ctrl+N new task | Game runs in its own window");
                 if let Some(notice) = &self.state.notice {
                     ui.colored_label(Color32::from_rgb(245, 180, 80), notice);
                 }
             });
         });
-        egui::CentralPanel::default().show(context, |ui| {
-            let available = ui.available_width();
-            let task_width = self.state.pane_widths(available).0;
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(task_width, ui.available_height()),
-                    egui::Layout::left_to_right(egui::Align::Min),
-                    |ui| {
-                        egui::SidePanel::left("tasks")
-                            .resizable(true)
-                            .default_width(210.0)
-                            .show_inside(ui, |ui| self.sidebar(ui));
-                        egui::CentralPanel::default().show_inside(ui, |ui| self.detail(ui));
-                    },
-                );
-                let splitter = ui
-                    .allocate_response(egui::vec2(8.0, ui.available_height()), egui::Sense::drag());
-                if splitter.dragged() {
-                    self.state
-                        .set_task_width(task_width + splitter.drag_delta().x, available);
-                    context.request_repaint();
-                }
-                ui.allocate_ui(ui.available_size(), |ui| self.game(ui));
-            });
-        });
+        egui::SidePanel::left("tasks")
+            .resizable(true)
+            .default_width(190.0)
+            .width_range(160.0..=280.0)
+            .show(context, |ui| self.sidebar(ui));
+        egui::CentralPanel::default().show(context, |ui| self.detail(ui));
         self.flush_intents();
     }
 }
@@ -2124,6 +2102,58 @@ mod tests {
             "stasis-editor-{label}-{}-{nonce}.png",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn long_thread_keeps_composer_visible_at_supported_window_sizes() {
+        for size in [egui::vec2(900.0, 600.0), egui::vec2(1440.0, 900.0)] {
+            let (client, _server) = live_session(4);
+            let mut editor =
+                DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+            editor.state = task_state();
+            for _ in 0..40 {
+                editor.state.reply = "A long conversation entry for the active task.".into();
+                editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+            }
+            // Keep this a layout test; do not dispatch queued provider requests.
+            editor.state.intents.clear();
+            let context = egui::Context::default();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            for frame in 0..3 {
+                let output = context.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |context| editor.ui(context),
+                );
+                // Newly created egui panels use an invisible first sizing pass.
+                if frame == 0 {
+                    continue;
+                }
+                for label in [
+                    "Send  Ctrl+Enter",
+                    "Done  Ctrl+Shift+D",
+                    "Attach game screenshot",
+                ] {
+                    let text = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| {
+                            if let egui::Shape::Text(text) = &shape.shape {
+                                if text.galley.text() == label {
+                                    return Some((shape.clip_rect, text));
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or_else(|| panic!("missing composer action: {label}"));
+                    let bounds = egui::Rect::from_min_size(text.1.pos, text.1.galley.size());
+                    assert!(screen.contains_rect(bounds), "{label} outside {size:?}");
+                    assert!(text.0.contains_rect(bounds), "{label} clipped at {size:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2350,15 +2380,6 @@ mod tests {
             assert_eq!(editor.state.active_id().unwrap(), expected);
             assert!(!editor.state.palette_open);
         }
-    }
-
-    #[test]
-    fn split_preserves_both_panes() {
-        let mut state = EditorState::default();
-        state.set_task_width(900.0, 1200.0);
-        assert_eq!(state.pane_widths(1200.0), (840.0, 360.0));
-        let panes = state.pane_widths(600.0);
-        assert_eq!(panes.0 + panes.1, 600.0);
     }
 
     #[test]
