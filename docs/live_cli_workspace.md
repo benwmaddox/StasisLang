@@ -182,7 +182,11 @@ metadata is not expanded for result files, so unloaded imports outside the reque
 scope cannot make the listing fail. `read_symbol` returns the selected full source and its hash as
 `expected_source_hash`, ready for use solely as a stale-write guard.
 An AI request may use up to 50 provider turns. The agent may batch up to 50 deliberate tool calls
-in each turn, such as reading a related set of functions after targeted discovery. Combined
+in each turn. The default instructions prioritize minimizing provider turns by batching useful
+independent symbol/reference/file reads and ready writes whose arguments are already known.
+Calls that need earlier results wait for the next turn; related writes remain one contiguous
+atomic tested batch. The desktop editor likewise batches source reads and puts related changes
+and tests in a single semantic edit proposal after inspecting the required source. Combined
 observations are bounded to 1 MiB; this supports substantial explicit source reads without making
 whole-project enumeration the default behavior.
 
