@@ -2,6 +2,8 @@ mod chat_export;
 mod git_completion;
 mod host_progress;
 mod image_attachments;
+#[cfg(test)]
+mod payload_tests;
 mod persistence;
 #[cfg(test)]
 mod request_image_tests;
@@ -517,9 +519,27 @@ fn run_reply_provider_observed_with_progress(
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
     progress: Option<ProgressReporter>,
-    mut observe_usage: impl FnMut(&Value),
+    observe_usage: impl FnMut(&Value),
 ) -> Result<ProviderReply, String> {
     let config = selected_provider_config(request.selected_provider, &project_root)?;
+    run_reply_provider_with_config(
+        request,
+        canceled,
+        project_root,
+        progress,
+        config,
+        observe_usage,
+    )
+}
+
+fn run_reply_provider_with_config(
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    project_root: PathBuf,
+    progress: Option<ProgressReporter>,
+    config: ProviderConfig,
+    mut observe_usage: impl FnMut(&Value),
+) -> Result<ProviderReply, String> {
     let reasoning_effort = effective_reasoning_effort(&config);
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
     if canceled.load(Ordering::Acquire) {
