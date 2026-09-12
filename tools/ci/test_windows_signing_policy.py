@@ -64,6 +64,12 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("$process.ExitCode -ne 0", signing_step)
         self.assertNotIn("Remove nightly signing root trust", source)
         self.assertNotIn("runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''", source)
+        extracted_verification_step = source.split(
+            "- name: Verify extracted Windows editor toolchain", 1
+        )[1].split("- name: Smoke test bundled graphics runtime (windows)", 1)[0]
+        self.assertIn('$env:STASIS_SIGNING_TIMEOUT_SECONDS = "30"', extracted_verification_step)
+        self.assertIn("& pwsh -NoProfile -File tools/windows/stasis-signing.ps1 verify", extracted_verification_step)
+        self.assertNotIn("& powershell.exe", extracted_verification_step)
 
         identity_source = (ROOT / "tools/windows/stasis-signing-identity.ps1").read_text(
             encoding="utf-8"
