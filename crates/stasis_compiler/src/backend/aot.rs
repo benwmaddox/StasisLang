@@ -1684,59 +1684,131 @@ mod tests {
 
     #[cfg(windows)]
     fn sign_test_executable(path: &Path) {
-        sign_test_artifact(path, false);
+        sign_test_artifact(path);
     }
 
     #[cfg(windows)]
-    fn sign_page_hashed_test_executable(path: &Path) {
-        sign_test_artifact(path, true);
+    fn sign_test_artifact(path: &Path) {
+        try_sign_test_artifact(path).unwrap_or_else(|message| panic!("{message}"));
     }
 
     #[cfg(windows)]
-    fn sign_test_artifact(path: &Path, page_hashes: bool) {
-        try_sign_test_artifact(path, page_hashes).unwrap_or_else(|message| panic!("{message}"));
-    }
-
-    #[cfg(windows)]
-    fn try_sign_test_artifact(path: &Path, page_hashes: bool) -> Result<(), String> {
-        let Some(sign_tool) =
-            std::env::var_os("STASIS_AOT_SIGN_TOOL").filter(|tool| !tool.is_empty())
-        else {
-            return if signed_execution_required() {
-                Err("signed execution is required but STASIS_AOT_SIGN_TOOL is not set".to_string())
-            } else {
-                Ok(())
-            };
-        };
-        let mut command = Command::new(&sign_tool);
-        command.arg(path);
-        if page_hashes {
-            command.env("STASIS_SIGN_PAGE_HASHES", "1");
-        } else {
-            command.env_remove("STASIS_SIGN_PAGE_HASHES");
+    fn try_sign_test_artifact(path: &Path) -> Result<(), String> {
+        if !test_signing_configured() {
+            return unconfigured_aot_signing_result(signed_execution_required());
         }
-        let status = command.status().map_err(|error| {
-            format!(
-                "failed to launch signer {:?} for {}: {error}",
-                sign_tool,
-                path.display()
-            )
-        })?;
-        if !status.success() {
+
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/windows/stasis-signing.ps1");
+        if !script.is_file() {
             return Err(format!(
-                "signer {:?} failed for {} with status {:?}",
-                sign_tool,
+                "Windows signing policy script is missing at {}; restore tools/windows/stasis-signing.ps1",
+                script.display()
+            ));
+        }
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script)
+            .arg("sign")
+            .arg("-Artifact")
+            .arg(path)
+            .output()
+            .map_err(|error| {
+                format!(
+                    "failed to launch Windows signing policy {} for {}: {error}",
+                    script.display(),
+                    path.display()
+                )
+            })?;
+        if !output.status.success() {
+            return Err(format!(
+                "Windows signing policy failed for {} with status {}: {}",
                 path.display(),
-                status.code()
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
         Ok(())
     }
 
     #[cfg(windows)]
+    fn test_signing_configured() -> bool {
+        [
+            "STASIS_AOT_SIGN_TOOL",
+            "STASIS_SIGNING_CERTIFICATE",
+            "STASIS_SIGNING_CERT_THUMBPRINT",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+            || local_development_signing_record().is_some_and(|path| path.is_file())
+    }
+
+    #[cfg(windows)]
+    fn local_development_signing_record() -> Option<PathBuf> {
+        if std::env::var("STASIS_SIGNING_MODE")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("production"))
+            || std::env::var("STASIS_SIGNING_PROFILE")
+                .ok()
+                .is_some_and(|value| value.eq_ignore_ascii_case("production"))
+        {
+            return None;
+        }
+        std::env::var_os("STASIS_SIGNING_LOCAL_RECORD")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(PathBuf::from)
+                    .map(|root| root.join("Stasis/signing/development-thumbprint.txt"))
+            })
+    }
+
+    #[cfg(windows)]
     fn signed_execution_required() -> bool {
-        std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
+        signed_execution_required_for(
+            std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").as_deref(),
+            std::env::var_os("STASIS_SIGNING_MODE").as_deref(),
+        )
+    }
+
+    #[cfg(windows)]
+    fn signed_execution_required_for(
+        explicit: Option<&std::ffi::OsStr>,
+        mode: Option<&std::ffi::OsStr>,
+    ) -> bool {
+        explicit == Some(std::ffi::OsStr::new("1"))
+            || mode.is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case("required"))
+    }
+
+    #[cfg(windows)]
+    fn unconfigured_aot_signing_result(required: bool) -> Result<(), String> {
+        if required {
+            Err("signed execution is required but no Windows signing certificate or legacy hook is configured".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn required_signing_modes_reject_unconfigured_aot_execution() {
+        for mode in ["required", "REQUIRED", "ReQuIrEd"] {
+            let required = signed_execution_required_for(None, Some(std::ffi::OsStr::new(mode)));
+            assert!(unconfigured_aot_signing_result(required).is_err());
+        }
+        let explicitly_required =
+            signed_execution_required_for(Some(std::ffi::OsStr::new("1")), None);
+        assert!(unconfigured_aot_signing_result(explicitly_required).is_err());
+
+        let optional = signed_execution_required_for(None, Some(std::ffi::OsStr::new("optional")));
+        assert!(unconfigured_aot_signing_result(optional).is_ok());
     }
 
     #[cfg(windows)]
@@ -1750,19 +1822,7 @@ mod tests {
                 .status()
         };
         sign_test_executable(path);
-        match launch() {
-            Ok(status) => status,
-            Err(error) if error.raw_os_error() == Some(4551) => {
-                sign_page_hashed_test_executable(path);
-                launch().unwrap_or_else(|retry_error| {
-                    panic!(
-                        "failed to run {} after page-hash signing retry: {retry_error}",
-                        path.display()
-                    )
-                })
-            }
-            Err(error) => panic!("failed to run {}: {error}", path.display()),
-        }
+        launch().unwrap_or_else(|error| panic!("failed to run {}: {error}", path.display()))
     }
 
     #[cfg(windows)]
@@ -1776,9 +1836,9 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn optional_signer_is_usable(source: &Path) -> bool {
-        if std::env::var_os("STASIS_AOT_SIGN_TOOL").is_none() {
-            return true;
+    fn validate_configured_signer(source: &Path) {
+        if !test_signing_configured() {
+            return;
         }
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1789,14 +1849,7 @@ mod tests {
         let _cleanup = TempFixtureCleanup(temp_root.clone());
         let probe = temp_root.join("sign_probe.dll");
         fs::copy(source, &probe).expect("copy signer probe artifact");
-        match try_sign_test_artifact(&probe, false) {
-            Ok(()) => true,
-            Err(message) if signed_execution_required() => panic!("{message}"),
-            Err(message) => {
-                eprintln!("skipping optional signed AOT execution: {message}");
-                false
-            }
-        }
+        try_sign_test_artifact(&probe).unwrap_or_else(|message| panic!("{message}"));
     }
 
     const GFX_CAPACITY_FIXTURE: &str =
@@ -3635,7 +3688,7 @@ function end_frame(): void { return; }
             &link_config,
         )
         .expect("link every receiver overload object");
-        sign_page_hashed_test_executable(&executable);
+        sign_test_executable(&executable);
         let status = Command::new(&executable)
             .status()
             .unwrap_or_else(|error| panic!("failed to run {}: {error}", executable.display()));
@@ -4161,9 +4214,7 @@ function on_code_swap(): void { return; }
                 .expect("Cargo deps directory")
                 .to_path_buf();
             let (_, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
-            if !optional_signer_is_usable(&runtime_dll) {
-                return;
-            }
+            validate_configured_signer(&runtime_dll);
             let Some(link_config) = resolve_link_config_for_smoke() else {
                 return;
             };

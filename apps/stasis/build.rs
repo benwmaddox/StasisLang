@@ -10,6 +10,18 @@ fn main() {
     println!("cargo:rerun-if-env-changed=STASIS_BUILD_FINGERPRINT");
     println!("cargo:rerun-if-env-changed=STASIS_SOURCE_COMMIT");
     println!("cargo:rerun-if-env-changed=STASIS_BUILD_TARGET");
+    for name in [
+        "STASIS_AOT_SIGN_TOOL",
+        "STASIS_REQUIRE_SIGNED_EXECUTION",
+        "STASIS_SIGNING_MODE",
+        "STASIS_SIGNING_PROFILE",
+        "STASIS_SIGNING_CERTIFICATE",
+        "STASIS_SIGNING_CERT_THUMBPRINT",
+        "STASIS_SIGNING_LOCAL_RECORD",
+        "LOCALAPPDATA",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
 
     for candidate in runtime_library_candidate_paths() {
         println!("cargo:rerun-if-changed={}", candidate.display());
@@ -40,21 +52,46 @@ fn main() {
         return;
     };
     let destination = output_dir.join(file_name);
-    if let Err(error) = fs::create_dir_all(&output_dir) {
+    fs::create_dir_all(&output_dir).expect("create graphics runtime staging directory");
+    fs::copy(&source, &destination).expect("stage graphics runtime before signing");
+    if env::var_os("CARGO_CFG_WINDOWS").is_some() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let signer = repo_root.join("tools/windows/stasis-rustc-wrapper.py");
+        println!("cargo:rerun-if-changed={}", signer.display());
         println!(
-            "cargo:warning=stasis build failed to create output dir {}: {error}",
-            output_dir.display()
+            "cargo:rerun-if-changed={}",
+            repo_root.join("tools/windows/stasis-signing.ps1").display()
         );
-        return;
-    }
-
-    if let Err(error) = fs::copy(&source, &destination) {
-        println!(
-            "cargo:warning=stasis build failed to stage {} to {}: {error}",
-            source.display(),
+        let record = env::var_os("STASIS_SIGNING_LOCAL_RECORD")
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("LOCALAPPDATA").map(|root| {
+                    PathBuf::from(root).join("Stasis/signing/development-thumbprint.txt")
+                })
+            });
+        if let Some(record) = record {
+            println!("cargo:rerun-if-changed={}", record.display());
+        }
+        if let Some(certificate) =
+            env::var_os("STASIS_SIGNING_CERTIFICATE").filter(|value| !value.is_empty())
+        {
+            println!(
+                "cargo:rerun-if-changed={}",
+                Path::new(&certificate).display()
+            );
+        }
+        let python = env::var_os("STASIS_RUSTC_WRAPPER_PYTHON").unwrap_or_else(|| "python".into());
+        let status = std::process::Command::new(python)
+            .arg(signer)
+            .arg("--sign-artifact")
+            .arg(&destination)
+            .status()
+            .expect("launch repository signing policy for staged graphics runtime");
+        assert!(
+            status.success(),
+            "staged graphics runtime signing failed: {}",
             destination.display()
         );
-        return;
     }
 }
 

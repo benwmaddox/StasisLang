@@ -298,6 +298,23 @@ fn native_host_frame(pointer_count: i32, mutate_writer: bool) -> (Vec<i32>, Vec<
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    if cfg!(windows) {
+        let policy = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/windows/stasis-rustc-wrapper.py");
+        let python =
+            std::env::var_os("STASIS_RUSTC_WRAPPER_PYTHON").unwrap_or_else(|| "python".into());
+        let signed = std::process::Command::new(python)
+            .arg(policy)
+            .arg("--sign-artifact")
+            .arg(&executable)
+            .output()
+            .expect("launch repository signer for native HostFrame fixture");
+        assert!(
+            signed.status.success(),
+            "native HostFrame fixture signing failed: {}",
+            String::from_utf8_lossy(&signed.stderr)
+        );
+    }
     let output = std::process::Command::new(&executable)
         .arg(pointer_count.to_string())
         .output()

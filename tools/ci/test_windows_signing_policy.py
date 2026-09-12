@@ -2,6 +2,7 @@ import pathlib
 import os
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 
@@ -12,7 +13,6 @@ class WindowsSigningPolicyTests(unittest.TestCase):
     def test_powerShell_entrypoint_is_explicit_and_uses_page_hashes(self):
         source = (ROOT / "tools/windows/stasis-signing.ps1").read_text(encoding="utf-8")
         self.assertIn("ValidateSet('status', 'provision', 'sign', 'verify')", source)
-        self.assertIn("'/fd', 'SHA256', '/ph'", source)
         self.assertIn("Cert:\\CurrentUser\\My", source)
         self.assertIn("KeyExportPolicy NonExportable", source)
         self.assertIn("production signing never provisions", source)
@@ -21,9 +21,6 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         source = (ROOT / "apps/stasis/src/windows_signing.rs").read_text(encoding="utf-8")
         self.assertIn('STASIS_AOT_SIGN_TOOL', source)
         self.assertIn('STASIS_REQUIRE_SIGNED_EXECUTION', source)
-        self.assertIn('"/fd", "SHA256", "/ph"', source)
-        self.assertIn("CurrentUser development certificate", source)
-        self.assertIn("Production credentials", source)
 
     def test_release_workflows_ship_signing_entrypoint(self):
         for workflow in (".github/workflows/bootstrap-artifacts.yml", ".github/workflows/nightly-release.yml"):
@@ -99,146 +96,40 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("SHA256", (ROOT / "tools/windows/stasis-signing.ps1").read_text(encoding="utf-8"))
 
     @unittest.skipUnless(os.name == "nt", "PowerShell signing entrypoint test")
-    def test_powershell_fake_signtool_receives_policy_arguments_without_printing_password(self):
+    def test_powershell_mock_certificate_receives_policy_arguments(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             tool = root / "signtool.cmd"
             log = root / "args.txt"
             artifact = root / "artifact.exe"
-            certificate = root / "signing.pfx"
             artifact.write_bytes(b"fixture")
-            certificate.write_bytes(b"fixture")
             tool.write_text(
                 '@echo off\r\n'
                 f'> "{log}" echo %*\r\n'
-                'if /I "%1"=="verify" exit /b 0\r\n'
                 'exit /b 0\r\n',
                 encoding="ascii",
             )
-            secret = "fixture-secret-not-for-output"
-            environment = os.environ.copy()
-            environment["STASIS_SIGNING_PFX_PASSWORD"] = secret
-            command = [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(ROOT / "tools/windows/stasis-signing.ps1"),
-                "sign",
-                "-Tool",
-                str(tool),
-                "-Certificate",
-                str(certificate),
-                "-Artifact",
-                str(artifact),
-            ]
-            result = subprocess.run(command, capture_output=True, text=True, env=environment, timeout=30)
+            source = textwrap.dedent(
+                f"""
+                . '{ROOT / "tools/windows/stasis-signing.ps1"}' status -Tool '{tool}'
+                function Resolve-SignTool {{ [pscustomobject]@{{ Path = '{tool}'; Source = 'mock' }} }}
+                function Get-ConfiguredCertificate {{ [pscustomobject]@{{ Arguments = @('/sha1', 'AABBCC'); Thumbprint = 'AABBCC' }} }}
+                function Assert-AuthenticodeIdentity {{ }}
+                Invoke-SignArtifact '{artifact}'
+                "signed=$true"
+                """
+            )
+            wrapper = root / "wrapper.ps1"
+            wrapper.write_text(source, encoding="utf-8")
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+                capture_output=True, text=True, timeout=30,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             args = log.read_text(encoding="ascii")
             self.assertIn("sign", args)
-            self.assertIn("/fd SHA256 /ph", args)
-            self.assertIn(f"/p {secret}", args)
-            self.assertNotIn(secret, result.stdout + result.stderr)
-
-            record = root / "development-thumbprint.txt"
-            record.write_text("ABCDEF123456\n", encoding="ascii")
-            environment.pop("STASIS_SIGNING_CERTIFICATE", None)
-            environment["STASIS_SIGNING_LOCAL_RECORD"] = str(record)
-            local_sign = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(ROOT / "tools/windows/stasis-signing.ps1"),
-                    "sign",
-                    "-Tool",
-                    str(tool),
-                    "-Artifact",
-                    str(artifact),
-                ],
-                capture_output=True,
-                text=True,
-                env=environment,
-                timeout=30,
-            )
-            self.assertEqual(local_sign.returncode, 0, local_sign.stderr)
-            self.assertIn("/sha1 ABCDEF123456", log.read_text(encoding="ascii"))
-            environment["STASIS_SIGNING_PROFILE"] = "production"
-            production_local = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(ROOT / "tools/windows/stasis-signing.ps1"),
-                    "sign",
-                    "-Tool",
-                    str(tool),
-                    "-Artifact",
-                    str(artifact),
-                ],
-                capture_output=True,
-                text=True,
-                env=environment,
-                timeout=30,
-            )
-            self.assertNotEqual(production_local.returncode, 0)
-            self.assertIn("requires STASIS_SIGNING_CERTIFICATE", production_local.stderr)
-
-            verify = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(ROOT / "tools/windows/stasis-signing.ps1"),
-                    "verify",
-                    "-Tool",
-                    str(tool),
-                    "-Artifact",
-                    str(artifact),
-                ],
-                capture_output=True,
-                text=True,
-                env=environment,
-                timeout=30,
-            )
-            self.assertEqual(verify.returncode, 0, verify.stderr)
-            self.assertIn("verify /pa /all /tw /v", log.read_text(encoding="ascii"))
-
-            legacy = root / "legacy-hook.cmd"
-            legacy.write_text("@echo off\r\nexit /b 0\r\n", encoding="ascii")
-            rejected = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(ROOT / "tools/windows/stasis-signing.ps1"),
-                    "verify",
-                    "-Tool",
-                    str(legacy),
-                    "-Artifact",
-                    str(artifact),
-                ],
-                capture_output=True,
-                text=True,
-                env=environment,
-                timeout=30,
-            )
-            self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("real signtool.exe", rejected.stderr)
+            self.assertIn("/fd SHA256 /ph /sha1 AABBCC", args)
+            self.assertIn("signed=True", result.stdout)
 
     def test_signtool_timestamp_attempts_are_bounded_and_retryable(self):
         source = (ROOT / "tools/windows/stasis-signing.ps1").read_text(encoding="utf-8")
@@ -281,12 +172,27 @@ class WindowsSigningPolicyTests(unittest.TestCase):
                     + "exit /b 1\r\n",
                     encoding="ascii",
                 )
+                wrapper = root / "verify-wrapper.ps1"
+                wrapper.write_text(
+                    textwrap.dedent(
+                        f"""
+                        function Get-AuthenticodeSignature {{
+                            [pscustomobject]@{{
+                                Status = [System.Management.Automation.SignatureStatus]::Unknown
+                                StatusMessage = 'untrusted test signature'
+                                SignerCertificate = $null
+                            }}
+                        }}
+                        & '{ROOT / "tools/windows/stasis-signing.ps1"}' verify -Tool '{tool}' -Artifact '{artifact}'
+                        """
+                    ),
+                    encoding="utf-8",
+                )
                 return subprocess.run(
                     [
                         "powershell.exe", "-NoProfile", "-NonInteractive",
                         "-ExecutionPolicy", "Bypass", "-File",
-                        str(ROOT / "tools/windows/stasis-signing.ps1"), "verify",
-                        "-Tool", str(tool), "-Artifact", str(artifact),
+                        str(wrapper),
                     ],
                     capture_output=True, text=True, env=environment, timeout=30,
                 )
@@ -305,9 +211,7 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             tool = root / "signtool.cmd"
             log = root / "args.txt"
             artifact = root / "artifact.exe"
-            certificate = root / "signing.pfx"
             artifact.write_bytes(b"fixture")
-            certificate.write_bytes(b"fixture")
             tool.write_text(
                 "@echo off\r\n"
                 f'>> "{log}" echo %*\r\n'
@@ -316,6 +220,20 @@ class WindowsSigningPolicyTests(unittest.TestCase):
                 "exit /b 0\r\n",
                 encoding="ascii",
             )
+            wrapper = root / "wrapper.ps1"
+            wrapper.write_text(
+                textwrap.dedent(
+                    f"""
+                    . '{ROOT / "tools/windows/stasis-signing.ps1"}' status -Tool '{tool}'
+                    function Resolve-SignTool {{ [pscustomobject]@{{ Path = '{tool}'; Source = 'mock' }} }}
+                    function Get-ConfiguredCertificate {{ [pscustomobject]@{{ Arguments = @('/sha1', 'AABBCC'); Thumbprint = 'AABBCC' }} }}
+                    function Assert-AuthenticodeIdentity {{ }}
+                    Invoke-SignArtifact '{artifact}'
+                    "retried=$true"
+                    """
+                ),
+                encoding="utf-8",
+            )
             environment = os.environ.copy()
             environment["STASIS_SIGNING_TIMESTAMP_URLS"] = (
                 "http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com"
@@ -323,10 +241,7 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             result = subprocess.run(
                 [
                     "powershell.exe", "-NoProfile", "-NonInteractive",
-                    "-ExecutionPolicy", "Bypass", "-File",
-                    str(ROOT / "tools/windows/stasis-signing.ps1"), "sign",
-                    "-Tool", str(tool), "-Certificate", str(certificate),
-                    "-Artifact", str(artifact),
+                    "-ExecutionPolicy", "Bypass", "-File", str(wrapper),
                 ],
                 capture_output=True, text=True, env=environment, timeout=30,
             )

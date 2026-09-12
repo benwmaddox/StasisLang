@@ -9,12 +9,16 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 
 SHARED_TARGET_RELATIVE = Path("build") / "codex-cargo-target"
+WINDOWS_RUSTC_WRAPPER_SOURCE_RELATIVE = (
+    Path("tools") / "windows" / "stasis-rustc-wrapper.rs"
+)
 
 
 @dataclass(frozen=True)
@@ -55,12 +59,121 @@ def discover_context(cwd: Path) -> RepoContext:
 
 
 def agent_environment(
-    parent: Mapping[str, str], shared_target: Path
+    parent: Mapping[str, str], shared_target: Path, *, windows: bool = os.name == "nt"
 ) -> dict[str, str]:
     child = dict(parent)
     child.setdefault("CARGO_TARGET_DIR", str(shared_target))
     child["CARGO_INCREMENTAL"] = "0"
+    production = any(
+        child.get(name, "").casefold() == "production"
+        for name in ("STASIS_SIGNING_MODE", "STASIS_SIGNING_PROFILE")
+    )
+    if windows and not production and child.pop("STASIS_AOT_SIGN_TOOL", None):
+        # Automation uses the repository signer, never an inherited personal hook.
+        # Preserve the requirement to sign even when the hook was the only setting.
+        child["STASIS_REQUIRE_SIGNED_EXECUTION"] = "1"
     return child
+
+
+def _signing_is_configured(environment: Mapping[str, str]) -> bool:
+    configured_values = (
+        "STASIS_AOT_SIGN_TOOL",
+        "STASIS_SIGNING_CERTIFICATE",
+        "STASIS_SIGNING_CERT_THUMBPRINT",
+    )
+    if any(environment.get(name) for name in configured_values):
+        return True
+    if environment.get("STASIS_REQUIRE_SIGNED_EXECUTION") == "1":
+        return True
+    signing_mode = environment.get("STASIS_SIGNING_MODE", "").casefold()
+    signing_profile = environment.get("STASIS_SIGNING_PROFILE", "").casefold()
+    if signing_mode == "required":
+        return True
+    production = (
+        signing_mode == "production" or signing_profile == "production"
+    )
+    record = environment.get("STASIS_SIGNING_LOCAL_RECORD")
+    if record is not None:
+        return not production and bool(record) and Path(record).is_file()
+    if production:
+        return False
+    local_app_data = environment.get("LOCALAPPDATA")
+    if local_app_data:
+        return (
+            Path(local_app_data)
+            / "Stasis"
+            / "signing"
+            / "development-thumbprint.txt"
+        ).is_file()
+    return False
+
+
+def configure_windows_rustc_wrapper(
+    environment: dict[str, str],
+    worktree_root: Path,
+    *,
+    windows: bool,
+    process_run=subprocess.run,
+) -> Path | None:
+    if not windows or not _signing_is_configured(environment):
+        return
+    target = Path(environment["CARGO_TARGET_DIR"]).resolve()
+    wrapper_dir = target / "stasis-signing-wrapper"
+    existing = environment.get("RUSTC_WRAPPER")
+    if existing:
+        raise ValueError(
+            "RUSTC_WRAPPER is already set to "
+            f"{existing}; unset it before running signed Cargo so the repository "
+            "wrapper can sign generated build scripts and proc macros before use"
+        )
+    source = (worktree_root / WINDOWS_RUSTC_WRAPPER_SOURCE_RELATIVE).resolve()
+    python_wrapper = (
+        worktree_root / "tools" / "windows" / "stasis-rustc-wrapper.py"
+    ).resolve()
+    policy = (worktree_root / "tools" / "windows" / "stasis-signing.ps1").resolve()
+    wrapper_dir.mkdir(parents=True, exist_ok=True)
+    # A private launcher avoids shared executable locks and cross-worktree races.
+    run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=wrapper_dir))
+    wrapper = run_dir / "stasis-rustc-wrapper.exe"
+    policy_command = [
+        "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+        "Bypass", "-File", str(policy),
+    ]
+    try:
+        compile_result = process_run(
+            ["rustc", str(source), "-o", str(wrapper)], env=environment
+        )
+        if compile_result.returncode != 0:
+            raise ValueError(
+                f"failed to compile the signed rustc wrapper (exit {compile_result.returncode})"
+            )
+        sign_result = process_run(
+            policy_command + ["sign", "-Artifact", str(wrapper)], env=environment
+        )
+        if sign_result.returncode != 0:
+            raise ValueError(
+                "failed to sign and verify the native rustc wrapper before Cargo launch "
+                f"(exit {sign_result.returncode})"
+            )
+    except BaseException:
+        cleanup_windows_rustc_wrapper(wrapper)
+        raise
+    environment["RUSTC_WRAPPER"] = str(wrapper)
+    environment["STASIS_RUSTC_WRAPPER_PYTHON"] = sys.executable
+    environment["STASIS_RUSTC_WRAPPER_SCRIPT"] = str(python_wrapper)
+    environment["STASIS_RUSTC_SIGNING_POLICY"] = str(policy)
+    return wrapper
+
+
+def cleanup_windows_rustc_wrapper(wrapper: Path | None) -> None:
+    if wrapper is None:
+        return
+    try:
+        wrapper.unlink(missing_ok=True)
+        wrapper.with_suffix(".pdb").unlink(missing_ok=True)
+        wrapper.parent.rmdir()
+    except OSError as error:
+        print(f"warning: could not clean private signing launcher: {error}", file=sys.stderr)
 
 
 def _directory_size(path: Path) -> int:
@@ -272,11 +385,17 @@ def _run_command(args: argparse.Namespace, context: RepoContext) -> int:
     if executable not in {"cargo", "cargo.exe"}:
         raise ValueError("run accepts only cargo or cargo.exe commands")
     environment = agent_environment(os.environ, context.shared_target)
+    wrapper = configure_windows_rustc_wrapper(
+        environment, context.worktree_root, windows=sys.platform == "win32"
+    )
     print(
         f"agent cargo target={environment['CARGO_TARGET_DIR']} incremental=0",
         file=sys.stderr,
     )
-    return subprocess.run(command, env=environment).returncode
+    try:
+        return subprocess.run(command, env=environment).returncode
+    finally:
+        cleanup_windows_rustc_wrapper(wrapper)
 
 
 def _measure_command(args: argparse.Namespace, context: RepoContext) -> int:

@@ -10,11 +10,41 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class CargoCacheTests(unittest.TestCase):
+    def test_local_automation_replaces_inherited_hook_without_skipping_signing(self):
+        parent = {
+            "STASIS_AOT_SIGN_TOOL": "C:/personal tools/sign.cmd",
+            "STASIS_SIGNING_CERT_THUMBPRINT": "ABC",
+        }
+        child = cargo_cache.agent_environment(parent, Path("target"), windows=True)
+        self.assertNotIn("STASIS_AOT_SIGN_TOOL", child)
+        self.assertEqual(child["STASIS_REQUIRE_SIGNED_EXECUTION"], "1")
+        self.assertEqual(child["STASIS_SIGNING_CERT_THUMBPRINT"], "ABC")
+        self.assertIn("STASIS_AOT_SIGN_TOOL", parent)
+
+    def test_hook_only_configuration_still_requires_signing(self):
+        child = cargo_cache.agent_environment(
+            {"STASIS_AOT_SIGN_TOOL": "old.cmd"}, Path("target"), windows=True
+        )
+        self.assertTrue(cargo_cache._signing_is_configured(child))
+
+    def test_non_windows_automation_preserves_hook(self):
+        child = cargo_cache.agent_environment(
+            {"STASIS_AOT_SIGN_TOOL": "sign.sh"}, Path("target"), windows=False
+        )
+        self.assertEqual(child["STASIS_AOT_SIGN_TOOL"], "sign.sh")
+
+    def test_production_automation_preserves_explicit_signer(self):
+        for setting in ("STASIS_SIGNING_MODE", "STASIS_SIGNING_PROFILE"):
+            parent = {setting: "production", "STASIS_AOT_SIGN_TOOL": "release.cmd"}
+            child = cargo_cache.agent_environment(parent, Path("target"), windows=True)
+            self.assertEqual(child["STASIS_AOT_SIGN_TOOL"], "release.cmd")
+            self.assertNotIn("STASIS_REQUIRE_SIGNED_EXECUTION", child)
+
     def test_repository_validation_routes_cargo_through_shared_policy(self) -> None:
         validation = (ROOT / "tools" / "validate_repo.sh").read_text(encoding="utf-8")
 
         self.assertIn(
-            "python3 tools/cargo_cache.py run -- cargo test --workspace --all-targets",
+            '"$PYTHON" tools/cargo_cache.py run -- cargo test --workspace --all-targets',
             validation,
         )
 

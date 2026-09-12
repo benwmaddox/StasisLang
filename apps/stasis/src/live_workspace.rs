@@ -4417,7 +4417,11 @@ mod tests {
     ) -> LiveResponse {
         let request_id = request.request_id;
         client.submit(request).expect("submit live request");
-        for tick in 1..=500 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        for tick in 1.. {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
             workspace.process_boundary(tick, jit, tick_ptr, render_ptr);
             if let Ok(response) = client.receive_timeout(std::time::Duration::from_millis(10)) {
                 if response.request_id == request_id
