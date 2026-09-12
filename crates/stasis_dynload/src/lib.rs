@@ -1681,6 +1681,7 @@ struct StasisGraphicsAssetsApi {
     stasis_gfx_dump_bmp: usize,
     stasis_gfx_dump_png: Option<usize>,
     stasis_host_schedule_screenshot: Option<usize>,
+    stasis_host_focus_game_window: Option<usize>,
     stasis_gfx_poll_reload: usize,
     stasis_load_font: usize,
     stasis_measure_text: usize,
@@ -1763,6 +1764,7 @@ impl StasisGraphicsAssetsApi {
             stasis_host_schedule_screenshot: lib
                 .symbol_address("stasis_host_schedule_screenshot")
                 .ok(),
+            stasis_host_focus_game_window: lib.symbol_address("stasis_host_focus_game_window").ok(),
             stasis_gfx_poll_reload: lib.symbol_address("stasis_gfx_poll_reload")?,
             stasis_load_font: lib.symbol_address("stasis_load_font")?,
             stasis_measure_text: lib.symbol_address("stasis_measure_text")?,
@@ -1832,6 +1834,26 @@ pub fn schedule_runtime_screenshot(path: &Path) -> Result<(), String> {
         return Err("graphics runtime rejected the screenshot path".to_string());
     }
     Ok(())
+}
+
+/// Requests focus for the existing desktop game window on the caller's thread.
+///
+/// A successful return means SDL accepted the raise request. The bool only reports whether SDL's
+/// input-focus flag was set immediately afterward; window managers may grant focus asynchronously.
+pub fn focus_runtime_game_window() -> Result<bool, String> {
+    let api = stasis_graphics_assets_api()?;
+    let address = api.stasis_host_focus_game_window.ok_or_else(|| {
+        "the loaded graphics runtime does not support game-window focus requests".to_string()
+    })?;
+    #[cfg(windows)]
+    let callback: extern "system" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn() -> i32 = unsafe { std::mem::transmute(address) };
+    match callback() {
+        1 => Ok(false),
+        2 => Ok(true),
+        _ => Err("graphics runtime rejected the game-window focus request".to_string()),
+    }
 }
 
 fn stasis_graphics_assets_api() -> Result<&'static StasisGraphicsAssetsApi, String> {
@@ -8746,6 +8768,87 @@ mod tests {
         assert!(invoke_i32_to_i32(0, 0)
             .expect_err("null invocation must fail")
             .contains("null function pointer"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_focus_request_targets_live_game_window_without_stopping_frames() {
+        type InitWindow = extern "system" fn(i32, i32, *const c_char) -> i32;
+        type FrameBoundary = extern "system" fn();
+        type ShouldQuit = extern "system" fn() -> i32;
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical repository root");
+        let runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                [
+                    root.join("runtime/build/bin/stasis_graphics.dll"),
+                    root.join("runtime/build/bin/Release/stasis_graphics.dll"),
+                ]
+                .into_iter()
+                .find(|path| path.is_file())
+            });
+        let Some(runtime) = runtime else {
+            eprintln!("native game-focus integration skipped: graphics runtime is unavailable");
+            return;
+        };
+        let _guard = test_lock();
+        let library = Library::load(&runtime).expect("load graphics runtime");
+        let init_window: InitWindow = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_init_window")
+                    .expect("resolve stasis_init_window"),
+            )
+        };
+        let begin_frame: FrameBoundary = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_begin_frame")
+                    .expect("resolve stasis_begin_frame"),
+            )
+        };
+        let end_frame: FrameBoundary = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_end_frame")
+                    .expect("resolve stasis_end_frame"),
+            )
+        };
+        let should_quit: ShouldQuit = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_should_quit")
+                    .expect("resolve stasis_should_quit"),
+            )
+        };
+
+        assert_eq!(
+            focus_runtime_game_window().expect_err("focus before game window"),
+            "graphics runtime rejected the game-window focus request"
+        );
+        let title = CString::new("Stasis native focus integration").expect("window title");
+        assert_eq!(
+            init_window(320, 180, title.as_ptr()),
+            1,
+            "initialize window"
+        );
+
+        begin_frame();
+        end_frame();
+        let _focused_immediately =
+            focus_runtime_game_window().expect("live window must accept focus request");
+        begin_frame();
+        end_frame();
+        assert_eq!(
+            should_quit(),
+            0,
+            "focus transfer must not interrupt the game frame loop"
+        );
     }
 
     #[test]

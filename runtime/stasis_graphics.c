@@ -2732,6 +2732,20 @@ STASIS_EXPORT int stasis_host_schedule_screenshot(const char* path) {
     return 1;
 }
 
+/* Host-only request. Call from the main tick boundary that owns the SDL window. */
+STASIS_EXPORT int stasis_host_focus_game_window(void) {
+    if (!g_window || g_recording_presentation) return 0;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    return 0;
+#else
+    if ((SDL_GetWindowFlags(g_window) & SDL_WINDOW_MINIMIZED) != 0) {
+        if (!SDL_RestoreWindow(g_window)) return 0;
+    }
+    if (!SDL_RaiseWindow(g_window)) return 0;
+    return (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0 ? 2 : 1;
+#endif
+}
+
 static void capture_scheduled_screenshot(void) {
     if (g_screenshot_taken || g_screenshot_path[0] == 0 ||
         g_debug_frame_counter + 1 != g_screenshot_frame) {

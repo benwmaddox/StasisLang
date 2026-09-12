@@ -55,6 +55,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod dap;
 mod desktop_editor;
+mod desktop_image;
 mod gauntlet;
 mod headless;
 mod live_tui;

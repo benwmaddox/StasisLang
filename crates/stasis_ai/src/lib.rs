@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub mod image_generation;
 mod openrouter;
 pub mod task_controller;
 pub mod task_session;

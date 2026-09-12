@@ -1,10 +1,12 @@
+use super::desktop_image::{import_png, validate_generated, ImageArtifact};
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use stasis_ai::image_generation::ImageGenerationConfig;
 use stasis_ai::task_session::{
-    ActionState, FallbackState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
-    ScreenshotAnalysisState, ShortcutMapper, TaskId, TaskSession, TaskSessionCommand,
-    ThreadEntryKind, UploadState,
+    ActionState, FallbackState, ImageAttribution, ImageHandoffState, ImageReviewState, Key,
+    KeyChord, Modifiers, ProviderState, RoutingState, ScreenshotAnalysisState, ShortcutMapper,
+    TaskId, TaskSession, TaskSessionCommand, ThreadEntryKind, UploadState,
 };
 use stasis_ai::{
     run_agent_with_profile, AgentEvent, AgentProfile, ProviderConfig, ProviderReply,
@@ -292,6 +294,7 @@ enum EditorIntent {
     Cancel(String),
     Retry(String),
     Reconnect(String),
+    FocusGame,
 }
 
 struct DesktopEditor {
@@ -305,6 +308,29 @@ struct DesktopEditor {
     capture_result_tx: mpsc::Sender<CaptureResult>,
     next_capture: u64,
     preview_texture: Option<(String, egui::TextureHandle)>,
+    image_generation: Option<PendingImageGeneration>,
+    image_results: Receiver<ImageGenerationResult>,
+    image_result_tx: mpsc::Sender<ImageGenerationResult>,
+    generated_images: std::collections::BTreeMap<TaskId, ImageArtifact>,
+    image_texture: Option<(String, egui::TextureHandle)>,
+    next_image: u64,
+    next_live_request: u64,
+    focus_results: Receiver<Result<bool, String>>,
+    focus_result_tx: mpsc::Sender<Result<bool, String>>,
+}
+
+#[derive(Debug)]
+struct PendingImageGeneration {
+    task_id: TaskId,
+    id: String,
+    canceled: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct ImageGenerationResult {
+    task_id: TaskId,
+    id: String,
+    result: Result<ImageArtifact, String>,
 }
 
 #[derive(Debug)]
@@ -515,6 +541,8 @@ fn screenshot_preview(
 impl DesktopEditor {
     fn new(client: LiveSessionClient, project_root: PathBuf, shutdown: Arc<AtomicBool>) -> Self {
         let (capture_result_tx, capture_results) = mpsc::channel();
+        let (image_result_tx, image_results) = mpsc::channel();
+        let (focus_result_tx, focus_results) = mpsc::channel();
         Self {
             state: EditorState::default(),
             controller: TaskController::new(run_reply_provider),
@@ -526,6 +554,15 @@ impl DesktopEditor {
             capture_result_tx,
             next_capture: 1,
             preview_texture: None,
+            image_generation: None,
+            image_results,
+            image_result_tx,
+            generated_images: std::collections::BTreeMap::new(),
+            image_texture: None,
+            next_image: 1,
+            next_live_request: 20_000,
+            focus_results,
+            focus_result_tx,
         }
     }
 
@@ -599,8 +636,19 @@ impl DesktopEditor {
                 EditorIntent::Cancel(task) => {
                     let task = TaskId::new(task);
                     let canceled_capture = self.cancel_capture_for(&task);
+                    let canceled_image = self
+                        .image_generation
+                        .as_ref()
+                        .is_some_and(|pending| pending.task_id == task);
+                    if canceled_image {
+                        if let Some(pending) = self.image_generation.take() {
+                            pending.canceled.store(true, Ordering::Release);
+                            self.state.notice =
+                                Some(format!("Image generation canceled for {task}."));
+                        }
+                    }
                     if let Err(error) = self.controller.cancel(&mut self.state.session, &task) {
-                        if !canceled_capture {
+                        if !canceled_capture && !canceled_image {
                             self.state.notice = Some(error.to_string());
                         }
                     }
@@ -613,10 +661,205 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::Screenshot(task) => self.start_capture(TaskId::new(task)),
+                EditorIntent::GenerateImage(task) => self.start_image_generation(TaskId::new(task)),
+                EditorIntent::ImportImage(task, image) => {
+                    self.import_image(TaskId::new(task), &image)
+                }
+                EditorIntent::FocusGame => {
+                    let request_id = self.next_live_request;
+                    self.next_live_request = self.next_live_request.saturating_add(1);
+                    let client = self.client.clone();
+                    let result_tx = self.focus_result_tx.clone();
+                    std::thread::spawn(move || {
+                        let result = client
+                            .submit(LiveRequest::new(request_id, LiveCommand::FocusGame))
+                            .and_then(|()| client.receive_timeout(Duration::from_secs(3)))
+                            .and_then(|response| {
+                                if response.ok && response.kind == "game_focus_requested" {
+                                    Ok(response
+                                        .data
+                                        .as_ref()
+                                        .and_then(|data| data.get("focused"))
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false))
+                                } else {
+                                    Err(response.error.unwrap_or_else(|| {
+                                        format!("runtime returned {}", response.kind)
+                                    }))
+                                }
+                            });
+                        let _ = result_tx.send(result);
+                    });
+                    self.state.notice =
+                        Some("Requesting focus for the native game window...".into());
+                }
                 intent => pending.push(intent),
             }
         }
         self.state.intents = pending;
+    }
+
+    fn start_image_generation(&mut self, task_id: TaskId) {
+        if self.image_generation.is_some() {
+            self.state.notice = Some("An image generation is already in progress.".into());
+            return;
+        }
+        if self
+            .state
+            .session
+            .active_task()
+            .ok()
+            .is_some_and(|task| task.pending_generated_images().next().is_some())
+        {
+            self.state.notice = Some(
+                "Approve and import the current generated image before generating another.".into(),
+            );
+            return;
+        }
+        if self.state.session.active_task_id() != Some(&task_id) {
+            self.state.notice = Some("Ignored image request from an inactive task.".into());
+            return;
+        }
+        let prompt = self.state.image_prompt.trim().to_string();
+        if prompt.is_empty() {
+            self.state.notice = Some("Enter an image prompt first.".into());
+            return;
+        }
+        let config = match ImageGenerationConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                self.state.notice = Some(format!("Cannot generate image: {error}"));
+                return;
+            }
+        };
+        let id = format!("image-{}", self.next_image);
+        self.next_image = self.next_image.saturating_add(1);
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = Arc::clone(&canceled);
+        let worker_task = task_id.clone();
+        let worker_id = id.clone();
+        let result_tx = self.image_result_tx.clone();
+        let generating_label = format!(
+            "Generating image with {} / {}...",
+            config.provider, config.model
+        );
+        std::thread::spawn(move || {
+            let result = config
+                .generate(&prompt, &worker_canceled)
+                .and_then(|generated| {
+                    validate_generated(worker_task.clone(), worker_id.clone(), generated)
+                });
+            let _ = result_tx.send(ImageGenerationResult {
+                task_id: worker_task,
+                id: worker_id,
+                result,
+            });
+        });
+        self.image_generation = Some(PendingImageGeneration {
+            task_id,
+            id,
+            canceled,
+        });
+        self.state.notice = Some(generating_label);
+    }
+
+    fn poll_images(&mut self) {
+        while let Ok(completed) = self.image_results.try_recv() {
+            let current = self.image_generation.as_ref().is_some_and(|pending| {
+                pending.task_id == completed.task_id && pending.id == completed.id
+            });
+            if !current {
+                continue;
+            }
+            self.image_generation = None;
+            match completed.result {
+                Ok(artifact) => {
+                    let cost = artifact
+                        .cost_micros
+                        .map(|value| format!("${:.4}", value as f64 / 1_000_000.0))
+                        .unwrap_or_else(|| "unknown cost".into());
+                    let credit = format!(
+                        "route {}; fallback {}; {cost}",
+                        artifact.route, artifact.fallback
+                    );
+                    let attribution = ImageAttribution::new(
+                        &artifact.provider,
+                        Some(artifact.model.clone()),
+                        Some(credit),
+                    );
+                    match attribution.and_then(|value| {
+                        self.state
+                            .session
+                            .task_mut(&completed.task_id)
+                            .and_then(|task| {
+                                task.add_generated_image(
+                                    completed.id.as_str(),
+                                    format!("memory://{}/{}", completed.task_id, completed.id),
+                                    value,
+                                )
+                            })
+                    }) {
+                        Ok(()) => {
+                            self.generated_images
+                                .insert(completed.task_id.clone(), artifact);
+                            self.image_texture = None;
+                            self.state.notice = Some(format!(
+                                "Image generated for {}. Select that task to review and approve it.",
+                                completed.task_id
+                            ));
+                        }
+                        Err(error) => self.state.notice = Some(error.to_string()),
+                    }
+                }
+                Err(error) => self.state.notice = Some(format!("Image generation failed: {error}")),
+            }
+        }
+    }
+
+    fn poll_focus(&mut self) {
+        while let Ok(result) = self.focus_results.try_recv() {
+            self.state.notice = Some(match result {
+                Ok(true) => "Native game window is focused.".into(),
+                Ok(false) => "Native game window accepted the request; foreground focus is not yet confirmed.".into(),
+                Err(error) => format!("Could not request game focus: {error}"),
+            });
+        }
+    }
+
+    fn import_image(&mut self, task_id: TaskId, image_id: &str) {
+        if self.state.session.active_task_id() != Some(&task_id) {
+            self.state.notice = Some("Ignored image import from an inactive task.".into());
+            return;
+        }
+        let Some(artifact) = self.generated_images.get(&task_id) else {
+            self.state.notice =
+                Some("Generated image bytes are no longer available; generate again.".into());
+            return;
+        };
+        if artifact.id != image_id {
+            self.state.notice = Some("Generated image identity changed; generate again.".into());
+            return;
+        }
+        let mut candidate = self.state.session.clone();
+        let approved = candidate
+            .task_mut(&task_id)
+            .and_then(|task| task.import_generated_image(image_id))
+            .map_err(|error| error.to_string());
+        match approved.and_then(|()| {
+            import_png(
+                &self.project_root,
+                &task_id,
+                artifact,
+                &self.state.image_destination,
+            )
+        }) {
+            Ok(path) => {
+                self.state.session = candidate;
+                self.state.notice =
+                    Some(format!("Imported generated image as {}.", path.display()));
+            }
+            Err(error) => self.state.notice = Some(format!("Image import failed: {error}")),
+        }
     }
 
     fn start_capture(&mut self, task_id: TaskId) {
@@ -789,8 +1032,12 @@ impl DesktopEditor {
         );
         ui.horizontal(|ui| {
             let objective = ui.text_edit_singleline(&mut self.state.objective);
-            if self.state.focus == FocusArea::Tasks {
+            if self.state.request_focus == Some(FocusArea::Tasks) {
                 objective.request_focus();
+                self.state.request_focus = None;
+            }
+            if objective.has_focus() {
+                self.state.focus = FocusArea::Tasks;
             }
             let submitted =
                 objective.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -849,6 +1096,7 @@ struct EditorState {
     session: TaskSession,
     shortcuts: ShortcutMapper,
     focus: FocusArea,
+    request_focus: Option<FocusArea>,
     task_fraction: f32,
     objective: String,
     reply: String,
@@ -858,6 +1106,9 @@ struct EditorState {
     intents: Vec<EditorIntent>,
     notice: Option<String>,
     preview: Option<ScreenshotPreview>,
+    image_prompt: String,
+    image_destination: String,
+    split_drag_start: Option<f32>,
 }
 
 impl Default for EditorState {
@@ -866,6 +1117,7 @@ impl Default for EditorState {
             session: TaskSession::new(),
             shortcuts: ShortcutMapper::new(),
             focus: FocusArea::Tasks,
+            request_focus: None,
             task_fraction: 0.42,
             objective: String::new(),
             reply: String::new(),
@@ -875,6 +1127,9 @@ impl Default for EditorState {
             intents: Vec::new(),
             notice: None,
             preview: None,
+            image_prompt: String::new(),
+            image_destination: "assets/generated/image.png".into(),
+            split_drag_start: None,
         }
     }
 }
@@ -921,6 +1176,7 @@ impl EditorState {
         self.objective.clear();
         self.reply.clear();
         self.focus = FocusArea::Reply;
+        self.request_focus = Some(FocusArea::Reply);
         Ok(())
     }
 
@@ -963,10 +1219,12 @@ impl EditorState {
             TaskSessionCommand::OpenCommandPalette | TaskSessionCommand::Search => {
                 self.palette_open = true;
                 self.focus = FocusArea::Palette;
+                self.request_focus = Some(FocusArea::Palette);
                 Ok(())
             }
             TaskSessionCommand::NewTask => {
                 self.focus = FocusArea::Tasks;
+                self.request_focus = Some(FocusArea::Tasks);
                 if self.objective.trim().is_empty() {
                     Ok(())
                 } else {
@@ -987,10 +1245,12 @@ impl EditorState {
             TaskSessionCommand::FocusReply => {
                 self.active_id()?;
                 self.focus = FocusArea::Reply;
+                self.request_focus = Some(FocusArea::Reply);
                 Ok(())
             }
             TaskSessionCommand::FocusGame => {
                 self.focus = FocusArea::Game;
+                self.intents.push(EditorIntent::FocusGame);
                 Ok(())
             }
             TaskSessionCommand::SendReply => {
@@ -1175,6 +1435,7 @@ impl DesktopEditor {
         egui::ScrollArea::vertical()
             .id_source("task-thread")
             .stick_to_bottom(true)
+            .max_height((ui.available_height() - 330.0).max(96.0))
             .show(ui, |ui| {
                 for entry in &task.thread {
                     let speaker = if matches!(entry.kind, ThreadEntryKind::Reply) {
@@ -1212,12 +1473,73 @@ impl DesktopEditor {
                 }
             });
         ui.separator();
+        ui.group(|ui| {
+            ui.label(RichText::new("Generated image").strong());
+            match ImageGenerationConfig::from_env() {
+                Ok(config) => ui.label(format!(
+                    "Configured: {} | Model: {} | Route: {} | Fallback: {} | Estimated cost: unknown until provider response",
+                    config.provider, config.model, config.route, config.fallback
+                )),
+                Err(error) => ui.label(RichText::new(format!("Image provider unavailable: {error}")).weak()),
+            };
+            let prompt = ui.add(egui::TextEdit::multiline(&mut self.state.image_prompt)
+                .desired_rows(2).hint_text("Describe one project image..."));
+            if prompt.has_focus() { self.state.focus = FocusArea::Reply; }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Import as");
+                ui.text_edit_singleline(&mut self.state.image_destination);
+                if ui.button("Generate  Ctrl+G").clicked() {
+                    self.state.dispatch(TaskSessionCommand::GenerateImage);
+                }
+            });
+            if let Some(artifact) = self.generated_images.get(&task.id) {
+                let needs_texture = self.image_texture.as_ref().map_or(true, |(id, _)| id != &artifact.id);
+                if needs_texture {
+                    let image = egui::ColorImage::from_rgba_unmultiplied([artifact.width, artifact.height], &artifact.rgba);
+                    self.image_texture = Some((artifact.id.clone(), ui.ctx().load_texture(
+                        format!("generated-preview-{}-{}", task.id, artifact.id), image, egui::TextureOptions::LINEAR)));
+                }
+                let texture = &self.image_texture.as_ref().expect("image texture").1;
+                let scale = (ui.available_width().min(220.0) / artifact.width as f32)
+                    .min(180.0 / artifact.height as f32);
+                let width = artifact.width as f32 * scale;
+                let height = artifact.height as f32 * scale;
+                ui.image((texture.id(), egui::vec2(width, height)));
+                let cost = artifact.cost_micros.map(|value| format!("${:.4}", value as f64 / 1_000_000.0)).unwrap_or_else(|| "unknown".into());
+                ui.label(format!("{} | {}x{} | sha256 {}", artifact.id, artifact.width, artifact.height, &artifact.sha256[..12]));
+                ui.label(format!("Provider: {} | Model: {} | Route: {} | Fallback: {} | Cost: {}", artifact.provider, artifact.model, artifact.route, artifact.fallback, cost));
+                let state = task.generated_images.get(artifact.id.as_str()).map(|image| (image.review.clone(), image.handoff.clone()));
+                if let Some((review, handoff)) = &state { ui.label(format!("Review: {review:?} | Import: {handoff:?}")); }
+                ui.horizontal_wrapped(|ui| {
+                    if matches!(&state, Some((ImageReviewState::Pending, _))) && ui.button("Approve preview").clicked() {
+                        self.state.notice = self.state.session.task_mut(&task.id)
+                            .and_then(|task| task.approve_generated_image(&artifact.id)).err().map(|error| error.to_string());
+                    }
+                    if matches!(&state, Some((ImageReviewState::Pending, _))) && ui.button("Reject preview").clicked() {
+                        self.state.notice = self.state.session.task_mut(&task.id)
+                            .and_then(|task| task.reject_generated_image(&artifact.id, "Rejected in desktop editor")).err().map(|error| error.to_string());
+                    }
+                    if matches!(&state, Some((ImageReviewState::Approved, ImageHandoffState::Pending))) && ui.button("Import approved  Ctrl+Shift+I").clicked() {
+                        self.state.intents.push(EditorIntent::ImportImage(task.id.to_string(), artifact.id.clone()));
+                    }
+                });
+            } else if let Some(pending) = &self.image_generation {
+                if pending.task_id == task.id { ui.label("Generating off the UI thread..."); }
+            } else {
+                ui.label(RichText::new("No generated preview for this task.").weak());
+            }
+        });
+        ui.separator();
         let reply = ui.add_sized(
             [ui.available_width(), 72.0],
             egui::TextEdit::multiline(&mut self.state.reply).hint_text("Reply to this task..."),
         );
-        if self.state.focus == FocusArea::Reply {
+        if self.state.request_focus == Some(FocusArea::Reply) {
             reply.request_focus();
+            self.state.request_focus = None;
+        }
+        if reply.has_focus() {
+            self.state.focus = FocusArea::Reply;
         }
         ui.horizontal_wrapped(|ui| {
             for (label, command) in [
@@ -1240,7 +1562,7 @@ impl DesktopEditor {
     fn game(&mut self, ui: &mut egui::Ui) {
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click());
         if response.clicked() {
-            self.state.focus = FocusArea::Game;
+            self.state.dispatch(TaskSessionCommand::FocusGame);
         }
         let painter = ui.painter_at(response.rect);
         painter.rect_filled(response.rect, 6.0, Color32::from_rgb(15, 18, 24));
@@ -1302,7 +1624,7 @@ impl DesktopEditor {
             );
         } else {
             painter.text(response.rect.center(), egui::Align2::CENTER_CENTER,
-                "LIVE GAME\n\nThe interactive game runs in its native window\nand keeps independent keyboard and mouse focus.\n\nCtrl+Alt+G focuses this surface.",
+                "LIVE GAME\n\nThe interactive game runs in its native window\nand keeps independent keyboard and mouse focus.\n\nCtrl+Alt+G requests focus for the native game window.",
                 egui::FontId::proportional(18.0), color);
         }
         if self.state.focus == FocusArea::Game {
@@ -1325,6 +1647,10 @@ impl DesktopEditor {
                 TaskSessionCommand::AttachScreenshot,
             ),
             ("Generate image", TaskSessionCommand::GenerateImage),
+            (
+                "Import approved image",
+                TaskSessionCommand::ImportGeneratedImage,
+            ),
             ("Reconnect", TaskSessionCommand::Reconnect),
             ("Cancel task", TaskSessionCommand::Cancel),
             ("Mark done", TaskSessionCommand::MarkDone),
@@ -1336,8 +1662,14 @@ impl DesktopEditor {
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, [0.0, 72.0])
             .show(context, |ui| {
-                ui.text_edit_singleline(&mut self.state.palette_query)
-                    .request_focus();
+                let query_edit = ui.text_edit_singleline(&mut self.state.palette_query);
+                if self.state.request_focus == Some(FocusArea::Palette) {
+                    query_edit.request_focus();
+                    self.state.request_focus = None;
+                }
+                if query_edit.has_focus() {
+                    self.state.focus = FocusArea::Palette;
+                }
                 let query = self.state.palette_query.to_ascii_lowercase();
                 for (label, command) in commands {
                     if (query.is_empty() || label.to_ascii_lowercase().contains(&query))
@@ -1364,9 +1696,11 @@ impl eframe::App for DesktopEditor {
         context.request_repaint_after(Duration::from_millis(100));
         self.poll_controller();
         self.poll_capture();
+        self.poll_images();
+        self.poll_focus();
         self.process_shortcuts(context);
         egui::TopBottomPanel::top("top-bar").show(context, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.strong("STASIS EDITOR");
                 ui.separator();
                 ui.label("Ctrl+K commands | Ctrl+N new task | Ctrl+Alt+G game");
@@ -1387,15 +1721,26 @@ impl eframe::App for DesktopEditor {
                             .resizable(true)
                             .default_width(210.0)
                             .show_inside(ui, |ui| self.sidebar(ui));
-                        egui::CentralPanel::default().show_inside(ui, |ui| self.detail(ui));
+                        egui::CentralPanel::default().show_inside(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_source("task-detail")
+                                .show(ui, |ui| self.detail(ui));
+                        });
                     },
                 );
                 let splitter = ui
                     .allocate_response(egui::vec2(8.0, ui.available_height()), egui::Sense::drag());
+                if splitter.drag_started() {
+                    self.state.split_drag_start = Some(task_width);
+                }
                 if splitter.dragged() {
+                    let start = self.state.split_drag_start.unwrap_or(task_width);
                     self.state
-                        .set_task_width(task_width + splitter.drag_delta().x, available);
+                        .set_task_width(start + splitter.drag_delta().x, available);
                     context.request_repaint();
+                }
+                if splitter.drag_stopped() {
+                    self.state.split_drag_start = None;
                 }
                 ui.allocate_ui(ui.available_size(), |ui| self.game(ui));
             });
@@ -1407,6 +1752,9 @@ impl eframe::App for DesktopEditor {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(capture) = self.capture.take() {
             capture.canceled.store(true, Ordering::Release);
+        }
+        if let Some(generation) = self.image_generation.take() {
+            generation.canceled.store(true, Ordering::Release);
         }
         let _ = self
             .client
@@ -1616,6 +1964,177 @@ mod tests {
             editor.state.session.active_task().unwrap().validation,
             ValidationStatus::Running
         ));
+    }
+
+    #[test]
+    fn image_import_checks_approval_before_writing_project_file() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis-editor-import-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let (client, _server) = live_session(4);
+        let mut editor = DesktopEditor::new(client, root.clone(), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Generate unit art".into();
+        editor.state.create_task().unwrap();
+        editor.state.image_destination = "assets/generated/unit.png".into();
+        let task = TaskId::new("task-1");
+        let artifact = validate_generated(
+            task.clone(),
+            "image-1".into(),
+            stasis_ai::image_generation::GeneratedImage {
+                png: test_png(),
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                route: "direct".into(),
+                fallback: "disabled".into(),
+                cost_micros: None,
+            },
+        )
+        .unwrap();
+        editor
+            .state
+            .session
+            .task_mut(&task)
+            .unwrap()
+            .add_generated_image(
+                "image-1",
+                "memory://task-1/image-1",
+                ImageAttribution::new("fixture", Some("fixture-model".into()), None).unwrap(),
+            )
+            .unwrap();
+        editor.generated_images.insert(task.clone(), artifact);
+
+        editor.import_image(task.clone(), "image-1");
+        assert!(!root.join("assets/generated/unit.png").exists());
+        assert!(matches!(
+            editor
+                .state
+                .session
+                .task(&task)
+                .unwrap()
+                .generated_images
+                .get("image-1")
+                .unwrap()
+                .review,
+            ImageReviewState::Pending
+        ));
+
+        editor
+            .state
+            .session
+            .task_mut(&task)
+            .unwrap()
+            .approve_generated_image("image-1")
+            .unwrap();
+        std::fs::create_dir_all(root.join("assets/generated")).unwrap();
+        std::fs::write(root.join("assets/generated/unit.png"), b"existing").unwrap();
+        editor.import_image(task, "image-1");
+        assert_eq!(
+            std::fs::read(root.join("assets/generated/unit.png")).unwrap(),
+            b"existing"
+        );
+        assert!(matches!(
+            editor
+                .state
+                .session
+                .active_task()
+                .unwrap()
+                .generated_images
+                .get("image-1")
+                .unwrap()
+                .handoff,
+            ImageHandoffState::Pending
+        ));
+        editor.state.image_destination = "assets/generated/unit-2.png".into();
+        editor.import_image(TaskId::new("task-1"), "image-1");
+        assert_eq!(
+            std::fs::read(root.join("assets/generated/unit-2.png")).unwrap(),
+            test_png()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn switching_tasks_does_not_redirect_or_discard_generated_result() {
+        let root = std::env::temp_dir();
+        let (client, _server) = live_session(4);
+        let mut editor = DesktopEditor::new(client, root, Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "First image".into();
+        editor.state.create_task().unwrap();
+        editor.state.objective = "Other task".into();
+        editor.state.create_task().unwrap();
+        let task = TaskId::new("task-1");
+        let artifact = validate_generated(
+            task.clone(),
+            "image-1".into(),
+            stasis_ai::image_generation::GeneratedImage {
+                png: test_png(),
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                route: "direct".into(),
+                fallback: "disabled".into(),
+                cost_micros: None,
+            },
+        )
+        .unwrap();
+        editor.image_generation = Some(PendingImageGeneration {
+            task_id: task.clone(),
+            id: "image-1".into(),
+            canceled: Arc::new(AtomicBool::new(false)),
+        });
+        editor
+            .image_result_tx
+            .send(ImageGenerationResult {
+                task_id: task.clone(),
+                id: "image-1".into(),
+                result: Ok(artifact),
+            })
+            .unwrap();
+        editor.poll_images();
+        assert!(editor
+            .state
+            .session
+            .task(&task)
+            .unwrap()
+            .generated_images
+            .contains_key("image-1"));
+        assert!(editor
+            .state
+            .session
+            .active_task()
+            .unwrap()
+            .generated_images
+            .is_empty());
+        assert!(editor.generated_images.contains_key(&task));
+    }
+
+    #[test]
+    fn cancel_stops_task_scoped_image_generation() {
+        let (client, _server) = live_session(4);
+        let mut editor =
+            DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+        editor.state.objective = "Cancelable image".into();
+        editor.state.create_task().unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        editor.image_generation = Some(PendingImageGeneration {
+            task_id: TaskId::new("task-1"),
+            id: "image-1".into(),
+            canceled: Arc::clone(&canceled),
+        });
+        editor.state.handle(TaskSessionCommand::Cancel).unwrap();
+        editor.flush_intents();
+        assert!(canceled.load(Ordering::Acquire));
+        assert!(editor.image_generation.is_none());
+        assert!(editor
+            .state
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("Image generation canceled")));
     }
 
     #[test]

@@ -927,6 +927,13 @@ impl LiveWorkspace {
             LiveCommand::CaptureFrame { .. } => {
                 unreachable!("frame captures are deferred before dispatch")
             }
+            LiveCommand::FocusGame => {
+                let focused = stasis_dynload::focus_runtime_game_window()?;
+                Ok((
+                    "game_focus_requested",
+                    json!({"requested": true, "focused": focused}),
+                ))
+            }
             LiveCommand::SetInputState { pointers } => {
                 validate_live_pointers(&pointers)?;
                 self.input_override = (!pointers.is_empty()).then_some(pointers);
@@ -3283,7 +3290,7 @@ fn cleanup_new_receipt(
 fn help_data() -> Value {
     json!({
         "commands": [
-            ":help", ":status", ":pause", ":resume", ":step [ticks]", ":cancel REQUEST_ID", ":quit",
+            ":help", ":status", ":pause", ":resume", ":step [ticks]", ":focus-game", ":cancel REQUEST_ID", ":quit",
             ":symbols [query] [--file PATH ... --kind KIND --owner OWNER --page N --limit N]",
             ":read NAME [KIND] [--file FILE --owner OWNER --signature SIGNATURE]",
             ":references SYMBOL [--limit N]", ":diagnostics",
@@ -3315,6 +3322,7 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":status",
         ":pause",
         ":resume",
+        ":focus-game",
         ":step",
         ":cancel",
         ":quit",

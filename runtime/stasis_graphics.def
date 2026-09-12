@@ -102,6 +102,7 @@ EXPORTS
     stasis_gfx_dump_bmp
     stasis_gfx_dump_png
     stasis_host_schedule_screenshot
+    stasis_host_focus_game_window
     stasis_load_font
     stasis_draw_text
     stasis_measure_text
