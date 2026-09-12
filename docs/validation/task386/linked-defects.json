@@ -1,0 +1,134 @@
+[
+    {
+        "sequence":  480,
+        "issueId":  "d4d7273b-d7e5-4e62-87c4-fa9119662e50",
+        "title":  "Stasis graphics: Seal host-controlled sprite display lists [chesstd]",
+        "status":  "Active",
+        "parentId":  "7fa3ff65-d7c7-44e1-93fc-6494690e780b",
+        "repositories":  [
+                             "chesstd"
+                         ],
+        "description":  "Split child of Maddox #399. Repository scope: chesstd only.\r\n\r\nImplement only the portion of the parent objective that belongs in the chesstd repository. References to other repositories in the preserved parent context are sibling coordination requirements, not authority to edit those repositories. Keep branches, commits, pull requests, validation, and repository labels scoped to this repository. Record cross-repository dependencies explicitly on the sibling or parent task.\r\n\r\nParent objective and acceptance context\r\n---------------------------------------\r\nMake the Stasis graphics frame blob a sealed semantic display list so games cannot bypass host-controlled sprite resource management. Replace public/raw sprite handles in game-facing APIs with opaque or otherwise non-forgeable typed sprite references; restrict compiler-owned stdlib/internal imports and privileged graphics externs; validate final IR provenance; keep command storage inaccessible to projects; resolve resource generations, atlas domains, UVs, fallback, and backend bindings exclusively in the shared host path. Provide a typed bounded presentation-command form for painter-ordered queues, migrate ChessTD and representative first-party games away from gfx_cmd_sprite(handle, ...) and Sprite.handle submission, add compile-fail bypass tests plus JIT/AOT/mobile/Web contract tests, preserve transparent order and hot-reload behavior, and document staged compatibility/removal. This follows merged StasisLang PR #628 and should use its interleaving evidence to ensure the host retains stable resource identity."
+    },
+    {
+        "sequence":  558,
+        "issueId":  "48d0c6f6-585e-46a5-9ab4-c6682ba5ee45",
+        "title":  "Restore canonical formatting in two ChessTD source files",
+        "status":  "Next",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "chesstd"
+                         ],
+        "description":  "Independent child defect D11 from compatibility sweep #386. At ChessTD commit 617fdb0ed321abff23cd9ff8d16d2fc3a4314040, `stasis fmt --check` reports formatting required in `src/game/audio_presentation.stasis` and `src/game/view/gameplay.stasis`; the gate fails on both tested nightly 270 and 299. Apply only canonical formatter changes and preserve unrelated source behavior. Acceptance: `stasis fmt --check`, `stasis check`, and `stasis test` pass after coordination with the reopened ChessTD SpriteRef migration task."
+    },
+    {
+        "sequence":  551,
+        "issueId":  "f69acc5b-0378-4107-81c9-78e72d530bb4",
+        "title":  "Restore HamsterHavenTycoon source compatibility with Stasis nightly 299",
+        "status":  "Blocked",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "hamsterhaventycoon"
+                         ],
+        "description":  "Child defect D4 from compatibility sweep #386. At HamsterHavenTycoon commit 319adf9857a701f0dbb919d4e858e3b08a959613, nightly-20260909-299 rejects `s.wheel_art.handle`; the clean source check passes nightly 290. This proves a release-to-release compatibility break, not yet an unintended compiler defect. Diagnose and perform the owned SpriteRef/API migration; route upstream only if a minimized reproduction proves a Stasis regression. Acceptance: format, check, test, release build, and 120-tick headless run pass with the official shared toolchain."
+    },
+    {
+        "sequence":  557,
+        "issueId":  "64912e63-f2b9-44e2-87fa-22e63ad155b4",
+        "title":  "Restore ToddlerMatch source compatibility with Stasis nightly 299",
+        "status":  "Blocked",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "toddlermatch"
+                         ],
+        "description":  "Child defect D10 from compatibility sweep #386. At ToddlerMatch commit 7a9225596b32097f0df461ee63d01e4a04c95b5c, nightly-20260909-299 rejects indexed collection field path `handle`; nightly 290 passes. Diagnose and perform the owned SpriteRef/API migration without a local compiler or compatibility shim. Route upstream only if a minimized reproduction proves an unintended Stasis regression. Acceptance: format, check, test, release build, and 120-tick headless run pass with the official shared toolchain."
+    },
+    {
+        "sequence":  549,
+        "issueId":  "7a39df48-fe85-42e6-afb8-48661479f5cb",
+        "title":  "Restore Afterlight source compatibility with Stasis nightly 299",
+        "status":  "Done",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "afterlight"
+                         ],
+        "description":  "Child defect D1 from compatibility sweep #386. At Afterlight commit f1bb277923cd7f368671d4ce0a5964c515569f61, use fingerprint-verified Stasis nightly-20260909-299 and run `stasis vendor update` then `stasis --json check`. Actual: src/main.stasis cannot resolve call `audio_init`; nightly 290 also fails, so current evidence indicates stale game API usage rather than a new compiler regression. Diagnose the first failure and any revealed follow-ons without a project-local compiler or shim. Acceptance: `stasis fmt --check`, `stasis check`, `stasis test`, `stasis build --mode release`, and a 120-tick headless run all pass."
+    },
+    {
+        "sequence":  550,
+        "issueId":  "1782606e-2a5b-4e01-b55e-0ee1dd76a2fa",
+        "title":  "Restore Exterminator source compatibility with Stasis nightly 299",
+        "status":  "Done",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "exterminator"
+                         ],
+        "description":  "Child defect D3 from compatibility sweep #386. At Exterminator commit 3b03140a25447c9832e556d543be8c3c824ca24a, nightly-20260909-299 fails `stasis --json check`: graphics internal identifier `gfx_cmd_sprite` is unavailable and the project must use the public graphics API. Nightly 290 also fails, indicating stale/private API usage. Diagnose and migrate without a local compiler or compatibility shim. Acceptance: format, check, test, release build, and 120-tick headless runtime pass using an official fingerprint-verified toolchain. The independent missing asset-manifest build defect is routed separately."
+    },
+    {
+        "sequence":  552,
+        "issueId":  "c93e707c-58a7-4da9-aeaf-0d83165a41a4",
+        "title":  "Restore maddox-and-friends source compatibility with Stasis nightly 299",
+        "status":  "Done",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "maddox-and-friends"
+                         ],
+        "description":  "Child defect D5 from compatibility sweep #386. At maddox-and-friends commit 610061c912040c8eb811bfc6124f57a5fde0171e, nightly-20260909-299 rejects `payload.length` and directs use of `payload.max_length` for declared capacity; nightly 290 passes. Diagnose the capacity-contract change and repair the owning game, routing upstream only if an unintended Stasis regression is proven. Acceptance: format, check, test, release build, the project\u0027s documented multi-suite wrapper, and a 120-tick headless run pass with the official shared toolchain."
+    },
+    {
+        "sequence":  553,
+        "issueId":  "beb3fd67-779d-4e31-b9e6-a870808cf132",
+        "title":  "Restore maddox-marble-run source compatibility with Stasis nightly 299",
+        "status":  "Done",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "maddox-marble-run"
+                         ],
+        "description":  "Child defect D6 from compatibility sweep #386. At maddox-marble-run commit b29fee1b4000a4b88578ab537e584270b72c792b, nightly-20260909-299 rejects local struct field path `sprite.handle`; nightly 290 passes. Diagnose and perform the owned SpriteRef/API migration without a local compiler or compatibility shim. Route upstream only if a minimized reproduction proves an unintended Stasis regression. Acceptance: format, check, test, release build, and 120-tick headless run pass with the official shared toolchain."
+    },
+    {
+        "sequence":  554,
+        "issueId":  "284b18ba-5cd6-4bbe-918b-8651f662b776",
+        "title":  "Restore RobotTournaments source compatibility with Stasis nightly 299",
+        "status":  "Done",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "robottournaments"
+                         ],
+        "description":  "Child defect D7 from compatibility sweep #386. At RobotTournaments commit 4bc1d6723c1d3c639caa139289fd38c168150172, nightly-20260909-299 cannot resolve call `is_key_down`; nightly 290 also fails, indicating stale game input API usage. Diagnose and migrate to the supported public input contract without a local compiler or shim. Acceptance: format, check, test, release build, and 120-tick headless run pass using an official fingerprint-verified toolchain."
+    },
+    {
+        "sequence":  555,
+        "issueId":  "aca497a2-8534-4a9b-8b2e-0644b070aeec",
+        "title":  "Restore RootbeerMaze3 source compatibility with Stasis nightly 299",
+        "status":  "Done",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "rootbeermaze3"
+                         ],
+        "description":  "Child defect D8 from compatibility sweep #386. At RootbeerMaze3 commit ce9ffc70dccbacf79bd4aec1c38c1afbdc1929e7, nightly-20260909-299 reports duplicate module alias `asset_tasks` between `src/asset_tasks.stasis` and `vendor/stasis/stdlib/asset_tasks.stasis`; nightly 290 also fails. Resolve the game/stdlib naming collision without a local compiler or shim. Preserve the canonical checkout\u0027s pre-existing user changes. Acceptance: format, check, test, release build, and 120-tick headless run pass in a clean isolated checkout."
+    },
+    {
+        "sequence":  556,
+        "issueId":  "657347b2-988f-4e87-8e77-e751f9505b74",
+        "title":  "Restore SheepHerder source compatibility with Stasis nightly 299",
+        "status":  "Done",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "sheepherder"
+                         ],
+        "description":  "Child defect D9 from compatibility sweep #386. At SheepHerder commit 24959b208c434d06fec4b006c58a261533415b23, nightly-20260909-299 rejects `app.resources.dog_sprite.handle`; nightly 290 passes. Diagnose and perform the owned SpriteRef/API migration, routing upstream only if a minimized reproduction proves an unintended Stasis regression. Acceptance: format, check, test, development build, and 120-tick headless run pass with the official shared toolchain."
+    },
+    {
+        "sequence":  559,
+        "issueId":  "d6f603a5-4429-4e68-906f-cbb408422076",
+        "title":  "Provide the asset manifest required for native Exterminator builds",
+        "status":  "Done",
+        "parentId":  "b4e4f3e2-52e0-4c26-8fab-b5cc314a2be7",
+        "repositories":  [
+                             "exterminator"
+                         ],
+        "description":  "Independent child defect D12 from compatibility sweep #386. At Exterminator commit 3b03140a25447c9832e556d543be8c3c824ca24a, nightly-20260831-270 passes check, test, and the 120-tick headless run but `stasis build --mode release` fails with `asset_manifest_missing (assets/manifest.json)`. Provide the required native asset contract and verify executable identity. Revalidate with nightly 299 after the separate private-graphics API defect is repaired. Acceptance: check, test, release build, and 120-tick headless run pass with the official shared toolchain."
+    }
+]

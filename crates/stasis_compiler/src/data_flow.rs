@@ -207,7 +207,7 @@ impl EffectSets {
     }
 
     fn record_scanned_path(&mut self, path: &str) {
-        if !path.contains("[*]") || path.ends_with(".length") {
+        if !path.contains("[*]") || path.ends_with(".length") || path.ends_with(".max_length") {
             return;
         }
         if let Some(iteration_id) = self.active_iterations.last().copied() {
@@ -297,7 +297,32 @@ pub(crate) fn validate_program_semantics(
     statements_by_id: &[Vec<SimpleStmt>],
     types: &TypeTable,
 ) -> Result<(), (u32, String)> {
-    let context = build_context(files, functions, types).map_err(|message| (0, message))?;
+    // Resolve storage types before checking properties, including globals whose
+    // types never appear in a function signature.
+    let mut semantic_types = types.clone();
+    let constants = crate::backend::compile_analysis::collect_top_level_constant_values(
+        files,
+        &mut semantic_types,
+    )
+    .map_err(|message| (0, message))?;
+    let paths = crate::backend::compile_analysis::collect_global_path_types(
+        files,
+        &mut semantic_types,
+        &constants,
+    )
+    .map_err(|message| (0, message))?;
+    let fields = crate::backend::compile_analysis::collect_named_struct_field_types(
+        files,
+        &mut semantic_types,
+        &constants,
+    )
+    .map_err(|message| (0, message))?;
+    let mut context =
+        build_context(files, functions, &semantic_types).map_err(|message| (0, message))?;
+    context.path_types.extend(paths);
+    for (owner, fields) in fields {
+        context.field_types.entry(owner).or_default().extend(fields);
+    }
     for function in functions {
         let statements = statements_by_id
             .get(function.storage_index as usize)
@@ -343,7 +368,7 @@ fn validate_statements(
                 if local_types.contains_key(name) {
                     return Err(format!("let binding '{name}' shadows existing variable"));
                 }
-                validate_expression_calls(expression, context)?;
+                validate_expression_access(expression, context, local_types)?;
                 let expression_type = semantic_expression_type_with_expected(
                     expression,
                     *type_id,
@@ -367,8 +392,8 @@ fn validate_statements(
             SimpleStmt::Assign {
                 target, expression, ..
             } => {
-                validate_expression_calls(expression, context)?;
-                validate_assignment_target_calls(target, context)?;
+                validate_expression_access(expression, context, local_types)?;
+                validate_assignment_target_access(target, context, local_types)?;
                 if let Some(target_type) =
                     semantic_assignment_target_type(target, context, local_types)
                 {
@@ -395,8 +420,8 @@ fn validate_statements(
                 kind,
                 source,
             } => {
-                validate_expression_calls(source, context)?;
-                validate_assignment_target_calls(target, context)?;
+                validate_expression_access(source, context, local_types)?;
+                validate_assignment_target_access(target, context, local_types)?;
                 let (required_source, allowed_targets, name) = match kind {
                     crate::ir::hir::ConversionKind::FromI32 => {
                         (TYPE_ID_I32, [TYPE_ID_F32, TYPE_ID_F64], "from_i32")
@@ -437,7 +462,7 @@ fn validate_statements(
                 then_statements,
                 else_statements,
             } => {
-                validate_condition_calls(condition, context)?;
+                validate_condition_access(condition, context, local_types)?;
                 validate_condition(condition, context, local_types)?;
                 let mut then_locals = local_types.clone();
                 validate_statements(
@@ -472,7 +497,7 @@ fn validate_statements(
                     &mut loop_locals,
                     loop_depth + 1,
                 )?;
-                validate_condition_calls(condition, context)?;
+                validate_condition_access(condition, context, &loop_locals)?;
                 validate_condition(condition, context, &loop_locals)?;
                 let mut body_locals = loop_locals.clone();
                 validate_statements(
@@ -524,13 +549,15 @@ fn validate_statements(
                     loop_depth + 1,
                 )?;
             }
-            SimpleStmt::Expr(expression) => validate_expression_calls(expression, context)?,
+            SimpleStmt::Expr(expression) => {
+                validate_expression_access(expression, context, local_types)?
+            }
             SimpleStmt::Continue if loop_depth == 0 => {
                 return Err("continue statement is only valid inside loops".to_string());
             }
             SimpleStmt::Continue => {}
             SimpleStmt::Return(expression) => {
-                validate_expression_calls(expression, context)?;
+                validate_expression_access(expression, context, local_types)?;
                 if let Some(expression_type) = semantic_expression_type_with_expected(
                     expression,
                     Some(return_type),
@@ -633,44 +660,120 @@ fn semantic_assignment_target_type(
     }
 }
 
-fn validate_assignment_target_calls(
-    target: &AssignTarget,
-    context: &AnalysisContext<'_>,
+fn reject_array_length(
+    type_id: Option<TypeId>,
+    path: &str,
+    types: &TypeTable,
 ) -> Result<(), String> {
-    if let AssignTarget::IndexedPath { index, .. } = target {
-        validate_expression_calls(index, context)?;
+    if type_id
+        .and_then(|id| types.type_info(id))
+        .is_some_and(|info| {
+            matches!(
+                info.category,
+                TypeCategory::ArrayFixed | TypeCategory::ArrayView
+            )
+        })
+    {
+        let collection = path.strip_suffix(".length").unwrap_or(path);
+        return Err(format!("array property '{path}' is unavailable; use '{collection}.max_length' for declared capacity"));
     }
     Ok(())
 }
 
-fn validate_condition_calls(
-    condition: &SimpleCondition,
+fn validate_property_access(
+    path: &str,
     context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
 ) -> Result<(), String> {
-    match condition {
-        SimpleCondition::Comparison { lhs, rhs, .. } => {
-            validate_expression_calls(lhs, context)?;
-            validate_expression_calls(rhs, context)
+    if let Some(collection) = path.strip_suffix(".length") {
+        reject_array_length(
+            path_type(collection, context, local_types, &BTreeMap::new()),
+            path,
+            context.types,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_indexed_property_access(
+    collection: &str,
+    suffix: &str,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<(), String> {
+    let suffix = suffix.trim_start_matches('.');
+    if suffix == "length" || suffix.ends_with(".length") {
+        let parent = suffix.strip_suffix("length").unwrap().trim_end_matches('.');
+        let type_id = path_type(collection, context, local_types, &BTreeMap::new())
+            .and_then(|id| context.types.indexed_element_type_id(id))
+            .and_then(|id| field_suffix_type(id, parent, &context.field_types));
+        reject_array_length(type_id, &format!("{collection}[*].{suffix}"), context.types)?;
+    }
+    Ok(())
+}
+
+fn validate_assignment_target_access(
+    target: &AssignTarget,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<(), String> {
+    match target {
+        AssignTarget::Local(path) | AssignTarget::GlobalPath(path) => {
+            validate_property_access(path, context, local_types)
         }
-        SimpleCondition::Expr(expression) => validate_expression_calls(expression, context),
-        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-            validate_condition_calls(lhs, context)?;
-            validate_condition_calls(rhs, context)
+        AssignTarget::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            validate_expression_access(index, context, local_types)?;
+            validate_indexed_property_access(collection_path, suffix, context, local_types)
         }
-        SimpleCondition::Not(inner) => validate_condition_calls(inner, context),
     }
 }
 
-fn validate_expression_calls(
+fn validate_condition_access(
+    condition: &SimpleCondition,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<(), String> {
+    match condition {
+        SimpleCondition::Comparison { lhs, rhs, .. } => {
+            validate_expression_access(lhs, context, local_types)?;
+            validate_expression_access(rhs, context, local_types)
+        }
+        SimpleCondition::Expr(expression) => {
+            validate_expression_access(expression, context, local_types)
+        }
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            validate_condition_access(lhs, context, local_types)?;
+            validate_condition_access(rhs, context, local_types)
+        }
+        SimpleCondition::Not(inner) => validate_condition_access(inner, context, local_types),
+    }
+}
+
+fn validate_expression_access(
     expression: &SimpleExpr,
     context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
 ) -> Result<(), String> {
     match expression {
-        SimpleExpr::Condition(condition) => validate_condition_calls(condition, context),
-        SimpleExpr::IndexedPath { index, .. } => validate_expression_calls(index, context),
+        SimpleExpr::Condition(condition) => {
+            validate_condition_access(condition, context, local_types)
+        }
+        SimpleExpr::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+        } => {
+            validate_expression_access(index, context, local_types)?;
+            validate_indexed_property_access(collection_path, suffix, context, local_types)
+        }
+        SimpleExpr::Identifier(path) => validate_property_access(path, context, local_types),
         SimpleExpr::Call { target, args } => {
             for argument in args {
-                validate_expression_calls(argument, context)?;
+                validate_expression_access(argument, context, local_types)?;
             }
             let bare_target = target
                 .rsplit_once('.')
@@ -690,15 +793,14 @@ fn validate_expression_calls(
             }
         }
         SimpleExpr::Binary { lhs, rhs, .. } => {
-            validate_expression_calls(lhs, context)?;
-            validate_expression_calls(rhs, context)
+            validate_expression_access(lhs, context, local_types)?;
+            validate_expression_access(rhs, context, local_types)
         }
         SimpleExpr::DefaultValue(_)
         | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
-        | SimpleExpr::StringLiteral(_)
-        | SimpleExpr::Identifier(_) => Ok(()),
+        | SimpleExpr::StringLiteral(_) => Ok(()),
     }
 }
 
@@ -1799,7 +1901,7 @@ fn analyze_statements(
                 let normalized = state_collection
                     .clone()
                     .unwrap_or_else(|| collection_path.clone());
-                let bound_path = format!("{normalized}.length");
+                let bound_path = format!("{normalized}.max_length");
                 if context.globals.contains(root_name(&normalized)) {
                     effects.insert_read(bound_path.clone());
                 } else if normalized.starts_with('$') {
@@ -2263,6 +2365,12 @@ fn field_suffix_type(
 ) -> Option<TypeId> {
     if suffix.is_empty() {
         return Some(type_id);
+    }
+    if let Some(field_type) = field_types
+        .get(&type_id)
+        .and_then(|fields| fields.get(suffix.trim_start_matches('.')))
+    {
+        return Some(*field_type);
     }
     for field in suffix.trim_start_matches('.').split('.') {
         type_id = *field_types.get(&type_id)?.get(field)?;

@@ -64,6 +64,29 @@ an old collision constant alone. For every changed inequality or threshold—inc
 collision, scoring, clamping, and reset conditions—test equality and the adjacent value on each
 side so `<` versus `<=` behavior is explicit.
 
+## Container-derived UI geometry
+
+- Derive draw, hit, and content geometry from the real safe/current container using
+  `ui_single_pass`. For screens and nested rows/columns, prefer `ui_begin_frame`,
+  stack scopes (`ui_vstack_begin`/`ui_hstack_begin` with matching ends), fixed/rest children
+  (at most one rest child, last), `ui_inset`, `ui_anchor`/`ui_anchor_current`, and
+  `ui_current_x`, `ui_current_y`, `ui_current_width`, and `ui_current_height`.
+- Use the same resolved rectangle for drawing and hit testing. Recompute ephemeral rectangles each frame
+  and retain only semantic interaction state; do not add a measurement pass or retained widget tree.
+- Use `ui_place_x`/`ui_place_y` with `UiHorizontal`/`UiVertical` for isolated known-size placement.
+  Do not replace a suitable container recipe with repeated hand-derived offsets.
+- Size and place button labels from measured or intentionally cached text width and the
+  actual inner content box after icon/padding allocation. Keep expensive measurement outside render hot paths
+  when required; text metrics must be known when the layout recipe encounters the child.
+- Place icons, thumbnails, badges, sprites, and status art from
+  nominal display bounds with aspect/alpha-safe padding and container-derived origins,
+  not source bitmap dimensions or opaque-trim guesses.
+- Allow direct offsets only for deliberate local decoration, fixed spacing inside an
+  already-derived rectangle, authored world coordinates, or a tested pixel adjustment.
+- When affected UI changes, require deterministic geometry/hit tests and
+  inspected desktop and phone evidence. Check container boundaries and draw/hit agreement;
+  inspect PNG stills and MP4 for motion or interaction before reporting visual validation.
+
 ## Edit semantically
 
 Prefer `stasis symbol add`, `update`, `delete`, or `apply` over text-range edits. `symbol read`
@@ -103,8 +126,9 @@ rolls every touched file back on failure. Do not use `--no-tests` unless the use
   motion, timing, animation, input, state transitions, or a multi-step interaction. Inspect the
   resulting pixels or recording; merely producing the file does not validate the behavior. Prefer
   deterministic `stasis record` output when available; see `docs/headless_recording.md`.
-- Finish with `stasis fmt --check`, `stasis check`, and `stasis test`. Semantic symbol edits already
-  preserve untouched formatting; do not run mutating whole-project formatting as routine cleanup.
+- Finish with `stasis fmt`, `stasis fmt --check`, `stasis check`, and `stasis test`. Treat formatter
+  changes as part of the implementation, review them, and stage them deliberately. CI keeps the
+  nonmutating `--check` verification.
 - Keep the generated `.githooks/pre-commit` active. `stasis new` configures it automatically; after
   cloning the project, run `git config --local core.hooksPath .githooks`. The hook formats source
   when necessary and blocks the first attempt so formatting changes can be reviewed and staged.

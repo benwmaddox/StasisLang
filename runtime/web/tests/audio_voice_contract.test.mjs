@@ -159,30 +159,30 @@ async function createRuntime({ deferredDecode = false, stereoPanner = true } = {
 test("overlapping plays of one asset return distinct independently controlled voices", async () => {
   const runtime = await createRuntime();
   const asset = await runtime.load();
-  const first = runtime.imports.audio_play(asset, false, 0.4, -0.25);
-  const second = runtime.imports.audio_play(asset, false, 0.8, 0.5);
+  const first = runtime.imports.stasis_jit_audio_play(asset, false, 0.4, -0.25);
+  const second = runtime.imports.stasis_jit_audio_play(asset, false, 0.8, 0.5);
   assert.ok(first > 0);
   assert.ok(second > first);
   assert.notEqual(first, second);
   await settle();
   assert.equal(runtime.sources.length, 2);
-  assert.equal(runtime.imports.audio_voice_is_playing(first), 1);
-  assert.equal(runtime.imports.audio_voice_is_playing(second), 1);
-  runtime.imports.audio_stop(first);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(first), 1);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(second), 1);
+  runtime.imports.stasis_jit_audio_stop(first);
   assert.equal(runtime.sources[0].stopped, true);
   assert.equal(runtime.sources[1].stopped, false);
-  assert.equal(runtime.imports.audio_voice_is_playing(first), 0);
-  assert.equal(runtime.imports.audio_voice_is_playing(second), 1);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(first), 0);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(second), 1);
 });
 
 test("start and live updates apply clamped stereo pan and volume per voice", async () => {
   const runtime = await createRuntime();
   const asset = await runtime.load();
-  const voice = runtime.imports.audio_play(asset, false, 0.25, -0.75);
+  const voice = runtime.imports.stasis_jit_audio_play(asset, false, 0.25, -0.75);
   await settle();
   assert.equal(runtime.gains[0].gain.value, 0.25);
   assert.equal(runtime.panners[0].pan.value, -0.75);
-  runtime.imports.audio_voice_set_volume_pan(voice, 2, -2);
+  runtime.imports.stasis_jit_audio_voice_set_volume_pan(voice, 2, -2);
   assert.equal(runtime.gains[0].gain.value, 1);
   assert.equal(runtime.panners[0].pan.value, -1);
 });
@@ -190,11 +190,11 @@ test("start and live updates apply clamped stereo pan and volume per voice", asy
 test("missing StereoPanner uses deterministic equal-power gains", async () => {
   const runtime = await createRuntime({ stereoPanner: false });
   const asset = await runtime.load();
-  const voice = runtime.imports.audio_play(asset, false, 0.5, 0);
+  const voice = runtime.imports.stasis_jit_audio_play(asset, false, 0.5, 0);
   await settle();
   assert.ok(Math.abs(runtime.gains[1].gain.value - Math.SQRT1_2) < 0.000001);
   assert.ok(Math.abs(runtime.gains[2].gain.value - Math.SQRT1_2) < 0.000001);
-  runtime.imports.audio_voice_set_volume_pan(voice, 0.5, 1);
+  runtime.imports.stasis_jit_audio_voice_set_volume_pan(voice, 0.5, 1);
   assert.ok(Math.abs(runtime.gains[1].gain.value) < 0.000001);
   assert.ok(Math.abs(runtime.gains[2].gain.value - 1) < 0.000001);
 });
@@ -202,47 +202,47 @@ test("missing StereoPanner uses deterministic equal-power gains", async () => {
 test("stopping before decode prevents a late source from starting", async () => {
   const runtime = await createRuntime({ deferredDecode: true });
   const asset = await runtime.load();
-  const voice = runtime.imports.audio_play(asset, false, 1, 0);
-  assert.equal(runtime.imports.audio_voice_is_playing(voice), 1);
-  runtime.imports.audio_stop(voice);
+  const voice = runtime.imports.stasis_jit_audio_play(asset, false, 1, 0);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(voice), 1);
+  runtime.imports.stasis_jit_audio_stop(voice);
   runtime.resolveDecode();
   await settle();
   assert.equal(runtime.sources.length, 0);
-  assert.equal(runtime.imports.audio_voice_is_playing(voice), 0);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(voice), 0);
 });
 
 test("ended cleanup cannot remove a different overlapping voice", async () => {
   const runtime = await createRuntime();
   const asset = await runtime.load();
-  const first = runtime.imports.audio_play(asset, false, 1, 0);
-  const second = runtime.imports.audio_play(asset, false, 1, 0);
+  const first = runtime.imports.stasis_jit_audio_play(asset, false, 1, 0);
+  const second = runtime.imports.stasis_jit_audio_play(asset, false, 1, 0);
   await settle();
   runtime.sources[0].end();
-  assert.equal(runtime.imports.audio_voice_is_playing(first), 0);
-  assert.equal(runtime.imports.audio_voice_is_playing(second), 1);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(first), 0);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(second), 1);
 });
 
 test("pause preserves a live voice and resumes its playback cursor", async () => {
   const runtime = await createRuntime();
   const asset = await runtime.load();
-  const voice = runtime.imports.audio_play(asset, true, 1, 0);
+  const voice = runtime.imports.stasis_jit_audio_play(asset, true, 1, 0);
   await settle();
-  runtime.imports.audio_voice_set_paused(voice, true);
+  runtime.imports.stasis_jit_audio_voice_set_paused(voice, true);
   assert.equal(runtime.sources[0].playbackRate.value, 0);
-  assert.equal(runtime.imports.audio_voice_is_playing(voice), 1);
-  runtime.imports.audio_voice_set_paused(voice, false);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(voice), 1);
+  runtime.imports.stasis_jit_audio_voice_set_paused(voice, false);
   assert.equal(runtime.sources[0].playbackRate.value, 1);
 });
 
 test("voice storage is bounded and stopped slots permit later voices", async () => {
   const runtime = await createRuntime();
   const asset = await runtime.load();
-  const voices = Array.from({ length: 32 }, () => runtime.imports.audio_play(asset, true, 1, 0));
+  const voices = Array.from({ length: 32 }, () => runtime.imports.stasis_jit_audio_play(asset, true, 1, 0));
   assert.ok(voices.every(handle => handle > 0));
   assert.equal(new Set(voices).size, 32);
-  assert.equal(runtime.imports.audio_play(asset, true, 1, 0), 0);
-  runtime.imports.audio_stop(voices[0]);
-  const replacement = runtime.imports.audio_play(asset, true, 1, 0);
+  assert.equal(runtime.imports.stasis_jit_audio_play(asset, true, 1, 0), 0);
+  runtime.imports.stasis_jit_audio_stop(voices[0]);
+  const replacement = runtime.imports.stasis_jit_audio_play(asset, true, 1, 0);
   assert.ok(replacement > voices.at(-1));
-  assert.equal(runtime.imports.audio_voice_is_playing(replacement), 1);
+  assert.equal(runtime.imports.stasis_jit_audio_voice_is_playing(replacement), 1);
 });

@@ -8,13 +8,14 @@ use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use stasis::run_staged_project_tests_bounded;
 use stasis::{
     load_and_apply_play_data_bindings_for_test, provision_local_certificate,
     resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
     run_play_in_process_with_replay, run_play_in_process_with_window_title,
-    run_self_host_aot_cli_with_desktop_network, run_self_host_aot_cli_with_options, sign_artifacts,
-    signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
-    SigningOptions, StasisTestRunSession,
+    run_project_tests_bounded_with_receipt, run_self_host_aot_cli_with_desktop_network,
+    run_self_host_aot_cli_with_options, sign_artifacts, signing_status, verify_artifacts,
+    DesktopNetworkMode, LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
@@ -22,7 +23,7 @@ use stasis_assets::{
     DEFAULT_ASSET_MANIFEST_PATH,
 };
 use stasis_compiler::backend::aot::AotProcess;
-use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::jit::{JitExternProfile, JitProcess};
 use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::wasm::WasmProcess;
@@ -32,9 +33,9 @@ use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
     workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
-    write_workshop_semantic_receipt, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
-    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
-    WorkshopSourceItemKind, WorkshopSymbolSelector,
+    write_workshop_semantic_receipt, WorkshopExposure, WorkshopSemanticEdit,
+    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
+    WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_jit::AotTarget;
 pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
@@ -60,16 +61,28 @@ mod gauntlet;
 mod headless;
 mod live_tui;
 mod record;
+mod source_catalog;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const GFX_CMD_NAME: &str = "gfx_cmd";
-const GFX_CMD_VERSION: i64 = 7;
+const GFX_CMD_VERSION: i64 = 8;
+const GFX_CMD_LEGACY_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
 const DESKTOP_NETWORK_ARTIFACTS: &[&str] = &[
-    "desktop/network/windows-x86_64/stasis_network.lib",
+    if cfg!(windows) {
+        "desktop/network/windows-x86_64/stasis_network.lib"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        "desktop/network/macos-arm64/libstasis_network.a"
+    } else if cfg!(target_os = "macos") {
+        "desktop/network/macos-x86_64/libstasis_network.a"
+    } else if cfg!(target_arch = "aarch64") {
+        "desktop/network/linux-arm64/libstasis_network.a"
+    } else {
+        "desktop/network/linux-x86_64/libstasis_network.a"
+    },
     "desktop/network/include/stasis_network.h",
 ];
 const MOBILE_RUNTIME_FILES: &[&str] = &[
@@ -171,7 +184,6 @@ function @effects(state) tick(): i32 {
 }
 
 function @effects(graphics) render(): i32 {
-    begin_frame();
     clear(0.05, 0.07, 0.10, 1.0);
     end_frame();
     return 0;
@@ -204,19 +216,14 @@ if ! command -v stasis >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Stasis pre-commit: checking canonical source format"
-if ! stasis format --check; then
-    echo "Stasis pre-commit: formatting source before blocking this commit"
-    if ! stasis format; then
-        echo "Commit blocked: 'stasis format' failed." >&2
-        exit 1
-    fi
-    echo "Commit blocked: review and stage the formatting changes, then commit again." >&2
+echo "Stasis pre-commit: enforcing canonical source format"
+if ! stasis format src tests; then
+    echo "Commit blocked: 'stasis format' failed." >&2
     exit 1
 fi
 
 if ! git diff --quiet -- ':(glob)**/*.stasis'; then
-    echo "Commit blocked: stage the formatted Stasis changes, then commit again." >&2
+    echo "Commit blocked: review and stage the enforced formatting changes, then commit again." >&2
     exit 1
 fi
 "#;
@@ -796,7 +803,7 @@ impl PackageTarget {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct ProjectManifest {
     manifest_version: u32,
     name: String,
@@ -811,6 +818,8 @@ struct ProjectManifest {
     android: Option<AndroidProjectManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capabilities: Option<ProjectCapabilities>,
+    #[serde(default)]
+    ai: stasis_ai::ProjectAiConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web: Option<WebProjectManifest>,
 }
@@ -877,6 +886,7 @@ impl ProjectManifest {
             vendor: None,
             android: None,
             capabilities: None,
+            ai: stasis_ai::ProjectAiConfig::default(),
             web: None,
         }
     }
@@ -889,6 +899,7 @@ impl ProjectManifest {
             ));
         }
         validate_project_name(&self.name)?;
+        self.ai.validate()?;
         for (field, value) in [
             ("entry", self.entry.as_str()),
             ("tests", self.tests.as_str()),
@@ -1367,6 +1378,7 @@ fn execute(
                 _ => None,
             });
             let vendor_gate = match &other {
+                ToolchainCommand::Fmt { .. } => VendorGate::Inspect,
                 ToolchainCommand::Vendor { .. } => VendorGate::Inspect,
                 ToolchainCommand::Prepare => VendorGate::Inspect,
                 ToolchainCommand::Symbol { command } if command.is_read_only() => {
@@ -2560,12 +2572,20 @@ fn validate_program_snapshot_assets(
 }
 
 fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
-    compile_workspace_jit_with_debug(workspace, false)
+    compile_workspace_jit_with_options(workspace, false, None)
 }
 
 fn compile_workspace_jit_with_debug(
     workspace: &Workspace,
     debug_instrumentation: bool,
+) -> Result<JitProcess, String> {
+    compile_workspace_jit_with_options(workspace, debug_instrumentation, None)
+}
+
+fn compile_workspace_jit_with_options(
+    workspace: &Workspace,
+    debug_instrumentation: bool,
+    extern_profile: Option<JitExternProfile>,
 ) -> Result<JitProcess, String> {
     let entry = workspace.root.join(&workspace.manifest.entry);
     validate_workspace_destination(workspace, "entry", &entry)?;
@@ -2574,6 +2594,9 @@ fn compile_workspace_jit_with_debug(
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
     jit.set_debug_instrumentation(debug_instrumentation)?;
+    if let Some(profile) = extern_profile {
+        jit.set_extern_profile(profile)?;
+    }
     jit.set_project_root(display_path(&workspace.root))?;
     jit.set_required_emit_roots(&runtime_analysis_roots());
     let mut sources = BTreeMap::new();
@@ -2782,6 +2805,22 @@ fn execute_noarg_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
 }
 
 fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandResult, String> {
+    test_workspace_with_progress(workspace, path, &mut |_| {})
+}
+
+fn report_toolchain_progress(
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+    stage: stasis_ai::task_controller::ProgressStage,
+) {
+    // Progress is observational and must not interrupt a source transaction.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| progress(stage)));
+}
+
+fn test_workspace_with_progress(
+    workspace: &Workspace,
+    path: Option<&Path>,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<CommandResult, String> {
     let directory = path
         .map(|value| workspace.root.join(value))
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
@@ -2801,6 +2840,11 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         None,
     )?;
     let mut session = StasisTestRunSession::new();
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::Compiling,
+    );
+    let mut running_tests_reported = false;
     let summary = stasis::run_jit_tests_in_directory_with_project_root_session_and_validator(
         &directory,
         &workspace.root,
@@ -2814,9 +2858,23 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
                 snapshot,
                 manifest.as_ref(),
             )?;
-            load_and_apply_play_data_bindings_for_test(&data_binding_paths, jit)
+            load_and_apply_play_data_bindings_for_test(&data_binding_paths, jit)?;
+            if !running_tests_reported {
+                report_toolchain_progress(
+                    progress,
+                    stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+                );
+                running_tests_reported = true;
+            }
+            Ok(())
         },
     )?;
+    if !running_tests_reported {
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+        );
+    }
     let scenarios = headless::run_scenarios(workspace, &directory)?;
     let data = json!({
         "files_discovered": summary.files_discovered,
@@ -2945,6 +3003,9 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
     if prompt.trim().is_empty() {
         return Err("AI prompt must not be empty".to_string());
     }
+    let configured_provider = stasis_ai::ProviderConfig::from_workspace(&workspace.root)?
+        .provider_name()
+        .to_string();
     let entry = workspace.root.join(&workspace.manifest.entry);
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
     let ai_root = workspace.root.clone();
@@ -2981,7 +3042,7 @@ fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult
         ),
         json!({
             "backend": "jit",
-            "provider": "installed_codex_subscription",
+            "provider": configured_provider,
             "summary": summary,
             "trace": trace,
             "usage_trace": usage_trace,
@@ -4121,7 +4182,18 @@ fn build_workspace_with_desktop_network(
             ))
         }
         BuildMode::Release => {
-            let validation_jit = compile_workspace_jit(workspace)?;
+            let validation_jit = if desktop_network
+                .as_ref()
+                .is_some_and(|network| network.mode == DesktopNetworkMode::Client)
+            {
+                compile_workspace_jit_with_options(
+                    workspace,
+                    false,
+                    Some(JitExternProfile::DeterministicOfflineWebNetwork),
+                )?
+            } else {
+                compile_workspace_jit(workspace)?
+            };
             let manifest = validate_compiled_workspace_assets(workspace, &validation_jit)?;
             preflight_release_asset_preparation(workspace, &validation_jit, manifest.as_ref())?;
             let output = output
@@ -4133,7 +4205,7 @@ fn build_workspace_with_desktop_network(
                     .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
             }
             let entry = Path::new(&workspace.manifest.entry);
-            let summary = if let Some(network) = desktop_network {
+            let summary = if let Some(network) = desktop_network.as_ref() {
                 run_self_host_aot_cli_with_desktop_network(
                     &workspace.root,
                     &output,
@@ -4169,12 +4241,11 @@ fn build_workspace_with_desktop_network(
                 .transpose()?;
             stage_workspace_assets(
                 workspace,
-                summary.linked_image_path.parent().ok_or_else(|| {
-                    format!(
-                        "release output has no parent: {}",
-                        summary.linked_image_path.display()
-                    )
-                })?,
+                release_asset_output_directory(
+                    &output,
+                    &summary.linked_image_path,
+                    desktop_network.is_some(),
+                )?,
                 retained.as_ref(),
             )?;
             Ok(CommandResult::success(
@@ -4234,15 +4305,23 @@ fn preflight_release_asset_preparation(
     cleanup
 }
 
+fn release_asset_output_directory<'a>(
+    requested: &'a Path,
+    linked: &'a Path,
+    network_package: bool,
+) -> Result<&'a Path, String> {
+    // Network monoliths share the package root with the browser guest bundle,
+    // including when the executable lives inside a macOS app bundle.
+    let output = if network_package { requested } else { linked };
+    output
+        .parent()
+        .ok_or_else(|| format!("release output has no parent: {}", output.display()))
+}
+
 fn build_desktop_network_library(
     staging_root: &Path,
     development_build: bool,
 ) -> Result<(PathBuf, PathBuf), String> {
-    if !cfg!(windows) {
-        return Err(
-            "network-enabled desktop production packaging currently requires Windows".to_string(),
-        );
-    }
     if let Some((library, header)) = bundled_network_artifacts_for_executable(
         &env::current_exe()
             .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
@@ -4270,10 +4349,12 @@ fn build_desktop_network_library(
     let target_dir = staging_root.join(".network-rust-target");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
-    if !rustflags.is_empty() {
-        rustflags.push(' ');
+    if cfg!(windows) {
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-C target-feature=+crt-static");
     }
-    rustflags.push_str("-C target-feature=+crt-static");
     let output = Command::new(cargo)
         .current_dir(&source_root)
         .args(["build", "-p", "stasis_network", "--release", "--target-dir"])
@@ -4507,7 +4588,7 @@ fn package_workspace(
             &workspace.root.join(MANIFEST_NAME),
             &payload_root.join(MANIFEST_NAME),
         )?;
-        if !cfg!(windows) {
+        if !cfg!(windows) && !network_enabled && !network_client_enabled {
             if let Some(runtime) = installed_runtime_library() {
                 copy_file(
                     &runtime,
@@ -5156,6 +5237,15 @@ fn web_runtime_config(
             )
         })
         .collect::<serde_json::Map<_, _>>();
+    let render_construction_lifecycle_version = process.program_snapshot().is_some_and(|snapshot| {
+        let has = |name: &str| {
+            snapshot
+                .functions()
+                .iter()
+                .any(|function| function.name == name)
+        };
+        has("gfx_cmd_construction_reset") && has("gfx_cmd_construction_finish")
+    }) as u8;
     let mut config = json!({
         "name": workspace.manifest.name,
         "strings": strings,
@@ -5163,6 +5253,8 @@ fn web_runtime_config(
         "views": views,
         "globals": globals,
         "assets": {},
+        "renderContractVersion": if render_construction_lifecycle_version == 1 { GFX_CMD_VERSION } else { GFX_CMD_LEGACY_VERSION },
+        "renderConstructionLifecycleVersion": render_construction_lifecycle_version,
     });
     if !development_build {
         prune_release_web_runtime_config(&mut config, process.imported_symbols());
@@ -5188,7 +5280,9 @@ fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTree
         })
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
-    let dynamic_text_paths = if imported_symbols.contains("stasis_jit_text_run_replace_from") {
+    let dynamic_text_paths = if imported_symbols.contains("stasis_jit_text_run_replace_from")
+        || imported_symbols.contains("stasis_jit_open_external_url")
+    {
         config["memory"]
             .as_object()
             .expect("generated memory layouts")
@@ -5723,7 +5817,11 @@ fn network_support_target(target: PackageTarget) -> Option<&'static str> {
         PackageTarget::AndroidX86_64 => Some("android-x86_64"),
         PackageTarget::IosArm64 => Some("ios-arm64"),
         PackageTarget::Desktop if cfg!(windows) => Some("windows-x86_64"),
+        PackageTarget::Desktop if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") => {
+            Some("macos-arm64")
+        }
         PackageTarget::Desktop if cfg!(target_os = "macos") => Some("macos-x86_64"),
+        PackageTarget::Desktop if cfg!(target_arch = "aarch64") => Some("linux-arm64"),
         PackageTarget::Desktop => Some("linux-x86_64"),
         PackageTarget::Web => None,
     }
@@ -7051,14 +7149,51 @@ fn apply_symbol_batch(
     workspace: &Workspace,
     editable_files: &[WorkshopSourceFile],
     query_files: &[WorkshopSourceFile],
-    mut batch: WorkshopSemanticEditBatch,
+    batch: WorkshopSemanticEditBatch,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
+    let plan = plan_symbol_batch(workspace, editable_files, query_files, batch)?;
+    apply_symbol_plan(workspace, plan, options)
+}
+
+fn plan_symbol_batch(
+    workspace: &Workspace,
+    editable_files: &[WorkshopSourceFile],
+    query_files: &[WorkshopSourceFile],
+    mut batch: WorkshopSemanticEditBatch,
+) -> Result<WorkshopSemanticEditPlan, String> {
     normalize_cli_semantic_batch(editable_files, &mut batch)?;
     let (after, plan) = plan_workshop_semantic_edits(editable_files, &batch)?;
     ensure_editable_semantic_plan(&plan)?;
     let validation_files = overlay_workshop_files(query_files, &after);
     validate_semantic_files(workspace, &validation_files)?;
+    Ok(plan)
+}
+
+fn apply_symbol_plan(
+    workspace: &Workspace,
+    plan: WorkshopSemanticEditPlan,
+    options: SymbolEditOptions,
+) -> Result<CommandResult, String> {
+    apply_symbol_plan_with_progress(workspace, plan, options, &mut |_| {})
+}
+
+fn apply_symbol_plan_with_progress(
+    workspace: &Workspace,
+    plan: WorkshopSemanticEditPlan,
+    options: SymbolEditOptions,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<CommandResult, String> {
+    apply_symbol_plan_with_validation_and_progress(workspace, plan, options, None, progress)
+}
+
+fn apply_symbol_plan_with_validation_and_progress(
+    workspace: &Workspace,
+    plan: WorkshopSemanticEditPlan,
+    options: SymbolEditOptions,
+    prevalidated_test_result: Option<Value>,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<CommandResult, String> {
     if options.dry_run {
         return Ok(CommandResult::success(
             format!(
@@ -7075,17 +7210,27 @@ fn apply_symbol_batch(
         ));
     }
 
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+    );
     write_workshop_semantic_plan(&workspace.root, &plan, false)?;
-    let validation = if options.no_tests {
+    let validation = if let Some(test_result) = prevalidated_test_result {
+        Ok(json!({"compiler": "passed", "tests": "passed", "test_result": test_result}))
+    } else if options.no_tests {
         Ok(json!({"compiler": "passed", "tests": "skipped"}))
     } else {
-        test_workspace(workspace, None).map(
+        test_workspace_with_progress(workspace, None, progress).map(
             |result| json!({"compiler": "passed", "tests": "passed", "test_result": result.data}),
         )
     };
     let validation = match validation {
         Ok(validation) => validation,
         Err(error) => {
+            report_toolchain_progress(
+                progress,
+                stasis_ai::task_controller::ProgressStage::RollingBack,
+            );
             write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
                 format!(
                     "semantic edit validation failed: {error}; rollback also failed: {rollback}"
@@ -7104,6 +7249,10 @@ fn apply_symbol_batch(
     let receipt = match write_symbol_receipt(workspace, &plan) {
         Ok(receipt) => receipt,
         Err(error) => {
+            report_toolchain_progress(
+                progress,
+                stasis_ai::task_controller::ProgressStage::RollingBack,
+            );
             write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
                 format!("semantic receipt failed: {error}; rollback also failed: {rollback}")
             })?;
@@ -7132,9 +7281,19 @@ fn apply_symbol_batch(
     ))
 }
 
-fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, Value), String> {
+#[derive(Clone, Debug)]
+pub(super) struct DesktopSemanticPreview {
+    pub(super) payload: Value,
+    pub(super) source_fingerprint: String,
+    pub(super) plan: WorkshopSemanticEditPlan,
+}
+
+fn desktop_preview_semantic_batch(
+    root: &Path,
+    payload: Value,
+) -> Result<DesktopSemanticPreview, String> {
     let workspace = load_workspace(Some(root))?;
-    let mut validated_inputs = desktop_validation_inputs(root, &[])?;
+    let source_fingerprint = desktop_source_fingerprint(root, &[])?;
     let files =
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let editable_files = files
@@ -7142,55 +7301,245 @@ fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, 
         .filter(|file| is_editable_workshop_path(&file.path))
         .cloned()
         .collect::<Vec<_>>();
-    let batch = serde_json::from_value::<WorkshopSemanticEditBatch>(payload)
+    let batch = serde_json::from_value::<WorkshopSemanticEditBatch>(payload.clone())
         .map_err(|error| format!("invalid proposed semantic edit: {error}"))?;
-    if batch.edits.iter().any(|edit| {
-        edit.operation != WorkshopSemanticEditOperation::Add
-            && edit
-                .expected_source_hash
-                .as_deref()
-                .is_none_or(str::is_empty)
-    }) {
-        return Err("Update and delete proposals require the target's expected_source_hash; read the current symbol and repair the proposal.".into());
+    let plan = plan_symbol_batch(&workspace, &editable_files, &files, batch)?;
+    if desktop_source_fingerprint(root, &[])? != source_fingerprint {
+        return Err(
+            "stale semantic preview: project sources changed while generating the preview".into(),
+        );
     }
-    let mut result = apply_symbol_batch(
+    Ok(DesktopSemanticPreview {
+        payload,
+        source_fingerprint,
+        plan,
+    })
+}
+
+fn desktop_validate_semantic_preview(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+) -> Result<Value, String> {
+    let workspace = load_workspace(Some(root))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let edited_files = preview
+        .plan
+        .changed_files
+        .iter()
+        .map(|change| WorkshopSourceFile {
+            path: change.file.clone(),
+            source: change.after_source.clone(),
+        })
+        .collect::<Vec<_>>();
+    let candidate_files = overlay_workshop_files(&files, &edited_files);
+    let test_result = run_staged_project_tests_bounded(
+        &workspace.root,
+        Path::new(&workspace.manifest.entry),
+        &candidate_files,
+        &AtomicBool::new(false),
+    )
+    .map_err(|error| format!("candidate compile or tests failed: {error}"))?;
+    desktop_require_executed_tests(&test_result)?;
+    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
+        return Err("project sources changed during candidate validation".into());
+    }
+    Ok(test_result)
+}
+
+#[cfg(test)]
+fn desktop_apply_semantic_preview(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+) -> Result<(String, Value), String> {
+    desktop_apply_semantic_preview_with_progress(root, preview, &mut |_| {})
+}
+
+#[cfg(test)]
+fn desktop_apply_semantic_preview_with_progress(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<(String, Value), String> {
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+    );
+    let current_fingerprint = desktop_source_fingerprint(root, &[])?;
+    if current_fingerprint != preview.source_fingerprint {
+        return Err("stale semantic preview: project sources changed; generate a new preview before applying".into());
+    }
+
+    let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
+    if replanned.source_fingerprint != preview.source_fingerprint || replanned.plan != preview.plan
+    {
+        return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+    }
+
+    let workspace = load_workspace(Some(root))?;
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let edited_files = preview
+        .plan
+        .changed_files
+        .iter()
+        .map(|change| WorkshopSourceFile {
+            path: change.file.clone(),
+            source: change.after_source.clone(),
+        })
+        .collect::<Vec<_>>();
+    let candidate_files = overlay_workshop_files(&files, &edited_files);
+    let mut validated_inputs = desktop_validation_inputs(root, &[])?;
+    if desktop_inputs_fingerprint(&validated_inputs) != preview.source_fingerprint {
+        return Err("stale semantic preview: project sources changed before apply".into());
+    }
+    for change in &preview.plan.changed_files {
+        validated_inputs.insert(change.file.clone(), change.after_hash.clone());
+    }
+    // Bind the receipt to the validated inputs overlaid with the exact reviewed plan.
+    let committed_fingerprint = desktop_inputs_fingerprint(&validated_inputs);
+    let apply_started = Instant::now();
+    let test_started = Instant::now();
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::Compiling,
+    );
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+    );
+    let test_result = run_staged_project_tests_bounded(
+        &workspace.root,
+        Path::new(&workspace.manifest.entry),
+        &candidate_files,
+        &AtomicBool::new(false),
+    )
+    .map_err(|error| {
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::RollingBack,
+        );
+        format!(
+            "semantic edit validation failed; candidate was discarded and all source changes were rolled back before publication: {error}"
+        )
+    })?;
+    let compile_and_tests_micros = test_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+    desktop_require_executed_tests(&test_result)?;
+    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
+        return Err(
+            "stale semantic preview: project sources changed during validation; live sources remained unchanged"
+                .into(),
+        );
+    }
+    let mut result = apply_symbol_plan_with_validation_and_progress(
         &workspace,
-        &editable_files,
-        &files,
-        batch,
+        preview.plan.clone(),
         SymbolEditOptions {
             dry_run: false,
             no_tests: false,
         },
+        Some(test_result),
+        progress,
     )?;
-    // Bind validation to the inputs and the committed plan, not a later disk read.
-    let plan: WorkshopSemanticEditPlan = serde_json::from_value(result.data["plan"].clone())
-        .map_err(|error| format!("invalid host semantic receipt: {error}"))?;
-    for change in plan.changed_files {
-        validated_inputs.insert(
-            change.file,
-            format!("{:x}", Sha256::digest(change.after_source.as_bytes())),
-        );
-    }
-    result.data["source_fingerprint"] = json!(desktop_inputs_fingerprint(&validated_inputs));
+    result.data["source_fingerprint"] = json!(committed_fingerprint);
+    result.data["timing_micros"] = json!({
+        "compile_and_tests_child": compile_and_tests_micros,
+        "apply_total": apply_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+    });
     Ok((result.human, result.data))
 }
 
+fn desktop_publish_semantic_preview_with_progress(
+    root: &Path,
+    preview: &DesktopSemanticPreview,
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<(String, Value), String> {
+    report_toolchain_progress(
+        progress,
+        stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+    );
+    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
+        return Err(
+            "stale semantic preview: project sources changed; generate a new preview before applying"
+                .into(),
+        );
+    }
+    let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
+    if replanned.source_fingerprint != preview.source_fingerprint || replanned.plan != preview.plan
+    {
+        return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+    }
+    let workspace = load_workspace(Some(root))?;
+    let mut result = apply_symbol_plan_with_progress(
+        &workspace,
+        preview.plan.clone(),
+        SymbolEditOptions {
+            dry_run: false,
+            no_tests: true,
+        },
+        progress,
+    )?;
+    result.data["source_fingerprint"] = json!(desktop_source_fingerprint(root, &[])?);
+    Ok((result.human, result.data))
+}
+
+fn desktop_revert_semantic_receipts(root: &Path, receipts: &[String]) -> Result<(), String> {
+    let workspace = load_workspace(Some(root))?;
+    for receipt in receipts.iter().rev() {
+        revert_symbol_plan(&workspace, Path::new(receipt), false, true)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, Value), String> {
+    let preview = desktop_preview_semantic_batch(root, payload)?;
+    desktop_apply_semantic_preview(root, &preview)
+}
+
+#[cfg(test)]
 fn desktop_run_focused_tests(
     root: &Path,
     relevant_tests: &[String],
 ) -> Result<(String, Value), String> {
-    let workspace = load_workspace(Some(root))?;
+    desktop_run_focused_tests_with_progress(root, relevant_tests, &mut |_| {})
+}
+
+fn desktop_run_focused_tests_with_progress(
+    root: &Path,
+    relevant_tests: &[String],
+    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
+) -> Result<(String, Value), String> {
     if relevant_tests.is_empty() {
-        let result = test_workspace(&workspace, None)?;
-        desktop_require_executed_tests(&result.data)?;
-        return Ok((result.human, result.data));
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::Compiling,
+        );
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+        );
+        let receipt = run_project_tests_bounded_with_receipt(root, None, &AtomicBool::new(false))?;
+        desktop_require_executed_tests(&receipt)?;
+        return Ok(("focused tests passed".to_string(), receipt));
     }
     let mut receipts = Vec::with_capacity(relevant_tests.len());
     for relative in relevant_tests {
-        let result = test_workspace(&workspace, Some(Path::new(relative)))?;
-        desktop_require_executed_tests(&result.data)?;
-        receipts.push(result.data);
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::Compiling,
+        );
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+        );
+        let receipt = run_project_tests_bounded_with_receipt(
+            root,
+            Some(Path::new(relative)),
+            &AtomicBool::new(false),
+        )?;
+        desktop_require_executed_tests(&receipt)?;
+        receipts.push(receipt);
     }
     Ok((
         format!("{} focused test path(s) passed", relevant_tests.len()),
@@ -7239,6 +7588,19 @@ fn desktop_validation_inputs(
         PathBuf::from(MANIFEST_NAME),
         workspace.root.join(MANIFEST_NAME),
     ));
+    for (data, metadata) in resolve_play_data_binding_paths(
+        &workspace.root.join(&workspace.manifest.entry),
+        &workspace.root,
+        None,
+        None,
+    )? {
+        for physical in [data, metadata] {
+            let relative = physical
+                .strip_prefix(&workspace.root)
+                .map_err(|_| format!("data binding escaped workspace: {}", physical.display()))?;
+            mapped.push((relative.to_path_buf(), physical));
+        }
+    }
     let mut test_roots = if relevant_tests.is_empty() {
         vec![workspace.root.join(&workspace.manifest.tests)]
     } else {
@@ -7278,27 +7640,18 @@ fn desktop_source_context(root: &Path) -> Result<Vec<Value>, String> {
     let items = workshop_source_items(&files)?;
     let context = items
         .into_iter()
-        .filter(|item| is_editable_workshop_path(&item.file))
+        .filter(|item| {
+            is_editable_workshop_path(&item.file) && item.exposure == WorkshopExposure::Public
+        })
         .map(|item| {
             json!({
                 "target": {"file": item.file, "kind": item.kind, "name": item.name,
                     "owner": item.owner, "signature": item.signature,
                     "symbol_id": item.symbol_id},
-                "expected_source_hash": item.source_hash,
                 "source": item.source,
             })
         })
         .collect::<Vec<_>>();
-    if serde_json::to_vec(&context)
-        .map_err(|error| error.to_string())?
-        .len()
-        > 256 * 1024
-    {
-        return Err(
-            "Project source context exceeds 256 KiB; narrow the project before requesting edits."
-                .into(),
-        );
-    }
     Ok(context)
 }
 
@@ -8586,6 +8939,28 @@ mod tests {
     }
 
     #[test]
+    fn release_web_runtime_retains_external_url_text_and_import() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
+        let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".to_string()]);
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; global url: utf8[64]; function main(): i32 { url.length = 0; return open_external_url_raw(url); }",
+        );
+        process.compile().expect("compile Web external URL fixture");
+        assert!(process
+            .imported_symbols()
+            .contains("stasis_jit_open_external_url"));
+
+        let release = web_runtime_config(&workspace, &process, false);
+        assert_eq!(release["memory"]["url"]["byte_backed"], json!(true));
+        assert!(release["globals"].get("url.length").is_some());
+        let runtime = link_web_runtime(&process, false, false).expect("link Web runtime");
+        assert!(runtime.contains("stasis_jit_open_external_url: openExternalUrl"));
+    }
+
+    #[test]
     fn web_runtime_import_markers_follow_imports_and_reject_malformed_layout() {
         let source = "before\n// @stasis-import web_input_axis begin\naxis\n// @stasis-import web_input_axis end\nmiddle\n// @stasis-import web_input_fire begin\nfire\n// @stasis-import web_input_fire end\nafter";
         let imports = BTreeSet::from(["web_input_fire".to_string()]);
@@ -8915,8 +9290,11 @@ mod tests {
             ),
             ("find_references", "stasis symbol references / :references"),
             ("read_symbol", "stasis symbol read / :read"),
+            ("inspect_source", "stasis symbol list/read / :symbols/:read"),
             ("read_imports", "stasis symbol read imports / :read imports"),
             ("write_symbol", "stasis symbol update / :update"),
+            ("add_symbol", "stasis symbol add"),
+            ("finish_task", "host completion gate / desktop Mark Done"),
             (
                 "write_imports",
                 "stasis symbol update imports / :update imports",
@@ -9106,8 +9484,357 @@ mod tests {
         root
     }
 
+    fn desktop_semantic_update(root: &Path, name: &str, new_source: &str) -> Value {
+        let item = desktop_source_context(root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == name)
+            .unwrap();
+        json!({"schema_version": 1, "edits": [{
+            "operation": "update",
+            "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+            "new_source": new_source,
+        }]})
+    }
+
+    fn desktop_semantic_delete(root: &Path, name: &str) -> Value {
+        let item = desktop_source_context(root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == name)
+            .unwrap();
+        json!({"schema_version": 1, "edits": [{
+            "operation": "delete",
+            "target": item["target"],
+            "expected_source_hash": item["expected_source_hash"],
+        }]})
+    }
+
     #[test]
-    fn desktop_editor_context_drives_hash_checked_apply_and_receipt() {
+    fn desktop_semantic_preview_plans_add_update_delete_and_multifile_deterministically() {
+        let root = desktop_editor_fixture("semantic_preview_operations");
+        let update = desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }");
+        let first = desktop_preview_semantic_batch(&root, update.clone()).unwrap();
+        let second = desktop_preview_semantic_batch(&root, update).unwrap();
+        assert_eq!(first.source_fingerprint, second.source_fingerprint);
+        assert_eq!(first.plan, second.plan);
+        assert_eq!(first.plan.changed_files.len(), 1);
+        assert!(first.plan.changed_files[0]
+            .after_source
+            .contains("return 2"));
+
+        let add = json!({"schema_version": 1, "edits": [{
+            "operation": "add",
+            "target": {"file": "src/main.stasis", "kind": "function", "name": "added"},
+            "new_source": "function added(): i32 { return 3; }",
+        }]});
+        let added = desktop_preview_semantic_batch(&root, add).unwrap();
+        assert_eq!(added.plan.changed_files.len(), 1);
+        assert!(added.plan.changed_files[0]
+            .after_source
+            .contains("function added"));
+
+        let deleted =
+            desktop_preview_semantic_batch(&root, desktop_semantic_delete(&root, "value")).unwrap();
+        assert_eq!(deleted.plan.changed_files.len(), 1);
+        assert!(!deleted.plan.changed_files[0]
+            .after_source
+            .contains("function value"));
+
+        fs::write(
+            root.join("src/main.stasis"),
+            "import \"values.stasis\";\nfunction main(): i32 { return value(); }\nfunction local(): i32 { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/values.stasis"),
+            "function value(): i32 { return 1; }\n",
+        )
+        .unwrap();
+        let local = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "local")
+            .unwrap();
+        let value = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let multifile = json!({"schema_version": 1, "edits": [
+            {"operation": "update", "target": local["target"],
+             "expected_source_hash": local["expected_source_hash"],
+             "new_source": "function local(): i32 { return 2; }"},
+            {"operation": "update", "target": value["target"],
+             "expected_source_hash": value["expected_source_hash"],
+             "new_source": "function value(): i32 { return 3; }"},
+        ]});
+        let multifile = desktop_preview_semantic_batch(&root, multifile).unwrap();
+        assert_eq!(
+            multifile
+                .plan
+                .changed_files
+                .iter()
+                .map(|change| change.file.as_str())
+                .collect::<Vec<_>>(),
+            ["src/main.stasis", "src/values.stasis"]
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_semantic_preview_validation_compiles_staged_candidate_without_writing() {
+        let root = desktop_editor_fixture("semantic_preview_validation");
+        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let valid = desktop_preview_semantic_batch(
+            &root,
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }"),
+        )
+        .unwrap();
+        assert!(desktop_validate_semantic_preview(&root, &valid).is_ok());
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+
+        let invalid = desktop_preview_semantic_batch(
+            &root,
+            json!({"schema_version": 1, "edits": [{
+                "operation": "add",
+                "target": {
+                    "file": "tests/main.test.stasis",
+                    "kind": "test",
+                    "name": "unsupported array"
+                },
+                "new_source": "test `unsupported array`(): bool { let values = [1, 2]; return values[0] == 1; }"
+            }]}),
+        )
+        .unwrap();
+        assert!(desktop_validate_semantic_preview(&root, &invalid)
+            .unwrap_err()
+            .contains("unexpected token LBracket"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_semantic_preview_rejects_noop_conflict_stale_and_identity_mismatch() {
+        let root = desktop_editor_fixture("semantic_preview_rejections");
+        let unchanged = desktop_source_context(&root)
+            .unwrap()
+            .into_iter()
+            .find(|item| item["target"]["name"] == "value")
+            .unwrap();
+        let noop = json!({"schema_version": 1, "edits": [{
+            "operation": "update", "target": unchanged["target"],
+            "expected_source_hash": unchanged["expected_source_hash"],
+            "new_source": unchanged["source"],
+        }]});
+        assert!(desktop_preview_semantic_batch(&root, noop)
+            .unwrap_err()
+            .contains("made no changes"));
+
+        let conflict = json!({"schema_version": 1, "edits": [{
+            "operation": "update", "target": unchanged["target"],
+            "expected_source_hash": "wrong-hash",
+            "new_source": "function value(): i32 { return 2; }",
+        }]});
+        assert!(desktop_preview_semantic_batch(&root, conflict)
+            .unwrap_err()
+            .contains("stale semantic"));
+
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }");
+        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
+        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            "import \"../src/main.stasis\";\n// changed after preview\ntest `positive`(): bool { return value() > 0; }\n",
+        )
+        .unwrap();
+        assert!(desktop_apply_semantic_preview(&root, &preview)
+            .unwrap_err()
+            .contains("stale semantic preview"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+
+        let mut mismatched = desktop_preview_semantic_batch(
+            &root,
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 4; }"),
+        )
+        .unwrap();
+        mismatched.plan.changed_files[0]
+            .after_source
+            .push_str("// tampered\n");
+        assert!(desktop_apply_semantic_preview(&root, &mismatched)
+            .unwrap_err()
+            .contains("identity mismatch"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_semantic_preview_applies_the_exact_reviewed_plan() {
+        let root = desktop_editor_fixture("semantic_preview_identity");
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 7; }");
+        let preview = desktop_preview_semantic_batch(&root, payload.clone()).unwrap();
+        assert_eq!(preview.payload, payload);
+        let reviewed_plan = preview.plan.clone();
+        let mut progress = Vec::new();
+        let (_, receipt) =
+            desktop_apply_semantic_preview_with_progress(&root, &preview, &mut |stage| {
+                progress.push(stage)
+            })
+            .unwrap();
+        assert_eq!(
+            progress,
+            [
+                stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+                stasis_ai::task_controller::ProgressStage::Compiling,
+                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+                stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+            ]
+        );
+        assert!(
+            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
+        );
+        assert_eq!(receipt["plan"], json!(reviewed_plan));
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            preview.plan.changed_files[0].after_source
+        );
+        assert_eq!(
+            receipt["source_fingerprint"],
+            desktop_source_fingerprint(&root, &[]).unwrap()
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_publish_exposes_source_before_tests_and_receipt_can_restore_it() {
+        let root = desktop_editor_fixture("semantic_publish_then_test");
+        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return -1; }");
+        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
+        let (_, receipt) =
+            desktop_publish_semantic_preview_with_progress(&root, &preview, &mut |_| {}).unwrap();
+
+        assert_eq!(receipt["validation"]["tests"], "skipped");
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            preview.plan.changed_files[0].after_source
+        );
+        assert!(desktop_run_focused_tests(&root, &[]).is_err());
+
+        desktop_revert_semantic_receipts(
+            &root,
+            &[receipt["receipt"].as_str().unwrap().to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+        remove_temp(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn desktop_apply_and_focused_tests_isolate_runtime_globals_and_stage_sidecars() {
+        fn global_hash(path: &str) -> i32 {
+            path.bytes().fold(2166136261u32, |hash, byte| {
+                (hash ^ u32::from(byte)).wrapping_mul(16777619)
+            }) as i32
+        }
+
+        let root = desktop_editor_fixture("editor_isolated_tests");
+        fs::write(
+            root.join("src/main.stasis"),
+            concat!(
+                "global desktop_isolation_probe: i32;\n",
+                "function main(): i32 { return 0; }\n",
+                "function tick(): void {}\n",
+                "function value(): i32 { return 1; }\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/main.test.stasis"),
+            concat!(
+                "import \"../src/main.stasis\";\n",
+                "test `overwrites isolation probe`(): bool {\n",
+                "    desktop_isolation_probe = 99;\n",
+                "    return value() > 0;\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/isolation.scenario.json"),
+            r#"{"schema_version":1,"name":"sidecar isolation","ticks":1,"state":{"desktop_isolation_probe":99},"invariants":[{"path":"desktop_isolation_probe","op":"eq","value":99}]}"#,
+        )
+        .unwrap();
+
+        let probe = global_hash("desktop_isolation_probe");
+        let prior = stasis_dynload::stasis_jit_global_i32_load(probe);
+        stasis_dynload::stasis_jit_global_i32_store(probe, 314_159);
+
+        let payload =
+            desktop_semantic_update(&root, "value", "function value(): i32 { return 7; }");
+        let (_, applied) = desktop_apply_semantic_batch(&root, payload).unwrap();
+        assert!(
+            applied["validation"]["test_result"]["tests_run"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(
+            applied["validation"]["test_result"]["scenario_cases_run"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(applied["timing_micros"]["compile_and_tests_child"]
+            .as_u64()
+            .is_some_and(|value| value > 0));
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(probe), 314_159);
+
+        let (_, focused) =
+            desktop_run_focused_tests(&root, &["tests/main.test.stasis".to_string()]).unwrap();
+        assert!(focused["receipts"][0]["tests_run"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(probe), 314_159);
+
+        let before_failure = fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        let failing = desktop_preview_semantic_batch(
+            &root,
+            desktop_semantic_update(&root, "value", "function value(): i32 { return -1; }"),
+        )
+        .unwrap();
+        let error = desktop_apply_semantic_preview(&root, &failing).unwrap_err();
+        assert!(error.contains("before publication"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before_failure
+        );
+        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(probe), 314_159);
+
+        stasis_dynload::stasis_jit_global_i32_store(probe, prior);
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_editor_context_drives_apply_without_model_hash_and_receipt() {
         let root = desktop_editor_fixture("editor_receipt");
         let item = desktop_source_context(&root)
             .unwrap()
@@ -9119,10 +9846,9 @@ mod tests {
             .is_some_and(|id| !id.is_empty()));
         let batch = json!({"schema_version": 2, "edits": [{
             "operation": "update", "target": item["target"],
-            "expected_source_hash": item["expected_source_hash"],
             "new_source": "function value(): i32 { return 2; }"
         }]});
-        let (_, receipt) = desktop_apply_semantic_batch(&root, batch.clone()).unwrap();
+        let (_, receipt) = desktop_apply_semantic_batch(&root, batch).unwrap();
         assert_eq!(
             receipt["source_fingerprint"],
             desktop_source_fingerprint(&root, &[]).unwrap()
@@ -9130,19 +9856,27 @@ mod tests {
         assert!(root.join(receipt["receipt"].as_str().unwrap()).is_file());
         assert_eq!(receipt["validation"]["test_result"]["tests_passed"], 1);
         let committed = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        assert!(desktop_apply_semantic_batch(&root, batch)
-            .unwrap_err()
-            .contains("stale semantic"));
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            committed
-        );
+        assert!(item.get("expected_source_hash").is_none());
+        assert!(committed.contains("function value(): i32 { return 2; }"));
         remove_temp(&root);
     }
 
     #[test]
     fn desktop_editor_fingerprints_selected_tests_and_rejects_empty_selection() {
         let root = desktop_editor_fixture("editor_fingerprint");
+        let mut progress = Vec::new();
+        desktop_run_focused_tests_with_progress(&root, &[], &mut |stage| progress.push(stage))
+            .unwrap();
+        assert_eq!(
+            progress,
+            [
+                stasis_ai::task_controller::ProgressStage::Compiling,
+                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+            ]
+        );
+        assert!(
+            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
+        );
         fs::create_dir_all(root.join("checks")).unwrap();
         fs::write(
             root.join("checks/selected.stasis"),
@@ -9164,13 +9898,13 @@ mod tests {
     }
 
     #[test]
-    fn desktop_editor_apply_rejects_missing_hash_without_writing() {
+    fn desktop_editor_apply_rejects_invalid_delete_without_model_hash() {
         let root = desktop_editor_fixture("editor_missing_hash");
         let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
         let error = desktop_apply_semantic_batch(&root, json!({"schema_version": 1, "edits": [{
             "operation": "delete", "target": {"file": "src/main.stasis", "kind": "function", "name": "value"}
         }]})).unwrap_err();
-        assert!(error.contains("expected_source_hash"));
+        assert!(!error.contains("expected_source_hash"));
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).unwrap(),
             before
@@ -9195,8 +9929,25 @@ mod tests {
         };
         let (_, accepted_receipt) = desktop_apply_semantic_batch(&root, propose(2)).unwrap();
         let accepted_source = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        let error = desktop_apply_semantic_batch(&root, propose(-1)).unwrap_err();
+        let preview = desktop_preview_semantic_batch(&root, propose(-1)).unwrap();
+        let mut progress = Vec::new();
+        let error = desktop_apply_semantic_preview_with_progress(&root, &preview, &mut |stage| {
+            progress.push(stage)
+        })
+        .unwrap_err();
         assert!(error.contains("rolled back"), "{error}");
+        assert_eq!(
+            progress,
+            [
+                stasis_ai::task_controller::ProgressStage::InspectingSymbols,
+                stasis_ai::task_controller::ProgressStage::Compiling,
+                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
+                stasis_ai::task_controller::ProgressStage::RollingBack,
+            ]
+        );
+        assert!(
+            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
+        );
         assert_eq!(
             fs::read_to_string(root.join("src/main.stasis")).unwrap(),
             accepted_source
@@ -9393,6 +10144,37 @@ mod tests {
         remove_temp(&root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn desktop_focused_tests_stage_project_data_bindings() {
+        let root = temp_dir("desktop_test_data_binding");
+        write_data_binding_test_project(
+            &root,
+            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
+            Some(DATA_BINDING_META),
+        );
+        let fingerprint = desktop_source_fingerprint(&root, &[]).unwrap();
+        let candidate_files =
+            load_workshop_edit_workspace(&root, Path::new("src/main.stasis")).unwrap();
+        let receipt = run_staged_project_tests_bounded(
+            &root,
+            Path::new("src/main.stasis"),
+            &candidate_files,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(receipt["tests_run"].as_u64().unwrap_or(0) > 0);
+        assert!(receipt["tests_passed"].as_u64().unwrap_or(0) > 0);
+        assert_eq!(receipt["tests_failed"], 0);
+        fs::write(
+            root.join("data/gameplay.json"),
+            r#"{"config":{"loaded":true,"scalar":18,"values":[4,9]}}"#,
+        )
+        .unwrap();
+        assert_ne!(fingerprint, desktop_source_fingerprint(&root, &[]).unwrap());
+        remove_temp(&root);
+    }
+
     #[test]
     fn workspace_tests_skip_project_bindings_outside_the_test_import_graph() {
         let root = temp_dir("test_data_binding_scoped_imports");
@@ -9563,6 +10345,10 @@ mod tests {
         assert!(error.contains("incomplete stdlib or documentation"));
         let (stdlib, docs) = resolve_vendor_directories(&[fallback]).unwrap();
         copy_dir_if_exists(&stdlib, &installed.join("src/stdlib")).unwrap();
+        assert_eq!(
+            fs::read(installed.join("src/stdlib/rig2d.stasis")).unwrap(),
+            fs::read(stdlib.join("rig2d.stasis")).unwrap()
+        );
         assert!(resolve_vendor_directories(&[installed.clone()]).is_err());
         copy_dir_if_exists(&docs, &installed.join("docs/knowledge")).unwrap();
         assert_eq!(
@@ -9638,6 +10424,49 @@ mod tests {
         assert!(vendor_root.join("stdlib/stdlib.stasis").is_file());
         assert!(vendor_root.join("docs/README.md").is_file());
         assert!(!vendor_root.join("src").exists());
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn formatting_preserves_mismatched_vendor_and_manifest() {
+        let root = temp_dir("format_preserves_vendor");
+        create_project(root.clone(), "format_preserves_vendor".into()).unwrap();
+        let manifest_path = root.join(MANIFEST_NAME);
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["vendor"]["stasis"]["release_id"] = json!("newer-than-this-toolchain");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("vendor/stasis/local-marker.txt"), "preserve me").unwrap();
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 {return 0;}\n",
+        )
+        .unwrap();
+        let original_manifest = fs::read(&manifest_path).unwrap();
+        let original_vendor = directory_sha256(&root.join("vendor/stasis")).unwrap();
+        for check in [false, true] {
+            execute(
+                ToolchainCommand::Fmt {
+                    check,
+                    stdin: false,
+                    paths: Vec::new(),
+                },
+                Some(root.clone()),
+                false,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&manifest_path).unwrap(), original_manifest);
+            assert_eq!(
+                directory_sha256(&root.join("vendor/stasis")).unwrap(),
+                original_vendor
+            );
+        }
+        assert!(PROJECT_PRE_COMMIT_HOOK.contains("stasis format src tests"));
+        assert!(!PROJECT_PRE_COMMIT_HOOK.contains("if ! stasis format;"));
         remove_temp(&root);
     }
 
@@ -10037,9 +10866,8 @@ mod tests {
         write_json_file(&manifest_path, &manifest).expect("write provenance fixture");
         verify_release_provenance(&manifest_path).expect("accept matching release");
 
-        let desktop_network = root.join("desktop/network");
-        let library = desktop_network.join("windows-x86_64/stasis_network.lib");
-        let header = desktop_network.join("include/stasis_network.h");
+        let library = root.join(DESKTOP_NETWORK_ARTIFACTS[0]);
+        let header = root.join(DESKTOP_NETWORK_ARTIFACTS[1]);
         fs::create_dir_all(library.parent().expect("library parent"))
             .expect("create desktop network library directory");
         fs::create_dir_all(header.parent().expect("header parent"))
@@ -10277,6 +11105,42 @@ mod tests {
     }
 
     #[test]
+    fn native_network_client_release_preflight_uses_offline_mailbox_profile() {
+        let root = temp_dir("native_network_client_preflight");
+        fs::create_dir_all(root.join("vendor/stasis/stdlib"))
+            .expect("create network client vendor directory");
+        fs::write(
+            root.join(MANIFEST_NAME),
+            r#"{"manifest_version":1,"name":"client","entry":"main.stasis","tests":"tests","output":"build","capabilities":{"network_client":true}}"#,
+        )
+        .expect("write network client manifest");
+        fs::write(
+            root.join("main.stasis"),
+            "import \"/vendor/stasis/stdlib/network_client.stasis\"; function main(): i32 { return network_client_supported(); } function tick(): i32 { return 0; } function render(): i32 { return 0; }\n",
+        )
+        .expect("write network client entry");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/stdlib/network_client.stasis"),
+            root.join("vendor/stasis/stdlib/network_client.stasis"),
+        )
+        .expect("vendor network client stdlib");
+        let workspace = load_workspace(Some(&root)).expect("load network client workspace");
+
+        let default_error = match compile_workspace_jit(&workspace) {
+            Ok(_) => panic!("ordinary native JIT must not acquire browser mailbox shims"),
+            Err(error) => error,
+        };
+        assert!(default_error.contains("stasis_web_network_supported"));
+        compile_workspace_jit_with_options(
+            &workspace,
+            false,
+            Some(JitExternProfile::DeterministicOfflineWebNetwork),
+        )
+        .expect("client package release preflight");
+        remove_temp(&root);
+    }
+
+    #[test]
     fn project_names_allow_internal_ascii_spaces() {
         assert!(validate_project_name("Chess TD").is_ok());
         for invalid in [" Chess TD", "Chess TD ", "Chess\tTD", "Chess/TD"] {
@@ -10465,6 +11329,7 @@ mod tests {
             fs::read_to_string(android.join("android/app/src/main/cpp/CMakeLists.txt"))
                 .expect("read Android CMake project");
         assert!(android_cmake.contains("STASIS_ENABLE_SEAM_TESTS"));
+        assert!(android_cmake.contains("stasis_android_external_url.c"));
         assert!(android_jni.contains("STASIS_SEAM_TEST_ID"));
         assert!(android_jni.contains("nativeSetAssetManifestSha256"));
         assert!(android_jni.contains("STASIS_ASSET_MANIFEST_SHA256"));
@@ -10532,6 +11397,8 @@ mod tests {
         assert!(java.contains("performanceHud.setSingleLine(false)"));
         assert!(java.contains("new AndroidAssetSource(getAssets())"));
         assert!(java.contains("Asset cache preparation failed before runtime startup"));
+        assert!(java.contains("Intent.ACTION_VIEW"));
+        assert!(java.contains("externalUrlHostActive"));
         assert!(java.contains("setOnApplyWindowInsetsListener"));
         let jni =
             fs::read_to_string(android.join("android/app/src/main/cpp/stasis_android_assets.c"))
@@ -10696,6 +11563,17 @@ mod tests {
             fs::read_to_string(ios_network.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
                 .expect("read network iOS Xcode project")
                 .contains("stasis_ios_network.m in Sources")
+        );
+        let ios_external_url =
+            fs::read_to_string(ios_network.join("ios/StasisMobile/stasis_ios_external_url.m"))
+                .expect("read iOS external URL adapter");
+        assert!(
+            ios_external_url.contains("openURL:target options:@{} completionHandler:completion")
+        );
+        assert!(
+            fs::read_to_string(ios_network.join("ios/StasisMobile.xcodeproj/project.pbxproj"))
+                .expect("read iOS Xcode project")
+                .contains("stasis_ios_external_url.m in Sources")
         );
 
         let android_network = root.join("android-network-package");
@@ -10870,20 +11748,59 @@ mod tests {
         remove_temp(&root);
     }
 
-    #[cfg(windows)]
+    #[test]
+    fn desktop_network_assets_share_guest_root_outside_macos_app() {
+        let requested = Path::new("dist/Game");
+        let linked = Path::new("dist/Game.app/Contents/MacOS/Game");
+        assert_eq!(
+            release_asset_output_directory(requested, linked, true).unwrap(),
+            Path::new("dist")
+        );
+        assert_eq!(
+            release_asset_output_directory(requested, linked, false).unwrap(),
+            Path::new("dist/Game.app/Contents/MacOS")
+        );
+        assert_eq!(
+            release_asset_output_directory(requested, requested, true).unwrap(),
+            Path::new("dist")
+        );
+    }
+
+    #[test]
+    fn desktop_network_provenance_rejects_foreign_target_libraries() {
+        let root = temp_dir("foreign_desktop_network");
+        for library in [
+            "desktop/network/windows-x86_64/stasis_network.lib",
+            "desktop/network/linux-x86_64/libstasis_network.a",
+            "desktop/network/linux-arm64/libstasis_network.a",
+            "desktop/network/macos-x86_64/libstasis_network.a",
+            "desktop/network/macos-arm64/libstasis_network.a",
+        ] {
+            if library == DESKTOP_NETWORK_ARTIFACTS[0] {
+                continue;
+            }
+            let provenance = json!({"desktop_network_artifacts": {
+                (library): "foreign-library-hash",
+                (DESKTOP_NETWORK_ARTIFACTS[1]): "header-hash",
+            }});
+            let error = verify_desktop_network_artifact_hashes(&provenance, &root)
+                .expect_err("reject a release built for another platform before linking");
+            assert!(error.contains("artifact set mismatch"), "{error}");
+        }
+        remove_temp(&root);
+    }
+
     #[test]
     fn bundled_desktop_network_artifacts_resolve_beside_the_cli() {
         let root = temp_dir("relocated_desktop_network");
         let executable = root.join("bin/stasis.exe");
         let support = root.join("bin/desktop/network");
-        fs::create_dir_all(support.join("windows-x86_64")).expect("create library directory");
+        let library_path = root.join("bin").join(DESKTOP_NETWORK_ARTIFACTS[0]);
+        fs::create_dir_all(library_path.parent().unwrap()).expect("create library directory");
         fs::create_dir_all(support.join("include")).expect("create include directory");
         fs::write(&executable, b"relocated stasis executable").expect("write executable fixture");
-        fs::write(
-            support.join("windows-x86_64/stasis_network.lib"),
-            b"relocated desktop network library",
-        )
-        .expect("write relocated network library");
+        fs::write(&library_path, b"relocated desktop network library")
+            .expect("write relocated network library");
         fs::write(
             support.join("include/stasis_network.h"),
             b"/* relocated network header */\n",
@@ -10894,7 +11811,7 @@ mod tests {
             bundled_network_artifacts_for_executable(&executable, PackageTarget::Desktop)
                 .expect("resolve desktop support")
                 .expect("desktop support artifacts");
-        assert_eq!(library, support.join("windows-x86_64/stasis_network.lib"));
+        assert_eq!(library, library_path);
         assert_eq!(header, support.join("include/stasis_network.h"));
         remove_temp(&root);
     }
@@ -10906,6 +11823,54 @@ mod tests {
             ..ProjectManifest::new("demo".to_string())
         };
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_defaults_and_serializes_approved_ai_routing_policy() {
+        let manifest = ProjectManifest::new("demo".to_string());
+        assert_eq!(
+            manifest.ai.openrouter.approved_models,
+            [stasis_ai::DEFAULT_OPENROUTER_MODEL]
+        );
+        assert_eq!(manifest.ai.openrouter.min_throughput_tokens_per_second, 400);
+        assert_eq!(manifest.ai.openrouter.max_p50_latency_seconds, 2.0);
+        assert!(!manifest.ai.editor.auto_persist_html_transcripts);
+        let encoded = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(
+            encoded.pointer("/ai/openrouter/approved_models/0"),
+            Some(&json!("openai/gpt-oss-120b"))
+        );
+        assert_eq!(
+            encoded.pointer("/ai/openrouter/max_p50_latency_seconds"),
+            Some(&json!(2.0))
+        );
+        assert_eq!(
+            encoded.pointer("/ai/editor/auto_persist_html_transcripts"),
+            Some(&json!(false))
+        );
+
+        let legacy: ProjectManifest = serde_json::from_value(json!({
+            "manifest_version": 1,
+            "name": "legacy",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build"
+        }))
+        .unwrap();
+        assert_eq!(legacy.ai, stasis_ai::ProjectAiConfig::default());
+
+        let mut invalid = manifest.clone();
+        invalid.ai.openrouter.approved_models.clear();
+        assert_eq!(
+            invalid.validate().unwrap_err(),
+            "ai.openrouter.approved_models must not be empty"
+        );
+        invalid = manifest;
+        invalid.ai.openrouter.max_p50_latency_seconds = 0.0;
+        assert_eq!(
+            invalid.validate().unwrap_err(),
+            "ai.openrouter.max_p50_latency_seconds must be a finite number greater than zero"
+        );
     }
 
     #[test]
@@ -10991,6 +11956,15 @@ mod tests {
         assert!(root
             .join(".stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis")
             .is_file());
+        assert_eq!(
+            fs::read(root.join(".stasis_cache/toolchain/src/stdlib/rig2d.stasis")).unwrap(),
+            fs::read(
+                bundled_stdlib_dir()
+                    .expect("bundled stdlib")
+                    .join("rig2d.stasis")
+            )
+            .expect("read bundled rig2d stdlib")
+        );
 
         remove_temp(&root);
     }

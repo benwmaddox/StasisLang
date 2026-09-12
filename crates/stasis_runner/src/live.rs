@@ -44,6 +44,10 @@ impl LiveRequest {
         if self.request_id == 0 {
             return Err("request_id must be greater than zero".to_string());
         }
+        if matches!(self.command, LiveCommand::PlaceGameWindow { width, height, .. } if width < 1 || height < 1)
+        {
+            return Err("native window placement requires a positive extent".to_string());
+        }
         let bytes = serde_json::to_vec(self)
             .map_err(|error| format!("failed serializing live request: {error}"))?
             .len();
@@ -74,6 +78,20 @@ pub enum LiveCommand {
     CaptureFrame {
         artifact: String,
     },
+    /// Host window controls run between ticks and never alter guest input or state.
+    WindowPlacement {
+        #[serde(default)]
+        editor_point: Option<[i32; 2]>,
+        #[serde(default)]
+        game_point: Option<[i32; 2]>,
+    },
+    PlaceGameWindow {
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    },
+    FocusGameWindow,
     SetInputState {
         #[serde(default)]
         pointers: Vec<LivePointerInput>,
@@ -2730,6 +2748,48 @@ mod tests {
         assert_eq!(cell.last_result.as_deref(), Some("ok"));
         scratch.clear(Some("score")).expect("clear");
         assert!(scratch.list().is_empty());
+    }
+
+    #[test]
+    fn native_window_commands_preserve_signed_coordinates_and_reject_empty_extents() {
+        let request: LiveRequest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "request_id": 9, "type": "place_game_window",
+            "x": -1600, "y": -100, "width": 800, "height": 600
+        }))
+        .unwrap();
+        assert_eq!(
+            request.command,
+            LiveCommand::PlaceGameWindow {
+                x: -1600,
+                y: -100,
+                width: 800,
+                height: 600
+            }
+        );
+        request.validate().unwrap();
+        assert!(LiveRequest::new(
+            10,
+            LiveCommand::PlaceGameWindow {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 600
+            }
+        )
+        .validate()
+        .unwrap_err()
+        .contains("positive extent"));
+        let query: LiveRequest = serde_json::from_value(serde_json::json!({
+            "request_id": 11, "type": "window_placement"
+        }))
+        .unwrap();
+        assert_eq!(
+            query.command,
+            LiveCommand::WindowPlacement {
+                editor_point: None,
+                game_point: None
+            }
+        );
     }
 
     #[test]

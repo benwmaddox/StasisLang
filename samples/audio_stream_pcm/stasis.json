@@ -1,0 +1,8 @@
+{
+  "manifest_version": 1,
+  "name": "audio_stream_pcm",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain"
+}

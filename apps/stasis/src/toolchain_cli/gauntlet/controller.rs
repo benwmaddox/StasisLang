@@ -4646,12 +4646,12 @@ mod tests {
 
         assert!(profile
             .instruction
-            .contains("Later JSONL records are completed; do not repeat them"));
+            .contains("Reuse supplied source and references; do not reread them"));
         assert!(profile
             .instruction
-            .contains("Use host-mediated tools through structured tool_calls, not native tools"));
+            .contains("Use structured tool_calls only"));
         assert!(profile.instruction.contains(
-            "Submit related symbols/imports/tests in one contiguous atomic tested write batch"
+            "Submit related code/imports/tests in one contiguous atomic tested write batch"
         ));
         assert!(profile
             .instruction

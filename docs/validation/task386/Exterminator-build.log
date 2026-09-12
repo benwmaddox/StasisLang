@@ -1,0 +1,1 @@
+{"code":"command_failed","command":"build","message":"failed to resolve mobile AOT assets: asset_manifest_missing (assets/manifest.json): The system cannot find the file specified. (os error 2)","ok":false}

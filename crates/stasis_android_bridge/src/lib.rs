@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -44,6 +44,101 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSymbolSelector,
 };
 use stasis_dynload::StasisAudioHostApi;
+
+const MAX_EXTERNAL_URL_BYTES: usize = 2048;
+
+type AndroidExternalUrlHost = extern "C" fn(*const u8, i32, *mut c_void) -> i32;
+
+#[derive(Clone, Copy, Default)]
+struct AndroidExternalUrlHostRegistration {
+    callback: Option<AndroidExternalUrlHost>,
+    context: usize,
+}
+
+fn android_external_url_host_registration() -> &'static Mutex<AndroidExternalUrlHostRegistration> {
+    static REGISTRATION: OnceLock<Mutex<AndroidExternalUrlHostRegistration>> = OnceLock::new();
+    REGISTRATION.get_or_init(|| Mutex::new(AndroidExternalUrlHostRegistration::default()))
+}
+
+thread_local! {
+    // Host actions are authorized only while a guest tick consumes a real input edge.
+    static EXTERNAL_URL_TICK_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static EXTERNAL_URL_ACTION_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ExternalUrlTickAuthorization;
+
+impl ExternalUrlTickAuthorization {
+    fn begin(armed: bool) -> Self {
+        EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(armed));
+        Self
+    }
+}
+
+impl Drop for ExternalUrlTickAuthorization {
+    fn drop(&mut self) {
+        EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(false));
+    }
+}
+
+fn dispatch_android_external_url(url: &[u8]) -> i32 {
+    if !EXTERNAL_URL_TICK_ARMED.with(|slot| slot.replace(false)) {
+        return 0;
+    }
+    if url.len() > MAX_EXTERNAL_URL_BYTES || std::str::from_utf8(url).is_err() {
+        return -1;
+    }
+    let registration = *android_external_url_host_registration()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(callback) = registration.callback else {
+        return 0;
+    };
+    // Own the bounded bytes for the complete callback. Native code must copy them
+    // before returning if it needs to post the browser request to the UI thread.
+    let copied = url.to_vec();
+    callback(
+        copied.as_ptr(),
+        copied.len() as i32,
+        registration.context as *mut c_void,
+    )
+}
+
+/// Installs the Android UI adapter used by the embedded JIT runtime.
+/// Passing a null callback removes the adapter and makes requests deterministic no-ops.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_set_external_url_host(
+    callback: Option<AndroidExternalUrlHost>,
+    context: *mut c_void,
+) {
+    *android_external_url_host_registration()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = AndroidExternalUrlHostRegistration {
+        callback,
+        context: if callback.is_some() {
+            context as usize
+        } else {
+            0
+        },
+    };
+    if callback.is_none() {
+        stasis_android_bridge_clear_external_url_action();
+    }
+}
+
+/// Arms one external URL request for the next embedded guest tick.
+/// Native callers must invoke this only for a real pointer or keyboard edge.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_arm_external_url_action() {
+    EXTERNAL_URL_ACTION_PENDING.with(|slot| slot.set(true));
+}
+
+/// Clears pending and in-progress authority on lifecycle or focus loss.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_clear_external_url_action() {
+    EXTERNAL_URL_ACTION_PENDING.with(|slot| slot.set(false));
+    EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(false));
+}
 
 pub const ANDROID_RENDER_COMMAND_CAPACITY: usize = 8;
 pub const ANDROID_RENDER_GFX_I32_CAPACITY: usize = stasis_dynload::STASIS_RENDER_I32_COUNT;
@@ -1510,6 +1605,14 @@ fn run_android_workshop_tick_internal(
     let project_root = project_root.as_ref();
     let entry_file = entry_file.as_ref();
 
+    // stasis_dynload host callbacks are guest-thread local. Rebind on each frame
+    // so a session created or resumed on this thread cannot inherit another mode.
+    stasis_dynload::set_external_url_host(Some(dispatch_android_external_url));
+    EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(false));
+    // Take authority before any fallible compile, init, or swap work. An error must
+    // never carry a user gesture into a later frame.
+    let external_url_authorized = EXTERNAL_URL_ACTION_PENDING.with(|slot| slot.replace(false));
+
     RUNTIME_SESSION.with(|session_cell| {
         let mut session_slot = session_cell.borrow_mut();
         let mut recompiled = false;
@@ -1567,11 +1670,14 @@ fn run_android_workshop_tick_internal(
                 .jit
                 .write_i32_global_path("Input.screen_h", metrics.logical_h);
         }
+        let external_url_authorization =
+            ExternalUrlTickAuthorization::begin(external_url_authorized);
         execute_lifecycle_noarg(&session.jit, "tick")
             .map_err(|error| AndroidBridgeError::phase("runtime_entry", "tick", error, None))?;
+        drop(external_url_authorization);
         take_embedded_resource_error().map_err(|error| resource_phase_error("tick", error))?;
         session.tick_count = session.tick_count.saturating_add(1);
-        execute_optional_lifecycle_noarg(&session.jit, "render")
+        execute_render_construction(&session.jit)
             .map_err(|error| AndroidBridgeError::phase("runtime_entry", "render", error, None))?;
         take_embedded_resource_error().map_err(|error| resource_phase_error("render", error))?;
         let write_runtime_state = should_write_jit_runtime_state(initialized, recompiled);
@@ -2106,6 +2212,60 @@ fn execute_optional_lifecycle_noarg(jit: &JitProcess, name: &str) -> Result<(), 
         Ok(()) => Ok(()),
         Err(error) if error.contains("function '") && error.contains("not found") => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+fn execute_render_construction(jit: &JitProcess) -> Result<(), String> {
+    let snapshot = jit.program_snapshot();
+    let has_render = snapshot.is_some_and(|snapshot| {
+        snapshot
+            .functions()
+            .iter()
+            .any(|function| function.name == "render")
+    });
+    if !has_render {
+        return Ok(());
+    }
+    let has_reset = snapshot.is_some_and(|snapshot| {
+        snapshot
+            .functions()
+            .iter()
+            .any(|function| function.name == "gfx_cmd_construction_reset")
+    });
+    let has_finish = snapshot.is_some_and(|snapshot| {
+        snapshot
+            .functions()
+            .iter()
+            .any(|function| function.name == "gfx_cmd_construction_finish")
+    });
+    match (has_reset, has_finish) {
+        (false, false) => execute_optional_lifecycle_noarg(jit, "render"),
+        (true, true) => {
+            jit.execute_void_noarg_by_name("gfx_cmd_construction_reset")?;
+            let render_result = match jit.execute_i32_noarg_by_name("render") {
+                Ok(result) => result,
+                Err(i32_error) => jit
+                    .execute_void_noarg_by_name("render")
+                    .map(|()| 0)
+                    .map_err(|void_error| {
+                        format!(
+                            "failed executing render construction: i32={i32_error}; void={void_error}"
+                        )
+                    })?,
+            };
+            let result =
+                jit.execute_i32_onearg_by_name("gfx_cmd_construction_finish", render_result)?;
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "render construction returned nonzero status {result}"
+                ))
+            }
+        }
+        _ => Err(
+            "render construction lifecycle requires matching reset and finish helpers".to_string(),
+        ),
     }
 }
 
@@ -2955,9 +3115,12 @@ pub extern "C" fn stasis_android_bridge_run_render_frame(
         let i32_values = std::slice::from_raw_parts_mut(out_i32, out_i32_len);
         let f32_values = std::slice::from_raw_parts_mut(out_f32, out_f32_len);
         let u8_values = std::slice::from_raw_parts_mut(out_u8, out_u8_len);
-        stasis_dynload::copy_jit_render_active(i32_values, f32_values, u8_values)
+        let copied = stasis_dynload::copy_jit_render_active(i32_values, f32_values, u8_values)
             .map_err(|error| AndroidBridgeError::phase("render_schema", "render", error, None))?;
-        write_android_display_metadata(i32_values).map_err(AndroidBridgeError::from)
+        if copied.published {
+            write_android_display_metadata(i32_values).map_err(AndroidBridgeError::from)?;
+        }
+        Ok(())
     }));
     match result {
         Ok(Ok(())) => {
@@ -3571,6 +3734,9 @@ mod tests {
         RUNTIME_SESSION.with(|session| {
             *session.borrow_mut() = None;
         });
+        EXTERNAL_URL_TICK_ARMED.with(|slot| slot.set(false));
+        stasis_dynload::set_external_url_host(None);
+        stasis_android_bridge_set_external_url_host(None, std::ptr::null_mut());
     }
 
     fn ffi_json(ptr: *mut c_char) -> serde_json::Value {
@@ -3591,6 +3757,178 @@ mod tests {
             screen_w: 360,
             screen_h: 640,
         }
+    }
+
+    static EXTERNAL_URL_CALLBACK_COUNT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static EXTERNAL_URL_CALLBACK_CONTEXT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn captured_external_url() -> &'static Mutex<Vec<u8>> {
+        static URL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+        URL.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    extern "C" fn capture_external_url(value: *const u8, length: i32, context: *mut c_void) -> i32 {
+        if value.is_null() || length < 0 {
+            return -1;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(value, length as usize) };
+        *captured_external_url()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = bytes.to_vec();
+        EXTERNAL_URL_CALLBACK_CONTEXT.store(context as usize, std::sync::atomic::Ordering::SeqCst);
+        EXTERNAL_URL_CALLBACK_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        1
+    }
+
+    fn reset_external_url_capture() {
+        EXTERNAL_URL_CALLBACK_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+        EXTERNAL_URL_CALLBACK_CONTEXT.store(0, std::sync::atomic::Ordering::SeqCst);
+        captured_external_url()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    #[test]
+    fn android_external_url_adapter_bounds_copy_and_consumes_one_authorization() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        reset_external_url_capture();
+        stasis_android_bridge_set_external_url_host(
+            Some(capture_external_url),
+            0x1234usize as *mut c_void,
+        );
+
+        let authorization = ExternalUrlTickAuthorization::begin(true);
+        assert_eq!(
+            dispatch_android_external_url(b"https://www.maddoxlabs.com/"),
+            1
+        );
+        assert_eq!(dispatch_android_external_url(b"https://second.example/"), 0);
+        drop(authorization);
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_CONTEXT.load(std::sync::atomic::Ordering::SeqCst),
+            0x1234
+        );
+        assert_eq!(
+            &*captured_external_url()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            b"https://www.maddoxlabs.com/"
+        );
+
+        let authorization = ExternalUrlTickAuthorization::begin(true);
+        assert_eq!(dispatch_android_external_url(&vec![b'a'; 2049]), -1);
+        drop(authorization);
+        let authorization = ExternalUrlTickAuthorization::begin(true);
+        assert_eq!(dispatch_android_external_url(&[0xff]), -1);
+        drop(authorization);
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        stasis_android_bridge_set_external_url_host(None, std::ptr::null_mut());
+        let authorization = ExternalUrlTickAuthorization::begin(true);
+        assert_eq!(
+            dispatch_android_external_url(b"https://www.maddoxlabs.com/"),
+            0
+        );
+        drop(authorization);
+        clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn android_jit_external_url_requires_explicit_edge_and_dispatches_once() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        reset_external_url_capture();
+        stasis_android_bridge_set_external_url_host(
+            Some(capture_external_url),
+            std::ptr::null_mut(),
+        );
+        let root = temp_project("external_url_pointer_edge");
+        let entry = Path::new("src/main.stasis");
+        fs::write(
+            root.join(entry),
+            "global host_i32: i32[768];\n\
+             global activation_count: i32;\n\
+             global main_result: i32;\n\
+             global first_result: i32;\n\
+             global second_result: i32;\n\
+             global render_result: i32;\n\
+             function @internal @effects(platform)@extern(\"stasis_jit_open_external_url\") open_url(url: string): i32;\n\
+             function main(): void { main_result = open_url(\"https://www.maddoxlabs.com/\"); }\n\
+             function tick(): void { if (host_i32[546] != 0) { activation_count += 1; first_result = open_url(\"https://www.maddoxlabs.com/\"); second_result = open_url(\"https://second.example/\"); } }\n\
+             function render(): void { render_result = open_url(\"https://render.example/\"); }\n",
+        )
+        .expect("write external URL edge fixture");
+
+        let released = AndroidBridgeTickInput {
+            touch_active: 0,
+            ..default_tick_input()
+        };
+        let pressed = default_tick_input();
+        run_android_workshop_tick(&root, entry, released).expect("initialize without an edge");
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "main_result").unwrap(),
+            0
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "render_result").unwrap(),
+            0
+        );
+
+        run_android_workshop_tick(&root, entry, pressed).expect("synthetic pointer-down tick");
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "input state without trusted native authority must not launch a browser"
+        );
+
+        run_android_workshop_tick(&root, entry, released).expect("release pointer");
+        stasis_android_bridge_arm_external_url_action();
+        run_android_workshop_tick(&root, entry, pressed).expect("consume trusted pointer edge");
+        run_android_workshop_tick(&root, entry, pressed).expect("held pointer tick");
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "activation_count").unwrap(),
+            2
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "first_result").unwrap(),
+            1
+        );
+        assert_eq!(
+            get_android_workshop_i32_global(&root, entry, "second_result").unwrap(),
+            0
+        );
+
+        run_android_workshop_tick(&root, entry, released).expect("release pointer");
+        stasis_android_bridge_arm_external_url_action();
+        run_android_workshop_tick(&root, entry, pressed).expect("consume next pointer-down edge");
+        assert_eq!(
+            EXTERNAL_URL_CALLBACK_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            &*captured_external_url()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            b"https://www.maddoxlabs.com/"
+        );
+
+        fs::remove_dir_all(&root).ok();
+        clear_runtime_session_for_test();
     }
 
     #[test]
@@ -4515,7 +4853,7 @@ function tick(): void {}
             take_embedded_resource_error()
                 .map_err(|error| format!("touch tick resource error: {}", error.detail))?;
             session.tick_count = session.tick_count.saturating_add(1);
-            execute_optional_lifecycle_noarg(&session.jit, "render")?;
+            execute_render_construction(&session.jit)?;
             take_embedded_resource_error()
                 .map_err(|error| format!("touch render resource error: {}", error.detail))?;
             Ok(())
@@ -5672,7 +6010,7 @@ function tick(): void {}
             expected_checksum,
             "IT-017 stable frame must retain its checked-in state oracle"
         );
-        assert_eq!(&frame_i32[0..5], &[1196967473, 7, 3, 0, 0]);
+        assert_eq!(&frame_i32[0..5], &[1196967473, 8, 3, 0, 0]);
         assert_eq!(frame_i32[7], 0, "IT-017 sample must not emit text");
         assert_eq!(frame_i32[9], 0, "IT-017 sample must not emit text bytes");
         assert_eq!(frame_i32[10], logical_w);
@@ -5784,7 +6122,7 @@ function tick(): void {}
                 .expect("read IT-018 stable probe sequence"),
             0
         );
-        assert_eq!(&frame_i32[..5], &[1196967473, 7, 3, 0, 0]);
+        assert_eq!(&frame_i32[..5], &[1196967473, 8, 3, 0, 0]);
         assert_eq!(
             &frame_i32[10..16],
             &[logical_w, logical_h, NATIVE_W, NATIVE_H, NATIVE_W, NATIVE_H]
@@ -6028,7 +6366,7 @@ function tick(): void {}
         assert!((global_f32("seam_pointer_y") - 540.0).abs() < 0.01);
         assert!((global_f32("seam_pointer_x_n") - 0.75).abs() < 0.01);
         assert!((global_f32("seam_pointer_y_n") - 0.75).abs() < 0.01);
-        assert_eq!(frame_i32[1], 7);
+        assert_eq!(frame_i32[1], 8);
         assert_eq!(frame_i32[22], 3, "IT-018 final render order count");
         assert_eq!(frame_i32[24], 3, "IT-018 final render rectangle count");
         assert_eq!(
@@ -6842,7 +7180,7 @@ function on_code_swap(): void {}\n",
     }
 
     #[test]
-    fn it031_render_schema_frame_failure_is_typed_at_copy_call_site() {
+    fn negotiated_render_discards_stale_malformed_working_storage() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
         let root = temp_project("it031_render_schema");
@@ -6867,9 +7205,9 @@ function on_code_swap(): void {}\n",
         }
         let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
         let entry_c = CString::new("src/main.stasis").expect("entry cstr");
-        let mut i32_values = vec![0; ANDROID_RENDER_GFX_I32_CAPACITY];
-        let mut f32_values = vec![0.0; ANDROID_RENDER_GFX_F32_CAPACITY];
-        let mut u8_values = vec![0; ANDROID_RENDER_GFX_U8_CAPACITY];
+        let mut i32_values = vec![-71; ANDROID_RENDER_GFX_I32_CAPACITY];
+        let mut f32_values = vec![-72.0; ANDROID_RENDER_GFX_F32_CAPACITY];
+        let mut u8_values = vec![73; ANDROID_RENDER_GFX_U8_CAPACITY];
         let status = stasis_android_bridge_run_render_frame(
             root_c.as_ptr(),
             entry_c.as_ptr(),
@@ -6885,26 +7223,10 @@ function on_code_swap(): void {}\n",
             u8_values.as_mut_ptr(),
             u8_values.len(),
         );
-        assert_eq!(status, -1);
-        let error_ptr = stasis_android_bridge_last_frame_error();
-        let error = unsafe { CStr::from_ptr(error_ptr) }
-            .to_string_lossy()
-            .into_owned();
-        stasis_android_bridge_free_string(error_ptr);
-        let envelope = error
-            .split("diagnostic_envelope=")
-            .nth(1)
-            .map(percent_decode_for_test)
-            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
-            .expect("render envelope");
-        assert_eq!(envelope["stage"], "render_schema");
-        assert_eq!(envelope["code"], "stasis.renderSchema");
-        assert_eq!(envelope["context"]["symbol"], "render");
-        assert_eq!(envelope["causes"][0], "render_schema phase");
-        assert_eq!(
-            envelope["causes"].as_array().unwrap().last().unwrap(),
-            &envelope["detail"]
-        );
+        assert_eq!(status, 0);
+        assert!(i32_values.iter().all(|value| *value == -71));
+        assert!(f32_values.iter().all(|value| *value == -72.0));
+        assert!(u8_values.iter().all(|value| *value == 73));
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
     }
@@ -6925,7 +7247,6 @@ global host_req_window_h_px: i32;
 function main(): void { host_req_window_w_px = 360; host_req_window_h_px = 720; }
 function tick(): void {}
 function render(): void {
-  begin_frame();
   clear(0.1, 0.2, 0.3, 0.4);
   draw_line(host_f32[0], host_f32[1], 30.0, 40.0, 1.0, 0.0, 0.0, 1.0);
   draw_text(5, \"A\", 12.0, 13.0, 1.0, 1.0, 1.0, 1.0);
@@ -6957,7 +7278,7 @@ function render(): void {
         );
         assert_eq!(status, 0);
         // Current source frames copy into the canonical destination layout.
-        assert_eq!(&frame_i32[..5], &[1196967473, 7, 3, 1, 0]);
+        assert_eq!(&frame_i32[..5], &[1196967473, 8, 3, 1, 0]);
         assert_eq!(&frame_i32[10..16], &[360, 720, 1080, 2400, 1080, 2400]);
         assert_eq!(&frame_i32[16..20], &[0, 0, 360, 720]);
         assert_eq!(&frame_i32[20..22], &[1, 1]);

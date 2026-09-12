@@ -1548,6 +1548,16 @@ fn build_engine_bundle_manifest(
         "  \"optimization_profile\": \"{}\",\n",
         optimization_profile.as_str()
     ));
+    let has_reset = rows
+        .iter()
+        .any(|(_, _, name, _, _, _)| name == "gfx_cmd_construction_reset");
+    let has_finish = rows
+        .iter()
+        .any(|(_, _, name, _, _, _)| name == "gfx_cmd_construction_finish");
+    let lifecycle_version = if has_reset && has_finish { 1 } else { 0 };
+    out.push_str(&format!(
+        "  \"render_construction_lifecycle_version\": {lifecycle_version},\n"
+    ));
     out.push_str("  \"entrypoints\": {\n");
     out.push_str(&format!(
         "    \"tick\": \"{}\",\n",
@@ -1674,59 +1684,131 @@ mod tests {
 
     #[cfg(windows)]
     fn sign_test_executable(path: &Path) {
-        sign_test_artifact(path, false);
+        sign_test_artifact(path);
     }
 
     #[cfg(windows)]
-    fn sign_page_hashed_test_executable(path: &Path) {
-        sign_test_artifact(path, true);
+    fn sign_test_artifact(path: &Path) {
+        try_sign_test_artifact(path).unwrap_or_else(|message| panic!("{message}"));
     }
 
     #[cfg(windows)]
-    fn sign_test_artifact(path: &Path, page_hashes: bool) {
-        try_sign_test_artifact(path, page_hashes).unwrap_or_else(|message| panic!("{message}"));
-    }
-
-    #[cfg(windows)]
-    fn try_sign_test_artifact(path: &Path, page_hashes: bool) -> Result<(), String> {
-        let Some(sign_tool) =
-            std::env::var_os("STASIS_AOT_SIGN_TOOL").filter(|tool| !tool.is_empty())
-        else {
-            return if signed_execution_required() {
-                Err("signed execution is required but STASIS_AOT_SIGN_TOOL is not set".to_string())
-            } else {
-                Ok(())
-            };
-        };
-        let mut command = Command::new(&sign_tool);
-        command.arg(path);
-        if page_hashes {
-            command.env("STASIS_SIGN_PAGE_HASHES", "1");
-        } else {
-            command.env_remove("STASIS_SIGN_PAGE_HASHES");
+    fn try_sign_test_artifact(path: &Path) -> Result<(), String> {
+        if !test_signing_configured() {
+            return unconfigured_aot_signing_result(signed_execution_required());
         }
-        let status = command.status().map_err(|error| {
-            format!(
-                "failed to launch signer {:?} for {}: {error}",
-                sign_tool,
-                path.display()
-            )
-        })?;
-        if !status.success() {
+
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/windows/stasis-signing.ps1");
+        if !script.is_file() {
             return Err(format!(
-                "signer {:?} failed for {} with status {:?}",
-                sign_tool,
+                "Windows signing policy script is missing at {}; restore tools/windows/stasis-signing.ps1",
+                script.display()
+            ));
+        }
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script)
+            .arg("sign")
+            .arg("-Artifact")
+            .arg(path)
+            .output()
+            .map_err(|error| {
+                format!(
+                    "failed to launch Windows signing policy {} for {}: {error}",
+                    script.display(),
+                    path.display()
+                )
+            })?;
+        if !output.status.success() {
+            return Err(format!(
+                "Windows signing policy failed for {} with status {}: {}",
                 path.display(),
-                status.code()
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
         Ok(())
     }
 
     #[cfg(windows)]
+    fn test_signing_configured() -> bool {
+        [
+            "STASIS_AOT_SIGN_TOOL",
+            "STASIS_SIGNING_CERTIFICATE",
+            "STASIS_SIGNING_CERT_THUMBPRINT",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+            || local_development_signing_record().is_some_and(|path| path.is_file())
+    }
+
+    #[cfg(windows)]
+    fn local_development_signing_record() -> Option<PathBuf> {
+        if std::env::var("STASIS_SIGNING_MODE")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("production"))
+            || std::env::var("STASIS_SIGNING_PROFILE")
+                .ok()
+                .is_some_and(|value| value.eq_ignore_ascii_case("production"))
+        {
+            return None;
+        }
+        std::env::var_os("STASIS_SIGNING_LOCAL_RECORD")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(PathBuf::from)
+                    .map(|root| root.join("Stasis/signing/development-thumbprint.txt"))
+            })
+    }
+
+    #[cfg(windows)]
     fn signed_execution_required() -> bool {
-        std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
+        signed_execution_required_for(
+            std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").as_deref(),
+            std::env::var_os("STASIS_SIGNING_MODE").as_deref(),
+        )
+    }
+
+    #[cfg(windows)]
+    fn signed_execution_required_for(
+        explicit: Option<&std::ffi::OsStr>,
+        mode: Option<&std::ffi::OsStr>,
+    ) -> bool {
+        explicit == Some(std::ffi::OsStr::new("1"))
+            || mode.is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case("required"))
+    }
+
+    #[cfg(windows)]
+    fn unconfigured_aot_signing_result(required: bool) -> Result<(), String> {
+        if required {
+            Err("signed execution is required but no Windows signing certificate or legacy hook is configured".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn required_signing_modes_reject_unconfigured_aot_execution() {
+        for mode in ["required", "REQUIRED", "ReQuIrEd"] {
+            let required = signed_execution_required_for(None, Some(std::ffi::OsStr::new(mode)));
+            assert!(unconfigured_aot_signing_result(required).is_err());
+        }
+        let explicitly_required =
+            signed_execution_required_for(Some(std::ffi::OsStr::new("1")), None);
+        assert!(unconfigured_aot_signing_result(explicitly_required).is_err());
+
+        let optional = signed_execution_required_for(None, Some(std::ffi::OsStr::new("optional")));
+        assert!(unconfigured_aot_signing_result(optional).is_ok());
     }
 
     #[cfg(windows)]
@@ -1740,19 +1822,7 @@ mod tests {
                 .status()
         };
         sign_test_executable(path);
-        match launch() {
-            Ok(status) => status,
-            Err(error) if error.raw_os_error() == Some(4551) => {
-                sign_page_hashed_test_executable(path);
-                launch().unwrap_or_else(|retry_error| {
-                    panic!(
-                        "failed to run {} after page-hash signing retry: {retry_error}",
-                        path.display()
-                    )
-                })
-            }
-            Err(error) => panic!("failed to run {}: {error}", path.display()),
-        }
+        launch().unwrap_or_else(|error| panic!("failed to run {}: {error}", path.display()))
     }
 
     #[cfg(windows)]
@@ -1766,9 +1836,9 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn optional_signer_is_usable(source: &Path) -> bool {
-        if std::env::var_os("STASIS_AOT_SIGN_TOOL").is_none() {
-            return true;
+    fn validate_configured_signer(source: &Path) {
+        if !test_signing_configured() {
+            return;
         }
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1779,14 +1849,7 @@ mod tests {
         let _cleanup = TempFixtureCleanup(temp_root.clone());
         let probe = temp_root.join("sign_probe.dll");
         fs::copy(source, &probe).expect("copy signer probe artifact");
-        match try_sign_test_artifact(&probe, false) {
-            Ok(()) => true,
-            Err(message) if signed_execution_required() => panic!("{message}"),
-            Err(message) => {
-                eprintln!("skipping optional signed AOT execution: {message}");
-                false
-            }
-        }
+        try_sign_test_artifact(&probe).unwrap_or_else(|message| panic!("{message}"));
     }
 
     const GFX_CAPACITY_FIXTURE: &str =
@@ -3100,6 +3163,99 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_resolves_native_network_client_mailbox_contract() {
+        let network_client = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/network_client.stasis"
+        ));
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "vendor/stasis/stdlib/network_client.stasis",
+            format!(
+                "{network_client}\nfunction main(): i32 {{ return network_client_supported(); }}\n"
+            ),
+        );
+
+        process
+            .compile()
+            .expect("compile native network client AOT");
+        let signatures = &process
+            .program_snapshot
+            .as_ref()
+            .expect("program snapshot")
+            .analysis
+            .resolved_extern_signatures;
+        let actual = signatures
+            .iter()
+            .map(|signature| signature.symbol.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            "stasis_web_network_supported",
+            "stasis_web_network_connect",
+            "stasis_web_network_status",
+            "stasis_web_network_poll",
+            "stasis_web_network_send",
+            "stasis_web_network_resume_seat",
+            "stasis_web_network_last_sequence",
+            "stasis_web_network_checkpoint",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn aot_emits_external_url_call_and_retains_its_string_literal() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        let clif = capture_aot_clif_by_function(&mut process);
+
+        assert!(
+            clif.get("open_external_url")
+                .expect("external URL wrapper CLIF")
+                .contains("call"),
+            "AOT wrapper must emit the host call"
+        );
+        assert!(process
+            .string_literals()
+            .values()
+            .any(|literal| literal == "https://www.maddoxlabs.com/"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aot_links_and_executes_external_url_headless_contract() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let deps_dir = std::env::current_exe()
+            .expect("current test executable")
+            .parent()
+            .expect("Cargo deps directory")
+            .to_path_buf();
+        let (_, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
+        if !optional_signer_is_usable(&runtime_dll) {
+            return;
+        }
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "external_url.stasis",
+            "function @extern(\"stasis_jit_open_external_url\") open_external_url_raw(url: string): i32; function open_external_url(url: string): i32 { return open_external_url_raw(url); } function main(): i32 { return 10 + open_external_url(\"https://www.maddoxlabs.com/\"); }",
+        );
+        process.compile().expect("compile external URL AOT fixture");
+
+        let Some(result) =
+            run_linked_i32_noarg_fixture(&process, "main", "external_url_headless", &link_config)
+        else {
+            return;
+        };
+        assert_eq!(result, 10, "headless AOT execution must ignore the request");
+    }
+
+    #[test]
     fn aot_process_accepts_known_runtime_shim_families() {
         let mut process = AotProcess::new();
         process.upsert_file(
@@ -3532,7 +3688,7 @@ function end_frame(): void { return; }
             &link_config,
         )
         .expect("link every receiver overload object");
-        sign_page_hashed_test_executable(&executable);
+        sign_test_executable(&executable);
         let status = Command::new(&executable)
             .status()
             .unwrap_or_else(|error| panic!("failed to run {}: {error}", executable.display()));
@@ -3948,6 +4104,53 @@ function on_code_swap(): void { return; }
         }
     }
 
+    #[test]
+    fn aot_rejects_fixed_array_and_view_length_access() {
+        let cases = [
+            (
+                "global read",
+                "global values: i32[4]; function main(): i32 { return values.length; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "conversion write",
+                "global values: i32[4]; function main(): i32 { values.length.from_f32(2.0); return 0; }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view compound write",
+                "global storage: i32[4]; function update(values: i32[]): i32 { values.length += 1; return 0; } function main(): i32 { return update(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "view read",
+                "global storage: i32[4]; function size(values: i32[]): i32 { return values.length; } function main(): i32 { return size(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "fixed parameter read",
+                "global storage: i32[4]; function size(values: i32[4]): i32 { return values.length; } function main(): i32 { return size(storage); }",
+                "array property 'values.length' is unavailable; use 'values.max_length' for declared capacity",
+            ),
+            (
+                "nested global write",
+                "struct State { values: i32[4]; } global state: State; function main(): i32 { state.values.length = 2; return 0; }",
+                "array property 'state.values.length' is unavailable; use 'state.values.max_length' for declared capacity",
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            let mut process = AotProcess::new();
+            process.upsert_file("array_length.stasis", source);
+            let error = process.compile().expect_err(name);
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains(expected),
+                "unexpected {name} diagnostic: {error:?}"
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn aot_and_jit_execute_receiver_overloads_with_different_arities() {
@@ -4011,9 +4214,7 @@ function on_code_swap(): void { return; }
                 .expect("Cargo deps directory")
                 .to_path_buf();
             let (_, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
-            if !optional_signer_is_usable(&runtime_dll) {
-                return;
-            }
+            validate_configured_signer(&runtime_dll);
             let Some(link_config) = resolve_link_config_for_smoke() else {
                 return;
             };
