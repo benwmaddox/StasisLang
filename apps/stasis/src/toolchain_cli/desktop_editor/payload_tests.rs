@@ -23,8 +23,10 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
     session.active_task_mut().unwrap().connection = ConnectionState::Connected;
     let objective = session.active_task().unwrap().objective.clone();
     let task_id = session.active_task_id().unwrap().clone();
+    let sources = super::super::desktop_source_context(&root).unwrap();
+    let symbol_count = sources.len();
     let expected_catalog = ProposalTools {
-        sources: super::super::desktop_source_context(&root).unwrap(),
+        sources,
         ..ProposalTools::default()
     }
     .source_catalog()
@@ -109,6 +111,12 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
         .unwrap();
     assert_eq!(reply.text, "Capture complete.");
     let bytes = server.join().unwrap();
+    if let Ok(limit) = std::env::var("STASIS_EDITOR_PAYLOAD_MAX_BYTES") {
+        assert!(
+            bytes.len() < limit.parse::<usize>().unwrap(),
+            "HTTP body exceeds payload budget"
+        );
+    }
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     let content = body["messages"][0]["content"].as_str().unwrap();
     assert_eq!(content.lines().count(), 1);
@@ -136,7 +144,7 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
         "desktop HTTP body={} bytes; model message={} bytes; symbols={}",
         bytes.len(),
         content.len(),
-        expected_catalog.as_array().unwrap().len()
+        symbol_count
     );
     if project.is_none() {
         std::fs::remove_dir_all(root).unwrap();

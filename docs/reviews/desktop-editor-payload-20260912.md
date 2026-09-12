@@ -1,5 +1,9 @@
 # Graphical editor payload verification
 
+This records the baseline capture before the [compact desktop catalog](../desktop_editor_catalog.md)
+change. The same capture test now verifies the compact catalog and accepts an optional
+`STASIS_EDITOR_PAYLOAD_MAX_BYTES` limit for the complete HTTP body.
+
 The graphical `stasis editor` path uses `TaskController`, the desktop reply provider,
 and the shared OpenRouter serializer. It does not use the live/TUI tool adapter.
 Its initial model message is one JSONL header containing instructions, three tool
