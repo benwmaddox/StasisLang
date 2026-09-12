@@ -34,9 +34,9 @@ use stasis_compiler::frontend::workshop::{
     find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
     plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
     workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
-    write_workshop_semantic_receipt, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
-    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
-    WorkshopSourceItemKind, WorkshopSymbolSelector,
+    write_workshop_semantic_receipt, WorkshopExposure, WorkshopSemanticEdit,
+    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
+    WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_jit::AotTarget;
 pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
@@ -7609,7 +7609,9 @@ fn desktop_source_context(root: &Path) -> Result<Vec<Value>, String> {
     let items = workshop_source_items(&files)?;
     let context = items
         .into_iter()
-        .filter(|item| is_editable_workshop_path(&item.file))
+        .filter(|item| {
+            is_editable_workshop_path(&item.file) && item.exposure == WorkshopExposure::Public
+        })
         .map(|item| {
             json!({
                 "target": {"file": item.file, "kind": item.kind, "name": item.name,

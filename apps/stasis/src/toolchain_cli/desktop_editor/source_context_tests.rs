@@ -67,6 +67,31 @@ fn compact_catalog_lists_imports_and_names_but_loads_details_on_demand() {
 }
 
 #[test]
+fn desktop_source_context_omits_internal_declarations_from_catalog_and_reads() {
+    let root = super::super::tests::desktop_editor_fixture("internal_catalog");
+    std::fs::write(
+        root.join("src/main.stasis"),
+        "function main(): i32 { return public_helper(); }\nfunction public_helper(): i32 { return internal_helper(); }\nfunction @internal internal_helper(): i32 { return 7; }\n",
+    )
+    .unwrap();
+    let sources = super::super::desktop_source_context(&root).unwrap();
+    assert!(sources
+        .iter()
+        .any(|item| item["target"]["name"] == "public_helper"));
+    assert!(!sources
+        .iter()
+        .any(|item| item["target"]["name"] == "internal_helper"));
+    let tools = ProposalTools {
+        sources,
+        ..ProposalTools::default()
+    };
+    let catalog = tools.source_catalog().unwrap();
+    assert!(catalog.as_str().unwrap().contains("public_helper"));
+    assert!(!catalog.as_str().unwrap().contains("internal_helper"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn compact_read_ids_disambiguate_duplicate_names_and_reject_invalid_ids() {
     let mut first = source("canonical-first", "function same(): void {}".into());
     let mut second = source("canonical-second", "function same(x: i32): void {}".into());

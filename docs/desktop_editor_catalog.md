@@ -29,6 +29,8 @@ A `tN` label returns the file's test names with their individual `sN` labels.
 Different overloads or duplicate names have different IDs. Names and paths escape
 embedded control characters so they cannot introduce extra catalog entries.
 Independent reads can be batched; related edits retain atomic validation.
+Declarations marked `@internal`, along with declarations from internal source files,
+are excluded from both the initial catalog and its on-demand source snapshot.
 
 The shared request transcript remains JSONL and the OpenRouter HTTP envelope and
 response schema remain JSON. The large project catalog inside that envelope is
