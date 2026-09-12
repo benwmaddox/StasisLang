@@ -250,8 +250,8 @@ function draw(self: LineBatch): void {
 }
 
 // Caller-owned storage for one direct canonical sprite run. The writer must be
-// global-backed and its storage may persist. Its token is frame-local and must
-// not cross begin_frame/code-swap; reserve and finalize/cancel in one frame.
+// global-backed and its storage may persist. Its token is construction-local and
+// must not cross a render entry/code-swap; reserve and finalize/cancel in one frame.
 struct SpriteRunWriter {
     token: i32;
 }
@@ -544,9 +544,10 @@ function set_maximized_canvas(width: i32, height: i32): i32 {
     return 0;
 }
 
-// Legacy-ish names retained as pure wrappers (no host calls).
+// Legacy/manual builder reset. Negotiated render entries are reset by the host
+// wrapper and must not call this function themselves.
 function begin_frame(): void {
-    gfx_cmd_begin();
+    gfx_cmd_manual_begin();
 }
 
 function end_frame(): void {

@@ -1,0 +1,1 @@
+{"code":"command_failed","command":"build","message":"src/main.stasis:1:1: unknown identifier 'app.resources.dog_sprite.handle' in current jit path","ok":false}

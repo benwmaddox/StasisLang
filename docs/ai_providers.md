@@ -1,6 +1,6 @@
 # AI providers
 
-Stasis live workspace AI uses one provider-neutral agent loop and one host `ToolExecutor`. Changing the transport does not change symbol selection, stale-hash checks, atomic writes, compilation, tests, cancellation gates, or completion validation.
+Stasis live workspace AI uses one provider-neutral agent loop and one host `ToolExecutor`. Changing the transport does not change symbol selection, atomic writes, compilation, tests, cancellation gates, or completion validation.
 
 ## Codex subscription (default)
 
@@ -19,34 +19,64 @@ The OpenRouter adapter uses HTTPS chat-completions streaming with a strict `resp
 ```powershell
 $env:STASIS_AI_PROVIDER = "openrouter"
 $env:OPENROUTER_API_KEY = "..."
-$env:STASIS_AI_MODEL = "openai/gpt-oss-120b"
 $env:STASIS_AI_ROUTE_ONLY = "cerebras"
-$env:STASIS_AI_ROUTE_ORDER = "cerebras"
 $env:STASIS_AI_ALLOW_FALLBACKS = "false"
-$env:STASIS_AI_ROUTE_SORT = "throughput"
 ```
 
-For OpenRouter Nitro routing, select the Nitro model variant and omit `STASIS_AI_ROUTE_ONLY` unless a provider pin is also required:
+Approved models and performance constraints belong in `stasis.json`:
 
-```powershell
-$env:STASIS_AI_MODEL = "openai/gpt-oss-120b:nitro"
-$env:STASIS_AI_ROUTE_SORT = "throughput"
+```json
+{
+  "ai": {
+    "provider": "openrouter",
+    "openrouter": {
+      "approved_models": ["openai/gpt-oss-120b"],
+      "min_throughput_tokens_per_second": 400,
+      "max_p50_latency_seconds": 2.0
+    }
+  }
+}
 ```
+
+`ai.provider` sets the default provider for new editor tasks to `codex` or `openrouter`.
+The per-task provider picker can still change an individual conversation. Secrets remain in
+`.env`; selecting OpenRouter requires `OPENROUTER_API_KEY`.
+
+The current approved editor model is `openai/gpt-oss-120b`. Project manifests may list
+additional models only after they have been approved through representative semantic-edit and
+test evaluation. Missing `ai.openrouter` fields use the values above, and the approved list is
+capped at eight models.
+
+Stasis does not query model or endpoint metadata before a normal generation. It sends one
+chat-completions request containing the complete approved `models` list, global price sorting
+(`provider.sort.by = "price"`, `partition = "none"`), the p50 throughput and latency preferences,
+and a stable task `session_id`. OpenRouter evaluates its current price, performance, and health
+information while routing that request. The approved-model list is a hard boundary; the p50
+values are OpenRouter routing preferences and are not hard exclusions or an SLA.
+
+Every turn in one editor task reuses the same session ID. This asks OpenRouter to preserve route
+and prompt-cache locality without Stasis holding an OpenRouter connection or maintaining a local
+route cache. A new task gets a new session ID. Changing `stasis.json`, reconnecting the provider,
+or restarting the editor reconstructs the request policy; OpenRouter owns any server-side routing
+and prompt-cache lifetime or invalidation.
 
 Routing variables are comma-separated where applicable:
 
 - `STASIS_AI_ROUTE_ONLY`: hard provider allow-list.
-- `STASIS_AI_ROUTE_ORDER`: preferred provider order.
 - `STASIS_AI_ALLOW_FALLBACKS`: `true` or `false`.
-- `STASIS_AI_ROUTE_SORT`: `price`, `throughput`, or `latency`. `price` requests lowest-price routing.
-- `STASIS_AI_PREFERRED_MIN_THROUGHPUT`: soft tokens/second target.
-- `STASIS_AI_PREFERRED_THROUGHPUT_POLICY`: `allow_below` (default) or `fail`. `fail` preflights endpoint metadata and pins only qualifying endpoints.
-- `STASIS_AI_HARD_MIN_THROUGHPUT`: hard tokens/second floor. Stasis preflights endpoint metadata and fails closed when no healthy, explicitly allowed endpoint qualifies; it never knowingly routes below the floor.
 - `STASIS_AI_MAX_PRICE`: maximum completion price accepted by the OpenRouter routing policy.
 - `STASIS_AI_TIMEOUT_SECONDS`: whole provider request timeout (default 120 seconds).
 - `STASIS_OPENROUTER_URL`: test/private gateway override; normally unset.
 
-Do not set both preferred and hard throughput thresholds. Metadata/preflight duration is logged separately from response header, first reasoning, first content, first action, inference-total, and turn-total timing. Inference timing and observed throughput exclude metadata preflight time. Usage records contain configured and resolved model/provider, route and fallback state, token/cache/reasoning counts, observed completion throughput, cost when returned by OpenRouter, and structured-validation status.
+Model, throughput, p50 latency, provider order, and routing sort environment variables are
+intentionally ignored for workspace requests; the checked-in manifest is authoritative and
+selection is always globally price-sorted. Timing records include response header, first
+reasoning, first content, first action, inference-total, and turn-total timing; metadata time is
+zero for normal generation because there is no preflight request.
+The 3-10 second edit goal is an end-to-end product target, not an OpenRouter metadata field.
+Usage records contain configured and resolved model/provider, route and fallback state,
+token/cache/reasoning counts, observed completion throughput, cost when returned by OpenRouter,
+and structured-validation status.
 
 ## Credentialed evaluation (opt in)
 
@@ -76,7 +106,30 @@ The desktop editor sends replies through the UI-neutral `stasis_ai::task_control
 controller. Each request captures bounded context from one task and carries an
 immutable task ID and request ID. Switching the selected task never changes the
 destination of an in-flight reply. Provider work runs off the UI thread; polling
-only collects completed work. Reply requests offer no editing tools.
+only collects completed work. Editing tools produce task-owned semantic proposals;
+they do not write source during a provider turn. Once the compiler-owned preview
+is ready, the editor automatically approves and atomically publishes one proposal,
+requests the live swap, and starts focused tests.
+
+Each action retains its payload and prior revisions. Provider repair responses
+may replace only rejected actions or actions marked for repair; they cannot
+regenerate accepted or applied work. Repaired proposals require fresh acceptance.
+Legacy task records without payloads remain readable but cannot execute edits.
+
+Applying an edit invalidates prior focused-test validation. Changing the test
+scope or repairing an action also invalidates it, including a run already in
+flight. Background test results carry a run ID, so an obsolete result cannot
+finish a newer validation run. Provider context contains compact action metadata;
+executable payloads and revision history stay in the task rather than being
+copied into every request. Done requires resolved actions and passing validation
+for current project sources. Host results and failure replies belong to the originating task even
+when another task is selected.
+
+Host operations are serialized. Cancellation stops queued work; an atomic edit
+already executing finishes or rolls back, and any committed receipt is retained
+on its originating task. Source conflicts preserve the previous source. Failed
+focused tests restore the published source through its hash-bound receipt and
+return a repairable failure. An empty focused-test selection cannot unlock Done.
 
 Cancellation and reconnect invalidate the old request before another response can
 be accepted. A late response cannot append to the thread or update its metrics.
@@ -99,6 +152,53 @@ when constructed, so its cloned client receives events even while the original
 client stays alive. Creating background clients does not transfer event ownership
 or change request-specific reply routing. Dropping the event recipient selects
 the oldest remaining client.
+
+## Live edit round trips
+
+Live edit requests provide current source, symbol identity, and reference results in
+`resolved_targets`. The adjacent `edit_execution` guidance tells the model to
+reuse that context, use supported arithmetic syntax, and set `complete: true`
+on its final write response. Missing dependencies still allow additional reads.
+Model tools and desktop proposals do not carry source hashes. Host transaction
+input verification and manual editor hash guards remain internal. This guidance
+reduces round trips; it is not a correctness gate.
+
+The structured response exposes one completion flag rather than a repeatable
+finish action. The provider decoder maps it to the existing host `finish_task`
+gate after all calls; it cannot bypass receipt, tests, or task-contract validation.
+Legacy finish calls remain compatible internally.
+`mode: "done", complete: true` also requests this gate, allowing a separate
+completion turn after inspecting a successful write receipt. It does not turn a
+rejected write into a successful task.
+
+Live replacements require ID and new source; deletes require ID alone.
+Name/file selectors remain available for read discovery; `add_symbol` creates
+new symbols in the same atomic batch. Legacy workshop selectors remain supported.
+The host registers IDs returned by reads as well as symbol indexes, so a correct
+read-derived ID does not fall back to model-authored selectors. Prefetched
+definitions replace redundant discovery suggestions and baseline-test prompts;
+the discovery tools remain available for missing dependencies.
+
+The brick-layout sample keeps test acceptance criteria in behavioral instructions,
+not exact assertion text. Equivalent equality and early-return assertions do not
+require extra repair turns. Required test edits and passing tests remain gates;
+the instructions alone are not an independent semantic oracle.
+
+Writes validate automatically. A following `run_tests` in the same response
+reuses a passing receipt, or is skipped when the preceding write failed, so
+tests of unchanged code cannot be mistaken for validation of a rejected edit.
+
+Resolved targets carry identity once in their definition; matching task requirements
+retain the symbol ID, name, and behavioral constraints without repeating file,
+kind, owner, and signature. Unresolved targets retain their discovery selectors.
+Repeated identical repair errors in a turn's model-facing observations may use
+`error_from_observation`, a zero-based index of an earlier full error in that same
+array. Short errors remain inline when a reference would cost more bytes. Tool
+order, results, and the full audit events are unchanged.
+
+Completed OpenRouter streams retain reported usage even when structured-response
+decoding fails, and the agent emits that usage before returning the error. Missing
+usage and incomplete transport failures cannot be reconstructed from these records.
 
 ## Security
 

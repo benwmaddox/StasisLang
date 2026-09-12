@@ -25,7 +25,7 @@ const UI_FONT_SIZE_PX: i32 = 24;
 // External runtime APIs
 // - init_window(width: i32, height: i32, title: string) -> bool
 // - HostFrame.refresh() snapshots timing, display, quit, keyboard, and pointer state
-// - begin_frame(), end_frame(): bracket GPU work
+// - end_frame(): explicitly publishes the host-reset construction
 // - clear(r: f32, g: f32, b: f32, a: f32): clears frame buffer
 // - draw_line(x1: f32, y1: f32, x2: f32, y2: f32, r: f32, g: f32, b: f32, a: f32)
 // - Sprite.load_sprite_from(path: string, width: i32, height: i32) -> bool
@@ -3022,7 +3022,6 @@ function tick(): i32 {
     handle_pointer_input();
     record_tap_pulses();
 
-    begin_frame();
     clear(0.05, 0.05, 0.15, 1.0);
 
     let delta_ms: i32 = compute_delta_ms();
@@ -3093,7 +3092,6 @@ function render(): i32 {
         return 1;
     }
 
-    begin_frame();
     clear(0.05, 0.05, 0.15, 1.0);
     draw_frame();
     end_frame();

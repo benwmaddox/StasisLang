@@ -11,7 +11,7 @@ import "../asset_tasks.stasis";
 
 const GFX_CMD_MAGIC: i32 = 1196967473; // 0x47584631 ('GXF1')
 
-const GFX_CMD_VERSION: i32 = 7;
+const GFX_CMD_VERSION: i32 = 8;
 
 // i32 header indices
 const GFX_I_MAGIC: i32 = 0;
@@ -119,6 +119,8 @@ global gfx_sprite_writer_blend: i32;
 global gfx_sprite_writer_filter: i32;
 global gfx_sprite_writer_pass: i32;
 global gfx_sprite_writer_flags: i32;
+global gfx_frame_construction_active: bool;
+global gfx_frame_construction_invalid: bool;
 
 // Begin a new frame, resetting all counts (typical immediate-mode usage).
 function @inline gfx_cmd_begin(): void {
@@ -145,6 +147,39 @@ function @inline gfx_cmd_begin(): void {
     gfx_cmd_i32[GFX_I_DROPPED_CLIPS] = 0;
     gfx_cmd_i32[GFX_I_SPRITE_RUN_COUNT] = 0;
     gfx_cmd_i32[GFX_I_DROPPED_SPRITE_RUNS] = 0;
+}
+
+// Generated host entries use these helpers around exactly one render call.
+// The public begin_frame wrapper remains available for legacy/manual builders.
+function @internal gfx_cmd_construction_reset(): void {
+    gfx_cmd_begin();
+    gfx_frame_construction_invalid = false;
+    gfx_frame_construction_active = true;
+}
+
+function @internal gfx_cmd_manual_begin(): void {
+    if (gfx_frame_construction_active) {
+        gfx_frame_construction_invalid = true;
+        return;
+    }
+    gfx_cmd_begin();
+}
+
+function @internal gfx_cmd_construction_finish(render_result: i32): i32 {
+    if (
+        !gfx_frame_construction_active
+        || gfx_frame_construction_invalid
+        || render_result != 0
+        || gfx_sprite_writer_token != 0
+        || gfx_cmd_i32[GFX_I_FLAGS] < GFX_FLAG_PRESENT
+    ) {
+        gfx_frame_construction_active = false;
+        // Abort makes every partial command unreachable and invalidates writers.
+        gfx_cmd_begin();
+        return render_result;
+    }
+    gfx_frame_construction_active = false;
+    return 0;
 }
 
 function @inline gfx_cmd_append_order(kind: i32, index: i32): bool {
@@ -185,7 +220,11 @@ function @inline gfx_cmd_clip_pop(): void {
 }
 
 function @inline gfx_cmd_clear(r: f32, g: f32, b: f32, a: f32): void {
-    gfx_cmd_i32[GFX_I_FLAGS] = GFX_FLAG_CLEAR;
+    if (gfx_cmd_i32[GFX_I_FLAGS] == GFX_FLAG_PRESENT) {
+        gfx_cmd_i32[GFX_I_FLAGS] = GFX_FLAG_CLEAR + GFX_FLAG_PRESENT;
+    } else if (gfx_cmd_i32[GFX_I_FLAGS] == 0) {
+        gfx_cmd_i32[GFX_I_FLAGS] = GFX_FLAG_CLEAR;
+    }
     gfx_cmd_f32[GFX_F_CLEAR_R] = r;
     gfx_cmd_f32[GFX_F_CLEAR_G] = g;
     gfx_cmd_f32[GFX_F_CLEAR_B] = b;
@@ -531,11 +570,13 @@ function gfx_cmd_text_cached(font: i32, run_handle: i32, x: f32, y: f32, r: f32,
 }
 
 function @inline gfx_cmd_submit(): void {
-    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
+    if (gfx_cmd_i32[GFX_I_FLAGS] < GFX_FLAG_PRESENT) {
+        gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
+    }
 }
 
 function @inline gfx_cmd_mark_present(): void {
-    gfx_cmd_i32[GFX_I_FLAGS] = gfx_cmd_i32[GFX_I_FLAGS] + GFX_FLAG_PRESENT;
+    gfx_cmd_submit();
 }
 
 function @inline gfx_cmd_line_count(): i32 {

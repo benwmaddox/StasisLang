@@ -29,10 +29,37 @@ Each page solves one system problem for one style of game.
 ## Focused references
 
 - [Geometry and collision](geometry-and-collision.md)
+- [Loading screens around asset IO](loading-screens.md)
 - [Semantic edit and validation](semantic-edit-and-validation.md)
 
 ## Executable backing
 
 The Stasis snippets come from the source and test files under `examples/`.
-Run `stasis format --check`, `stasis check`, and `stasis test` from
-`examples/` after changing a snippet or its backing behavior.
+Keep both the source documentation and `vendor/stasis` immutable. Copy the
+example project to a separate workspace under `build`, then initialize its
+own vendor snapshot before running it. From a generated project root:
+
+```powershell
+New-Item -ItemType Directory -Force build/knowledge-examples
+Copy-Item -Recurse vendor/stasis/docs/examples/* build/knowledge-examples
+stasis --workspace build/knowledge-examples vendor update
+stasis --workspace build/knowledge-examples format --check
+stasis --workspace build/knowledge-examples check
+stasis --workspace build/knowledge-examples test
+```
+
+```sh
+mkdir -p build/knowledge-examples
+cp -R vendor/stasis/docs/examples/. build/knowledge-examples/
+stasis --workspace build/knowledge-examples vendor update
+stasis --workspace build/knowledge-examples format --check
+stasis --workspace build/knowledge-examples check
+stasis --workspace build/knowledge-examples test
+```
+
+In a Stasis checkout, use `docs/knowledge/examples` as the copy source instead.
+The example uses public `/vendor/stasis/stdlib/` imports, which remain inside
+the shipped package during vendor validation. `vendor update` installs the
+selected toolchain into the copied workspace's `vendor/stasis`, outside the
+original fingerprinted snapshot. Run these commands only in the copy: installing
+a vendor inside the source documentation would contaminate future packages.

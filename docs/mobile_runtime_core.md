@@ -42,8 +42,10 @@ The shared shell targets 60 deterministic steps per second independently of
 the display refresh rate. Vsync time counts toward the frame interval, so a
 60 Hz display does not receive an unconditional extra delay while 90 Hz and
 120 Hz displays cannot accelerate game time. If suspension or overload misses
-a complete interval, the pacer resets its absolute deadline and never runs a
-burst of catch-up ticks.
+a complete interval, the completed step owns the current interval: the pacer
+returns a full interval of sleep before the following tick and stores the
+deadline two intervals ahead. Subsequent steps resume normal absolute-deadline
+pacing without a burst of catch-up ticks.
 
 The generated AOT symbol header declares `main`, `tick`, and `render` as
 `int32_t(void)` and is the source of the actual symbol names. The runtime turns

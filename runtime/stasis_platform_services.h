@@ -10,6 +10,40 @@ extern "C" {
 #define STASIS_PLATFORM_SERVICE_QUEUE_CAPACITY 16
 #define STASIS_PLATFORM_SERVICE_KEY_CAPACITY 128
 #define STASIS_PLATFORM_SERVICE_TEXT_CAPACITY 512
+#define STASIS_EXTERNAL_URL_MAX_BYTES 2048
+
+typedef int (*StasisExternalUrlOpener)(
+    const char *url,
+    int32_t length,
+    void *user_data
+);
+
+typedef struct StasisExternalUrlActionState {
+    int32_t gesture_available;
+    int32_t disabled;
+} StasisExternalUrlActionState;
+
+/* Returns 1 only for a bounded, well-formed http:// or https:// URL. */
+int stasis_external_url_validate(const char *url, int32_t length);
+
+/* Replaces the previous frame's authority with one real input-edge budget. */
+void stasis_external_url_action_begin_frame(
+    StasisExternalUrlActionState *state,
+    int32_t has_input_edge,
+    int32_t disabled
+);
+
+/* Clears authority before lifecycle transitions and non-guest callbacks. */
+void stasis_external_url_action_clear(StasisExternalUrlActionState *state);
+
+/* Returns -1 invalid, 0 ignored/unavailable, or 1 accepted by the host. */
+int stasis_external_url_action_request(
+    StasisExternalUrlActionState *state,
+    const char *url,
+    int32_t length,
+    StasisExternalUrlOpener opener,
+    void *user_data
+);
 
 enum StasisPlatformServiceSubmitResult {
     STASIS_PLATFORM_SERVICE_SUBMIT_INVALID = -1,

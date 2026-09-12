@@ -126,6 +126,48 @@ Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeReadNetworkJoinUrl(
     return (*env)->NewStringUTF(env, url);
 }
 
+JNIEXPORT jint JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeProvisionNetworkClient(
+    JNIEnv *env,
+    jclass activity,
+    jstring value
+) {
+    (void)activity;
+#if defined(STASIS_NETWORK_CLIENT_ENABLED)
+    if (value == NULL) return -1;
+    const char *join_url = (*env)->GetStringUTFChars(env, value, NULL);
+    if (join_url == NULL) return -1;
+    size_t length = strlen(join_url);
+    int32_t result = stasis_mobile_network_client_provision(join_url, length);
+    (*env)->ReleaseStringUTFChars(env, value, join_url);
+    if (result == 0) result = stasis_mobile_network_client_connect();
+    return result;
+#else
+    (void)env; (void)value;
+    return -4;
+#endif
+}
+
+JNIEXPORT jint JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetNetworkClientBackground(
+    JNIEnv *env,
+    jclass activity,
+    jboolean background
+) {
+    (void)env; (void)activity;
+    return stasis_mobile_network_client_set_background(
+        background == JNI_TRUE ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeShutdownNetworkClient(
+    JNIEnv *env,
+    jclass activity
+) {
+    (void)env; (void)activity;
+    stasis_mobile_network_client_shutdown();
+}
+
 JNIEXPORT jboolean JNICALL
 Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeReadPerformanceMetrics(
     JNIEnv *env,

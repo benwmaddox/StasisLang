@@ -16,7 +16,6 @@ function tick(): i32 {
 
 function render(): i32 {
     seam_render_calls = seam_render_calls + 1;
-    begin_frame();
     clear(0.7, 0.1, 0.1, 1.0);
     end_frame();
     return 43;

@@ -3,9 +3,13 @@ package @STASIS_PACKAGE_ID@;
 import android.content.res.AssetManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Intent;
+import android.content.ComponentName;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageInfo;
+import android.content.ActivityNotFoundException;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -17,10 +21,12 @@ import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import com.stasislang.shell.StasisAssetCache;
+import com.stasislang.shell.NetworkJoinPolicy;
 import org.libsdl.app.SDLActivity;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 public final class MainActivity extends SDLActivity {
     private static final String STASIS_ANDROID_ORIENTATION = "@STASIS_ANDROID_ORIENTATION@";
@@ -28,6 +34,9 @@ public final class MainActivity extends SDLActivity {
     private static final long HUD_UPDATE_INTERVAL_MS = 200L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final boolean STASIS_NETWORK_ENABLED = @STASIS_NETWORK_ENABLED@ != 0;
+    private static final boolean STASIS_NETWORK_CLIENT_ENABLED =
+            @STASIS_NETWORK_CLIENT_ENABLED@ != 0;
+    private static final String NETWORK_JOIN_URL_EXTRA = "stasis.network_join_url";
 
     private static native void nativeSetAssetRoot(String path);
     private static native void nativeSetAssetVerificationError(String diagnostic);
@@ -37,6 +46,9 @@ public final class MainActivity extends SDLActivity {
     private static native void nativeSetPerformanceMetricsEnabled(boolean enabled);
     private static native String nativeReadRuntimeError();
     private static native String nativeReadNetworkJoinUrl();
+    private static native int nativeProvisionNetworkClient(String joinUrl);
+    private static native int nativeSetNetworkClientBackground(boolean background);
+    private static native void nativeShutdownNetworkClient();
 
     private final Handler hudHandler = new Handler(Looper.getMainLooper());
     private final float[] nativePerformance = new float[14];
@@ -54,6 +66,7 @@ public final class MainActivity extends SDLActivity {
     private Runnable hudUpdater;
     private String displayedRuntimeError;
     private String startupAssetVerificationDiagnostic;
+    private volatile boolean externalUrlHostActive;
 
     @Override
     public void setOrientationBis(int width, int height, boolean resizable, String hint) {
@@ -78,6 +91,8 @@ public final class MainActivity extends SDLActivity {
     @Override
     protected void onCreate(Bundle state) {
         System.loadLibrary("main");
+        if (STASIS_NETWORK_CLIENT_ENABLED) nativeSetNetworkClientBackground(true);
+        provisionNetworkClient(getIntent());
         String seamTestId = getIntent().getStringExtra("stasis.seam_test_id");
         String assetVariant = getIntent().getStringExtra("stasis.asset_variant");
         if (BuildConfig.STASIS_SEAM_TESTS && seamTestId != null) {
@@ -143,6 +158,55 @@ public final class MainActivity extends SDLActivity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        provisionNetworkClient(intent);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (STASIS_NETWORK_CLIENT_ENABLED) nativeSetNetworkClientBackground(false);
+        externalUrlHostActive = true;
+    }
+
+    @Override
+    protected void onPause() {
+        externalUrlHostActive = false;
+        if (STASIS_NETWORK_CLIENT_ENABLED) nativeSetNetworkClientBackground(true);
+        super.onPause();
+    }
+
+    public boolean openExternalUrlFromNative(byte[] utf8Url) {
+        if (!externalUrlHostActive || utf8Url == null || utf8Url.length == 0
+                || utf8Url.length > 2048 || isFinishing()
+                || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1
+                        && isDestroyed())) {
+            return false;
+        }
+        final String url = new String(utf8Url, StandardCharsets.UTF_8);
+        final Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        intent.addCategory(Intent.CATEGORY_BROWSABLE);
+        try {
+            if (intent.resolveActivity(getPackageManager()) == null) return false;
+        } catch (RuntimeException error) {
+            return false;
+        }
+        runOnUiThread(() -> {
+            if (!externalUrlHostActive || isFinishing()
+                    || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1
+                            && isDestroyed())) return;
+            try {
+                startActivity(intent);
+            } catch (ActivityNotFoundException | SecurityException error) {
+                Log.w("Stasis", "External URL request was blocked", error);
+            }
+        });
+        return true;
+    }
+
+    @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
         if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN
                 && event.getPointerCount() >= 3) {
@@ -153,9 +217,24 @@ public final class MainActivity extends SDLActivity {
 
     @Override
     protected void onDestroy() {
+        externalUrlHostActive = false;
         nativeSetPerformanceMetricsEnabled(false);
         stopPerformanceHudUpdates();
+        if (STASIS_NETWORK_CLIENT_ENABLED) nativeShutdownNetworkClient();
         super.onDestroy();
+    }
+
+    private void provisionNetworkClient(Intent intent) {
+        if (intent == null || !intent.hasExtra(NETWORK_JOIN_URL_EXTRA)) return;
+        ComponentName component = intent.getComponent();
+        // Android enforces the signature permission on the NetworkJoin alias.
+        // The public launcher activity must never consume provisioning extras.
+        boolean trusted = STASIS_NETWORK_CLIENT_ENABLED && component != null
+                && NetworkJoinPolicy.acceptsComponent(getPackageName(),
+                        component.getPackageName(), component.getClassName());
+        String joinUrl = trusted ? intent.getStringExtra(NETWORK_JOIN_URL_EXTRA) : null;
+        intent.removeExtra(NETWORK_JOIN_URL_EXTRA);
+        if (joinUrl != null && !joinUrl.isEmpty()) nativeProvisionNetworkClient(joinUrl);
     }
 
     private void installDiagnosticOverlay() {
