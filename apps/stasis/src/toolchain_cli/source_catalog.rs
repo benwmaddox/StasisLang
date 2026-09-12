@@ -64,14 +64,10 @@ fn push(catalog: &mut String, line: &str) -> bool {
 
 pub(super) fn render(sources: &[Value]) -> Result<String, String> {
     let files = files(sources)?;
-    let mut catalog = String::from(
-        "files [id path imports(count@source) globals(count@source) structs functions tests]\n",
-    );
+    let mut catalog = String::from("files [id path]\n");
     let mut vendor = BTreeSet::new();
     for (file_id, (file, items)) in files.iter().enumerate() {
-        let (mut imports, mut globals, mut structs, mut functions, mut tests) = (0, 0, 0, 0, 0);
-        let (mut import_id, mut global_id) = (None, None);
-        for &(index, item) in items {
+        for &(_, item) in items {
             match item["target"]["kind"]
                 .as_str()
                 .ok_or("Missing source kind")?
@@ -80,8 +76,6 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
                     let parsed =
                         parse_imports(file, item["source"].as_str().ok_or("Missing source text")?)
                             .map_err(|error| error.message)?;
-                    imports = parsed.len();
-                    import_id = Some(index);
                     if file.starts_with("src/") {
                         for import in parsed {
                             if let Some(path) = import.path.strip_prefix("/vendor/") {
@@ -90,26 +84,11 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
                         }
                     }
                 }
-                "globals" => {
-                    globals = global_names(item)?.len();
-                    global_id = Some(index);
-                }
-                "struct" => structs += 1,
-                "function" => functions += 1,
-                "test" => tests += 1,
+                "globals" | "struct" | "function" | "test" => {}
                 kind => return Err(format!("Unsupported source kind: {kind}")),
             }
         }
-        let group = |count: usize, id: Option<usize>| match id {
-            Some(id) if count > 0 => format!(" {count}@{id}"),
-            _ => format!(" {count}"),
-        };
-        let line = format!(
-            "  {file_id} {}{}{} {structs} {functions} {tests}",
-            file.escape_debug(),
-            group(imports, import_id),
-            group(globals, global_id)
-        );
+        let line = format!("  f{file_id} {}", file.escape_debug());
         if !push(&mut catalog, &line) {
             push(&mut catalog, &format!("  +{} files", files.len() - file_id));
             return Ok(catalog);
@@ -123,9 +102,26 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
             }
         }
     }
-    push(&mut catalog, "symbols [file kind optional-prefix]");
-    'details: for (file_id, (_, items)) in files.iter().enumerate() {
-        for kind in ["struct", "function"] {
+    let entry = files
+        .iter()
+        .enumerate()
+        .find(|(_, (_, items))| {
+            items.iter().any(|(_, item)| {
+                item["target"]["kind"] == "function" && item["target"]["name"] == "main"
+            })
+        })
+        .or_else(|| {
+            files
+                .iter()
+                .enumerate()
+                .find(|(_, (file, _))| file.starts_with("src/"))
+        });
+    if let Some((file_id, (file, items))) = entry {
+        push(
+            &mut catalog,
+            &format!("entry f{file_id} {}", file.escape_debug()),
+        );
+        for kind in ["imports", "globals", "struct", "function", "test"] {
             let entries = items
                 .iter()
                 .filter(|(_, item)| item["target"]["kind"] == kind)
@@ -133,37 +129,78 @@ pub(super) fn render(sources: &[Value]) -> Result<String, String> {
             if entries.is_empty() {
                 continue;
             }
-            let entry_names = entries
-                .iter()
-                .map(|(_, item)| item["target"]["name"].as_str().unwrap_or_default())
-                .collect::<Vec<_>>();
-            let prefix = shared_prefix(&entry_names);
-            let suffix = if prefix.is_empty() {
-                String::new()
+            let heading = if matches!(kind, "imports" | "globals") {
+                format!("  {kind} s{}", entries[0].0)
             } else {
-                format!(" prefix={prefix}")
+                format!("  {kind}s")
             };
-            if !push(&mut catalog, &format!("  {file_id} {kind}s{suffix}")) {
-                break 'details;
-            }
-            for (position, name) in entry_names.iter().enumerate() {
-                let shown = name
-                    .strip_prefix(&prefix)
-                    .unwrap_or(name)
-                    .escape_debug()
-                    .to_string();
-                if catalog.len() + shown.len() + 7 > MAX_INITIAL_CATALOG_BYTES {
-                    push(
-                        &mut catalog,
-                        &format!("    +{}", entry_names.len() - position),
-                    );
-                    break 'details;
+            push(&mut catalog, &heading);
+            if kind == "globals" {
+                let names = global_names(entries[0].1)?;
+                for (position, name) in names.iter().enumerate() {
+                    if !push(&mut catalog, &format!("    {}", name.escape_debug())) {
+                        push(&mut catalog, &format!("    +{}", names.len() - position));
+                        break;
+                    }
                 }
-                push(&mut catalog, &format!("    {shown}"));
+            } else if !matches!(kind, "imports") {
+                for (position, (index, item)) in entries.iter().enumerate() {
+                    let name = item["target"]["name"].as_str().unwrap_or_default();
+                    if !push(
+                        &mut catalog,
+                        &format!("    s{index} {}", name.escape_debug()),
+                    ) {
+                        push(&mut catalog, &format!("    +{}", entries.len() - position));
+                        break;
+                    }
+                }
+            }
+        }
+        let examples = items
+            .iter()
+            .filter(|(_, item)| {
+                item["target"]["kind"] == "function"
+                    && matches!(
+                        item["target"]["name"].as_str(),
+                        Some("main" | "on_code_swap")
+                    )
+                    && item["source"]
+                        .as_str()
+                        .is_some_and(|source| source.len() <= 1_200)
+            })
+            .collect::<Vec<_>>();
+        if !examples.is_empty() {
+            push(&mut catalog, "examples");
+        }
+        for (index, item) in examples.into_iter().take(2) {
+            push(&mut catalog, &format!("  s{index}"));
+            for line in item["source"].as_str().unwrap_or_default().lines() {
+                if !push(&mut catalog, &format!("    {line}")) {
+                    return Ok(catalog);
+                }
             }
         }
     }
     Ok(catalog)
+}
+
+fn file_symbols(sources: &[Value], file_id: usize) -> Option<Value> {
+    let file = file_for_id(sources, file_id)?;
+    let mut listing = String::new();
+    for (index, item) in sources
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item["target"]["file"] == file)
+    {
+        let kind = item["target"]["kind"].as_str()?;
+        if matches!(kind, "imports" | "globals") {
+            writeln!(listing, "  s{index} {kind}").unwrap();
+        } else {
+            let name = item["target"]["name"].as_str()?.escape_debug();
+            writeln!(listing, "  s{index} {kind} {name}").unwrap();
+        }
+    }
+    Some(serde_json::json!({"file":file, "symbols":listing}))
 }
 
 pub(super) fn file_for_id(sources: &[Value], id: usize) -> Option<&str> {
@@ -224,7 +261,7 @@ pub(super) fn search(
             if score == 0 {
                 continue;
             }
-            let mut result = serde_json::json!({"selector":format!("source {index}"), "file_id":file_id,
+            let mut result = serde_json::json!({"selector":format!("s{index}"), "file_id":format!("f{file_id}"),
                 "file":file, "kind":item["target"]["kind"], "name":item["target"]["name"]});
             if include_source {
                 result["item"] = (*item).clone();
@@ -259,7 +296,7 @@ pub(super) fn test_names(sources: &[Value], index: usize) -> Option<Value> {
     {
         writeln!(
             names,
-            "  source {index} {}",
+            "  s{index} {}",
             item["target"]["name"].as_str()?.escape_debug()
         )
         .unwrap();
@@ -283,6 +320,13 @@ pub(super) fn inspect(
     if let Some(query) = selector.strip_prefix("search ") {
         return search(sources, query, false);
     }
+    if let Some(file_id) = selector
+        .strip_prefix('f')
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        return file_symbols(sources, file_id)
+            .ok_or_else(|| format!("Unknown source file: f{file_id}"));
+    }
     if let Some(query) = selector.strip_prefix("?+") {
         return search(sources, query, true);
     }
@@ -299,6 +343,10 @@ pub(super) fn inspect(
         let file = file_for_id(sources, file_id)
             .ok_or_else(|| format!("Unknown source file: {file_id}"))?;
         let (kind, name) = rest.split_once(' ').unwrap_or((rest, ""));
+        if kind == "symbols" && name.is_empty() {
+            return file_symbols(sources, file_id)
+                .ok_or_else(|| format!("Unknown source file: {file_id}"));
+        }
         if kind == "tests" && name.is_empty() {
             return sources
                 .iter()
@@ -320,10 +368,13 @@ pub(super) fn inspect(
                 .filter(|item| item["target"]["file"] == file && item["target"]["kind"] == kind)
                 .cloned()
                 .collect()
-        } else if matches!(kind, "function" | "struct") && !name.is_empty() {
+        } else if matches!(kind, "function" | "struct" | "test" | "tests") && !name.is_empty() {
             find_by_file_name(sources, file_id, name)
                 .into_iter()
-                .filter(|item| item["target"]["kind"] == kind)
+                .filter(|item| {
+                    item["target"]["kind"] == kind
+                        || (kind == "tests" && item["target"]["kind"] == "test")
+                })
                 .collect()
         } else {
             return Err(format!("Unknown source selector: {selector}"));

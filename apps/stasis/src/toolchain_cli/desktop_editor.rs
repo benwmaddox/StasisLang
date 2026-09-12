@@ -104,9 +104,26 @@ struct ProposalTools {
     proposals: Vec<ProviderActionProposal>,
     sources: Vec<Value>,
     existing_actions: BTreeMap<String, String>,
+    project_root: Option<PathBuf>,
 }
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 256 * 1024;
+
+fn canonicalize_proposal_payload(payload: &mut Value) {
+    let Some(edits) = payload.get_mut("edits").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for edit in edits {
+        if edit.get("operation").and_then(Value::as_str) != Some("add") {
+            continue;
+        }
+        if let Some(target) = edit.get_mut("target").and_then(Value::as_object_mut) {
+            target.remove("symbol_id");
+            target.remove("owner");
+            target.remove("signature");
+        }
+    }
+}
 
 impl ProposalTools {
     fn validate_proposal(
@@ -164,7 +181,14 @@ impl ProposalTools {
                 description,
                 payload.clone(),
             )
-            .map_err(|error| format!("invalid proposal: {error}"))
+            .map_err(|error| format!("invalid proposal: {error}"))?;
+        if let Some(root) = &self.project_root {
+            let preview = super::desktop_preview_semantic_batch(root, payload.clone())
+                .map_err(|error| format!("proposal does not parse or resolve: {error}"))?;
+            super::desktop_validate_semantic_preview(root, &preview)
+                .map_err(|error| format!("proposal does not compile and pass tests: {error}"))?;
+        }
+        Ok(())
     }
 
     fn source_catalog(&self) -> Result<Value, String> {
@@ -208,11 +232,12 @@ impl ToolExecutor for ProposalTools {
                         .get("description")
                         .and_then(Value::as_str)
                         .ok_or_else(|| "description must be a string".to_string())?;
-                    let payload = call
+                    let mut payload = call
                         .args
                         .get("batch")
                         .cloned()
                         .ok_or_else(|| "batch is required".to_string())?;
+                    canonicalize_proposal_payload(&mut payload);
                     if payload
                         .get("edits")
                         .and_then(Value::as_array)
@@ -240,6 +265,12 @@ impl ToolExecutor for ProposalTools {
                 }
             })
             .collect()
+    }
+
+    fn terminal_success(&self) -> Option<String> {
+        self.proposals
+            .last()
+            .map(|proposal| proposal.description.clone())
     }
 }
 
@@ -373,7 +404,7 @@ fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> Provi
 
 fn effective_reasoning_effort(config: &ProviderConfig) -> String {
     if matches!(config, ProviderConfig::OpenRouter(_)) {
-        "low".to_string()
+        "medium".to_string()
     } else {
         std::env::var("STASIS_AI_REASONING_EFFORT")
             .ok()
@@ -558,6 +589,7 @@ fn run_reply_provider_with_config(
     let source_context = super::desktop_source_context(&project_root)?;
     let mut tools = ProposalTools {
         sources: source_context,
+        project_root: Some(project_root.clone()),
         existing_actions: request
             .actions
             .iter()
@@ -597,8 +629,8 @@ fn run_reply_provider_with_config(
     let initial_context = Value::String(initial_context);
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Solve the task with tools. Stasis is typed and C-like: import, struct, global, function, test `name`(): bool. Follow local syntax; invent no APIs. Catalog IDs are hypermedia leads: follow them for current source and canonical targets, then continue with newly revealed lookups or file changes. Rows follow declared columns; N@R means count N with source link R. prefix= prepends nested names. inspect_source accepts source N; file N function/struct name; file N imports/globals/tests; search terms; or search-source terms. Batch every independent call and all related code/tests. Wait for prerequisites; never guess. Preserve live state; use on_code_swap only for requested migration. Submit at most one atomic proposal; the editor applies, hot-swaps, and tests it. Use repair only for rejected work. Return only response-contract JSON.".to_string(),
-        max_turns: 4,
+        instruction: "Solve the task with tools. Stasis is typed and C-like: import, struct, global, function, test `name`(): bool. No array literals or collection iteration; copy local loop forms. Follow local syntax; invent no APIs. Catalog IDs are hypermedia leads. IDs are one letter plus digits: for example, f6 lists that file's symbols and s203 returns exact source. Copy a shown ID exactly; fN and sN are not IDs. Continue with newly revealed links or file changes. search TERMS returns matching links; search-source TERMS includes top bodies. Before adding, inspect one same-kind source in the target file. Batch every independent call and all related code/tests. Wait for prerequisites; never guess. Preserve live state. Use on_code_swap when the requested change needs migration or immediate visual setup; change only the minimum state, such as player position or phase, needed to reveal it. Submit at most one atomic proposal; the editor applies, hot-swaps, and tests it. Use repair only for rejected work. Return only response-contract JSON.".to_string(),
+        max_turns: 8,
         compact_request: true,
         ..AgentProfile::default()
     };
@@ -614,6 +646,15 @@ fn run_reply_provider_with_config(
         proposal_tool_specs(),
         &canceled,
         |event| {
+            #[cfg(test)]
+            if std::env::var_os("STASIS_EDITOR_OPENROUTER_TRACE").is_some()
+                && matches!(
+                    &event,
+                    AgentEvent::ToolBatch(_) | AgentEvent::Observations(_)
+                )
+            {
+                eprintln!("OpenRouter editor event: {event:?}");
+            }
             if let AgentEvent::Observations(observations) = &event {
                 last_tool_error = observations
                     .iter()
@@ -7638,7 +7679,7 @@ mod tests {
 
         assert_eq!(state.provider.as_deref(), Some("openrouter"));
         assert_eq!(state.model.as_deref(), Some("example/model"));
-        assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(state.reasoning_effort.as_deref(), Some("medium"));
         assert!(matches!(
             state.routing,
             RoutingState::Assigned { route } if route == "openrouter:cerebras"
@@ -7753,6 +7794,48 @@ mod tests {
 
         assert_eq!(tools.proposals.len(), 1);
         assert!(observations[0].error.is_none());
+    }
+
+    #[test]
+    fn proposal_tools_canonicalize_new_symbol_targets_and_finish_immediately() {
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "propose_semantic_edit".to_string(),
+                args: json!({
+                    "proposal_id": "add-test",
+                    "description": "Add a test",
+                    "batch": {
+                        "schema_version": 1,
+                        "edits": [{
+                            "operation": "add",
+                            "target": {
+                                "file": "tests/main.test.stasis",
+                                "kind": "test",
+                                "name": "new test",
+                                "owner": "Tests",
+                                "signature": "test `new test`",
+                                "symbol_id": null
+                            },
+                            "new_source": "test `new test`(): bool { return true; }"
+                        }]
+                    }
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0].error.is_none());
+        let target = &tools.proposals[0].payload["edits"][0]["target"];
+        assert_eq!(
+            target,
+            &json!({
+                "file": "tests/main.test.stasis",
+                "kind": "test",
+                "name": "new test"
+            })
+        );
+        assert_eq!(tools.terminal_success().as_deref(), Some("Add a test"));
     }
 
     #[test]

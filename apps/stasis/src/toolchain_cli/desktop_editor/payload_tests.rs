@@ -59,6 +59,7 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
                 Err(error) => panic!("capture listener: {error}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -122,12 +123,12 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
     assert!(content.contains("\ntools:\n"));
     assert!(content.contains("\tinspect_source\tselector\t"));
     assert!(content.contains("Catalog IDs are hypermedia leads"));
-    assert!(content.contains("file N function/struct name"));
+    assert!(content.contains("f6 lists that file's symbols"));
     assert!(content.ends_with(expected_catalog.as_str().unwrap()));
     assert!(expected_catalog
         .as_str()
         .unwrap()
-        .starts_with("files [id path imports(count@source)"));
+        .starts_with("files [id path]"));
     assert!(expected_catalog.as_str().unwrap().len() <= 5_000);
     assert_eq!(body["response_format"]["type"], "json_schema");
     if let Some(output) = std::env::var_os("STASIS_EDITOR_PAYLOAD_OUTPUT") {
@@ -150,4 +151,88 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
     if project.is_none() {
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+// Opt-in paid acceptance. It uses the production OpenRouter/editor path but stops at a proposal.
+#[test]
+fn openrouter_follows_readable_catalog_links_into_a_valid_proposal() {
+    let Some(root) =
+        std::env::var_os("STASIS_EDITOR_OPENROUTER_EFFECTIVE_PROJECT").map(PathBuf::from)
+    else {
+        return;
+    };
+    let before = super::super::desktop_source_context(&root).unwrap();
+    let config = stasis_ai::OpenRouterConfig::from_workspace(&root).unwrap();
+    let model = config.model.clone();
+    let objective = "Add one focused test named `opposite_direction_round_trip` in tests/maze.test.stasis that verifies applying maze_opposite_direction twice returns the original direction. Preserve production code. Inspect the existing maze_opposite_direction function and nearby tests before proposing the single atomic change.";
+    let mut session = TaskSession::new();
+    session
+        .new_task("readable-catalog-live", objective, "RootbeerMaze3")
+        .unwrap();
+    let task = session.active_task_mut().unwrap();
+    task.connection = ConnectionState::Connected;
+    task.select_provider(ProviderSelection::OpenRouter).unwrap();
+
+    let provider_root = root.clone();
+    let provider_config = config.clone();
+    let (sent, received) = mpsc::channel();
+    let controller = TaskController::new(move |request, canceled| {
+        let result = run_reply_provider_with_config(
+            request,
+            canceled,
+            provider_root.clone(),
+            None,
+            ProviderConfig::OpenRouter(provider_config.clone()),
+            |_| {},
+        );
+        sent.send(result.clone()).unwrap();
+        result
+    });
+    let started = Instant::now();
+    controller.send_active(&mut session).unwrap();
+    let reply = received
+        .recv_timeout(Duration::from_secs(5 * 60))
+        .expect("OpenRouter editor response timed out")
+        .expect("OpenRouter editor response failed");
+
+    let report = json!({
+        "model": model,
+        "summary": reply.text,
+        "input_tokens": reply.usage.input_tokens,
+        "output_tokens": reply.usage.output_tokens,
+        "estimated_cost_usd": reply.usage.estimated_cost_micros as f64 / 1_000_000.0,
+        "elapsed_ms": started.elapsed().as_millis(),
+        "proposals": reply.proposals.iter().map(|proposal| json!({
+            "id": proposal.id,
+            "description": proposal.description,
+            "repair": proposal.repair,
+            "payload": proposal.payload,
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(path) = std::env::var_os("STASIS_EDITOR_OPENROUTER_EFFECTIVE_OUTPUT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    eprintln!("OpenRouter readable-catalog acceptance: {report}");
+
+    assert!(
+        reply.usage.estimated_cost_micros <= 5_000_000,
+        "OpenRouter acceptance exceeded the authorized $5 budget"
+    );
+    assert_eq!(reply.proposals.len(), 1, "expected one atomic proposal");
+    let edits = reply.proposals[0].payload["edits"]
+        .as_array()
+        .expect("semantic proposal edits");
+    assert_eq!(edits.len(), 1, "expected one test-only edit");
+    let edit = &edits[0];
+    assert_eq!(edit["operation"], "add");
+    assert_eq!(edit["target"]["file"], "tests/maze.test.stasis");
+    assert_eq!(edit["target"]["name"], "opposite_direction_round_trip");
+    let source = edit["new_source"].as_str().expect("proposed test source");
+    assert!(source.starts_with("test `opposite_direction_round_trip`()"));
+    assert!(source.matches("maze_opposite_direction").count() >= 2);
+    assert_eq!(
+        super::super::desktop_source_context(&root).unwrap(),
+        before,
+        "proposal-only acceptance changed RootbeerMaze3"
+    );
 }

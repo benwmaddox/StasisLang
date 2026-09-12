@@ -42,12 +42,17 @@ fn compact_catalog_lists_imports_and_names_but_loads_details_on_demand() {
     };
     let catalog = tools.source_catalog().unwrap();
     let text = catalog.as_str().unwrap();
-    assert!(text.contains("src/main.stasis 1@"));
-    assert!(text.contains(" 2@"));
-    assert!(text.contains("  1 structs\n    Player\n"));
-    assert!(text.contains("  1 functions\n    main\n"));
+    assert!(text.contains("  f1 src/main.stasis\n"));
+    assert!(text.contains("entry f1 src/main.stasis\n"));
+    assert!(text.contains("  imports s"));
+    assert!(text.contains("  globals s"));
+    assert!(text.contains("    player\n"));
+    assert!(text.contains("    LIMIT\n"));
+    assert!(text.contains("  structs\n    s"));
+    assert!(text.contains(" Player\n"));
+    assert!(text.contains("  functions\n    s"));
+    assert!(text.contains(" main\n"));
     assert!(!text.contains("helper.stasis\n    "));
-    assert!(!text.contains("    player\n"));
     assert!(!text.contains("hp"));
     assert!(!text.contains("signature"));
     assert!(!text.contains("symbol_id"));
@@ -104,8 +109,19 @@ fn compact_selectors_read_prefixed_functions_and_search_deferred_globals() {
     assert!(catalog
         .as_str()
         .unwrap()
-        .contains("functions prefix=render_\n    draw_background\n"));
-    assert!(!catalog.as_str().unwrap().contains("background_blue"));
+        .contains("functions\n    s1 render_draw_background\n    s2 render_load_sprite\n"));
+    assert!(catalog.as_str().unwrap().contains("background_blue"));
+    let symbols = tools
+        .inspect_source(&json!({"selector":"file 0 symbols"}))
+        .unwrap();
+    assert_eq!(
+        tools.inspect_source(&json!({"selector":"f0"})).unwrap(),
+        symbols
+    );
+    assert!(symbols["symbols"]
+        .as_str()
+        .unwrap()
+        .contains("s1 function render_draw_background"));
     assert_eq!(
         tools
             .inspect_source(&json!({"selector":"file 0 function draw_background"}))
@@ -137,7 +153,7 @@ fn compact_selectors_read_prefixed_functions_and_search_deferred_globals() {
     let found = tools
         .inspect_source(&json!({"selector":"search-source background pattern"}))
         .unwrap();
-    assert_eq!(found[0]["selector"], "source 0");
+    assert_eq!(found[0]["selector"], "s0");
     assert!(found[0]["item"]["source"]
         .as_str()
         .unwrap()
@@ -156,7 +172,7 @@ fn compact_read_ids_disambiguate_duplicate_names_and_reject_invalid_ids() {
     };
     assert_eq!(
         tools.source_catalog().unwrap(),
-        "files [id path imports(count@source) globals(count@source) structs functions tests]\n  0 src/main.stasis 0 0 0 2 0\nsymbols [file kind optional-prefix]\n  0 functions\n    same\n    same\n"
+        "files [id path]\n  f0 src/main.stasis\nentry f0 src/main.stasis\n  functions\n    s0 same\n    s1 same\n"
     );
     assert_eq!(
         tools
@@ -208,21 +224,30 @@ fn compact_catalog_defers_test_names_and_preserves_exact_read_targets() {
     };
     assert_eq!(
         tools.source_catalog().unwrap(),
-        "files [id path imports(count@source) globals(count@source) structs functions tests]\n  0 src/main.stasis 0 0 0 0 2\nsymbols [file kind optional-prefix]\n"
+        "files [id path]\n  f0 src/main.stasis\nentry f0 src/main.stasis\n  tests\n    s0 first case\n    s1 second case\n"
     );
     let names = tools
         .read_source_symbol(&json!({"symbol_id":"t0"}))
         .unwrap();
-    assert_eq!(
-        names["tests"],
-        "  source 0 first case\n  source 1 second case\n"
-    );
+    assert_eq!(names["tests"], "  s0 first case\n  s1 second case\n");
     assert!(!names.to_string().contains("return"));
     assert_eq!(
         tools
             .inspect_source(&json!({"selector":"file 0 tests"}))
             .unwrap(),
         names
+    );
+    assert_eq!(
+        tools
+            .inspect_source(&json!({"selector":"file 0 test second case"}))
+            .unwrap(),
+        second
+    );
+    assert_eq!(
+        tools
+            .inspect_source(&json!({"selector":"file 0 tests second case"}))
+            .unwrap(),
+        second
     );
     assert_eq!(
         tools
@@ -249,7 +274,7 @@ fn source_context_catalog_bounds_large_snapshot_without_discarding_source() {
     let catalog = tools.source_catalog().unwrap();
     assert_eq!(
         catalog,
-        "files [id path imports(count@source) globals(count@source) structs functions tests]\n  0 src/main.stasis 0 0 0 2 0\nsymbols [file kind optional-prefix]\n  0 functions\n    first\n    second\n"
+        "files [id path]\n  f0 src/main.stasis\nentry f0 src/main.stasis\n  functions\n    s0 first\n    s1 second\n"
     );
     assert!(serde_json::to_vec(&catalog).unwrap().len() < 1024);
     let observations = tools.execute(
@@ -382,7 +407,7 @@ fn source_context_agent_reads_before_proposing_without_applying() {
         |_| {},
     )
     .unwrap();
-    assert_eq!(result, "Ready for acceptance.");
+    assert_eq!(result, "Update value");
     assert_eq!(tools.proposals.len(), 1);
     assert_eq!(tools.sources, vec![original]);
 }
