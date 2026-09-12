@@ -1,16 +1,13 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
+    [ValidateSet('add', 'remove')]
+    [string] $Mode = 'add',
     [string] $Certificate,
     [Parameter(Mandatory = $true)]
     [string] $ExpectedThumbprint
 )
 
 $ErrorActionPreference = 'Stop'
-
-if (-not (Test-Path -LiteralPath $Certificate -PathType Leaf)) {
-    throw "signing certificate does not exist: $Certificate"
-}
 
 function Invoke-BoundedNativeCommand([string] $Label, [string] $Executable, [string[]] $Arguments) {
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
@@ -37,8 +34,19 @@ function Invoke-BoundedNativeCommand([string] $Label, [string] $Executable, [str
     }
 }
 
-$openssl = (Get-Command openssl.exe -ErrorAction Stop).Source
 $certutil = (Get-Command certutil.exe -ErrorAction Stop).Source
+if ($Mode -eq 'remove') {
+    Invoke-BoundedNativeCommand 'temporary signer root trust removal' $certutil @(
+        '-user', '-f', '-silent', '-delstore', 'Root', $ExpectedThumbprint
+    )
+    exit 0
+}
+
+if (-not (Test-Path -LiteralPath $Certificate -PathType Leaf)) {
+    throw "signing certificate does not exist: $Certificate"
+}
+
+$openssl = (Get-Command openssl.exe -ErrorAction Stop).Source
 $publicPem = Join-Path $env:RUNNER_TEMP "stasis-signing-public.pem"
 $publicDer = Join-Path $env:RUNNER_TEMP "stasis-signing-public.cer"
 try {
@@ -63,7 +71,7 @@ try {
     }
 
     Invoke-BoundedNativeCommand 'temporary signer root trust' $certutil @(
-        '-user', '-f', '-addstore', 'Root', $publicDer
+        '-user', '-f', '-silent', '-addstore', 'Root', $publicDer
     )
 } finally {
     Remove-Item -LiteralPath $publicPem, $publicDer -Force -ErrorAction SilentlyContinue
