@@ -62,7 +62,7 @@ Copy-Item -Force (Join-Path $scriptRoot "codex_native\Cargo.toml") (Join-Path $w
 Copy-Item -Force (Join-Path $scriptRoot "codex_native\src\lib.rs") (Join-Path $wrapperRoot "src\lib.rs")
 New-Item -ItemType Directory -Force (Join-Path $sharedAiRoot "src") | Out-Null
 Copy-Item -Force (Join-Path $repoRoot "crates\stasis_ai\Cargo.toml") (Join-Path $sharedAiRoot "Cargo.toml")
-Copy-Item -Force (Join-Path $repoRoot "crates\stasis_ai\src\lib.rs") (Join-Path $sharedAiRoot "src\lib.rs")
+Copy-Item -Force -Recurse (Join-Path $repoRoot "crates\stasis_ai\src\*") (Join-Path $sharedAiRoot "src")
 $sharedManifest = Join-Path $sharedAiRoot "Cargo.toml"
 $sharedCargo = Get-Content -Raw $sharedManifest
 $sharedCargo = $sharedCargo.Replace('version.workspace = true', 'version = "0.1.0"')
@@ -77,6 +77,8 @@ $wrapperCargo = $wrapperCargo.Replace('../../../crates/stasis_ai', '../stasis-ai
 Set-Content -NoNewline -Path $wrapperManifest -Value $wrapperCargo
 
 $env:CARGO_INCREMENTAL = "0"
+$codexTargetRoot = Join-Path $scriptRoot "target"
+$env:CARGO_TARGET_DIR = $codexTargetRoot
 $profileArgs = @()
 $profileDir = "debug"
 if ($Release) {
@@ -109,7 +111,7 @@ foreach ($abi in $Abis) {
     cargo +1.95.0 build --manifest-path (Join-Path $wrapperRoot "Cargo.toml") --target $rustTarget @profileArgs
     if ($LASTEXITCODE -ne 0) { throw "Codex Android native build failed with exit code $LASTEXITCODE" }
 
-    $source = Join-Path $codexRustRoot "target\$rustTarget\$profileDir\libstasis_codex_android.so"
+    $source = Join-Path $codexTargetRoot "$rustTarget\$profileDir\libstasis_codex_android.so"
     if (-not (Test-Path $source)) { throw "Codex Android library was not produced: $source" }
     $destDir = Join-Path $scriptRoot "app\src\workshop\jniLibs\$abi"
     New-Item -ItemType Directory -Force $destDir | Out-Null

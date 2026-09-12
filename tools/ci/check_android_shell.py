@@ -8,6 +8,7 @@ REQUIRED_FILES = [
     "mobile/android/settings.gradle",
     "mobile/android/build.gradle",
     "mobile/android/build_rust_bridge.ps1",
+    "mobile/android/build_codex_native.ps1",
     "mobile/android/rust_bridge_provenance.ps1",
     "mobile/android/build_release.ps1",
     "mobile/android/validate_device.ps1",
@@ -153,6 +154,7 @@ def main() -> int:
     assert "artifact_kind=executable-memory" in bridge
 
     rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
+    codex_native_script = read("mobile/android/build_codex_native.ps1")
     rust_bridge_provenance = read("mobile/android/rust_bridge_provenance.ps1")
     debug_script = read("mobile/android/build_debug.ps1")
     emulator_script = read("mobile/android/start_emulator.ps1")
@@ -180,6 +182,9 @@ def main() -> int:
     assert "libstasis_android_bridge.so" in rust_bridge_script
     assert 'Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $scriptRoot "app") "src") "workshop") "jniLibs") $abi' in rust_bridge_script
     assert "cargo_cache.py" in rust_bridge_script
+    assert 'crates\\stasis_ai\\src\\*' in codex_native_script
+    assert '$codexTargetRoot = Join-Path $scriptRoot "target"' in codex_native_script
+    assert '$env:CARGO_TARGET_DIR = $codexTargetRoot' in codex_native_script
     assert 'build_rust_bridge.ps1") -Release' in debug_script
     assert ":app:assembleWorkshopDebug" in debug_script
     assert "package-mobile" in release_script
@@ -215,6 +220,10 @@ def main() -> int:
     assert "prepareWorkshopAssets" in app_gradle
     assert "workshop_sample/build/**" in app_gradle
     assert "exploration_sample/build/**" in app_gradle
+
+    native_smoke = read("mobile/android/app/src/main/cpp/stasis_mobile_smoke.c")
+    assert '#define STASIS_WORKSHOP_HOST_ENTRY "src/host.stasis"' in native_smoke
+    assert "stasis_workshop_runtime_entry(project_root)" in native_smoke
 
     manifest = read("mobile/android/app/src/main/AndroidManifest.xml")
     styles = read("mobile/android/app/src/main/res/values/styles.xml")

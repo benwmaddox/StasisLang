@@ -4447,6 +4447,18 @@ function tick(): void {}
         )
     }
 
+    fn stage_bundled_exploration_sample() -> PathBuf {
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mobile/android/app/src/main/assets/exploration_sample")
+            .canonicalize()
+            .expect("bundled exploration root");
+        stage_project_with_stdlib(
+            &sample,
+            "bundled_exploration",
+            Path::new("vendor/stasis/src/stdlib"),
+        )
+    }
+
     fn stage_render_parity_sample() -> PathBuf {
         let sample = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../samples/render_parity")
@@ -6290,14 +6302,11 @@ function tick(): void {}
     fn android_exploration_template_accepts_touch_and_exports_render_commands() {
         let _guard = bridge_runtime_test_guard();
         clear_runtime_session_for_test();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../mobile/android/app/src/main/assets/exploration_sample")
-            .canonicalize()
-            .expect("exploration template root");
+        let root = stage_bundled_exploration_sample();
 
         let result = run_android_workshop_tick(
             &root,
-            Path::new("src/main.stasis"),
+            Path::new("src/host.stasis"),
             AndroidBridgeTickInput {
                 touch_x: 90,
                 touch_y: 180,
@@ -6321,6 +6330,7 @@ function tick(): void {}
         assert_eq!(result.render_commands[5].asset, 476_662_006);
         assert!(result.observed_game_tick_count >= 1);
         clear_runtime_session_for_test();
+        fs::remove_dir_all(&root).ok();
     }
     #[test]
     fn android_bundled_touch_pong_enemy_paddle_speed_schedule_is_linear() {
