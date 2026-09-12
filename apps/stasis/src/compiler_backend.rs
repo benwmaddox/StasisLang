@@ -4847,11 +4847,21 @@ mod tests {
         }
     }
 
-    fn disable_ambient_signing() -> (RemovedEnvironmentVariable, RemovedEnvironmentVariable) {
-        (
-            RemovedEnvironmentVariable::new("STASIS_AOT_SIGN_TOOL"),
-            RemovedEnvironmentVariable::new("STASIS_REQUIRE_SIGNED_EXECUTION"),
-        )
+    fn disable_ambient_signing() -> Vec<RemovedEnvironmentVariable> {
+        // Fake-linker fixtures emit text, never executable images.
+        [
+            "STASIS_AOT_SIGN_TOOL",
+            "STASIS_REQUIRE_SIGNED_EXECUTION",
+            "STASIS_SIGNING_MODE",
+            "STASIS_SIGNING_PROFILE",
+            "STASIS_SIGNING_CERTIFICATE",
+            "STASIS_SIGNING_CERT_THUMBPRINT",
+            "STASIS_SIGNING_LOCAL_RECORD",
+            "LOCALAPPDATA",
+        ]
+        .into_iter()
+        .map(RemovedEnvironmentVariable::new)
+        .collect()
     }
 
     #[test]
@@ -6716,6 +6726,7 @@ echo "signed" > "$1.signed"
         let _global_guard = crate::jit_test_support::lock();
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
+        let _signing_environment = disable_ambient_signing();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -6751,7 +6762,13 @@ echo "signed" > "$1.signed"
             std::env::remove_var("STASIS_AOT_SIGN_TOOL");
         }
 
-        result.expect("self-host signing run should succeed");
+        if cfg!(windows) {
+            assert!(result
+                .expect_err("a marker-only hook must not pass Authenticode verification")
+                .contains("Authenticode verification failed"));
+        } else {
+            result.expect("self-host signing run should succeed");
+        }
         let signed_marker = output_exe.with_file_name(format!(
             "{}.signed",
             output_exe
@@ -6768,6 +6785,7 @@ echo "signed" > "$1.signed"
     fn missing_optional_signer_does_not_block_unsigned_local_artifacts() {
         let _process_env_guard = stasis_process_env_lock().lock().expect("lock process env");
         let _guard = SIGN_ENV_LOCK.lock().expect("lock signer env");
+        let _signing_environment = disable_ambient_signing();
         let old_signer = std::env::var_os("STASIS_AOT_SIGN_TOOL");
         let old_required = std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION");
         let missing_signer = std::env::temp_dir().join("stasis-missing-sign-tool");

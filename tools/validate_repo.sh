@@ -4,48 +4,62 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+signing_mode="${STASIS_SIGNING_MODE:-}"
+signing_profile="${STASIS_SIGNING_PROFILE:-}"
+if [[ "${OS:-}" == Windows_NT && "${signing_mode,,}" != production && "${signing_profile,,}" != production && -n "${STASIS_AOT_SIGN_TOOL:-}" ]]; then
+  unset STASIS_AOT_SIGN_TOOL
+  export STASIS_REQUIRE_SIGNED_EXECUTION=1
+fi
+
+PYTHON="$(command -v python3 || command -v python)"
+
 if [[ -f "$HOME/.cargo/env" ]]; then
   source "$HOME/.cargo/env"
 fi
 
-python3 tools/ci/check_stasis_src_layout.py
+"$PYTHON" tools/ci/check_stasis_src_layout.py
 if command -v cc >/dev/null 2>&1; then
   mkdir -p target/audio-ring-test
+  audio_test=target/audio-ring-test/stasis_audio_ring_test
+  case "${OSTYPE:-}" in msys*|cygwin*|win32*) audio_test="${audio_test}.exe" ;; esac
   cc -std=c11 -Wall -Wextra -Werror -Iruntime \
     runtime/stasis_audio_ring.c runtime/tests/stasis_audio_ring_test.c \
-    -o target/audio-ring-test/stasis_audio_ring_test
-  target/audio-ring-test/stasis_audio_ring_test
+    -o "$audio_test"
+  "$PYTHON" tools/windows/stasis-rustc-wrapper.py --sign-artifact "$audio_test"
+  "$audio_test"
 fi
-python3 tools/ci/check_sdl3_migration.py
-python3 tools/ci/check_deterministic_live_simulation_roadmap.py
-python3 tools/ci/check_jit_generation_contract.py
-python3 tools/ci/check_runtime_abi_contract.py
-python3 tools/ci/check_host_runtime_contract.py
-python3 tools/ci/check_unsafe_boundaries.py
-python3 tools/ci/run_architecture_characterization.py --check
-python3 -m unittest tools.ci.test_run_architecture_characterization
-python3 tools/ci/run_architecture_characterization.py --run-fast
-python3 -m unittest tools.ci.test_jit_generation_contract
-python3 -m unittest tools.ci.test_deterministic_live_simulation_roadmap
-python3 -m unittest tools.ci.test_runtime_abi_contract
-python3 -m unittest tools.ci.test_host_runtime_contract
-python3 -m unittest tools.ci.test_cargo_cache
-python3 -m unittest tools.ci.test_pr_ci_cargo_policy
-python3 -m unittest tools.ci.test_unsafe_boundaries
-python3 -m unittest tools.ci.test_desktop_network_diagnostics
-python3 -m unittest tools.ci.test_nightly_network_support
-python3 -m unittest tools.ci.test_nightly_freshness
-python3 -m unittest tools.ci.test_stasis_ai_efficiency_matrix
-python3 -m unittest tools.ci.test_release_provenance
-python3 -m unittest tools.ci.test_audio_stream_native_acceptance
-python3 -m unittest tools.ci.test_local_toolchain_install
-python3 -m unittest tools.ci.test_sdl3_migration
-python3 -m unittest tools.ci.test_windows_sign_runner
-python3 -m unittest tools.ci.test_windows_signing_policy
-python3 tools/ci/test_android_project_baseline_policy.py
-python3 -m unittest tools.ci.test_verify_android_render_performance
-python3 -m unittest tools.ci.test_verify_render_parity
-python3 tools/ci/verify_render_parity.py
+"$PYTHON" tools/ci/check_sdl3_migration.py
+"$PYTHON" tools/ci/check_deterministic_live_simulation_roadmap.py
+"$PYTHON" tools/ci/check_jit_generation_contract.py
+"$PYTHON" tools/ci/check_runtime_abi_contract.py
+"$PYTHON" tools/ci/check_host_runtime_contract.py
+"$PYTHON" tools/ci/check_unsafe_boundaries.py
+"$PYTHON" tools/ci/run_architecture_characterization.py --check
+"$PYTHON" -m unittest tools.ci.test_run_architecture_characterization
+"$PYTHON" tools/ci/run_architecture_characterization.py --run-fast
+"$PYTHON" -m unittest tools.ci.test_jit_generation_contract
+"$PYTHON" -m unittest tools.ci.test_deterministic_live_simulation_roadmap
+"$PYTHON" -m unittest tools.ci.test_runtime_abi_contract
+"$PYTHON" -m unittest tools.ci.test_host_runtime_contract
+"$PYTHON" -m unittest tools.ci.test_cargo_cache
+"$PYTHON" -m unittest tools.ci.test_pr_ci_cargo_policy
+"$PYTHON" -m unittest tools.ci.test_unsafe_boundaries
+"$PYTHON" -m unittest tools.ci.test_desktop_network_diagnostics
+"$PYTHON" -m unittest tools.ci.test_nightly_network_support
+"$PYTHON" -m unittest tools.ci.test_nightly_freshness
+"$PYTHON" -m unittest tools.ci.test_stasis_ai_efficiency_matrix
+"$PYTHON" -m unittest tools.ci.test_release_provenance
+"$PYTHON" -m unittest tools.ci.test_audio_stream_native_acceptance
+"$PYTHON" -m unittest tools.ci.test_local_toolchain_install
+"$PYTHON" -m unittest tools.ci.test_sdl3_migration
+"$PYTHON" -m unittest tools.ci.test_windows_sign_runner
+"$PYTHON" -m unittest tools.ci.test_windows_signing_policy
+"$PYTHON" -m unittest tools.ci.test_windows_signing_trust
+"$PYTHON" -m unittest tools.ci.test_windows_rustc_signing
+"$PYTHON" tools/ci/test_android_project_baseline_policy.py
+"$PYTHON" -m unittest tools.ci.test_verify_android_render_performance
+"$PYTHON" -m unittest tools.ci.test_verify_render_parity
+"$PYTHON" tools/ci/verify_render_parity.py
 node --test runtime/web/tests/orientation_host_frame.test.mjs
 node --test runtime/web/tests/viewport_fit.test.mjs
 node --test runtime/web/tests/sys_memcpy_u8.test.mjs
@@ -67,4 +81,4 @@ elif [[ $ignored_status -ne 1 ]]; then
   exit "$ignored_status"
 fi
 
-python3 tools/cargo_cache.py run -- cargo test --workspace --all-targets -- --test-threads=1
+"$PYTHON" tools/cargo_cache.py run -- cargo test --workspace --all-targets -- --test-threads=1

@@ -85,9 +85,12 @@ fn repository_root() -> PathBuf {
 }
 
 fn evidence_root() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| repository_root().join("target"))
+        .unwrap_or_else(|| repository_root().join("target"));
+    std::env::current_dir()
+        .expect("resolve evidence directory before changing working directory")
+        .join(target)
         .join("seam-tests")
 }
 

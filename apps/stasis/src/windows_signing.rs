@@ -1,10 +1,10 @@
-//! Repository-owned Windows development signing policy.
+//! Adapter for the repository-owned Windows signing policy.
 //!
 //! The legacy `STASIS_AOT_SIGN_TOOL` hook intentionally remains a one-argument
-//! compatibility hook.  Stasis-controlled signtool invocations use the
-//! explicit SHA-256 and page-hash switches in this module.
+//! compatibility hook. Windows Authenticode policy lives in
+//! `tools/windows/stasis-signing.ps1`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -18,9 +18,9 @@ const REQUIRE_SIGNED_ENV: &str = "STASIS_REQUIRE_SIGNED_EXECUTION";
 const SIGNING_MODE_ENV: &str = "STASIS_SIGNING_MODE";
 const CERTIFICATE_ENV: &str = "STASIS_SIGNING_CERTIFICATE";
 const THUMBPRINT_ENV: &str = "STASIS_SIGNING_CERT_THUMBPRINT";
-const TIMESTAMP_ENV: &str = "STASIS_SIGNING_TIMESTAMP_URL";
 const LOCAL_RECORD_ENV: &str = "STASIS_SIGNING_LOCAL_RECORD";
 const DEVELOPMENT_SUBJECT: &str = "CN=StasisLang Development Signing";
+const SIGNING_SCRIPT_RELATIVE: &str = "tools/windows/stasis-signing.ps1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SigningStatus {
@@ -39,6 +39,11 @@ pub struct ProvisionResult {
     pub subject: &'static str,
     pub store: &'static str,
     pub thumbprint: String,
+    pub personal_store: String,
+    pub trust_store: String,
+    pub certificate: String,
+    pub root_trust: String,
+    pub record: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +92,84 @@ fn env_nonempty(name: &str) -> Option<OsString> {
     env::var_os(name).filter(|value| !value.is_empty())
 }
 
+fn resolve_signing_script_for(
+    current_exe: Option<&Path>,
+    source_root: &Path,
+) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Some(directory) = current_exe.and_then(Path::parent) {
+        candidates.push(directory.join(SIGNING_SCRIPT_RELATIVE));
+        if let Some(parent) = directory.parent() {
+            candidates.push(parent.join(SIGNING_SCRIPT_RELATIVE));
+        }
+    }
+    candidates.push(source_root.join(SIGNING_SCRIPT_RELATIVE));
+    candidates.dedup();
+    if let Some(path) = candidates.iter().find(|path| path.is_file()) {
+        return Ok(path.clone());
+    }
+    Err(format!(
+        "Windows signing policy script is missing; checked {}. Reinstall the complete Stasis toolchain or restore {SIGNING_SCRIPT_RELATIVE}",
+        candidates
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn signing_script() -> Result<PathBuf, String> {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    resolve_signing_script_for(env::current_exe().ok().as_deref(), &source_root)
+}
+
+fn script_command(action: &str) -> Result<Command, String> {
+    let script = signing_script()?;
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    command.arg(script).arg(action);
+    Ok(command)
+}
+
+fn add_signing_options(command: &mut Command, options: &SigningOptions) {
+    for (name, value) in [
+        ("-Tool", options.tool.as_deref()),
+        ("-Certificate", options.certificate.as_deref()),
+    ] {
+        if let Some(value) = value {
+            command.arg(name).arg(value);
+        }
+    }
+    if let Some(value) = &options.thumbprint {
+        command.arg("-Thumbprint").arg(value);
+    }
+    if let Some(value) = &options.timestamp_url {
+        command.arg("-TimestampUrl").arg(value);
+    }
+}
+
+fn run_script(mut command: Command, action: &str) -> Result<String, String> {
+    let output = command.output().map_err(|error| {
+        format!("failed to launch Windows signing policy for {action}: {error}")
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!(
+            "Windows signing policy {action} failed with status {}: {detail}",
+            output.status
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 fn production_mode() -> bool {
     env::var(SIGNING_MODE_ENV)
         .ok()
@@ -115,47 +198,6 @@ fn read_local_development_thumbprint() -> Option<String> {
     let path = local_record_path()?;
     let value = fs::read_to_string(path).ok()?.trim().to_string();
     (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(value)
-}
-
-fn write_local_development_thumbprint(thumbprint: &str) -> Result<(), String> {
-    let path = local_record_path().ok_or_else(|| {
-        "cannot persist local development certificate selection: LOCALAPPDATA is not set; set STASIS_SIGNING_LOCAL_RECORD explicitly".to_string()
-    })?;
-    let parent = path.parent().ok_or_else(|| {
-        format!(
-            "local signing record has no parent directory: {}",
-            path.display()
-        )
-    })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        format!(
-            "failed to create local signing record directory {}: {error}",
-            parent.display()
-        )
-    })?;
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temporary, format!("{thumbprint}\n")).map_err(|error| {
-        format!(
-            "failed to write local signing record {}: {error}",
-            temporary.display()
-        )
-    })?;
-    if path.exists() {
-        fs::remove_file(&path).map_err(|error| {
-            let _ = fs::remove_file(&temporary);
-            format!(
-                "failed to replace stale local signing record {}: {error}",
-                path.display()
-            )
-        })?;
-    }
-    fs::rename(&temporary, &path).map_err(|error| {
-        let _ = fs::remove_file(&temporary);
-        format!(
-            "failed to publish local signing record {}: {error}",
-            path.display()
-        )
-    })
 }
 
 pub fn signing_required() -> bool {
@@ -289,7 +331,7 @@ fn configured_certificate(options: &SigningOptions) -> (Option<PathBuf>, Option<
     )
 }
 
-pub fn status() -> SigningStatus {
+fn discovered_status() -> SigningStatus {
     let signer = discover_signer(None);
     let (certificate, thumbprint) = configured_certificate(&SigningOptions::default());
     let local_development_certificate_configured = read_local_development_thumbprint().is_some();
@@ -329,6 +371,115 @@ pub fn status() -> SigningStatus {
     }
 }
 
+#[derive(Deserialize)]
+struct ScriptStatus {
+    signer: Option<String>,
+    signer_source: Option<String>,
+    certificate_configured: bool,
+    certificate_diagnostic: Option<String>,
+    local_development_certificate_configured: bool,
+    production_credentials_configured: bool,
+    required: bool,
+}
+
+fn signer_source_label(source: Option<&str>) -> Option<&'static str> {
+    match source {
+        Some("explicit") => Some("explicit"),
+        Some("path") => Some("path"),
+        Some("windows-kits") => Some("windows-kits"),
+        Some(_) => Some("script"),
+        None => None,
+    }
+}
+
+pub fn status() -> SigningStatus {
+    if !cfg!(windows) {
+        return discovered_status();
+    }
+    let result = script_command("status")
+        .and_then(|command| run_script(command, "status"))
+        .and_then(|json| {
+            serde_json::from_str::<ScriptStatus>(&json).map_err(|error| {
+                format!("Windows signing policy returned invalid status JSON: {error}")
+            })
+        });
+    match result {
+        Ok(script) => {
+            let mut diagnostics = Vec::new();
+            if script.signer.is_none() {
+                diagnostics.push("signtool.exe was not found; set STASIS_AOT_SIGN_TOOL, add it to PATH, or install the Windows SDK".to_string());
+            }
+            if !script.certificate_configured {
+                diagnostics.push(script.certificate_diagnostic.unwrap_or_else(|| "no signing certificate is configured; provision a local test certificate explicitly with 'stasis signing provision' or set STASIS_SIGNING_CERT_THUMBPRINT/STASIS_SIGNING_CERTIFICATE for CI".to_string()));
+            }
+            SigningStatus {
+                platform: "windows",
+                required: script.required,
+                signer_source: signer_source_label(script.signer_source.as_deref()),
+                signer: script.signer,
+                certificate_configured: script.certificate_configured,
+                local_development_certificate_configured: script
+                    .local_development_certificate_configured,
+                production_credentials_configured: script.production_credentials_configured,
+                diagnostics,
+            }
+        }
+        Err(error) => {
+            let mut fallback = discovered_status();
+            fallback.diagnostics.insert(0, error);
+            fallback
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ScriptProvisionResult {
+    subject: String,
+    store: String,
+    thumbprint: String,
+    personal_store: String,
+    trust_store: String,
+    certificate: String,
+    root_trust: String,
+    record: String,
+}
+
+fn parse_provision_result(json: &str) -> Result<ProvisionResult, String> {
+    let script: ScriptProvisionResult = serde_json::from_str(json).map_err(|error| {
+        format!("Windows signing policy returned invalid provision JSON: {error}")
+    })?;
+    if script.subject != DEVELOPMENT_SUBJECT
+        || script.store != "CurrentUser\\My"
+        || script.personal_store != "CurrentUser\\My"
+        || script.trust_store != "CurrentUser\\Root"
+    {
+        return Err(format!(
+            "Windows signing policy returned unexpected certificate identity: subject={} personal_store={} trust_store={}",
+            script.subject, script.personal_store, script.trust_store
+        ));
+    }
+    if script.thumbprint.is_empty()
+        || !script
+            .thumbprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(
+            "Windows signing policy returned an invalid certificate thumbprint".to_string(),
+        );
+    }
+    Ok(ProvisionResult {
+        subject: DEVELOPMENT_SUBJECT,
+        store: "CurrentUser\\My",
+        thumbprint: script.thumbprint,
+        personal_store: script.personal_store,
+        trust_store: script.trust_store,
+        certificate: script.certificate,
+        root_trust: script.root_trust,
+        record: script.record,
+    })
+}
+
 pub fn provision_local_certificate() -> Result<ProvisionResult, String> {
     if !cfg!(windows) {
         return Err(
@@ -336,111 +487,20 @@ pub fn provision_local_certificate() -> Result<ProvisionResult, String> {
                 .to_string(),
         );
     }
-    if production_mode() {
-        return Err("production signing never provisions certificates; configure externally supplied CI credentials".to_string());
-    }
-    let command = format!(
-        "$c = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{DEVELOPMENT_SUBJECT}' -CertStoreLocation 'Cert:\\CurrentUser\\My' -KeyExportPolicy NonExportable -KeyLength 2048 -HashAlgorithm SHA256; $c.Thumbprint"
-    );
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &command,
-        ])
-        .output()
-        .map_err(|error| {
-            format!("failed to launch PowerShell for CurrentUser certificate provisioning: {error}")
-        })?;
-    if !output.status.success() {
-        return Err(format!(
-            "CurrentUser development certificate provisioning failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let thumbprint = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .unwrap_or_default()
-        .to_string();
-    if thumbprint.is_empty() {
-        return Err("certificate provisioning returned no thumbprint".to_string());
-    }
-    write_local_development_thumbprint(&thumbprint)?;
-    Ok(ProvisionResult {
-        subject: DEVELOPMENT_SUBJECT,
-        store: "CurrentUser\\My",
-        thumbprint,
-    })
-}
-
-fn signer_error(signer: Option<&Signer>, required: bool) -> Result<&Signer, String> {
-    let Some(signer) = signer else {
-        return Err("Windows signing is unavailable: signtool.exe was not found. Set STASIS_AOT_SIGN_TOOL, add signtool.exe to PATH, or install the Windows SDK. For local development run 'stasis signing provision'; for production configure an externally supplied certificate and signer.".to_string());
-    };
-    if !signer_is_available(signer) {
-        let message = format!(
-            "configured signer tool {} does not exist; set STASIS_AOT_SIGN_TOOL to signtool.exe or install the Windows SDK",
-            signer.path.display()
-        );
-        if required {
-            return Err(message);
-        }
-    }
-    Ok(signer)
-}
-
-fn run_signtool_sign(
-    signer: &Signer,
-    artifact: &Path,
-    options: &SigningOptions,
-) -> Result<(), String> {
-    let (certificate, thumbprint) = configured_certificate(options);
-    if certificate.is_none() && thumbprint.is_none() {
-        return Err("Windows signing requires a certificate. Set STASIS_SIGNING_CERT_THUMBPRINT or STASIS_SIGNING_CERTIFICATE; local development may provision an explicitly requested CurrentUser certificate with 'stasis signing provision'. Production credentials are never generated by Stasis.".to_string());
-    }
-    let mut command = Command::new(&signer.path);
-    command.args(["sign", "/fd", "SHA256", "/ph"]);
-    if let Some(path) = certificate {
-        command.args(["/f", path.to_string_lossy().as_ref()]);
-        if let Some(password) = env_nonempty("STASIS_SIGNING_PFX_PASSWORD") {
-            command.args(["/p", password.to_string_lossy().as_ref()]);
-        }
-    } else if let Some(thumbprint) = thumbprint {
-        command.args(["/sha1", &thumbprint]);
-    }
-    let timestamp = options
-        .timestamp_url
-        .clone()
-        .or_else(|| env_nonempty(TIMESTAMP_ENV).map(|value| value.to_string_lossy().into_owned()));
-    if let Some(timestamp) = timestamp {
-        command.args(["/tr", timestamp.as_str(), "/td", "SHA256"]);
-    }
-    command.arg(artifact);
-    let output = command.output().map_err(|error| {
-        format!(
-            "failed to launch signtool {} for {}: {error}",
-            signer.path.display(),
-            artifact.display()
-        )
-    })?;
-    if !output.status.success() {
-        return Err(format!(
-            "signtool failed for {} with status {}: {}",
-            artifact.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(())
+    let json = run_script(script_command("provision")?, "provision")?;
+    parse_provision_result(&json)
 }
 
 fn run_legacy_hook(path: &Path, artifact: &Path) -> Result<(), String> {
+    if cfg!(windows) {
+        let mut command = script_command("sign")?;
+        add_legacy_hook_arguments(&mut command, path, artifact);
+        return run_script(
+            command,
+            &format!("legacy-hook sign for {}", artifact.display()),
+        )
+        .map(|_| ());
+    }
     let status = Command::new(path).arg(artifact).status().map_err(|error| {
         format!(
             "failed to launch configured signer {}: {error}",
@@ -457,6 +517,14 @@ fn run_legacy_hook(path: &Path, artifact: &Path) -> Result<(), String> {
             status
         ))
     }
+}
+
+fn add_legacy_hook_arguments(command: &mut Command, path: &Path, artifact: &Path) {
+    command
+        .arg("-Tool")
+        .arg(path)
+        .arg("-Artifact")
+        .arg(artifact);
 }
 
 fn policy_signing_decision(
@@ -481,12 +549,6 @@ fn policy_signing_decision(
 }
 
 pub fn sign_artifact(artifact: &Path, options: &SigningOptions) -> Result<(), String> {
-    if !cfg!(windows) {
-        return Err(
-            "Authenticode signing is only available for Windows artifacts on a Windows host"
-                .to_string(),
-        );
-    }
     if !artifact.is_file() {
         return Err(format!(
             "signing input does not exist: {}",
@@ -510,9 +572,16 @@ pub fn sign_artifact(artifact: &Path, options: &SigningOptions) -> Result<(), St
             return run_legacy_hook(&path, artifact);
         }
     }
-    let signer = discover_signer(options.tool.as_deref());
-    let signer = signer_error(signer.as_ref(), true)?;
-    run_signtool_sign(signer, artifact, options)
+    if !cfg!(windows) {
+        return Err(
+            "Authenticode signing is only available for Windows artifacts on a Windows host"
+                .to_string(),
+        );
+    }
+    let mut command = script_command("sign")?;
+    add_signing_options(&mut command, options);
+    command.arg("-Artifact").arg(artifact);
+    run_script(command, &format!("sign for {}", artifact.display())).map(|_| ())
 }
 
 pub fn sign_artifacts(artifacts: &[PathBuf], options: &SigningOptions) -> Result<(), String> {
@@ -538,47 +607,12 @@ pub fn verify_artifact(artifact: &Path, tool: Option<&Path>) -> Result<(), Strin
             artifact.display()
         ));
     }
-    let signer = if let Some(tool) = tool {
-        if !is_signtool(tool) {
-            return Err(format!(
-                "verification requires a real signtool.exe; configured legacy hook {} only supports signing",
-                tool.display()
-            ));
-        }
-        discover_signer(Some(tool))
-    } else if let Some(configured) = env_nonempty(SIGN_TOOL_ENV).map(PathBuf::from) {
-        if is_signtool(&configured) {
-            discover_signer(Some(&configured))
-        } else {
-            path_signer().or_else(windows_kit_signer)
-        }
-    } else {
-        path_signer().or_else(windows_kit_signer)
-    };
-    if signer.is_none()
-        && env_nonempty(SIGN_TOOL_ENV)
-            .map(PathBuf::from)
-            .is_some_and(|path| !is_signtool(&path))
-    {
-        return Err(
-            "signature verification cannot use STASIS_AOT_SIGN_TOOL because it is a legacy signing hook; install signtool.exe or pass --tool signtool.exe"
-                .to_string(),
-        );
+    let mut command = script_command("verify")?;
+    if let Some(tool) = tool {
+        command.arg("-Tool").arg(tool);
     }
-    let signer = signer_error(signer.as_ref(), true)?;
-    let output = Command::new(&signer.path)
-        .args(["verify", "/pa", "/all"])
-        .arg(artifact)
-        .output()
-        .map_err(|error| format!("failed to launch signtool verification: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "signature verification failed for {}: {}",
-            artifact.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(())
+    command.arg("-Artifact").arg(artifact);
+    run_script(command, &format!("verify for {}", artifact.display())).map(|_| ())
 }
 
 pub fn verify_artifacts(artifacts: &[PathBuf], tool: Option<&Path>) -> Result<(), String> {
@@ -596,31 +630,32 @@ pub fn sign_output_artifact_if_configured(artifact: &Path) -> Result<(), String>
     if !cfg!(windows) && !configured {
         return Ok(());
     }
-    if let Some(path) = env_nonempty(SIGN_TOOL_ENV).map(PathBuf::from) {
-        if !is_signtool(&path) {
-            if !signer_is_available(&Signer {
-                path: path.clone(),
-                source: SignerSource::Explicit,
-            }) {
-                if signing_required() {
-                    return Err(format!(
-                        "configured signer tool {} does not exist",
-                        path.display()
-                    ));
-                }
-                eprintln!(
-                    "warning: ignoring unavailable optional signer tool {}",
+    let legacy_hook = env_nonempty(SIGN_TOOL_ENV)
+        .map(PathBuf::from)
+        .filter(|path| !is_signtool(path));
+    if let Some(path) = legacy_hook.as_ref() {
+        if !signer_is_available(&Signer {
+            path: path.clone(),
+            source: SignerSource::Explicit,
+        }) {
+            if signing_required() {
+                return Err(format!(
+                    "configured signer tool {} does not exist",
                     path.display()
-                );
-                return Ok(());
+                ));
             }
-            return run_legacy_hook(&path, artifact);
+            eprintln!(
+                "warning: ignoring unavailable optional signer tool {}",
+                path.display()
+            );
+            return Ok(());
         }
+        return run_legacy_hook(&path, artifact);
     }
     let status = status();
     let should_attempt = policy_signing_decision(
         cfg!(windows),
-        configured,
+        legacy_hook.is_some(),
         status.certificate_configured,
         signing_required(),
     )?;
@@ -670,6 +705,72 @@ mod tests {
     }
 
     #[test]
+    fn signing_script_resolves_source_and_installed_layouts() {
+        let root = env::temp_dir().join(format!(
+            "stasis-signing-script-layout-{}",
+            std::process::id()
+        ));
+        let installed = root.join("installed");
+        let script = installed.join(SIGNING_SCRIPT_RELATIVE);
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "# fixture").unwrap();
+
+        assert_eq!(
+            resolve_signing_script_for(Some(&installed.join("stasis.exe")), &root).unwrap(),
+            script
+        );
+        assert_eq!(
+            resolve_signing_script_for(Some(&installed.join("bin/stasis.exe")), &root).unwrap(),
+            installed.join(SIGNING_SCRIPT_RELATIVE)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_signing_script_has_actionable_diagnostic() {
+        let root = env::temp_dir().join(format!(
+            "stasis-missing-signing-script-{}",
+            std::process::id()
+        ));
+        let error = resolve_signing_script_for(Some(&root.join("stasis.exe")), &root)
+            .expect_err("missing signing policy must fail");
+        assert!(error.contains(SIGNING_SCRIPT_RELATIVE));
+        assert!(error.contains("Reinstall"));
+    }
+
+    #[test]
+    fn provision_result_preserves_certificate_and_trust_changes() {
+        let result = parse_provision_result(
+            r#"{"subject":"CN=StasisLang Development Signing","store":"CurrentUser\\My","thumbprint":"ABCDEF123456","personal_store":"CurrentUser\\My","trust_store":"CurrentUser\\Root","certificate":"reused","root_trust":"already-present","record":"unchanged"}"#,
+        )
+        .expect("valid provision result");
+
+        assert_eq!(result.thumbprint, "ABCDEF123456");
+        assert_eq!(result.certificate, "reused");
+        assert_eq!(result.root_trust, "already-present");
+        assert_eq!(result.record, "unchanged");
+    }
+
+    #[test]
+    fn windows_legacy_hook_arguments_route_one_artifact_through_policy() {
+        let hook = Path::new(r"C:\signing tools\legacy-hook.cmd");
+        let artifact = Path::new(r"C:\build output\game.exe");
+        let mut command = Command::new("powershell.exe");
+        add_legacy_hook_arguments(&mut command, hook, artifact);
+
+        let arguments = command.get_args().collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            [
+                std::ffi::OsStr::new("-Tool"),
+                hook.as_os_str(),
+                std::ffi::OsStr::new("-Artifact"),
+                artifact.as_os_str(),
+            ]
+        );
+    }
+
+    #[test]
     fn windows_kit_versions_sort_numerically() {
         assert_eq!(
             compare_versions("10.0.26100.1", "10.0.22621.0"),
@@ -704,7 +805,6 @@ mod tests {
         env::set_var(LOCAL_RECORD_ENV, &path);
         env::remove_var("STASIS_SIGNING_PROFILE");
         env::remove_var(THUMBPRINT_ENV);
-        write_local_development_thumbprint("ABCDEF123456").unwrap();
         assert_eq!(
             configured_certificate(&SigningOptions::default())
                 .1
