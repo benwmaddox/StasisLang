@@ -78,6 +78,7 @@ pub enum LiveCommand {
     CaptureFrame {
         artifact: String,
     },
+    FocusGame,
     /// Host window controls run between ticks and never alter guest input or state.
     WindowPlacement {
         #[serde(default)]
@@ -1524,6 +1525,8 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":status" => ready(LiveCommand::Status),
         ":pause" => ready(LiveCommand::Pause),
         ":resume" => ready(LiveCommand::Resume),
+        ":focus-game" if args.len() == 1 => ready(LiveCommand::FocusGame),
+        ":focus-game" => Err(":focus-game does not accept arguments".to_string()),
         ":quit" => ready(LiveCommand::Quit),
         ":step" => ready(LiveCommand::Step {
             ticks: args
@@ -2858,6 +2861,35 @@ mod tests {
         )
         .expect("reinitialize request");
         assert_eq!(reinitialize.command, LiveCommand::ValidationReinitialize);
+
+        let focus: LiveRequest =
+            serde_json::from_str(r#"{"schema_version":1,"request_id":73,"type":"focus_game"}"#)
+                .expect("focus game request");
+        assert_eq!(focus.command, LiveCommand::FocusGame);
+        assert_eq!(
+            serde_json::to_value(&focus).expect("serialize focus game request"),
+            serde_json::json!({
+                "schema_version": 1,
+                "request_id": 73,
+                "type": "focus_game"
+            })
+        );
+    }
+
+    #[test]
+    fn terminal_focus_game_command_is_exact() {
+        let mut terminal = TerminalBuffer::new();
+        let TerminalInput::Request(request) = terminal
+            .feed_line(":focus-game")
+            .expect("focus game command")
+        else {
+            panic!("expected focus game request")
+        };
+        assert_eq!(request.command, LiveCommand::FocusGame);
+        assert!(terminal
+            .feed_line(":focus-game now")
+            .expect_err("unexpected argument")
+            .contains("does not accept arguments"));
     }
 
     #[test]

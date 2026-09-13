@@ -73,6 +73,14 @@ fn live_game_capture_completes_with_decodable_pixels_while_paused() {
     let consumer = std::thread::spawn(move || {
         let guard = QuitOnDrop(client);
         request(&guard.0, 1, LiveCommand::Pause);
+        let before_focus = request(&guard.0, 3, LiveCommand::Status);
+        let focus = request(&guard.0, 4, LiveCommand::FocusGame);
+        assert_eq!(focus["kind"], "game_focus_requested");
+        assert_eq!(focus["data"]["requested"], true);
+        assert!(focus["data"]["focused"].is_boolean());
+        let after_focus = request(&guard.0, 5, LiveCommand::Status);
+        assert_eq!(after_focus["data"]["paused"], true);
+        assert_eq!(before_focus["data"]["tick"], after_focus["data"]["tick"]);
         let response = request(
             &guard.0,
             2,
@@ -109,6 +117,9 @@ fn live_game_capture_completes_with_decodable_pixels_while_paused() {
             evidence_for_thread.join("capture.json"),
             serde_json::to_vec_pretty(&json!({
                 "response": response, "inspected_png": retained,
+                "focus_response": focus,
+                "before_focus": before_focus,
+                "after_focus": after_focus,
                 "oracle": "paused live game produces red rectangle on dark background"
             }))
             .unwrap(),
