@@ -7213,6 +7213,58 @@ mod tests {
     }
 
     #[test]
+    fn long_thread_keeps_composer_visible_at_supported_window_sizes() {
+        for size in [egui::vec2(900.0, 600.0), egui::vec2(1440.0, 900.0)] {
+            let (client, _server) = live_session(4);
+            let mut editor =
+                DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+            editor.state = task_state();
+            for _ in 0..40 {
+                editor.state.reply = "A long conversation entry for the active task.".into();
+                editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+            }
+            // Keep this a layout test; do not dispatch queued provider requests.
+            editor.state.intents.clear();
+            let context = egui::Context::default();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            for frame in 0..3 {
+                let output = context.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |context| editor.ui(context),
+                );
+                // Newly created egui panels use an invisible first sizing pass.
+                if frame == 0 {
+                    continue;
+                }
+                for label in [
+                    "Send (Ctrl+Enter)",
+                    "Success (Ctrl+Shift+D)",
+                    "Attach image",
+                ] {
+                    let text = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| {
+                            if let egui::Shape::Text(text) = &shape.shape {
+                                if text.galley.text() == label {
+                                    return Some((shape.clip_rect, text));
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or_else(|| panic!("missing composer action: {label}"));
+                    let bounds = egui::Rect::from_min_size(text.1.pos, text.1.galley.size());
+                    assert!(screen.contains_rect(bounds), "{label} outside {size:?}");
+                    assert!(text.0.contains_rect(bounds), "{label} clipped at {size:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn drafts_follow_all_task_switches_and_creation() {
         let mut state = task_state();
         state.reply = "unsent first".into();
