@@ -258,11 +258,7 @@ impl Expansion {
                         structure.name
                     ));
                 }
-                let identity = generic_definition_identity(
-                    &file.path,
-                    &structure.name,
-                    definition_range.start,
-                );
+                let identity = generic_definition_identity(&file.path, &structure.name);
                 generic_structs.insert(
                     identity.clone(),
                     GenericStructDefinition {
@@ -2237,10 +2233,9 @@ impl Expansion {
                         "internal error: missing generic function definition".to_string()
                     })?;
                 let name = if needs_mangled_names {
-                    let identity_path = format!(
-                        "{}#{}",
-                        self.files[definition.file_index].path,
-                        definition.signature.signature_range.start
+                    let identity_path = generic_function_identity(
+                        &self.files[definition.file_index].path,
+                        &definition.signature,
                     );
                     mangle_specialization(
                         "function",
@@ -2455,8 +2450,27 @@ impl Expansion {
     }
 }
 
-fn generic_definition_identity(path: &str, name: &str, start: usize) -> String {
-    format!("{path}::{name}#{start}")
+fn generic_definition_identity(path: &str, name: &str) -> String {
+    format!("{path}::{name}")
+}
+
+fn generic_function_identity(path: &str, signature: &ParsedFunctionSignature) -> String {
+    // Keep source offsets out of the identity: edits to constants or comments
+    // before a declaration must not orphan an otherwise reusable specialization.
+    let mut identity = format!("{path}::{}|", signature.name);
+    for parameter in &signature.generic_parameters {
+        identity.push_str(match parameter.kind {
+            ParsedGenericParameterKind::Type => "type",
+            ParsedGenericParameterKind::I32 => "i32",
+        });
+        identity.push('|');
+    }
+    for parameter in &signature.params {
+        identity.push_str(&parameter.type_name);
+        identity.push('|');
+    }
+    identity.push_str(&signature.return_type_name);
+    identity
 }
 
 fn module_alias_for_path(path: &str) -> String {
