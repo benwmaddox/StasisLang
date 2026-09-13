@@ -14,6 +14,45 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcceptanceMode {
+    TwoTaskImage,
+    ApprovedModelOnly,
+}
+
+#[cfg(target_os = "windows")]
+impl AcceptanceMode {
+    fn from_environment() -> Self {
+        if std::env::var("STASIS_EDITOR_APPROVED_MODEL_ACCEPTANCE").as_deref() == Ok("1") {
+            Self::ApprovedModelOnly
+        } else {
+            Self::TwoTaskImage
+        }
+    }
+
+    fn workspace_directory(self) -> &'static str {
+        match self {
+            Self::TwoTaskImage => "target/task-524-live-workspace",
+            Self::ApprovedModelOnly => "target/task-566-live-workspace",
+        }
+    }
+
+    fn game_window_title(self) -> &'static str {
+        match self {
+            Self::TwoTaskImage => "Task 524 live acceptance game",
+            Self::ApprovedModelOnly => "Task 566 approved-model acceptance game",
+        }
+    }
+
+    fn editor_window_title(self) -> &'static str {
+        match self {
+            Self::TwoTaskImage => "Stasis Editor - Task 524 live acceptance",
+            Self::ApprovedModelOnly => "Stasis Editor - Task 566 approved-model acceptance",
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 #[test]
 fn two_openrouter_tasks_share_one_live_game() {
     let Ok(_) = std::env::var("STASIS_EDITOR_LIVE_ACCEPTANCE_DIR") else {
@@ -38,19 +77,24 @@ fn run_live_acceptance() -> Result<(), String> {
         std::env::var("STASIS_EDITOR_LIVE_SOURCE")
             .map_err(|_| "STASIS_EDITOR_LIVE_SOURCE must name the source game".to_string())?,
     );
-    let workspace = repository.join("target/task-524-live-workspace");
+    let mode = AcceptanceMode::from_environment();
+    let workspace = repository.join(mode.workspace_directory());
     prepare_disposable_workspace(&repository, &source, &workspace)?;
-    load_openrouter_key()?;
-    std::env::set_var("STASIS_AI_PROVIDER", "openrouter");
-    let initial_model = std::env::var("STASIS_EDITOR_OPENROUTER_MODEL")
-        .unwrap_or_else(|_| stasis_ai::DEFAULT_OPENROUTER_MODEL.to_string());
-    set_workspace_approved_model(&workspace, &initial_model)?;
+    if mode == AcceptanceMode::TwoTaskImage {
+        let initial_model = std::env::var("STASIS_EDITOR_OPENROUTER_MODEL")
+            .unwrap_or_else(|_| stasis_ai::DEFAULT_OPENROUTER_MODEL.to_string());
+        set_workspace_approved_model(&workspace, &initial_model)?;
+    }
 
     let manifest: Value = serde_json::from_slice(
         &std::fs::read(workspace.join("stasis.json"))
             .map_err(|error| format!("read disposable manifest: {error}"))?,
     )
     .map_err(|error| format!("parse disposable manifest: {error}"))?;
+    let approved_models = approved_models_from_manifest(&manifest)?;
+    let model = approved_models[0].clone();
+    load_openrouter_key()?;
+    std::env::set_var("STASIS_AI_PROVIDER", "openrouter");
     let entry_relative = PathBuf::from(
         manifest["entry"]
             .as_str()
@@ -65,7 +109,7 @@ fn run_live_acceptance() -> Result<(), String> {
     let runtime_entry = entry.clone();
     let runtime = std::thread::spawn(move || {
         let config = LiveRunConfig::new(runtime_workspace, entry_relative, build)
-            .with_window_title("Task 524 live acceptance game");
+            .with_window_title(mode.game_window_title());
         let result = stasis::run_live_in_process_with_data(
             &runtime_entry,
             None,
@@ -118,16 +162,10 @@ fn run_live_acceptance() -> Result<(), String> {
             .join()
             .map_err(|_| "live runtime thread panicked".to_string())?;
     }
-
     let (result_tx, result_rx) = mpsc::channel();
-    let model = manifest
-        .pointer("/ai/openrouter/approved_models/0")
-        .and_then(Value::as_str)
-        .unwrap_or(stasis_ai::DEFAULT_OPENROUTER_MODEL)
-        .to_string();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Stasis Editor - Task 524 live acceptance")
+            .with_title(mode.editor_window_title())
             .with_inner_size([1440.0, 900.0]),
         event_loop_builder: Some(Box::new(|builder| {
             builder.with_any_thread(true);
@@ -180,6 +218,8 @@ fn run_live_acceptance() -> Result<(), String> {
                 output: app_output,
                 workspace: app_workspace,
                 model,
+                approved_models,
+                mode,
                 state: AcceptanceState::HoldBeforeStart,
                 state_started: Instant::now(),
                 hold_until: Instant::now() + Duration::from_secs(hold_seconds),
@@ -282,8 +322,20 @@ fn run_local_apply_preflight(
         .map_err(|error| error.to_string())?;
     editor.flush_intents();
     let deadline = Instant::now() + Duration::from_secs(120);
-    while editor.busy_tasks.contains("task-1") {
+    while editor.busy_tasks.contains("task-1")
+        || editor
+            .state
+            .session
+            .task("task-1")
+            .is_ok_and(|task| task.validation.is_running())
+        || editor
+            .state
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, EditorIntent::Test(task, _) if task == "task-1"))
+    {
         editor.poll_host();
+        editor.flush_intents();
         if Instant::now() >= deadline {
             return Err("local apply execution timed out".to_string());
         }
@@ -645,6 +697,29 @@ fn set_workspace_approved_model(workspace: &Path, model: &str) -> Result<(), Str
 }
 
 #[cfg(target_os = "windows")]
+fn approved_models_from_manifest(manifest: &Value) -> Result<Vec<String>, String> {
+    let models = manifest
+        .pointer("/ai/openrouter/approved_models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "disposable manifest must list ai.openrouter.approved_models".to_string())?;
+    if models.is_empty() {
+        return Err("disposable manifest approved_models must not be empty".to_string());
+    }
+    models
+        .iter()
+        .map(|model| {
+            model
+                .as_str()
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    "disposable manifest approved_models must contain non-empty strings".to_string()
+                })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     std::fs::create_dir_all(target)
         .map_err(|error| format!("create disposable directory: {error}"))?;
@@ -759,6 +834,8 @@ struct LiveAcceptanceApp {
     output: PathBuf,
     workspace: PathBuf,
     model: String,
+    approved_models: Vec<String>,
+    mode: AcceptanceMode,
     state: AcceptanceState,
     state_started: Instant,
     hold_until: Instant,
@@ -802,7 +879,9 @@ impl LiveAcceptanceApp {
             serde_json::to_vec_pretty(&json!({
                 "result": "failed",
                 "error": error,
+                "mode": format!("{:?}", self.mode),
                 "model": self.model,
+                "approved_models": self.approved_models,
                 "tasks": tasks,
                 "provider_turn_usage": self.usage_records,
                 "runtime_probes": self.runtime_probes.iter().map(runtime_probe_json).collect::<Vec<_>>(),
@@ -990,6 +1069,9 @@ impl LiveAcceptanceApp {
     }
 
     fn finish_report(&self) -> Result<(), String> {
+        if self.mode == AcceptanceMode::ApprovedModelOnly {
+            return self.finish_approved_model_report();
+        }
         let first = self
             .editor
             .state
@@ -1111,6 +1193,122 @@ impl LiveAcceptanceApp {
             second.metrics.output_tokens,
             second.metrics.estimated_cost_micros as f64 / 1_000_000.0,
             self.apply_wall_ms.get("task-2").copied().unwrap_or_default(),
+        );
+        std::fs::write(self.output.join("report.md"), markdown)
+            .map_err(|error| format!("write report markdown: {error}"))?;
+        Ok(())
+    }
+
+    fn finish_approved_model_report(&self) -> Result<(), String> {
+        let task = self
+            .editor
+            .state
+            .session
+            .task("task-1")
+            .map_err(|error| error.to_string())?;
+        let validation_summary = match &task.validation {
+            ValidationStatus::Passed { summary } => summary,
+            _ => return Err("approved-model task did not preserve passing focused tests".into()),
+        };
+        if !task
+            .actions
+            .values()
+            .any(|action| matches!(action.state, ActionState::Applied))
+        {
+            return Err("approved-model task did not preserve its applied edit".into());
+        }
+        let resolved_model =
+            task.provider.model.as_deref().ok_or_else(|| {
+                "approved-model task did not record its resolved model".to_string()
+            })?;
+        if resolved_model != self.model
+            || !self
+                .approved_models
+                .iter()
+                .any(|model| model == resolved_model)
+        {
+            return Err(
+                "provider resolved a model outside the workspace approved_models list".into(),
+            );
+        }
+        if !task.screenshots.is_empty() {
+            return Err("approved-model-only task unexpectedly sent image evidence".into());
+        }
+        if self.runtime_probes.len() != 2 {
+            return Err("approved-model acceptance is missing its post-swap runtime probe".into());
+        }
+        let initial = &self.runtime_probes[0];
+        let swapped = &self.runtime_probes[1];
+        if swapped.session_id != initial.session_id
+            || swapped.generation <= initial.generation
+            || swapped.tick != initial.tick
+            || !same_scalar(&swapped.paddle_x, &initial.paddle_x)
+            || !same_scalar(&swapped.bricks_left, &initial.bricks_left)
+            || swapped.assets_ready != Value::Bool(true)
+            || swapped.loader_failed != Value::Bool(false)
+        {
+            return Err(
+                "paused guest state or runtime session was not preserved across the swap".into(),
+            );
+        }
+        let receipts = self
+            .editor
+            .execution_receipts
+            .iter()
+            .filter(|((task_id, _), _)| task_id == "task-1")
+            .map(|((task_id, action_id), receipt)| {
+                json!({
+                    "task_id": task_id,
+                    "action_id": action_id,
+                    "receipt": receipt,
+                })
+            })
+            .collect::<Vec<_>>();
+        if receipts.is_empty() {
+            return Err("approved-model task has no automatic semantic publish receipt".into());
+        }
+        let report = json!({
+            "result": "passed",
+            "mode": "approved_model_only",
+            "provider": "openrouter",
+            "selected_model": resolved_model,
+            "workspace_approved_models": self.approved_models,
+            "model_was_approved": true,
+            "image_input_sent": false,
+            "same_disposable_workspace": self.workspace,
+            "warmup_ms": self.warmup_ms,
+            "tasks": self.task_records,
+            "total_wall_ms": self.acceptance_started.elapsed().as_millis(),
+            "apply_wall_ms": self.apply_wall_ms,
+            "provider_turn_usage": self.usage_records,
+            "execution_receipts": receipts,
+            "runtime_probes": self.runtime_probes.iter().map(runtime_probe_json).collect::<Vec<_>>(),
+            "provider_totals": {"task-1": self.provider_totals("task-1")},
+            "final_user_feedback": {
+                "status": "Applied / tests passed",
+                "focused_test_summary": validation_summary,
+            },
+            "final": [task_summary(task)],
+            "motion_input": "one bounded pointer-down frame at (320,320), then input override cleared before resume",
+            "motion_ball_positions": self.motion_positions,
+            "visual_evidence": ["first-proposal.png", "final-editor.png", "editor-flow.mp4", "game-motion.mp4"],
+        });
+        std::fs::write(
+            self.output.join("report.json"),
+            serde_json::to_vec_pretty(&report)
+                .map_err(|error| format!("serialize report: {error}"))?,
+        )
+        .map_err(|error| format!("write report JSON: {error}"))?;
+        let markdown = format!(
+            "# Task 566 approved-model-only live acceptance\n\nOne semantic task ran through the native desktop editor against a disposable running Asset Breakout workspace using OpenRouter model `{resolved_model}`, selected directly from `stasis.json`. No image was attached and no alternate image model was selected. The editor automatically published the reviewed semantic edit, requested a live swap, ran focused tests, and displayed the final passing result.\n\n- Playable warmup: {} ms.\n- First action: {} ms; provider total {} ms, {} input tokens, {} output tokens, ${:.6}; automatic apply/test receipt {} ms.\n- State preservation: one runtime session spans the generation advance; paused tick, `paddle_x`, `bricks_left`, and asset-loader health are unchanged.\n- Final user feedback: Applied / tests passed; {}.\n- Visual evidence: `first-proposal.png`, `final-editor.png`, `editor-flow.mp4`, and `game-motion.mp4`.\n",
+            self.warmup_ms,
+            self.first_action_ms("task-1").map_or_else(|| "unavailable".to_string(), |value| value.to_string()),
+            task.metrics.elapsed_ms,
+            task.metrics.input_tokens,
+            task.metrics.output_tokens,
+            task.metrics.estimated_cost_micros as f64 / 1_000_000.0,
+            self.apply_wall_ms.get("task-1").copied().unwrap_or_default(),
+            validation_summary,
         );
         std::fs::write(self.output.join("report.md"), markdown)
             .map_err(|error| format!("write report markdown: {error}"))?;
@@ -1491,6 +1689,22 @@ impl eframe::App for LiveAcceptanceApp {
                             return;
                         }
                     }
+                    if self.mode == AcceptanceMode::ApprovedModelOnly {
+                        if let Err(error) = launch_ball_for_motion(&self.editor.client) {
+                            self.fail(context, error);
+                            return;
+                        }
+                        if let Err(error) = request_live(
+                            &self.editor.client,
+                            63_003,
+                            stasis_runner::live::LiveCommand::Resume,
+                        ) {
+                            self.fail(context, error);
+                            return;
+                        }
+                        self.transition(AcceptanceState::ResumeMotion);
+                        return;
+                    }
                     let image_model = std::env::var("STASIS_EDITOR_OPENROUTER_IMAGE_MODEL")
                         .unwrap_or_else(|_| "openai/gpt-5.6-luna".to_string());
                     if let Err(error) = set_workspace_approved_model(&self.workspace, &image_model)
@@ -1667,5 +1881,53 @@ impl eframe::App for LiveAcceptanceApp {
                 u64::MAX,
                 stasis_runner::live::LiveCommand::Quit,
             ));
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod approved_model_harness_tests {
+    use super::*;
+
+    #[test]
+    fn approved_model_mode_selects_only_the_first_workspace_model() {
+        let manifest = json!({
+            "ai": {"openrouter": {"approved_models": [
+                "text/approved-model",
+                "vision/also-approved"
+            ]}}
+        });
+
+        let approved = approved_models_from_manifest(&manifest).unwrap();
+
+        assert_eq!(approved, ["text/approved-model", "vision/also-approved"]);
+        assert_eq!(approved[0], "text/approved-model");
+    }
+
+    #[test]
+    fn approved_model_mode_fails_closed_without_a_manifest_allowlist() {
+        for manifest in [
+            json!({}),
+            json!({"ai": {"openrouter": {"approved_models": []}}}),
+            json!({"ai": {"openrouter": {"approved_models": [""]}}}),
+            json!({"ai": {"openrouter": {"approved_models": [42]}}}),
+        ] {
+            assert!(approved_models_from_manifest(&manifest).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_image_and_approved_model_modes_keep_separate_workspaces() {
+        assert_ne!(
+            AcceptanceMode::TwoTaskImage.workspace_directory(),
+            AcceptanceMode::ApprovedModelOnly.workspace_directory()
+        );
+        assert_eq!(
+            AcceptanceMode::TwoTaskImage.workspace_directory(),
+            "target/task-524-live-workspace"
+        );
+        assert_eq!(
+            AcceptanceMode::ApprovedModelOnly.workspace_directory(),
+            "target/task-566-live-workspace"
+        );
     }
 }
