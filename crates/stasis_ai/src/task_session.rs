@@ -18,6 +18,9 @@ pub const MAX_ACTIONS: usize = 64;
 pub const MAX_ACTION_TEXT_CHARS: usize = 1_024;
 pub const MAX_ACTION_REVISIONS: usize = 16;
 pub const MAX_ACTION_PAYLOAD_BYTES: usize = 256 * 1024;
+const MAX_FILE_WRITE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_FILE_WRITES: usize = 8;
+const MAX_FILE_WRITE_CONTENT_BYTES: usize = 1024 * 1024;
 pub const MAX_SCREENSHOTS: usize = 16;
 pub const MAX_SCREENSHOTS_PER_REQUEST: usize = 8;
 pub const MAX_IMAGES: usize = 16;
@@ -148,14 +151,53 @@ impl std::error::Error for TaskSessionError {}
 
 fn validate_action_payload(payload: &serde_json::Value) -> Result<(), TaskSessionError> {
     let actual = payload.to_string().len();
-    if actual > MAX_ACTION_PAYLOAD_BYTES {
+    let max = if bounded_file_write_payload(payload) {
+        MAX_FILE_WRITE_PAYLOAD_BYTES
+    } else {
+        MAX_ACTION_PAYLOAD_BYTES
+    };
+    if actual > max {
         return Err(TaskSessionError::FieldTooLong {
             field: "action payload bytes",
-            max: MAX_ACTION_PAYLOAD_BYTES,
+            max,
             actual,
         });
     }
     Ok(())
+}
+
+fn bounded_file_write_payload(payload: &serde_json::Value) -> bool {
+    let Some(object) = payload.as_object() else {
+        return false;
+    };
+    if object.len() != 2
+        || object
+            .get("schema_version")
+            .and_then(|value| value.as_u64())
+            != Some(1)
+    {
+        return false;
+    }
+    let Some(writes) = object.get("file_writes").and_then(|value| value.as_array()) else {
+        return false;
+    };
+    !writes.is_empty()
+        && writes.len() <= MAX_FILE_WRITES
+        && writes.iter().all(|write| {
+            let Some(write) = write.as_object() else {
+                return false;
+            };
+            if write.len() != 2 {
+                return false;
+            }
+            let Some(path) = write.get("path").and_then(|value| value.as_str()) else {
+                return false;
+            };
+            let Some(content) = write.get("content").and_then(|value| value.as_str()) else {
+                return false;
+            };
+            !path.is_empty() && path.len() <= 512 && content.len() <= MAX_FILE_WRITE_CONTENT_BYTES
+        })
 }
 
 fn validate_text(field: &'static str, value: &str, max: usize) -> Result<String, TaskSessionError> {
@@ -3058,6 +3100,21 @@ mod tests {
             )
             .is_err());
         assert_eq!(task, before);
+    }
+
+    #[test]
+    fn bounded_file_write_payload_allows_one_mib_per_file() {
+        let mut task = Task::new("task", "edit", "project").unwrap();
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "file_writes": [{
+                "path": "assets/generated/background.svg",
+                "content": "x".repeat(MAX_FILE_WRITE_CONTENT_BYTES),
+            }],
+        });
+        task.propose_action_with_payload("edit", ActionKind::Edit, "large file", payload.clone())
+            .unwrap();
+        assert_eq!(task.actions["edit"].payload, Some(payload));
     }
 
     #[test]

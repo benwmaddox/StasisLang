@@ -48,6 +48,8 @@ pub const DEFAULT_AGENT_TURNS: usize = 50;
 pub const MAX_AGENT_TURNS: usize = 50;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 50;
 pub const MAX_SEMANTIC_EDITS_PER_BATCH: usize = 64;
+const MAX_FILE_WRITES_PER_BATCH: usize = 8;
+const MAX_FILE_WRITE_CHARS: usize = 1024 * 1024;
 const MAX_SYMBOL_QUERY_FILES: usize = 16;
 const MAX_PNG_SHAPES: usize = 512;
 pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
@@ -892,6 +894,7 @@ fn validate_tool_call(
         "propose_semantic_edit" | "repair_semantic_edit" => {
             Some(("/batch/edits", MAX_SEMANTIC_EDITS_PER_BATCH))
         }
+        "propose_file_write" | "repair_file_write" => Some(("/writes", MAX_FILE_WRITES_PER_BATCH)),
         "list_symbols" => Some(("/files", MAX_SYMBOL_QUERY_FILES)),
         "write_png_asset" => Some(("/shapes", MAX_PNG_SHAPES)),
         _ => None,
@@ -1083,6 +1086,34 @@ fn full_tool_args_schema(spec: &ToolSpec) -> Value {
                 ("batch", semantic_edit_batch_schema()),
             ],
             &["proposal_id", "description", "batch"],
+        ),
+        "propose_file_write" | "repair_file_write" => object_schema(
+            &[
+                (
+                    "proposal_id",
+                    bounded_string_schema(1, task_session::MAX_ID_CHARS),
+                ),
+                (
+                    "description",
+                    bounded_string_schema(1, task_session::MAX_ACTION_TEXT_CHARS),
+                ),
+                (
+                    "writes",
+                    json!({
+                        "type": "array",
+                        "items": object_schema(
+                            &[
+                                ("path", bounded_string_schema(1, 512)),
+                                ("content", bounded_string_schema(0, MAX_FILE_WRITE_CHARS)),
+                            ],
+                            &["path", "content"],
+                        ),
+                        "minItems": 1,
+                        "maxItems": MAX_FILE_WRITES_PER_BATCH,
+                    }),
+                ),
+            ],
+            &["proposal_id", "description", "writes"],
         ),
         "list_symbols" => object_schema(
             &[
@@ -3424,6 +3455,27 @@ mod tests {
             args("write_png_asset")["properties"]["shapes"]["items"]["anyOf"][0]
                 ["additionalProperties"],
             json!(false)
+        );
+    }
+
+    #[test]
+    fn desktop_file_write_proposal_schema_is_closed_and_bounded() {
+        let proposal = spec(
+            "propose_file_write",
+            "Propose project file writes.",
+            &["proposal_id", "description", "writes"],
+            &[],
+        );
+        let schema = tool_args_schema(&proposal);
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(schema["required"].as_array().unwrap().len(), 3);
+        let writes = &schema["properties"]["writes"];
+        assert_eq!(writes["minItems"], json!(1));
+        assert_eq!(writes["maxItems"], json!(MAX_FILE_WRITES_PER_BATCH));
+        assert_eq!(writes["items"]["additionalProperties"], json!(false));
+        assert_eq!(
+            writes["items"]["properties"]["content"]["maxLength"],
+            json!(MAX_FILE_WRITE_CHARS)
         );
     }
 

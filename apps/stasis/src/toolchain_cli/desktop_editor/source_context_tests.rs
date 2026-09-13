@@ -180,3 +180,30 @@ fn source_context_agent_reads_before_proposing_without_applying() {
     assert_eq!(tools.proposals.len(), 1);
     assert_eq!(tools.sources, vec![original]);
 }
+
+#[test]
+fn desktop_tools_turn_file_writes_into_reviewable_proposals() {
+    let mut tools = ProposalTools::default();
+    let result = tools.execute(
+        &[ToolCall {
+            tool: "propose_file_write".into(),
+            args: json!({
+                "proposal_id": "brown-background",
+                "description": "Add a patterned brown background",
+                "writes": [{
+                    "path": "assets/generated/brown-background.svg",
+                    "content": "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'></svg>"
+                }],
+            }),
+        }],
+        &AtomicBool::new(false),
+    );
+
+    assert!(result[0].result.is_some());
+    assert_eq!(tools.proposals.len(), 1);
+    assert_eq!(tools.proposals[0].kind, stasis_ai::ActionKind::Edit);
+    assert_eq!(
+        tools.proposals[0].payload.pointer("/file_writes/0/path"),
+        Some(&json!("assets/generated/brown-background.svg"))
+    );
+}

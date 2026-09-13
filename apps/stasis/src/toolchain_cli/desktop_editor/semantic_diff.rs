@@ -50,7 +50,7 @@ pub(super) fn render(
         .sum::<usize>();
 
     let header = ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Semantic source diff").strong());
+        ui.label(RichText::new("Proposed file diff").strong());
         ui.label(format!(
             "{} changed file{}",
             plan.changed_files.len(),
