@@ -56,5 +56,29 @@ about 7 minutes in Stasis integration Cargo tests after the preceding checks.
 Those two independent lanes define the expected post-change critical path;
 hosted follow-up measurements are recorded here after the split stabilizes.
 
+## Post-change measurements
+
+These are five successful hosted repetitions after the split and compiled
+provenance-harness repair. GitHub keeps reruns under the same workflow run URL;
+the rows below are attempts 1 through 5 of
+[34733590591](https://github.com/benwmaddox/StasisLang/actions/runs/34733590591).
+Elapsed time is the workflow start to the required `test` aggregator finish.
+
+| Attempt | Workflow start (UTC) | Aggregator finish (UTC) | Elapsed |
+| ---: | --- | --- | ---: |
+| 1 | 2026-09-13 02:39:40 | 2026-09-13 02:52:54 | 13:14 |
+| 2 | 2026-09-13 02:53:36 | 2026-09-13 03:06:04 | 12:28 |
+| 3 | 2026-09-13 03:07:27 | 2026-09-13 03:20:29 | 13:02 |
+| 4 | 2026-09-13 03:21:17 | 2026-09-13 03:34:18 | 13:01 |
+| 5 | 2026-09-13 03:35:35 | 2026-09-13 03:50:55 | 15:20 |
+
+Sorted post-change samples: 12:28, 13:01, 13:02, 13:14, 15:20. Median:
+13:02. The conservative five-run p95 bound is 15:20, satisfying the required
+median <=15 minutes and p95 <=20 minutes. Every required lane and the
+fail-closed aggregator passed in all five repetitions. Coverage remains
+complete: the main-binary suite still runs in full across the main lane and
+the exact isolated provenance test, with the latter executed from the
+published test harness rather than compiled a second time.
+
 Visual evidence: not applicable; this change is CI workflow timing and coverage
 configuration.
