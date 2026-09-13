@@ -844,55 +844,7 @@ impl OpenRouterProvider {
     }
 
     fn route_json(&self) -> Value {
-        let routing = &self.config.routing;
-        let mut value = json!({
-            "allow_fallbacks": routing.allow_fallbacks,
-            "sort": {
-                "by": match routing.sort {
-                    RoutingSort::Price => "price",
-                    RoutingSort::Throughput => "throughput",
-                    RoutingSort::Latency => "latency",
-                },
-                "partition": "none"
-            },
-            "require_parameters": true,
-        });
-        let object = value.as_object_mut().expect("route object");
-        let only = routing
-            .only
-            .clone()
-            .into_iter()
-            .filter_map(|value| normalize_provider_slug(&value))
-            .collect::<Vec<_>>();
-        if !only.is_empty() {
-            object.insert("only".to_string(), json!(only));
-        }
-        if !routing.order.is_empty() {
-            object.insert(
-                "order".to_string(),
-                json!(routing
-                    .order
-                    .iter()
-                    .filter_map(|value| normalize_provider_slug(value))
-                    .collect::<Vec<_>>()),
-            );
-        }
-        if let Some(target) = routing
-            .preferred_min_throughput
-            .or(routing.hard_min_throughput)
-        {
-            object.insert(
-                "preferred_min_throughput".to_string(),
-                json!({"p50": target}),
-            );
-        }
-        if let Some(target) = routing.preferred_max_latency_seconds {
-            object.insert("preferred_max_latency".to_string(), json!({"p50": target}));
-        }
-        if let Some(max_price) = routing.max_price {
-            object.insert("max_price".to_string(), json!({"completion": max_price}));
-        }
-        value
+        route_json_for_config(&self.config.routing, None)
     }
 
     fn observe_tool_results(&mut self, observations: &[crate::ToolObservation]) {
@@ -908,6 +860,59 @@ impl OpenRouterProvider {
             self.reasoning_effort = Some("medium".to_string());
         }
     }
+}
+
+pub(crate) fn route_json_for_config(
+    routing: &RoutingConfig,
+    hard_only: Option<Vec<String>>,
+) -> Value {
+    let mut value = json!({
+        "allow_fallbacks": routing.allow_fallbacks,
+        "sort": {
+            "by": match routing.sort {
+                RoutingSort::Price => "price",
+                RoutingSort::Throughput => "throughput",
+                RoutingSort::Latency => "latency",
+            },
+            "partition": "none"
+        },
+        "require_parameters": true,
+    });
+    let object = value.as_object_mut().expect("route object");
+    let only = hard_only
+        .unwrap_or_else(|| routing.only.clone())
+        .into_iter()
+        .filter_map(|value| normalize_provider_slug(&value))
+        .collect::<Vec<_>>();
+    if !only.is_empty() {
+        object.insert("only".to_string(), json!(only));
+    }
+    if !routing.order.is_empty() {
+        object.insert(
+            "order".to_string(),
+            json!(routing
+                .order
+                .iter()
+                .filter_map(|value| normalize_provider_slug(value))
+                .collect::<Vec<_>>()),
+        );
+    }
+    if let Some(target) = routing
+        .preferred_min_throughput
+        .or(routing.hard_min_throughput)
+    {
+        object.insert(
+            "preferred_min_throughput".to_string(),
+            json!({"p50": target}),
+        );
+    }
+    if let Some(target) = routing.preferred_max_latency_seconds {
+        object.insert("preferred_max_latency".to_string(), json!({"p50": target}));
+    }
+    if let Some(max_price) = routing.max_price {
+        object.insert("max_price".to_string(), json!({"completion": max_price}));
+    }
+    value
 }
 
 impl ModelProvider for OpenRouterProvider {
