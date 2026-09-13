@@ -79,6 +79,8 @@ $wrapperCargo = $wrapperCargo.Replace('../../../crates/stasis_ai', '../stasis-ai
 Set-Content -NoNewline -Path $wrapperManifest -Value $wrapperCargo
 
 $env:CARGO_INCREMENTAL = "0"
+$codexTargetRoot = Join-Path $scriptRoot "target"
+$env:CARGO_TARGET_DIR = $codexTargetRoot
 $profileArgs = @()
 $profileDir = "debug"
 if ($Release) {
@@ -108,7 +110,14 @@ foreach ($abi in $Abis) {
     Set-Item -Path "Env:CC_$targetEnvName" -Value $linker
     Set-Item -Path "Env:AR_$targetEnvName" -Value (Join-Path $toolchain "llvm-ar.exe")
 
-    cargo +1.95.0 build --manifest-path (Join-Path $wrapperRoot "Cargo.toml") --target $rustTarget @profileArgs
+    # Keep this upstream workspace's outputs isolated, while applying the repository signer.
+    $previousCargoTarget = $env:CARGO_TARGET_DIR
+    try {
+        $env:CARGO_TARGET_DIR = Join-Path $codexRustRoot "target"
+        & python (Join-Path $repoRoot "tools/cargo_cache.py") run -- cargo +1.95.0 build --manifest-path (Join-Path $wrapperRoot "Cargo.toml") --target $rustTarget @profileArgs
+    } finally {
+        $env:CARGO_TARGET_DIR = $previousCargoTarget
+    }
     if ($LASTEXITCODE -ne 0) { throw "Codex Android native build failed with exit code $LASTEXITCODE" }
 
     $targetRoot = if ($env:CARGO_TARGET_DIR) {

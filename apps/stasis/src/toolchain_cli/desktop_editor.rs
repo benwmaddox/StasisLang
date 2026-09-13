@@ -2,6 +2,8 @@ mod chat_export;
 mod git_completion;
 mod host_progress;
 mod image_attachments;
+#[cfg(test)]
+mod payload_tests;
 mod persistence;
 #[cfg(test)]
 mod request_image_tests;
@@ -9,6 +11,8 @@ mod semantic_diff;
 #[cfg(test)]
 mod source_context_tests;
 
+use super::desktop_image::{import_png, validate_generated, ImageArtifact};
+use super::source_catalog;
 use host_progress::{HostProgress, HostProgressState};
 use stasis_ai::task_controller::{ProgressReporter, ProgressStage, TaskControllerConfig};
 mod semantic_revisions;
@@ -20,20 +24,22 @@ use semantic_revisions::proposal_revisions;
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use stasis_ai::image_generation::ImageGenerationConfig;
 use stasis_ai::session_store::{
     CompletionPathProvenance, SessionSnapshot, SessionStore, TaskCompletionCommit, TaskGitBaseline,
     WindowPreferences,
 };
 use stasis_ai::task_session::{
-    ActionState, ActivityKind, ConnectionState, FallbackState, ImageHandoffState, ImageReviewState,
-    Key, KeyChord, Modifiers, ProviderSelection, ProviderState, RoutingState,
+    ActionState, ActivityKind, ConnectionState, FallbackState, ImageAttribution, ImageHandoffState,
+    ImageReviewState, Key, KeyChord, Modifiers, ProviderSelection, ProviderState, RoutingState,
     ScreenshotAnalysisState, ShortcutMapper, TaskId, TaskLifecycle, TaskSession,
     TaskSessionCommand, ThreadEntryKind, UploadState, ValidationStatus,
 };
 use stasis_ai::{
-    action_id_for_tool, run_agent_with_profile, AgentEvent, AgentProfile, ProviderActionProposal,
-    ProviderConfig, ProviderReply, ProviderRequest, ProviderUsage, TaskController,
-    TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation, ToolSpec,
+    action_id_for_tool, run_agent_with_profile, source_inspection_tool_spec, AgentEvent,
+    AgentProfile, ProviderActionProposal, ProviderConfig, ProviderReply, ProviderRequest,
+    ProviderUsage, TaskController, TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation,
+    ToolSpec,
 };
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,9 +106,26 @@ struct ProposalTools {
     proposals: Vec<ProviderActionProposal>,
     sources: Vec<Value>,
     existing_actions: BTreeMap<String, String>,
+    project_root: Option<PathBuf>,
 }
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 256 * 1024;
+
+fn canonicalize_proposal_payload(payload: &mut Value) {
+    let Some(edits) = payload.get_mut("edits").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for edit in edits {
+        if edit.get("operation").and_then(Value::as_str) != Some("add") {
+            continue;
+        }
+        if let Some(target) = edit.get_mut("target").and_then(Value::as_object_mut) {
+            target.remove("symbol_id");
+            target.remove("owner");
+            target.remove("signature");
+        }
+    }
+}
 
 impl ProposalTools {
     fn validate_proposal(
@@ -160,46 +183,27 @@ impl ProposalTools {
                 description,
                 payload.clone(),
             )
-            .map_err(|error| format!("invalid proposal: {error}"))
+            .map_err(|error| format!("invalid proposal: {error}"))?;
+        if let Some(root) = &self.project_root {
+            let preview = super::desktop_preview_semantic_batch(root, payload.clone())
+                .map_err(|error| format!("proposal does not parse or resolve: {error}"))?;
+            super::desktop_validate_semantic_preview(root, &preview)
+                .map_err(|error| format!("proposal does not compile and pass tests: {error}"))?;
+        }
+        Ok(())
     }
 
     fn source_catalog(&self) -> Result<Value, String> {
-        let catalog = Value::Array(
-            self.sources
-                .iter()
-                .map(|item| item["target"].clone())
-                .collect(),
-        );
-        if serde_json::to_vec(&catalog)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_SOURCE_CONTEXT_BYTES
-        {
-            return Err("Project symbol catalog exceeds 256 KiB; narrow the project before requesting edits.".into());
-        }
-        Ok(catalog)
+        source_catalog::render(&self.sources).map(Value::String)
     }
 
+    fn inspect_source(&self, args: &Value) -> Result<Value, String> {
+        source_catalog::inspect(&self.sources, args, MAX_SOURCE_CONTEXT_BYTES)
+    }
+
+    #[cfg(test)]
     fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
-        let symbol_id = args
-            .get("symbol_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "symbol_id must be a string".to_string())?;
-        let item = self
-            .sources
-            .iter()
-            .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id))
-            .ok_or_else(|| format!("Unknown source symbol: {symbol_id}"))?;
-        if serde_json::to_vec(item)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_SOURCE_CONTEXT_BYTES
-        {
-            return Err(format!(
-                "Source symbol {symbol_id} exceeds the 256 KiB read limit."
-            ));
-        }
-        Ok(item.clone())
+        self.inspect_source(args)
     }
 }
 
@@ -214,7 +218,9 @@ impl ToolExecutor for ProposalTools {
                 let repair = call.tool == "repair_semantic_edit";
                 let result: Result<Value, String> = (|| {
                     match call.tool.as_str() {
-                        "read_source_symbol" => return self.read_source_symbol(&call.args),
+                        "inspect_source" | "read_source_symbol" => {
+                            return self.inspect_source(&call.args)
+                        }
                         "propose_semantic_edit" | "repair_semantic_edit" => {}
                         _ => return Err(format!("Unknown desktop editor tool: {}", call.tool)),
                     }
@@ -228,11 +234,12 @@ impl ToolExecutor for ProposalTools {
                         .get("description")
                         .and_then(Value::as_str)
                         .ok_or_else(|| "description must be a string".to_string())?;
-                    let payload = call
+                    let mut payload = call
                         .args
                         .get("batch")
                         .cloned()
                         .ok_or_else(|| "batch is required".to_string())?;
+                    canonicalize_proposal_payload(&mut payload);
                     if payload
                         .get("edits")
                         .and_then(Value::as_array)
@@ -261,6 +268,12 @@ impl ToolExecutor for ProposalTools {
             })
             .collect()
     }
+
+    fn terminal_success(&self) -> Option<String> {
+        self.proposals
+            .last()
+            .map(|proposal| proposal.description.clone())
+    }
 }
 
 fn proposal_tool_specs() -> Vec<ToolSpec> {
@@ -287,13 +300,7 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
         optional_args: Vec::new(),
     })
     .collect();
-    specs.push(ToolSpec {
-        tool: "read_source_symbol".to_string(),
-        action_id: action_id_for_tool("read_source_symbol"),
-        purpose: "Read exact source and target metadata from the request's immutable source snapshot before proposing edits. Calls for multiple symbols can be batched.".to_string(),
-        required_args: vec!["symbol_id".to_string()],
-        optional_args: Vec::new(),
-    });
+    specs.push(source_inspection_tool_spec());
     specs
 }
 
@@ -399,7 +406,7 @@ fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> Provi
 
 fn effective_reasoning_effort(config: &ProviderConfig) -> String {
     if matches!(config, ProviderConfig::OpenRouter(_)) {
-        "low".to_string()
+        "medium".to_string()
     } else {
         std::env::var("STASIS_AI_REASONING_EFFORT")
             .ok()
@@ -517,9 +524,27 @@ fn run_reply_provider_observed_with_progress(
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
     progress: Option<ProgressReporter>,
-    mut observe_usage: impl FnMut(&Value),
+    observe_usage: impl FnMut(&Value),
 ) -> Result<ProviderReply, String> {
     let config = selected_provider_config(request.selected_provider, &project_root)?;
+    run_reply_provider_with_config(
+        request,
+        canceled,
+        project_root,
+        progress,
+        config,
+        observe_usage,
+    )
+}
+
+fn run_reply_provider_with_config(
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    project_root: PathBuf,
+    progress: Option<ProgressReporter>,
+    config: ProviderConfig,
+    mut observe_usage: impl FnMut(&Value),
+) -> Result<ProviderReply, String> {
     let reasoning_effort = effective_reasoning_effort(&config);
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
     if canceled.load(Ordering::Acquire) {
@@ -566,6 +591,7 @@ fn run_reply_provider_observed_with_progress(
     let source_context = super::desktop_source_context(&project_root)?;
     let mut tools = ProposalTools {
         sources: source_context,
+        project_root: Some(project_root.clone()),
         existing_actions: request
             .actions
             .iter()
@@ -574,22 +600,40 @@ fn run_reply_provider_observed_with_progress(
         ..ProposalTools::default()
     };
     let source_catalog = tools.source_catalog()?;
-    let initial_context = json!({
-        "task_id": request.task_id,
-        "objective": request.objective,
-        "project_summary": request.project_summary,
-        "relevant_files": request.relevant_files,
-        "relevant_symbols": request.relevant_symbols,
-        "relevant_tests": request.relevant_tests,
-        "screenshots": request.screenshots,
-        "thread": request.context,
-        "actions": request.actions,
-        "editable_symbols": source_catalog,
-    });
+    let mut initial_context = source_catalog.as_str().unwrap_or_default().to_string();
+    let mut append_context = |label: &str, value: &Value| -> Result<(), String> {
+        initial_context.push_str(label);
+        initial_context.push(':');
+        initial_context.push_str(&serde_json::to_string(value).map_err(|error| error.to_string())?);
+        initial_context.push('\n');
+        Ok(())
+    };
+    if request.objective.trim() != prompt.trim() {
+        append_context("goal", &json!(request.objective))?;
+    }
+    for (label, value) in [
+        ("files", json!(request.relevant_files)),
+        ("symbols", json!(request.relevant_symbols)),
+        ("tests", json!(request.relevant_tests)),
+        ("screenshots", json!(request.screenshots)),
+        ("actions", json!(request.actions)),
+    ] {
+        if value.as_array().is_some_and(|items| !items.is_empty()) {
+            append_context(label, &value)?;
+        }
+    }
+    if request.context.len() > 1 {
+        append_context(
+            "history",
+            &json!(&request.context[..request.context.len() - 1]),
+        )?;
+    }
+    let initial_context = Value::String(initial_context);
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Return at most one semantic edit proposal, containing related source and behavioral tests together as one atomic batch. The editor validates and applies that batch immediately after this response, then requests a live hot swap and runs focused tests; do not ask the user to apply it. The editable_symbols catalog identifies project source. Use read_source_symbol to inspect exact source before proposing changes; batch independent symbol reads. Use propose_semantic_edit for new source changes. Use repair_semantic_edit only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Keep the response concise and self-contained.".to_string(),
-        max_turns: 4,
+        instruction: "Solve the task with tools. Stasis is typed and C-like: import, struct, global, function, test `name`(): bool. No array literals or collection iteration; copy local loop forms. Follow local syntax; invent no APIs. Catalog IDs are hypermedia leads. IDs are one letter plus digits: for example, f6 lists that file's symbols and s203 returns exact source. Copy a shown ID exactly; fN and sN are not IDs. Continue with newly revealed links or file changes. search TERMS returns matching links; search-source TERMS includes top bodies. Before adding, inspect one same-kind source in the target file. Batch every independent call and all related code/tests. Wait for prerequisites; never guess. Preserve live state. Use on_code_swap when the requested change needs migration or immediate visual setup; change only the minimum state, such as player position or phase, needed to reveal it. Submit at most one atomic proposal; the editor applies, hot-swaps, and tests it. Use repair only for rejected work. Return only response-contract JSON.".to_string(),
+        max_turns: 8,
+        compact_request: true,
         ..AgentProfile::default()
     };
     let mut usage = None;
@@ -604,6 +648,15 @@ fn run_reply_provider_observed_with_progress(
         proposal_tool_specs(),
         &canceled,
         |event| {
+            #[cfg(test)]
+            if std::env::var_os("STASIS_EDITOR_OPENROUTER_TRACE").is_some()
+                && matches!(
+                    &event,
+                    AgentEvent::ToolBatch(_) | AgentEvent::Observations(_)
+                )
+            {
+                eprintln!("OpenRouter editor event: {event:?}");
+            }
             if let AgentEvent::Observations(observations) = &event {
                 last_tool_error = observations
                     .iter()
@@ -736,6 +789,20 @@ enum EditorIntent {
     Reconnect(String),
     MarkDone(String),
     ExportChat(String),
+}
+
+#[derive(Debug)]
+struct PendingImageGeneration {
+    task_id: TaskId,
+    id: String,
+    canceled: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct ImageGenerationResult {
+    task_id: TaskId,
+    id: String,
+    result: Result<ImageArtifact, String>,
 }
 
 #[derive(Debug)]
@@ -1049,6 +1116,12 @@ struct DesktopEditor {
     capture_result_tx: mpsc::Sender<CaptureResult>,
     next_capture: u64,
     preview_texture: Option<(String, egui::TextureHandle)>,
+    image_generation: Option<PendingImageGeneration>,
+    image_results: Receiver<ImageGenerationResult>,
+    image_result_tx: mpsc::Sender<ImageGenerationResult>,
+    generated_images: BTreeMap<TaskId, ImageArtifact>,
+    image_texture: Option<(String, egui::TextureHandle)>,
+    next_image: u64,
     asset_textures: BTreeMap<(String, String), Option<egui::TextureHandle>>,
     attachment_store: SessionAttachmentStore,
     attachment_textures: BTreeMap<(String, String), egui::TextureHandle>,
@@ -1521,6 +1594,7 @@ impl DesktopEditor {
             .filter(|config| config.editor.auto_persist_html_transcripts)
             .map(|_| project_root.join(".stasis_cache/logs/ai-transcripts"));
         let (capture_result_tx, capture_results) = mpsc::channel();
+        let (image_result_tx, image_results) = mpsc::channel();
         let (capability_result_tx, capability_results) = mpsc::channel();
         Self {
             windows: None,
@@ -1553,6 +1627,12 @@ impl DesktopEditor {
             capture_result_tx,
             next_capture: 1,
             preview_texture: None,
+            image_generation: None,
+            image_results,
+            image_result_tx,
+            generated_images: BTreeMap::new(),
+            image_texture: None,
+            next_image: 1,
             asset_textures: BTreeMap::new(),
             attachment_store: SessionAttachmentStore::new(),
             attachment_textures: BTreeMap::new(),
@@ -1987,6 +2067,17 @@ impl DesktopEditor {
                     let task = TaskId::new(task);
                     self.host.cancel(task.as_str());
                     let canceled_capture = self.cancel_capture_for(&task);
+                    let canceled_image = self
+                        .image_generation
+                        .as_ref()
+                        .is_some_and(|pending| pending.task_id == task);
+                    if canceled_image {
+                        if let Some(pending) = self.image_generation.take() {
+                            pending.canceled.store(true, Ordering::Release);
+                            self.state.notice =
+                                Some(format!("Image generation canceled for {task}."));
+                        }
+                    }
                     let queued = self
                         .state
                         .session
@@ -2036,7 +2127,7 @@ impl DesktopEditor {
                         self.task_git_baseline_errors.remove(task.as_str());
                         self.state.session.select_queue_gate_after(&task);
                     } else if let Err(error) = result {
-                        if !canceled_capture {
+                        if !canceled_capture && !canceled_image {
                             self.state.notice = Some(error);
                         }
                     }
@@ -2187,15 +2278,165 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::ExportChat(task) => self.export_chat(&task),
-                EditorIntent::GenerateImage(task) | EditorIntent::ImportImage(task, _) => {
-                    let message = "Image generation and asset import are unavailable in the desktop editor. No asset was generated or imported.";
-                    if let Ok(task) = self.state.session.task_mut(task.as_str()) {
-                        let _ = task.append_host_result(message);
-                    }
-                    self.state.notice = Some(message.into());
+                EditorIntent::GenerateImage(task) => self.start_image_generation(TaskId::new(task)),
+                EditorIntent::ImportImage(task, image) => {
+                    self.import_image(TaskId::new(task), &image)
                 }
                 EditorIntent::Screenshot(task) => self.start_capture(TaskId::new(task)),
             }
+        }
+    }
+
+    fn start_image_generation(&mut self, task_id: TaskId) {
+        if self.image_generation.is_some() {
+            self.state.notice = Some("An image generation is already in progress.".into());
+            return;
+        }
+        if self
+            .state
+            .session
+            .active_task()
+            .ok()
+            .is_some_and(|task| task.pending_generated_images().next().is_some())
+        {
+            self.state.notice = Some(
+                "Approve and import the current generated image before generating another.".into(),
+            );
+            return;
+        }
+        if self.state.session.active_task_id() != Some(&task_id) {
+            self.state.notice = Some("Ignored image request from an inactive task.".into());
+            return;
+        }
+        let prompt = self.state.image_prompt.trim().to_string();
+        if prompt.is_empty() {
+            self.state.notice = Some("Enter an image prompt first.".into());
+            return;
+        }
+        let config = match ImageGenerationConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                self.state.notice = Some(format!("Cannot generate image: {error}"));
+                return;
+            }
+        };
+        let id = format!("image-{}", self.next_image);
+        self.next_image = self.next_image.saturating_add(1);
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = Arc::clone(&canceled);
+        let worker_task = task_id.clone();
+        let worker_id = id.clone();
+        let result_tx = self.image_result_tx.clone();
+        let generating_label = format!(
+            "Generating image with {} / {}...",
+            config.provider, config.model
+        );
+        thread::spawn(move || {
+            let result = config
+                .generate(&prompt, &worker_canceled)
+                .and_then(|generated| {
+                    validate_generated(worker_task.clone(), worker_id.clone(), generated)
+                });
+            let _ = result_tx.send(ImageGenerationResult {
+                task_id: worker_task,
+                id: worker_id,
+                result,
+            });
+        });
+        self.image_generation = Some(PendingImageGeneration {
+            task_id,
+            id,
+            canceled,
+        });
+        self.state.notice = Some(generating_label);
+    }
+
+    fn poll_images(&mut self) {
+        while let Ok(completed) = self.image_results.try_recv() {
+            let current = self.image_generation.as_ref().is_some_and(|pending| {
+                pending.task_id == completed.task_id && pending.id == completed.id
+            });
+            if !current {
+                continue;
+            }
+            self.image_generation = None;
+            match completed.result {
+                Ok(artifact) => {
+                    let cost = artifact
+                        .cost_micros
+                        .map(|value| format!("${:.4}", value as f64 / 1_000_000.0))
+                        .unwrap_or_else(|| "unknown cost".into());
+                    let credit = format!(
+                        "route {}; fallback {}; {cost}",
+                        artifact.route, artifact.fallback
+                    );
+                    let attribution = ImageAttribution::new(
+                        &artifact.provider,
+                        Some(artifact.model.clone()),
+                        Some(credit),
+                    );
+                    match attribution.and_then(|value| {
+                        self.state
+                            .session
+                            .task_mut(&completed.task_id)
+                            .and_then(|task| {
+                                task.add_generated_image(
+                                    completed.id.as_str(),
+                                    format!("memory://{}/{}", completed.task_id, completed.id),
+                                    value,
+                                )
+                            })
+                    }) {
+                        Ok(()) => {
+                            self.generated_images
+                                .insert(completed.task_id.clone(), artifact);
+                            self.image_texture = None;
+                            self.state.notice = Some(format!(
+                                "Image generated for {}. Select that task to review and approve it.",
+                                completed.task_id
+                            ));
+                        }
+                        Err(error) => self.state.notice = Some(error.to_string()),
+                    }
+                }
+                Err(error) => self.state.notice = Some(format!("Image generation failed: {error}")),
+            }
+        }
+    }
+
+    fn import_image(&mut self, task_id: TaskId, image_id: &str) {
+        if self.state.session.active_task_id() != Some(&task_id) {
+            self.state.notice = Some("Ignored image import from an inactive task.".into());
+            return;
+        }
+        let Some(artifact) = self.generated_images.get(&task_id) else {
+            self.state.notice =
+                Some("Generated image bytes are unavailable; generate again.".into());
+            return;
+        };
+        if artifact.id != image_id {
+            self.state.notice = Some("Generated image identity changed; generate again.".into());
+            return;
+        }
+        let mut candidate = self.state.session.clone();
+        let approved = candidate
+            .task_mut(&task_id)
+            .and_then(|task| task.import_generated_image(image_id))
+            .map_err(|error| error.to_string());
+        match approved.and_then(|()| {
+            import_png(
+                &self.project_root,
+                &task_id,
+                artifact,
+                &self.state.image_destination,
+            )
+        }) {
+            Ok(path) => {
+                self.state.session = candidate;
+                self.state.notice =
+                    Some(format!("Imported generated image as {}.", path.display()));
+            }
+            Err(error) => self.state.notice = Some(format!("Image import failed: {error}")),
         }
     }
 
@@ -3337,6 +3578,8 @@ struct EditorState {
     intents: Vec<EditorIntent>,
     notice: Option<String>,
     preview: Option<ScreenshotPreview>,
+    image_prompt: String,
+    image_destination: String,
     cancel_confirmation: Option<String>,
     project_root: Option<PathBuf>,
     semantic_previews: BTreeMap<SemanticPreviewKey, SemanticPreviewRecord>,
@@ -3360,6 +3603,8 @@ impl Default for EditorState {
             intents: Vec::new(),
             notice: None,
             preview: None,
+            image_prompt: String::new(),
+            image_destination: "assets/generated/image.png".into(),
             cancel_confirmation: None,
             project_root: None,
             semantic_previews: BTreeMap::new(),
@@ -5549,6 +5794,9 @@ impl DesktopEditor {
         let mut stop_request = false;
         egui::Frame::none().fill(panel_fill()).stroke(egui::Stroke::new(1.0_f32, border())).rounding(9.0).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
             let busy = self.ui_busy(task);
+            if !busy {
+                self.image_generation_panel(ui, task, compact);
+            }
             let reply = ui.add_sized(
                 [ui.available_width(), if compact { 42.0 } else { 58.0 }],
                 egui::TextEdit::multiline(&mut self.state.reply)
@@ -5665,6 +5913,151 @@ impl DesktopEditor {
                 .err()
                 .map(|error| error.to_string());
         }
+    }
+
+    fn image_generation_panel(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task, compact: bool) {
+        ui.group(|ui| {
+            ui.label(RichText::new("Generated image").strong());
+            match ImageGenerationConfig::from_env() {
+                Ok(config) => {
+                    ui.label(format!(
+                        "Configured: {} | Model: {} | Route: {} | Fallback: {}",
+                        config.provider, config.model, config.route, config.fallback
+                    ));
+                }
+                Err(error) => {
+                    ui.label(RichText::new(format!("Image provider unavailable: {error}")).weak());
+                }
+            }
+            let prompt = ui.add(
+                egui::TextEdit::multiline(&mut self.state.image_prompt)
+                    .desired_rows(if compact { 1 } else { 2 })
+                    .hint_text("Describe one project image..."),
+            );
+            if prompt.has_focus() {
+                self.state.focus = FocusArea::Reply;
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Import as");
+                ui.text_edit_singleline(&mut self.state.image_destination);
+                if ui
+                    .button(if compact {
+                        "Generate"
+                    } else {
+                        "Generate  Ctrl+G"
+                    })
+                    .clicked()
+                {
+                    self.state.dispatch(TaskSessionCommand::GenerateImage);
+                }
+            });
+
+            let Some(artifact) = self.generated_images.get(&task.id).cloned() else {
+                if let Some(pending) = &self.image_generation {
+                    if pending.task_id == task.id {
+                        ui.label("Generating off the UI thread...");
+                        return;
+                    }
+                }
+                ui.label(RichText::new("No generated preview for this task.").weak());
+                return;
+            };
+
+            let needs_texture = self
+                .image_texture
+                .as_ref()
+                .map_or(true, |(id, _)| id != &artifact.id);
+            if needs_texture {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [artifact.width, artifact.height],
+                    &artifact.rgba,
+                );
+                self.image_texture = Some((
+                    artifact.id.clone(),
+                    ui.ctx().load_texture(
+                        format!("generated-preview-{}-{}", task.id, artifact.id),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ),
+                ));
+            }
+            let texture_id = self
+                .image_texture
+                .as_ref()
+                .expect("generated image texture")
+                .1
+                .id();
+            let scale = (ui.available_width().min(220.0) / artifact.width as f32)
+                .min(180.0 / artifact.height as f32);
+            ui.image((
+                texture_id,
+                egui::vec2(
+                    artifact.width as f32 * scale,
+                    artifact.height as f32 * scale,
+                ),
+            ));
+            let cost = artifact
+                .cost_micros
+                .map(|value| format!("${:.4}", value as f64 / 1_000_000.0))
+                .unwrap_or_else(|| "unknown".into());
+            ui.label(format!(
+                "{} | {}x{} | sha256 {}",
+                artifact.id,
+                artifact.width,
+                artifact.height,
+                &artifact.sha256[..12]
+            ));
+            ui.label(format!(
+                "Provider: {} | Model: {} | Route: {} | Fallback: {} | Cost: {}",
+                artifact.provider, artifact.model, artifact.route, artifact.fallback, cost
+            ));
+            let state = self
+                .state
+                .session
+                .task(&task.id)
+                .ok()
+                .and_then(|task| task.generated_images.get(artifact.id.as_str()))
+                .map(|image| (image.review.clone(), image.handoff.clone()));
+            if let Some((review, handoff)) = &state {
+                ui.label(format!("Review: {review:?} | Import: {handoff:?}"));
+            }
+            ui.horizontal_wrapped(|ui| {
+                if matches!(&state, Some((ImageReviewState::Pending, _)))
+                    && ui.button("Approve preview").clicked()
+                {
+                    self.state.notice = self
+                        .state
+                        .session
+                        .task_mut(&task.id)
+                        .and_then(|task| task.approve_generated_image(&artifact.id))
+                        .err()
+                        .map(|error| error.to_string());
+                }
+                if matches!(&state, Some((ImageReviewState::Pending, _)))
+                    && ui.button("Reject preview").clicked()
+                {
+                    self.state.notice = self
+                        .state
+                        .session
+                        .task_mut(&task.id)
+                        .and_then(|task| {
+                            task.reject_generated_image(&artifact.id, "Rejected in desktop editor")
+                        })
+                        .err()
+                        .map(|error| error.to_string());
+                }
+                if matches!(
+                    &state,
+                    Some((ImageReviewState::Approved, ImageHandoffState::Pending))
+                ) && ui.button("Import approved  Ctrl+Shift+I").clicked()
+                {
+                    self.state.intents.push(EditorIntent::ImportImage(
+                        task.id.to_string(),
+                        artifact.id.clone(),
+                    ));
+                }
+            });
+        });
     }
 
     fn palette(&mut self, context: &egui::Context) {
@@ -5867,6 +6260,7 @@ impl DesktopEditor {
         self.poll_controller();
         self.poll_host();
         self.poll_capture();
+        self.poll_images();
         self.poll_semantic_previews();
         self.auto_apply_ready_proposal();
         self.process_shortcuts(context);
@@ -6200,6 +6594,9 @@ impl eframe::App for DesktopEditor {
         }
         if let Some(capture) = self.capture.take() {
             capture.canceled.store(true, Ordering::Release);
+        }
+        if let Some(generation) = self.image_generation.take() {
+            generation.canceled.store(true, Ordering::Release);
         }
         let _ = self
             .client
@@ -6813,6 +7210,58 @@ mod tests {
             "stasis-editor-{label}-{}-{nonce}.png",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn long_thread_keeps_composer_visible_at_supported_window_sizes() {
+        for size in [egui::vec2(900.0, 600.0), egui::vec2(1440.0, 900.0)] {
+            let (client, _server) = live_session(4);
+            let mut editor =
+                DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+            editor.state = task_state();
+            for _ in 0..40 {
+                editor.state.reply = "A long conversation entry for the active task.".into();
+                editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+            }
+            // Keep this a layout test; do not dispatch queued provider requests.
+            editor.state.intents.clear();
+            let context = egui::Context::default();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            for frame in 0..3 {
+                let output = context.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |context| editor.ui(context),
+                );
+                // Newly created egui panels use an invisible first sizing pass.
+                if frame == 0 {
+                    continue;
+                }
+                for label in [
+                    "Send (Ctrl+Enter)",
+                    "Success (Ctrl+Shift+D)",
+                    "Attach image",
+                ] {
+                    let text = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| {
+                            if let egui::Shape::Text(text) = &shape.shape {
+                                if text.galley.text() == label {
+                                    return Some((shape.clip_rect, text));
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or_else(|| panic!("missing composer action: {label}"));
+                    let bounds = egui::Rect::from_min_size(text.1.pos, text.1.galley.size());
+                    assert!(screen.contains_rect(bounds), "{label} outside {size:?}");
+                    assert!(text.0.contains_rect(bounds), "{label} clipped at {size:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -7628,7 +8077,7 @@ mod tests {
 
         assert_eq!(state.provider.as_deref(), Some("openrouter"));
         assert_eq!(state.model.as_deref(), Some("example/model"));
-        assert_eq!(state.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(state.reasoning_effort.as_deref(), Some("medium"));
         assert!(matches!(
             state.routing,
             RoutingState::Assigned { route } if route == "openrouter:cerebras"
@@ -7743,6 +8192,48 @@ mod tests {
 
         assert_eq!(tools.proposals.len(), 1);
         assert!(observations[0].error.is_none());
+    }
+
+    #[test]
+    fn proposal_tools_canonicalize_new_symbol_targets_and_finish_immediately() {
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "propose_semantic_edit".to_string(),
+                args: json!({
+                    "proposal_id": "add-test",
+                    "description": "Add a test",
+                    "batch": {
+                        "schema_version": 1,
+                        "edits": [{
+                            "operation": "add",
+                            "target": {
+                                "file": "tests/main.test.stasis",
+                                "kind": "test",
+                                "name": "new test",
+                                "owner": "Tests",
+                                "signature": "test `new test`",
+                                "symbol_id": null
+                            },
+                            "new_source": "test `new test`(): bool { return true; }"
+                        }]
+                    }
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0].error.is_none());
+        let target = &tools.proposals[0].payload["edits"][0]["target"];
+        assert_eq!(
+            target,
+            &json!({
+                "file": "tests/main.test.stasis",
+                "kind": "test",
+                "name": "new test"
+            })
+        );
+        assert_eq!(tools.terminal_success().as_deref(), Some("Add a test"));
     }
 
     #[test]

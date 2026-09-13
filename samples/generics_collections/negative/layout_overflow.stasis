@@ -1,0 +1,9 @@
+struct Buffer<N: i32> {
+    values: i32[N];
+}
+
+global invalid: Buffer<2147483647>;
+
+function main(): i32 {
+    return 0;
+}

@@ -1,0 +1,21 @@
+struct Item {
+    value: i32;
+    values: i32[2];
+}
+
+struct Buffer<T: type, N: i32> {
+    values: T[N];
+}
+
+global items: Buffer<Item, 2>;
+global source: Item;
+
+function append<T: type, N: i32>(self: Buffer<T, N>, value: T): bool {
+    self.values[0] = value;
+    return true;
+}
+
+function main(): i32 {
+    append(items, source);
+    return 0;
+}

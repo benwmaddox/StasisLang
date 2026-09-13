@@ -22,6 +22,7 @@ pub type FunctionStorageIndex = u32;
 pub struct SourceFile {
     pub path: String,
     pub content: String,
+    pub original_content: String,
     pub hash: u64,
     pub functions: Vec<FunctionId>,
 }
@@ -378,11 +379,13 @@ impl Compiler {
             .find(|file| file.path == normalized_path)
         {
             existing.content = content;
+            existing.original_content = existing.content.clone();
             existing.hash = hash;
             return;
         }
         self.files.push(SourceFile {
             path: normalized_path,
+            original_content: content.clone(),
             content,
             hash,
             functions: Vec::new(),
@@ -432,7 +435,7 @@ impl Compiler {
         let available: BTreeMap<String, String> = self
             .files
             .iter()
-            .map(|file| (file.path.clone(), file.content.clone()))
+            .map(|file| (file.path.clone(), file.original_content.clone()))
             .collect();
         let project_root = self.project_root.clone();
         let mut confined_root = None;
@@ -528,6 +531,18 @@ impl Compiler {
             return Err(CompileError::Frontend(error));
         }
         self.refresh_module_graph()?;
+        crate::frontend::generics::expand_sources(&mut self.files).map_err(|message| {
+            self.last_source_diagnostic = self.files.first().map(|file| {
+                crate::SourceDiagnostic::new(
+                    file.path.clone(),
+                    0,
+                    file.content.len(),
+                    String::new(),
+                    message.clone(),
+                )
+            });
+            CompileError::Frontend(message)
+        })?;
         let changed_paths: Vec<String> = self
             .files
             .iter()
