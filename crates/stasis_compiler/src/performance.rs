@@ -380,6 +380,7 @@ mod tests {
         let files = vec![SourceFile {
             path: "game.stasis".to_string(),
             content: "function @tick_budget_us(250) tick(): i32 { return 0; }".to_string(),
+            original_content: "function @tick_budget_us(250) tick(): i32 { return 0; }".to_string(),
             hash: 0,
             functions: Vec::new(),
         }];
@@ -388,6 +389,8 @@ mod tests {
         let invalid = vec![SourceFile {
             path: "game.stasis".to_string(),
             content: "function @tick_budget_us(250) helper(): i32 { return 0; }".to_string(),
+            original_content: "function @tick_budget_us(250) helper(): i32 { return 0; }"
+                .to_string(),
             hash: 0,
             functions: Vec::new(),
         }];
@@ -407,6 +410,7 @@ mod tests {
             tick_budget_us(&[SourceFile {
                 path: "budget.stasis".to_string(),
                 content: source.to_string(),
+                original_content: source.to_string(),
                 hash: 0,
                 functions: Vec::new(),
             }])

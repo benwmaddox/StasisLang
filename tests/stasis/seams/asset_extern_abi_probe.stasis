@@ -15,7 +15,6 @@ function set_replacement_text(a: u8, b: u8, length: i32): void {
 }
 
 function render(): i32 {
-    begin_frame();
     ProbeState.text.draw(12.0, 34.0, 1.0, 1.0, 1.0, 1.0);
     end_frame();
     return 0;

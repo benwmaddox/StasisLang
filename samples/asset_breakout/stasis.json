@@ -4,6 +4,15 @@
   "entry": "src/main.stasis",
   "tests": "tests",
   "output": "build",
+  "ai": {
+    "openrouter": {
+      "approved_models": [
+        "openai/gpt-oss-120b"
+      ],
+      "min_throughput_tokens_per_second": 400,
+      "max_p50_latency_seconds": 2.0
+    }
+  },
   "vendor": {
     "stasis": {
       "release_id": "development",

@@ -18,8 +18,8 @@ content or prove that a frame was displayed.
 
 ## Presentation boundary
 
-`begin_frame` and `end_frame` build a command buffer; `end_frame` marks it for
-presentation, rather than synchronously swapping the display. The example records
+The host resets the graphics builder when it enters `render`; `end_frame` marks
+the completed construction for publication rather than synchronously swapping the display. The example records
 submission in `render`, returns to the host, and allows IO only on a subsequent
 `tick`. Its first-frame-presented gate relies on a host that consumes and presents
 that render before the next simulation tick. Repeated ticks without a render do
@@ -204,7 +204,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.04, 0.06, 0.1, 1.0);
     if (gate.phase == LoadingPhase.Gameplay) {
         draw_sprite(hero.sprite_ref, 288.0, 148.0, 64.0, 64.0, 0, 255);

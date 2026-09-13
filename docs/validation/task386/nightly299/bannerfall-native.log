@@ -1,0 +1,16 @@
+Stasis provenance: production-monolith tag=direct-bound commit=unknown renderer=gfx_cmd schema=7
+App name: bannerfall_tactics.exe
+App version: <unspecified>
+App ID: <unspecified>
+SDL revision: SDL-release-3.4.10-0-g8e37db5e7
+Created renderer: direct3d11
+Stasis graphics initialized (SDL renderer): 1280x720 name=direct3d11
+Stasis renderer loading screen presented: backend=sdl reason=none surface_generation=1 renderer_generation=1
+Stasis display metrics: logical=1280x720 native=1920x1046 drawable=1920x1046 scale=1.453 display_scale=1.000 display_generation=1 density_generation=1
+stasis_load_font: loaded D:/code/MaddoxTasks-worktrees/stasislang-386/artifacts/task386/BannerfallTactics/build/assets/gauntlet-ui.ttf logical_size=18 raster_size=27 scale=1.45 handle=1
+Stasis window presentation: mode=windowed
+Stasis window presentation: mode=windowed logical=960x540 native=960x540 drawable=960x540 display_scale=1.000 display_generation=2 density_generation=2
+Stasis render contract v7 trace=2317274223 flags=3 lines=9632 rects=0 sprites=10 text=21
+Stasis mobile runtime received a quit event before the frame
+Stasis mobile loop stopped with status 1
+Stasis graphics shutdown

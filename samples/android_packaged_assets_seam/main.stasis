@@ -83,7 +83,6 @@ function render(): i32 {
     if (seam_sprite_handle <= 0 || seam_cached_text_handle <= 0 || seam_direct_text_width <= 0.0 || seam_cached_text_width <= 0.0) {
         return 20;
     }
-    begin_frame();
     clear(0.03, 0.06, 0.11, 1.0);
     fill_rect(24.0, 32.0, 184.0, 296.0, 0.08, 0.12, 0.18, 1.0);
     fill_rect(232.0, 32.0, 384.0, 296.0, 0.10, 0.13, 0.20, 1.0);

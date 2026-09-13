@@ -33,7 +33,7 @@ jobs:
       nightly_tag: ${{ steps.meta.outputs.nightly_tag }}
       last_tag: ${{ steps.meta.outputs.last_tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -82,16 +82,16 @@ jobs:
             kind: ios
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Rust targets
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.kind == 'android' && 'aarch64-linux-android,x86_64-linux-android' || 'aarch64-apple-ios' }}
 
       - name: Install pinned Android NDK
         if: matrix.kind == 'android'
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
 
       - name: Build Android network support
         if: matrix.kind == 'android'
@@ -134,8 +134,9 @@ jobs:
           cp target/aarch64-apple-ios/release/libstasis_network.a network-artifact/ios-arm64/
 
       - name: Upload immutable mobile network support
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: mobile-network-support-${{ matrix.kind }}
           path: network-artifact
           if-no-files-found: error
@@ -168,10 +169,8 @@ jobs:
       STASIS_RELEASE_ID: ${{ needs.detect.outputs.nightly_tag }}
       STASIS_SOURCE_COMMIT: ${{ github.sha }}
       STASIS_BUILD_TARGET: ${{ matrix.rust_target }}
-      STASIS_SIGNING_PFX_BASE64: ${{ secrets.STASIS_SIGNING_PFX_BASE64 }}
-      STASIS_SIGNING_PFX_PASSWORD: ${{ secrets.STASIS_SIGNING_PFX_PASSWORD }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Compute shared toolchain fingerprint
         shell: bash
@@ -180,14 +179,14 @@ jobs:
           echo "STASIS_BUILD_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
 
       - name: Download immutable mobile network support
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: mobile-network-support-*
           path: mobile/network
           merge-multiple: true
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.rust_target }}
 
@@ -196,7 +195,7 @@ jobs:
         run: >-
           sudo apt-get update && sudo apt-get install --yes pkg-config
           libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev
-          libxi-dev libxss-dev libxtst-dev libxkbcommon-dev
+          libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libegl1 libgl1-mesa-dri
 
       - name: Install SDL development packages (macos)
         if: runner.os == 'macOS'
@@ -204,7 +203,7 @@ jobs:
 
       - name: Setup MSVC dev environment (windows)
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
       - name: Build stasis (release)
         run: cargo build -p stasis --release --target ${{ matrix.rust_target }}
@@ -217,11 +216,15 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo build -p stasis_dynload --release --target ${{ matrix.rust_target }}
 
+      - name: Build desktop network support (unix)
+        if: runner.os != 'Windows'
+        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --release --target ${{ matrix.rust_target }}
+
       - name: Build desktop network support (windows)
         if: runner.os == 'Windows'
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --release --target ${{ matrix.rust_target }}
+        run: python tools/cargo_cache.py run -- cargo build -p stasis_network --release --target ${{ matrix.rust_target }} --features supervision-cli
 
       - name: Build stasis_graphics runtime (windows)
         if: runner.os == 'Windows'
@@ -262,25 +265,7 @@ jobs:
             test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
           fi
 
-      - name: Authenticode sign Stasis Windows binaries
-        if: runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''
-        shell: pwsh
-        run: |
-          $certificate = Join-Path $env:RUNNER_TEMP "stasis-signing.pfx"
-          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:STASIS_SIGNING_PFX_BASE64))
-          $env:STASIS_SIGNING_CERTIFICATE = $certificate
-          $env:STASIS_SIGNING_TIMESTAMP_URL = "http://timestamp.digicert.com"
-          @(
-            "target/${{ matrix.rust_target }}/release/stasis.exe",
-            "target/${{ matrix.rust_target }}/release/stasis_dynload.dll",
-            "runtime/build_ci/bin/Release/stasis_graphics.dll",
-            "runtime/build_ci/bin/Release/stasis_runner.exe"
-          ) | ForEach-Object {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/windows/stasis-signing.ps1 sign -Artifact $_
-            if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $_" }
-          }
-          Remove-Item -LiteralPath $certificate -Force
-
+      # Nightly Windows artifacts are intentionally unsigned until a trusted production certificate is available.
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -308,6 +293,11 @@ jobs:
           test -f mobile/network/android-x86_64/libstasis_network.a
           test -f mobile/network/ios-arm64/libstasis_network.a
           cp -R mobile/network "${out}/mobile/"
+          network_target=linux-x86_64
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then network_target=macos-arm64; fi
+          mkdir -p "${out}/desktop/network/${network_target}" "${out}/desktop/network/include"
+          cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/libstasis_network.a" "${out}/desktop/network/${network_target}/"
+          cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"
           mkdir -p "${out}/runtime"
           cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_network_join_card.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stasis_platform_services.c runtime/stasis_platform_services.h runtime/stb_truetype.h "${out}/runtime/"
           cp -R runtime/third_party "${out}/runtime/"
@@ -374,12 +364,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out/desktop/network/windows-x86_64", "$out/desktop/network/include" | Out-Null
           Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.lib" "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
           Copy-Item crates/stasis_network/include/stasis_network.h "$out/desktop/network/include/" -ErrorAction Stop
+          Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe" "$out/" -ErrorAction Stop
           Copy-Item tools/diagnose_desktop_network.ps1 "$out/tools/" -ErrorAction Stop
           New-Item -ItemType Directory -Force -Path "$out/runtime" | Out-Null
           @('CMakeLists.txt', 'MINIMP3-LICENSE.txt', 'minimp3.h', 'minimp3_ex.h', 'stasis_svg.cpp', 'stasis_svg.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_render_contract.h', 'stasis_renderer_lifecycle.h', 'stasis_performance_metrics.h', 'stasis_audio_assets.c', 'stasis_audio_assets.h', 'stasis_graphics.c', 'stasis_mixed_quad_planner.h', 'stasis_sprite_atlas_policy.h', 'stasis_image_writer.c', 'stasis_image_writer.h', 'stasis_runner.manifest', 'stasis_runner_macos.plist.in', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stasis_network_join_card.h', 'stasis_platform_storage.c', 'stasis_platform_storage.h', 'stasis_platform_services.c', 'stasis_platform_services.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
           Copy-Item "runtime/third_party" "$out/runtime/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
-          Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md "$out/docs/" -Force
+          Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md,docs/network_supervision.md "$out/docs/" -Force
           Copy-Item docs/knowledge "$out/docs/knowledge" -Recurse -Force
           python tools/generate_release_provenance.py `
             --archive-root "$out" `
@@ -396,6 +387,34 @@ jobs:
             --output "bundle-audit/${{ matrix.archive }}.json" `
             --max-archive-bytes 125829120
 
+      - name: Verify extracted Windows editor toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $validationRoot = "build/network-supervision-release"
+          Expand-Archive -LiteralPath "dist/${{ matrix.archive }}.${{ matrix.ext }}" -DestinationPath $validationRoot -Force
+          @(
+            "$validationRoot/stasis.exe",
+            "$validationRoot/stasis_graphics.dll",
+            "$validationRoot/stasis_dynload.dll",
+            "$validationRoot/src/stdlib",
+            "$validationRoot/stasis_release_provenance.json"
+          ) | ForEach-Object {
+            if (-not (Test-Path $_)) { throw "extracted Windows editor toolchain is missing $_" }
+          }
+          $editorInfo = & "$validationRoot/stasis.exe" --json editor-info | ConvertFrom-Json
+          if (-not $editorInfo.ok) { throw "extracted editor-info probe failed" }
+          if ($editorInfo.result.release_id -ne "${{ needs.detect.outputs.nightly_tag }}") { throw "extracted editor release ID mismatch" }
+          if ($editorInfo.result.source_commit -ne "${{ github.sha }}") { throw "extracted editor source commit mismatch" }
+          if ($editorInfo.result.build_fingerprint -ne $editorInfo.result.graphics_runtime.build_fingerprint) { throw "extracted editor fingerprint mismatch" }
+          & "$validationRoot/stasis.exe" editor --help
+          if ($LASTEXITCODE -ne 0) { throw "extracted editor help probe failed" }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_network_supervision.ps1 `
+            -Toolchain "$validationRoot/stasis.exe" `
+            -Supervisor "$validationRoot/stasis-network-supervise.exe" `
+            -InstalledToolchain
+
       - name: Smoke test bundled graphics runtime (windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -411,8 +430,13 @@ jobs:
           try {
             .\stasis.exe probe-graphics-runtime
             .\stasis.exe --json editor-info
+            .\stasis.exe editor --help
             & .\samples\windows_launch_smoke\verify.ps1 -Toolchain (Resolve-Path .\stasis.exe) -ArtifactRoot (Join-Path (Get-Location) 'windows-launch-evidence')
             .\stasis.exe new ci_smoke --dir cli-smoke
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$checkoutRoot/tools/ci/test_editor_windows.ps1" `
+              -Toolchain (Resolve-Path .\stasis.exe) `
+              -Workspace (Resolve-Path .\cli-smoke) `
+              -GameWindowTitle "ci_smoke"
             .\stasis.exe --workspace cli-smoke check
             .\stasis.exe --workspace cli-smoke test
             .\stasis.exe --workspace cli-smoke build --mode release
@@ -479,6 +503,27 @@ jobs:
           python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-android" --expect-runtime-sources
           if ($env:RUNNER_OS -eq "macOS") { python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-ios" --expect-runtime-sources }
 
+      - name: Qualify extracted Windows native client package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = "Stop"
+          $checkoutRoot = (Get-Location).Path
+          $repoNetworkSource = Join-Path $checkoutRoot "crates/stasis_network"
+          $repoNetworkBackup = Join-Path $env:RUNNER_TEMP ("stasis-network-client-source-backup-" + [guid]::NewGuid().ToString())
+          try {
+            Move-Item $repoNetworkSource $repoNetworkBackup -Force
+            powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_windows_desktop_network_client_package.ps1 `
+              -Toolchain "build/network-supervision-release/stasis.exe" `
+              -InstalledToolchain
+            if ($LASTEXITCODE -ne 0) { throw "extracted Windows native client package qualification failed" }
+          } finally {
+            if (Test-Path $repoNetworkBackup) {
+              Move-Item $repoNetworkBackup $repoNetworkSource -Force
+            }
+          }
+
       - name: Smoke test bundled CLI (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -494,6 +539,7 @@ jobs:
           trap restore_network_source EXIT
           pushd "dist/${{ matrix.archive }}"
           ./bin/stasis --json editor-info
+          ./bin/stasis editor --help
           ./bin/stasis new ci_smoke --dir cli-smoke
           ./bin/stasis --workspace cli-smoke check
           ./bin/stasis --workspace cli-smoke test
@@ -539,6 +585,13 @@ jobs:
           manifest["web"] = {"entry": "src/main.stasis"}
           path.write_text(json.dumps(manifest, indent=2) + "\n")
           PY
+          ./bin/stasis --workspace cli-smoke package --target desktop --out dist/network-desktop
+          test -f cli-smoke/dist/network-desktop/network_guest.bundle
+          test -f cli-smoke/dist/network-desktop/network_guest.bundle.json
+          python3 "${repo_root}/tools/verify_package_provenance.py" --release-root . --package-root cli-smoke/dist/network-desktop
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            python3 "${repo_root}/tools/ci/test_linux_desktop_network_package.py" --executable cli-smoke/dist/network-desktop/ci_smoke --result cli-smoke/network-desktop-result.json
+          fi
           ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/network-android
           test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network.a
           test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/include/stasis_network.h
@@ -566,8 +619,9 @@ jobs:
           if [[ "${RUNNER_OS}" == "macOS" ]]; then python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-ios" --expect-runtime-sources; fi
 
       - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: ${{ matrix.archive }}
           path: dist/${{ matrix.archive }}.${{ matrix.ext }}
           if-no-files-found: error
@@ -603,12 +657,13 @@ jobs:
       STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/vscode-nightly/${{ matrix.archive }}/${{ matrix.executable }}
       STASIS_E2E_SCREENSHOT: ${{ github.workspace }}/target/vscode-e2e/frame.png
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          package-manager-cache: false
+          node-version: "24"
           cache: npm
           cache-dependency-path: vscode-stasis/package-lock.json
 
@@ -624,7 +679,7 @@ jobs:
         run: brew install pkg-config
 
       - name: Download matching nightly toolchain
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ matrix.archive }}
           path: target/vscode-nightly
@@ -682,8 +737,9 @@ jobs:
           Compress-Archive -Path "$releaseRoot/*" -DestinationPath "target/stasis-editor-release-${{ matrix.vsce_target }}.zip" -Force
 
       - name: Upload atomic editor release
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: stasis-editor-release-${{ matrix.vsce_target }}
           path: target/stasis-editor-release-${{ matrix.vsce_target }}.zip
           if-no-files-found: error
@@ -693,11 +749,11 @@ jobs:
     if: needs.detect.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
@@ -724,6 +780,7 @@ jobs:
           fi
           gh release create "${NIGHTLY_TAG}" "${release_assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
             --title "Nightly ${NIGHTLY_TAG}" \
             --notes "${notes}" \
             --prerelease

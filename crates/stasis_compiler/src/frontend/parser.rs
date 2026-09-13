@@ -27,6 +27,18 @@ pub struct ParsedParam {
     pub type_name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParsedGenericParameterKind {
+    Type,
+    I32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ParsedGenericParameter {
+    pub name: String,
+    pub kind: ParsedGenericParameterKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedLocalBinding {
     pub function_name: String,
@@ -47,6 +59,7 @@ pub struct ParsedLocalDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFunctionSignature {
     pub name: String,
+    pub generic_parameters: Vec<ParsedGenericParameter>,
     pub annotations: Vec<ParsedFunctionAnnotation>,
     pub params: Vec<ParsedParam>,
     pub return_type_name: String,
@@ -79,6 +92,7 @@ pub enum ParsedFunctionAnnotationArgumentKind {
 pub struct ParsedExternFunctionDeclaration {
     pub name: String,
     pub name_range: Range<usize>,
+    pub generic_parameters: Vec<ParsedGenericParameter>,
     pub symbol_name: String,
     pub explicit_symbol: bool,
     pub annotations: Vec<ParsedFunctionAnnotation>,
@@ -95,12 +109,14 @@ pub struct ParsedField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedStructDefinition {
     pub name: String,
+    pub generic_parameters: Vec<ParsedGenericParameter>,
     pub fields: Vec<ParsedField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedStructDefinitionRange {
     pub name: String,
+    pub generic_parameters: Vec<ParsedGenericParameter>,
     pub definition_range: Range<usize>,
 }
 
@@ -567,6 +583,124 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
     parse_top_level_functions_with_diagnostic(source).map_err(|error| error.message)
 }
 
+/// Return the source ranges of generic declaration, type-application, and
+/// explicit-call angle brackets.
+///
+/// Tooling must use the parser's delimiter decisions instead of treating every
+/// `<` and `>` as an operator.  The compiler grammar has no general expression
+/// comma operator, so a matched angle group in a type context is unambiguous;
+/// ordinary comparisons remain outside the returned set.
+pub fn generic_angle_ranges(source: &str) -> Result<Vec<Range<usize>>, String> {
+    let tokens = lex(source)?;
+    let mut generic = Vec::new();
+    for (index, token) in tokens.iter().copied().enumerate() {
+        if !token_is_other_char(source, token, b'<')
+            || !looks_like_generic_open(source, &tokens, index)
+        {
+            continue;
+        }
+        let Some(close) = matching_angle_token(source, &tokens, index) else {
+            continue;
+        };
+        generic.push(token.start..token.end);
+        let close_token = tokens[close];
+        generic.push(close_token.start..close_token.end);
+    }
+    Ok(generic)
+}
+
+fn looks_like_generic_open(source: &str, tokens: &[Token], open: usize) -> bool {
+    let previous = open.checked_sub(1).and_then(|index| tokens.get(index));
+    if open >= 2
+        && token_text(source, tokens[open - 1]) == ":"
+        && token_text(source, tokens[open - 2]) == ":"
+    {
+        return true;
+    }
+
+    let Some(close) = matching_angle_token(source, tokens, open) else {
+        return false;
+    };
+    if generic_parameter_group(source, tokens, open, close) {
+        return true;
+    }
+
+    let previous_is_nested = previous.is_some_and(|token| {
+        token_is_other_char(source, *token, b'<')
+            || token_is_other_char(source, *token, b',')
+            || token_is_other_char(source, *token, b'>')
+    });
+    if previous_is_nested {
+        return true;
+    }
+
+    let Some(previous) = previous else {
+        return false;
+    };
+    if previous.kind != TokenKind::Identifier && !token_is_other_char(source, *previous, b'>') {
+        return false;
+    }
+
+    let after_close = tokens.get(close + 1);
+    let type_terminator = after_close.is_none_or(|token| {
+        matches!(
+            token_text(source, *token),
+            "[" | "." | "," | ";" | ")" | "}" | "=" | ">"
+        )
+    });
+    type_terminator && generic_type_context(source, tokens, open)
+}
+
+fn generic_parameter_group(source: &str, tokens: &[Token], open: usize, close: usize) -> bool {
+    let mut depth = 0usize;
+    let mut has_parameter = false;
+    for token in tokens.iter().copied().take(close).skip(open + 1) {
+        if token_is_other_char(source, token, b'<') {
+            depth = depth.saturating_add(1);
+        } else if token_is_other_char(source, token, b'>') {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 && token_text(source, token) == ":" {
+            has_parameter = true;
+        }
+    }
+    has_parameter
+}
+
+fn generic_type_context(source: &str, tokens: &[Token], open: usize) -> bool {
+    let mut index = open;
+    while index > 0 {
+        index -= 1;
+        let token = tokens[index];
+        if token_text(source, token) == ":" {
+            return true;
+        }
+        if matches!(token_text(source, token), ";" | "{" | "}" | "(" | ")" | "=") {
+            return false;
+        }
+        if token.kind == TokenKind::FunctionKw {
+            return false;
+        }
+    }
+    false
+}
+
+fn matching_angle_token(source: &str, tokens: &[Token], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().copied().enumerate().skip(open) {
+        if token_is_other_char(source, token, b'<') {
+            depth = depth.saturating_add(1);
+        } else if token_is_other_char(source, token, b'>') {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        } else if depth > 0 && matches!(token_text(source, token), "{" | "}" | "(" | ")" | ";") {
+            return None;
+        }
+    }
+    None
+}
+
 pub fn parse_top_level_functions_with_diagnostic(
     source: &str,
 ) -> Result<Vec<ParsedFunctionSignature>, ParserDiagnostic> {
@@ -615,6 +749,18 @@ fn parse_top_level_functions_impl(
         )
         .to_string();
         cursor += 1;
+        let (generic_parameters, next_cursor) =
+            parse_generic_parameter_list(source, &tokens, cursor).map_err(|message| {
+                contextual_parser_error(
+                    source,
+                    &tokens,
+                    function_token_index,
+                    cursor,
+                    Some(&name),
+                    message,
+                )
+            })?;
+        cursor = next_cursor;
         expect(&tokens, cursor, TokenKind::LParen).map_err(|message| {
             contextual_parser_error(
                 source,
@@ -692,6 +838,22 @@ fn parse_top_level_functions_impl(
         })?;
         cursor += 1;
 
+        if let Some(parameter) = generic_parameters.iter().find(|parameter| {
+            params
+                .iter()
+                .any(|ordinary| ordinary.name == parameter.name)
+        }) {
+            return Err(ParserDiagnostic {
+                message: format!(
+                    "generic parameter '{}' conflicts with an ordinary function parameter",
+                    parameter.name
+                ),
+                start: signature_start,
+                end: cursor,
+                symbol: name.clone(),
+            });
+        }
+
         let mut return_type_name = "void".to_string();
         if tokens
             .get(cursor)
@@ -747,6 +909,7 @@ fn parse_top_level_functions_impl(
         let body_range = body_start_token.start..body_end_token.end;
         out.push(ParsedFunctionSignature {
             name,
+            generic_parameters,
             annotations,
             params,
             return_type_name,
@@ -1023,6 +1186,9 @@ pub fn parse_top_level_extern_functions(
         let name = token_text(source, name_token).to_string();
         let name_range = name_token.start..name_token.end;
         cursor += 1;
+        let (generic_parameters, next_cursor) =
+            parse_generic_parameter_list(source, &tokens, cursor)?;
+        cursor = next_cursor;
         expect(&tokens, cursor, TokenKind::LParen)?;
         cursor += 1;
         let mut params = Vec::new();
@@ -1051,6 +1217,17 @@ pub fn parse_top_level_extern_functions(
         expect(&tokens, cursor, TokenKind::RParen)?;
         cursor += 1;
 
+        if let Some(parameter) = generic_parameters.iter().find(|parameter| {
+            params
+                .iter()
+                .any(|ordinary| ordinary.name == parameter.name)
+        }) {
+            return Err(format!(
+                "generic parameter '{}' conflicts with an ordinary function parameter",
+                parameter.name
+            ));
+        }
+
         let mut return_type_name = "void".to_string();
         if tokens
             .get(cursor)
@@ -1072,6 +1249,7 @@ pub fn parse_top_level_extern_functions(
                 out.push(ParsedExternFunctionDeclaration {
                     name,
                     name_range,
+                    generic_parameters,
                     symbol_name,
                     explicit_symbol,
                     annotations,
@@ -1165,8 +1343,11 @@ fn parse_struct_definition(
     cursor: usize,
 ) -> Result<(ParsedStructDefinition, usize), String> {
     let name_token = expect(tokens, cursor + 1, TokenKind::Identifier)?;
-    let body_open = expect(tokens, cursor + 2, TokenKind::LBrace)?;
-    let (fields, mut next_cursor) = parse_braced_fields(source, tokens, body_open, cursor + 2)?;
+    let generic_cursor = cursor + 2;
+    let (generic_parameters, body_cursor) =
+        parse_generic_parameter_list(source, tokens, generic_cursor)?;
+    let body_open = expect(tokens, body_cursor, TokenKind::LBrace)?;
+    let (fields, mut next_cursor) = parse_braced_fields(source, tokens, body_open, body_cursor)?;
     if tokens
         .get(next_cursor)
         .is_some_and(|token| token.kind == TokenKind::Semicolon)
@@ -1176,6 +1357,7 @@ fn parse_struct_definition(
     Ok((
         ParsedStructDefinition {
             name: token_text(source, name_token).to_string(),
+            generic_parameters,
             fields,
         },
         next_cursor,
@@ -1188,8 +1370,11 @@ fn parse_struct_definition_range(
     cursor: usize,
 ) -> Result<(ParsedStructDefinitionRange, usize), String> {
     let name_token = expect(tokens, cursor + 1, TokenKind::Identifier)?;
-    let body_open = expect(tokens, cursor + 2, TokenKind::LBrace)?;
-    let (_, mut next_cursor) = parse_braced_fields(source, tokens, body_open, cursor + 2)?;
+    let generic_cursor = cursor + 2;
+    let (generic_parameters, body_cursor) =
+        parse_generic_parameter_list(source, tokens, generic_cursor)?;
+    let body_open = expect(tokens, body_cursor, TokenKind::LBrace)?;
+    let (_, mut next_cursor) = parse_braced_fields(source, tokens, body_open, body_cursor)?;
     if tokens
         .get(next_cursor)
         .is_some_and(|token| token.kind == TokenKind::Semicolon)
@@ -1203,6 +1388,7 @@ fn parse_struct_definition_range(
     Ok((
         ParsedStructDefinitionRange {
             name: token_text(source, name_token).to_string(),
+            generic_parameters,
             definition_range: tokens[cursor].start..definition_end,
         },
         next_cursor,
@@ -1549,6 +1735,61 @@ fn parse_extern_symbol_annotation(
     Ok(Some(symbol))
 }
 
+fn parse_generic_parameter_list(
+    source: &str,
+    tokens: &[Token],
+    cursor: usize,
+) -> Result<(Vec<ParsedGenericParameter>, usize), String> {
+    let Some(open) = tokens.get(cursor).copied() else {
+        return Ok((Vec::new(), cursor));
+    };
+    if !token_is_other_char(source, open, b'<') {
+        return Ok((Vec::new(), cursor));
+    }
+
+    let mut parameters = Vec::new();
+    let mut cursor = cursor + 1;
+    loop {
+        let name = token_text(source, expect(tokens, cursor, TokenKind::Identifier)?).to_string();
+        cursor += 1;
+        expect(tokens, cursor, TokenKind::Colon)?;
+        cursor += 1;
+        let kind = token_text(source, expect(tokens, cursor, TokenKind::Identifier)?);
+        let kind = match kind {
+            "type" => ParsedGenericParameterKind::Type,
+            "i32" => ParsedGenericParameterKind::I32,
+            other => {
+                return Err(format!(
+                    "generic parameter '{name}' has unsupported kind '{other}'; expected 'type' or 'i32'"
+                ));
+            }
+        };
+        cursor += 1;
+        if parameters
+            .iter()
+            .any(|parameter: &ParsedGenericParameter| parameter.name == name)
+        {
+            return Err(format!("duplicate generic parameter '{name}'"));
+        }
+        parameters.push(ParsedGenericParameter { name, kind });
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.kind == TokenKind::Comma)
+        {
+            cursor += 1;
+            continue;
+        }
+        let close = tokens
+            .get(cursor)
+            .copied()
+            .ok_or_else(|| "missing closing '>' in generic parameter list".to_string())?;
+        if !token_is_other_char(source, close, b'>') {
+            return Err("expected ',' or '>' in generic parameter list".to_string());
+        }
+        return Ok((parameters, cursor + 1));
+    }
+}
+
 pub(crate) fn parse_string_literal_text(literal_text: &str) -> Result<String, String> {
     let bytes = literal_text.as_bytes();
     if bytes.len() < 2 || bytes[0] != b'"' || *bytes.last().unwrap_or(&0) != b'"' {
@@ -1623,6 +1864,42 @@ fn parse_type_name(
     let base = expect(tokens, cursor, TokenKind::Identifier)?;
     let mut next = cursor + 1;
     let mut end = base.end;
+    while tokens
+        .get(next)
+        .copied()
+        .is_some_and(|token| token_is_other_char(source, token, b'.'))
+    {
+        let segment = expect(tokens, next + 1, TokenKind::Identifier)?;
+        end = segment.end;
+        next += 2;
+    }
+    if tokens
+        .get(next)
+        .copied()
+        .is_some_and(|token| token_is_other_char(source, token, b'<'))
+    {
+        let mut depth = 1i32;
+        let mut scan = next + 1;
+        while scan < tokens.len() {
+            let token = tokens[scan];
+            if token_is_other_char(source, token, b'<') {
+                depth += 1;
+            } else if token_is_other_char(source, token, b'>') {
+                depth -= 1;
+                if depth == 0 {
+                    end = token.end;
+                    next = scan + 1;
+                    break;
+                }
+            } else if token.kind == TokenKind::Eof {
+                return Err("missing closing '>' in type application".to_string());
+            }
+            scan += 1;
+        }
+        if depth != 0 {
+            return Err("missing closing '>' in type application".to_string());
+        }
+    }
     while let Some(open) = tokens.get(next).copied() {
         if !token_is_other_char(source, open, b'[') {
             break;
@@ -1854,6 +2131,37 @@ fn find_matching_rbrace(tokens: &[Token], start: usize, mut depth: usize) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_keywords_do_not_declare_symbols() {
+        let source = r#"
+/* invokes `update */
+/* " global const struct enum function test import { //
+ actual */
+const words: string = "global const struct enum function test import from as { } `";
+test `checkers mandatory capture is global and removes one piece`(): bool { return true; }
+test `const struct enum function test import from as " // { }`(): bool { return true; }
+struct Real { value: i32; }
+enum Choice { One, Two }
+global state: Real;
+function actual(): i32 { return 1; }
+"#;
+        let layout = parse_top_level_type_layout(source).expect("quoted layout");
+        assert_eq!(layout.constants.len(), 1);
+        assert_eq!(layout.structs[0].name, "Real");
+        assert_eq!(layout.structs.len(), 1);
+        assert_eq!(layout.enums.len(), 1);
+        assert_eq!(layout.globals.len(), 1);
+        let functions = parse_top_level_functions(source).expect("quoted functions");
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "actual");
+        assert_eq!(parse_top_level_test_declarations(source).unwrap().len(), 2);
+        assert!(
+            crate::frontend::module_graph::parse_imports("quoted.stasis", source)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn parses_function_signature_and_body_range() {
@@ -2154,6 +2462,69 @@ function tick(): i32 {
         assert_eq!(&source[parsed[0].name_range.clone()], "first");
         assert_eq!(&source[parsed[1].name_range.clone()], "second");
         assert!(parsed[0].name_range.end < parsed[1].name_range.start);
+    }
+
+    #[test]
+    fn parses_generic_parameters_and_nested_type_applications_structurally() {
+        let source = concat!(
+            "struct Buffer<N: i32> { values: i32[N]; }\n",
+            "struct Outer<N: i32> { buffers: Buffer<Buffer<N>>[2]; }\n",
+            "function clear<N: i32>(self: Buffer<N>): void { return; }\n",
+            "global samples: Buffer<4>;\n",
+        );
+        let layout = parse_top_level_type_layout(source).expect("generic layout");
+        assert_eq!(layout.structs.len(), 2);
+        assert_eq!(
+            layout.structs[0].generic_parameters,
+            vec![ParsedGenericParameter {
+                name: "N".to_string(),
+                kind: ParsedGenericParameterKind::I32,
+            }]
+        );
+        assert_eq!(layout.structs[0].fields[0].type_name, "i32[N]");
+        assert_eq!(
+            layout.structs[1].fields[0].type_name,
+            "Buffer<Buffer<N>>[2]"
+        );
+        let functions = parse_top_level_functions(source).expect("generic function");
+        assert_eq!(functions[0].generic_parameters[0].name, "N");
+        assert_eq!(functions[0].params[0].type_name, "Buffer<N>");
+        assert_eq!(layout.globals[0].type_name, "Buffer<4>");
+    }
+
+    #[test]
+    fn parses_module_qualified_generic_type_applications() {
+        let source =
+            "global sample: left_box.Buffer<i32, 4>;\nfunction use(value: left_box.Buffer<i32, 4>): void { return; }\n";
+        let layout = parse_top_level_type_layout(source).expect("qualified generic layout");
+        assert_eq!(layout.globals[0].type_name, "left_box.Buffer<i32, 4>");
+        let functions = parse_top_level_functions(source).expect("qualified generic function");
+        assert_eq!(functions[0].params[0].type_name, "left_box.Buffer<i32, 4>");
+    }
+
+    #[test]
+    fn rejects_duplicate_or_unknown_generic_parameter_kinds() {
+        for (source, expected) in [
+            (
+                "struct Buffer<N: i32, N: i32> { value: i32; }",
+                "duplicate generic parameter",
+            ),
+            (
+                "struct Buffer<N: const> { value: i32; }",
+                "unsupported kind",
+            ),
+        ] {
+            let error = parse_top_level_type_layout(source).expect_err("invalid generic list");
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejects_generic_parameter_collisions_with_ordinary_parameters() {
+        let error =
+            parse_top_level_functions("function collide<N: i32>(N: i32): i32 { return N; }")
+                .expect_err("generic and ordinary parameter names must be distinct");
+        assert!(error.contains("conflicts with an ordinary function parameter"));
     }
 
     #[test]

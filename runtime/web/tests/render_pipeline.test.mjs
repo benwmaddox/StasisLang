@@ -265,6 +265,16 @@ test("ordered clipping intersects nested logical clips through WebGL scissor", a
   ]);
 });
 
+test("ordered clipping clamps negative clip extents before WebGL scissor", async () => {
+  const scale = 16384;
+  const runtime = await loadRuntime({
+    clips: [[25, 30, -40, -24]],
+    ordered: [5 * scale, 6 * scale]
+  });
+  runtime.frame();
+  assert.deepEqual(runtime.stats.scissors, [[25, 330, 0, 0]]);
+});
+
 test("line barriers preserve source order between rectangle submissions", async () => {
   const first = Array.from({ length: 64 }, (_, index) => 4 * 16384 + index);
   const second = Array.from({ length: 64 }, (_, index) => 4 * 16384 + 64 + index);

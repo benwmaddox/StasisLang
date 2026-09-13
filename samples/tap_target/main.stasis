@@ -53,7 +53,6 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    begin_frame();
     clear(0.04, 0.06, 0.10, 1.0);
     fill_rect(0.0, 0.0, SCREEN_W, SCREEN_H, 0.04, 0.06, 0.10, 1.0);
     fill_rect(state.x, state.y, TARGET_SIZE, TARGET_SIZE, 0.95, 0.25, 0.48, 1.0);

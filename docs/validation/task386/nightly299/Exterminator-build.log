@@ -1,0 +1,1 @@
+{"code":"command_failed","command":"build","message":"workshop module graph failed: graphics internal identifier 'gfx_cmd_sprite' is unavailable here; use stdlib/graphics.stasis","ok":false}

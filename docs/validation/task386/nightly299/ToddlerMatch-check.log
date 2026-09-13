@@ -1,0 +1,1 @@
+{"code":"command_failed","command":"check","message":"src/main.stasis:1:1: unknown indexed collection field path 'handle'","ok":false}

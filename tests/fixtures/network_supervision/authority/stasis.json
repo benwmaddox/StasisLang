@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "name": "network_supervision_authority",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain",
+  "capabilities": {
+    "network": true
+  },
+  "web": {
+    "entry": "src/guest.stasis"
+  }
+}

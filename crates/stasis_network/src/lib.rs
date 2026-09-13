@@ -1,12 +1,14 @@
 #![deny(warnings)]
 
 pub mod client;
+pub mod lan;
 pub mod realtime;
+pub mod supervision;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::raw::{c_char, c_uchar};
 use std::str;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -38,6 +40,385 @@ pub const SESSION_SECRET_BYTES: usize = 32;
 pub const RESUME_CREDENTIAL_BYTES: usize = 16;
 const SESSION_PATH: &str = "/session";
 pub const ADVERTISE_IPV4_ENV: &str = "STASIS_NETWORK_ADVERTISE_IPV4";
+pub const SUPERVISION_HANDLE_ENV: &str = "STASIS_NETWORK_SUPERVISION_HANDLE";
+pub const SUPERVISION_FRAME_MAGIC: &[u8] = b"STASIS-SUPERVISION/1\n";
+
+#[cfg(windows)]
+#[doc(hidden)]
+pub mod supervision_windows {
+    use std::ffi::{OsStr, OsString};
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::mem::{size_of, zeroed};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::path::Path;
+    use windows_sys::Win32::Foundation::{
+        SetHandleInformation, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+        InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
+        WaitForSingleObject, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
+        EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    };
+
+    fn pipe_handles() -> io::Result<(OwnedHandle, OwnedHandle)> {
+        let mut read = std::ptr::null_mut();
+        let mut write = std::ptr::null_mut();
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        // SAFETY: valid writable outputs and attributes; successful handles are owned once.
+        if unsafe { CreatePipe(&mut read, &mut write, &attributes, 4096) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe {
+            (
+                OwnedHandle::from_raw_handle(read),
+                OwnedHandle::from_raw_handle(write),
+            )
+        })
+    }
+
+    fn inherit(handle: &OwnedHandle, enabled: bool) -> io::Result<()> {
+        // SAFETY: the borrowed owned handle stays live through the call.
+        if unsafe {
+            SetHandleInformation(
+                handle.as_raw_handle(),
+                HANDLE_FLAG_INHERIT,
+                if enabled { HANDLE_FLAG_INHERIT } else { 0 },
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn pipe_to_child() -> io::Result<(File, OwnedHandle)> {
+        let (read, write) = pipe_handles()?;
+        inherit(&read, false)?;
+        Ok((File::from(read), write))
+    }
+
+    pub fn pipe_from_parent() -> io::Result<(OwnedHandle, File)> {
+        let (read, write) = pipe_handles()?;
+        inherit(&write, false)?;
+        Ok((read, File::from(write)))
+    }
+
+    pub fn raw_handle(handle: &OwnedHandle) -> usize {
+        handle.as_raw_handle() as usize
+    }
+
+    pub struct Process {
+        handle: OwnedHandle,
+        id: u32,
+    }
+
+    impl Process {
+        pub fn id(&self) -> u32 {
+            self.id
+        }
+
+        pub fn try_wait(&self) -> io::Result<Option<u32>> {
+            // SAFETY: handle owns a process and remains live through both calls.
+            match unsafe { WaitForSingleObject(self.handle.as_raw_handle(), 0) } {
+                WAIT_TIMEOUT => Ok(None),
+                WAIT_OBJECT_0 => {
+                    let mut code = 0;
+                    if unsafe { GetExitCodeProcess(self.handle.as_raw_handle(), &mut code) } == 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(Some(code))
+                }
+                _ => Err(io::Error::last_os_error()),
+            }
+        }
+
+        pub fn terminate(&self) -> io::Result<()> {
+            // SAFETY: this wrapper owns the live process handle.
+            if unsafe { TerminateProcess(self.handle.as_raw_handle(), 1) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+    }
+
+    pub struct Job(OwnedHandle);
+
+    impl Job {
+        pub fn new() -> io::Result<Self> {
+            // SAFETY: null optional attributes/name create an unnamed, non-inheritable job.
+            let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if raw.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: successful creation returns one owned job handle.
+            let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+            // SAFETY: the Win32 information structure permits zero initialization.
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if unsafe {
+                SetInformationJobObject(
+                    raw,
+                    JobObjectExtendedLimitInformation,
+                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self(handle))
+        }
+
+        pub fn terminate(&self) -> io::Result<()> {
+            // SAFETY: this wrapper owns the live job handle.
+            if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+
+        pub fn active_processes(&self) -> io::Result<u32> {
+            // SAFETY: zero-initializable output lives through the query, with its exact size.
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+            if unsafe {
+                QueryInformationJobObject(
+                    self.0.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(info.ActiveProcesses)
+        }
+
+        pub fn spawn(
+            &self,
+            program: &Path,
+            args: &[String],
+            overrides: &[(OsString, OsString)],
+            stdin: Option<&OwnedHandle>,
+            extra_inherited: &[&OwnedHandle],
+        ) -> io::Result<Process> {
+            let application = wide(program.as_os_str())?;
+            let mut command = quote(program.as_os_str())?;
+            for arg in args {
+                command.push(b' ' as u16);
+                command.extend(quote(OsStr::new(arg))?);
+            }
+            command.push(0);
+            let environment = environment(overrides)?;
+            let null: OwnedHandle = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("NUL")?
+                .into();
+            inherit(&null, true)?;
+            let input = stdin.unwrap_or(&null).as_raw_handle();
+            let mut handles = vec![input, null.as_raw_handle()];
+            handles.extend(extra_inherited.iter().map(|handle| handle.as_raw_handle()));
+            handles.sort_unstable();
+            handles.dedup();
+            let jobs = [self.0.as_raw_handle()];
+            let mut bytes = 0;
+            // SAFETY: first call computes storage; usize backing gives pointer alignment.
+            unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &mut bytes) };
+            if bytes == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())];
+            let list = storage.as_mut_ptr().cast();
+            if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &mut bytes) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // Storage, handles and jobs outlive the initialized attribute list and launch.
+            let result = (|| {
+                for (attribute, values) in [
+                    (PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles.as_slice()),
+                    (PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs.as_slice()),
+                ] {
+                    if unsafe {
+                        UpdateProcThreadAttribute(
+                            list,
+                            0,
+                            attribute as usize,
+                            values.as_ptr().cast(),
+                            std::mem::size_of_val(values),
+                            std::ptr::null_mut(),
+                            std::ptr::null(),
+                        )
+                    } == 0
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
+                startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+                startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+                startup.StartupInfo.hStdInput = input;
+                startup.StartupInfo.hStdOutput = null.as_raw_handle();
+                startup.StartupInfo.hStdError = null.as_raw_handle();
+                startup.lpAttributeList = list;
+                let mut info: PROCESS_INFORMATION = unsafe { zeroed() };
+                // JOB_LIST attaches atomically, before any code can spawn descendants.
+                if unsafe {
+                    CreateProcessW(
+                        application.as_ptr(),
+                        command.as_mut_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        1,
+                        EXTENDED_STARTUPINFO_PRESENT
+                            | CREATE_UNICODE_ENVIRONMENT
+                            | CREATE_NO_WINDOW,
+                        environment.as_ptr().cast(),
+                        std::ptr::null(),
+                        &startup.StartupInfo,
+                        &mut info,
+                    )
+                } == 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                let handle = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+                let _thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
+                Ok(Process {
+                    handle,
+                    id: info.dwProcessId,
+                })
+            })();
+            unsafe { DeleteProcThreadAttributeList(list) };
+            result
+        }
+    }
+
+    fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
+        let mut result: Vec<_> = value.encode_wide().collect();
+        if result.contains(&0) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "embedded NUL"));
+        }
+        result.push(0);
+        Ok(result)
+    }
+
+    fn quote(value: &OsStr) -> io::Result<Vec<u16>> {
+        let mut value = wide(value)?;
+        value.pop();
+        let mut result = vec![34];
+        let mut slashes = 0;
+        for unit in value {
+            if unit == 92 {
+                slashes += 1;
+                continue;
+            }
+            result.extend(std::iter::repeat_n(
+                92,
+                if unit == 34 { slashes * 2 + 1 } else { slashes },
+            ));
+            slashes = 0;
+            result.push(unit);
+        }
+        result.extend(std::iter::repeat_n(92, slashes * 2));
+        result.push(34);
+        Ok(result)
+    }
+
+    fn environment(overrides: &[(OsString, OsString)]) -> io::Result<Vec<u16>> {
+        let mut vars = std::collections::BTreeMap::new();
+        for (key, value) in std::env::vars_os() {
+            vars.insert(key.to_string_lossy().to_uppercase(), (key, value));
+        }
+        // Only the authority's explicit override may receive a readiness handle.
+        vars.remove(super::SUPERVISION_HANDLE_ENV);
+        for (key, value) in overrides {
+            if key.is_empty() || key.encode_wide().any(|unit| unit == 61 || unit == 0) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid environment key",
+                ));
+            }
+            vars.insert(
+                key.to_string_lossy().to_uppercase(),
+                (key.clone(), value.clone()),
+            );
+        }
+        let mut block = Vec::new();
+        for (key, value) in vars.into_values() {
+            let mut entry = key;
+            entry.push("=");
+            entry.push(value);
+            block.extend(wide(&entry)?);
+        }
+        if block.is_empty() {
+            block.push(0);
+        }
+        block.push(0);
+        Ok(block)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn windows_arguments_escape_quotes_and_trailing_slashes() {
+            for (input, expected) in [
+                ("", "\"\""),
+                ("a b", "\"a b\""),
+                ("a\"b", "\"a\\\"b\""),
+                ("a\\", "\"a\\\\\""),
+                ("a\\\"b", "\"a\\\\\\\"b\""),
+            ] {
+                assert_eq!(
+                    String::from_utf16(&quote(OsStr::new(input)).unwrap()).unwrap(),
+                    expected
+                );
+            }
+            assert!(quote(OsStr::new("a\0b")).is_err());
+        }
+
+        #[test]
+        fn environment_override_is_unique_and_double_terminated() {
+            let block = environment(&[
+                (OsString::from("Path"), OsString::from("first-path")),
+                (OsString::from("PATH"), OsString::from("second-path")),
+                (OsString::from("STASIS_TEST_ENV"), OsString::from("first")),
+                (OsString::from("stasis_test_env"), OsString::from("second")),
+            ])
+            .unwrap();
+            assert!(block.ends_with(&[0, 0]));
+            let text = String::from_utf16_lossy(&block).to_lowercase();
+            assert_eq!(text.matches("stasis_test_env=").count(), 1);
+            assert_eq!(
+                text.split('\0')
+                    .filter(|entry| entry.starts_with("path="))
+                    .count(),
+                1
+            );
+            assert!(text.contains("stasis_test_env=second\0"));
+            assert!(environment(&[(OsString::from("a=b"), OsString::from("value"))]).is_err());
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -534,17 +915,31 @@ fn resolve_advertised_ipv4(
     options: &HostOptions,
     advertise_ipv4: Option<Ipv4Addr>,
 ) -> Result<Option<Ipv4Addr>, NetworkError> {
-    if !options.bind_addr.is_unspecified() {
+    resolve_advertised_ipv4_with(
+        options.bind_addr,
+        advertise_ipv4,
+        || std::env::var_os(ADVERTISE_IPV4_ENV),
+        lan::native_lan_ipv4,
+    )
+}
+
+fn resolve_advertised_ipv4_with(
+    bind_addr: IpAddr,
+    advertise_ipv4: Option<Ipv4Addr>,
+    environment: impl FnOnce() -> Option<std::ffi::OsString>,
+    enumerate: impl FnOnce() -> Result<Ipv4Addr, lan::LanAddressError>,
+) -> Result<Option<Ipv4Addr>, NetworkError> {
+    if !bind_addr.is_unspecified() {
         return Ok(None);
     }
     if let Some(ip) = advertise_ipv4 {
         return Ok(Some(ip));
     }
-    if let Some(value) = std::env::var_os(ADVERTISE_IPV4_ENV) {
+    if let Some(value) = environment() {
         let value = value.to_str().ok_or(NetworkError::InvalidArgument)?;
         return parse_advertise_ipv4(value).map(Some);
     }
-    Ok(Some(route_advertised_ipv4()))
+    enumerate().map(Some).map_err(|_| NetworkError::Io)
 }
 
 fn parse_advertise_ipv4(value: &str) -> Result<Ipv4Addr, NetworkError> {
@@ -562,35 +957,6 @@ fn is_advertisable(ip: Ipv4Addr) -> bool {
     !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast()
 }
 
-fn route_advertised_ipv4() -> Ipv4Addr {
-    // UDP connect consults the routing table without sending a packet. The
-    // documentation-only destinations avoid a dependency on a public service.
-    let candidates = [
-        Ipv4Addr::new(192, 0, 2, 1),
-        Ipv4Addr::new(198, 51, 100, 1),
-        Ipv4Addr::new(203, 0, 113, 1),
-    ]
-    .into_iter()
-    .filter_map(|destination| {
-        let Ok(probe) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
-            return None;
-        };
-        if probe.connect((destination, 9)).is_ok() {
-            if let Ok(SocketAddr::V4(address)) = probe.local_addr() {
-                return Some(*address.ip());
-            }
-        }
-        None
-    });
-    select_advertised_ipv4(candidates)
-}
-
-fn select_advertised_ipv4(candidates: impl IntoIterator<Item = Ipv4Addr>) -> Ipv4Addr {
-    candidates
-        .into_iter()
-        .find(|ip| is_advertisable(*ip))
-        .unwrap_or(Ipv4Addr::LOCALHOST)
-}
 fn reserve(shared: &Shared, amount: usize) -> Result<(), NetworkError> {
     loop {
         let current = shared.buffered_bytes.load(Ordering::Acquire);
@@ -1799,6 +2165,90 @@ pub unsafe extern "C" fn stasis_network_host_copy_join_url(
     }
     0
 }
+
+/// Publishes the complete private join URL to the supervisor pipe, when present.
+///
+/// The pipe handle is inherited from `stasis-network-supervise` and is never
+/// written to a console or diagnostic stream. The URL is materialized through
+/// the same native join-card path used by the copy UI.
+#[no_mangle]
+pub unsafe extern "C" fn stasis_network_host_publish_supervision_join_url(
+    host: *mut NetworkHost,
+) -> i32 {
+    let Some(raw_handle) = std::env::var_os(SUPERVISION_HANDLE_ENV) else {
+        return 0;
+    };
+    if host.is_null() {
+        return -1;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = raw_handle;
+        return -2;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::Storage::FileSystem::{GetFileType, WriteFile, FILE_TYPE_PIPE};
+
+        let Ok(value) = raw_handle.to_string_lossy().parse::<usize>() else {
+            return -2;
+        };
+        if value == 0 {
+            return -2;
+        }
+        let handle = value as HANDLE;
+        if GetFileType(handle) != FILE_TYPE_PIPE
+            || windows_sys::Win32::Foundation::SetHandleInformation(
+                handle,
+                windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT,
+                0,
+            ) == 0
+        {
+            CloseHandle(handle);
+            std::env::remove_var(SUPERVISION_HANDLE_ENV);
+            return -3;
+        }
+        let mut url = [0 as c_char; 513];
+        let mut url_length = 0;
+        let copied =
+            stasis_network_host_copy_join_url(host, url.as_mut_ptr(), url.len(), &mut url_length);
+        let result = if copied != 0 || url_length == 0 || url_length > 512 {
+            -2
+        } else {
+            let mut frame = Vec::with_capacity(SUPERVISION_FRAME_MAGIC.len() + 4 + url_length);
+            frame.extend_from_slice(SUPERVISION_FRAME_MAGIC);
+            frame.extend_from_slice(&(url_length as u32).to_be_bytes());
+            frame.extend_from_slice(std::slice::from_raw_parts(
+                url.as_ptr().cast::<u8>(),
+                url_length,
+            ));
+            let mut offset = 0;
+            let mut status = 1;
+            while offset < frame.len() {
+                let mut written = 0;
+                let ok = WriteFile(
+                    handle,
+                    frame[offset..].as_ptr(),
+                    (frame.len() - offset) as u32,
+                    &mut written,
+                    std::ptr::null_mut(),
+                );
+                if ok == 0 || written == 0 {
+                    status = -3;
+                    break;
+                }
+                offset += written as usize;
+            }
+            frame.fill(0);
+            status
+        };
+        url.fill(0);
+        CloseHandle(handle);
+        std::env::remove_var(SUPERVISION_HANDLE_ENV);
+        result
+    }
+}
 #[no_mangle]
 pub unsafe extern "C" fn stasis_network_host_copy_join_card(
     host: *mut NetworkHost,
@@ -2098,19 +2548,62 @@ mod tests {
                 "accepted invalid override {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn address_resolution_precedence_and_failure_policy() {
+        let wildcard = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let chosen = Ipv4Addr::new(192, 168, 4, 10);
         assert_eq!(
-            select_advertised_ipv4([
-                Ipv4Addr::UNSPECIFIED,
-                Ipv4Addr::new(224, 0, 0, 1),
-                Ipv4Addr::new(10, 2, 3, 4),
-                Ipv4Addr::new(192, 168, 1, 8),
-            ]),
-            Ipv4Addr::new(10, 2, 3, 4)
+            resolve_advertised_ipv4_with(
+                wildcard,
+                Some(chosen),
+                || panic!("explicit override must bypass environment"),
+                || panic!("explicit override must bypass enumeration")
+            ),
+            Ok(Some(chosen))
         );
         assert_eq!(
-            select_advertised_ipv4([Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST]),
-            Ipv4Addr::LOCALHOST
+            resolve_advertised_ipv4_with(
+                wildcard,
+                None,
+                || Some("192.168.4.10".into()),
+                || panic!("environment override must bypass enumeration")
+            ),
+            Ok(Some(chosen))
         );
+        assert_eq!(
+            resolve_advertised_ipv4_with(
+                wildcard,
+                None,
+                || Some("secret-invalid-value".into()),
+                || panic!("invalid override must not fall back")
+            ),
+            Err(NetworkError::InvalidArgument)
+        );
+        assert_eq!(
+            resolve_advertised_ipv4_with(
+                IpAddr::V4(chosen),
+                None,
+                || panic!("concrete bind must bypass environment"),
+                || panic!("concrete bind must bypass enumeration")
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_advertised_ipv4_with(wildcard, None, || None, || Ok(chosen)),
+            Ok(Some(chosen))
+        );
+        for error in [
+            lan::LanAddressError::EnumerationFailed,
+            lan::LanAddressError::NoUsableAddress,
+            lan::LanAddressError::MultipleUsableAddresses,
+        ] {
+            assert_eq!(
+                resolve_advertised_ipv4_with(wildcard, None, || None, || Err(error)),
+                Err(NetworkError::Io)
+            );
+        }
     }
 
     #[test]

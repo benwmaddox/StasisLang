@@ -1,0 +1,35 @@
+// The complete sample is intentionally a JIT/AOT workload because receiver
+// struct-array element views remain a backend-specific capability. This small
+// scalar fixture keeps the same generic collection contract independently
+// executable through Wasm without pulling the unsupported entity-pool paths
+// into the WebAssembly module.
+struct WasmBuffer<T: type, N: i32> {
+    count: i32;
+    values: T[N];
+}
+
+function wasm_buffer_append<T: type, N: i32>(self: WasmBuffer<T, N>, value: T): bool {
+    if (self.count < 0 || self.count >= N) {
+        return false;
+    }
+    self.values[self.count] = value;
+    self.count = self.count + 1;
+    return true;
+}
+
+function wasm_buffer_first<T: type, N: i32>(self: WasmBuffer<T, N>): T {
+    return self.values[0];
+}
+
+global wasm_values: WasmBuffer<i32, 4>;
+
+function main(): i32 {
+    wasm_values.count = 0;
+    if (!wasm_buffer_append(wasm_values, 7)) {
+        return 1;
+    }
+    if (wasm_values.count != 1 || wasm_buffer_first(wasm_values) != 7) {
+        return 2;
+    }
+    return 0;
+}

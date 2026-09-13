@@ -427,6 +427,7 @@ pub fn canonical_state_layout_digest_for_files(
         .map(|(path, content)| crate::compiler::SourceFile {
             hash: crate::frontend::indexer::hash_text(&content),
             path,
+            original_content: content.clone(),
             content,
             functions: Vec::new(),
         })
@@ -831,7 +832,6 @@ function render(): void {{ {draws} }}
     }
 
     #[test]
-    #[ignore = "representative timing report; run explicitly with --ignored"]
     fn hot_render_compiler_microbenchmark() {
         use std::time::Instant;
 

@@ -1,0 +1,4 @@
+cache_cleanup_removed_files=0
+cache_cleanup_removed_dirs=1
+cache_cleanup_ttl_days=7
+{"command":"run","ok":true,"result":{"backend":"jit","exit_code":0,"fast_forward":true,"headless":true,"state_hash":"f8d8376c0453b2f04194b77d38a87dbd508b0727d5e52fe658aeefefe21ac513","ticks_executed":120}}
