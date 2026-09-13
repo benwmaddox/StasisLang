@@ -660,7 +660,10 @@ class WorkshopSeamTests(unittest.TestCase):
         compile_native = native[start:end]
         self.assertNotIn("char message[", compile_native)
         self.assertNotIn("call_rust_bridge_compile", compile_native)
-        self.assertIn('bridge->compile_project(root, "src/main.stasis")', compile_native)
+        self.assertIn(
+            "bridge->compile_project(root, stasis_workshop_runtime_entry(root));",
+            compile_native,
+        )
         self.assertIn("jstring result = (*env)->NewStringUTF(env, message);", compile_native)
         self.assertIn("bridge->free_string(message);", compile_native)
 
