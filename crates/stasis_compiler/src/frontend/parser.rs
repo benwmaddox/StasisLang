@@ -677,9 +677,6 @@ fn generic_type_context(source: &str, tokens: &[Token], open: usize) -> bool {
         if matches!(token_text(source, token), ";" | "{" | "}" | "(" | ")" | "=") {
             return false;
         }
-        if token_is_other_char(source, token, b'<') {
-            return true;
-        }
         if token.kind == TokenKind::FunctionKw {
             return false;
         }
