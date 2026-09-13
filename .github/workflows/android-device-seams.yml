@@ -26,35 +26,35 @@ jobs:
       STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
     steps:
       - name: Checkout Stasis
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
         with:
           gradle-version: "8.9"
 
       - name: Checkout SDL3
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: libsdl-org/SDL
           ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
           path: target/android-link-deps/SDL
 
       - name: Checkout SDL3_image
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: libsdl-org/SDL_image
           ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
           path: target/android-link-deps/SDL_image
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Install Android Rust targets
         run: rustup target add aarch64-linux-android x86_64-linux-android
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -65,7 +65,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Run generated Android AOT release-shell seams
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         env:
           STASIS_RELEASE_SHELL_TEST_ID: ${{ inputs.release_shell_test_id }}
         with:
@@ -86,64 +86,72 @@ jobs:
 
       - name: Upload Android release-shell evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: android-release-shell-seam
           path: artifacts/android_release_shell/e
           if-no-files-found: warn
 
       - name: Upload Android resource-restore evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: android-resource-restore-seam
           path: artifacts/android_resource_restore/e
           if-no-files-found: warn
 
       - name: Upload Android touch round-trip evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: android-touch-roundtrip-seam
           path: artifacts/android_touch_roundtrip/e
           if-no-files-found: warn
 
       - name: Upload Android orientation metrics evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: android-orientation-metrics-seam
           path: artifacts/android_orientation_metrics/e
           if-no-files-found: warn
 
       - name: Upload Android packaged-assets evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: android-packaged-assets-seam
           path: artifacts/android_packaged_assets/e
           if-no-files-found: warn
 
       - name: Upload Android asset-rejection evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: android-asset-rejection-seam
           path: artifacts/android_asset_rejection/e
           if-no-files-found: warn
 
       - name: Upload Android storage-persistence evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: android-storage-persistence-seam
           path: artifacts/android_storage_persistence/e
           if-no-files-found: warn
 
       - name: Upload Android lifecycle-entry-failure evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: android-lifecycle-entry-failure-seam
           path: artifacts/android_entry_failures/*/e
           if-no-files-found: warn
@@ -159,35 +167,35 @@ jobs:
       STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
     steps:
       - name: Checkout Stasis
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
         with:
           gradle-version: "8.9"
 
       - name: Checkout SDL3
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: libsdl-org/SDL
           ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
           path: target/android-link-deps/SDL
 
       - name: Checkout SDL3_image
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: libsdl-org/SDL_image
           ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
           path: target/android-link-deps/SDL_image
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Install Android Rust targets
         run: rustup target add aarch64-linux-android x86_64-linux-android
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -198,7 +206,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Run Android Workshop seams
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: 35
           target: google_apis
@@ -217,8 +225,9 @@ jobs:
 
       - name: Upload Android Workshop IT-025 through IT-032 evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          archive: true
           name: android-workshop-it025-it032-seams
           path: artifacts/android_workshop_seam/e
           if-no-files-found: warn

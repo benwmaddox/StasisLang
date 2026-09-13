@@ -10,7 +10,7 @@ use eframe::egui;
 use serde::Deserialize;
 use stasis_ai::task_session::Task;
 use stasis_compiler::frontend::workshop::WorkshopSemanticEditPlan;
-use std::{fs, path::PathBuf, time::Duration};
+use std::{collections::BTreeSet, fs, path::PathBuf, time::Duration};
 
 #[derive(Deserialize)]
 struct Plan {
@@ -27,6 +27,7 @@ struct Snapshot {
 
 struct EvidenceApp {
     snapshots: Vec<Snapshot>,
+    expanded: BTreeSet<String>,
     directory: PathBuf,
     frame: usize,
     settle_frames: u8,
@@ -61,7 +62,16 @@ impl eframe::App for EvidenceApp {
                                     .iter()
                                     .find(|plan| plan.revision == proposal.revision)
                                     .expect("every proposal retains its real compiler preview");
-                                semantic_diff::render(ui, &plan.plan, "semantic-files");
+                                semantic_diff::render(
+                                    ui,
+                                    &plan.plan,
+                                    "semantic-files",
+                                    &format!(
+                                        "{}/{}/{}",
+                                        snapshot.task.id, action.id, proposal.revision
+                                    ),
+                                    &mut self.expanded,
+                                );
                             });
                         });
                     }
@@ -118,6 +128,7 @@ fn main() -> eframe::Result<()> {
         },
         Box::new(move |_| {
             Box::new(EvidenceApp {
+                expanded: BTreeSet::new(),
                 snapshots,
                 directory,
                 frame: 0,

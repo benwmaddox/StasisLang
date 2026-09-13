@@ -1,0 +1,123 @@
+{
+  "error": "OpenRouter request failed: OpenRouter returned invalid agent JSON: trailing characters at line 3 column 1 (finish_reason=stop, response_bytes=6413)",
+  "execution_receipts": [],
+  "model": "openai/gpt-5.6-luna",
+  "provider_turn_usage": [
+    {
+      "task_id": "task-1",
+      "usage": {
+        "configured_model": "openai/gpt-5.6-luna",
+        "configured_provider": "openrouter",
+        "cost": 0.00130316,
+        "fallback": false,
+        "resolved_model": "openai/gpt-5.6-luna",
+        "resolved_provider": "openai",
+        "route": {
+          "allow_fallbacks": true,
+          "require_parameters": true,
+          "sort": "throughput"
+        },
+        "throughput_tokens_per_second": 126.55451289421877,
+        "timing_ms": {
+          "first_action": 2386,
+          "first_content": 2363,
+          "first_reasoning": 1718,
+          "headers": 617,
+          "inference_total": 7680,
+          "metadata": 0,
+          "turn_total": 7681
+        },
+        "tokens": {
+          "cache": 6808,
+          "completion": 972,
+          "prompt": 6811,
+          "reasoning": 32
+        },
+        "validation": {
+          "repair_count": 0,
+          "structured_schema": "rejected"
+        }
+      }
+    },
+    {
+      "task_id": "task-1",
+      "usage": {
+        "configured_model": "openai/gpt-5.6-luna",
+        "configured_provider": "openrouter",
+        "cost": 0.00346436,
+        "fallback": false,
+        "resolved_model": "openai/gpt-5.6-luna",
+        "resolved_provider": "openai",
+        "route": {
+          "allow_fallbacks": true,
+          "require_parameters": true,
+          "sort": "throughput"
+        },
+        "throughput_tokens_per_second": 141.15397625991696,
+        "timing_ms": {
+          "first_action": 4188,
+          "first_content": 4143,
+          "first_reasoning": 2065,
+          "headers": 747,
+          "inference_total": 19645,
+          "metadata": 0,
+          "turn_total": 19646
+        },
+        "tokens": {
+          "cache": 6808,
+          "completion": 2773,
+          "prompt": 6811,
+          "reasoning": 204
+        },
+        "validation": {
+          "repair_count": 0,
+          "structured_schema": "rejected"
+        }
+      }
+    }
+  ],
+  "result": "failed",
+  "runtime_probes": [
+    {
+      "assets_ready": true,
+      "bricks_left": 35,
+      "generation": 1,
+      "loader_failed": false,
+      "paddle_x": 0.0,
+      "session_id": "11048:560e456776677af34b23821efa19f1c3898b6f780faa162f700959e0c2e7ba68",
+      "tick": 19
+    }
+  ],
+  "tasks": [
+    {
+      "actions": {},
+      "metrics": {
+        "elapsed_ms": 0,
+        "estimated_cost_micros": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "retry_count": 1,
+        "turn_count": 0
+      },
+      "objective": "Polish the hot-swap accent",
+      "provider": {
+        "fallback": {
+          "Ready": {
+            "model": "openai/gpt-5.6-luna",
+            "provider": "openrouter",
+            "route": "openrouter:throughput"
+          }
+        },
+        "model": "openai/gpt-5.6-luna",
+        "provider": "openrouter",
+        "routing": {
+          "Assigned": {
+            "route": "openrouter:throughput"
+          }
+        }
+      },
+      "task_id": "task-1",
+      "validation": "NotRun"
+    }
+  ]
+}

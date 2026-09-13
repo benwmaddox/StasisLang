@@ -56,11 +56,56 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         cls.runner = RUNNER.read_text(encoding="utf-8")
         cls.strategy = STRATEGY.read_text(encoding="utf-8")
         cls.linux = job(cls.workflow, "test")
+        cls.linux_ordinary = "\n".join(
+            job(cls.workflow, name)
+            for name in (
+                "pr-ci-preflight",
+                "pr-ci-cargo-workspace",
+                "pr-ci-cargo-stasis-library",
+                "pr-ci-cargo-stasis-test-harness",
+                "pr-ci-cargo-stasis-main",
+                "pr-ci-cargo-stasis-provenance",
+                "pr-ci-cargo-stasis-integration",
+            )
+        )
         cls.windows = job(cls.workflow, "bootstrap-smoke-windows")
 
-    def test_linux_ordinary_rust_seams_run_once_in_workspace_lane(self):
-        broad = "cargo test --workspace --all-targets -- --test-threads=1"
-        self.assertEqual(self.linux.count(broad), 1)
+    def test_linux_ordinary_rust_seams_run_once_in_bounded_shards(self):
+        commands = (
+            "cargo test --workspace --exclude stasis --all-targets -- --test-threads=1",
+            "cargo build -p stasis --bin stasis",
+            "cargo test -p stasis --lib -- --test-threads=1",
+            "cargo test -p stasis --bin stasis --\n          --skip toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources\n          --test-threads=1",
+            "cargo test -p stasis --bin stasis --no-run",
+            "./target/pr-ci-stasis/provenance-test-harness\n          toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources",
+            'cargo test -p stasis "${test_args[@]}" -- --test-threads=1',
+        )
+        expected_counts = {
+            "cargo build -p stasis --bin stasis": 2,
+        }
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.linux_ordinary.count(command),
+                    expected_counts.get(command, 1),
+                )
+        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 8)
+        self.assertIn("find apps/stasis/tests", self.linux_ordinary)
+        self.assertIn("needs:", self.linux)
+        self.assertIn("always()", self.linux)
+        for lane in (
+            "pr-ci-preflight",
+            "pr-ci-cargo-workspace",
+            "pr-ci-cargo-stasis-library",
+            "pr-ci-cargo-stasis-test-harness",
+            "pr-ci-cargo-stasis-main",
+            "pr-ci-cargo-stasis-provenance",
+            "pr-ci-cargo-stasis-integration",
+        ):
+            with self.subTest(lane=lane):
+                self.assertIn(f"needs.{lane}.result", self.linux)
+        self.assertIn("actions/upload-artifact@", self.linux_ordinary)
+        self.assertIn("actions/download-artifact@", self.linux_ordinary)
         redundant_commands = (
             "--test host_frame_jit_seam",
             "gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace",
@@ -69,7 +114,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         )
         for command in redundant_commands:
             with self.subTest(command=command):
-                self.assertNotIn(command, self.linux)
+                self.assertNotIn(command, self.linux_ordinary)
 
     def test_windows_platform_suites_have_exact_ownership(self):
         self.assertEqual(self.windows.count("--suite DesktopSdl"), 1)
@@ -136,7 +181,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         upload = step(self.windows, upload_name)
         upload_markers = (
             "if: always()",
-            "uses: actions/upload-artifact@v4",
+            "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
             "name: windows-platform-seam-evidence",
             "if-no-files-found: warn",
             "target/render-parity-ci/frame.png",

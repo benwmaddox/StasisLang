@@ -74,7 +74,6 @@ function tick(): i32 {
 
 function render(): i32 {
     immediate_layout_host_frame.refresh();
-    begin_frame();
     clear(0.04, 0.06, 0.10, 1.0);
     update_menu_layout();
     state.title.draw(menu_title_x, menu_title_y, 1.0, 0.9, 0.7, 1.0);

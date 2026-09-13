@@ -1,0 +1,23 @@
+[
+  {
+    "tag": "nightly-20260831-270",
+    "archive_sha256": "725d56ee9fbf8625c0ddff76e740e1ed3575bb3431009f343d73459c1385280a",
+    "source_commit": "8414904107c0a370504ff5dedb4311b9c7e85504",
+    "fingerprint": "81f336021c299975f36bddd0ad52feb5b8c9666de931cd9dcf8001751f702b81",
+    "merge_ancestor_exit": 0
+  },
+  {
+    "tag": "nightly-20260903-290",
+    "archive_sha256": "a7f9281bea4ba872ea146975fefb76b11d8b23a96f0c7e456b449b7997e9028e",
+    "source_commit": "d08c2075334e26e79b18e097783285e52605a307",
+    "fingerprint": "76ddf570c670d42411eff508af4b0ab8ac33015ceb5094ae96eb654816cd2ad7",
+    "merge_ancestor_exit": 0
+  },
+  {
+    "tag": "nightly-20260909-299",
+    "archive_sha256": "4102fde1dac301b004e1ca7155a50946201cf116ee53561609fce633d669d3f3",
+    "source_commit": "d9898edeb0e025e87994c1302459688095120dcd",
+    "fingerprint": "016947e34ac0efb2e0d95ae294902630d52f2d8858f0129c10b94258c81fba98",
+    "merge_ancestor_exit": 0
+  }
+]

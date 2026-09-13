@@ -10,6 +10,7 @@ use crate::frontend::types::{TypeId, TypeTable};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedFunction {
     pub name: String,
+    pub generic_parameters: Vec<crate::frontend::parser::ParsedGenericParameter>,
     pub name_hash: u64,
     pub source_range: Range<u32>,
     pub signature_range: Range<u32>,
@@ -107,6 +108,7 @@ pub fn index_file_with_diagnostic(
             .map_err(|message| diagnostic_for_function(&function, message, body_range.clone()))?;
         out.push(IndexedFunction {
             name: function.name,
+            generic_parameters: function.generic_parameters,
             name_hash,
             source_range: function.body_range.start as u32..function.body_range.end as u32,
             signature_range: function.signature_range.start as u32

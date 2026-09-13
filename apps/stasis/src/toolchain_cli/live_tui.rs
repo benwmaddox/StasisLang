@@ -13,9 +13,8 @@ use serde_json::Value;
 use stasis_ai::action_id_for_tool;
 use stasis_ai::{
     asset_tool_specs, gauntlet_tool_specs, live_tool_specs, offered_action, project_ai_tool_specs,
-    run_agent, run_agent_with_profile, runtime_tool_specs, AgentEvent, AgentProfile,
-    ConfiguredProvider, ProviderConfig, ToolCall, ToolExecutor, ToolObservation,
-    DEFAULT_REASONING_EFFORT,
+    run_agent_with_profile, runtime_tool_specs, AgentEvent, AgentProfile, ConfiguredProvider,
+    ProviderConfig, ToolCall, ToolExecutor, ToolObservation, DEFAULT_REASONING_EFFORT,
 };
 use stasis_compiler::frontend::lexer::{lex, TokenKind};
 use stasis_compiler::frontend::parser::{
@@ -78,7 +77,7 @@ pub(super) fn run_scripted_ai_with_cancel(
         client,
         project_root,
         prompt,
-        AgentProfile::default(),
+        compact_live_agent_profile(),
         Vec::new(),
         false,
         false,
@@ -101,7 +100,7 @@ pub(super) fn run_scripted_project_ai_with_cancel(
         client,
         project_root,
         prompt,
-        AgentProfile::default(),
+        compact_live_agent_profile(),
         Vec::new(),
         false,
         true,
@@ -112,6 +111,13 @@ pub(super) fn run_scripted_project_ai_with_cancel(
     )
     .map_err(|error| error.message)?;
     Ok((outcome.summary, outcome.trace, outcome.usage_trace))
+}
+
+fn compact_live_agent_profile() -> AgentProfile {
+    AgentProfile {
+        compact_request: true,
+        ..AgentProfile::default()
+    }
 }
 
 pub(super) struct ScriptedAiOutcome {
@@ -145,6 +151,14 @@ impl From<String> for ScriptedAiFailure {
     }
 }
 
+fn configured_model_for_profile(provider: &ProviderConfig, profile: &AgentProfile) -> String {
+    if provider.provider_name() == "openrouter" {
+        provider.model()
+    } else {
+        profile.model.clone().unwrap_or_else(|| provider.model())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_scripted_ai_profile(
     client: &LiveSessionClient,
@@ -159,11 +173,9 @@ pub(super) fn run_scripted_ai_profile(
     require_imagegen: bool,
     canceled: &AtomicBool,
 ) -> Result<ScriptedAiOutcome, ScriptedAiFailure> {
-    let provider_config = ProviderConfig::from_env()?;
-    let configured_model = profile
-        .model
-        .clone()
-        .unwrap_or_else(|| provider_config.model());
+    let provider_config = ProviderConfig::from_workspace(project_root)?;
+    let configured_model = configured_model_for_profile(&provider_config, &profile);
+    let manifest_owns_model = provider_config.provider_name() == "openrouter";
     let effective_reasoning_effort = profile
         .reasoning_effort
         .as_deref()
@@ -183,8 +195,10 @@ pub(super) fn run_scripted_ai_profile(
         .with_session_id(provider_session_id)?
         .with_images(images)?
         .with_web_search(web_search)?;
-    if let Some(model) = profile.model.as_deref() {
-        provider = provider.with_model(model);
+    if !manifest_owns_model {
+        if let Some(model) = profile.model.as_deref() {
+            provider = provider.with_model(model);
+        }
     }
     if let Some(reasoning_effort) = effective_reasoning_effort {
         provider = provider.with_reasoning_effort(reasoning_effort);
@@ -331,6 +345,17 @@ fn load_ai_initial_context(
     user_prompt: &str,
     canceled: &AtomicBool,
 ) -> Result<Value, String> {
+    let source_catalog = if project_root.join("stasis.json").is_file() {
+        let source_context = super::desktop_source_context(project_root)?;
+        let catalog = super::source_catalog::render(&source_context)?;
+        for item in &source_context {
+            tools.register_symbol(&item["target"]);
+        }
+        tools.source_context = source_context;
+        Some(catalog)
+    } else {
+        None
+    };
     let response = tools.request(
         LiveCommand::Symbols {
             query: None,
@@ -387,6 +412,9 @@ fn load_ai_initial_context(
     tools.stdlib_root = stdlib_root;
     tools.test_project_root = Some(project_root.to_path_buf());
     let mut context = ai_initial_context(project_hints);
+    if let Some(source_catalog) = source_catalog {
+        context["catalog"] = Value::String(source_catalog);
+    }
     if !resolved_targets.is_empty() {
         // Prefetched definitions replace discovery leads, not the discovery tools.
         context.as_object_mut().unwrap().remove("start");
@@ -1148,6 +1176,9 @@ fn audit_agent_event(event: &AgentEvent) -> Value {
     match event {
         AgentEvent::Turn { current, maximum } => {
             serde_json::json!({"event": "turn", "current": current, "maximum": maximum})
+        }
+        AgentEvent::ProviderProgress(progress) => {
+            serde_json::json!({"event": "provider_progress", "progress": progress})
         }
         AgentEvent::ProviderUsage(_) => unreachable!("provider usage has a separate log"),
         AgentEvent::WorkingNotes(notes) => {
@@ -2292,7 +2323,7 @@ impl LiveTui {
         let Some(prompt) = self.queued_ai_prompt.take() else {
             return;
         };
-        let provider_config = match ProviderConfig::from_env() {
+        let provider_config = match ProviderConfig::from_workspace(&self.project_root) {
             Ok(config) => config,
             Err(error) => {
                 self.status = format!("AI provider unavailable: {error}");
@@ -2339,9 +2370,10 @@ impl LiveTui {
                 load_ai_initial_context(&mut tools, &project_root, &prompt, &worker_canceled)
                     .and_then(|initial_context| {
                         let _ = progress.send(AiUiEvent::InitialContext(initial_context.clone()));
-                        run_agent(
+                        run_agent_with_profile(
                             &mut provider,
                             &mut tools,
+                            &compact_live_agent_profile(),
                             &prompt,
                             initial_context,
                             live_tool_specs(),
@@ -2387,6 +2419,11 @@ impl LiveTui {
                 AiUiEvent::Progress(AgentEvent::Turn { current, maximum }) => {
                     self.status = format!("AI turn {current}/{maximum}; Ctrl+C cancels");
                     self.audit(serde_json::json!({"event": "turn", "current": current, "maximum": maximum}));
+                }
+                AiUiEvent::Progress(AgentEvent::ProviderProgress(progress)) => {
+                    self.audit(
+                        serde_json::json!({"event": "provider_progress", "progress": progress}),
+                    );
                 }
                 AiUiEvent::Progress(AgentEvent::ProviderUsage(usage)) => {
                     if let Some(log) = &mut self.ai_audit {
@@ -3046,6 +3083,7 @@ struct LiveAiTools {
     imagegen_committed: bool,
     finish_requested: bool,
     current_write_passed: bool,
+    source_context: Vec<Value>,
     symbol_selectors: BTreeMap<String, LiveSymbolTarget>,
     required_completion_targets: Vec<LiveSymbolTarget>,
     completion_source_rules: Vec<CompletionSourceRule>,
@@ -3076,6 +3114,7 @@ impl LiveAiTools {
             imagegen_committed: false,
             finish_requested: false,
             current_write_passed: false,
+            source_context: Vec::new(),
             symbol_selectors: BTreeMap::new(),
             required_completion_targets: Vec::new(),
             completion_source_rules: Vec::new(),
@@ -3539,6 +3578,16 @@ impl LiveAiTools {
 
     fn execute_read(&mut self, call: &ToolCall, canceled: &AtomicBool) -> ToolObservation {
         let args = call.args.as_object().expect("validated tool args");
+        if call.tool == "inspect_source" {
+            return match super::source_catalog::inspect(
+                &self.source_context,
+                &call.args,
+                stasis_ai::MAX_OBSERVATION_BYTES,
+            ) {
+                Ok(value) => ToolObservation::result(&call.tool, value),
+                Err(error) => ToolObservation::error(&call.tool, error),
+            };
+        }
         if call.tool == "run_tests" {
             if self.current_write_passed
                 && self.last_write.as_ref().is_some_and(|response| {
@@ -5471,6 +5520,30 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn scripted_openrouter_profile_uses_manifest_model() {
+        let provider = ProviderConfig::OpenRouter(stasis_ai::OpenRouterConfig {
+            api_key: "test-only".into(),
+            base_url: "https://example.invalid".into(),
+            model: stasis_ai::DEFAULT_OPENROUTER_MODEL.into(),
+            approved_models: vec![stasis_ai::DEFAULT_OPENROUTER_MODEL.into()].into_boxed_slice(),
+            routing: stasis_ai::RoutingConfig::default(),
+            timeout: Duration::from_secs(1),
+        });
+        let profile = AgentProfile {
+            model: Some("unapproved/profile-model".into()),
+            ..AgentProfile::default()
+        };
+        assert_eq!(
+            configured_model_for_profile(&provider, &profile),
+            stasis_ai::DEFAULT_OPENROUTER_MODEL
+        );
+        assert_eq!(
+            configured_model_for_profile(&ProviderConfig::Codex, &profile),
+            "unapproved/profile-model"
+        );
+    }
+
     fn font_path_edit(source: &str) -> LiveEdit {
         LiveEdit {
             operation: LiveEditOperation::Update,
@@ -5805,6 +5878,53 @@ mod tests {
     }
 
     #[test]
+    fn stdlib_rig2d_catalog_exposes_owned_layout_and_public_surface() {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical project root");
+        let stdlib = project
+            .join("src/stdlib")
+            .canonicalize()
+            .expect("canonical stdlib root");
+        let root = StdlibApiRoot {
+            canonical_project: project,
+            canonical_root: stdlib.clone(),
+            import_prefix: "/src/stdlib",
+        };
+        let catalog = load_stdlib_module_index(Some(&root)).expect("stdlib module index");
+        assert!(catalog["modules"]
+            .as_array()
+            .expect("stdlib modules")
+            .iter()
+            .any(|module| {
+                module["module"] == "rig2d"
+                    && module["canonical_import"] == "/src/stdlib/rig2d.stasis"
+            }));
+
+        let source = fs::read_to_string(stdlib.join("rig2d.stasis")).expect("read rig2d source");
+        assert!(source.contains("bones: RigBone2D[N];"));
+        let (_, items) = read_stdlib_api_items(&root, &stdlib.join("rig2d.stasis"))
+            .expect("read canonical rig2d API");
+        let rendered = serde_json::to_string(&items).expect("rig2d API JSON");
+        for public in [
+            "RIG2D_BONE_CAPACITY",
+            "RigBone2D",
+            "Rig2D",
+            "add_bone<N: i32>(self: Rig2D<N>",
+            "blend_local<N: i32>(self: Rig2D<N>",
+            "reset_pose<N: i32>(self: Rig2D<N>",
+            "solve<N: i32>(self: Rig2D<N>",
+            "world_angle<N: i32>(self: Rig2D<N>",
+        ] {
+            assert!(
+                rendered.contains(public),
+                "missing public rig2d API: {public}"
+            );
+        }
+    }
+
+    #[test]
     fn stdlib_catalog_does_not_truncate_public_modules_at_sixteen() {
         let root = std::env::temp_dir().join(format!(
             "stasis_ai_stdlib_catalog_many_{}",
@@ -6036,6 +6156,42 @@ mod tests {
                 .name,
             "update_enemies"
         );
+    }
+
+    #[test]
+    fn live_ai_uses_the_shared_compact_source_discovery_contract() {
+        let (client, _server) = stasis_runner::live::live_session(1);
+        let mut tools = LiveAiTools::new(client);
+        tools.source_context = vec![json!({
+            "target": {
+                "file": "src/main.stasis",
+                "kind": "function",
+                "name": "main",
+                "symbol_id": "canonical-main"
+            },
+            "source": "function main(): i32 { return 0; }"
+        })];
+        let observation = tools.execute_read(
+            &ToolCall {
+                tool: "inspect_source".into(),
+                args: json!({"selector":"file 0 function main"}),
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert!(observation.error.is_none());
+        assert_eq!(
+            observation.result.unwrap()["target"]["symbol_id"],
+            "canonical-main"
+        );
+        assert!(compact_live_agent_profile().compact_request);
+        let inspect = live_tool_specs()
+            .iter()
+            .find(|spec| spec.tool == "inspect_source")
+            .unwrap()
+            .purpose
+            .clone();
+        assert!(inspect.contains("canonical targets"));
     }
 
     #[test]

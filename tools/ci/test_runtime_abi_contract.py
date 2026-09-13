@@ -109,7 +109,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 contract.WINDOWS_LAUNCH_FIXTURE, "smoke_writer.reserve(2,", "legacy_sprite(", "public_graphics_path",
             ),
             (
-                contract.WORKSHOP_PREVIEW_ADAPTER, "begin_frame();", "legacy_begin();", "public_graphics_path",
+                contract.WORKSHOP_PREVIEW_ADAPTER, "end_frame();", "legacy_end();", "public_graphics_path",
             ),
             (
                 contract.GENERATED_MOBILE_AOT_FIXTURE,
@@ -231,7 +231,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
                 '// import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
             ),
-            (contract.HOT_SWAP_V2_FIXTURE, "begin_frame();", "legacy_begin();"),
+            (contract.HOT_SWAP_V2_FIXTURE, "end_frame();", "legacy_end();"),
             (contract.HOT_SWAP_INVALID_FIXTURE, "end_frame();", "legacy_end();"),
             (contract.HOT_SWAP_REJECT_FIXTURE, "end_frame();", "legacy_end();"),
         )
@@ -544,7 +544,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_java_version_drift_is_rejected(self):
         failures, _ = self.run_with(
             contract.JAVA_RENDERER,
-            "static final int RENDER_VERSION = 7;",
+            "static final int RENDER_VERSION = 8;",
             "static final int RENDER_VERSION = 5;",
         )
         self.assertTrue(any(failure.field == "STASIS_RENDER_VERSION" for failure in failures))
@@ -575,9 +575,9 @@ class RuntimeAbiContractTests(unittest.TestCase):
 
     def test_web_current_version_capacity_stride_and_offset_drift(self):
         mutations = (
-            ("const GFX_CMD_VERSION = 7;",
+            ("const GFX_CMD_VERSION = 8;",
              "const GFX_CMD_VERSION = 6;",
-             "STASIS_RENDER_VERSION", 7, 6),
+             "STASIS_RENDER_VERSION", 8, 6),
             ("const GFX_MAX_TEXT = 2048;", "const GFX_MAX_TEXT = 2047;",
              "STASIS_RENDER_MAX_TEXT", 2048, 2047),
             ("const GFX_SPRITE_STRIDE_F32 = 13;", "const GFX_SPRITE_STRIDE_F32 = 12;",
@@ -595,9 +595,9 @@ class RuntimeAbiContractTests(unittest.TestCase):
 
     def test_provenance_current_version_drift_reports_values(self):
         mutations = (
-            (contract.PACKAGE_PROVENANCE, "CURRENT_COMMAND_BUFFER_VERSION = 7",
+            (contract.PACKAGE_PROVENANCE, "CURRENT_COMMAND_BUFFER_VERSION = 8",
              "CURRENT_COMMAND_BUFFER_VERSION = 6", "tools/verify_package_provenance.py"),
-            (contract.TOOLCHAIN, "GFX_CMD_VERSION: i64 = 7",
+            (contract.TOOLCHAIN, "GFX_CMD_VERSION: i64 = 8",
              "GFX_CMD_VERSION: i64 = 6", "apps/stasis/src/toolchain_cli.rs"),
         )
         for path, old, new, consumer in mutations:
@@ -607,7 +607,7 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 if failure.field == "STASIS_RENDER_VERSION"
                 and failure.consumer == consumer
             )
-            self.assertEqual(7, failure.expected)
+            self.assertEqual(8, failure.expected)
             self.assertEqual(6, failure.actual)
 
     def test_rust_offset_drift_is_rejected(self):

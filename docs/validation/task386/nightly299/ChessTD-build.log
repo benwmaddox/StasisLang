@@ -1,0 +1,1 @@
+{"code":"command_failed","command":"build","message":"src/game/systems/presentation.stasis:1:1: unknown local struct field path 'aura.handle' in current jit path","ok":false}

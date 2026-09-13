@@ -1,0 +1,11 @@
+Toolchain: D:\code\MaddoxTasks-worktrees\stasislang-386\artifacts\task386\toolchain-299\toolchain\stasis.exe
+stasis 0.1.0
+all Stasis files are formatted
+stasis check: src/main.stasis:1:1: cannot resolve call 'audio_init'
+Stasis check failed with exit code 1
+At D:\code\MaddoxTasks-worktrees\stasislang-386\artifacts\task386\Afterlight\tools\build.ps1:54 char:32
++ ... DE -ne 0) { throw "Stasis $($Arguments -join ' ') failed with exit co ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (Stasis check failed with exit code 1:String) [], RuntimeException
+    + FullyQualifiedErrorId : Stasis check failed with exit code 1
+ 

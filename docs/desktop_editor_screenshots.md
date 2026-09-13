@@ -1,15 +1,22 @@
 # Desktop editor game screenshots
 
+The task window uses a narrow, resizable task sidebar and one conversation
+pane. The game remains in its independently movable native window; there is
+no placeholder game pane in the editor. The reply and action area stays below
+the scrolling conversation. The latest verified screenshot preview appears
+inside its originating task thread, with capture provenance retained.
+
 The editor's **Attach game screenshot** command captures the independent live
 game window, including its current rendered state while gameplay is paused.
 It waits for verified PNG completion and shows a preview. Capture does not
 send an AI request; the next task reply includes that task's attached images.
 
-The selected transport and model must explicitly support image input. The
-current supported pairing is the installed Codex transport with `gpt-5.6-sol`,
-the repository's default and visual-critic model. Unknown model names and the
-current OpenRouter transport fail closed. Capability is checked again when
-sending, so an attachment cannot silently become a text-only request.
+The selected transport and model must explicitly support image input. Codex
+uses the installed transport with `gpt-5.6-sol`. OpenRouter checks the selected
+model's image modality using provider metadata and fails closed when the model
+is absent or does not advertise image input. It sends immutable, hash-verified
+image snapshots as multimodal `image_url` data content. Capability is checked
+again when sending, so an attachment cannot silently become a text-only request.
 
 Each attachment retains its originating task, source, content SHA-256, upload
 state, and analysis state. The preview also shows the runtime identity and

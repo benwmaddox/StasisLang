@@ -1,0 +1,9 @@
+global values: i32[];
+
+function extent<T: type, N: i32>(items: T[N]): i32 {
+    return N;
+}
+
+function main(): i32 {
+    return extent(values);
+}

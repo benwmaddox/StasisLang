@@ -44,7 +44,6 @@ function main(): i32 {
         return 7;
     }
 
-    begin_frame();
     // Invalid typed sprites are ignored without exposing or forging a host id.
     state.sprite.draw(12.5, 23.5, 211, 17);
 

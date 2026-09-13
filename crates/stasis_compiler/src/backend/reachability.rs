@@ -1,7 +1,14 @@
 use crate::compiler::{FunctionId, FunctionMeta};
 use std::collections::BTreeSet;
 
-const DEFAULT_ROOTS: [&str; 4] = ["tick", "main", "render", "on_code_swap"];
+const DEFAULT_ROOTS: [&str; 6] = [
+    "tick",
+    "main",
+    "render",
+    "on_code_swap",
+    "gfx_cmd_construction_reset",
+    "gfx_cmd_construction_finish",
+];
 
 pub(crate) fn matches_root(function: &FunctionMeta, root_name: &str) -> bool {
     function.name == root_name && (root_name != "tick" || function.params.is_empty())

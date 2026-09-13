@@ -17,7 +17,7 @@ function exploration_host_load_assets(): void {
 
 function exploration_host_draw(): void {
     exploration_render_extract_system();
-    exploration_host_begin_frame();
+    exploration_host_prepare_frame();
     if (Render.command1_kind == 2) {
         exploration_host_sprite(
             ExplorationHostAssets.sun.reference(),

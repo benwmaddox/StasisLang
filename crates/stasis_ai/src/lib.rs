@@ -9,35 +9,50 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub mod image_generation;
 mod openrouter;
+pub mod session_store;
 pub mod task_controller;
 pub mod task_session;
 
 pub use openrouter::{
-    ConfiguredProvider, OpenRouterConfig, OpenRouterProvider, PreferredThroughputPolicy,
-    ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+    ConfiguredProvider, ImageInputCapability, OpenRouterConfig, OpenRouterImageInput,
+    OpenRouterProvider, PreferredThroughputPolicy, ProjectAiConfig, ProjectEditorConfig,
+    ProjectOpenRouterConfig, ProviderConfig, ProviderKind, RoutingConfig, RoutingSort,
+    APPROVED_OPENROUTER_MODELS, DEFAULT_OPENROUTER_MAX_LATENCY_SECONDS,
+    DEFAULT_OPENROUTER_MIN_THROUGHPUT, DEFAULT_OPENROUTER_MODEL, MAX_OPENROUTER_IMAGES,
+    MAX_OPENROUTER_IMAGE_BYTES,
+};
+
+pub use session_store::{
+    ExecutionReceipt, LoadOutcome, RecoveryDiagnostic, SessionSnapshot, SessionStore, StoreError,
+    WindowPreferences,
 };
 
 pub use task_controller::{
-    ProviderActionContext, ProviderActionProposal, ProviderReply, ProviderRequest, ProviderUsage,
-    RequestId, TaskController, TaskControllerConfig, TaskControllerError, TaskControllerEvent,
-    TaskRequestSnapshot, TaskRequestState,
+    ProgressEvent, ProgressReporter, ProgressStage, ProviderActionContext, ProviderActionProposal,
+    ProviderReply, ProviderRequest, ProviderUsage, RequestId, TaskController, TaskControllerConfig,
+    TaskControllerError, TaskControllerEvent, TaskRequestSnapshot, TaskRequestState,
 };
 
 pub use task_session::{
     ActionId, ActionKind, ActionRevision, ActionState, ConnectionState, FallbackState,
     FocusedTestResult, GeneratedImageArtifact, GeneratedImageId, ImageAttribution,
-    ImageHandoffState, ImageReviewState, Key, KeyChord, Modifiers, ProviderState, RoutingState,
-    ScreenshotAnalysisState, ScreenshotAttachment, ScreenshotId, ShortcutBinding, ShortcutMapper,
-    Task, TaskAction, TaskId, TaskLifecycle, TaskMetrics, TaskProvenance, TaskSession,
-    TaskSessionCommand, TaskSessionError, ThreadEntry, ThreadEntryKind, UploadState,
-    ValidationStatus, VisionCapability,
+    ImageHandoffState, ImageReviewState, Key, KeyChord, Modifiers, ProviderState,
+    ProviderTurnMetrics, RoutingState, ScreenshotAnalysisState, ScreenshotAttachment, ScreenshotId,
+    ShortcutBinding, ShortcutMapper, Task, TaskAction, TaskId, TaskLifecycle, TaskMetrics,
+    TaskProvenance, TaskSession, TaskSessionCommand, TaskSessionError, ThreadEntry,
+    ThreadEntryKind, UploadState, ValidationStatus, VisionCapability,
 };
 
 pub const DEFAULT_AGENT_TURNS: usize = 50;
 pub const MAX_AGENT_TURNS: usize = 50;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 50;
+pub const MAX_SEMANTIC_EDITS_PER_BATCH: usize = 64;
+const MAX_SYMBOL_QUERY_FILES: usize = 16;
+const MAX_PNG_SHAPES: usize = 512;
 pub const MAX_WORKING_NOTES_CHARS: usize = 2_000;
+pub const MAX_SUMMARY_CHARS: usize = task_session::MAX_THREAD_TEXT_CHARS;
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_REASONING_EFFORT: &str = "medium";
 pub const MAX_OBSERVATION_BYTES: usize = 1024 * 1024;
@@ -45,7 +60,7 @@ pub const MIN_COMPACTION_BYTES: usize = 256 * 1024;
 pub const MAX_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COMPACTION_RETAINED_TURNS: usize = 16;
 const MAX_COMPLETION_REJECTIONS: usize = 3;
-const AGENT_INSTRUCTION: &str = "Stasis is statically typed, C-like. Syntax: import, struct, global, function, test `name`(): bool. Receiver: function damage(self: Enemy, amount: i32): void; enemy.damage(5). Use local syntax and no unproven helpers such as abs. Use structured tool_calls only. start actions are leads; resolved_targets are exact. Reuse supplied source and references; do not reread them. For existing symbols use symbol_id only, plus new_source for writes; omit redundant selectors. task_contract required_changes, invariants, and acceptance are mandatory. Refine via list_symbols. Use canonical_import via read_imports/write_imports. Before writes, batch remaining reads/references. Preserve live state. Use on_code_swap only for requested migration/reinit. Submit related code/imports/tests in one contiguous atomic tested write batch. Writes test automatically; do not append run_tests. Set complete=true for the entire request; the host validates completion after all calls. Get runtime/assets capability only when necessary. Return one response-contract object.";
+const AGENT_INSTRUCTION: &str = "Stasis is statically typed, C-like. Syntax: import, struct, global, function, test `name`(): bool. Receiver: function damage(self: Enemy, amount: i32): void; enemy.damage(5). Use local syntax and no unproven helpers such as abs. Use structured tool_calls only. start actions and catalog IDs are hypermedia leads; resolved_targets are exact. Follow leads for current source and canonical targets, then continue with any newly revealed lookups or file changes. Reuse supplied source and references; do not reread them. For existing symbols use symbol_id only, plus new_source for writes; omit redundant selectors. task_contract required_changes, invariants, and acceptance are mandatory. Refine via list_symbols. Use canonical_import via read_imports/write_imports. Before adding, inspect one same-kind source in the target file. Minimize provider turns: include as many useful tool calls as can be determined from current context in one tool_calls response, up to the advertised limit. Batch independent symbol reads, references, file reads, and ready writes instead of issuing one call per turn. Wait for results before constructing calls that depend on them; never guess missing source, IDs, or arguments. Before writes, batch remaining prerequisite reads/references. Keep writes contiguous, including when batching them with unrelated reads. Preserve live state. Use on_code_swap when a requested change needs migration or immediate visual setup; change only the minimum state, such as player position or phase, needed to reveal it. Submit related code/imports/tests in one contiguous atomic tested write batch. Writes test automatically; do not append run_tests. Set complete=true for the entire request; the host validates completion after all calls. Get runtime/assets capability only when necessary. Return one response-contract object.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProfile {
@@ -56,6 +71,7 @@ pub struct AgentProfile {
     pub reasoning_effort: Option<String>,
     pub request_timeout: Option<Duration>,
     pub compaction: Option<AgentCompactionPolicy>,
+    pub compact_request: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +91,7 @@ impl Default for AgentProfile {
             reasoning_effort: None,
             request_timeout: None,
             compaction: None,
+            compact_request: false,
         }
     }
 }
@@ -169,6 +186,7 @@ pub enum AgentEvent {
         current: usize,
         maximum: usize,
     },
+    ProviderProgress(ProviderProgress),
     ProviderUsage(Value),
     WorkingNotes(String),
     ToolBatch(Vec<ToolCall>),
@@ -179,6 +197,15 @@ pub enum AgentEvent {
         after_bytes: usize,
     },
     Completed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProviderProgress {
+    ContactingProvider,
+    FirstResponse { elapsed_ms: u64 },
+    FirstAction { elapsed_ms: u64 },
+    Fallback,
 }
 
 #[derive(Serialize)]
@@ -193,8 +220,59 @@ struct ModelRequestHeader<'a> {
     initial_context: &'a Value,
 }
 
+fn compact_request_header(
+    profile: &AgentProfile,
+    tool_specs: &[ToolSpec],
+    user_prompt: &str,
+    initial_context: &Value,
+) -> Result<String, String> {
+    let one_line = |value: &str| value.replace(['\r', '\n', '\t'], " ");
+    let mut header = format!(
+        "request:1\nrole:{}\nrules:{}\ntools:\n",
+        one_line(&profile.role),
+        one_line(&profile.instruction)
+    );
+    for spec in tool_specs {
+        header.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            spec.action_id,
+            spec.tool,
+            spec.required_args.join(","),
+            spec.optional_args.join(","),
+            one_line(&spec.purpose)
+        ));
+    }
+    header.push_str(&format!(
+        "contract:tool_calls|done; notes<=2000; calls<=50; action_id+args\nprompt:{}\ncontext:\n",
+        one_line(user_prompt)
+    ));
+    match initial_context {
+        Value::String(text) => header.push_str(text),
+        value => header.push_str(
+            &serde_json::to_string(value)
+                .map_err(|error| format!("failed encoding compact AI context: {error}"))?,
+        ),
+    }
+    Ok(header)
+}
+
 pub trait ModelProvider {
     fn respond(&mut self, request: &str, canceled: &AtomicBool) -> Result<ModelResponse, String>;
+
+    fn respond_with_progress(
+        &mut self,
+        request: &str,
+        canceled: &AtomicBool,
+        progress: &mut dyn FnMut(ProviderProgress),
+    ) -> Result<ModelResponse, String> {
+        let started = std::time::Instant::now();
+        progress(ProviderProgress::ContactingProvider);
+        let response = self.respond(request, canceled)?;
+        progress(ProviderProgress::FirstResponse {
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
+        Ok(response)
+    }
 
     fn take_usage(&mut self) -> Option<Value> {
         None
@@ -310,17 +388,21 @@ where
     if known_tools.contains("finish_task") {
         response_contract["complete"] = json!("Set true only when all requested work is covered; the host validates the receipt after all calls.");
     }
-    let header = serde_json::to_string(&ModelRequestHeader {
-        record: "request",
-        schema_version: 1,
-        role: &profile.role,
-        instruction: &profile.instruction,
-        tool_specs: &tool_specs,
-        response_contract: &response_contract,
-        user_prompt,
-        initial_context: &initial_context,
-    })
-    .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?;
+    let header = if profile.compact_request {
+        compact_request_header(profile, &tool_specs, user_prompt, &initial_context)?
+    } else {
+        serde_json::to_string(&ModelRequestHeader {
+            record: "request",
+            schema_version: 1,
+            role: &profile.role,
+            instruction: &profile.instruction,
+            tool_specs: &tool_specs,
+            response_contract: &response_contract,
+            user_prompt,
+            initial_context: &initial_context,
+        })
+        .map_err(|error| format!("failed encoding append-only AI request header: {error}"))?
+    };
     let mut transcript = AgentTranscript::new(header);
     let mut completion_rejections = 0_usize;
     let require_action_ids = provider.requires_action_ids();
@@ -333,7 +415,9 @@ where
             maximum: profile.max_turns,
         });
         let request = transcript.render()?;
-        let response = provider.respond(&request, canceled);
+        let response = provider.respond_with_progress(&request, canceled, &mut |progress| {
+            emit(AgentEvent::ProviderProgress(progress));
+        });
         if let Some(usage) = provider.take_usage() {
             emit(AgentEvent::ProviderUsage(usage));
         }
@@ -766,6 +850,12 @@ fn validate_working_notes(notes: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn truncate_summary(summary: &mut String) {
+    if summary.chars().count() > MAX_SUMMARY_CHARS {
+        *summary = summary.chars().take(MAX_SUMMARY_CHARS).collect();
+    }
+}
+
 fn resolve_tool_spec<'a>(
     call: &ToolCall,
     specs: &'a [ToolSpec],
@@ -840,6 +930,28 @@ fn validate_tool_call(
             call.tool
         ));
     }
+    // Provider grammars may omit upper array bounds; admission still enforces them.
+    let bound = match spec.tool.as_str() {
+        "propose_semantic_edit" | "repair_semantic_edit" => {
+            Some(("/batch/edits", MAX_SEMANTIC_EDITS_PER_BATCH))
+        }
+        "list_symbols" => Some(("/files", MAX_SYMBOL_QUERY_FILES)),
+        "write_png_asset" => Some(("/shapes", MAX_PNG_SHAPES)),
+        _ => None,
+    };
+    if let Some((path, limit)) = bound {
+        if call
+            .args
+            .pointer(path)
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.len() > limit)
+        {
+            return Err(format!(
+                "AI action {} exceeds {path} limit of {limit}",
+                spec.tool
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -911,16 +1023,25 @@ pub fn model_response_schema_for(tool_specs: &[ToolSpec]) -> Value {
         .map(|spec| Value::String(spec.action_id.clone()))
         .collect::<Vec<_>>();
     if !action_ids.is_empty() {
-        let variants = tool_specs
-            .iter()
-            .filter(|spec| spec.tool != "finish_task")
-            .map(|spec| {
+        let mut grouped = BTreeMap::<String, (Value, Vec<Value>)>::new();
+        for spec in tool_specs.iter().filter(|spec| spec.tool != "finish_task") {
+            let args = tool_args_schema(spec);
+            let key = serde_json::to_string(&args).unwrap_or_default();
+            grouped
+                .entry(key)
+                .or_insert_with(|| (args, Vec::new()))
+                .1
+                .push(json!(spec.action_id));
+        }
+        let variants = grouped
+            .into_values()
+            .map(|(args, action_ids)| {
                 json!({
                     "type": "object",
                     "required": ["action_id", "args"],
                     "properties": {
-                        "action_id": {"type": "string", "enum": [spec.action_id]},
-                        "args": tool_args_schema(spec),
+                        "action_id": {"type": "string", "enum": action_ids},
+                        "args": args,
                     },
                     "additionalProperties": false,
                 })
@@ -933,15 +1054,52 @@ pub fn model_response_schema_for(tool_specs: &[ToolSpec]) -> Value {
 
 fn model_response_schema_for_request(request: &str) -> Result<Value, String> {
     let mut lines = request.lines();
-    let header: Value = serde_json::from_str(lines.next().unwrap_or_default())
-        .map_err(|error| format!("AI request header is not valid JSON: {error}"))?;
-    let mut specs: Vec<ToolSpec> = serde_json::from_value(
-        header
-            .get("tool_specs")
-            .cloned()
-            .ok_or_else(|| "AI request header omitted tool_specs".to_string())?,
-    )
-    .map_err(|error| format!("AI request tool_specs are invalid: {error}"))?;
+    let first = lines.next().unwrap_or_default();
+    let mut specs: Vec<ToolSpec> = if first == "request:1" {
+        let mut specs = Vec::new();
+        let mut in_tools = false;
+        for line in request.lines().skip(1) {
+            if line == "tools:" {
+                in_tools = true;
+                continue;
+            }
+            if line.starts_with("contract:") {
+                break;
+            }
+            if !in_tools {
+                continue;
+            }
+            let fields = line.splitn(5, '\t').collect::<Vec<_>>();
+            if fields.len() != 5 {
+                return Err("compact AI request has an invalid tool line".into());
+            }
+            let args = |value: &str| {
+                if value.is_empty() {
+                    Vec::new()
+                } else {
+                    value.split(',').map(str::to_string).collect()
+                }
+            };
+            specs.push(ToolSpec {
+                action_id: fields[0].into(),
+                tool: fields[1].into(),
+                required_args: args(fields[2]),
+                optional_args: args(fields[3]),
+                purpose: fields[4].into(),
+            });
+        }
+        specs
+    } else {
+        let header: Value = serde_json::from_str(first)
+            .map_err(|error| format!("AI request header is not valid JSON: {error}"))?;
+        serde_json::from_value(
+            header
+                .get("tool_specs")
+                .cloned()
+                .ok_or_else(|| "AI request header omitted tool_specs".to_string())?,
+        )
+        .map_err(|error| format!("AI request tool_specs are invalid: {error}"))?
+    };
     for line in lines {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -1003,15 +1161,24 @@ fn full_tool_args_schema(spec: &ToolSpec) -> Value {
         ),
         "propose_semantic_edit" | "repair_semantic_edit" => object_schema(
             &[
-                ("proposal_id", string_schema()),
-                ("description", string_schema()),
+                (
+                    "proposal_id",
+                    bounded_string_schema(1, task_session::MAX_ID_CHARS),
+                ),
+                (
+                    "description",
+                    bounded_string_schema(1, task_session::MAX_ACTION_TEXT_CHARS),
+                ),
                 ("batch", semantic_edit_batch_schema()),
             ],
             &["proposal_id", "description", "batch"],
         ),
         "list_symbols" => object_schema(
             &[
-                ("files", array_schema(string_schema(), Some(16))),
+                (
+                    "files",
+                    array_schema(string_schema(), Some(MAX_SYMBOL_QUERY_FILES)),
+                ),
                 ("query", string_schema()),
                 ("kind", string_schema()),
                 ("owner", string_schema()),
@@ -1134,7 +1301,10 @@ fn full_tool_args_schema(spec: &ToolSpec) -> Value {
                 ("width", integer_schema(Some(1), Some(2048))),
                 ("height", integer_schema(Some(1), Some(2048))),
                 ("background", string_schema()),
-                ("shapes", array_schema(png_shape_schema(), Some(512))),
+                (
+                    "shapes",
+                    array_schema(png_shape_schema(), Some(MAX_PNG_SHAPES)),
+                ),
             ],
             &["id", "path", "width", "height", "background", "shapes"],
         ),
@@ -1228,7 +1398,10 @@ fn semantic_edit_batch_schema() -> Value {
     object_schema(
         &[
             ("schema_version", integer_schema(Some(1), Some(2))),
-            ("edits", array_schema(edit, Some(64))),
+            (
+                "edits",
+                array_schema(edit, Some(MAX_SEMANTIC_EDITS_PER_BATCH)),
+            ),
         ],
         &["schema_version", "edits"],
     )
@@ -1236,6 +1409,10 @@ fn semantic_edit_batch_schema() -> Value {
 
 fn string_schema() -> Value {
     json!({"type": "string"})
+}
+
+fn bounded_string_schema(min_length: usize, max_length: usize) -> Value {
+    json!({"type": "string", "minLength": min_length, "maxLength": max_length})
 }
 
 fn number_schema() -> Value {
@@ -1340,7 +1517,7 @@ pub fn model_response_schema() -> Value {
         "properties": {
             "mode": {"type": "string", "enum": ["tool_calls", "done"]},
             "working_notes": {"type": "string", "minLength": 1, "maxLength": MAX_WORKING_NOTES_CHARS},
-            "summary": {"type": "string"},
+            "summary": {"type": "string", "maxLength": MAX_SUMMARY_CHARS},
             "tool_calls": {
                 "type": "array",
                 "maxItems": MAX_TOOL_CALLS_PER_TURN,
@@ -1411,6 +1588,7 @@ pub fn live_tool_specs() -> Vec<ToolSpec> {
             tool.purpose = "Use the exact ID from read_symbol or resolved_targets. Writes replace and test atomically; additions use add_symbol.".into();
         }
     }
+    tools.push(source_inspection_tool_spec());
     tools.push(spec(
         "add_symbol",
         "Add a new symbol in the same atomic batch as related replacements and tests.",
@@ -1424,6 +1602,15 @@ pub fn live_tool_specs() -> Vec<ToolSpec> {
         &[],
     ));
     tools
+}
+
+pub fn source_inspection_tool_spec() -> ToolSpec {
+    spec(
+        "inspect_source",
+        "Follow catalog links. IDs are one letter plus digits: for example, f6 lists that file's symbols and s203 returns exact source. Copy an ID shown by the host exactly; fN and sN are not IDs. search TERMS returns matching links; search-source TERMS includes top bodies. Results provide canonical targets for more lookups or edits. Batch independent calls.",
+        &["selector"],
+        &[],
+    )
 }
 
 pub fn action_id_for_tool(tool: &str) -> String {
@@ -1861,6 +2048,10 @@ fn decode_model_response(source: &str, provider: &str) -> Result<ModelResponse, 
     };
     let mut response: ModelResponse = serde_json::from_value(value)
         .map_err(|error| format!("{provider} returned invalid agent response: {error}"))?;
+    let summary = match &mut response {
+        ModelResponse::ToolCalls { summary, .. } | ModelResponse::Done { summary, .. } => summary,
+    };
+    truncate_summary(summary);
     if complete {
         if let ModelResponse::Done {
             working_notes,
@@ -1973,6 +2164,14 @@ mod tests {
                 optional_args: Vec::new(),
             };
             let schema = tool_args_schema(&spec);
+            assert_eq!(
+                schema["properties"]["proposal_id"]["maxLength"],
+                task_session::MAX_ID_CHARS
+            );
+            assert_eq!(
+                schema["properties"]["description"]["maxLength"],
+                task_session::MAX_ACTION_TEXT_CHARS
+            );
             let batch = &schema["properties"]["batch"];
             assert_eq!(batch["type"], "object");
             let edit = &batch["properties"]["edits"]["items"];
@@ -2024,6 +2223,31 @@ mod tests {
         ) -> Result<ModelResponse, String> {
             Ok(self.0.remove(0))
         }
+    }
+
+    #[test]
+    fn default_provider_progress_reports_only_observable_boundaries() {
+        let mut provider = Responses(vec![ModelResponse::Done {
+            working_notes: "done".to_string(),
+            summary: "done".to_string(),
+        }]);
+        let mut progress = Vec::new();
+        provider
+            .respond_with_progress("request", &AtomicBool::new(false), &mut |event| {
+                progress.push(event)
+            })
+            .expect("response");
+
+        assert!(matches!(
+            progress.as_slice(),
+            [
+                ProviderProgress::ContactingProvider,
+                ProviderProgress::FirstResponse { .. }
+            ]
+        ));
+        assert!(!progress
+            .iter()
+            .any(|event| matches!(event, ProviderProgress::FirstAction { .. })));
     }
 
     #[derive(Default)]
@@ -2186,6 +2410,7 @@ mod tests {
                 reasoning_effort: None,
                 request_timeout: None,
                 compaction: None,
+                compact_request: false,
             },
             "extended task",
             json!({}),
@@ -2513,6 +2738,7 @@ mod tests {
                     max_request_bytes: MIN_COMPACTION_BYTES,
                     retain_recent_turns: 4,
                 }),
+                compact_request: false,
             },
             "inspect large symbols",
             json!({}),
@@ -2905,8 +3131,14 @@ mod tests {
         assert!(live.len() < workshop.len());
         assert!(live
             .iter()
-            .filter(|tool| !matches!(tool.tool.as_str(), "get_capability" | "add_symbol"))
+            .filter(|tool| {
+                !matches!(
+                    tool.tool.as_str(),
+                    "get_capability" | "add_symbol" | "inspect_source"
+                )
+            })
             .all(|tool| workshop.iter().any(|candidate| candidate.tool == tool.tool)));
+        assert!(live.iter().any(|tool| tool.tool == "inspect_source"));
         assert!(live.iter().any(|tool| tool.tool == "write_symbol"));
         assert!(live.iter().any(|tool| tool.tool == "find_references"));
         assert!(live.iter().any(|tool| tool.tool == "get_stdlib_api"));
@@ -3480,6 +3712,49 @@ mod tests {
     }
 
     #[test]
+    fn host_enforces_array_caps_without_provider_grammar_bounds() {
+        for (tool, arg, path, limit) in [
+            (
+                "propose_semantic_edit",
+                "batch",
+                "/batch/edits",
+                MAX_SEMANTIC_EDITS_PER_BATCH,
+            ),
+            (
+                "repair_semantic_edit",
+                "batch",
+                "/batch/edits",
+                MAX_SEMANTIC_EDITS_PER_BATCH,
+            ),
+            ("list_symbols", "files", "/files", MAX_SYMBOL_QUERY_FILES),
+            ("write_png_asset", "shapes", "/shapes", MAX_PNG_SHAPES),
+        ] {
+            let specs = vec![spec(tool, "bounded request", &[arg], &[])];
+            let known = BTreeSet::from([tool.to_string()]);
+            let mut args = if arg == "batch" {
+                json!({"batch":{"edits":[]}})
+            } else {
+                json!({arg:[]})
+            };
+            *args.pointer_mut(path).unwrap() = json!(vec![Value::Null; limit]);
+            let mut call = ToolCall {
+                tool: tool.into(),
+                args,
+            };
+            validate_tool_call(&call, &specs, &known, false).unwrap();
+            call.args
+                .pointer_mut(path)
+                .unwrap()
+                .as_array_mut()
+                .unwrap()
+                .push(Value::Null);
+            assert!(validate_tool_call(&call, &specs, &known, false)
+                .unwrap_err()
+                .contains("limit of"));
+        }
+    }
+
+    #[test]
     fn host_rejects_unknown_tool_arguments() {
         let specs = workshop_tool_specs();
         let known = specs
@@ -3554,6 +3829,28 @@ mod tests {
         .expect_err("unknown call field");
         assert!(error.contains("unknown field"));
     }
+
+    #[test]
+    fn provider_summary_matches_the_task_thread_limit_and_truncates_defensively() {
+        assert_eq!(
+            model_response_schema().pointer("/properties/summary/maxLength"),
+            Some(&json!(MAX_SUMMARY_CHARS))
+        );
+        let oversized = json!({
+            "mode": "done",
+            "working_notes": "Complete.",
+            "summary": "x".repeat(MAX_SUMMARY_CHARS + 1),
+            "tool_calls": []
+        });
+        let response = decode_codex_response(&oversized.to_string()).expect("bounded summary");
+        let summary = match response {
+            ModelResponse::Done { summary, .. } => summary,
+            ModelResponse::ToolCalls { .. } => panic!("expected done response"),
+        };
+        assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS);
+        assert_eq!(MAX_SUMMARY_CHARS, 16_384);
+    }
+
     #[test]
     fn response_schema_requires_native_object_args() {
         assert_eq!(

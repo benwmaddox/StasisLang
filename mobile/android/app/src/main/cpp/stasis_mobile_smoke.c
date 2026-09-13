@@ -2,6 +2,7 @@
 #include <android/log.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -18,9 +19,23 @@
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
 #define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
+#define STASIS_WORKSHOP_MAIN_ENTRY "src/main.stasis"
+#define STASIS_WORKSHOP_HOST_ENTRY "src/host.stasis"
 #ifndef STASIS_RENDER_ACCEPTANCE
 #define STASIS_RENDER_ACCEPTANCE 0
 #endif
+
+static const char *stasis_workshop_runtime_entry(const char *project_root) {
+    char host_path[PATH_MAX];
+    struct stat info;
+    int length = snprintf(host_path, sizeof(host_path), "%s/%s",
+            project_root, STASIS_WORKSHOP_HOST_ENTRY);
+    if (length > 0 && (size_t)length < sizeof(host_path)
+            && stat(host_path, &info) == 0 && S_ISREG(info.st_mode)) {
+        return STASIS_WORKSHOP_HOST_ENTRY;
+    }
+    return STASIS_WORKSHOP_MAIN_ENTRY;
+}
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
 typedef const char *(*stasis_android_bridge_version_fn)(void);
 typedef char *(*stasis_android_bridge_run_tests_fn)(const char *project_root);
@@ -65,6 +80,11 @@ typedef struct StasisAudioHostApi {
     int (*play_effect)(int, float);
 } StasisAudioHostApi;
 typedef int (*stasis_android_bridge_install_audio_api_fn)(const StasisAudioHostApi *api);
+typedef int (*stasis_android_external_url_host_fn)(
+        const uint8_t *url, int32_t length, void *context);
+typedef void (*stasis_android_bridge_set_external_url_host_fn)(
+        stasis_android_external_url_host_fn callback, void *context);
+typedef void (*stasis_android_bridge_external_url_action_fn)(void);
 typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
 typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
 typedef void (*stasis_codex_android_cancel_response_fn)(void);
@@ -94,10 +114,54 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_set_storage_root_fn set_storage_root;
     stasis_android_bridge_free_string_fn free_string;
     stasis_android_bridge_install_audio_api_fn install_audio_api;
+    stasis_android_bridge_set_external_url_host_fn set_external_url_host;
+    stasis_android_bridge_external_url_action_fn arm_external_url_action;
+    stasis_android_bridge_external_url_action_fn clear_external_url_action;
     int attempted;
 } RustBridgeApi;
 
 static RustBridgeApi rust_bridge_api = {0};
+static _Atomic int external_url_action_pending;
+static JavaVM *external_url_vm;
+static jclass external_url_activity_class;
+
+static int workshop_open_external_url(
+        const uint8_t *url, int32_t length, void *context) {
+    JNIEnv *env = NULL;
+    jmethodID method;
+    jbyteArray bytes;
+    jboolean accepted;
+    (void)context;
+    if (url == NULL || length <= 0 || length > 2048 || external_url_vm == NULL ||
+            external_url_activity_class == NULL) return 0;
+    if ((*external_url_vm)->GetEnv(
+            external_url_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) return 0;
+    method = (*env)->GetStaticMethodID(
+            env, external_url_activity_class, "openExternalUrlFromNative", "([B)Z");
+    if (method == NULL) {
+        (*env)->ExceptionClear(env);
+        return 0;
+    }
+    bytes = (*env)->NewByteArray(env, (jsize)length);
+    if (bytes == NULL) {
+        (*env)->ExceptionClear(env);
+        return 0;
+    }
+    (*env)->SetByteArrayRegion(env, bytes, 0, (jsize)length, (const jbyte *)url);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        accepted = JNI_FALSE;
+    } else {
+        accepted = (*env)->CallStaticBooleanMethod(
+                env, external_url_activity_class, method, bytes);
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        accepted = JNI_FALSE;
+    }
+    (*env)->DeleteLocalRef(env, bytes);
+    return accepted == JNI_TRUE ? 1 : 0;
+}
 typedef struct CodexBridgeApi {
     void *handle;
     stasis_codex_android_initialize_fn initialize;
@@ -373,6 +437,15 @@ static RustBridgeApi *load_rust_bridge_api(void) {
     rust_bridge_api.install_audio_api =
             (stasis_android_bridge_install_audio_api_fn)dlsym(
                     rust_bridge_api.handle, "stasis_android_bridge_install_audio_api");
+    rust_bridge_api.set_external_url_host =
+            (stasis_android_bridge_set_external_url_host_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_set_external_url_host");
+    rust_bridge_api.arm_external_url_action =
+            (stasis_android_bridge_external_url_action_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_arm_external_url_action");
+    rust_bridge_api.clear_external_url_action =
+            (stasis_android_bridge_external_url_action_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_clear_external_url_action");
     if (rust_bridge_api.version == NULL ||
         rust_bridge_api.compile_project == NULL ||
         rust_bridge_api.run_tick == NULL ||
@@ -562,7 +635,9 @@ static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int t
         return 0;
     }
 
-    char *bridge_message = bridge->run_tick(project_root, "src/main.stasis", touch_x, touch_y, touch_active, screen_w, screen_h);
+    char *bridge_message = bridge->run_tick(project_root,
+            stasis_workshop_runtime_entry(project_root), touch_x, touch_y, touch_active,
+            screen_w, screen_h);
     if (bridge_message == NULL) {
         snprintf(message, message_size, "RunError: Rust Android bridge returned null message");
         return 1;
@@ -584,7 +659,8 @@ static int try_rust_bridge_set_i32_global(const char *project_root, const char *
         return 0;
     }
 
-    char *bridge_message = bridge->set_i32_global(project_root, "src/main.stasis", path, value);
+    char *bridge_message = bridge->set_i32_global(project_root,
+            stasis_workshop_runtime_entry(project_root), path, value);
     if (bridge_message == NULL) {
         snprintf(message, message_size, "StateError: Rust Android bridge returned null message");
         return 1;
@@ -606,7 +682,8 @@ static int try_rust_bridge_get_i32_global(const char *project_root, const char *
         return 0;
     }
 
-    char *bridge_message = bridge->get_i32_global(project_root, "src/main.stasis", path);
+    char *bridge_message = bridge->get_i32_global(project_root,
+            stasis_workshop_runtime_entry(project_root), path);
     if (bridge_message == NULL) {
         snprintf(message, message_size, "StateError: Rust Android bridge returned null message");
         return 1;
@@ -643,9 +720,46 @@ static int try_rust_bridge_run_render_frame(const char *project_root, int touch_
     if (bridge == NULL || bridge->run_render_frame == NULL) {
         return -1;
     }
-    return bridge->run_render_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active,
+    if (atomic_exchange(&external_url_action_pending, 0) != 0) {
+        if (bridge->arm_external_url_action != NULL) bridge->arm_external_url_action();
+    } else if (bridge->clear_external_url_action != NULL) {
+        bridge->clear_external_url_action();
+    }
+    return bridge->run_render_frame(project_root, stasis_workshop_runtime_entry(project_root),
+            touch_x, touch_y, touch_active,
             screen_w, screen_h, out_i32, out_i32_len, out_f32, out_f32_len,
             out_u8, out_u8_len);
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeArmExternalUrlAction(
+        JNIEnv *env, jclass activity_class) {
+    RustBridgeApi *bridge;
+    if (external_url_vm == NULL) (*env)->GetJavaVM(env, &external_url_vm);
+    if (external_url_activity_class == NULL) {
+        external_url_activity_class = (jclass)(*env)->NewGlobalRef(env, activity_class);
+    }
+    bridge = load_rust_bridge_api();
+    if (bridge != NULL && bridge->set_external_url_host != NULL) {
+        bridge->set_external_url_host(workshop_open_external_url, NULL);
+        atomic_store(&external_url_action_pending, 1);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeClearExternalUrlAction(
+        JNIEnv *env, jclass activity_class) {
+    RustBridgeApi *bridge = rust_bridge_api.handle == NULL ? NULL : &rust_bridge_api;
+    (void)env;
+    (void)activity_class;
+    atomic_store(&external_url_action_pending, 0);
+    if (bridge != NULL) {
+        if (bridge->set_external_url_host != NULL) {
+            bridge->set_external_url_host(NULL, NULL);
+        } else if (bridge->clear_external_url_action != NULL) {
+            bridge->clear_external_url_action();
+        }
+    }
 }
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeSetRuntimeI32(JNIEnv *env, jclass activity_class, jstring project_root, jstring path, jint value) {
@@ -954,7 +1068,7 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
                 "CompileError: required Rust Android compiler bridge is unavailable");
     }
 
-    char *message = bridge->compile_project(root, "src/main.stasis");
+    char *message = bridge->compile_project(root, stasis_workshop_runtime_entry(root));
 
     (*env)->ReleaseStringUTFChars(env, project_root, root);
     if (message == NULL) {

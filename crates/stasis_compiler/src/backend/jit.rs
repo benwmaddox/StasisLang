@@ -22,8 +22,8 @@ use crate::backend::EngineEntrypoints;
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::indexer::hash_text;
 use crate::frontend::types::{
-    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
-    TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+    TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::{AssignTarget, SimpleCondition, SimpleExpr, SimpleStmt};
 use crate::ir::hir::{DebugStatement, FunctionHIR};
@@ -485,8 +485,11 @@ struct JitArena {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitEnginePackage {
+    pub render_construction_lifecycle_version: u32,
     pub tick_code_ptr: u64,
     pub render_code_ptr: u64,
+    pub render_construction_reset_code_ptr: Option<u64>,
+    pub render_construction_finish_code_ptr: Option<u64>,
     pub on_code_swap_code_ptr: Option<u64>,
     pub symbol_code_ptrs: BTreeMap<String, u64>,
     pub function_code_ptrs: BTreeMap<FunctionId, u64>,
@@ -506,6 +509,12 @@ impl JitEnginePackage {
             main: main as usize,
             tick: self.tick_code_ptr as usize,
             render: self.render_code_ptr as usize,
+            render_construction_reset: self
+                .render_construction_reset_code_ptr
+                .map(|address| address as usize),
+            render_construction_finish: self
+                .render_construction_finish_code_ptr
+                .map(|address| address as usize),
             on_code_swap: self.on_code_swap_code_ptr.map(|address| address as usize),
         })
     }
@@ -630,7 +639,10 @@ impl JitProcess {
                 .expect("accepted compiler project root remains valid");
         }
         for file in self.compiler.files() {
-            candidate.upsert_file(file.path.clone(), file.content.clone());
+            // `content` is the expanded backend source for generic programs.  A
+            // staged candidate must start from the user-authored source so the
+            // generic expansion pass can rebuild every module consistently.
+            candidate.upsert_file(file.path.clone(), file.original_content.clone());
         }
         candidate.active_compiler = self.active_compiler.clone();
         candidate.artifacts = self.artifacts.clone();
@@ -704,7 +716,7 @@ impl JitProcess {
             .files()
             .iter()
             .filter(|file| file.path != root_source_path)
-            .map(|file| (file.path.clone(), file.hash))
+            .map(|file| (file.path.clone(), hash_text(&file.original_content)))
             .collect();
         let tracked_paths: BTreeSet<String> =
             tracked.iter().map(|(path, _)| path.clone()).collect();
@@ -829,7 +841,10 @@ impl JitProcess {
         self.compiler
             .set_analysis_required_roots(&self.required_emit_roots);
         for file in pending_files {
-            self.compiler.upsert_file(file.path, file.content);
+            // Preserve pending edits in source form.  Re-inserting expanded
+            // generic output here would discard the template and make the next
+            // retry depend on a stale specialization set.
+            self.compiler.upsert_file(file.path, file.original_content);
         }
         self.program_snapshot = self.active_program_snapshot.clone();
         self.staged_string_literals = self.active_string_literals.clone();
@@ -1336,8 +1351,14 @@ impl JitProcess {
     }
 
     fn is_host_export(&self, function: &FunctionMeta) -> bool {
-        matches!(function.name.as_str(), "main" | "render" | "on_code_swap")
-            || matches_root(function, "tick")
+        matches!(
+            function.name.as_str(),
+            "main"
+                | "render"
+                | "on_code_swap"
+                | "gfx_cmd_construction_reset"
+                | "gfx_cmd_construction_finish"
+        ) || matches_root(function, "tick")
             || self
                 .required_emit_roots
                 .iter()
@@ -1769,6 +1790,13 @@ impl JitProcess {
                 stasis_dynload::stasis_jit_global_i32_array_load(collection_hash, field_hash, index)
                     as u32,
             )),
+            type_id if self.is_named_i32_collection_scalar(type_id) => Ok(JitScalarValue::I32(
+                stasis_dynload::stasis_jit_global_i32_array_load(
+                    collection_hash,
+                    field_hash,
+                    index,
+                ),
+            )),
             _ => Err(format!(
                 "global collection path '{path}' field '{field}' is not a supported scalar"
             )),
@@ -1860,6 +1888,16 @@ impl JitProcess {
                     field_hash,
                     index,
                     value as i32,
+                )
+            }
+            (type_id, JitScalarValue::I32(value))
+                if self.is_named_i32_collection_scalar(type_id) =>
+            {
+                stasis_dynload::stasis_jit_global_i32_array_store(
+                    collection_hash,
+                    field_hash,
+                    index,
+                    value,
                 )
             }
             (_, value) => {
@@ -1980,6 +2018,19 @@ impl JitProcess {
                 &snapshot.analysis.global_path_types,
                 snapshot.types(),
             )
+        })
+    }
+
+    fn is_named_i32_collection_scalar(&self, type_id: u16) -> bool {
+        self.program_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .types()
+                .type_info(type_id)
+                .is_some_and(|info| info.category == TypeCategory::Named)
+                && !snapshot
+                    .analysis
+                    .named_struct_field_types
+                    .contains_key(&type_id)
         })
     }
 
@@ -2120,6 +2171,9 @@ impl JitProcess {
         }
         match type_id {
             TYPE_ID_I32 | TYPE_ID_BOOL | TYPE_ID_U32 => {
+                i32_capacity(collection_hash, field_hash, capacity)
+            }
+            type_id if self.is_named_i32_collection_scalar(type_id) => {
                 i32_capacity(collection_hash, field_hash, capacity)
             }
             TYPE_ID_F32 => f32_capacity(collection_hash, field_hash, capacity),
@@ -2306,6 +2360,30 @@ impl JitProcess {
     ) -> Result<JitEnginePackage, String> {
         let tick_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.tick)?;
         let render_code_ptr = self.code_ptr_for_i32_noarg_entrypoint(&entrypoints.render)?;
+        let render_construction_reset_code_ptr = self
+            .optional_render_construction_helper_code_ptr(
+                "gfx_cmd_construction_reset",
+                TYPE_ID_VOID,
+                &[],
+                "function gfx_cmd_construction_reset(): void",
+            )?;
+        let render_construction_finish_code_ptr = self
+            .optional_render_construction_helper_code_ptr(
+                "gfx_cmd_construction_finish",
+                TYPE_ID_I32,
+                &[TYPE_ID_I32],
+                "function gfx_cmd_construction_finish(render_result: i32): i32",
+            )?;
+        if render_construction_reset_code_ptr.is_some()
+            != render_construction_finish_code_ptr.is_some()
+        {
+            return Err(
+                "render construction lifecycle requires matching reset and finish helpers"
+                    .to_string(),
+            );
+        }
+        let render_construction_lifecycle_version =
+            u32::from(render_construction_reset_code_ptr.is_some());
         let on_code_swap_code_ptr = if let Some(name) = entrypoints.on_code_swap.as_ref() {
             self.validate_on_code_swap_signature()?;
             Some(self.code_ptr_for_function_name(name)?)
@@ -2314,8 +2392,11 @@ impl JitProcess {
         };
 
         Ok(JitEnginePackage {
+            render_construction_lifecycle_version,
             tick_code_ptr,
             render_code_ptr,
+            render_construction_reset_code_ptr,
+            render_construction_finish_code_ptr,
             on_code_swap_code_ptr,
             symbol_code_ptrs: self.symbol_code_ptrs(),
             function_code_ptrs: self.function_code_ptrs(),
@@ -2342,6 +2423,35 @@ impl JitProcess {
         self.artifact_for_function_id(function.id)
             .map(|artifact| artifact.code_ptr)
             .ok_or_else(|| format!("compiled artifact missing for required entrypoint '{name}'"))
+    }
+
+    fn optional_render_construction_helper_code_ptr(
+        &self,
+        name: &str,
+        expected_return_type: TypeId,
+        expected_params: &[TypeId],
+        expected_signature: &str,
+    ) -> Result<Option<u64>, String> {
+        if !self
+            .compiler
+            .functions()
+            .iter()
+            .any(|function| function.name == name)
+        {
+            return Ok(None);
+        }
+        let function = self.unique_host_alias(name)?;
+        if function.return_type != expected_return_type || function.params != expected_params {
+            return Err(format!(
+                "render construction helper signature mismatch for '{name}': expected `{expected_signature}`; actual return type id {}, parameter types {:?}",
+                function.return_type, function.params
+            ));
+        }
+        self.artifact_for_function_id(function.id)
+            .map(|artifact| Some(artifact.code_ptr))
+            .ok_or_else(|| {
+                format!("compiled artifact missing for render construction helper '{name}'")
+            })
     }
 
     fn unique_host_alias(&self, name: &str) -> Result<&FunctionMeta, String> {
@@ -3034,6 +3144,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         | "stasis_clipboard_save_ascii"
         | "stasis_jit_clipboard_save_ascii" => {
             function_address(stasis_dynload::stasis_jit_clipboard_save_ascii as *const ())
+        }
+        "open_external_url" | "stasis_open_external_url" | "stasis_jit_open_external_url" => {
+            function_address(stasis_dynload::stasis_jit_open_external_url as *const ())
         }
         "storage_load_ascii" | "stasis_storage_load_ascii" | "stasis_jit_storage_load_ascii" => {
             function_address(stasis_dynload::stasis_jit_storage_load_ascii as *const ())
@@ -3941,6 +4054,130 @@ function main(): i32 {
                 .expect("execute changed local layout"),
             3
         );
+    }
+
+    #[test]
+    fn generic_body_edits_rejit_specializations_and_callers_but_reuse_unrelated_code() {
+        fn source(body: &str) -> String {
+            format!(
+                "function value<N: i32>(): i32 {{ {body} }}\nfunction unrelated(): i32 {{ return 5; }}\nfunction main(): i32 {{ return value::<4>() + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic.stasis", source("return N;"));
+        process.compile().expect("generic baseline compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(9));
+        let old_unrelated_ptr = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "unrelated")
+            .expect("unrelated baseline artifact")
+            .code_ptr;
+
+        process.upsert_file("generic.stasis", source("return N + 1;"));
+        let report = process.compile().expect("generic body edit compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(10));
+        assert_eq!(
+            process
+                .artifacts()
+                .iter()
+                .find(|artifact| artifact.function_key.name == "unrelated")
+                .expect("unrelated retained artifact")
+                .code_ptr,
+            old_unrelated_ptr,
+            "unrelated reachable code should be reused"
+        );
+        assert!(
+            report.emit.emitted_functions >= 2,
+            "generic specialization and its caller must be re-emitted: {report:?}"
+        );
+        let metadata = process.generation_metadata().expect("generation metadata");
+        let emitted_names = metadata
+            .emitted_function_ids
+            .iter()
+            .filter_map(|id| {
+                process
+                    .compiler
+                    .functions()
+                    .iter()
+                    .find(|function| function.id == *id)
+            })
+            .map(|function| function.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            emitted_names
+                .iter()
+                .any(|name| name.starts_with("__stasis_function_")),
+            "specialized value function was not re-emitted: {emitted_names:?}"
+        );
+        assert!(emitted_names.contains("main"));
+        assert!(!emitted_names.contains("unrelated"));
+    }
+
+    #[test]
+    fn equivalent_generic_argument_spelling_reuses_specialization_and_callers() {
+        fn source(argument: &str) -> String {
+            format!(
+                "const CAPACITY: i32 = {argument};\nfunction value<N: i32>(): i32 {{ return N; }}\nfunction main(): i32 {{ return value::<CAPACITY>(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic.stasis", source("24"));
+        process
+            .compile()
+            .expect("canonical generic baseline compiles");
+        let first_metadata = process
+            .generation_metadata()
+            .expect("baseline generation metadata")
+            .clone();
+        let first_ptrs = process.function_code_ptrs();
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(24));
+
+        process.upsert_file("generic.stasis", source("12 + 12"));
+        let report = process
+            .compile()
+            .expect("equivalent generic argument spelling compiles");
+        assert_eq!(
+            report.emit.emitted_functions, 0,
+            "equivalent spelling should reuse all code: {report:?}"
+        );
+        assert_eq!(process.function_code_ptrs(), first_ptrs);
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(24));
+        assert_eq!(
+            process
+                .generation_metadata()
+                .expect("updated generation metadata")
+                .source_revision,
+            first_metadata.source_revision,
+            "equivalent source spellings should retain the semantic revision"
+        );
+    }
+
+    #[test]
+    fn equivalent_generic_struct_capacity_spelling_reuses_layout_and_code() {
+        fn source(argument: &str) -> String {
+            format!(
+                "const CAPACITY: i32 = {argument};\nstruct Buffer<N: i32> {{ values: i32[N]; }}\nglobal samples: Buffer<CAPACITY>;\nfunction main(): i32 {{ return samples.values[0]; }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic_struct.stasis", source("24"));
+        process
+            .compile()
+            .expect("canonical generic struct baseline compiles");
+        let first_layout = process.state_layout();
+        let first_ptrs = process.function_code_ptrs();
+
+        process.upsert_file("generic_struct.stasis", source("12 + 12"));
+        let report = process
+            .compile()
+            .expect("equivalent generic struct spelling compiles");
+        assert_eq!(report.emit.emitted_functions, 0);
+        assert_eq!(process.state_layout(), first_layout);
+        assert_eq!(process.function_code_ptrs(), first_ptrs);
     }
 
     #[test]
@@ -5145,6 +5382,74 @@ function main(): i32 {
 
     #[cfg(windows)]
     #[test]
+    fn jit_executes_external_url_edge_fixture_once_while_pointer_is_held() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static REQUESTS: AtomicUsize = AtomicUsize::new(0);
+        static LAST_URL: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+
+        fn capture_url(url: &[u8]) -> i32 {
+            REQUESTS.fetch_add(1, Ordering::SeqCst);
+            *LAST_URL
+                .get_or_init(|| Mutex::new(Vec::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = url.to_vec();
+            1
+        }
+
+        REQUESTS.store(0, Ordering::SeqCst);
+        LAST_URL
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        stasis_dynload::set_external_url_host(Some(capture_url));
+
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture_path =
+            repository.join("tests/stasis/seams/external_url_edge_probe.test.stasis");
+        let mut process = JitProcess::new();
+        process
+            .set_project_root(repository.to_string_lossy())
+            .expect("set repository root");
+        process.set_required_emit_roots(&["run_edge_probe".to_string()]);
+        process.upsert_file(
+            fixture_path.to_string_lossy().into_owned(),
+            include_str!("../../../../tests/stasis/seams/external_url_edge_probe.test.stasis"),
+        );
+        process
+            .compile()
+            .expect("compile external URL edge fixture");
+
+        process
+            .execute_optional_on_code_swap()
+            .expect("execute swap hook with host actions suppressed");
+        assert_eq!(REQUESTS.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            process.read_i32_global_path("external_url_last_result"),
+            0,
+            "swap-time URL request should report ignored"
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("run_edge_probe"),
+            Ok(11),
+            "one activation and an accepted host request should be observable"
+        );
+        assert_eq!(REQUESTS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            &*LAST_URL
+                .get()
+                .expect("URL capture")
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            b"https://www.maddoxlabs.com/"
+        );
+        stasis_dynload::set_external_url_host(None);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_stdlib_ascii_recount_is_bounded_by_capacity() {
         let mut process = JitProcess::new();
         process
@@ -6168,6 +6473,72 @@ function main(): i32 {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_round_trips_nominal_enum_collection_fields() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["main".to_string(), "host_values_match".to_string()]);
+        process.upsert_file(
+            "sample.stasis",
+            "enum Mood { Waiting, Happy, }\n\
+             enum AssetState { None, Pending, Loading, Loaded, Failed, Cancelled, }\n\
+             struct Ham { mood: Mood; }\n\
+             struct AudioAsset { handle: i32; request: i32; state: AssetState; }\n\
+             global hams: Ham[1];\n\
+             global prompt_audio_assets: AudioAsset[1];\n\
+             function main(): i32 { hams[0].mood = Mood.Happy; prompt_audio_assets[0].state = AssetState.Loaded; return 0; }\n\
+             function host_values_match(): i32 { if (hams[0].mood == Mood.Waiting && prompt_audio_assets[0].state == AssetState.Failed) { return 1; } return 0; }\n",
+        );
+        process.compile().expect("compile enum collection fixture");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(0));
+
+        assert_eq!(
+            process.read_global_collection_scalar("hams", "mood", 0),
+            Ok(JitScalarValue::I32(1))
+        );
+        assert_eq!(
+            process.read_global_collection_scalar("prompt_audio_assets", "state", 0),
+            Ok(JitScalarValue::I32(3))
+        );
+        process
+            .write_global_collection_scalar("hams", "mood", 0, JitScalarValue::I32(0))
+            .expect("write Mood through its i32 storage lane");
+        process
+            .write_global_collection_scalar(
+                "prompt_audio_assets",
+                "state",
+                0,
+                JitScalarValue::I32(4),
+            )
+            .expect("write AssetState through its i32 storage lane");
+        assert_eq!(
+            process.execute_i32_noarg_by_name("host_values_match"),
+            Ok(1)
+        );
+
+        assert_eq!(
+            process
+                .write_global_collection_scalar(
+                    "prompt_audio_assets",
+                    "state",
+                    0,
+                    JitScalarValue::Bool(true),
+                )
+                .expect_err("nominal enum field must reject a mismatched storage value"),
+            "global collection path 'prompt_audio_assets' field 'state' does not accept bool"
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("prompt_audio_assets", "state", 1)
+                .expect_err("enum field bounds must remain enforced"),
+            "global collection path 'prompt_audio_assets' index 1 is outside capacity 1"
+        );
+        assert!(process
+            .read_global_collection_scalar("prompt_audio_assets", "", 0)
+            .expect_err("a whole struct element must not be exposed as a scalar")
+            .contains("field '' was not found"));
     }
 
     #[cfg(windows)]
@@ -8433,6 +8804,77 @@ function main(): i32 { batch.update(0); return 0; }
         ));
     }
 
+    #[test]
+    fn staged_candidate_reexpands_generic_imports_from_original_sources() {
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "main.stasis",
+            "import \"lib/generic.stasis\";\nfunction main(): i32 { return generic.capacity::<4>(); }\n",
+        );
+        active.upsert_file(
+            "lib/generic.stasis",
+            "function capacity<N: i32>(): i32 { return N; }\n",
+        );
+        active.compile().expect("generic baseline compiles");
+        assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(4));
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "main.stasis",
+            "import \"lib/generic.stasis\";\nfunction main(): i32 { return generic.capacity::<8>(); }\n",
+        );
+        candidate
+            .compile()
+            .expect("candidate must retain imported generic templates");
+        assert_eq!(candidate.execute_i32_noarg_by_name("main"), Ok(8));
+    }
+
+    #[test]
+    fn imported_generic_source_watcher_compares_source_hashes() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_jit_generic_watch_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create watcher root");
+        let helper_path = root.join("generic.stasis");
+        let initial_source = "function capacity<N: i32>(): i32 { return N; }\n";
+        std::fs::write(&helper_path, initial_source).expect("write initial generic source");
+
+        let result = (|| {
+            let mut process = JitProcess::new();
+            process
+                .set_project_root(root.to_string_lossy().into_owned())
+                .expect("set watcher project root");
+            process.upsert_file(
+                "main.stasis",
+                "import \"generic.stasis\";\nfunction main(): i32 { return generic.capacity::<4>(); }\n",
+            );
+            process.upsert_file("generic.stasis", initial_source);
+            process
+                .compile()
+                .expect("generic watcher baseline compiles");
+            assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(4));
+            assert!(
+                !process.refresh_imported_sources_from_disk("main.stasis"),
+                "unchanged generic source must not trigger a refresh"
+            );
+
+            let changed_source =
+                "function capacity<N: i32>(): i32 { return N + 1; }\n// source edit\n";
+            std::fs::write(&helper_path, changed_source).expect("write changed generic source");
+            assert!(process.refresh_imported_sources_from_disk("main.stasis"));
+            process.compile().expect("changed generic source compiles");
+            assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(5));
+            Ok::<(), String>(())
+        })();
+        let _ = std::fs::remove_dir_all(&root);
+        result.expect("generic source watcher regression");
+    }
+
     #[cfg(windows)]
     #[test]
     fn jit_process_reuses_stable_functions_when_ordinal_ids_shift() {
@@ -8902,6 +9344,37 @@ function main(): i32 { batch.update(0); return 0; }
             .expect_err("void tick should fail");
         assert!(error.contains("expected `function tick(): i32`"));
         assert!(error.contains("actual return type id"));
+    }
+
+    #[test]
+    fn jit_engine_package_rejects_invalid_render_construction_helper_signatures() {
+        let mut invalid_reset = JitProcess::new();
+        invalid_reset.upsert_file(
+            "tests/stasis/seams/invalid_render_construction_reset.stasis",
+            "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction @internal gfx_cmd_construction_reset(): i32 { return 0; }\nfunction @internal gfx_cmd_construction_finish(render_result: i32): i32 { return render_result; }\n",
+        );
+        invalid_reset
+            .compile()
+            .expect("compile invalid reset fixture");
+        let error = invalid_reset
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect_err("invalid reset signature must fail packaging");
+        assert!(error.contains("expected `function gfx_cmd_construction_reset(): void`"));
+        drop(invalid_reset);
+
+        let mut invalid_finish = JitProcess::new();
+        invalid_finish.upsert_file(
+            "tests/stasis/seams/invalid_render_construction_finish.stasis",
+            "function tick(): i32 { return 0; }\nfunction render(): i32 { return 0; }\nfunction @internal gfx_cmd_construction_reset(): void { return; }\nfunction @internal gfx_cmd_construction_finish(): i32 { return 0; }\n",
+        );
+        invalid_finish
+            .compile()
+            .expect("compile invalid finish fixture");
+        let error = invalid_finish
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect_err("invalid finish signature must fail packaging");
+        assert!(error
+            .contains("expected `function gfx_cmd_construction_finish(render_result: i32): i32`"));
     }
 
     #[test]
