@@ -71,12 +71,12 @@ install a certificate or authorize it under Application Control.
 Stasis-controlled Authenticode signing always requests a SHA-256 file digest and page hashes.
 Production credentials are supplied externally with `STASIS_SIGNING_CERT_THUMBPRINT` or
 `STASIS_SIGNING_CERTIFICATE`; Stasis never generates, exports, prints, or logs private keys.
-The nightly currently uses a pinned, self-signed Maddox Labs release identity. Its Windows job
-does not install that certificate into the runner's trust stores. It verifies the pinned signer
-identity before packaging and performs strict Authenticode verification afterward, with only the
-narrow expected self-signed root-trust failure bridged in production verification. This proves
-artifact integrity and stable private publisher identity in CI, but it does not confer public CA
-trust or SmartScreen reputation on downloaded binaries.
+Nightly Windows artifacts are currently intentionally unsigned while the production certificate
+trust issue is deferred. The Windows release job still performs the build, packaging, provenance,
+editor, and network supervision checks, and ships the standalone signing entrypoint for an
+explicitly signed deployment. This means nightly Windows downloads do not satisfy an App Control
+policy that requires a trusted Authenticode publisher; use the required-signing settings and a
+trusted production certificate for that deployment path.
 
 ## Canonical validation and executable boundaries
 
