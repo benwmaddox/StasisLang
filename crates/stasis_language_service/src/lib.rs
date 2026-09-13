@@ -10,14 +10,14 @@ use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
 use stasis_compiler::frontend::parser::{completion_expected_type, parse_top_level_functions};
 use stasis_compiler::frontend::workshop::{
     find_workshop_references, organize_workshop_imports, plan_workshop_rename,
-    prepare_workshop_rename, workshop_call_hierarchy, workshop_completion_items,
-    workshop_folding_ranges, workshop_inlay_hints, workshop_inlay_hints_from_local_types,
-    workshop_linked_edit_ranges, workshop_reachable_files, workshop_selection_ranges,
-    workshop_semantic_tokens, workshop_source_items, workshop_symbols, workshop_type_hierarchy,
-    WorkshopCallHierarchyEdge, WorkshopCompletionItem, WorkshopCompletionScope,
-    WorkshopHierarchyItem, WorkshopInlayHint, WorkshopInlayHintKind, WorkshopSourceFile,
-    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol, WorkshopSymbolKind,
-    WorkshopTypeHierarchyEdge,
+    prepare_workshop_rename, workshop_base_type_name, workshop_call_hierarchy,
+    workshop_completion_items, workshop_folding_ranges, workshop_inlay_hints,
+    workshop_inlay_hints_from_local_types, workshop_linked_edit_ranges, workshop_reachable_files,
+    workshop_selection_ranges, workshop_semantic_tokens, workshop_source_items, workshop_symbols,
+    workshop_type_hierarchy, WorkshopCallHierarchyEdge, WorkshopCompletionItem,
+    WorkshopCompletionScope, WorkshopHierarchyItem, WorkshopInlayHint, WorkshopInlayHintKind,
+    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol,
+    WorkshopSymbolKind, WorkshopTypeHierarchyEdge,
 };
 pub use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopReference, WorkshopReferenceKind,
@@ -541,12 +541,7 @@ impl WarmDefinitionIndex {
         };
         let mut definition = None;
         for field_name in &segments[1..] {
-            let owner = type_name
-                .split('[')
-                .next()
-                .unwrap_or(&type_name)
-                .trim()
-                .to_string();
+            let owner = workshop_base_type_name(&type_name).to_string();
             let (field_type, reference) = self
                 .fields
                 .get(&(owner.clone(), (*field_name).to_string()))?;
@@ -951,7 +946,7 @@ impl LanguageService {
         };
         let mut signatures = matches
             .iter()
-            .filter_map(|item| item_signature(item))
+            .filter_map(|item| hover_signature(&document.text, &range, item))
             .collect::<Vec<_>>();
         signatures.sort();
         signatures.dedup();
@@ -1005,7 +1000,18 @@ impl LanguageService {
             .iter()
             .filter(|item| item.text == call.target && workshop_completion_visible(item, &context))
             .filter_map(|item| {
-                let label = item_signature(item)?;
+                let signature = item_signature(item)?;
+                let label = call
+                    .generic_arguments
+                    .as_deref()
+                    .and_then(|arguments| {
+                        specialize_generic_signature(
+                            &signature,
+                            &item.generic_parameters,
+                            arguments,
+                        )
+                    })
+                    .unwrap_or(signature);
                 Some(SignatureInformation {
                     parameters: signature_parameters(&label),
                     documentation: documentation_for_completion(index, item),
@@ -1046,7 +1052,10 @@ impl LanguageService {
         let has_scoped_candidate = self.language_index.as_ref().is_some_and(|index| {
             index.workshop_items.iter().any(|item| {
                 item.text == symbol
-                    && matches!(item.kind.as_str(), "local" | "parameter")
+                    && matches!(
+                        item.kind.as_str(),
+                        "local" | "parameter" | "generic_parameter"
+                    )
                     && item
                         .scope
                         .as_ref()
@@ -2360,7 +2369,10 @@ fn scoped_binding_definition(
         .iter()
         .filter(|item| {
             item.text == symbol
-                && matches!(item.kind.as_str(), "local" | "parameter")
+                && matches!(
+                    item.kind.as_str(),
+                    "local" | "parameter" | "generic_parameter"
+                )
                 && scoped_completion_owner_matches(item, context)
         })
         .filter_map(|item| {
@@ -2411,7 +2423,7 @@ fn scoped_binding_declaration_range(
     let Some(scope) = item.scope.as_ref() else {
         return Ok(None);
     };
-    if item.kind == "local" {
+    if matches!(item.kind.as_str(), "local" | "generic_parameter") {
         let (Some(start), Some(end)) = (scope.declaration_from, scope.declaration_to) else {
             return Ok(None);
         };
@@ -2450,6 +2462,128 @@ fn item_signature(item: &WorkshopCompletionItem) -> Option<String> {
     item.signature
         .clone()
         .filter(|signature| signature.contains('('))
+}
+
+fn hover_signature(
+    source: &str,
+    symbol_range: &Range<usize>,
+    item: &WorkshopCompletionItem,
+) -> Option<String> {
+    let signature = item_signature(item)?;
+    if item.generic_parameters.is_empty() {
+        return Some(signature);
+    }
+    let Some(arguments) = explicit_generic_arguments(source, symbol_range.end)
+        .or_else(|| concrete_generic_arguments(item))
+    else {
+        return Some(signature);
+    };
+    specialize_generic_signature(&signature, &item.generic_parameters, &arguments)
+        .or(Some(signature))
+}
+
+fn explicit_generic_arguments(source: &str, start: usize) -> Option<Vec<String>> {
+    let suffix = source.get(start..)?.trim_start();
+    let generic = suffix.strip_prefix("::")?;
+    if !generic.starts_with('<') {
+        return None;
+    }
+    let close = matching_angle_text(generic, 0)?;
+    let arguments = split_generic_arguments(&generic[1..close]);
+    (!arguments.is_empty()).then_some(arguments)
+}
+
+fn concrete_generic_arguments(item: &WorkshopCompletionItem) -> Option<Vec<String>> {
+    let owner = item.owner.as_deref()?;
+    let open = owner.find('<')?;
+    let close = matching_angle_text(&owner[open..], 0)?;
+    let arguments = split_generic_arguments(&owner[open + 1..open + close]);
+    (!arguments.is_empty()).then_some(arguments)
+}
+
+fn split_generic_arguments(arguments: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    for (index, character) in arguments.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let argument = arguments[start..index].trim();
+                if !argument.is_empty() {
+                    values.push(argument.to_string());
+                }
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let argument = arguments[start..].trim();
+    if !argument.is_empty() {
+        values.push(argument.to_string());
+    }
+    values
+}
+
+fn specialize_generic_signature(
+    signature: &str,
+    parameters: &[stasis_compiler::frontend::workshop::WorkshopGenericParameter],
+    arguments: &[String],
+) -> Option<String> {
+    let open = signature.find('<')?;
+    let close = matching_angle_text(&signature[open..], 0)? + open;
+    let rendered = arguments.join(", ");
+    let mut remainder = signature[close + 1..].to_string();
+    for (parameter, argument) in parameters.iter().zip(arguments) {
+        remainder = replace_signature_identifier(&remainder, &parameter.name, argument);
+    }
+    Some(format!("{}<{}>{}", &signature[..open], rendered, remainder))
+}
+
+fn replace_signature_identifier(source: &str, identifier: &str, replacement: &str) -> String {
+    if identifier.is_empty() {
+        return source.to_string();
+    }
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    while let Some(relative) = source[cursor..].find(identifier) {
+        let start = cursor + relative;
+        let end = start + identifier.len();
+        let before = source[..start].chars().next_back();
+        let after = source[end..].chars().next();
+        let boundary = before
+            .is_none_or(|character| !(character.is_ascii_alphanumeric() || character == '_'))
+            && after
+                .is_none_or(|character| !(character.is_ascii_alphanumeric() || character == '_'));
+        if boundary {
+            output.push_str(&source[cursor..start]);
+            output.push_str(replacement);
+        } else {
+            output.push_str(&source[cursor..end]);
+        }
+        cursor = end;
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
+fn matching_angle_text(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    for index in open..bytes.len() {
+        match bytes[index] {
+            b'<' => depth += 1,
+            b'>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn documentation_for_completion(
@@ -2728,6 +2862,7 @@ fn language_symbol(project_root: &str, symbol: &WorkshopSymbol) -> LanguageSymbo
 struct CallContext {
     target: String,
     active_parameter: usize,
+    generic_arguments: Option<Vec<String>>,
 }
 
 fn call_context(source: &str, byte_offset: usize) -> Result<Option<CallContext>, String> {
@@ -2749,9 +2884,43 @@ fn call_context(source: &str, byte_offset: usize) -> Result<Option<CallContext>,
     let Some(open_index) = open_calls.last().copied() else {
         return Ok(None);
     };
-    let Some(target_end_index) = open_index.checked_sub(1) else {
+    let Some(mut target_end_index) = open_index.checked_sub(1) else {
         return Ok(None);
     };
+    let mut generic_arguments = None;
+    if token_text(prefix, tokens[target_end_index]) == ">" {
+        let mut depth = 0usize;
+        let mut index = target_end_index;
+        loop {
+            let text = token_text(prefix, tokens[index]);
+            if text == ">" {
+                depth += 1;
+            } else if text == "<" {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    "signature call has an unmatched generic closing delimiter".to_string()
+                })?;
+                if depth == 0 {
+                    if index < 3
+                        || token_text(prefix, tokens[index - 1]) != ":"
+                        || token_text(prefix, tokens[index - 2]) != ":"
+                    {
+                        return Ok(None);
+                    }
+                    generic_arguments = Some(generic_call_arguments(
+                        prefix,
+                        &tokens,
+                        index,
+                        target_end_index,
+                    ));
+                    target_end_index = index - 3;
+                    break;
+                }
+            }
+            index = index.checked_sub(1).ok_or_else(|| {
+                "signature call has an unmatched generic opening delimiter".to_string()
+            })?;
+        }
+    }
     if tokens[target_end_index].kind != TokenKind::Identifier {
         return Ok(None);
     }
@@ -2778,7 +2947,36 @@ fn call_context(source: &str, byte_offset: usize) -> Result<Option<CallContext>,
     Ok(Some(CallContext {
         target: prefix[tokens[target_start_index].start..tokens[target_end_index].end].to_string(),
         active_parameter,
+        generic_arguments,
     }))
+}
+
+fn generic_call_arguments(
+    source: &str,
+    tokens: &[Token],
+    open: usize,
+    close: usize,
+) -> Vec<String> {
+    let mut arguments = Vec::new();
+    let mut start = tokens[open].end;
+    let mut depth = 0usize;
+    for index in open + 1..close {
+        let token = tokens[index];
+        match token_text(source, token) {
+            "<" => depth += 1,
+            ">" => depth = depth.saturating_sub(1),
+            "," if depth == 0 => {
+                arguments.push(source[start..token.start].trim().to_string());
+                start = token.end;
+            }
+            _ => {}
+        }
+    }
+    let last = source[start..tokens[close].start].trim();
+    if !last.is_empty() {
+        arguments.push(last.to_string());
+    }
+    arguments
 }
 
 fn signature_parameters(signature: &str) -> Vec<SignatureParameter> {
@@ -3500,6 +3698,42 @@ function main(): i32 {
             function.documentation.as_deref(),
             Some("Creates an enemy with explicit health.")
         );
+    }
+
+    #[test]
+    fn generic_hover_signature_help_and_parameter_navigation_use_shared_metadata() {
+        let root = std::env::temp_dir().join("stasis-language-service-generics");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "struct Buffer<N: i32> { values: i32[N]; }\nfunction clear<N: i32>(self: Buffer<N>): void { let count: i32 = N; return; }\nglobal samples: Buffer<4>;\nfunction main(): void { clear::<4>(samples); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("service");
+        service.set_disk_document(path_text.clone(), source);
+
+        let call = source.find("clear::<4>").expect("explicit generic call");
+        let hover = service
+            .hover(&path_text, call + 2)
+            .expect("generic hover")
+            .expect("generic hover info");
+        assert_eq!(hover.signatures, vec!["clear<4>(self: Buffer<4>): void"]);
+
+        let signature_cursor = call + source[call..].find('(').expect("call open") + 1;
+        let help = service
+            .signature_help(&path_text, signature_cursor)
+            .expect("generic signature help")
+            .expect("generic call signature");
+        assert_eq!(help.signatures[0].label, "clear<4>(self: Buffer<4>): void");
+
+        let parameter = source.find("Buffer<N>").expect("generic use") + "Buffer<".len();
+        let prepared = service
+            .prepare_rename(&path_text, parameter)
+            .expect("generic parameter rename preparation");
+        assert_eq!(prepared.kind, "generic_parameter");
+        assert_eq!(prepared.placeholder, "N");
+        let renamed = service
+            .rename(&path_text, parameter, "Count")
+            .expect("generic parameter rename");
+        assert_eq!(renamed.kind, "generic_parameter");
+        assert!(renamed.edits.len() >= 3);
     }
 
     #[test]

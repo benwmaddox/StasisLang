@@ -831,12 +831,14 @@ impl LiveAcceptanceApp {
     fn active_action_ready(&self) -> Option<String> {
         let task = self.editor.state.session.active_task().ok()?;
         task.actions.values().find_map(|action| {
-            (matches!(action.state, ActionState::Proposed)
-                && self
-                    .editor
-                    .state
-                    .reviewed_preview(task.id.as_str(), action.id.as_str())
-                    .is_ok())
+            (matches!(
+                action.state,
+                ActionState::Proposed | ActionState::Accepted | ActionState::Applied
+            ) && self
+                .editor
+                .state
+                .reviewed_preview(task.id.as_str(), action.id.as_str())
+                .is_ok())
             .then(|| action.id.to_string())
         })
     }
@@ -1093,7 +1095,7 @@ impl LiveAcceptanceApp {
         )
         .map_err(|error| format!("write report JSON: {error}"))?;
         let markdown = format!(
-            "# Task 524 live acceptance\n\nTwo semantic tasks ran through the native desktop editor against one disposable running Asset Breakout workspace. They used OpenRouter models `{}` and `{}` and required explicit acceptance and apply. The second task attached the verified SDL game frame before its provider request.\n\n- Playable warmup: {} ms to `assets_ready=true`, `loader_failed=false`, and `bricks_left=35`.\n- Task 1: first action {} ms; provider total {} ms, {} input tokens, {} output tokens, ${:.6}; apply receipt {} ms.\n- Task 2: first action {} ms; provider total {} ms, {} input tokens, {} output tokens, ${:.6}; apply receipt {} ms.\n- State preservation: both actions remain applied and both focused test receipts remain passing. One runtime session spans two consecutive generation advances; paused tick, `paddle_x`, `bricks_left`, and asset-loader health are unchanged.\n- Timing receipts: `report.json` includes compile and test receipts, per-apply wall time, provider timings, and total wall time; `target/task-524-final-live.log` records watcher compile/package/commit timing.\n- Visual evidence: `first-proposal.png`, `second-proposal.png`, `final-editor.png`, `game-frame.png`, `editor-flow.mp4`, and `game-motion.mp4`. Native editor and SDL videos are separate task-surface captures.\n",
+            "# Task 524 live acceptance\n\nTwo semantic tasks ran through the native desktop editor against one disposable running Asset Breakout workspace. They used OpenRouter models `{}` and `{}` and automatically published each reviewed semantic edit before running focused tests. The second task attached the verified SDL game frame before its provider request.\n\n- Playable warmup: {} ms to `assets_ready=true`, `loader_failed=false`, and `bricks_left=35`.\n- Task 1: first action {} ms; provider total {} ms, {} input tokens, {} output tokens, ${:.6}; automatic apply/test receipt {} ms.\n- Task 2: first action {} ms; provider total {} ms, {} input tokens, {} output tokens, ${:.6}; automatic apply/test receipt {} ms.\n- State preservation: both actions remain applied and both focused test receipts remain passing. One runtime session spans two consecutive generation advances; paused tick, `paddle_x`, `bricks_left`, and asset-loader health are unchanged.\n- Timing receipts: `report.json` includes compile and test receipts, per-apply wall time, provider timings, and total wall time; `target/task-524-final-live.log` records watcher compile/package/commit timing.\n- Visual evidence: `first-proposal.png`, `second-proposal.png`, `final-editor.png`, `game-frame.png`, `editor-flow.mp4`, and `game-motion.mp4`. Native editor and SDL videos are separate task-surface captures.\n",
             first.provider.model.as_deref().unwrap_or("unknown"),
             second.provider.model.as_deref().unwrap_or("unknown"),
             self.warmup_ms,
@@ -1442,6 +1444,9 @@ impl eframe::App for LiveAcceptanceApp {
             }
             AcceptanceState::WaitFirstProposal => {
                 if self.pending_editor_capture.is_none() && self.active_action_ready().is_some() {
+                    self.apply_started
+                        .entry("task-1".to_string())
+                        .or_insert_with(Instant::now);
                     if let Err(error) = self.record_active("reviewed") {
                         self.fail(context, error);
                         return;
@@ -1458,27 +1463,6 @@ impl eframe::App for LiveAcceptanceApp {
                 self.transition(AcceptanceState::CaptureFirstProposal);
             }
             AcceptanceState::CaptureFirstProposal if self.pending_editor_capture.is_none() => {
-                if let Err(error) = self
-                    .editor
-                    .state
-                    .handle(TaskSessionCommand::AcceptAction)
-                    .map_err(|error| error.to_string())
-                {
-                    self.fail(context, error);
-                    return;
-                }
-                self.apply_started
-                    .insert("task-1".to_string(), Instant::now());
-                if let Err(error) = self
-                    .editor
-                    .state
-                    .handle(TaskSessionCommand::ApplyAction)
-                    .map_err(|error| error.to_string())
-                {
-                    self.fail(context, error);
-                    return;
-                }
-                self.editor.flush_intents();
                 self.transition(AcceptanceState::WaitFirstApply);
             }
             AcceptanceState::WaitFirstApply => {
@@ -1556,6 +1540,9 @@ impl eframe::App for LiveAcceptanceApp {
             }
             AcceptanceState::WaitSecondProposal => {
                 if self.pending_editor_capture.is_none() && self.active_action_ready().is_some() {
+                    self.apply_started
+                        .entry("task-2".to_string())
+                        .or_insert_with(Instant::now);
                     if let Err(error) = self.record_active("reviewed_with_image") {
                         self.fail(context, error);
                         return;
@@ -1572,27 +1559,6 @@ impl eframe::App for LiveAcceptanceApp {
                 self.transition(AcceptanceState::CaptureSecondProposal);
             }
             AcceptanceState::CaptureSecondProposal if self.pending_editor_capture.is_none() => {
-                if let Err(error) = self
-                    .editor
-                    .state
-                    .handle(TaskSessionCommand::AcceptAction)
-                    .map_err(|error| error.to_string())
-                {
-                    self.fail(context, error);
-                    return;
-                }
-                self.apply_started
-                    .insert("task-2".to_string(), Instant::now());
-                if let Err(error) = self
-                    .editor
-                    .state
-                    .handle(TaskSessionCommand::ApplyAction)
-                    .map_err(|error| error.to_string())
-                {
-                    self.fail(context, error);
-                    return;
-                }
-                self.editor.flush_intents();
                 self.transition(AcceptanceState::WaitSecondApply);
             }
             AcceptanceState::WaitSecondApply => {

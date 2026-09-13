@@ -98,10 +98,11 @@ The network acceptance workflow runs the native client tests alongside the
 existing browser acceptance gate. The protocol is shared; neither native
 transport nor native packaging replaces the browser path.
 
-A post-fix Windows nightly qualifies this contract only after the extracted,
-signed toolchain passes `test_windows_desktop_network_client_package.ps1` with
-the checkout's `crates/stasis_network` source hidden. The probe packages a fresh
-vendored-stdlib client, consumes `STASIS_NETWORK_JOIN_URL`, exercises all eight
+A post-fix Windows nightly qualifies this contract after the extracted toolchain
+passes `test_windows_desktop_network_client_package.ps1` with the checkout's
+`crates/stasis_network` source hidden. Nightly Windows artifacts are currently
+published unsigned while the production certificate trust issue is deferred. The
+probe packages a fresh vendored-stdlib client, consumes `STASIS_NETWORK_JOIN_URL`,
+exercises all eight
 mailbox imports against a real host, observes graceful disconnect, and rejects
-logs containing the private URL. The nightly workflow keeps signing publication
-behind the existing task #525 release precondition.
+logs containing the private URL.

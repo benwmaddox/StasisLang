@@ -1,7 +1,7 @@
 import "../../../src/stdlib/rig2d.stasis";
 
-global rig2d_probe_left: Rig2D;
-global rig2d_probe_right: Rig2D;
+global rig2d_probe_left: Rig2D<24>;
+global rig2d_probe_right: Rig2D<64>;
 
 function rig2d_probe_near(actual: f32, expected: f32): bool {
     let difference: f32 = actual - expected;

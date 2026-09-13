@@ -767,6 +767,50 @@ impl TaskController {
         Ok(())
     }
 
+    /// Cancels only the in-flight provider request while leaving its task active.
+    pub fn cancel_request(
+        &self,
+        session: &mut TaskSession,
+        task_id: &TaskId,
+    ) -> Result<(), TaskControllerError> {
+        let mut task = session.task(task_id)?.clone();
+        if task.lifecycle != TaskLifecycle::Active {
+            return Err(TaskControllerError::TaskClosed(task_id.clone()));
+        }
+        let mut state = lock(&self.state);
+        let Some(record) = state.requests.get_mut(&(self.client_id, task_id.clone())) else {
+            return Err(TaskControllerError::NoPreviousRequest(task_id.clone()));
+        };
+        if record.snapshot.state != TaskRequestState::Running {
+            return Err(TaskControllerError::NoPreviousRequest(task_id.clone()));
+        }
+        record.canceled.store(true, Ordering::Release);
+        record.snapshot.state = TaskRequestState::Canceled;
+        record.snapshot.elapsed_ms =
+            u64::try_from(record.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        record.snapshot.error = None;
+        let elapsed = record.snapshot.elapsed_ms;
+        push_progress(&mut record.snapshot, ProgressStage::Canceled, elapsed, None);
+        let request_id = record.snapshot.request_id;
+        update_screenshots(
+            &mut task,
+            &record.request.screenshots,
+            ScreenshotOutcome::Canceled,
+        );
+        state.events.push_back((
+            self.client_id,
+            TaskControllerEvent::Canceled {
+                request_id,
+                task_id: task_id.clone(),
+            },
+        ));
+        drop(state);
+        *session
+            .task_mut(task_id)
+            .expect("task was present while request cancellation was validated") = task;
+        Ok(())
+    }
+
     pub fn reconnect(
         &self,
         session: &mut TaskSession,
@@ -1653,6 +1697,49 @@ mod tests {
             session.task("one").unwrap().screenshots[&crate::ScreenshotId::new("shot")].analysis,
             ScreenshotAnalysisState::Canceled
         );
+    }
+
+    #[test]
+    fn request_cancellation_keeps_task_active_and_rejects_late_completion() {
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_started = Arc::clone(&started);
+        let worker_release = Arc::clone(&release);
+        let controller = TaskController::new(move |_, _| {
+            worker_started.wait();
+            worker_release.wait();
+            Ok(ProviderReply::new("late"))
+        });
+        let mut session = session(&["one"]);
+        let id = TaskId::new("one");
+        controller.send(&mut session, &id).unwrap();
+        started.wait();
+        controller.cancel_request(&mut session, &id).unwrap();
+        assert_eq!(session.task(&id).unwrap().lifecycle, TaskLifecycle::Active);
+        assert_eq!(
+            controller.snapshot(&id).unwrap().state,
+            TaskRequestState::Canceled
+        );
+        release.wait();
+        let mut events = Vec::new();
+        for _ in 0..100 {
+            events.extend(controller.poll(&mut session));
+            if events
+                .iter()
+                .any(|event| matches!(event, TaskControllerEvent::Stale { .. }))
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TaskControllerEvent::Canceled { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TaskControllerEvent::Stale { .. })));
+        assert_eq!(session.task(&id).unwrap().lifecycle, TaskLifecycle::Active);
+        assert_eq!(session.task(&id).unwrap().thread.len(), 1);
     }
 
     #[test]

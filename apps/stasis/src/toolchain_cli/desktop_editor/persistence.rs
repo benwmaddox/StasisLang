@@ -585,17 +585,20 @@ mod tests {
             while !worker_shutdown.load(Ordering::Acquire) {
                 thread::yield_now();
             }
-            let result =
-                super::super::super::desktop_apply_semantic_preview(&worker_root, &preview)
-                    .and_then(|(summary, receipt)| {
-                        receipt
-                            .get("source_fingerprint")
-                            .and_then(Value::as_str)
-                            .map(|fingerprint| (summary, receipt.clone(), fingerprint.to_string()))
-                            .ok_or_else(|| {
-                                "semantic edit receipt omitted its source fingerprint".to_string()
-                            })
-                    });
+            let result = super::super::super::desktop_publish_semantic_preview_with_progress(
+                &worker_root,
+                &preview,
+                &mut |_| {},
+            )
+            .and_then(|(summary, receipt)| {
+                receipt
+                    .get("source_fingerprint")
+                    .and_then(Value::as_str)
+                    .map(|fingerprint| (summary, receipt.clone(), fingerprint.to_string()))
+                    .ok_or_else(|| {
+                        "semantic edit receipt omitted its source fingerprint".to_string()
+                    })
+            });
             result_tx
                 .send(HostResult {
                     request_id: 1,
@@ -623,11 +626,11 @@ mod tests {
         let recovered = reopen(&root);
         let task = recovered.state.session.task("task-1").unwrap();
         assert!(matches!(task.actions["value"].state, ActionState::Applied));
-        assert!(task.validation.is_passing());
+        assert!(matches!(task.validation, ValidationStatus::NotRun));
         assert!(recovered
             .execution_receipts
             .contains_key(&("task-1".into(), "value".into())));
-        assert!(recovered.validation_fingerprints.contains_key("task-1"));
+        assert!(!recovered.validation_fingerprints.contains_key("task-1"));
         drop(recovered);
         std::fs::remove_dir_all(root).unwrap();
     }

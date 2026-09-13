@@ -80,6 +80,7 @@ game window.
   "tests": "tests",
   "output": "build",
   "ai": {
+    "provider": "openrouter",
     "openrouter": {
       "approved_models": ["openai/gpt-oss-120b"],
       "min_throughput_tokens_per_second": 400,
@@ -253,8 +254,9 @@ restore release assets.
 - `signing status|provision|sign|verify`: inspect Windows signer discovery, explicitly provision a
   CurrentUser-only development certificate, sign explicit executable/toolchain paths, or verify
   Authenticode signatures. These commands do not require `stasis.json`; `provision` is never a
-  production credential path. Stasis-controlled signing requests SHA-256 file digests and page
-  hashes. The explicit sign/verify operations require a Windows host; `STASIS_AOT_SIGN_TOOL`
+  production credential path. Local provisioning trusts the public certificate only in CurrentUser Root.
+  Stasis-controlled signing requests SHA-256 digests with page hashes for EXEs and without them
+  for DLLs, then verifies Authenticode and signer identity. See [Windows test signing](windows-app-control.md). The explicit sign/verify operations require a Windows host; `STASIS_AOT_SIGN_TOOL`
   remains supported as a one-argument external hook for existing cross-platform build flows.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
   assets, graphics runtime when present, and verified release provenance. Windows packages keep
@@ -456,12 +458,15 @@ PNG, SVG, font, tick, and framebuffer assertions.
 
 Creating a task sends its objective as the first message. The editor starts with a bounded
 symbol catalog and reads exact source symbols as needed, so a project does not have to fit
-all its source into the initial AI prompt. Proposed changes still require acceptance.
+all its source into the initial AI prompt. A returned semantic edit is compiler-validated,
+atomically published, and made available to the live watcher immediately. Focused tests start
+after publication. A failed test restores the prior sources from the hash-bound edit receipt;
+passing tests leave the live result available for user feedback, Success, or Reject.
 
-The desktop editor reads secrets and transport selection from the selected project's `.env`
+The desktop editor reads secrets and optional local transport selection from the selected project's `.env`
 (not the launcher's working directory). Process environment values take precedence for those
-operational settings. An `OPENROUTER_API_KEY` selects OpenRouter when `STASIS_AI_PROVIDER` is
-unset; an explicit provider selection wins. Keep `.env` ignored by Git. The key is not included
+operational settings. An `OPENROUTER_API_KEY` selects OpenRouter when `STASIS_AI_PROVIDER` and
+`ai.provider` are unset; a per-task provider selection wins. Keep `.env` ignored by Git. The key is not included
 in task history or AI context.
 
 Approved models and their performance preferences have one source of truth: `stasis.json`. The
@@ -496,11 +501,13 @@ Enter does nothing when there are no matches. Palette input is consumed before
 underlying task fields and global shortcuts, including Ctrl+Enter and Escape.
 
 The palette exposes new task, next/previous task and individual task switching,
-focus reply/game, send reply, accept/reject/apply action, focused tests, retry,
+focus reply/game, send reply, focused tests, retry,
 attach screenshot, generate/import image, reconnect, active-task rejection, and mark done.
 Every active task also exposes `Reject... (Ctrl+Esc)`, including after a provider failure.
-The confirmation uses Enter to reject or Escape to keep the task. Rejecting permanently closes
-that conversation and advances to the queued-task gate when another task is waiting.
+The confirmation uses Enter to reject or Escape to keep the task. Rejecting restores source
+changes owned by that task from their edit receipts, logs that they were discarded, permanently
+closes the conversation, and advances to the queued-task gate when another task is waiting. A
+conflicting later edit blocks automatic rejection instead of being overwritten.
 It also exposes **Export chat as HTML**, which writes a user-selected, self-contained
 snapshot of the active task without contacting the configured AI provider.
 Set `ai.editor.auto_persist_html_transcripts` to `true` in `stasis.json` to

@@ -384,6 +384,117 @@ mod tests {
     }
 
     #[test]
+    fn generic_collection_capacity_swap_migrates_state_and_allows_retry_after_rejection() {
+        fn source(capacity: i32, element_type: &str, result: &str) -> String {
+            format!(
+                "struct Buffer<N: i32> {{ values: {element_type}[N]; }}\nglobal samples: Buffer<{capacity}>;\nfunction main(): i32 {{ return {result}; }}\n"
+            )
+        }
+
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "main.stasis",
+            source(24, "i32", "samples.values[0] + samples.values[23]"),
+        );
+        active.compile().expect("generic active source compiles");
+        assert_eq!(
+            active
+                .state_layout()
+                .collections
+                .iter()
+                .find(|collection| collection.path == "samples.values")
+                .map(|collection| collection.capacity),
+            Some(24)
+        );
+        active
+            .write_global_collection_scalar("samples.values", "", 0, JitScalarValue::I32(7))
+            .expect("write first active element");
+        active
+            .write_global_collection_scalar("samples.values", "", 23, JitScalarValue::I32(11))
+            .expect("write last active element");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "main.stasis",
+            source(32, "i32", "samples.values[0] + samples.values[23]"),
+        );
+        candidate
+            .compile_staged()
+            .expect("expanded generic capacity candidate compiles");
+        let current = Rc::new(Cell::new(1));
+        let mut host = TestHost {
+            current: Rc::clone(&current),
+            next: 2,
+            fail_stage: false,
+            fail_publish: false,
+            restores: 0,
+        };
+        let receipt = commit_development_swap(
+            &mut active,
+            candidate,
+            DevelopmentSwapDescriptor::new(vec!["main".to_string()], false),
+            &mut host,
+            |_| Ok::<(), String>(()),
+        )
+        .expect("generic collection growth is migratable");
+        assert_eq!(receipt.status, DevelopmentSwapStatus::Accepted);
+        assert!(receipt.layout_changed);
+        assert_eq!(current.get(), 2);
+        assert_eq!(
+            active.read_global_collection_scalar("samples.values", "", 0),
+            Ok(JitScalarValue::I32(7))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("samples.values", "", 23),
+            Ok(JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("samples.values", "", 31),
+            Ok(JitScalarValue::I32(0))
+        );
+
+        let mut rejected = active.staged_candidate();
+        rejected.upsert_file("main.stasis", source(32, "f32", "0"));
+        rejected
+            .compile_staged()
+            .expect("incompatible generic candidate still compiles");
+        let failure = commit_development_swap(
+            &mut active,
+            rejected,
+            DevelopmentSwapDescriptor::new(vec!["main".to_string()], false),
+            &mut host,
+            |_| Ok::<(), String>(()),
+        )
+        .expect_err("generic element type change must be rejected");
+        assert_eq!(failure.receipt.status, DevelopmentSwapStatus::Rejected);
+        assert!(!failure.receipt.state_layout_compatible);
+        assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(18));
+        assert_eq!(
+            active.read_global_collection_scalar("samples.values", "", 23),
+            Ok(JitScalarValue::I32(11))
+        );
+
+        let mut retry = active.staged_candidate();
+        retry.upsert_file("main.stasis", source(32, "i32", "samples.values[0] + 1"));
+        retry
+            .compile_staged()
+            .expect("valid generic candidate retry compiles");
+        commit_development_swap(
+            &mut active,
+            retry,
+            DevelopmentSwapDescriptor::new(vec!["main".to_string()], false),
+            &mut host,
+            |_| Ok::<(), String>(()),
+        )
+        .expect("valid retry should commit after rejected candidate");
+        assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(8));
+        assert_eq!(
+            active.read_global_collection_scalar("samples.values", "", 0),
+            Ok(JitScalarValue::I32(7))
+        );
+    }
+
+    #[test]
     fn hook_failure_restores_host_and_runtime_state() {
         let source = "global State { score: i32; } function main(): i32 { State.score = 7; return 0; } function tick(): i32 { return State.score; }";
         let (mut active, _) = active_and_candidate(source);

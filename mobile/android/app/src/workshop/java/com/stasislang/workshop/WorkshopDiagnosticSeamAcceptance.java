@@ -14,7 +14,7 @@ final class WorkshopDiagnosticSeamAcceptance {
 
     static String[] caseNames() {
         return new String[] {"parse", "extern_resolution", "runtime_entry",
-                "render_schema", "missing_resource"};
+                "render_construction", "missing_resource"};
     }
 
     static String run(MainActivity activity, String projectRoot) {
@@ -43,21 +43,15 @@ final class WorkshopDiagnosticSeamAcceptance {
             requireContext(runtime, null, "tick", null);
             cases.put(caseEvidence(activity, "runtime_entry", runtime, runtimeMessage, null));
 
-            activity.acceptanceReplaceSource(projectRoot, original);
-            requireCompileReady(activity.acceptanceCompile(projectRoot), "render-schema baseline");
-            requireEquals("passed", activity.runIt031Frame(projectRoot), "render-schema baseline frame");
-            String renderSchemaSource = renderSchemaSource(original);
-            activity.acceptanceReplaceSource(projectRoot, renderSchemaSource);
-            requireCompileReady(activity.acceptanceCompile(projectRoot), "render-schema setup");
-            requireEquals("passed", activity.runIt031Frame(projectRoot), "render-schema activation");
-            if (!MainActivity.nativeCorruptRenderSchemaForAcceptance()) {
-                throw new IllegalStateException("render-schema header injection failed");
-            }
+            String renderConstructionSource = renderConstructionSource(original);
+            activity.acceptanceReplaceSource(projectRoot, renderConstructionSource);
+            requireCompileReady(activity.acceptanceCompile(projectRoot),
+                    "render-construction setup");
             String renderMessage = activity.runIt031Frame(projectRoot);
             WorkshopNativeDiagnostic render = activity.acceptanceNativeDiagnostic(renderMessage);
-            requireCode(render, "render_schema", "stasis.renderSchema");
+            requireCode(render, "runtime_entry", "stasis.runtimeEntry");
             requireContext(render, null, "render", null);
-            cases.put(caseEvidence(activity, "render_schema", render, renderMessage, null));
+            cases.put(caseEvidence(activity, "render_construction", render, renderMessage, null));
 
             String missingResource = missingResourceSource(original);
             activity.acceptanceReplaceSource(projectRoot, missingResource);
@@ -148,10 +142,10 @@ final class WorkshopDiagnosticSeamAcceptance {
                 "\n    state.opaque.load_sprite_from(\"assets/IT031_missing.svg\", 32, 32);\n");
     }
 
-    static String renderSchemaSource(String source) {
-        // Keep the real command storage, but leave the injected header untouched.
+    static String renderConstructionSource(String source) {
+        // A nonzero render result aborts host-owned frame construction.
         return insertAfterInFunction(source, "function render(): i32 {",
-                "function render(): i32 {", "\n    return 0;\n");
+                "function render(): i32 {", "\n    return 17;\n");
     }
 
     private static JSONObject caseEvidence(MainActivity activity, String name,

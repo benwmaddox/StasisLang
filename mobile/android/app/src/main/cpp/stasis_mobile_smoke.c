@@ -2,6 +2,7 @@
 #include <android/log.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -18,9 +19,23 @@
 
 #define STASIS_ANDROID_LOG_TAG "StasisWorkshop"
 #define STASIS_RUNTIME_STATE_RELATIVE_PATH "build/runtime_state.txt"
+#define STASIS_WORKSHOP_MAIN_ENTRY "src/main.stasis"
+#define STASIS_WORKSHOP_HOST_ENTRY "src/host.stasis"
 #ifndef STASIS_RENDER_ACCEPTANCE
 #define STASIS_RENDER_ACCEPTANCE 0
 #endif
+
+static const char *stasis_workshop_runtime_entry(const char *project_root) {
+    char host_path[PATH_MAX];
+    struct stat info;
+    int length = snprintf(host_path, sizeof(host_path), "%s/%s",
+            project_root, STASIS_WORKSHOP_HOST_ENTRY);
+    if (length > 0 && (size_t)length < sizeof(host_path)
+            && stat(host_path, &info) == 0 && S_ISREG(info.st_mode)) {
+        return STASIS_WORKSHOP_HOST_ENTRY;
+    }
+    return STASIS_WORKSHOP_MAIN_ENTRY;
+}
 typedef char *(*stasis_android_bridge_compile_project_fn)(const char *project_root, const char *entry_file);
 typedef const char *(*stasis_android_bridge_version_fn)(void);
 typedef char *(*stasis_android_bridge_run_tests_fn)(const char *project_root);
@@ -620,7 +635,9 @@ static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int t
         return 0;
     }
 
-    char *bridge_message = bridge->run_tick(project_root, "src/main.stasis", touch_x, touch_y, touch_active, screen_w, screen_h);
+    char *bridge_message = bridge->run_tick(project_root,
+            stasis_workshop_runtime_entry(project_root), touch_x, touch_y, touch_active,
+            screen_w, screen_h);
     if (bridge_message == NULL) {
         snprintf(message, message_size, "RunError: Rust Android bridge returned null message");
         return 1;
@@ -642,7 +659,8 @@ static int try_rust_bridge_set_i32_global(const char *project_root, const char *
         return 0;
     }
 
-    char *bridge_message = bridge->set_i32_global(project_root, "src/main.stasis", path, value);
+    char *bridge_message = bridge->set_i32_global(project_root,
+            stasis_workshop_runtime_entry(project_root), path, value);
     if (bridge_message == NULL) {
         snprintf(message, message_size, "StateError: Rust Android bridge returned null message");
         return 1;
@@ -664,7 +682,8 @@ static int try_rust_bridge_get_i32_global(const char *project_root, const char *
         return 0;
     }
 
-    char *bridge_message = bridge->get_i32_global(project_root, "src/main.stasis", path);
+    char *bridge_message = bridge->get_i32_global(project_root,
+            stasis_workshop_runtime_entry(project_root), path);
     if (bridge_message == NULL) {
         snprintf(message, message_size, "StateError: Rust Android bridge returned null message");
         return 1;
@@ -706,7 +725,8 @@ static int try_rust_bridge_run_render_frame(const char *project_root, int touch_
     } else if (bridge->clear_external_url_action != NULL) {
         bridge->clear_external_url_action();
     }
-    return bridge->run_render_frame(project_root, "src/main.stasis", touch_x, touch_y, touch_active,
+    return bridge->run_render_frame(project_root, stasis_workshop_runtime_entry(project_root),
+            touch_x, touch_y, touch_active,
             screen_w, screen_h, out_i32, out_i32_len, out_f32, out_f32_len,
             out_u8, out_u8_len);
 }
@@ -1048,7 +1068,7 @@ Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jcla
                 "CompileError: required Rust Android compiler bridge is unavailable");
     }
 
-    char *message = bridge->compile_project(root, "src/main.stasis");
+    char *message = bridge->compile_project(root, stasis_workshop_runtime_entry(root));
 
     (*env)->ReleaseStringUTFChars(env, project_root, root);
     if (message == NULL) {
@@ -1230,27 +1250,6 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
 }
 
 #if STASIS_RENDER_ACCEPTANCE
-JNIEXPORT jboolean JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeCorruptRenderSchemaForAcceptance(
-        JNIEnv *env, jclass activity_class) {
-    (void)env;
-    (void)activity_class;
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL) return JNI_FALSE;
-    typedef int32_t *(*global_i32_array_ptr_fn)(int32_t, int32_t, int32_t);
-    global_i32_array_ptr_fn global_i32_array_ptr = (global_i32_array_ptr_fn)dlsym(
-            bridge->handle, "stasis_jit_global_i32_array_ptr");
-    if (global_i32_array_ptr == NULL) return JNI_FALSE;
-    uint32_t hash = 2166136261u;
-    const unsigned char *name = (const unsigned char *)"gfx_cmd_i32";
-    for (; *name != 0; ++name) hash = (hash ^ *name) * 16777619u;
-    int32_t *header = global_i32_array_ptr((int32_t)hash, 0, 2);
-    if (header == NULL) return JNI_FALSE;
-    header[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
-    header[STASIS_RENDER_I_VERSION] = 99;
-    return JNI_TRUE;
-}
-
 JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeFrameAbiDescriptor(
         JNIEnv *env, jclass activity_class) {

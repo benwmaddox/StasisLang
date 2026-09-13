@@ -55,14 +55,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     def test_workflow_uses_hosted_x86_emulator(self):
         self.assertIn("runs-on: ubuntu-latest", self.workflow)
         self.assertNotIn("runs-on: macos-15", self.workflow)
-        self.assertIn("reactivecircus/android-emulator-runner@v2", self.workflow)
+        self.assertIn("reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d", self.workflow)
         self.assertIn("api-level: 35", self.workflow)
         self.assertIn("arch: x86_64", self.workflow)
         self.assertIn("Enable KVM", self.workflow)
         self.assertIn("workflow_call:", self.workflow)
         self.assertIn("workflow_dispatch:", self.workflow)
         self.assertNotIn("pull_request:", self.workflow)
-        self.assertIn('uses: actions/setup-python@v5', self.workflow)
+        self.assertIn('uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97', self.workflow)
         self.assertIn('python-version: "3.12"', self.workflow)
         self.assertIn("group: android-emulator-seams-nightly", self.workflow)
         self.assertIn("cancel-in-progress: false", self.workflow)
@@ -157,6 +157,18 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             "queueEvent(renderer::startPerformanceSamplingForAcceptance)",
             self.workshop_activity,
         )
+        self.assertIn(
+            "renderer.isPerformanceSamplingForAcceptanceActive()",
+            self.workshop_activity,
+        )
+        self.assertIn("postOnAnimation(this)", self.workshop_activity)
+        self.assertIn(
+            "postOnAnimation(performanceRenderPump)", self.workshop_activity
+        )
+        self.assertIn(
+            "removeCallbacks(performanceRenderPump)", self.workshop_activity
+        )
+        self.assertIn("private volatile boolean reported", self.preview_renderer)
 
     def test_workshop_benchmarks_after_capture_with_one_retry(self):
         third_capture = self.workshop_script.index("$stableCaptures -ge 3")
@@ -201,7 +213,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("needs:", self.workflow)
         for body in job_bodies.values():
             self.assertEqual(1, body.count("runs-on: ubuntu-latest"))
-            self.assertEqual(1, body.count("reactivecircus/android-emulator-runner@v2"))
+            self.assertEqual(1, body.count("reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d"))
             for setup in (
                 "- name: Setup Gradle",
                 "- name: Checkout SDL3",
@@ -672,6 +684,19 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("marker is ambiguous", source)
         self.assertNotIn("directTextAssignments", source)
         self.assertNotIn("cmd_u8", source)
+
+    def test_workshop_it029_customizes_assets_before_project_activation(self):
+        method = self.workshop_resource_scope.split(
+            "private static JSONObject activateCustomizeRender", 1
+        )[1].split("private static void customize", 1)[0]
+        self.assertLess(
+            method.index("activity.materializeIt029Project(project);"),
+            method.index("customize(project.root, identity);"),
+        )
+        self.assertLess(
+            method.index("customize(project.root, identity);"),
+            method.index("activity.activateProject(project)"),
+        )
 
     def test_workshop_fatal_scan_delegates_only_valid_it031_case_records(self):
         self.assertIn("ConvertFrom-Json -ErrorAction Stop", self.workshop_script)

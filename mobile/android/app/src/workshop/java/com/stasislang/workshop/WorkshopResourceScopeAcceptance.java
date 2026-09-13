@@ -105,10 +105,12 @@ final class WorkshopResourceScopeAcceptance {
     private static JSONObject activateCustomizeRender(MainActivity activity,
             WorkshopProjectRegistry.ProjectInfo project, String identity, int sequence)
             throws Exception {
+        activity.materializeIt029Project(project);
+        // Finish the project-specific asset identity before activation can render/cache it.
+        customize(project.root, identity);
         if (!activity.activateProject(project)) {
             throw new IllegalStateException("could not activate IT-029 " + identity);
         }
-        customize(project.root, identity);
         String compile = activity.acceptanceCompile(project.root.getAbsolutePath());
         if (compile == null || !compile.startsWith("CompileReady")
                 || !compile.contains("status=0")) {

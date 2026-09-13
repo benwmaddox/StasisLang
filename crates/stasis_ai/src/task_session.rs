@@ -354,6 +354,8 @@ pub enum FallbackState {
 pub struct ProviderState {
     pub provider: Option<String>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub routing: RoutingState,
     pub fallback: FallbackState,
 }
@@ -394,12 +396,20 @@ impl ProviderState {
         Ok(Self {
             provider: validate_optional_text("provider", provider.as_deref(), MAX_ID_CHARS)?,
             model: validate_optional_text("model", model.as_deref(), MAX_ID_CHARS)?,
+            reasoning_effort: None,
             routing,
             fallback,
         })
     }
     fn validate(self) -> Result<Self, TaskSessionError> {
-        Self::new(self.provider, self.model, self.routing, self.fallback)
+        let reasoning_effort = validate_optional_text(
+            "reasoning effort",
+            self.reasoning_effort.as_deref(),
+            MAX_ID_CHARS,
+        )?;
+        let mut state = Self::new(self.provider, self.model, self.routing, self.fallback)?;
+        state.reasoning_effort = reasoning_effort;
+        Ok(state)
     }
 }
 
@@ -669,6 +679,8 @@ pub struct ProviderTurnMetrics {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
 }
@@ -1010,6 +1022,7 @@ impl Task {
                 estimated_cost_micros: cost_micros,
                 provider: self.provider.provider.clone(),
                 model: self.provider.model.clone(),
+                reasoning_effort: self.provider.reasoning_effort.clone(),
                 route: match &self.provider.routing {
                     RoutingState::Assigned { route } => Some(route.clone()),
                     RoutingState::Unassigned => None,
@@ -3406,6 +3419,7 @@ mod tests {
         task.set_provider_state(ProviderState {
             provider: Some("openrouter".into()),
             model: Some("cerebras/model".into()),
+            reasoning_effort: Some("low".into()),
             routing: RoutingState::Assigned {
                 route: "price".into(),
             },
@@ -3423,6 +3437,15 @@ mod tests {
         assert_eq!(
             reply.provider_turn.as_ref().unwrap().model.as_deref(),
             Some("cerebras/model")
+        );
+        assert_eq!(
+            reply
+                .provider_turn
+                .as_ref()
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("low")
         );
         let round_trip: Task =
             serde_json::from_str(&serde_json::to_string(&task).unwrap()).unwrap();

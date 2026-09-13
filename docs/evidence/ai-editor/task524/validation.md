@@ -115,8 +115,9 @@ python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis two_openrou
 
 The opt-in harness copies the sample to `target/task-524-live-workspace`, boots
 the real runtime, waits for playable assets, runs two task-scoped provider
-requests, explicitly accepts and applies the reviewed semantic plans, and
-captures native editor/SDL renders. It never modifies the source sample.
+requests, observes automatic publication and focused testing of the reviewed
+semantic plans, and captures native editor/SDL renders. It never modifies the
+source sample.
 `STASIS_EDITOR_LIVE_LOCAL_APPLY_ONLY=1` runs the deterministic isolation preflight
 without inference. Clear that variable for provider acceptance.
 

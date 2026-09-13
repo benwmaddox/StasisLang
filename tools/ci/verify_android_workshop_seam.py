@@ -480,7 +480,7 @@ def verify_it031(log: str, after_position: int) -> dict | None:
         ("parse", "parse", "stasis.parse"),
         ("extern_resolution", "extern_resolution", "stasis.unresolvedExtern"),
         ("runtime_entry", "runtime_entry", "stasis.runtimeEntry"),
-        ("render_schema", "render_schema", "stasis.renderSchema"),
+        ("render_construction", "runtime_entry", "stasis.runtimeEntry"),
         ("missing_resource", "resource", "stasis.missingResource"),
     ]
     case_names = [case.get("name") for _, case in case_markers]
@@ -538,8 +538,8 @@ def verify_it031(log: str, after_position: int) -> dict | None:
             raise SeamError("IT-031 resource diagnostic lost its resource path")
         if name == "runtime_entry" and context.get("symbol") != "tick":
             raise SeamError("IT-031 runtime diagnostic lost the tick symbol")
-        if name == "render_schema" and context.get("symbol") != "render":
-            raise SeamError("IT-031 render diagnostic lost the render symbol")
+        if name == "render_construction" and context.get("symbol") != "render":
+            raise SeamError("IT-031 render-construction diagnostic lost the render symbol")
     cleanup = marker.get("cleanup_receipt")
     cleanup_ui = cleanup.get("ui") if isinstance(cleanup, dict) else None
     if not isinstance(cleanup, dict) or cleanup.get("status") != "Restored" \

@@ -1,3 +1,7 @@
+use std::ops::Range;
+
+use super::parser::generic_angle_ranges;
+
 const INDENT_WIDTH: usize = 4;
 pub const LINE_WIDTH: usize = 160;
 
@@ -16,6 +20,8 @@ enum TokenKind {
 struct Token {
     kind: TokenKind,
     text: String,
+    start: usize,
+    end: usize,
     newline_before: bool,
     blank_before: bool,
 }
@@ -141,8 +147,9 @@ impl Writer {
 }
 
 pub fn format_source(source: &str) -> Result<String, String> {
+    let generic_angles = generic_angle_ranges(source)?;
     let tokens = canonicalize_enum_commas(&scan(source)?)?;
-    let formatted = apply_source_line_endings(&render(&tokens)?, source);
+    let formatted = apply_source_line_endings(&render(&tokens, &generic_angles)?, source);
     let formatted_tokens = scan(&formatted)?;
     let original_significant = significant_tokens(&tokens);
     let formatted_significant = significant_tokens(&formatted_tokens);
@@ -325,6 +332,8 @@ fn canonicalize_enum_commas(tokens: &[Token]) -> Result<Vec<Token>, String> {
             canonical.push(Token {
                 kind: TokenKind::Symbol,
                 text: ",".to_string(),
+                start: 0,
+                end: 0,
                 newline_before: false,
                 blank_before: false,
             });
@@ -465,6 +474,8 @@ fn scan(source: &str) -> Result<Vec<Token>, String> {
         tokens.push(Token {
             kind,
             text,
+            start,
+            end: cursor,
             newline_before: newline_count > 0,
             blank_before: newline_count > 1,
         });
@@ -519,7 +530,7 @@ fn matched_operator_width(bytes: &[u8]) -> usize {
     utf8_width(bytes[0])
 }
 
-fn render(tokens: &[Token]) -> Result<String, String> {
+fn render(tokens: &[Token], generic_angles: &[Range<usize>]) -> Result<String, String> {
     let mut writer = Writer::default();
     let mut braces = Vec::<BraceKind>::new();
     let mut brace_content = Vec::<bool>::new();
@@ -830,6 +841,15 @@ fn render(tokens: &[Token]) -> Result<String, String> {
             continue;
         }
 
+        if is_generic_angle_token(token, generic_angles) {
+            writer.write(&token.text);
+            last_significant = Some(token);
+            last_was_unary = false;
+            force_space_after_comment = false;
+            index += 1;
+            continue;
+        }
+
         if matches!(token.text.as_str(), "&&" | "||")
             && parens.last().is_some_and(|context| context.wrapped)
             && !writer.line_is_empty()
@@ -838,8 +858,12 @@ fn render(tokens: &[Token]) -> Result<String, String> {
         }
 
         let unary = is_unary_operator(token, last_significant);
-        if needs_space_before(last_significant, token, unary, last_was_unary)
-            || force_space_after_comment
+        let after_generic_open = last_significant.is_some_and(|previous| previous.is_symbol("<"))
+            && last_significant
+                .is_some_and(|previous| is_generic_angle_token(previous, generic_angles));
+        if !after_generic_open
+            && (needs_space_before(last_significant, token, unary, last_was_unary)
+                || force_space_after_comment)
         {
             writer.space();
         }
@@ -869,6 +893,13 @@ fn render(tokens: &[Token]) -> Result<String, String> {
         return Err("unmatched opening bracket".to_string());
     }
     Ok(writer.finish())
+}
+
+fn is_generic_angle_token(token: &Token, generic_angles: &[Range<usize>]) -> bool {
+    token.start != token.end
+        && generic_angles
+            .iter()
+            .any(|range| range.start == token.start && range.end == token.end)
 }
 
 fn next_significant(tokens: &[Token], start: usize) -> Option<&Token> {
@@ -1044,6 +1075,7 @@ fn matching_close(tokens: &[Token], open_index: usize, open: &str, close: &str) 
 #[cfg(test)]
 mod tests {
     use super::{format_source, LINE_WIDTH};
+    use crate::frontend::parser::generic_angle_ranges;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1119,6 +1151,33 @@ mod tests {
             "function @effects(state.enemies, state.projectiles) tick(): void {\n    return;\n}\n";
         assert_eq!(format_source(source).expect("format effects"), expected);
         assert_eq!(format_source(expected).expect("reformat effects"), expected);
+    }
+
+    #[test]
+    fn formats_nested_generic_angles_and_explicit_calls_without_touching_comparisons() {
+        let source = "struct Buffer<T:type,N:i32>{values:T[N];} function clear<T:type,N:i32>(value:Buffer<Buffer<T,N>>):void{return;} function main():void{clear::<f32,4>(buffer);if(1<2){return;}}";
+        let formatted = format_source(source).expect("format generics");
+        assert!(formatted.contains("struct Buffer<T: type, N: i32> {"));
+        assert!(formatted
+            .contains("function clear<T: type, N: i32>(value: Buffer<Buffer<T, N>>): void {"));
+        assert!(formatted.contains("clear::<f32, 4>(buffer);"));
+        assert!(formatted.contains("if (1 < 2) {"));
+        assert_eq!(
+            format_source(&formatted).expect("reformat generics"),
+            formatted
+        );
+
+        let ranges = generic_angle_ranges(source).expect("classify generic angles");
+        assert!(ranges.iter().any(|range| &source[range.clone()] == "<"));
+        assert!(ranges.iter().any(|range| &source[range.clone()] == ">"));
+        let comparison_start = source.find("1<2").expect("comparison");
+        assert!(!ranges
+            .iter()
+            .any(|range| range.start == comparison_start + 1));
+
+        let comparisons = "function reserve(): void { if (run < 0 || run >= limit) { return; } }";
+        let formatted_comparisons = format_source(comparisons).expect("format comparisons");
+        assert!(formatted_comparisons.contains("run < 0 || run >= limit"));
     }
 
     #[test]

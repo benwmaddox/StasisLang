@@ -1,11 +1,26 @@
 import "../../src/stdlib/rig2d.stasis";
 
-global rig_test_a: Rig2D;
-global rig_test_b: Rig2D;
+global rig_test_a: Rig2D<24>;
+global rig_test_b: Rig2D<64>;
 
 function rig2d_test_near(a: f32, b: f32): bool {
     let difference: f32 = a - b;
     return difference > -0.0001 && difference < 0.0001;
+}
+
+test `rig generic capacities are independent and receiver-owned`(): bool {
+    rig_test_a.clear();
+    rig_test_b.clear();
+    let i: i32 = 0;
+    for (i = 0; i < 25; i = i + 1) {
+        if (rig_test_b.add_bone(i - 1, 1.0, 0.0, 0.0) != i) {
+            return false;
+        }
+    }
+    if (rig_test_a.add_bone(-1, 2.0, 3.0, 0.0) != 0) {
+        return false;
+    }
+    return rig_test_a.count == 1 && rig_test_b.count == 25 && rig_test_b.add_bone(24, 1.0, 0.0, 0.0) == 25;
 }
 
 test `rig rejects invalid parents and capacity without modifying topology`(): bool {

@@ -2,6 +2,8 @@ mod chat_export;
 mod git_completion;
 mod host_progress;
 mod image_attachments;
+#[cfg(test)]
+mod payload_tests;
 mod persistence;
 #[cfg(test)]
 mod request_image_tests;
@@ -9,6 +11,8 @@ mod semantic_diff;
 #[cfg(test)]
 mod source_context_tests;
 
+use super::desktop_image::{import_png, validate_generated, ImageArtifact};
+use super::source_catalog;
 use host_progress::{HostProgress, HostProgressState};
 use stasis_ai::task_controller::{ProgressReporter, ProgressStage, TaskControllerConfig};
 mod semantic_revisions;
@@ -20,20 +24,22 @@ use semantic_revisions::proposal_revisions;
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use stasis_ai::image_generation::ImageGenerationConfig;
 use stasis_ai::session_store::{
     CompletionPathProvenance, SessionSnapshot, SessionStore, TaskCompletionCommit, TaskGitBaseline,
     WindowPreferences,
 };
 use stasis_ai::task_session::{
-    ActionState, ActivityKind, ConnectionState, FallbackState, ImageHandoffState, ImageReviewState,
-    Key, KeyChord, Modifiers, ProviderSelection, ProviderState, RoutingState,
+    ActionState, ActivityKind, ConnectionState, FallbackState, ImageAttribution, ImageHandoffState,
+    ImageReviewState, Key, KeyChord, Modifiers, ProviderSelection, ProviderState, RoutingState,
     ScreenshotAnalysisState, ShortcutMapper, TaskId, TaskLifecycle, TaskSession,
-    TaskSessionCommand, UploadState, ValidationStatus,
+    TaskSessionCommand, ThreadEntryKind, UploadState, ValidationStatus,
 };
 use stasis_ai::{
-    action_id_for_tool, run_agent_with_profile, AgentEvent, AgentProfile, ProviderActionProposal,
-    ProviderConfig, ProviderReply, ProviderRequest, ProviderUsage, TaskController,
-    TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation, ToolSpec,
+    action_id_for_tool, run_agent_with_profile, source_inspection_tool_spec, AgentEvent,
+    AgentProfile, ProviderActionProposal, ProviderConfig, ProviderReply, ProviderRequest,
+    ProviderUsage, TaskController, TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation,
+    ToolSpec,
 };
 use stasis_assets::{load_project_asset_manifest, AssetLimits};
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
@@ -87,9 +93,6 @@ struct PrimaryAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TimelineAction {
-    Accept(String, String),
-    Reject(String, String),
-    Apply(String, String),
     ApproveImage(String, String),
     RejectImage(String, String),
     Import(String, String),
@@ -104,9 +107,26 @@ struct ProposalTools {
     proposals: Vec<ProviderActionProposal>,
     sources: Vec<Value>,
     existing_actions: BTreeMap<String, String>,
+    project_root: Option<PathBuf>,
 }
 
 const MAX_SOURCE_CONTEXT_BYTES: usize = 256 * 1024;
+
+fn canonicalize_proposal_payload(payload: &mut Value) {
+    let Some(edits) = payload.get_mut("edits").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for edit in edits {
+        if edit.get("operation").and_then(Value::as_str) != Some("add") {
+            continue;
+        }
+        if let Some(target) = edit.get_mut("target").and_then(Value::as_object_mut) {
+            target.remove("symbol_id");
+            target.remove("owner");
+            target.remove("signature");
+        }
+    }
+}
 
 impl ProposalTools {
     fn validate_proposal(
@@ -160,46 +180,27 @@ impl ProposalTools {
         .map_err(|error| error.to_string())?;
         validator
             .propose_action_with_payload(id, kind, description, payload.clone())
-            .map_err(|error| format!("invalid proposal: {error}"))
+            .map_err(|error| format!("invalid proposal: {error}"))?;
+        if let Some(root) = &self.project_root {
+            let preview = super::desktop_preview_semantic_batch(root, payload.clone())
+                .map_err(|error| format!("proposal does not parse or resolve: {error}"))?;
+            super::desktop_validate_semantic_preview(root, &preview)
+                .map_err(|error| format!("proposal does not compile and pass tests: {error}"))?;
+        }
+        Ok(())
     }
 
     fn source_catalog(&self) -> Result<Value, String> {
-        let catalog = Value::Array(
-            self.sources
-                .iter()
-                .map(|item| item["target"].clone())
-                .collect(),
-        );
-        if serde_json::to_vec(&catalog)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_SOURCE_CONTEXT_BYTES
-        {
-            return Err("Project symbol catalog exceeds 256 KiB; narrow the project before requesting edits.".into());
-        }
-        Ok(catalog)
+        source_catalog::render(&self.sources).map(Value::String)
     }
 
+    fn inspect_source(&self, args: &Value) -> Result<Value, String> {
+        source_catalog::inspect(&self.sources, args, MAX_SOURCE_CONTEXT_BYTES)
+    }
+
+    #[cfg(test)]
     fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
-        let symbol_id = args
-            .get("symbol_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "symbol_id must be a string".to_string())?;
-        let item = self
-            .sources
-            .iter()
-            .find(|item| item["target"]["symbol_id"].as_str() == Some(symbol_id))
-            .ok_or_else(|| format!("Unknown source symbol: {symbol_id}"))?;
-        if serde_json::to_vec(item)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_SOURCE_CONTEXT_BYTES
-        {
-            return Err(format!(
-                "Source symbol {symbol_id} exceeds the 256 KiB read limit."
-            ));
-        }
-        Ok(item.clone())
+        self.inspect_source(args)
     }
 }
 
@@ -217,6 +218,7 @@ impl ToolExecutor for ProposalTools {
                 );
                 let result: Result<Value, String> = (|| {
                     match call.tool.as_str() {
+                        "inspect_source" => return self.inspect_source(&call.args),
                         "read_source_symbol" => return self.read_source_symbol(&call.args),
                         "propose_semantic_edit"
                         | "repair_semantic_edit"
@@ -255,6 +257,10 @@ impl ToolExecutor for ProposalTools {
                             .cloned()
                             .ok_or_else(|| "batch is required".to_string())?
                     };
+                    let mut payload = payload;
+                    if !file_write {
+                        canonicalize_proposal_payload(&mut payload);
+                    }
                     if payload
                         .get("edits")
                         .and_then(Value::as_array)
@@ -285,6 +291,12 @@ impl ToolExecutor for ProposalTools {
                 }
             })
             .collect()
+    }
+
+    fn terminal_success(&self) -> Option<String> {
+        self.proposals
+            .last()
+            .map(|proposal| proposal.description.clone())
     }
 }
 
@@ -349,6 +361,7 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
         optional_args: Vec::new(),
     })
     .collect();
+    specs.push(source_inspection_tool_spec());
     specs.push(ToolSpec {
         tool: "read_source_symbol".to_string(),
         action_id: action_id_for_tool("read_source_symbol"),
@@ -426,6 +439,7 @@ fn configured_provider_state(config: &ProviderConfig) -> ProviderState {
     ProviderState {
         provider: Some(config.provider_name().to_string()),
         model: Some(bounded_provider_label(Some(&config.model()), "configured")),
+        reasoning_effort: Some(effective_reasoning_effort(config)),
         routing: RoutingState::Assigned {
             route: bounded_provider_label(Some(&route), "direct"),
         },
@@ -434,22 +448,18 @@ fn configured_provider_state(config: &ProviderConfig) -> ProviderState {
 }
 
 fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> ProviderState {
-    let provider = bounded_provider_label(
+    let resolved_provider = bounded_provider_label(
         usage
             .and_then(|value| value.get("resolved_provider"))
             .and_then(Value::as_str),
         config.provider_name(),
     );
-    let model = bounded_provider_label(
-        usage
-            .and_then(|value| value.get("resolved_model"))
-            .and_then(Value::as_str),
-        &config.model(),
-    );
+    let provider = bounded_provider_label(Some(config.provider_name()), "configured");
+    let model = bounded_provider_label(Some(&config.model()), "configured");
     let route = match usage.and_then(|value| value.get("route")) {
         Some(Value::String(route)) => bounded_provider_label(Some(route), "direct"),
         Some(Value::Object(_)) => bounded_provider_label(
-            Some(&format!("{}:{provider}", config.provider_name())),
+            Some(&format!("{}:{resolved_provider}", config.provider_name())),
             "direct",
         ),
         _ => {
@@ -465,8 +475,11 @@ fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> Provi
         .unwrap_or(false)
     {
         FallbackState::Active {
-            provider: provider.clone(),
-            model: Some(model.clone()),
+            provider: resolved_provider,
+            model: usage
+                .and_then(|value| value.get("resolved_model"))
+                .and_then(Value::as_str)
+                .map(|model| bounded_provider_label(Some(model), "resolved model")),
             route: Some(route.clone()),
         }
     } else {
@@ -475,8 +488,20 @@ fn provider_reply_state(config: &ProviderConfig, usage: Option<&Value>) -> Provi
     ProviderState {
         provider: Some(provider),
         model: Some(model),
+        reasoning_effort: Some(effective_reasoning_effort(config)),
         routing: RoutingState::Assigned { route },
         fallback,
+    }
+}
+
+fn effective_reasoning_effort(config: &ProviderConfig) -> String {
+    if matches!(config, ProviderConfig::OpenRouter(_)) {
+        "medium".to_string()
+    } else {
+        std::env::var("STASIS_AI_REASONING_EFFORT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| stasis_ai::DEFAULT_REASONING_EFFORT.to_string())
     }
 }
 
@@ -589,10 +614,28 @@ fn run_reply_provider_observed_with_progress(
     canceled: Arc<AtomicBool>,
     project_root: PathBuf,
     progress: Option<ProgressReporter>,
-    mut observe_usage: impl FnMut(&Value),
+    observe_usage: impl FnMut(&Value),
 ) -> Result<ProviderReply, String> {
     let config = selected_provider_config(request.selected_provider, &project_root)?;
-    let effective_reasoning_effort = (config.provider_name() == "openrouter").then_some("low");
+    run_reply_provider_with_config(
+        request,
+        canceled,
+        project_root,
+        progress,
+        config,
+        observe_usage,
+    )
+}
+
+fn run_reply_provider_with_config(
+    request: ProviderRequest,
+    canceled: Arc<AtomicBool>,
+    project_root: PathBuf,
+    progress: Option<ProgressReporter>,
+    config: ProviderConfig,
+    mut observe_usage: impl FnMut(&Value),
+) -> Result<ProviderReply, String> {
+    let reasoning_effort = effective_reasoning_effort(&config);
     let image_paths = verified_provider_screenshot_paths(&config, &request)?;
     if canceled.load(Ordering::Acquire) {
         return Err("AI request canceled".into());
@@ -624,9 +667,7 @@ fn run_reply_provider_observed_with_progress(
     } else {
         provider.with_images(image_paths)?
     };
-    if let Some(reasoning_effort) = effective_reasoning_effort {
-        provider = provider.with_reasoning_effort(reasoning_effort);
-    }
+    provider = provider.with_reasoning_effort(reasoning_effort);
     let prompt = request
         .context
         .last()
@@ -640,6 +681,7 @@ fn run_reply_provider_observed_with_progress(
     let source_context = super::desktop_source_context(&project_root)?;
     let mut tools = ProposalTools {
         sources: source_context,
+        project_root: Some(project_root.clone()),
         existing_actions: request
             .actions
             .iter()
@@ -657,23 +699,43 @@ fn run_reply_provider_observed_with_progress(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let initial_context = json!({
-        "task_id": request.task_id,
-        "objective": request.objective,
-        "project_summary": request.project_summary,
-        "relevant_files": request.relevant_files,
-        "relevant_symbols": request.relevant_symbols,
-        "relevant_tests": request.relevant_tests,
-        "screenshots": request.screenshots,
-        "thread": request.context,
-        "actions": request.actions,
-        "editable_symbols": source_catalog,
-        "assets": asset_catalog,
-    });
+    let mut initial_context = source_catalog.as_str().unwrap_or_default().to_string();
+    let mut append_context = |label: &str, value: &Value| -> Result<(), String> {
+        initial_context.push_str(label);
+        initial_context.push(':');
+        initial_context.push_str(&serde_json::to_string(value).map_err(|error| error.to_string())?);
+        initial_context.push('\n');
+        Ok(())
+    };
+    if request.objective.trim() != prompt.trim() {
+        append_context("goal", &json!(request.objective))?;
+    }
+    for (label, value) in [
+        ("files", json!(request.relevant_files)),
+        ("symbols", json!(request.relevant_symbols)),
+        ("tests", json!(request.relevant_tests)),
+        ("screenshots", json!(request.screenshots)),
+        ("actions", json!(request.actions)),
+    ] {
+        if value.as_array().is_some_and(|items| !items.is_empty()) {
+            append_context(label, &value)?;
+        }
+    }
+    if request.context.len() > 1 {
+        append_context(
+            "history",
+            &json!(&request.context[..request.context.len() - 1]),
+        )?;
+    }
+    append_context("task_id", &json!(request.task_id))?;
+    append_context("project_summary", &json!(request.project_summary))?;
+    append_context("assets", &json!(asset_catalog))?;
+    let initial_context = Value::String(initial_context);
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Answer the user's task-scoped message. Return exactly one response-contract JSON object, without Markdown fences or trailing prose. Stasis is statically typed and C-like: import, struct, global, function, and test `name`(): bool. Follow existing local syntax; do not invent helpers. Preserve live state; use on_code_swap only for requested migration or reinitialization. Propose related source and behavioral tests together in one atomic batch. The editable_symbols catalog identifies project source. Use read_source_symbol to inspect exact source before proposing changes; batch independent symbol reads. Use propose_semantic_edit for Stasis source changes. The assets catalog identifies current manifest entries. Use propose_file_write for bounded UTF-8 non-source project files such as SVG, JSON, and documentation. Batch files that must change together. Reuse an existing asset path when replacing a visual; the host refreshes tracked asset hashes automatically. When adding an asset, include any required manifest update in the same file-write batch. The host previews exact diffs, blocks project escapes and protected internal paths, validates relevant manifests, and waits for explicit acceptance. Use repair_semantic_edit or repair_file_write only for an action the task context shows as rejected or needing repair. Never regenerate or replace accepted work. Proposals require explicit user acceptance and are not executed during this request. Keep the response concise and self-contained.".to_string(),
-        max_turns: 4,
+        instruction: "Solve the task with tools. Stasis is typed and C-like: import, struct, global, function, test `name`(): bool. No array literals or collection iteration; copy local loop forms. Follow local syntax; invent no APIs. Catalog IDs are hypermedia leads. IDs are one letter plus digits: for example, f6 lists that file's symbols and s203 returns exact source. Copy a shown ID exactly; fN and sN are not IDs. Continue with newly revealed links or file changes. search TERMS returns matching links; search-source TERMS includes top bodies. Before adding, inspect one same-kind source in the target file. Batch every independent call and all related code/tests. Wait for prerequisites; never guess. Preserve live state. Use on_code_swap when the requested change needs migration or immediate visual setup; change only the minimum state, such as player position or phase, needed to reveal it. Use read_source_symbol or inspect_source to inspect exact source before proposing changes. Use propose_semantic_edit for Stasis source changes and propose_file_write for bounded UTF-8 non-source project files such as SVG, JSON, and documentation. Batch files that must change together. Reuse existing asset paths when replacing visuals; the host refreshes tracked asset hashes automatically. When adding an asset, include any required manifest update in the same file-write batch. The host previews exact diffs, blocks project escapes and protected internal paths, validates relevant manifests, and waits for explicit acceptance. Submit at most one atomic proposal; the editor applies, hot-swaps, and tests it. Use repair_semantic_edit or repair_file_write only for rejected or needs-repair work. Never regenerate or replace accepted work. Return only response-contract JSON.".to_string(),
+        max_turns: 8,
+        compact_request: true,
         ..AgentProfile::default()
     };
     let mut usage = None;
@@ -688,6 +750,15 @@ fn run_reply_provider_observed_with_progress(
         proposal_tool_specs(),
         &canceled,
         |event| {
+            #[cfg(test)]
+            if std::env::var_os("STASIS_EDITOR_OPENROUTER_TRACE").is_some()
+                && matches!(
+                    &event,
+                    AgentEvent::ToolBatch(_) | AgentEvent::Observations(_)
+                )
+            {
+                eprintln!("OpenRouter editor event: {event:?}");
+            }
             if let AgentEvent::Observations(observations) = &event {
                 last_tool_error = observations
                     .iter()
@@ -823,6 +894,20 @@ enum EditorIntent {
 }
 
 #[derive(Debug)]
+struct PendingImageGeneration {
+    task_id: TaskId,
+    id: String,
+    canceled: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct ImageGenerationResult {
+    task_id: TaskId,
+    id: String,
+    result: Result<ImageArtifact, String>,
+}
+
+#[derive(Debug)]
 enum HostOperation {
     Apply {
         action_id: String,
@@ -831,6 +916,7 @@ enum HostOperation {
     Test {
         paths: Vec<String>,
         run_id: u64,
+        rollback_receipts: Vec<String>,
     },
 }
 
@@ -959,18 +1045,39 @@ impl HostExecutor {
                 } else {
                     let operation_result = match &request.operation {
                         HostOperation::Apply { preview, .. } => {
-                            super::desktop_apply_semantic_preview_with_progress(
+                            super::desktop_publish_semantic_preview_with_progress(
                                 &project_root,
                                 preview,
                                 &mut emit,
                             )
                         }
-                        HostOperation::Test { paths, .. } => {
-                            super::desktop_run_focused_tests_with_progress(
+                        HostOperation::Test {
+                            paths,
+                            rollback_receipts,
+                            ..
+                        } => {
+                            let tested = super::desktop_run_focused_tests_with_progress(
                                 &project_root,
                                 paths,
                                 &mut emit,
-                            )
+                            );
+                            tested.map_err(|error| {
+                                if rollback_receipts.is_empty() {
+                                    return error;
+                                }
+                                emit(ProgressStage::RollingBack);
+                                match super::desktop_revert_semantic_receipts(
+                                    &project_root,
+                                    rollback_receipts,
+                                ) {
+                                    Ok(()) => format!(
+                                        "{error}; the applied source changes were rolled back"
+                                    ),
+                                    Err(rollback) => format!(
+                                        "{error}; automatic rollback also failed: {rollback}"
+                                    ),
+                                }
+                            })
                         }
                     };
                     operation_result.and_then(|(summary, receipt)| match &request.operation {
@@ -1111,6 +1218,12 @@ struct DesktopEditor {
     capture_result_tx: mpsc::Sender<CaptureResult>,
     next_capture: u64,
     preview_texture: Option<(String, egui::TextureHandle)>,
+    image_generation: Option<PendingImageGeneration>,
+    image_results: Receiver<ImageGenerationResult>,
+    image_result_tx: mpsc::Sender<ImageGenerationResult>,
+    generated_images: BTreeMap<TaskId, ImageArtifact>,
+    image_texture: Option<(String, egui::TextureHandle)>,
+    next_image: u64,
     asset_textures: BTreeMap<(String, String), Option<egui::TextureHandle>>,
     attachment_store: SessionAttachmentStore,
     attachment_textures: BTreeMap<(String, String), egui::TextureHandle>,
@@ -1282,6 +1395,86 @@ impl DesktopEditor {
                     worker,
                 });
             }
+        }
+    }
+
+    fn auto_apply_ready_proposal(&mut self) {
+        let Some(task_id) = self
+            .state
+            .session
+            .running_task_id()
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+        if self.busy_tasks.contains(&task_id)
+            || self.state.intents.iter().any(|intent| {
+                matches!(intent, EditorIntent::Apply(task, _) | EditorIntent::Test(task, _) if task == &task_id)
+            })
+        {
+            return;
+        }
+        let proposal = self.state.session.task(&task_id).ok().and_then(|task| {
+            task.activity
+                .iter()
+                .find_map(|entry| match &entry.kind {
+                    ActivityKind::SemanticAction { action_id, .. } => task
+                        .actions
+                        .get(action_id)
+                        .filter(|action| matches!(action.state, ActionState::Proposed))
+                        .map(|action| (action_id, action)),
+                    _ => None,
+                })
+                .and_then(|(id, action)| {
+                    action.payload.as_ref().map(|payload| {
+                        (
+                            id.to_string(),
+                            SemanticPreviewKey::new(
+                                &task_id,
+                                id.as_str(),
+                                proposal_revisions(action).len() - 1,
+                                payload,
+                            ),
+                        )
+                    })
+                })
+        });
+        let Some((action_id, key)) = proposal else {
+            return;
+        };
+        let Some(record) = self.state.semantic_previews.get(&key) else {
+            return;
+        };
+        match &record.result {
+            None => return,
+            Some(Err(error)) => {
+                let reason = bounded_failure(error, 900);
+                if let Ok(task) = self.state.session.task_mut(&task_id) {
+                    let _ = task.mark_action_for_repair(&action_id, reason.clone());
+                    let _ = task.append_host_result(format!(
+                        "Could not prepare {action_id} for automatic application: {reason}"
+                    ));
+                }
+                self.state.notice = Some(format!("Could not prepare {action_id}: {error}"));
+                return;
+            }
+            Some(Ok(_)) if record.stale => return,
+            Some(Ok(_)) => {}
+        }
+        if self.state.reviewed_preview(&task_id, &action_id).is_err() {
+            return;
+        }
+        let accepted = self
+            .state
+            .session
+            .task_mut(&task_id)
+            .and_then(|task| task.accept_action(&action_id));
+        match accepted {
+            Ok(()) => self
+                .state
+                .intents
+                .push(EditorIntent::Apply(task_id, action_id)),
+            Err(error) => self.state.notice = Some(error.to_string()),
         }
     }
 }
@@ -1503,6 +1696,7 @@ impl DesktopEditor {
             .filter(|config| config.editor.auto_persist_html_transcripts)
             .map(|_| project_root.join(".stasis_cache/logs/ai-transcripts"));
         let (capture_result_tx, capture_results) = mpsc::channel();
+        let (image_result_tx, image_results) = mpsc::channel();
         let (capability_result_tx, capability_results) = mpsc::channel();
         Self {
             windows: None,
@@ -1535,6 +1729,12 @@ impl DesktopEditor {
             capture_result_tx,
             next_capture: 1,
             preview_texture: None,
+            image_generation: None,
+            image_results,
+            image_result_tx,
+            generated_images: BTreeMap::new(),
+            image_texture: None,
+            next_image: 1,
             asset_textures: BTreeMap::new(),
             attachment_store: SessionAttachmentStore::new(),
             attachment_textures: BTreeMap::new(),
@@ -1969,17 +2169,57 @@ impl DesktopEditor {
                     let task = TaskId::new(task);
                     self.host.cancel(task.as_str());
                     let canceled_capture = self.cancel_capture_for(&task);
+                    let canceled_image = self
+                        .image_generation
+                        .as_ref()
+                        .is_some_and(|pending| pending.task_id == task);
+                    if canceled_image {
+                        if let Some(pending) = self.image_generation.take() {
+                            pending.canceled.store(true, Ordering::Release);
+                            self.state.notice =
+                                Some(format!("Image generation canceled for {task}."));
+                        }
+                    }
                     let queued = self
                         .state
                         .session
                         .task(&task)
                         .is_ok_and(|value| value.lifecycle == TaskLifecycle::Queued);
+                    let receipts = self
+                        .execution_receipts
+                        .iter()
+                        .filter(|((receipt_task, _), _)| receipt_task == task.as_str())
+                        .filter_map(|(_, receipt)| {
+                            receipt
+                                .get("receipt")
+                                .and_then(Value::as_str)
+                                .map(ToString::to_string)
+                        })
+                        .collect::<Vec<_>>();
                     let result: Result<(), String> = if queued {
                         self.state
                             .session
                             .reject_queued_task(&task)
                             .map_err(|error| error.to_string())
                     } else {
+                        if !receipts.is_empty() {
+                            if let Err(error) = super::desktop_revert_semantic_receipts(
+                                &self.project_root,
+                                &receipts,
+                            ) {
+                                self.state.notice = Some(format!(
+                                    "Could not reject {task} safely because its applied changes could not be restored: {error}"
+                                ));
+                                continue;
+                            }
+                            if let Ok(task_state) = self.state.session.task_mut(&task) {
+                                let _ = task_state.append_host_result(
+                                    "Task rejected by the user; its applied source changes were discarded and restored from the recorded edit receipt.",
+                                );
+                            }
+                            self.execution_receipts
+                                .retain(|(receipt_task, _), _| receipt_task != task.as_str());
+                        }
                         self.controller
                             .cancel(&mut self.state.session, &task)
                             .map_err(|error| error.to_string())
@@ -1989,7 +2229,7 @@ impl DesktopEditor {
                         self.task_git_baseline_errors.remove(task.as_str());
                         self.state.session.select_queue_gate_after(&task);
                     } else if let Err(error) = result {
-                        if !canceled_capture {
+                        if !canceled_capture && !canceled_image {
                             self.state.notice = Some(error);
                         }
                     }
@@ -2089,7 +2329,21 @@ impl DesktopEditor {
                         .and_then(|source_before| {
                             self.host.submit(HostRequest {
                                 task_id: task.clone(),
-                                operation: HostOperation::Test { paths, run_id },
+                                operation: HostOperation::Test {
+                                    paths,
+                                    run_id,
+                                    rollback_receipts: self
+                                        .execution_receipts
+                                        .iter()
+                                        .filter(|((receipt_task, _), _)| receipt_task == &task)
+                                        .filter_map(|(_, receipt)| {
+                                            receipt
+                                                .get("receipt")
+                                                .and_then(Value::as_str)
+                                                .map(ToString::to_string)
+                                        })
+                                        .collect(),
+                                },
                                 source_before: Some(source_before),
                             })
                         });
@@ -2126,15 +2380,165 @@ impl DesktopEditor {
                     }
                 }
                 EditorIntent::ExportChat(task) => self.export_chat(&task),
-                EditorIntent::GenerateImage(task) | EditorIntent::ImportImage(task, _) => {
-                    let message = "Image generation and asset import are unavailable in the desktop editor. No asset was generated or imported.";
-                    if let Ok(task) = self.state.session.task_mut(task.as_str()) {
-                        let _ = task.append_host_result(message);
-                    }
-                    self.state.notice = Some(message.into());
+                EditorIntent::GenerateImage(task) => self.start_image_generation(TaskId::new(task)),
+                EditorIntent::ImportImage(task, image) => {
+                    self.import_image(TaskId::new(task), &image)
                 }
                 EditorIntent::Screenshot(task) => self.start_capture(TaskId::new(task)),
             }
+        }
+    }
+
+    fn start_image_generation(&mut self, task_id: TaskId) {
+        if self.image_generation.is_some() {
+            self.state.notice = Some("An image generation is already in progress.".into());
+            return;
+        }
+        if self
+            .state
+            .session
+            .active_task()
+            .ok()
+            .is_some_and(|task| task.pending_generated_images().next().is_some())
+        {
+            self.state.notice = Some(
+                "Approve and import the current generated image before generating another.".into(),
+            );
+            return;
+        }
+        if self.state.session.active_task_id() != Some(&task_id) {
+            self.state.notice = Some("Ignored image request from an inactive task.".into());
+            return;
+        }
+        let prompt = self.state.image_prompt.trim().to_string();
+        if prompt.is_empty() {
+            self.state.notice = Some("Enter an image prompt first.".into());
+            return;
+        }
+        let config = match ImageGenerationConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                self.state.notice = Some(format!("Cannot generate image: {error}"));
+                return;
+            }
+        };
+        let id = format!("image-{}", self.next_image);
+        self.next_image = self.next_image.saturating_add(1);
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = Arc::clone(&canceled);
+        let worker_task = task_id.clone();
+        let worker_id = id.clone();
+        let result_tx = self.image_result_tx.clone();
+        let generating_label = format!(
+            "Generating image with {} / {}...",
+            config.provider, config.model
+        );
+        thread::spawn(move || {
+            let result = config
+                .generate(&prompt, &worker_canceled)
+                .and_then(|generated| {
+                    validate_generated(worker_task.clone(), worker_id.clone(), generated)
+                });
+            let _ = result_tx.send(ImageGenerationResult {
+                task_id: worker_task,
+                id: worker_id,
+                result,
+            });
+        });
+        self.image_generation = Some(PendingImageGeneration {
+            task_id,
+            id,
+            canceled,
+        });
+        self.state.notice = Some(generating_label);
+    }
+
+    fn poll_images(&mut self) {
+        while let Ok(completed) = self.image_results.try_recv() {
+            let current = self.image_generation.as_ref().is_some_and(|pending| {
+                pending.task_id == completed.task_id && pending.id == completed.id
+            });
+            if !current {
+                continue;
+            }
+            self.image_generation = None;
+            match completed.result {
+                Ok(artifact) => {
+                    let cost = artifact
+                        .cost_micros
+                        .map(|value| format!("${:.4}", value as f64 / 1_000_000.0))
+                        .unwrap_or_else(|| "unknown cost".into());
+                    let credit = format!(
+                        "route {}; fallback {}; {cost}",
+                        artifact.route, artifact.fallback
+                    );
+                    let attribution = ImageAttribution::new(
+                        &artifact.provider,
+                        Some(artifact.model.clone()),
+                        Some(credit),
+                    );
+                    match attribution.and_then(|value| {
+                        self.state
+                            .session
+                            .task_mut(&completed.task_id)
+                            .and_then(|task| {
+                                task.add_generated_image(
+                                    completed.id.as_str(),
+                                    format!("memory://{}/{}", completed.task_id, completed.id),
+                                    value,
+                                )
+                            })
+                    }) {
+                        Ok(()) => {
+                            self.generated_images
+                                .insert(completed.task_id.clone(), artifact);
+                            self.image_texture = None;
+                            self.state.notice = Some(format!(
+                                "Image generated for {}. Select that task to review and approve it.",
+                                completed.task_id
+                            ));
+                        }
+                        Err(error) => self.state.notice = Some(error.to_string()),
+                    }
+                }
+                Err(error) => self.state.notice = Some(format!("Image generation failed: {error}")),
+            }
+        }
+    }
+
+    fn import_image(&mut self, task_id: TaskId, image_id: &str) {
+        if self.state.session.active_task_id() != Some(&task_id) {
+            self.state.notice = Some("Ignored image import from an inactive task.".into());
+            return;
+        }
+        let Some(artifact) = self.generated_images.get(&task_id) else {
+            self.state.notice =
+                Some("Generated image bytes are unavailable; generate again.".into());
+            return;
+        };
+        if artifact.id != image_id {
+            self.state.notice = Some("Generated image identity changed; generate again.".into());
+            return;
+        }
+        let mut candidate = self.state.session.clone();
+        let approved = candidate
+            .task_mut(&task_id)
+            .and_then(|task| task.import_generated_image(image_id))
+            .map_err(|error| error.to_string());
+        match approved.and_then(|()| {
+            import_png(
+                &self.project_root,
+                &task_id,
+                artifact,
+                &self.state.image_destination,
+            )
+        }) {
+            Ok(path) => {
+                self.state.session = candidate;
+                self.state.notice =
+                    Some(format!("Imported generated image as {}.", path.display()));
+            }
+            Err(error) => self.state.notice = Some(format!("Image import failed: {error}")),
         }
     }
 
@@ -2635,7 +3039,7 @@ impl DesktopEditor {
                 TaskControllerEvent::Completed {
                     task_id, proposals, ..
                 } => Some(format!(
-                    "AI reply completed for {task_id}; {} action(s) proposed",
+                    "AI reply completed for {task_id}; preparing {} atomic change(s)",
                     proposals.len()
                 )),
                 TaskControllerEvent::Failed {
@@ -2674,11 +3078,10 @@ impl DesktopEditor {
                     Ok(task),
                 ) => {
                     let validated = receipt_has_test_evidence(&receipt);
-                    let receipt_summary = receipt
+                    let receipt_path = receipt
                         .get("receipt")
                         .and_then(Value::as_str)
-                        .unwrap_or("recorded validation receipt")
-                        .to_string();
+                        .map(ToString::to_string);
                     self.execution_receipts
                         .insert((task_id.clone(), action_id.clone()), receipt);
                     if task.lifecycle == stasis_ai::TaskLifecycle::Active {
@@ -2690,7 +3093,7 @@ impl DesktopEditor {
                                 ))?;
                             }
                             task.append_host_result(format!(
-                                "Applied {action_id}: {summary}\nValidation receipt: {receipt_summary}"
+                                "Applied {action_id} atomically and requested a live swap. Edit receipt recorded."
                             ))?;
                             Ok(())
                         });
@@ -2706,11 +3109,38 @@ impl DesktopEditor {
                                 .insert(task_id.clone(), (fingerprint, Vec::new()));
                         }
                         self.state.notice = Some(format!("Applied {action_id} for {task_id}"));
+                        if task.begin_focused_tests().is_ok() {
+                            let run_id = task.validation_run_id;
+                            self.state
+                                .intents
+                                .push(EditorIntent::Test(task_id.clone(), run_id));
+                            self.state.notice = Some(format!(
+                                "Applied {action_id} for {task_id}; live swap requested and focused tests started"
+                            ));
+                        }
                     } else if let Some(action) = task.actions.get_mut(action_id.as_str()) {
-                        action.state = ActionState::Applied;
-                        self.state.notice = Some(format!(
-                            "{action_id} committed before {task_id} cancellation completed"
-                        ));
+                        let restored = receipt_path.as_ref().is_some_and(|receipt| {
+                            super::desktop_revert_semantic_receipts(
+                                &self.project_root,
+                                std::slice::from_ref(receipt),
+                            )
+                            .is_ok()
+                        });
+                        if restored {
+                            action.state = ActionState::Rejected {
+                                reason: "Task was rejected while the edit was being applied; the published source was restored from its receipt.".into(),
+                            };
+                            self.execution_receipts
+                                .remove(&(task_id.clone(), action_id.clone()));
+                            self.state.notice = Some(format!(
+                                "{action_id} finished after {task_id} was rejected and was immediately restored"
+                            ));
+                        } else {
+                            action.state = ActionState::Applied;
+                            self.state.notice = Some(format!(
+                                "{action_id} committed before {task_id} cancellation completed; automatic restore needs review"
+                            ));
+                        }
                     }
                 }
                 (HostOperation::Apply { action_id, .. }, Err(error), Ok(task)) => {
@@ -2725,7 +3155,7 @@ impl DesktopEditor {
                     self.state.notice = Some(format!("Apply failed for {task_id}: {error}"));
                 }
                 (
-                    HostOperation::Test { paths, run_id },
+                    HostOperation::Test { paths, run_id, .. },
                     Ok((summary, receipt, fingerprint)),
                     Ok(task),
                 ) => {
@@ -2762,6 +3192,18 @@ impl DesktopEditor {
                     }
                     self.state.notice =
                         Some(format!("Focused tests failed for {task_id}: {error}"));
+                    let repair_reason = bounded_failure(&error, 900);
+                    let applied = task
+                        .actions
+                        .iter()
+                        .filter(|(_, action)| matches!(action.state, ActionState::Applied))
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>();
+                    for action_id in applied {
+                        let _ = task.mark_action_for_repair(action_id, repair_reason.clone());
+                    }
+                    self.execution_receipts
+                        .retain(|(receipt_task, _), _| receipt_task != &task_id);
                 }
                 (_, _, Err(error)) => self.state.notice = Some(error.to_string()),
             }
@@ -3004,6 +3446,36 @@ fn status_chip(ui: &mut egui::Ui, label: &str, color: Color32) {
         });
 }
 
+fn render_message_provider(
+    ui: &mut egui::Ui,
+    turn: Option<&stasis_ai::task_session::ProviderTurnMetrics>,
+) {
+    let Some(turn) = turn else {
+        ui.label(
+            RichText::new("Provider details unavailable for this restored message")
+                .size(10.0)
+                .color(muted_text()),
+        );
+        return;
+    };
+    let provider = turn.provider.as_deref().unwrap_or("provider unavailable");
+    let provider = if provider == "installed_codex_subscription" {
+        "Codex"
+    } else {
+        provider
+    };
+    ui.label(
+        RichText::new(format!(
+            "Provider: {}  |  Model: {}  |  Reasoning: {}",
+            provider,
+            turn.model.as_deref().unwrap_or("model unavailable"),
+            turn.reasoning_effort.as_deref().unwrap_or("unavailable")
+        ))
+        .size(10.0)
+        .color(muted_text()),
+    );
+}
+
 fn validation_label_ui(status: &ValidationStatus) -> &'static str {
     match status {
         ValidationStatus::NotRun => "not tested",
@@ -3208,6 +3680,8 @@ struct EditorState {
     intents: Vec<EditorIntent>,
     notice: Option<String>,
     preview: Option<ScreenshotPreview>,
+    image_prompt: String,
+    image_destination: String,
     cancel_confirmation: Option<String>,
     project_root: Option<PathBuf>,
     semantic_previews: BTreeMap<SemanticPreviewKey, SemanticPreviewRecord>,
@@ -3231,6 +3705,8 @@ impl Default for EditorState {
             intents: Vec::new(),
             notice: None,
             preview: None,
+            image_prompt: String::new(),
+            image_destination: "assets/generated/image.png".into(),
             cancel_confirmation: None,
             project_root: None,
             semantic_previews: BTreeMap::new(),
@@ -3371,10 +3847,12 @@ impl EditorState {
             .any(|action| matches!(action.state, ActionState::Proposed))
         {
             return PrimaryAction {
-                label: "Accept proposal",
+                label: "Preparing change...",
                 command: TaskSessionCommand::AcceptAction,
-                enabled: true,
-                disabled_reason: None,
+                enabled: false,
+                disabled_reason: Some(
+                    "The editor is validating the atomic edit before publishing it.".into(),
+                ),
             };
         }
         if task
@@ -3383,10 +3861,10 @@ impl EditorState {
             .any(|action| matches!(action.state, ActionState::Accepted))
         {
             return PrimaryAction {
-                label: "Apply change",
+                label: "Applying change...",
                 command: TaskSessionCommand::ApplyAction,
-                enabled: true,
-                disabled_reason: None,
+                enabled: false,
+                disabled_reason: Some("The validated edit is being published for hot swap.".into()),
             };
         }
         if task
@@ -3962,7 +4440,7 @@ impl DesktopEditor {
                 .is_some_and(|capture| capture.task_id == task.id)
     }
 
-    fn detail(&mut self, ui: &mut egui::Ui) {
+    fn detail(&mut self, ui: &mut egui::Ui, compact: bool) {
         let Ok(task) = self.state.session.active_task() else {
             egui::Frame::none().inner_margin(32.0).show(ui, |ui| {
                 ui.vertical_centered(|ui| {
@@ -3975,7 +4453,7 @@ impl DesktopEditor {
         };
         let task = task.clone();
         if task.lifecycle == TaskLifecycle::Queued {
-            self.queue_gate(ui, &task);
+            self.queue_gate(ui, &task, compact);
             return;
         }
         egui::TopBottomPanel::bottom("task-composer")
@@ -3983,23 +4461,38 @@ impl DesktopEditor {
             .frame(
                 egui::Frame::none()
                     .fill(canvas_fill())
-                    .inner_margin(egui::Margin::symmetric(18.0, 12.0)),
+                    .inner_margin(egui::Margin::symmetric(
+                        if compact { 8.0 } else { 18.0 },
+                        if compact { 7.0 } else { 12.0 },
+                    )),
             )
-            .show_inside(ui, |ui| self.composer(ui, &task));
+            .show_inside(ui, |ui| self.composer(ui, &task, compact));
+        egui::TopBottomPanel::top("task-header")
+            .resizable(false)
+            .frame(
+                egui::Frame::none()
+                    .fill(canvas_fill())
+                    .inner_margin(egui::Margin::symmetric(
+                        if compact { 10.0 } else { 18.0 },
+                        if compact { 4.0 } else { 12.0 },
+                    )),
+            )
+            .show_inside(ui, |ui| self.task_header(ui, &task, compact));
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
                     .fill(canvas_fill())
-                    .inner_margin(egui::Margin::symmetric(18.0, 12.0)),
+                    .inner_margin(egui::Margin::symmetric(
+                        if compact { 10.0 } else { 18.0 },
+                        if compact { 4.0 } else { 12.0 },
+                    )),
             )
             .show_inside(ui, |ui| {
-                self.task_header(ui, &task);
-                ui.add_space(12.0);
-                self.timeline(ui, &task);
+                self.timeline(ui, &task, compact);
             });
     }
 
-    fn queue_gate(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+    fn queue_gate(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task, compact: bool) {
         let start_shortcut =
             ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         let move_shortcut =
@@ -4009,32 +4502,82 @@ impl DesktopEditor {
         let rollback_shortcut =
             ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::R));
         let rollback_task = self.rollback_candidate();
-        egui::Frame::none().inner_margin(32.0).show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(72.0);
-                ui.label(RichText::new("Ready when you are").size(24.0).strong());
-                ui.add_space(8.0);
-                ui.label(RichText::new(&task.objective).size(17.0));
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(
-                        "Starting creates a fresh AI conversation. No queued task contacts a provider.",
-                    )
-                    .size(13.0)
-                    .color(muted_text()),
-                );
-                ui.add_space(18.0);
+        let queued = self
+            .state
+            .session
+            .tasks()
+            .filter(|candidate| candidate.lifecycle == TaskLifecycle::Queued)
+            .map(|candidate| (candidate.id.to_string(), candidate.objective.clone()))
+            .collect::<Vec<_>>();
+        let position = queued
+            .iter()
+            .position(|candidate| candidate.0 == task.id.as_str())
+            .map_or(1, |index| index + 1);
+        let after = queued.get(position).map(|candidate| candidate.1.clone());
+        egui::Frame::none()
+            .inner_margin(if compact { 12.0 } else { 32.0 })
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                ui.add_space(if compact { 4.0 } else { 72.0 });
                 ui.horizontal(|ui| {
-                    if ui.button("Start task (Enter)").clicked() || start_shortcut {
+                    ui.label(
+                        RichText::new(if compact { "Next task" } else { "Ready when you are" })
+                            .size(if compact { 13.0 } else { 24.0 })
+                            .strong(),
+                    );
+                    if compact {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("{position} of {}", queued.len()))
+                                    .size(11.0)
+                                    .color(muted_text()),
+                            );
+                        });
+                    }
+                });
+                ui.add_space(if compact { 5.0 } else { 8.0 });
+                ui.label(
+                    RichText::new(&task.objective)
+                        .size(if compact { 20.0 } else { 17.0 })
+                        .strong(),
+                );
+                if !compact {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "Starting creates a fresh AI conversation. No queued task contacts a provider.",
+                        )
+                        .size(13.0)
+                        .color(muted_text()),
+                    );
+                }
+                ui.add_space(if compact { 10.0 } else { 18.0 });
+                let actions = |ui: &mut egui::Ui| {
+                    let start_label = if compact {
+                        "Start (Enter)"
+                    } else {
+                        "Start task (Enter)"
+                    };
+                    if ui.button(start_label).clicked() || start_shortcut {
                         self.state.notice = self.state.start_queued_task(task.id.as_str()).err();
                     }
-                    if ui.button("Move to back (B)").clicked() || move_shortcut {
+                    let back_label = if compact {
+                        "Back (B)"
+                    } else {
+                        "Move to back (B)"
+                    };
+                    if ui.button(back_label).clicked() || move_shortcut {
                         self.state.notice = self
                             .state
                             .move_queued_task_to_back(task.id.as_str())
                             .err();
                     }
-                    if ui.button("Reject... (Del)").clicked() || reject_shortcut {
+                    let reject_label = if compact {
+                        "Reject (Del)"
+                    } else {
+                        "Reject... (Del)"
+                    };
+                    if ui.button(reject_label).clicked() || reject_shortcut {
                         self.state.cancel_confirmation = Some(task.id.to_string());
                     }
                     if let Some(completed_task) = &rollback_task {
@@ -4043,14 +4586,198 @@ impl DesktopEditor {
                                 Some((task.id.to_string(), completed_task.clone()));
                         }
                     }
-                });
+                };
+                if compact {
+                    ui.horizontal_wrapped(actions);
+                    if let Some(after) = after {
+                        ui.add_space(9.0);
+                        ui.label(
+                            RichText::new(format!("After this: {after}"))
+                                .size(11.0)
+                                .color(muted_text()),
+                        );
+                    }
+                } else {
+                    ui.horizontal(actions);
+                }
             });
         });
     }
 
-    fn task_header(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+    fn compact_task_header(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+        let mut provider_choice = None;
+        let mut refresh_image_support = false;
+        let mut export = false;
+        let mut tile = false;
+        let mut new_task = false;
+        let mut selected_task = None;
+        let openrouter = stasis_ai::OpenRouterConfig::from_workspace(&self.project_root).ok();
+        let provider = task
+            .provider
+            .provider
+            .as_deref()
+            .unwrap_or("Provider pending");
+        let provider_label = if provider == "installed_codex_subscription" {
+            "Codex"
+        } else {
+            provider
+        };
+        let model = task.provider.model.as_deref().unwrap_or("model pending");
+        let task_choices = self
+            .state
+            .session
+            .tasks()
+            .map(|candidate| (candidate.id.to_string(), candidate.objective.clone()))
+            .collect::<Vec<_>>();
+        let total = task
+            .metrics
+            .input_tokens
+            .saturating_add(task.metrics.output_tokens);
+
+        egui::Frame::none()
+            .fill(Color32::from_rgb(22, 27, 34))
+            .stroke(egui::Stroke::new(1.0_f32, border()))
+            .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (dot, _) =
+                        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot.center(), 3.0, status_color(task));
+                    let title_width = (ui.available_width() - 30.0).max(70.0);
+                    ui.add_sized(
+                        [title_width, 26.0],
+                        egui::Label::new(RichText::new(&task.objective).size(16.0).strong())
+                            .truncate(true),
+                    )
+                    .on_hover_text(&task.objective);
+                    ui.menu_button(RichText::new("...").size(14.0), |ui| {
+                        ui.label(
+                            RichText::new(task_header_status(task).0)
+                                .color(status_color(task))
+                                .strong(),
+                        );
+                        ui.label(
+                            RichText::new(format!("{provider_label} / {model}"))
+                                .size(11.0)
+                                .color(muted_text()),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "{total} tokens / ${:.4}",
+                                task.metrics.estimated_cost_micros as f64 / 1_000_000.0
+                            ))
+                            .size(11.0)
+                            .color(muted_text()),
+                        );
+                        ui.separator();
+                        if ui.button("New task (Ctrl+N)").clicked() {
+                            new_task = true;
+                            ui.close_menu();
+                        }
+                        ui.menu_button("Switch task", |ui| {
+                            for (id, objective) in &task_choices {
+                                if ui
+                                    .selectable_label(id == task.id.as_str(), objective)
+                                    .clicked()
+                                {
+                                    selected_task = Some(id.clone());
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                        ui.menu_button("Provider", |ui| {
+                            let provider_mutable =
+                                task.lifecycle == TaskLifecycle::Active && !self.ui_busy(task);
+                            if ui
+                                .add_enabled(
+                                    provider_mutable,
+                                    egui::SelectableLabel::new(
+                                        provider == "installed_codex_subscription",
+                                        "Codex subscription",
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                provider_choice =
+                                    Some((ProviderSelection::Codex, ProviderConfig::Codex));
+                                ui.close_menu();
+                            }
+                            if ui
+                                .add_enabled(
+                                    provider_mutable && openrouter.is_some(),
+                                    egui::SelectableLabel::new(
+                                        provider != "installed_codex_subscription",
+                                        "OpenRouter",
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                provider_choice = openrouter.clone().map(|config| {
+                                    (
+                                        ProviderSelection::OpenRouter,
+                                        ProviderConfig::OpenRouter(config),
+                                    )
+                                });
+                                ui.close_menu();
+                            }
+                            if provider != "installed_codex_subscription"
+                                && ui.button("Refresh image support").clicked()
+                            {
+                                refresh_image_support = true;
+                                ui.close_menu();
+                            }
+                        });
+                        if ui.button("Export chat as HTML").clicked() {
+                            export = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Tile editor + game").clicked() {
+                            tile = true;
+                            ui.close_menu();
+                        }
+                    });
+                });
+            });
+
+        if let Some((selection, config)) = provider_choice {
+            self.state.notice = self
+                .state
+                .session
+                .task_mut(&task.id)
+                .and_then(|task| {
+                    task.select_provider(selection)?;
+                    task.set_provider_state(configured_provider_state(&config))
+                })
+                .err()
+                .map(|error| error.to_string());
+        }
+        if refresh_image_support {
+            self.refresh_active_image_capability();
+        }
+        if export {
+            self.state.dispatch(TaskSessionCommand::ExportChat);
+        }
+        if new_task {
+            self.state.dispatch(TaskSessionCommand::NewTask);
+        }
+        if let Some(task_id) = selected_task {
+            self.state.notice = self.state.switch_task(&task_id).err();
+        }
+        if tile {
+            if let Some(windows) = self.windows.as_mut() {
+                windows.tile();
+            }
+        }
+    }
+
+    fn task_header(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task, compact: bool) {
         if self.uncertain_calls.contains(task.id.as_str()) && !self.ui_busy(task) {
             ui.colored_label(warning(), "Previous AI request outcome is uncertain. It may already have incurred a charge; review before sending again.");
+        }
+        if compact {
+            self.compact_task_header(ui, task);
+            return;
         }
         let mut provider_choice = None;
         let mut refresh_image_support = false;
@@ -4221,7 +4948,48 @@ impl DesktopEditor {
         }
     }
 
-    fn progress_timeline(&self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+    fn progress_timeline(&self, ui: &mut egui::Ui, task: &stasis_ai::Task, compact: bool) {
+        if compact {
+            if let Some(request) = self.controller.snapshot(&task.id) {
+                if request.state == stasis_ai::TaskRequestState::Running {
+                    let stage = provider_timeline_stage(task, &request);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new(stage.label()).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("{}s", request.elapsed_ms / 1_000))
+                                    .size(11.0)
+                                    .color(muted_text()),
+                            );
+                        });
+                    });
+                } else if let Some(error) = &request.error {
+                    ui.colored_label(failure(), error);
+                }
+            }
+            if let Some(host) = self.host.snapshot(task.id.as_str()) {
+                let stage = host
+                    .events
+                    .last()
+                    .map(|event| event.0)
+                    .unwrap_or(ProgressStage::Queued);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new(stage.label()).strong());
+                    if let Some((_, elapsed)) = host.events.last() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("{}s", elapsed / 1_000))
+                                    .size(11.0)
+                                    .color(muted_text()),
+                            );
+                        });
+                    }
+                });
+            }
+            return;
+        }
         if let Some(request) = self.controller.snapshot(&task.id) {
             let stage = provider_timeline_stage(task, &request);
             egui::Frame::none()
@@ -4302,17 +5070,25 @@ impl DesktopEditor {
         }
     }
 
-    fn timeline(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+    fn timeline(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task, compact: bool) {
         let activity = task.activity_timeline();
+        let mut latest_attachments = BTreeMap::new();
         let mut latest_actions = BTreeMap::new();
         let mut latest_images = BTreeMap::new();
+        let mut latest_tests = BTreeMap::new();
         for item in &activity {
             match &item.kind {
+                ActivityKind::Attachment { screenshot_id, .. } => {
+                    latest_attachments.insert(screenshot_id.to_string(), item.sequence);
+                }
                 ActivityKind::SemanticAction { action_id, .. } => {
                     latest_actions.insert(action_id.to_string(), item.sequence);
                 }
                 ActivityKind::GeneratedAsset { image_id, .. } => {
                     latest_images.insert(image_id.to_string(), item.sequence);
+                }
+                ActivityKind::FocusedTest { run_id, .. } => {
+                    latest_tests.insert(*run_id, item.sequence);
                 }
                 _ => {}
             }
@@ -4326,7 +5102,9 @@ impl DesktopEditor {
             .auto_shrink([false, false])
             .stick_to_bottom(follow_latest)
             .show(ui, |ui| {
-                ui.set_width(ui.available_width());
+                let content_width = (ui.clip_rect().width() - 4.0).max(1.0);
+                ui.set_max_width(content_width);
+                ui.set_width(content_width);
                 if activity.is_empty() {
                     ui.add_space(30.0);
                     ui.vertical_centered(|ui| {
@@ -4346,46 +5124,32 @@ impl DesktopEditor {
                 }
                 for entry in activity {
                     let latest_entity_snapshot = match &entry.kind {
+                        ActivityKind::Attachment { screenshot_id, .. } => latest_attachments
+                            .get(screenshot_id.as_str())
+                            .is_some_and(|sequence| *sequence == entry.sequence),
                         ActivityKind::SemanticAction { action_id, .. } => latest_actions
                             .get(action_id.as_str())
                             .is_some_and(|sequence| *sequence == entry.sequence),
                         ActivityKind::GeneratedAsset { image_id, .. } => latest_images
                             .get(image_id.as_str())
                             .is_some_and(|sequence| *sequence == entry.sequence),
+                        ActivityKind::FocusedTest { run_id, .. } => latest_tests
+                            .get(run_id)
+                            .is_some_and(|sequence| *sequence == entry.sequence),
                         _ => true,
                     };
                     if command.is_none() {
-                        command = self.activity_card(ui, task, entry, latest_entity_snapshot);
+                        command =
+                            self.activity_card(ui, task, entry, latest_entity_snapshot, compact);
                     } else {
-                        self.activity_card(ui, task, entry, latest_entity_snapshot);
+                        self.activity_card(ui, task, entry, latest_entity_snapshot, compact);
                     }
-                    ui.add_space(9.0);
+                    ui.add_space(if compact { 4.0 } else { 9.0 });
                 }
-                self.progress_timeline(ui, task);
+                self.progress_timeline(ui, task, compact);
             });
         if let Some(command) = command {
             let result = match command {
-                TimelineAction::Accept(task, action) => self
-                    .state
-                    .reviewed_preview(&task, &action)
-                    .map(|_| ())
-                    .and_then(|()| {
-                        self.state
-                            .session
-                            .task_mut(task)
-                            .and_then(|task| task.accept_action(action))
-                            .map_err(|error| error.to_string())
-                    }),
-                TimelineAction::Reject(task, action) => self
-                    .state
-                    .session
-                    .task_mut(task)
-                    .and_then(|task| task.reject_action(action, "Rejected in desktop editor"))
-                    .map_err(|error| error.to_string()),
-                TimelineAction::Apply(task, action) => {
-                    self.state.intents.push(EditorIntent::Apply(task, action));
-                    Ok(())
-                }
                 TimelineAction::ApproveImage(task, image) => self
                     .state
                     .session
@@ -4445,6 +5209,7 @@ impl DesktopEditor {
         task: &stasis_ai::Task,
         entry: stasis_ai::task_session::ActivityEntry,
         latest_entity_snapshot: bool,
+        compact: bool,
     ) -> Option<TimelineAction> {
         let can_interact = task.lifecycle == TaskLifecycle::Active
             && task.connection == ConnectionState::Connected
@@ -4462,6 +5227,175 @@ impl DesktopEditor {
             ActivityKind::HostResult { .. } => ("Host result", Color32::from_rgb(113, 196, 205)),
             ActivityKind::FocusedTest { .. } => ("Focused tests", accent()),
         };
+        if compact {
+            match &entry.kind {
+                ActivityKind::UserMessage { thread_sequence }
+                | ActivityKind::AiReply { thread_sequence }
+                | ActivityKind::HostResult { thread_sequence } => {
+                    if let Some(message) = task
+                        .thread
+                        .iter()
+                        .find(|item| item.sequence == *thread_sequence)
+                    {
+                        ui.label(RichText::new(title).size(11.0).strong().color(tint));
+                        ui.add(
+                            egui::Label::new(RichText::new(&message.text).size(13.0)).wrap(true),
+                        );
+                        if matches!(&entry.kind, ActivityKind::AiReply { .. }) {
+                            render_message_provider(ui, entry.provider_turn.as_ref());
+                        }
+                        ui.add_space(2.0);
+                    }
+                    return None;
+                }
+                ActivityKind::FocusedTest { status, .. } => {
+                    if latest_entity_snapshot {
+                        let (label, color) = match status {
+                            ValidationStatus::Passed { .. } => ("Applied / tests passed", accent()),
+                            ValidationStatus::Failed { .. } => ("Tests failed", failure()),
+                            ValidationStatus::Running => ("Running focused tests", warning()),
+                            ValidationStatus::NotRun => ("Tests not run", muted_text()),
+                        };
+                        egui::Frame::none()
+                            .fill(color.linear_multiply(0.12))
+                            .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(label).size(12.0).strong().color(color));
+                            });
+                    }
+                    return None;
+                }
+                ActivityKind::Attachment {
+                    screenshot_id,
+                    upload,
+                    analysis,
+                } => {
+                    if !latest_entity_snapshot {
+                        return None;
+                    }
+                    let mut command = None;
+                    if let Some(screenshot) = task.screenshots.get(screenshot_id) {
+                        let name = self
+                            .attachment_store
+                            .get(&task.id, screenshot.id.as_str())
+                            .map(|owned| owned.name.clone())
+                            .unwrap_or_else(|| {
+                                std::path::Path::new(&screenshot.source)
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or(screenshot.id.as_str())
+                                    .to_string()
+                            });
+                        let sent = matches!(upload, UploadState::Uploaded);
+                        let status = match (upload, analysis) {
+                            (UploadState::Failed { .. }, _)
+                            | (_, ScreenshotAnalysisState::Failed { .. }) => "Needs attention",
+                            (UploadState::Uploaded, _) => "Sent",
+                            _ if screenshot.selected_for_request => "Included in next message",
+                            _ => "Attached locally",
+                        };
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(22, 27, 34))
+                            .inner_margin(egui::Margin::same(7.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    self.inline_screenshot(
+                                        ui,
+                                        screenshot.id.as_str(),
+                                        Some(egui::vec2(72.0, 56.0)),
+                                    );
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new(&name).size(12.0).strong())
+                                            .on_hover_text(&screenshot.source);
+                                        ui.label(
+                                            RichText::new(status).size(10.0).color(muted_text()),
+                                        );
+                                        if !sent {
+                                            ui.horizontal_wrapped(|ui| {
+                                                if screenshot.consent_to_send
+                                                    && screenshot.selected_for_request
+                                                {
+                                                    if can_interact
+                                                        && ui.small_button("Undo").clicked()
+                                                    {
+                                                        command = Some(
+                                                            TimelineAction::UnselectAttachment(
+                                                                task.id.to_string(),
+                                                                screenshot.id.to_string(),
+                                                            ),
+                                                        );
+                                                    }
+                                                } else {
+                                                    let retry = matches!(
+                                                        upload,
+                                                        UploadState::Failed { .. }
+                                                    ) || matches!(
+                                                        analysis,
+                                                        ScreenshotAnalysisState::Failed { .. }
+                                                            | ScreenshotAnalysisState::Canceled
+                                                    );
+                                                    let capability = self
+                                                        .image_attachment_capability(&task.id)
+                                                        .and_then(|()| {
+                                                            task.validate_screenshot_selection(
+                                                                screenshot.id.as_str(),
+                                                            )
+                                                            .map_err(|error| error.to_string())
+                                                        });
+                                                    let include = ui.add_enabled(
+                                                        can_interact && capability.is_ok(),
+                                                        egui::Button::new(if retry {
+                                                            "Retry"
+                                                        } else {
+                                                            "Include"
+                                                        })
+                                                        .small(),
+                                                    );
+                                                    if include.clicked() {
+                                                        command =
+                                                            Some(TimelineAction::SelectAttachment(
+                                                                task.id.to_string(),
+                                                                screenshot.id.to_string(),
+                                                            ));
+                                                    }
+                                                    if let Err(reason) = capability {
+                                                        include.on_disabled_hover_text(reason);
+                                                    }
+                                                }
+                                                if ui.small_button("Preview").clicked() {
+                                                    command =
+                                                        Some(TimelineAction::PreviewAttachment(
+                                                            task.id.to_string(),
+                                                            screenshot.id.to_string(),
+                                                        ));
+                                                }
+                                                if can_interact
+                                                    && ui.small_button("Remove").clicked()
+                                                {
+                                                    command =
+                                                        Some(TimelineAction::RemoveAttachment(
+                                                            task.id.to_string(),
+                                                            screenshot.id.to_string(),
+                                                        ));
+                                                }
+                                            });
+                                        }
+                                    });
+                                });
+                            });
+                    }
+                    return command;
+                }
+                ActivityKind::SemanticAction { state, .. }
+                    if !latest_entity_snapshot
+                        || matches!(state, ActionState::Applied | ActionState::Rejected { .. }) =>
+                {
+                    return None;
+                }
+                ActivityKind::GeneratedAsset { .. } if !latest_entity_snapshot => return None,
+                _ => {}
+            }
+        }
         let mut command = None;
         egui::Frame::none()
             .fill(Color32::from_rgb(28, 33, 41))
@@ -4490,7 +5424,13 @@ impl DesktopEditor {
                             .iter()
                             .find(|item| item.sequence == thread_sequence)
                         {
-                            ui.label(RichText::new(&message.text).size(14.0));
+                            ui.add(
+                                egui::Label::new(RichText::new(&message.text).size(14.0))
+                                    .wrap(true),
+                            );
+                            if matches!(message.kind, ThreadEntryKind::Result) {
+                                render_message_provider(ui, entry.provider_turn.as_ref());
+                            }
                         }
                     }
                     ActivityKind::Attachment {
@@ -4499,7 +5439,7 @@ impl DesktopEditor {
                         analysis,
                     } => {
                         if let Some(screenshot) = task.screenshots.get(&screenshot_id) {
-                            self.inline_screenshot(ui, screenshot.id.as_str());
+                            self.inline_screenshot(ui, screenshot.id.as_str(), None);
                             ui.horizontal_wrapped(|ui| {
                                 status_chip(
                                     ui,
@@ -4607,7 +5547,7 @@ impl DesktopEditor {
                                         semantic_revisions::render_heading(ui, action_id.as_str(), &proposal);
                                         if let Some(record) = self.state.semantic_previews.get(&key) {
                                             if record.stale {
-                                                ui.colored_label(warning(), "Stale: project sources changed. Acceptance and Apply disabled.");
+                                                ui.colored_label(warning(), "Stale: project sources changed. Automatic apply stopped.");
                                             }
                                             match &record.result {
                                                 None => { ui.spinner(); ui.label("Planning semantic changes..."); }
@@ -4633,28 +5573,14 @@ impl DesktopEditor {
                             (ActionState::Proposed, Some(ActionState::Proposed), true)
                                 if can_interact =>
                             {
-                                if ui.add_enabled(self.state.check_preview(task.id.as_str(), action_id.as_str(), false).is_ok(), egui::Button::new("Accept")).clicked() {
-                                    command = Some(TimelineAction::Accept(
-                                        task.id.to_string(),
-                                        action_id.to_string(),
-                                    ));
-                                }
-                                if ui.button("Reject").clicked() {
-                                    command = Some(TimelineAction::Reject(
-                                        task.id.to_string(),
-                                        action_id.to_string(),
-                                    ));
-                                }
+                                ui.spinner();
+                                ui.label("Validating, then applying automatically...");
                             }
                             (ActionState::Accepted, Some(ActionState::Accepted), true)
                                 if can_interact =>
                             {
-                                if ui.add_enabled(self.state.check_preview(task.id.as_str(), action_id.as_str(), false).is_ok(), egui::Button::new("Apply change")).clicked() {
-                                    command = Some(TimelineAction::Apply(
-                                        task.id.to_string(),
-                                        action_id.to_string(),
-                                    ));
-                                }
+                                ui.spinner();
+                                ui.label("Publishing for live swap...");
                             }
                             _ => {}
                         });
@@ -4785,7 +5711,12 @@ impl DesktopEditor {
         command
     }
 
-    fn inline_screenshot(&mut self, ui: &mut egui::Ui, screenshot_id: &str) {
+    fn inline_screenshot(
+        &mut self,
+        ui: &mut egui::Ui,
+        screenshot_id: &str,
+        compact_limit: Option<egui::Vec2>,
+    ) {
         if let Some(source) = self.state.session.active_task().ok().and_then(|task| {
             task.screenshots
                 .get(screenshot_id)
@@ -4820,8 +5751,9 @@ impl DesktopEditor {
                 }
                 let texture = &self.attachment_textures[&key];
                 let original = texture.size_vec2();
-                let scale = (ui.available_width().min(560.0) / original.x)
-                    .min(160.0 / original.y)
+                let max_size = compact_limit.unwrap_or(egui::vec2(560.0, 160.0));
+                let scale = (ui.available_width().min(max_size.x) / original.x)
+                    .min(max_size.y / original.y)
                     .min(1.0);
                 ui.image((texture.id(), original * scale));
                 return;
@@ -4870,26 +5802,29 @@ impl DesktopEditor {
             self.preview_texture = Some((screenshot_id.to_string(), texture));
         }
         let texture = &self.preview_texture.as_ref().expect("preview texture").1;
-        let max_width = ui.available_width().min(560.0);
+        let max_size = compact_limit.unwrap_or(egui::vec2(560.0, 120.0));
+        let max_width = ui.available_width().min(max_size.x);
         let scale = (max_width / preview.width as f32)
-            .min(120.0 / preview.height as f32)
+            .min(max_size.y / preview.height as f32)
             .min(1.0);
         let size = egui::vec2(preview.width as f32, preview.height as f32) * scale;
         ui.image((texture.id(), size));
-        ui.label(
-            RichText::new(format!(
-                "{} x {} / tick {} -> {} / runtime {}:{} / verified {}",
-                preview.width,
-                preview.height,
-                preview.scheduled_tick,
-                preview.captured_tick,
-                preview.runtime_identity.session_id,
-                preview.runtime_identity.generation,
-                &preview.sha256[..12]
-            ))
-            .size(11.0)
-            .color(muted_text()),
-        );
+        if compact_limit.is_none() {
+            ui.label(
+                RichText::new(format!(
+                    "{} x {} / tick {} -> {} / runtime {}:{} / verified {}",
+                    preview.width,
+                    preview.height,
+                    preview.scheduled_tick,
+                    preview.captured_tick,
+                    preview.runtime_identity.session_id,
+                    preview.runtime_identity.generation,
+                    &preview.sha256[..12]
+                ))
+                .size(11.0)
+                .color(muted_text()),
+            );
+        }
     }
 
     fn inline_generated_asset(
@@ -4957,13 +5892,22 @@ impl DesktopEditor {
         }
     }
 
-    fn composer(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task) {
+    fn composer(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task, compact: bool) {
+        let mut stop_request = false;
         egui::Frame::none().fill(panel_fill()).stroke(egui::Stroke::new(1.0_f32, border())).rounding(9.0).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
+            let busy = self.ui_busy(task);
+            if !busy {
+                self.image_generation_panel(ui, task, compact);
+            }
             let reply = ui.add_sized(
-                [ui.available_width(), 58.0],
+                [ui.available_width(), if compact { 42.0 } else { 58.0 }],
                 egui::TextEdit::multiline(&mut self.state.reply)
                     .id_source(("task-reply-input", task.id.as_str()))
-                    .hint_text("Reply to Stasis AI..."),
+                    .hint_text(if compact && busy {
+                        "Draft a note for after this request..."
+                    } else {
+                        "Reply to Stasis AI..."
+                    }),
             );
             reply.widget_info(|| {
                 let mut info = egui::WidgetInfo::text_edit(&self.state.reply, &self.state.reply);
@@ -4984,21 +5928,37 @@ impl DesktopEditor {
             if reply.has_focus() {
                 self.state.focus = FocusArea::Reply;
             }
+            if compact && busy {
+                let stop_shortcut = ui
+                    .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Stop (Esc)").clicked() || stop_shortcut {
+                        stop_request = true;
+                    }
+                    ui.label(
+                        RichText::new("AI is working")
+                            .size(11.0)
+                            .color(muted_text()),
+                    );
+                });
+                return;
+            }
             ui.horizontal_wrapped(|ui| {
-                let busy = self.ui_busy(task);
                 let interactive = task.lifecycle == TaskLifecycle::Active
                     && task.connection == ConnectionState::Connected
                     && !busy;
                 let image_capability = self.image_attachment_capability(&task.id);
                 let can_attach = interactive && image_capability.is_ok();
                 let disabled_reason = image_capability.as_ref().err().map(String::as_str).unwrap_or("Attachments are unavailable while this task is closed, disconnected, or busy.");
-                if ui.add_enabled(can_attach, egui::Button::new("Attach image")).on_hover_text("Select up to eight bounded PNG or JPEG files").on_disabled_hover_text(disabled_reason).clicked() {
+                let attach_label = if compact { "Attach" } else { "Attach image" };
+                if ui.add_enabled(can_attach, egui::Button::new(attach_label)).on_hover_text("Select up to eight bounded PNG or JPEG files").on_disabled_hover_text(disabled_reason).clicked() {
                     self.select_image_files(&task.id);
                 }
 
                 let can_send = interactive && !self.state.reply.trim().is_empty();
+                let send_label = if compact { "Send" } else { "Send (Ctrl+Enter)" };
                 if ui
-                    .add_enabled(can_send, egui::Button::new("Send (Ctrl+Enter)"))
+                    .add_enabled(can_send, egui::Button::new(send_label))
                     .on_hover_text(if can_send {
                         "Send this message and keep the task active"
                     } else {
@@ -5013,30 +5973,190 @@ impl DesktopEditor {
                 let success_ready = primary.command == TaskSessionCommand::MarkDone
                     && primary.enabled
                     && self.validation_fingerprints.contains_key(task.id.as_str());
-                if ui
-                    .add_enabled(
-                        success_ready,
-                        egui::Button::new("Success (Ctrl+Shift+D)"),
-                    )
-                    .on_hover_text(if success_ready {
-                        "Review task-time files, commit them, and mark this task accomplished"
+                let has_ai_reply = task.thread.iter().any(|entry| {
+                    matches!(entry.kind, ThreadEntryKind::Result | ThreadEntryKind::HostResult)
+                });
+                if !compact || has_ai_reply {
+                    let success_label = if compact {
+                        "Success"
                     } else {
-                        "Resolve pending changes and pass focused tests before marking success."
-                    })
-                    .clicked()
-                {
-                    self.state.dispatch(TaskSessionCommand::MarkDone);
+                        "Success (Ctrl+Shift+D)"
+                    };
+                    if ui
+                        .add_enabled(success_ready, egui::Button::new(success_label))
+                        .on_hover_text(if success_ready {
+                            "Review task-time files, commit them, and mark this task accomplished"
+                        } else {
+                            "Resolve pending changes and pass focused tests before marking success."
+                        })
+                        .clicked()
+                    {
+                        self.state.dispatch(TaskSessionCommand::MarkDone);
+                    }
                 }
 
+                let reject_label = if compact { "Reject" } else { "Reject (Ctrl+Esc)" };
                 if ui
                     .add_enabled(
                         task.lifecycle == TaskLifecycle::Active,
-                        egui::Button::new("Reject (Ctrl+Esc)"),
+                        egui::Button::new(reject_label),
                     )
                     .on_hover_text("Close this task after confirmation")
                     .clicked()
                 {
                     self.state.dispatch(TaskSessionCommand::Cancel);
+                }
+            });
+        });
+        if stop_request {
+            self.state.notice = self
+                .controller
+                .cancel_request(&mut self.state.session, &task.id)
+                .err()
+                .map(|error| error.to_string());
+        }
+    }
+
+    fn image_generation_panel(&mut self, ui: &mut egui::Ui, task: &stasis_ai::Task, compact: bool) {
+        ui.group(|ui| {
+            ui.label(RichText::new("Generated image").strong());
+            match ImageGenerationConfig::from_env() {
+                Ok(config) => {
+                    ui.label(format!(
+                        "Configured: {} | Model: {} | Route: {} | Fallback: {}",
+                        config.provider, config.model, config.route, config.fallback
+                    ));
+                }
+                Err(error) => {
+                    ui.label(RichText::new(format!("Image provider unavailable: {error}")).weak());
+                }
+            }
+            let prompt = ui.add(
+                egui::TextEdit::multiline(&mut self.state.image_prompt)
+                    .desired_rows(if compact { 1 } else { 2 })
+                    .hint_text("Describe one project image..."),
+            );
+            if prompt.has_focus() {
+                self.state.focus = FocusArea::Reply;
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Import as");
+                ui.text_edit_singleline(&mut self.state.image_destination);
+                if ui
+                    .button(if compact {
+                        "Generate"
+                    } else {
+                        "Generate  Ctrl+G"
+                    })
+                    .clicked()
+                {
+                    self.state.dispatch(TaskSessionCommand::GenerateImage);
+                }
+            });
+
+            let Some(artifact) = self.generated_images.get(&task.id).cloned() else {
+                if let Some(pending) = &self.image_generation {
+                    if pending.task_id == task.id {
+                        ui.label("Generating off the UI thread...");
+                        return;
+                    }
+                }
+                ui.label(RichText::new("No generated preview for this task.").weak());
+                return;
+            };
+
+            let needs_texture = self
+                .image_texture
+                .as_ref()
+                .map_or(true, |(id, _)| id != &artifact.id);
+            if needs_texture {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [artifact.width, artifact.height],
+                    &artifact.rgba,
+                );
+                self.image_texture = Some((
+                    artifact.id.clone(),
+                    ui.ctx().load_texture(
+                        format!("generated-preview-{}-{}", task.id, artifact.id),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ),
+                ));
+            }
+            let texture_id = self
+                .image_texture
+                .as_ref()
+                .expect("generated image texture")
+                .1
+                .id();
+            let scale = (ui.available_width().min(220.0) / artifact.width as f32)
+                .min(180.0 / artifact.height as f32);
+            ui.image((
+                texture_id,
+                egui::vec2(
+                    artifact.width as f32 * scale,
+                    artifact.height as f32 * scale,
+                ),
+            ));
+            let cost = artifact
+                .cost_micros
+                .map(|value| format!("${:.4}", value as f64 / 1_000_000.0))
+                .unwrap_or_else(|| "unknown".into());
+            ui.label(format!(
+                "{} | {}x{} | sha256 {}",
+                artifact.id,
+                artifact.width,
+                artifact.height,
+                &artifact.sha256[..12]
+            ));
+            ui.label(format!(
+                "Provider: {} | Model: {} | Route: {} | Fallback: {} | Cost: {}",
+                artifact.provider, artifact.model, artifact.route, artifact.fallback, cost
+            ));
+            let state = self
+                .state
+                .session
+                .task(&task.id)
+                .ok()
+                .and_then(|task| task.generated_images.get(artifact.id.as_str()))
+                .map(|image| (image.review.clone(), image.handoff.clone()));
+            if let Some((review, handoff)) = &state {
+                ui.label(format!("Review: {review:?} | Import: {handoff:?}"));
+            }
+            ui.horizontal_wrapped(|ui| {
+                if matches!(&state, Some((ImageReviewState::Pending, _)))
+                    && ui.button("Approve preview").clicked()
+                {
+                    self.state.notice = self
+                        .state
+                        .session
+                        .task_mut(&task.id)
+                        .and_then(|task| task.approve_generated_image(&artifact.id))
+                        .err()
+                        .map(|error| error.to_string());
+                }
+                if matches!(&state, Some((ImageReviewState::Pending, _)))
+                    && ui.button("Reject preview").clicked()
+                {
+                    self.state.notice = self
+                        .state
+                        .session
+                        .task_mut(&task.id)
+                        .and_then(|task| {
+                            task.reject_generated_image(&artifact.id, "Rejected in desktop editor")
+                        })
+                        .err()
+                        .map(|error| error.to_string());
+                }
+                if matches!(
+                    &state,
+                    Some((ImageReviewState::Approved, ImageHandoffState::Pending))
+                ) && ui.button("Import approved  Ctrl+Shift+I").clicked()
+                {
+                    self.state.intents.push(EditorIntent::ImportImage(
+                        task.id.to_string(),
+                        artifact.id.clone(),
+                    ));
                 }
             });
         });
@@ -5197,14 +6317,6 @@ impl DesktopEditor {
     fn compact_rail(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let spacing = ui.spacing().item_spacing.x;
-            let project_width = (ui.available_width() * 0.25)
-                .min((ui.available_width() - 164.0 - 2.0 * spacing).max(0.0));
-            let name = project_name(&self.project_root);
-            ui.add_sized(
-                [project_width, 30.0],
-                egui::Label::new(RichText::new(&name).strong()).truncate(true),
-            )
-            .on_hover_text(&name);
             let input_width = (ui.available_width() - 64.0 - spacing).clamp(0.0, 250.0);
             let input = ui.add_sized(
                 [input_width, 30.0],
@@ -5235,40 +6347,6 @@ impl DesktopEditor {
                 self.state.notice = self.state.create_and_send_task().err();
             }
         });
-        let active = self.state.session.active_task_id().map(ToString::to_string);
-        let active_memory_id = ui.make_persistent_id("compact-task-rail-active");
-        let active_changed = ui.data(|data| data.get_temp::<Option<String>>(active_memory_id))
-            != Some(active.clone());
-        ui.data_mut(|data| data.insert_temp(active_memory_id, active.clone()));
-        let cards = self
-            .state
-            .session
-            .tasks()
-            .map(|task| (task.id.to_string(), task.objective.clone()))
-            .collect::<Vec<_>>();
-        egui::ScrollArea::horizontal()
-            .id_source("compact-task-rail")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (id, objective) in cards {
-                        let selected = active.as_deref() == Some(&id);
-                        let response = ui.selectable_label(selected, &objective);
-                        response.widget_info(|| {
-                            egui::WidgetInfo::selected(
-                                egui::WidgetType::SelectableLabel,
-                                selected,
-                                format!("Task: {objective}"),
-                            )
-                        });
-                        if selected && active_changed {
-                            response.scroll_to_me(Some(egui::Align::Center));
-                        }
-                        if response.clicked() {
-                            self.state.notice = self.state.switch_task(&id).err();
-                        }
-                    }
-                });
-            });
     }
 
     fn ui(&mut self, context: &egui::Context) {
@@ -5284,7 +6362,9 @@ impl DesktopEditor {
         self.poll_controller();
         self.poll_host();
         self.poll_capture();
+        self.poll_images();
         self.poll_semantic_previews();
+        self.auto_apply_ready_proposal();
         self.process_shortcuts(context);
         if let Some(windows) = self.windows.as_mut() {
             if self.state.focus == FocusArea::Game && self.state.focus_pending {
@@ -5302,6 +6382,8 @@ impl DesktopEditor {
         if palette_frame {
             context.input_mut(|input| input.events.clear());
         }
+        let layout = EditorLayout::for_width(context.screen_rect().width());
+        let compact = layout == EditorLayout::Compact;
         egui::TopBottomPanel::top("top-bar")
             .frame(
                 egui::Frame::none()
@@ -5310,46 +6392,82 @@ impl DesktopEditor {
             )
             .show(context, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Stasis AI Editor").size(13.0).strong());
-                    if ui
-                        .button("Tile Editor + Game")
-                        .on_hover_text(
-                            "Restore and arrange the editor on the left and game on the right",
-                        )
-                        .clicked()
-                    {
-                        if let Some(windows) = self.windows.as_mut() {
-                            windows.tile();
+                    ui.label(
+                        RichText::new(if compact {
+                            "Stasis"
+                        } else {
+                            "Stasis AI Editor"
+                        })
+                        .size(13.0)
+                        .strong(),
+                    );
+                    if compact {
+                        let queued = self
+                            .state
+                            .session
+                            .tasks()
+                            .filter(|task| task.lifecycle == TaskLifecycle::Queued)
+                            .count();
+                        if queued > 0 {
+                            ui.label(
+                                RichText::new(format!("{queued} queued"))
+                                    .size(11.0)
+                                    .color(muted_text()),
+                            );
                         }
-                    }
-                    if ui.available_width() >= 250.0 {
-                        ui.label(
-                            RichText::new("Ctrl+K commands  |  Ctrl+N new task")
-                                .size(11.0)
-                                .color(muted_text()),
-                        );
-                    }
-                    if self.store.is_some() && ui.button("Erase saved history...").clicked() {
-                        self.erase_confirmation = true;
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button("Ctrl+K")
+                                .on_hover_text("Command palette")
+                                .clicked()
+                            {
+                                self.state.dispatch(TaskSessionCommand::OpenCommandPalette);
+                            }
+                        });
+                    } else {
+                        if ui
+                            .button("Tile Editor + Game")
+                            .on_hover_text(
+                                "Restore and arrange the editor on the left and game on the right",
+                            )
+                            .clicked()
+                        {
+                            if let Some(windows) = self.windows.as_mut() {
+                                windows.tile();
+                            }
+                        }
+                        if ui.available_width() >= 250.0 {
+                            ui.label(
+                                RichText::new("Ctrl+K commands  |  Ctrl+N new task")
+                                    .size(11.0)
+                                    .color(muted_text()),
+                            );
+                        }
+                        if self.store.is_some() && ui.button("Erase saved history...").clicked() {
+                            self.erase_confirmation = true;
+                        }
                     }
                 });
                 if let Some(notice) = &self.state.notice {
                     ui.colored_label(warning(), notice);
                 }
             });
-        let width = context.screen_rect().width();
-        match EditorLayout::for_width(width) {
+        match layout {
             EditorLayout::Compact => {
-                egui::TopBottomPanel::top("compact-rail")
-                    .frame(
-                        egui::Frame::none()
-                            .fill(rail_fill())
-                            .inner_margin(egui::Margin::symmetric(10.0, 7.0)),
-                    )
-                    .show(context, |ui| self.compact_rail(ui));
+                if self.state.focus == FocusArea::Tasks
+                    || self.state.session.active_task_id().is_none()
+                {
+                    egui::TopBottomPanel::top("compact-rail")
+                        .frame(
+                            egui::Frame::none()
+                                .fill(rail_fill())
+                                .inner_margin(egui::Margin::symmetric(10.0, 5.0)),
+                        )
+                        .show(context, |ui| self.compact_rail(ui));
+                }
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none().fill(canvas_fill()))
-                    .show(context, |ui| self.detail(ui));
+                    .show(context, |ui| self.detail(ui, true));
             }
             EditorLayout::Wide => {
                 egui::SidePanel::left("project-task-rail")
@@ -5369,7 +6487,7 @@ impl DesktopEditor {
                             ui.allocate_ui_with_layout(
                                 egui::vec2(content_width, ui.available_height()),
                                 egui::Layout::top_down(egui::Align::Min),
-                                |ui| self.detail(ui),
+                                |ui| self.detail(ui, false),
                             );
                         });
                     });
@@ -5578,6 +6696,9 @@ impl eframe::App for DesktopEditor {
         }
         if let Some(capture) = self.capture.take() {
             capture.canceled.store(true, Ordering::Release);
+        }
+        if let Some(generation) = self.image_generation.take() {
+            generation.canceled.store(true, Ordering::Release);
         }
         let _ = self
             .client
@@ -5927,8 +7048,29 @@ mod tests {
             .unwrap();
         editor.flush_intents();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !editor.busy_tasks.is_empty() {
+        while !editor.busy_tasks.is_empty()
+            || editor
+                .state
+                .session
+                .active_task()
+                .is_ok_and(|task| task.validation.is_running())
+            || editor
+                .state
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, EditorIntent::Test(task, _) if task == "task-1"))
+        {
             editor.poll_host();
+            editor.flush_intents();
+            if editor.busy_tasks.is_empty()
+                && editor
+                    .state
+                    .session
+                    .active_task()
+                    .is_ok_and(|task| !task.validation.is_running())
+            {
+                break;
+            }
             assert!(Instant::now() < deadline, "host apply exceeded deadline");
             thread::sleep(Duration::from_millis(10));
         }
@@ -6074,6 +7216,56 @@ mod tests {
     }
 
     #[test]
+    fn ready_semantic_proposal_is_accepted_and_queued_for_apply_automatically() {
+        let (mut editor, _root, _) = review_fixture("preview_auto_apply");
+        finish_preview(&mut editor);
+
+        editor.auto_apply_ready_proposal();
+
+        assert!(matches!(
+            editor.state.session.active_task().unwrap().actions["value"].state,
+            ActionState::Accepted
+        ));
+        assert!(editor.state.intents.iter().any(|intent| matches!(
+            intent,
+            EditorIntent::Apply(task, action) if task == "task-1" && action == "value"
+        )));
+    }
+
+    #[test]
+    fn rejecting_an_applied_task_restores_its_source_receipt() {
+        let (mut editor, root, _) = review_fixture("reject_restores_applied");
+        let before = std::fs::read_to_string(root.join("src/main.stasis")).unwrap();
+        finish_preview(&mut editor);
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        finish_apply(&mut editor);
+        assert_ne!(
+            std::fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+
+        editor
+            .state
+            .intents
+            .push(EditorIntent::Cancel("task-1".into()));
+        editor.flush_intents();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/main.stasis")).unwrap(),
+            before
+        );
+        assert_eq!(
+            editor.state.session.task("task-1").unwrap().lifecycle,
+            TaskLifecycle::Canceled
+        );
+        assert!(editor.execution_receipts.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn semantic_preview_retains_revisions_and_binds_task_and_exact_payload() {
         let (mut editor, root, payload) = review_fixture("preview_editor_revisions");
         finish_preview(&mut editor);
@@ -6174,6 +7366,58 @@ mod tests {
             "stasis-editor-{label}-{}-{nonce}.png",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn long_thread_keeps_composer_visible_at_supported_window_sizes() {
+        for size in [egui::vec2(900.0, 600.0), egui::vec2(1440.0, 900.0)] {
+            let (client, _server) = live_session(4);
+            let mut editor =
+                DesktopEditor::new(client, PathBuf::from("."), Arc::new(AtomicBool::new(false)));
+            editor.state = task_state();
+            for _ in 0..40 {
+                editor.state.reply = "A long conversation entry for the active task.".into();
+                editor.state.handle(TaskSessionCommand::SendReply).unwrap();
+            }
+            // Keep this a layout test; do not dispatch queued provider requests.
+            editor.state.intents.clear();
+            let context = egui::Context::default();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            for frame in 0..3 {
+                let output = context.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |context| editor.ui(context),
+                );
+                // Newly created egui panels use an invisible first sizing pass.
+                if frame == 0 {
+                    continue;
+                }
+                for label in [
+                    "Send (Ctrl+Enter)",
+                    "Success (Ctrl+Shift+D)",
+                    "Attach image",
+                ] {
+                    let text = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| {
+                            if let egui::Shape::Text(text) = &shape.shape {
+                                if text.galley.text() == label {
+                                    return Some((shape.clip_rect, text));
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or_else(|| panic!("missing composer action: {label}"));
+                    let bounds = egui::Rect::from_min_size(text.1.pos, text.1.galley.size());
+                    assert!(screen.contains_rect(bounds), "{label} outside {size:?}");
+                    assert!(text.0.contains_rect(bounds), "{label} clipped at {size:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -6987,7 +8231,9 @@ mod tests {
 
         let state = provider_reply_state(&config, Some(&usage));
 
-        assert_eq!(state.provider.as_deref(), Some("cerebras"));
+        assert_eq!(state.provider.as_deref(), Some("openrouter"));
+        assert_eq!(state.model.as_deref(), Some("example/model"));
+        assert_eq!(state.reasoning_effort.as_deref(), Some("medium"));
         assert!(matches!(
             state.routing,
             RoutingState::Assigned { route } if route == "openrouter:cerebras"
@@ -7105,6 +8351,48 @@ mod tests {
     }
 
     #[test]
+    fn proposal_tools_canonicalize_new_symbol_targets_and_finish_immediately() {
+        let mut tools = ProposalTools::default();
+        let observations = tools.execute(
+            &[ToolCall {
+                tool: "propose_semantic_edit".to_string(),
+                args: json!({
+                    "proposal_id": "add-test",
+                    "description": "Add a test",
+                    "batch": {
+                        "schema_version": 1,
+                        "edits": [{
+                            "operation": "add",
+                            "target": {
+                                "file": "tests/main.test.stasis",
+                                "kind": "test",
+                                "name": "new test",
+                                "owner": "Tests",
+                                "signature": "test `new test`",
+                                "symbol_id": null
+                            },
+                            "new_source": "test `new test`(): bool { return true; }"
+                        }]
+                    }
+                }),
+            }],
+            &AtomicBool::new(false),
+        );
+
+        assert!(observations[0].error.is_none());
+        let target = &tools.proposals[0].payload["edits"][0]["target"];
+        assert_eq!(
+            target,
+            &json!({
+                "file": "tests/main.test.stasis",
+                "kind": "test",
+                "name": "new test"
+            })
+        );
+        assert_eq!(tools.terminal_success().as_deref(), Some("Add a test"));
+    }
+
+    #[test]
     fn repaired_proposal_is_structured_and_keeps_its_action_id() {
         let mut tools = ProposalTools::default();
         tools
@@ -7181,6 +8469,7 @@ mod tests {
                 operation: HostOperation::Test {
                     paths: Vec::new(),
                     run_id: first_run_id,
+                    rollback_receipts: Vec::new(),
                 },
                 result: Err("test player_speed failed at tests/player.test.stasis".to_string()),
             })
@@ -7306,6 +8595,7 @@ mod tests {
             operation: HostOperation::Test {
                 paths: Vec::new(),
                 run_id: 1,
+                rollback_receipts: Vec::new(),
             },
             source_before: Some("unused".to_string()),
         })
@@ -7358,6 +8648,7 @@ mod tests {
                     operation: HostOperation::Test {
                         paths: Vec::new(),
                         run_id: old_run,
+                        rollback_receipts: Vec::new(),
                     },
                     result: Err("late failure".into()),
                 })
@@ -7442,6 +8733,18 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while editor.busy_tasks.contains("task-1") && std::time::Instant::now() < deadline {
             editor.poll_host();
+            editor.flush_intents();
+            thread::yield_now();
+        }
+        while editor
+            .state
+            .session
+            .task("task-1")
+            .is_ok_and(|task| task.validation.is_running())
+            && std::time::Instant::now() < deadline
+        {
+            editor.poll_host();
+            editor.flush_intents();
             thread::yield_now();
         }
 
