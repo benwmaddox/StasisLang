@@ -3469,9 +3469,17 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     }
     fs::write(
         project.join("stasis.json"),
-        "{\n  \"manifest_version\": 1,\n  \"name\": \"TUI Asset Root\",\n  \"entry\": \"src/main.stasis\",\n  \"tests\": \"tests\",\n  \"output\": \"build\"\n}\n",
+        "{\n  \"manifest_version\": 1,\n  \"name\": \"TUI Asset Root\",\n  \"entry\": \"src/main.stasis\",\n  \"tests\": \"tests\",\n  \"output\": \"build\",\n  \"stdlib\": \"toolchain\"\n}\n",
     )
     .expect("write manifest");
+    let prepared = stasis(&["prepare"], &project);
+    assert_eq!(
+        prepared.status.code(),
+        Some(0),
+        "toolchain preparation failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&prepared.stdout),
+        String::from_utf8_lossy(&prepared.stderr)
+    );
     fs::write(project.join("live.commands"), ":quit\n").expect("write live script");
 
     let rooted_output = stasis(

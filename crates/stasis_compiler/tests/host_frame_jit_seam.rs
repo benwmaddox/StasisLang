@@ -264,7 +264,9 @@ fn native_host_frame(pointer_count: i32, mutate_writer: bool) -> (Vec<i32>, Vec<
         mutate_writer
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+    let canonical = dir.canonicalize().unwrap();
+    let display = canonical.to_string_lossy();
+    let dir = PathBuf::from(display.strip_prefix(r"\\?\").unwrap_or(&display));
     let source = dir.join("fixture.c");
     std::fs::write(
         &source,
