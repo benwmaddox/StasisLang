@@ -1174,6 +1174,10 @@ mod tests {
         assert!(!ranges
             .iter()
             .any(|range| range.start == comparison_start + 1));
+
+        let comparisons = "function reserve(): void { if (run < 0 || run >= limit) { return; } }";
+        let formatted_comparisons = format_source(comparisons).expect("format comparisons");
+        assert!(formatted_comparisons.contains("run < 0 || run >= limit"));
     }
 
     #[test]

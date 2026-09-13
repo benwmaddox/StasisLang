@@ -674,7 +674,7 @@ fn generic_type_context(source: &str, tokens: &[Token], open: usize) -> bool {
         if token_text(source, token) == ":" {
             return true;
         }
-        if matches!(token_text(source, token), ";" | "{" | "}" | "=") {
+        if matches!(token_text(source, token), ";" | "{" | "}" | "(" | ")" | "=") {
             return false;
         }
         if token_is_other_char(source, token, b'<') {
