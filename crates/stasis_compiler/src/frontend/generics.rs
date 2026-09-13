@@ -174,8 +174,12 @@ impl Expansion {
         let mut concrete_paths = BTreeMap::new();
 
         for (file_index, file) in files.iter().enumerate() {
-            let layout = parse_top_level_type_layout(&file.source)
-                .map_err(|error| format!("{}: {error}", file.path))?;
+            // This discovery pass must not take ownership of malformed-source
+            // diagnostics. The canonical parser/indexer below has the source
+            // span and function context needed to report those errors.
+            let Ok(layout) = parse_top_level_type_layout(&file.source) else {
+                continue;
+            };
             for global in &layout.globals {
                 concrete_paths.insert(global.name.clone(), global.type_name.clone());
             }
@@ -233,9 +237,10 @@ impl Expansion {
                     },
                 );
             }
-            for function in parse_top_level_functions(&file.source)
-                .map_err(|error| format!("{}: {error}", file.path))?
-            {
+            let Ok(functions) = parse_top_level_functions(&file.source) else {
+                continue;
+            };
+            for function in functions {
                 if function.generic_parameters.is_empty() {
                     continue;
                 }
@@ -2637,6 +2642,21 @@ mod tests {
             .check()
             .expect_err("generic value parameters are immutable");
         assert!(format!("{error:?}").contains("cannot assign to compile-time generic parameter"));
+    }
+
+    #[test]
+    fn defers_malformed_sources_to_canonical_parser_diagnostics() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file("broken.stasis", "function broken(: i32): void {}\n");
+        compiler
+            .check()
+            .expect_err("malformed source must fail in the canonical parser");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("canonical parser diagnostic");
+        assert_eq!(diagnostic.path, "broken.stasis");
+        assert_eq!(diagnostic.symbol, "broken");
+        assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Parse);
     }
 
     #[test]
