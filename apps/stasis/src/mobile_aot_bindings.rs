@@ -56,6 +56,7 @@ pub fn write_mobile_aot_bindings_source_with_profile_and_assets(
         .get("functions")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "mobile AOT manifest missing functions array".to_string())?;
+    let render_lifecycle_version = mobile_aot_render_lifecycle_version(manifest, functions)?;
     let literals = manifest
         .get("string_literals")
         .and_then(serde_json::Value::as_array)
@@ -67,12 +68,20 @@ pub fn write_mobile_aot_bindings_source_with_profile_and_assets(
         build_aot_direct_storage_source(state_layout)?;
     out.push_str(&direct_storage_source);
     for function in functions {
+        let name = function
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "mobile AOT function missing name".to_string())?;
         let symbol = function
             .get("symbol")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
         let return_type = mobile_aot_c_return_type(function)?;
-        out.push_str(&format!("extern {return_type} {symbol}(void);\n"));
+        if name == "gfx_cmd_construction_finish" {
+            out.push_str(&format!("extern int32_t {symbol}(int32_t);\n"));
+        } else {
+            out.push_str(&format!("extern {return_type} {symbol}(void);\n"));
+        }
     }
     for (name, wrapper) in [
         ("main", "stasis_mobile_main_entry"),
@@ -80,7 +89,23 @@ pub fn write_mobile_aot_bindings_source_with_profile_and_assets(
         ("render", "stasis_mobile_render_entry"),
     ] {
         let (symbol, return_type) = mobile_aot_function_for(manifest, name)?;
-        if return_type == 0 {
+        if name == "render" && render_lifecycle_version == 1 {
+            let (reset, _) = mobile_aot_function_for(manifest, "gfx_cmd_construction_reset")?;
+            let (finish, _) = mobile_aot_function_for(manifest, "gfx_cmd_construction_finish")?;
+            if return_type == 0 {
+                out.push_str(&format!(
+                    "int32_t {wrapper}(void) {{ {reset}(); {symbol}(); return {finish}(0); }}\n"
+                ));
+            } else if return_type == 1 {
+                out.push_str(&format!(
+                    "int32_t {wrapper}(void) {{ {reset}(); return {finish}({symbol}()); }}\n"
+                ));
+            } else {
+                return Err(format!(
+                    "mobile AOT entry '{name}' must return void or i32, found type id {return_type}"
+                ));
+            }
+        } else if return_type == 0 {
             out.push_str(&format!(
                 "int32_t {wrapper}(void) {{ {symbol}(); return 0; }}\n"
             ));
@@ -186,13 +211,22 @@ pub fn audit_mobile_aot_bindings(
         .get("functions")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "mobile AOT manifest missing functions array".to_string())?;
+    let render_lifecycle_version = mobile_aot_render_lifecycle_version(manifest, functions)?;
     for function in functions {
+        let name = function
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "mobile AOT function missing name".to_string())?;
         let symbol = function
             .get("symbol")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
         let return_type = mobile_aot_c_return_type(function)?;
-        let declaration = format!("extern {return_type} {symbol}(void);");
+        let declaration = if name == "gfx_cmd_construction_finish" {
+            format!("extern int32_t {symbol}(int32_t);")
+        } else {
+            format!("extern {return_type} {symbol}(void);")
+        };
         if !bindings_source.contains(&declaration) {
             return Err(format!(
                 "mobile AOT bindings missing declaration for generated symbol '{symbol}'"
@@ -205,7 +239,15 @@ pub fn audit_mobile_aot_bindings(
         ("render", "stasis_mobile_render_entry"),
     ] {
         let (symbol, return_type) = mobile_aot_function_for(manifest, name)?;
-        let expected = if return_type == 0 {
+        let expected = if name == "render" && render_lifecycle_version == 1 {
+            let (reset, _) = mobile_aot_function_for(manifest, "gfx_cmd_construction_reset")?;
+            let (finish, _) = mobile_aot_function_for(manifest, "gfx_cmd_construction_finish")?;
+            if return_type == 0 {
+                format!("int32_t {wrapper}(void) {{ {reset}(); {symbol}(); return {finish}(0); }}")
+            } else {
+                format!("int32_t {wrapper}(void) {{ {reset}(); return {finish}({symbol}()); }}")
+            }
+        } else if return_type == 0 {
             format!("int32_t {wrapper}(void) {{ {symbol}(); return 0; }}")
         } else {
             format!("int32_t {wrapper}(void) {{ return {symbol}(); }}")
@@ -220,6 +262,33 @@ pub fn audit_mobile_aot_bindings(
         return Err("mobile AOT bindings missing runtime-global binding entry".to_string());
     }
     Ok(())
+}
+
+fn mobile_aot_render_lifecycle_version(
+    manifest: &serde_json::Value,
+    functions: &[serde_json::Value],
+) -> Result<u64, String> {
+    let version = manifest
+        .get("render_construction_lifecycle_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if version > 1 {
+        return Err(format!(
+            "mobile AOT manifest has unsupported render construction lifecycle version {version}"
+        ));
+    }
+    let has_reset = functions.iter().any(|entry| {
+        entry.get("name").and_then(serde_json::Value::as_str) == Some("gfx_cmd_construction_reset")
+    });
+    let has_finish = functions.iter().any(|entry| {
+        entry.get("name").and_then(serde_json::Value::as_str) == Some("gfx_cmd_construction_finish")
+    });
+    if has_reset != has_finish || (version == 1) != (has_reset && has_finish) {
+        return Err(format!(
+            "mobile AOT render construction lifecycle {version} does not match generated reset/finish helpers"
+        ));
+    }
+    Ok(version)
 }
 
 pub fn mobile_aot_function_for(

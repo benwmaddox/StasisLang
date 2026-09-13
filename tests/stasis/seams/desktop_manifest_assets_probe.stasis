@@ -2,14 +2,14 @@
 
 import "../../../src/stdlib/internal/gfx_cmd.stasis";
 
-extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
+extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): SpriteRef;
 extern function load_font(path: string, size: i32): i32;
 extern function measure_text(font: i32, text: string): f32;
 
 function @extern("stasis_jit_gfx_cache_text") gfx_cache_text(font: i32, text: string): i32;
 function @extern("stasis_jit_gfx_measure_text_cached") gfx_measure_text_cached(handle: i32): f32;
 
-global seam_sprite_handle: i32;
+global seam_sprite_handle: SpriteRef;
 global seam_font_handle: i32;
 global seam_cached_handle: i32;
 global seam_direct_width: f32;
@@ -17,7 +17,7 @@ global seam_cached_width: f32;
 
 function main(): i32 {
     seam_sprite_handle = gfx_load_sprite("assets/smoke.png", 64, 64);
-    if (seam_sprite_handle == 0) {
+    if (seam_sprite_handle == SpriteRef.Invalid) {
         return 21;
     }
     seam_font_handle = load_font("assets/smoke.ttf", 24);

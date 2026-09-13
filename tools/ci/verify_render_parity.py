@@ -30,14 +30,14 @@ ALLOWED_STAGES = {
 }
 INITIAL_STAGE_FRAMES = {"initial_launch": 1, "second_frame": 2}
 RUNTIME_TRACE_PATTERN = re.compile(
-    r"Stasis render contract v7 trace=(\d+)\s+flags=3\s+lines=2\s+rects=1\s+sprites=5\s+text=2"
+    r"Stasis render contract v8 trace=(\d+)\s+flags=3\s+lines=2\s+rects=1\s+sprites=5\s+text=2"
 )
 
 
 def _runtime_command_trace(log: str, stage: str) -> int:
     trace_match = RUNTIME_TRACE_PATTERN.search(log)
     if trace_match is None:
-        raise ValueError(f"runtime evidence for {stage} lacks current v7 command counts")
+        raise ValueError(f"runtime evidence for {stage} lacks current v8 command counts")
     trace = int(trace_match.group(1))
     if trace == 0:
         raise ValueError(f"runtime evidence for {stage} has a zero command trace")

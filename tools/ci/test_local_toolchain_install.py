@@ -49,7 +49,7 @@ class LocalToolchainInstallTests(unittest.TestCase):
             'stasis_runner.exe',
             'Get-ChildItem -LiteralPath (Split-Path -Parent $runtime) -Filter "*.dll"',
             'Join-Path $Destination "runtime"',
-            'Join-Path $staging "mobile"',
+            'Copy-TrackedTree -SourceRoot $repoRoot -Destination $staging -RelativeRoot "mobile"',
             'Join-Path $staging "tools/windows"',
             '$signingArtifacts',
             'configured local signer failed',
@@ -85,6 +85,20 @@ class LocalToolchainInstallTests(unittest.TestCase):
         self.assertNotIn(
             'Copy-Item -LiteralPath (Join-Path $repoRoot "runtime") '
             '-Destination (Join-Path $staging "runtime") -Recurse',
+            SCRIPT,
+        )
+
+    def test_mobile_staging_copies_only_versioned_inputs(self):
+        self.assertIn("function Copy-TrackedTree", SCRIPT)
+        self.assertIn('"ls-files", "--", $normalizedRoot', SCRIPT)
+        self.assertIn(
+            'Copy-TrackedTree -SourceRoot $repoRoot -Destination $staging '
+            '-RelativeRoot "mobile"',
+            SCRIPT,
+        )
+        self.assertNotIn(
+            'Copy-Item -LiteralPath (Join-Path $repoRoot "mobile") '
+            '-Destination (Join-Path $staging "mobile") -Recurse',
             SCRIPT,
         )
 

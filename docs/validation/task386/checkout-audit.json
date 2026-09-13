@@ -1,0 +1,68 @@
+[
+  {
+    "project": "Afterlight",
+    "before": "M src/view.stasis",
+    "after": "M src/view.stasis",
+    "unchanged": true
+  },
+  {
+    "project": "BannerfallTactics",
+    "before": "",
+    "after": "",
+    "unchanged": true
+  },
+  {
+    "project": "ChessTD",
+    "before": "",
+    "after": "",
+    "unchanged": true
+  },
+  {
+    "project": "Exterminator",
+    "before": "",
+    "after": "",
+    "unchanged": true
+  },
+  {
+    "project": "HamsterHavenTycoon",
+    "before": "",
+    "after": "",
+    "unchanged": true
+  },
+  {
+    "project": "maddox-and-friends",
+    "before": "",
+    "after": "",
+    "unchanged": true
+  },
+  {
+    "project": "maddox-marble-run",
+    "before": "",
+    "after": "",
+    "unchanged": true
+  },
+  {
+    "project": "RobotTournaments",
+    "before": "",
+    "after": "",
+    "unchanged": true
+  },
+  {
+    "project": "RootbeerMaze3",
+    "before": "M .gitignore\n M README.md\n M stasis.json\n M vendor/stasis/stdlib/audio.stasis\n M vendor/stasis/stdlib/clipboard.stasis\n M vendor/stasis/stdlib/graphics.stasis\n M vendor/stasis/stdlib/internal/host_window_request.stasis\n M vendor/stasis/stdlib/memory.stasis\n M vendor/stasis/stdlib/stdlib.stasis\n M vendor/stasis/stdlib/storage.stasis\n M vendor/stasis/stdlib/testing/input_testkit.stasis",
+    "after": "M .gitignore\n M README.md\n M stasis.json\n M vendor/stasis/stdlib/audio.stasis\n M vendor/stasis/stdlib/clipboard.stasis\n M vendor/stasis/stdlib/graphics.stasis\n M vendor/stasis/stdlib/internal/host_window_request.stasis\n M vendor/stasis/stdlib/memory.stasis\n M vendor/stasis/stdlib/stdlib.stasis\n M vendor/stasis/stdlib/storage.stasis\n M vendor/stasis/stdlib/testing/input_testkit.stasis",
+    "unchanged": true
+  },
+  {
+    "project": "SheepHerder",
+    "before": "",
+    "after": "",
+    "unchanged": true
+  },
+  {
+    "project": "ToddlerMatch",
+    "before": "",
+    "after": "",
+    "unchanged": true
+  }
+]

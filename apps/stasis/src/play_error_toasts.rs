@@ -13,7 +13,7 @@ pub const MAX_VISIBLE_TOASTS: usize = 5;
 pub const MAX_MESSAGE_BYTES: usize = 160;
 
 const GFX_CMD_MAGIC: i32 = 0x4758_4631;
-const GFX_CMD_VERSION: i32 = 7;
+const GFX_CMD_VERSION: i32 = 8;
 const GFX_I_VERSION: usize = 1;
 const GFX_I_LINE_COUNT: usize = 3;
 const GFX_I_SPRITE_COUNT: usize = 4;

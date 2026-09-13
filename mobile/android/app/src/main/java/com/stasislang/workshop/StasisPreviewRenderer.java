@@ -19,7 +19,8 @@ import org.json.JSONObject;
 final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private static final String LOG_TAG = "StasisRenderer";
     static final int RENDER_MAGIC = 0x47584631;
-    static final int RENDER_VERSION = 7;
+    static final int RENDER_VERSION = 8;
+    static final int LEGACY_RENDER_VERSION = 7;
     static final int FLAG_CLEAR = 1;
     static final int FLAG_PRESENT = 2;
 
@@ -251,7 +252,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         private int sampleCount;
         private int minimumDrawCalls = Integer.MAX_VALUE;
         private int maximumDrawCalls;
-        private boolean reported;
+        private volatile boolean reported;
 
         FramePerformanceSamples(int warmupFrames, int sampleFrames) {
             if (warmupFrames < 0 || sampleFrames <= 0) {
@@ -288,6 +289,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + " draw_calls_max=" + maximumDrawCalls
                     + " lines=" + lines + " rects=" + rectangles
                     + " sprites=" + sprites + " text=" + text + " order=" + order;
+        }
+
+        boolean isComplete() {
+            return reported;
         }
 
         private static long percentileMicros(long[] values, int percentile) {
@@ -736,6 +741,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
         performanceSamples = new FramePerformanceSamples(
                 PERFORMANCE_WARMUP_FRAMES, PERFORMANCE_SAMPLE_FRAMES);
+    }
+
+    synchronized boolean isPerformanceSamplingForAcceptanceActive() {
+        return performanceSamples != null && !performanceSamples.isComplete();
     }
 
     // Acceptance synchronization waits for the GL thread to consume the exact
@@ -1572,7 +1581,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 || values.limit() < FRAME_I32_CAPACITY
                 || floats.limit() < FRAME_F32_CAPACITY
                 || values.get(I_MAGIC) != RENDER_MAGIC
-                || values.get(I_VERSION) != RENDER_VERSION) return false;
+                || (values.get(I_VERSION) != RENDER_VERSION
+                    && values.get(I_VERSION) != LEGACY_RENDER_VERSION)) return false;
         // Mirror stasis_render_validate in runtime/stasis_render_contract.h.
         // Validate the complete frame before resource preparation or any GLES writes.
         int lineCount = values.get(I_LINE_COUNT);

@@ -1,0 +1,893 @@
+[
+  {
+    "project": "Afterlight",
+    "commit": "f1bb277923cd7f368671d4ce0a5964c515569f61",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Afterlight",
+        "exit": 0,
+        "duration_seconds": 0.562,
+        "log": "docs/validation/task386/Afterlight-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Afterlight",
+        "exit": 0,
+        "duration_seconds": 0.172,
+        "log": "docs/validation/task386/Afterlight-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Afterlight",
+        "exit": 1,
+        "duration_seconds": 0.031,
+        "log": "docs/validation/task386/Afterlight-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Afterlight",
+        "exit": 1,
+        "duration_seconds": 0.219,
+        "log": "docs/validation/task386/Afterlight-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Afterlight",
+        "exit": 1,
+        "duration_seconds": 0.047,
+        "log": "docs/validation/task386/Afterlight-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Afterlight",
+        "exit": 1,
+        "duration_seconds": 0.031,
+        "log": "docs/validation/task386/Afterlight-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "BannerfallTactics",
+    "commit": "a3f9edf4579be9bf56d0600d31bc26e9ef897d95",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\BannerfallTactics",
+        "exit": 0,
+        "duration_seconds": 0.5,
+        "log": "docs/validation/task386/BannerfallTactics-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\BannerfallTactics",
+        "exit": 0,
+        "duration_seconds": 0.094,
+        "log": "docs/validation/task386/BannerfallTactics-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\BannerfallTactics",
+        "exit": 1,
+        "duration_seconds": 0.015,
+        "log": "docs/validation/task386/BannerfallTactics-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\BannerfallTactics",
+        "exit": 1,
+        "duration_seconds": 0.141,
+        "log": "docs/validation/task386/BannerfallTactics-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\BannerfallTactics",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/BannerfallTactics-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\BannerfallTactics",
+        "exit": 1,
+        "duration_seconds": 0.031,
+        "log": "docs/validation/task386/BannerfallTactics-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "ChessTD",
+    "commit": "617fdb0ed321abff23cd9ff8d16d2fc3a4314040",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ChessTD",
+        "exit": 0,
+        "duration_seconds": 0.282,
+        "log": "docs/validation/task386/ChessTD-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ChessTD",
+        "exit": 1,
+        "duration_seconds": 0.89,
+        "log": "docs/validation/task386/ChessTD-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ChessTD",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/ChessTD-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ChessTD",
+        "exit": 1,
+        "duration_seconds": 1.406,
+        "log": "docs/validation/task386/ChessTD-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ChessTD",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/ChessTD-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ChessTD",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/ChessTD-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "Exterminator",
+    "commit": "3b03140a25447c9832e556d543be8c3c824ca24a",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Exterminator",
+        "exit": 0,
+        "duration_seconds": 0.218,
+        "log": "docs/validation/task386/Exterminator-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Exterminator",
+        "exit": 0,
+        "duration_seconds": 0.125,
+        "log": "docs/validation/task386/Exterminator-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Exterminator",
+        "exit": 0,
+        "duration_seconds": 0.188,
+        "log": "docs/validation/task386/Exterminator-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Exterminator",
+        "exit": 0,
+        "duration_seconds": 0.078,
+        "log": "docs/validation/task386/Exterminator-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Exterminator",
+        "exit": 1,
+        "duration_seconds": 0.25,
+        "log": "docs/validation/task386/Exterminator-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\Exterminator",
+        "exit": 0,
+        "duration_seconds": 0.359,
+        "log": "docs/validation/task386/Exterminator-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "HamsterHavenTycoon",
+    "commit": "319adf9857a701f0dbb919d4e858e3b08a959613",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\HamsterHavenTycoon",
+        "exit": 0,
+        "duration_seconds": 0.375,
+        "log": "docs/validation/task386/HamsterHavenTycoon-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\HamsterHavenTycoon",
+        "exit": 0,
+        "duration_seconds": 0.25,
+        "log": "docs/validation/task386/HamsterHavenTycoon-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\HamsterHavenTycoon",
+        "exit": 1,
+        "duration_seconds": 0.11,
+        "log": "docs/validation/task386/HamsterHavenTycoon-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\HamsterHavenTycoon",
+        "exit": 1,
+        "duration_seconds": 3.296,
+        "log": "docs/validation/task386/HamsterHavenTycoon-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\HamsterHavenTycoon",
+        "exit": 1,
+        "duration_seconds": 0.094,
+        "log": "docs/validation/task386/HamsterHavenTycoon-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\HamsterHavenTycoon",
+        "exit": 1,
+        "duration_seconds": 0.094,
+        "log": "docs/validation/task386/HamsterHavenTycoon-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "maddox-and-friends",
+    "commit": "610061c912040c8eb811bfc6124f57a5fde0171e",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-and-friends",
+        "exit": 0,
+        "duration_seconds": 0.328,
+        "log": "docs/validation/task386/maddox-and-friends-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-and-friends",
+        "exit": 0,
+        "duration_seconds": 2.265,
+        "log": "docs/validation/task386/maddox-and-friends-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-and-friends",
+        "exit": 1,
+        "duration_seconds": 0.203,
+        "log": "docs/validation/task386/maddox-and-friends-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-and-friends",
+        "exit": 1,
+        "duration_seconds": 28.032,
+        "log": "docs/validation/task386/maddox-and-friends-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-and-friends",
+        "exit": 1,
+        "duration_seconds": 0.078,
+        "log": "docs/validation/task386/maddox-and-friends-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-and-friends",
+        "exit": 1,
+        "duration_seconds": 0.078,
+        "log": "docs/validation/task386/maddox-and-friends-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "maddox-marble-run",
+    "commit": "b29fee1b4000a4b88578ab537e584270b72c792b",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-marble-run",
+        "exit": 0,
+        "duration_seconds": 0.328,
+        "log": "docs/validation/task386/maddox-marble-run-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-marble-run",
+        "exit": 0,
+        "duration_seconds": 0.36,
+        "log": "docs/validation/task386/maddox-marble-run-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-marble-run",
+        "exit": 1,
+        "duration_seconds": 0.015,
+        "log": "docs/validation/task386/maddox-marble-run-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-marble-run",
+        "exit": 1,
+        "duration_seconds": 0.438,
+        "log": "docs/validation/task386/maddox-marble-run-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-marble-run",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/maddox-marble-run-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\maddox-marble-run",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/maddox-marble-run-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "RobotTournaments",
+    "commit": "4bc1d6723c1d3c639caa139289fd38c168150172",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RobotTournaments",
+        "exit": 0,
+        "duration_seconds": 0.344,
+        "log": "docs/validation/task386/RobotTournaments-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RobotTournaments",
+        "exit": 0,
+        "duration_seconds": 0.156,
+        "log": "docs/validation/task386/RobotTournaments-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RobotTournaments",
+        "exit": 0,
+        "duration_seconds": 0.203,
+        "log": "docs/validation/task386/RobotTournaments-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RobotTournaments",
+        "exit": 0,
+        "duration_seconds": 0.11,
+        "log": "docs/validation/task386/RobotTournaments-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RobotTournaments",
+        "exit": 1,
+        "duration_seconds": 3.812,
+        "log": "docs/validation/task386/RobotTournaments-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RobotTournaments",
+        "exit": 0,
+        "duration_seconds": 0.094,
+        "log": "docs/validation/task386/RobotTournaments-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "RootbeerMaze3",
+    "commit": "ce9ffc70dccbacf79bd4aec1c38c1afbdc1929e7",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RootbeerMaze3",
+        "exit": 0,
+        "duration_seconds": 0.344,
+        "log": "docs/validation/task386/RootbeerMaze3-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RootbeerMaze3",
+        "exit": 0,
+        "duration_seconds": 0.094,
+        "log": "docs/validation/task386/RootbeerMaze3-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RootbeerMaze3",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/RootbeerMaze3-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RootbeerMaze3",
+        "exit": 1,
+        "duration_seconds": 0.094,
+        "log": "docs/validation/task386/RootbeerMaze3-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RootbeerMaze3",
+        "exit": 1,
+        "duration_seconds": 0.031,
+        "log": "docs/validation/task386/RootbeerMaze3-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\RootbeerMaze3",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/RootbeerMaze3-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "SheepHerder",
+    "commit": "24959b208c434d06fec4b006c58a261533415b23",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\SheepHerder",
+        "exit": 0,
+        "duration_seconds": 0.359,
+        "log": "docs/validation/task386/SheepHerder-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\SheepHerder",
+        "exit": 0,
+        "duration_seconds": 0.203,
+        "log": "docs/validation/task386/SheepHerder-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\SheepHerder",
+        "exit": 1,
+        "duration_seconds": 0.031,
+        "log": "docs/validation/task386/SheepHerder-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\SheepHerder",
+        "exit": 1,
+        "duration_seconds": 0.25,
+        "log": "docs/validation/task386/SheepHerder-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "dev"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\SheepHerder",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/SheepHerder-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\SheepHerder",
+        "exit": 1,
+        "duration_seconds": 0.031,
+        "log": "docs/validation/task386/SheepHerder-run.log"
+      }
+    ],
+    "executables": []
+  },
+  {
+    "project": "ToddlerMatch",
+    "commit": "7a9225596b32097f0df461ee63d01e4a04c95b5c",
+    "steps": [
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "vendor",
+          "update"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ToddlerMatch",
+        "exit": 0,
+        "duration_seconds": 0.407,
+        "log": "docs/validation/task386/ToddlerMatch-vendor.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ToddlerMatch",
+        "exit": 0,
+        "duration_seconds": 0.062,
+        "log": "docs/validation/task386/ToddlerMatch-fmt.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "check"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ToddlerMatch",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/ToddlerMatch-check.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "test"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ToddlerMatch",
+        "exit": 1,
+        "duration_seconds": 0.203,
+        "log": "docs/validation/task386/ToddlerMatch-test.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "build",
+          "--mode",
+          "release"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ToddlerMatch",
+        "exit": 1,
+        "duration_seconds": 0.031,
+        "log": "docs/validation/task386/ToddlerMatch-build.log"
+      },
+      {
+        "command": [
+          "D:\\code\\StasisToolchains\\nightly-20260831-270\\toolchain\\stasis.exe",
+          "--json",
+          "run",
+          "--headless",
+          "--ticks",
+          "120",
+          "--fast-forward"
+        ],
+        "cwd": "D:\\code\\MaddoxTasks-worktrees\\stasislang-386\\artifacts\\task386\\ToddlerMatch",
+        "exit": 1,
+        "duration_seconds": 0.016,
+        "log": "docs/validation/task386/ToddlerMatch-run.log"
+      }
+    ],
+    "executables": []
+  }
+]

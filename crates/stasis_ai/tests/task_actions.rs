@@ -1,7 +1,7 @@
 use serde_json::json;
 use stasis_ai::{
     ActionKind, ActionState, ProviderActionProposal, ProviderReply, TaskController,
-    TaskControllerEvent, TaskId, TaskSession,
+    TaskControllerEvent, TaskId, TaskSession, ThreadEntryKind,
 };
 use std::time::{Duration, Instant};
 
@@ -44,7 +44,9 @@ fn proposal_is_drained_only_to_origin_and_requires_explicit_acceptance() {
         Ok(reply)
     });
     let mut session = session();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     session
         .new_task("other", "other objective", "project")
         .unwrap();
@@ -81,7 +83,9 @@ fn rejected_work_can_be_repaired_without_regenerating_applied_work() {
     task.apply_action("good").unwrap();
     task.reject_action("bad", "wrong target").unwrap();
     let accepted = task.actions["good"].clone();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     assert!(matches!(
         drain(&controller, &mut session)[0],
         TaskControllerEvent::Completed { .. }
@@ -108,12 +112,28 @@ fn provider_cannot_replace_accepted_work_even_in_a_mixed_reply() {
         .unwrap();
     task.accept_action("accepted").unwrap();
     let before = task.clone();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     assert!(matches!(
         drain(&controller, &mut session)[0],
         TaskControllerEvent::Failed { .. }
     ));
-    assert_eq!(session.task("origin").unwrap(), &before);
+    let task = session.task("origin").unwrap();
+    assert_eq!(task.actions, before.actions);
+    assert!(!task.actions.contains_key("new"));
+    assert_eq!(task.thread.len(), before.thread.len() + 1);
+    assert_eq!(task.thread[..before.thread.len()], before.thread);
+    let audit = task.thread.last().unwrap();
+    assert_eq!(audit.kind, ThreadEntryKind::HostResult);
+    assert!(audit.text.contains("AI reply discarded"));
+    assert!(audit
+        .text
+        .contains("no longer matched the task action state"));
+    assert!(!task
+        .thread
+        .iter()
+        .any(|entry| entry.text == "Replace accepted work."));
 }
 
 #[test]
@@ -133,7 +153,9 @@ fn cancellation_discards_a_late_proposal() {
         Ok(reply)
     });
     let mut session = session();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     controller
         .cancel(&mut session, &TaskId::new("origin"))
@@ -176,7 +198,9 @@ fn provider_context_omits_payload_and_revision_history() {
     .unwrap();
     task.accept_action("edit").unwrap();
     task.mark_action_for_repair("edit", "fix conflict").unwrap();
-    controller.send(&session, &TaskId::new("origin")).unwrap();
+    controller
+        .send(&mut session, &TaskId::new("origin"))
+        .unwrap();
     assert!(matches!(
         drain(&controller, &mut session)[0],
         TaskControllerEvent::Completed { .. }

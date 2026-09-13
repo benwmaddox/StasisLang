@@ -278,7 +278,7 @@ function append_marker(missing_sprite: i32): void {
             evidence = root / "evidence.json"
             capture.write_bytes(b"captured frame")
             log.write_text(
-                "Stasis render contract v7 trace=0 flags=3 lines=2 rects=1 sprites=5 text=2\n",
+                "Stasis render contract v8 trace=0 flags=3 lines=2 rects=1 sprites=5 text=2\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "zero command trace"):
@@ -291,7 +291,7 @@ gfx_load_sprite: /fixture/assets/opaque.svg (96x72) -> handle=1 raster=144x108 b
 gfx_load_sprite: /fixture/assets/translucent.svg (96x72) -> handle=2 raster=144x108 backend=sdl
 gfx_load_sprite: /fixture/assets/full_canvas.svg (640x360) -> handle=3 raster=960x540 backend=sdl
 stasis_load_font: loaded /fixture/assets/parity.ttf logical_size=24 raster_size=36 scale=1.50 handle=1
-Stasis render contract v7 trace=1853793133 flags=3 lines=2 rects=1 sprites=5 text=2
+Stasis render contract v8 trace=1853793133 flags=3 lines=2 rects=1 sprites=5 text=2
 Stasis renderer resources restored: backend=sdl surface_generation=3 renderer_generation=1 reason=surface_changed sprites=3
 Stasis renderer resources restored: backend=sdl surface_generation=4 renderer_generation=1 reason=surface_changed sprites=3
 Stasis renderer resources restored: backend=sdl surface_generation=5 renderer_generation=2 reason=foreground sprites=3
@@ -330,7 +330,7 @@ gfx_load_sprite: /fixture/assets/opaque.svg (96x72) -> handle=1 raster=96x72 bac
 gfx_load_sprite: /fixture/assets/translucent.svg (96x72) -> handle=2 raster=96x72 backend=sdl
 gfx_load_sprite: /fixture/assets/full_canvas.svg (640x360) -> handle=3 raster=640x360 backend=sdl
 stasis_load_font: loaded /fixture/assets/parity.ttf logical_size=24 raster_size=24 scale=1.00 handle=1
-Stasis render contract v7 trace=123456789 flags=3 lines=2 rects=1 sprites=5 text=2
+Stasis render contract v8 trace=123456789 flags=3 lines=2 rects=1 sprites=5 text=2
 """
         with tempfile.TemporaryDirectory() as directory:
             capture = Path(directory) / "capture.png"

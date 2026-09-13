@@ -395,7 +395,6 @@ function tick(): i32 {
     return 0;
 }
 function render(): i32 {
-    begin_frame();
     clear(0.015, 0.025, 0.055, 1.0);
     for (let i: i32 = 0; i < SPRITE_COUNT; i = i + 1) {
         let column: i32 = i % 128;
@@ -468,7 +467,6 @@ function tick(): i32 {
     return 0;
 }
 function render(): i32 {
-    begin_frame();
     clear(0.015, 0.025, 0.055, 1.0);
     for (let i: i32 = 0; i < SPRITE_COUNT; i = i + 1) {
         let column: i32 = i % 64;

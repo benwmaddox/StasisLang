@@ -838,6 +838,7 @@ mod tests {
         let files = vec![SourceFile {
             path: "custom.stasis".into(),
             content: source.into(),
+            original_content: source.into(),
             hash: 0,
             functions: Vec::new(),
         }];
@@ -858,6 +859,7 @@ mod tests {
         let files = vec![SourceFile {
             path: "custom.stasis".into(),
             content: source.into(),
+            original_content: source.into(),
             hash: 0,
             functions: Vec::new(),
         }];

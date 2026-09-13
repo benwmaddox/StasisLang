@@ -44,6 +44,10 @@ impl LiveRequest {
         if self.request_id == 0 {
             return Err("request_id must be greater than zero".to_string());
         }
+        if matches!(self.command, LiveCommand::PlaceGameWindow { width, height, .. } if width < 1 || height < 1)
+        {
+            return Err("native window placement requires a positive extent".to_string());
+        }
         let bytes = serde_json::to_vec(self)
             .map_err(|error| format!("failed serializing live request: {error}"))?
             .len();
@@ -74,6 +78,21 @@ pub enum LiveCommand {
     CaptureFrame {
         artifact: String,
     },
+    FocusGame,
+    /// Host window controls run between ticks and never alter guest input or state.
+    WindowPlacement {
+        #[serde(default)]
+        editor_point: Option<[i32; 2]>,
+        #[serde(default)]
+        game_point: Option<[i32; 2]>,
+    },
+    PlaceGameWindow {
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    },
+    FocusGameWindow,
     SetInputState {
         #[serde(default)]
         pointers: Vec<LivePointerInput>,
@@ -1506,6 +1525,8 @@ fn parse_terminal_command(line: &str) -> Result<ParsedTerminalCommand, String> {
         ":status" => ready(LiveCommand::Status),
         ":pause" => ready(LiveCommand::Pause),
         ":resume" => ready(LiveCommand::Resume),
+        ":focus-game" if args.len() == 1 => ready(LiveCommand::FocusGame),
+        ":focus-game" => Err(":focus-game does not accept arguments".to_string()),
         ":quit" => ready(LiveCommand::Quit),
         ":step" => ready(LiveCommand::Step {
             ticks: args
@@ -2733,6 +2754,48 @@ mod tests {
     }
 
     #[test]
+    fn native_window_commands_preserve_signed_coordinates_and_reject_empty_extents() {
+        let request: LiveRequest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "request_id": 9, "type": "place_game_window",
+            "x": -1600, "y": -100, "width": 800, "height": 600
+        }))
+        .unwrap();
+        assert_eq!(
+            request.command,
+            LiveCommand::PlaceGameWindow {
+                x: -1600,
+                y: -100,
+                width: 800,
+                height: 600
+            }
+        );
+        request.validate().unwrap();
+        assert!(LiveRequest::new(
+            10,
+            LiveCommand::PlaceGameWindow {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 600
+            }
+        )
+        .validate()
+        .unwrap_err()
+        .contains("positive extent"));
+        let query: LiveRequest = serde_json::from_value(serde_json::json!({
+            "request_id": 11, "type": "window_placement"
+        }))
+        .unwrap();
+        assert_eq!(
+            query.command,
+            LiveCommand::WindowPlacement {
+                editor_point: None,
+                game_point: None
+            }
+        );
+    }
+
+    #[test]
     fn request_schema_and_ids_are_validated() {
         let (client, _) = live_session(1);
         let mut request = LiveRequest::new(0, LiveCommand::Status);
@@ -2798,6 +2861,35 @@ mod tests {
         )
         .expect("reinitialize request");
         assert_eq!(reinitialize.command, LiveCommand::ValidationReinitialize);
+
+        let focus: LiveRequest =
+            serde_json::from_str(r#"{"schema_version":1,"request_id":73,"type":"focus_game"}"#)
+                .expect("focus game request");
+        assert_eq!(focus.command, LiveCommand::FocusGame);
+        assert_eq!(
+            serde_json::to_value(&focus).expect("serialize focus game request"),
+            serde_json::json!({
+                "schema_version": 1,
+                "request_id": 73,
+                "type": "focus_game"
+            })
+        );
+    }
+
+    #[test]
+    fn terminal_focus_game_command_is_exact() {
+        let mut terminal = TerminalBuffer::new();
+        let TerminalInput::Request(request) = terminal
+            .feed_line(":focus-game")
+            .expect("focus game command")
+        else {
+            panic!("expected focus game request")
+        };
+        assert_eq!(request.command, LiveCommand::FocusGame);
+        assert!(terminal
+            .feed_line(":focus-game now")
+            .expect_err("unexpected argument")
+            .contains("does not accept arguments"));
     }
 
     #[test]

@@ -1,0 +1,333 @@
+import "live_edit_helper.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/rig2d.stasis";
+
+// Fixed storage is explicit. A generic collection owns exactly one declared
+// array and never allocates, resizes, or copies its backing storage.
+struct Buffer<T: type, N: i32> {
+    count: i32;
+    values: T[N];
+}
+
+function buffer_clear<T: type, N: i32>(self: Buffer<T, N>): void {
+    self.count = 0;
+}
+
+function buffer_capacity<T: type, N: i32>(self: Buffer<T, N>): i32 {
+    return N;
+}
+
+function buffer_append<T: type, N: i32>(self: Buffer<T, N>, value: T): bool {
+    if (self.count < 0 || self.count >= N) {
+        return false;
+    }
+    self.values[self.count] = value;
+    self.count = self.count + 1;
+    return true;
+}
+
+function buffer_at<T: type, N: i32>(self: Buffer<T, N>, index: i32): T {
+    return self.values[index];
+}
+
+function integer_buffer_sum<N: i32>(self: Buffer<i32, N>): i32 {
+    let total: i32 = 0;
+    let index: i32 = 0;
+    for (index = 0; index < self.count; index = index + 1) {
+        total = total + self.values[index];
+    }
+    return total;
+}
+
+// A view-only generic algorithm works with fixed arrays of different sizes.
+function first_value<T: type>(items: T[]): T {
+    return items[0];
+}
+
+struct SampleWindow<N: i32> {
+    count: i32;
+    samples: f32[N];
+}
+
+function window_clear<N: i32>(self: SampleWindow<N>): void {
+    self.count = 0;
+}
+
+function window_push<N: i32>(self: SampleWindow<N>, value: f32): bool {
+    if (self.count < 0 || self.count >= N) {
+        return false;
+    }
+    self.samples[self.count] = value;
+    self.count = self.count + 1;
+    return true;
+}
+
+function window_mean<N: i32>(self: SampleWindow<N>): f32 {
+    if (self.count <= 0) {
+        return 0.0;
+    }
+    let total: f32 = 0.0;
+    let index: i32 = 0;
+    for (index = 0; index < self.count; index = index + 1) {
+        total = total + self.samples[index];
+    }
+    return total / i32_to_f32(self.count);
+}
+
+// The count is authoritative. head plus count identifies the next write slot,
+// while the fixed capacity makes wraparound deterministic.
+struct Ring<T: type, N: i32> {
+    count: i32;
+    head: i32;
+    values: T[N];
+}
+
+function ring_clear<T: type, N: i32>(self: Ring<T, N>): void {
+    self.count = 0;
+    self.head = 0;
+}
+
+function ring_push<T: type, N: i32>(self: Ring<T, N>, value: T): bool {
+    if (self.count < 0 || self.count >= N) {
+        return false;
+    }
+    let tail: i32 =(self.head + self.count) % N;
+    self.values[tail] = value;
+    self.count = self.count + 1;
+    return true;
+}
+
+function ring_drop<T: type, N: i32>(self: Ring<T, N>): bool {
+    if (self.count <= 0) {
+        return false;
+    }
+    self.head =(self.head + 1) % N;
+    self.count = self.count - 1;
+    return true;
+}
+
+function ring_peek<T: type, N: i32>(self: Ring<T, N>): T {
+    return self.values[self.head];
+}
+
+struct Entity {
+    id: i32;
+    x: f32;
+    y: f32;
+}
+
+struct EntityPool<N: i32> {
+    count: i32;
+    entities: Entity[N];
+}
+
+function entity_pool_clear<N: i32>(self: EntityPool<N>): void {
+    self.count = 0;
+}
+
+function entity_pool_spawn<N: i32>(self: EntityPool<N>, id: i32, x: f32, y: f32): i32 {
+    if (self.count < 0 || self.count >= N) {
+        return -1;
+    }
+    let index: i32 = self.count;
+    self.entities[index].id = id;
+    self.entities[index].x = x;
+    self.entities[index].y = y;
+    self.count = self.count + 1;
+    return index;
+}
+
+function entity_pool_release_last<N: i32>(self: EntityPool<N>): bool {
+    if (self.count <= 0) {
+        return false;
+    }
+    self.count = self.count - 1;
+    self.entities[self.count].id = 0;
+    self.entities[self.count].x = 0.0;
+    self.entities[self.count].y = 0.0;
+    return true;
+}
+
+function entity_pool_id<N: i32>(self: EntityPool<N>, index: i32): i32 {
+    if (index < 0 || index >= self.count || index >= N) {
+        return -1;
+    }
+    return self.entities[index].id;
+}
+
+function first_entity_id(items: Entity[]): i32 {
+    return items[0].id;
+}
+
+struct Nested<T: type, N: i32> {
+    inner: Buffer<T, N>;
+}
+
+function nested_capacity<T: type, N: i32>(self: Nested<T, N>): i32 {
+    return N;
+}
+
+// N is a compile-time value, but it is not inherently an array capacity.
+function apply_offset<N: i32>(value: i32): i32 {
+    return value + N;
+}
+
+function apply_mode<N: i32>(value: i32): i32 {
+    if (N == 0) {
+        return value;
+    }
+    if (N == 1) {
+        return value * 2;
+    }
+    return value + N;
+}
+
+global integer_buffer: Buffer<i32, 4>;
+global wide_buffer: Buffer<i32, 8>;
+global float_buffer: Buffer<f32, 3>;
+global nested_buffer: Nested<i32, 2>;
+global sample_window: SampleWindow<3>;
+global ring: Ring<i32, 3>;
+global entity_pool: EntityPool<2>;
+global courier_rig: Rig2D<24>;
+global boss_rig: Rig2D<64>;
+
+function near(actual: f32, expected: f32): bool {
+    let difference: f32 = actual - expected;
+    return difference > -0.001 && difference < 0.001;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function main(): i32 {
+    buffer_clear(integer_buffer);
+    buffer_clear(wide_buffer);
+    buffer_clear(float_buffer);
+    window_clear(sample_window);
+    ring_clear(ring);
+    entity_pool_clear(entity_pool);
+    reset_live_edit_state();
+    courier_rig.clear();
+    boss_rig.clear();
+
+    if (buffer_capacity(integer_buffer) != 4 || buffer_capacity::<f32, 3>(float_buffer) != 3) {
+        return 1;
+    }
+    if (
+        !buffer_append(integer_buffer, 10)
+        || !buffer_append(integer_buffer, 20)
+        || !buffer_append(integer_buffer, 30)
+        || !buffer_append(integer_buffer, 40)
+        || buffer_append(integer_buffer, 50)
+    ) {
+        return 2;
+    }
+    if (integer_buffer_sum(integer_buffer) != 100 || integer_buffer.count != 4 || buffer_at(integer_buffer, 2) != 30) {
+        return 3;
+    }
+    buffer_clear(integer_buffer);
+    if (integer_buffer.count != 0 || !buffer_append(integer_buffer, 7) || buffer_capacity(wide_buffer) != 8 || !buffer_append(wide_buffer, 70)) {
+        return 4;
+    }
+    if (first_value(integer_buffer.values) != 7 || first_value(wide_buffer.values) != 70) {
+        return 5;
+    }
+
+    if (
+        !buffer_append(float_buffer, 0.5)
+        || !buffer_append(float_buffer, 1.5)
+        || !buffer_append(float_buffer, 4.0)
+        || buffer_append(float_buffer, 8.0)
+    ) {
+        return 6;
+    }
+    if (!near(buffer_at(float_buffer, 1), 1.5)) {
+        return 7;
+    }
+
+    if (
+        nested_capacity(nested_buffer) != 2
+        || !buffer_append(nested_buffer.inner, 3)
+        || !buffer_append(nested_buffer.inner, 4)
+        || integer_buffer_sum(nested_buffer.inner) != 7
+    ) {
+        return 8;
+    }
+
+    if (
+        !window_push(sample_window, 1.0)
+        || !window_push(sample_window, 2.0)
+        || !window_push(sample_window, 4.0)
+        || window_push(sample_window, 5.0)
+        || !near(window_mean(sample_window), 2.3333333)
+    ) {
+        return 9;
+    }
+
+    if (
+        !ring_push(ring, 1)
+        || !ring_push(ring, 2)
+        || !ring_push(ring, 3)
+        || ring_push(ring, 4)
+        || ring.count != 3
+        || ring_peek(ring) != 1
+    ) {
+        return 10;
+    }
+    if (
+        !ring_drop(ring)
+        || !ring_push(ring, 4)
+        || ring_peek(ring) != 2
+        || !ring_drop(ring)
+        || !ring_drop(ring)
+        || !ring_drop(ring)
+        || ring_drop(ring)
+        || ring.count != 0
+    ) {
+        return 11;
+    }
+    if (!ring_push(ring, 5) || ring_peek(ring) != 5) {
+        return 12;
+    }
+
+    if (
+        entity_pool_spawn(entity_pool, 100, 1.0, 2.0) != 0
+        || entity_pool_spawn(entity_pool, 200, 3.0, 4.0) != 1
+        || entity_pool_spawn(entity_pool, 300, 5.0, 6.0) != -1
+    ) {
+        return 13;
+    }
+    if (
+        entity_pool_id(entity_pool, 0) != 100
+        || first_entity_id(entity_pool.entities) != 100
+        || !entity_pool_release_last(entity_pool)
+        || entity_pool_spawn(entity_pool, 300, 5.0, 6.0) != 1
+        || entity_pool_id(entity_pool, 1) != 300
+    ) {
+        return 14;
+    }
+
+    if (apply_offset::<-3>(10) != 7 || apply_mode::<0>(5) != 5 || apply_mode::<1>(5) != 10 || apply_mode::<2>(5) != 7) {
+        return 15;
+    }
+
+    if (
+        courier_rig.add_bone(-1, 10.0, 0.0, 0.0) != 0
+        || courier_rig.add_bone(0, 5.0, 0.0, 45.0) != 1
+        || !courier_rig.solve(2.0, 3.0, 90.0)
+    ) {
+        return 16;
+    }
+    if (!near(courier_rig.world_x(1), 2.0) || !near(courier_rig.world_y(1), 18.0) || !near(courier_rig.world_angle(1), 135.0)) {
+        return 17;
+    }
+    if (boss_rig.add_bone(-1, 25.0, 0.0, 0.0) != 0 || !boss_rig.solve(0.0, 0.0, 0.0) || !near(boss_rig.world_x(0), 25.0)) {
+        return 18;
+    }
+
+    if (live_edit_tick() != 8 || live_edit_tick() != 9) {
+        return 19;
+    }
+    return 0;
+}

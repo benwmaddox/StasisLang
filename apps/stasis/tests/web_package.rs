@@ -1255,3 +1255,60 @@ fn existing_audio_game_packages_wav_and_mp3_for_web_audio() {
 
     fs::remove_dir_all(&workspace).expect("clean existing audio web fixture");
 }
+
+#[test]
+fn web_package_retains_all_public_audio_stream_imports() {
+    let root = repo_root();
+    let workspace = root
+        .join("build")
+        .join(format!("web-audio-stream-test-{}", stamp()));
+    fs::create_dir_all(&workspace).expect("create AudioStream fixture");
+    for file in ["stasis.json", "main.stasis"] {
+        fs::copy(
+            root.join("samples/audio_stream_pcm").join(file),
+            workspace.join(file),
+        )
+        .expect("copy AudioStream fixture");
+    }
+    let output = package(&workspace, Path::new("build/web-package"));
+    let runtime = fs::read_to_string(output.join("game.js")).expect("AudioStream runtime");
+    let required = [
+        "stasis_jit_audio_get_channels",
+        "stasis_jit_audio_get_queued_frames",
+        "stasis_jit_audio_get_sample_rate",
+        "stasis_jit_audio_get_underruns",
+        "stasis_jit_audio_init",
+        "stasis_jit_audio_is_available",
+        "stasis_jit_audio_play",
+        "stasis_jit_audio_push_f32_interleaved",
+        "stasis_jit_audio_shutdown",
+        "stasis_jit_audio_stop",
+        "stasis_jit_audio_voice_is_playing",
+        "stasis_jit_audio_voice_set_paused",
+        "stasis_jit_audio_voice_set_volume_pan",
+    ];
+    let inspection = Command::new("node")
+        .arg("-e")
+        .arg("const fs = require('node:fs'); const module = new WebAssembly.Module(fs.readFileSync(process.argv[1])); process.stdout.write(JSON.stringify(WebAssembly.Module.imports(module).filter(item => item.module === 'env' && item.name.startsWith('stasis_jit_audio_')).map(item => item.name).sort()));")
+        .arg(output.join("game.wasm"))
+        .output()
+        .expect("inspect packaged AudioStream imports");
+    assert!(
+        inspection.status.success(),
+        "AudioStream import inspection failed: {}",
+        String::from_utf8_lossy(&inspection.stderr)
+    );
+    let imports: Vec<String> =
+        serde_json::from_slice(&inspection.stdout).expect("parse AudioStream imports");
+    assert_eq!(
+        imports, required,
+        "public fixture must retain all stream and voice imports"
+    );
+    for name in required {
+        assert!(
+            runtime.contains(&format!("{name}:")),
+            "packaged runtime omitted public AudioStream binding {name}"
+        );
+    }
+    fs::remove_dir_all(&workspace).expect("clean AudioStream web fixture");
+}

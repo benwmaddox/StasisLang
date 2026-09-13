@@ -348,7 +348,6 @@ function render(): i32 {
         return 1;
     }
 
-    begin_frame();
     clear(state.config.background_red, state.config.background_green, state.config.background_blue, 1.0);
     draw_balls();
     draw_bucket();

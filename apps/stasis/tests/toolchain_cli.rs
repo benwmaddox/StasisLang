@@ -726,6 +726,53 @@ fn generated_knowledge_examples_compile_and_test() {
 }
 
 #[test]
+fn generated_project_contains_container_geometry_guidance() {
+    let parent = temp_dir("geometry_guidance");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let created = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(
+        created.status.code(),
+        Some(0),
+        "project creation failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let agent_guide = fs::read_to_string(parent.join("demo/AGENTS.md")).expect("read agent guide");
+    assert_eq!(agent_guide, include_str!("../../../docs/agent_workflow.md"));
+    for rule in [
+        "## Container-derived UI geometry",
+        "real safe/current container",
+        "`ui_begin_frame`",
+        "`ui_vstack_begin`/`ui_hstack_begin` with matching ends",
+        "fixed/rest children",
+        "`ui_inset`",
+        "`ui_anchor`/`ui_anchor_current`",
+        "`ui_current_x`, `ui_current_y`, `ui_current_width`, and `ui_current_height`",
+        "same resolved rectangle for drawing and hit testing",
+        "Recompute ephemeral rectangles each frame",
+        "retain only semantic interaction state",
+        "do not add a measurement pass or retained widget tree",
+        "`ui_place_x`/`ui_place_y` with `UiHorizontal`/`UiVertical`",
+        "repeated hand-derived offsets",
+        "measured or intentionally cached text width",
+        "actual inner content box after icon/padding allocation",
+        "expensive measurement outside render hot paths",
+        "nominal display bounds with aspect/alpha-safe padding",
+        "container-derived origins",
+        "source bitmap dimensions or opaque-trim guesses",
+        "Allow direct offsets only for deliberate local decoration, fixed spacing inside an",
+        "authored world coordinates, or a tested pixel adjustment",
+        "deterministic geometry/hit tests",
+        "inspected desktop and phone evidence",
+    ] {
+        assert!(
+            agent_guide.contains(rule),
+            "generated guidance missing: {rule}"
+        );
+    }
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
 fn project_commands_emit_stable_json_from_nested_directories() {
     let parent = temp_dir("success");
     fs::create_dir_all(&parent).expect("create temp parent");
@@ -1699,6 +1746,100 @@ fn headless_ticks_and_seeded_scenarios_are_deterministic_and_reproducible() {
     );
 
     fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn semantic_symbol_queries_ignore_quoted_keywords() {
+    let parent = temp_dir("quoted_symbols");
+    fs::create_dir_all(&parent).unwrap();
+    let project = parent.join("demo");
+    assert!(stasis(&["new", "demo", "--dir", "demo"], &parent)
+        .status
+        .success());
+    let source = r#"
+/* invokes `update */
+/* " global const struct enum function test import { //
+ actual */
+const words: string = "global const struct enum function test import from as { } ` actual";
+struct Real { value: i32; }
+enum Choice { One, Two }
+global state: Real;
+function actual(): i32 { return 1; }
+test `checkers mandatory capture is global and removes one piece`(): bool { return actual() == 1; }
+test `const struct enum function test import from as " // { } actual`(): bool { return true; }
+"#;
+    let file = "tests/checkers.test.stasis";
+    fs::write(project.join(file), source).unwrap();
+    let listed = stasis(&["--json", "symbol", "list", "--file", file], &project);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listing = json_stdout(&listed);
+    let items = listing["result"]["items"].as_array().unwrap();
+    for name in [
+        "globals",
+        "Real",
+        "actual",
+        "checkers mandatory capture is global and removes one piece",
+    ] {
+        assert!(
+            items.iter().any(|item| item["name"] == name),
+            "missing {name}: {listing}"
+        );
+    }
+    assert_eq!(items.len(), 5, "{listing}");
+    let read = stasis(
+        &["--json", "symbol", "read", "actual", "--file", file],
+        &project,
+    );
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(json_stdout(&read).to_string().contains("return 1;"));
+    let references = stasis(&["--json", "symbol", "references", "actual"], &project);
+    assert!(
+        references.status.success(),
+        "{}",
+        String::from_utf8_lossy(&references.stderr)
+    );
+    assert_eq!(
+        json_stdout(&references)["result"]["references"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let executed = stasis(&["--json", "test", file], &project);
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert_eq!(json_stdout(&executed)["result"]["tests_passed"], 2);
+    for (invalid, message) in [
+        ("/* invokes `update", "unterminated block comment"),
+        (
+            "test `global const function",
+            "unterminated test name (missing closing backtick)",
+        ),
+        (
+            "const words: string = \"global",
+            "unterminated string literal",
+        ),
+    ] {
+        fs::write(project.join(file), invalid).unwrap();
+        let output = stasis(&["--json", "symbol", "list", "--file", file], &project);
+        assert!(!output.status.success());
+        assert!(json_stderr(&output)["message"]
+            .as_str()
+            .unwrap()
+            .contains(message));
+    }
+    fs::remove_dir_all(parent).ok();
 }
 
 #[test]
@@ -3580,7 +3721,7 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     }
     fs::write(
         project.join("stasis.json"),
-        "{\n  \"manifest_version\": 1,\n  \"name\": \"TUI Asset Root\",\n  \"entry\": \"src/main.stasis\",\n  \"tests\": \"tests\",\n  \"output\": \"build\"\n}\n",
+        "{\n  \"manifest_version\": 1,\n  \"name\": \"TUI Asset Root\",\n  \"stdlib\": \"toolchain\",\n  \"entry\": \"src/main.stasis\",\n  \"tests\": \"tests\",\n  \"output\": \"build\"\n}\n",
     )
     .expect("write manifest");
     fs::write(project.join("live.commands"), ":quit\n").expect("write live script");
