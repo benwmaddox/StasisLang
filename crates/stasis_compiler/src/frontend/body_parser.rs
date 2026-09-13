@@ -1408,7 +1408,10 @@ pub(crate) enum ExprToken {
     Identifier(String),
     Op(char),
     Comma,
+    ColonColon,
     Dot,
+    Less,
+    Greater,
     LBracket,
     RBracket,
     LParen,
@@ -1559,8 +1562,20 @@ pub(crate) fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprTok
                 tokens.push(ExprToken::Comma);
                 index += 1;
             }
+            b':' if index + 1 < bytes.len() && bytes[index + 1] == b':' => {
+                tokens.push(ExprToken::ColonColon);
+                index += 2;
+            }
             b'.' => {
                 tokens.push(ExprToken::Dot);
+                index += 1;
+            }
+            b'<' => {
+                tokens.push(ExprToken::Less);
+                index += 1;
+            }
+            b'>' => {
+                tokens.push(ExprToken::Greater);
                 index += 1;
             }
             b'(' => {
@@ -1631,6 +1646,7 @@ impl ExprParser<'_> {
                 if name == "false" {
                     return Ok(SimpleExpr::Bool(false));
                 }
+                self.consume_explicit_generic_arguments()?;
                 if matches!(self.tokens.get(self.cursor), Some(ExprToken::LParen)) {
                     self.cursor += 1;
                     let mut args = Vec::new();
@@ -1688,11 +1704,34 @@ impl ExprParser<'_> {
         let mut suffix = String::new();
         loop {
             if matches!(self.tokens.get(self.cursor), Some(ExprToken::Dot)) {
-                if let (Some(ExprToken::Identifier(method)), Some(ExprToken::LParen)) = (
-                    self.tokens.get(self.cursor + 1).cloned(),
-                    self.tokens.get(self.cursor + 2),
-                ) {
-                    self.cursor += 3;
+                if let Some(ExprToken::Identifier(method)) =
+                    self.tokens.get(self.cursor + 1).cloned()
+                {
+                    let after_method = self.cursor + 2;
+                    let call_open =
+                        if matches!(self.tokens.get(after_method), Some(ExprToken::ColonColon)) {
+                            self.generic_arguments_end(after_method)?
+                        } else {
+                            after_method
+                        };
+                    if !matches!(self.tokens.get(call_open), Some(ExprToken::LParen)) {
+                        // This is a normal path segment, not a method call.
+                        self.cursor += 1;
+                        self.cursor = after_method;
+                        if index_expr.is_none() {
+                            collection_path.push('.');
+                            collection_path.push_str(&method);
+                        } else {
+                            if !suffix.is_empty() {
+                                suffix.push('.');
+                            }
+                            suffix.push_str(&method);
+                        }
+                        continue;
+                    }
+                    self.cursor = after_method;
+                    self.consume_explicit_generic_arguments()?;
+                    self.cursor += 1;
                     let receiver = if let Some(index) = index_expr {
                         SimpleExpr::IndexedPath {
                             collection_path,
@@ -1777,6 +1816,50 @@ impl ExprParser<'_> {
         } else {
             Ok(SimpleExpr::Identifier(collection_path))
         }
+    }
+
+    fn consume_explicit_generic_arguments(&mut self) -> Result<(), String> {
+        if !matches!(self.tokens.get(self.cursor), Some(ExprToken::ColonColon)) {
+            return Ok(());
+        }
+        let end = self.generic_arguments_end(self.cursor)?;
+        self.cursor = end;
+        Ok(())
+    }
+
+    fn generic_arguments_end(&self, start: usize) -> Result<usize, String> {
+        if !matches!(self.tokens.get(start), Some(ExprToken::ColonColon))
+            || !matches!(self.tokens.get(start + 1), Some(ExprToken::Less))
+        {
+            return Err("expected '<' after '::' in explicit generic call".to_string());
+        }
+        let mut depth = 1usize;
+        let mut cursor = start + 2;
+        let mut has_argument = false;
+        while let Some(token) = self.tokens.get(cursor) {
+            match token {
+                ExprToken::Less => depth += 1,
+                ExprToken::Greater => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        if !has_argument {
+                            return Err(
+                                "explicit generic call requires at least one argument".to_string()
+                            );
+                        }
+                        return Ok(cursor + 1);
+                    }
+                }
+                ExprToken::Comma if depth == 1 => {}
+                ExprToken::ColonColon => {
+                    return Err("nested explicit generic call is not a type argument".to_string())
+                }
+                _ if depth == 1 => has_argument = true,
+                _ => {}
+            }
+            cursor += 1;
+        }
+        Err("missing closing '>' in explicit generic call".to_string())
     }
 
     fn peek_binary_operator(&self) -> Option<(char, u8)> {
