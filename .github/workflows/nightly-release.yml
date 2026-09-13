@@ -69,23 +69,6 @@ jobs:
           echo "should release: ${should_release}"
           echo "new nightly tag: ${nightly_tag}"
 
-  release_preconditions:
-    needs: detect
-    if: needs.detect.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    env:
-      STASIS_SIGNING_PFX_BASE64: ${{ secrets.STASIS_SIGNING_PFX_BASE64 }}
-      STASIS_SIGNING_PFX_PASSWORD: ${{ secrets.STASIS_SIGNING_PFX_PASSWORD }}
-    steps:
-      - name: Require production Windows signing configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${STASIS_SIGNING_PFX_BASE64}" || -z "${STASIS_SIGNING_PFX_PASSWORD}" ]]; then
-            echo "::error::Nightly publication requires the production Windows signing configuration owned by Maddox task #525."
-            exit 1
-          fi
-
   mobile_network_support:
     needs: detect
     if: needs.detect.outputs.should_release == 'true'
@@ -160,7 +143,7 @@ jobs:
           retention-days: 14
 
   build:
-    needs: [detect, mobile_network_support, release_preconditions]
+    needs: [detect, mobile_network_support]
     if: needs.detect.outputs.should_release == 'true'
     strategy:
       fail-fast: false
@@ -183,10 +166,6 @@ jobs:
       STASIS_RELEASE_ID: ${{ needs.detect.outputs.nightly_tag }}
       STASIS_SOURCE_COMMIT: ${{ github.sha }}
       STASIS_BUILD_TARGET: ${{ matrix.rust_target }}
-      STASIS_SIGNING_PFX_BASE64: ${{ secrets.STASIS_SIGNING_PFX_BASE64 }}
-      STASIS_SIGNING_PFX_PASSWORD: ${{ secrets.STASIS_SIGNING_PFX_PASSWORD }}
-      STASIS_SIGNING_PROFILE: production
-      STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -283,71 +262,7 @@ jobs:
             test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
           fi
 
-      - name: Authenticode sign Stasis Windows binaries
-        if: runner.os == 'Windows'
-        timeout-minutes: 15
-        shell: pwsh
-        run: |
-          $certificate = Join-Path $env:RUNNER_TEMP "stasis-signing.pfx"
-          $expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"
-          try {
-            [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:STASIS_SIGNING_PFX_BASE64))
-            $env:STASIS_SIGNING_CERTIFICATE = $certificate
-            $env:STASIS_SIGNING_TIMESTAMP_URLS = "http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com"
-            $env:STASIS_SIGNING_TIMEOUT_SECONDS = "30"
-            function Invoke-BoundedPowerShellCommand([string] $label, [string] $script, [string[]] $arguments) {
-              $startInfo = [Diagnostics.ProcessStartInfo]::new()
-              $startInfo.FileName = (Get-Command pwsh -ErrorAction Stop).Source
-              $startInfo.UseShellExecute = $false
-              foreach ($argument in @('-NoProfile', '-File', $script) + $arguments) {
-                $startInfo.ArgumentList.Add($argument)
-              }
-              $process = [Diagnostics.Process]::new()
-              $process.StartInfo = $startInfo
-              try {
-                Write-Host "Starting $label"
-                if (-not $process.Start()) { throw "$label process did not start" }
-                if (-not $process.WaitForExit(90000)) {
-                  try {
-                    $process.Kill()
-                  } catch [InvalidOperationException] {
-                    if (-not $process.HasExited) { throw }
-                  }
-                  if (-not $process.WaitForExit(5000)) {
-                    throw "$label timed out and did not terminate within 5 seconds"
-                  }
-                  throw "$label timed out after 90 seconds"
-                }
-                if ($process.ExitCode -ne 0) {
-                  throw "$label failed with exit code $($process.ExitCode)"
-                }
-              } finally {
-                $process.Dispose()
-              }
-            }
-            function Invoke-BoundedSigningCommand([string] $mode, [string] $artifact) {
-              Invoke-BoundedPowerShellCommand "Authenticode $mode for $artifact" 'tools/windows/stasis-signing.ps1' @(
-                $mode, '-Artifact', $artifact
-              )
-            }
-            $artifacts = @(
-              "target/${{ matrix.rust_target }}/release/stasis.exe",
-              "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe",
-              "target/${{ matrix.rust_target }}/release/stasis_dynload.dll",
-              "runtime/build_ci/bin/Release/stasis_graphics.dll",
-              "runtime/build_ci/bin/Release/stasis_runner.exe"
-            )
-            Invoke-BoundedPowerShellCommand "pinned signer identity validation" 'tools/windows/stasis-signing-identity.ps1' @(
-              '-Certificate', $certificate, '-ExpectedThumbprint', $expectedThumbprint
-            )
-            $artifacts | ForEach-Object {
-              Invoke-BoundedSigningCommand sign $_
-              Invoke-BoundedSigningCommand verify $_
-            }
-          } finally {
-            Remove-Item -LiteralPath $certificate -Force -ErrorAction SilentlyContinue
-          }
-
+      # Nightly Windows artifacts are intentionally unsigned until a trusted production certificate is available.
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -480,11 +395,6 @@ jobs:
           if ($editorInfo.result.build_fingerprint -ne $editorInfo.result.graphics_runtime.build_fingerprint) { throw "extracted editor fingerprint mismatch" }
           & "$validationRoot/stasis.exe" editor --help
           if ($LASTEXITCODE -ne 0) { throw "extracted editor help probe failed" }
-          $env:STASIS_SIGNING_TIMEOUT_SECONDS = "30"
-          @("stasis.exe", "stasis-network-supervise.exe", "stasis_dynload.dll", "stasis_graphics.dll", "stasis_runner.exe") | ForEach-Object {
-            & pwsh -NoProfile -File tools/windows/stasis-signing.ps1 verify -Artifact "$validationRoot/$_"
-            if ($LASTEXITCODE -ne 0) { throw "extracted Authenticode verification failed for $_" }
-          }
           powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_network_supervision.ps1 `
             -Toolchain "$validationRoot/stasis.exe" `
             -Supervisor "$validationRoot/stasis-network-supervise.exe" `
