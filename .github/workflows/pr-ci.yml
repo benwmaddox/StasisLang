@@ -36,7 +36,31 @@ concurrency:
 
 jobs:
   test:
+    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    needs:
+      - pr-ci-preflight
+      - pr-ci-cargo-workspace
+      - pr-ci-cargo-stasis-unit
+      - pr-ci-cargo-stasis-integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required PR CI lanes
+        env:
+          PREFLIGHT_RESULT: ${{ needs.pr-ci-preflight.result }}
+          WORKSPACE_RESULT: ${{ needs.pr-ci-cargo-workspace.result }}
+          STASIS_UNIT_RESULT: ${{ needs.pr-ci-cargo-stasis-unit.result }}
+          STASIS_INTEGRATION_RESULT: ${{ needs.pr-ci-cargo-stasis-integration.result }}
+        run: |
+          for result in "$PREFLIGHT_RESULT" "$WORKSPACE_RESULT" "$STASIS_UNIT_RESULT" "$STASIS_INTEGRATION_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "A required PR CI lane finished with result: $result"
+              exit 1
+            fi
+          done
+
+  pr-ci-preflight:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI preflight
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -120,10 +144,32 @@ jobs:
           python -m unittest tools.ci.test_run_architecture_characterization
           python tools/ci/run_architecture_characterization.py --run-fast
 
+  pr-ci-cargo-workspace:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI workspace Cargo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
       - name: Run workspace Cargo tests
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
         timeout-minutes: 15
         run: python tools/cargo_cache.py run -- cargo test --workspace --exclude stasis --all-targets -- --test-threads=1
+
+  pr-ci-cargo-stasis-unit:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI Stasis unit Cargo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Build Stasis test executable
         # Some isolated app tests launch the sibling CLI; make that prerequisite explicit.
@@ -134,6 +180,17 @@ jobs:
         # Keep the large app unit target separate from its integration binaries so every command stays bounded.
         timeout-minutes: 15
         run: python tools/cargo_cache.py run -- cargo test -p stasis --lib --bins -- --test-threads=1
+
+  pr-ci-cargo-stasis-integration:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI Stasis integration Cargo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Run Stasis integration Cargo tests
         timeout-minutes: 15

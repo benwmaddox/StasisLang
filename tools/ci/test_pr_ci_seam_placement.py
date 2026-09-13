@@ -56,6 +56,15 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         cls.runner = RUNNER.read_text(encoding="utf-8")
         cls.strategy = STRATEGY.read_text(encoding="utf-8")
         cls.linux = job(cls.workflow, "test")
+        cls.linux_ordinary = "\n".join(
+            job(cls.workflow, name)
+            for name in (
+                "pr-ci-preflight",
+                "pr-ci-cargo-workspace",
+                "pr-ci-cargo-stasis-unit",
+                "pr-ci-cargo-stasis-integration",
+            )
+        )
         cls.windows = job(cls.workflow, "bootstrap-smoke-windows")
 
     def test_linux_ordinary_rust_seams_run_once_in_bounded_shards(self):
@@ -67,9 +76,11 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         )
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(self.linux.count(command), 1)
-        self.assertEqual(self.linux.count("timeout-minutes: 15"), 4)
-        self.assertIn("find apps/stasis/tests", self.linux)
+                self.assertEqual(self.linux_ordinary.count(command), 1)
+        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 4)
+        self.assertIn("find apps/stasis/tests", self.linux_ordinary)
+        self.assertIn("needs:", self.linux)
+        self.assertIn("always()", self.linux)
         redundant_commands = (
             "--test host_frame_jit_seam",
             "gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace",
@@ -78,7 +89,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         )
         for command in redundant_commands:
             with self.subTest(command=command):
-                self.assertNotIn(command, self.linux)
+                self.assertNotIn(command, self.linux_ordinary)
 
     def test_windows_platform_suites_have_exact_ownership(self):
         self.assertEqual(self.windows.count("--suite DesktopSdl"), 1)
