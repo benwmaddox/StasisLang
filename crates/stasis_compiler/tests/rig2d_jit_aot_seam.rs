@@ -169,7 +169,7 @@ fn rig2d_owned_bone_arrays_match_jit_and_linked_aot() {
 fn rig2d_stasis_tests_pass_in_the_production_jit_test_shape() {
     let (rewritten, tests) =
         rewrite_top_level_test_declarations(STASIS_TESTS).expect("discover Stasis tests");
-    assert_eq!(tests.len(), 11, "focused behavior test count");
+    assert_eq!(tests.len(), 12, "focused behavior test count");
     let mut process = JitProcess::new();
     process
         .set_project_root(repository_root().to_string_lossy())

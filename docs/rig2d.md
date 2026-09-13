@@ -1,9 +1,10 @@
 # Bounded rigid 2D rigging
 
 `src/stdlib/rig2d.stasis` provides a small renderer-independent hierarchy for
-rigid cutout characters and articulated props. A rig owns at most 24 bones,
-stores one rest pose and one mutable local pose, and resolves those locals into
-world positions and clockwise screen-degree angles in one bounded forward pass.
+rigid cutout characters and articulated props. A rig owns a caller-selected
+compile-time number of bones, stores one rest pose and one mutable local pose,
+and resolves those locals into world positions and clockwise screen-degree
+angles in one bounded forward pass.
 
 The module does not load assets, choose draw order, play clips, advance time, or
 submit graphics commands. Those choices remain in the game. This makes the same
@@ -25,18 +26,22 @@ import "/.stasis_cache/toolchain/src/stdlib/rig2d.stasis";
 Inside the StasisLang repository, samples and tests use a relative import such
 as `../../src/stdlib/rig2d.stasis`.
 
-Each `Rig2D` directly owns `RigBone2D[RIG2D_BONE_CAPACITY]`; there is no shared
-module arena and no slot allocator. Put long-lived rigs in explicit global
-state, just like other persistent Stasis data:
+Each `Rig2D<N>` directly owns `RigBone2D[N]`; there is no shared module arena
+and no slot allocator. Put long-lived rigs in explicit global state, just like
+other persistent Stasis data:
 
 ```stasis
-global courier_rig: Rig2D;
+global courier_rig: Rig2D<24>;
+global boss_rig: Rig2D<64>;
 ```
 
-The fixed capacity is 24 bones per rig. A rig occupies its full bounded layout
-even when it has fewer bones. Adding the `Rig2D` field or changing its position
-changes application state layout and can require restarting a live session;
-ordinary pose edits do not change layout.
+The compatibility constant `RIG2D_BONE_CAPACITY` is 24, but it is not a
+global arena limit. Each capacity must be a non-negative compile-time `i32`
+argument and is independently bounded. A rig occupies its full bounded layout
+even when it has fewer bones. Adding a `Rig2D<N>` field or changing `N` changes
+application state layout and can require restarting a live session; ordinary
+pose edits do not change layout. A zero-capacity rig is valid but has no usable
+bone slots: `add_bone()` returns `-1` and `solve()` succeeds for an empty rig.
 
 ## Construct a parent-first hierarchy
 
@@ -153,7 +158,8 @@ angle normalization.
 
 ## Deliberate version 1 limits
 
-- 24 rigid bones per `Rig2D`, with bounded `O(count)` solve work.
+- A caller-selected non-negative compile-time capacity per `Rig2D<N>`, with
+  bounded `O(count)` solve work.
 - Translation and rotation only; no scale, shear, weighted mesh, or skinning.
 - No inverse kinematics, constraints, animation clips, queues, or layers.
 - No JSON/atlas importer, editor format, attachment type, or draw-order model.

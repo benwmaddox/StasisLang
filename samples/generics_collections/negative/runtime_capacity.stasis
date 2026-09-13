@@ -1,0 +1,10 @@
+struct Buffer<N: i32> {
+    values: i32[N];
+}
+
+global runtime_capacity: i32;
+global invalid: Buffer<runtime_capacity>;
+
+function main(): i32 {
+    return 0;
+}
