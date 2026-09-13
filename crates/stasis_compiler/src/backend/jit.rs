@@ -4152,6 +4152,31 @@ function main(): i32 {
     }
 
     #[test]
+    fn equivalent_generic_struct_capacity_spelling_reuses_layout_and_code() {
+        fn source(argument: &str) -> String {
+            format!(
+                "const CAPACITY: i32 = {argument};\nstruct Buffer<N: i32> {{ values: i32[N]; }}\nglobal samples: Buffer<CAPACITY>;\nfunction main(): i32 {{ return samples.values[0]; }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic_struct.stasis", source("24"));
+        process
+            .compile()
+            .expect("canonical generic struct baseline compiles");
+        let first_layout = process.state_layout();
+        let first_ptrs = process.function_code_ptrs();
+
+        process.upsert_file("generic_struct.stasis", source("12 + 12"));
+        let report = process
+            .compile()
+            .expect("equivalent generic struct spelling compiles");
+        assert_eq!(report.emit.emitted_functions, 0);
+        assert_eq!(process.state_layout(), first_layout);
+        assert_eq!(process.function_code_ptrs(), first_ptrs);
+    }
+
+    #[test]
     fn lowering_contract_cache_respects_scopes_and_failed_retries() {
         fn source(value: i32, valid: bool) -> String {
             let main = if valid {
