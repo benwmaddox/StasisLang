@@ -152,14 +152,17 @@ jobs:
             rust_target: x86_64-unknown-linux-gnu
             archive: stasis-nightly-linux-x64
             ext: tar.gz
+            bundle_platform: linux
           - os: windows-latest
             rust_target: x86_64-pc-windows-msvc
             archive: stasis-nightly-win-x64
             ext: zip
+            bundle_platform: windows
           - os: macos-15
             rust_target: aarch64-apple-darwin
             archive: stasis-nightly-osx-arm64
             ext: tar.gz
+            bundle_platform: macos
     runs-on: ${{ matrix.os }}
     env:
       STASIS_RELEASE_ID: ${{ needs.detect.outputs.nightly_tag }}
@@ -319,6 +322,12 @@ jobs:
             --dependency "sdl3=3.4.10-static" \
             --dependency "sdl3_image=3.4.4-static"
           tar -C dist -czf "dist/${{ matrix.archive }}.${{ matrix.ext }}" "${{ matrix.archive }}"
+          python3 tools/audit_release_bundle.py \
+            --root "${out}" \
+            --platform "${{ matrix.bundle_platform }}" \
+            --archive "dist/${{ matrix.archive }}.${{ matrix.ext }}" \
+            --output "bundle-audit/${{ matrix.archive }}.json" \
+            --max-archive-bytes 125829120
 
       - name: Assemble bundle (windows)
         if: runner.os == 'Windows'
@@ -380,6 +389,12 @@ jobs:
             --dependency "sdl3=3.4.10-static" `
             --dependency "sdl3_image=3.4.4-static"
           Compress-Archive -Path "$out/*" -DestinationPath "dist/${{ matrix.archive }}.${{ matrix.ext }}" -Force
+          python tools/audit_release_bundle.py `
+            --root "$out" `
+            --platform "${{ matrix.bundle_platform }}" `
+            --archive "dist/${{ matrix.archive }}.${{ matrix.ext }}" `
+            --output "bundle-audit/${{ matrix.archive }}.json" `
+            --max-archive-bytes 125829120
 
       - name: Smoke test bundled graphics runtime (windows)
         if: runner.os == 'Windows'
