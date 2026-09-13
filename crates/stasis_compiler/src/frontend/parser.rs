@@ -583,6 +583,124 @@ pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSigna
     parse_top_level_functions_with_diagnostic(source).map_err(|error| error.message)
 }
 
+/// Return the source ranges of generic declaration, type-application, and
+/// explicit-call angle brackets.
+///
+/// Tooling must use the parser's delimiter decisions instead of treating every
+/// `<` and `>` as an operator.  The compiler grammar has no general expression
+/// comma operator, so a matched angle group in a type context is unambiguous;
+/// ordinary comparisons remain outside the returned set.
+pub fn generic_angle_ranges(source: &str) -> Result<Vec<Range<usize>>, String> {
+    let tokens = lex(source)?;
+    let mut generic = Vec::new();
+    for (index, token) in tokens.iter().copied().enumerate() {
+        if !token_is_other_char(source, token, b'<')
+            || !looks_like_generic_open(source, &tokens, index)
+        {
+            continue;
+        }
+        let Some(close) = matching_angle_token(source, &tokens, index) else {
+            continue;
+        };
+        generic.push(token.start..token.end);
+        let close_token = tokens[close];
+        generic.push(close_token.start..close_token.end);
+    }
+    Ok(generic)
+}
+
+fn looks_like_generic_open(source: &str, tokens: &[Token], open: usize) -> bool {
+    let previous = open.checked_sub(1).and_then(|index| tokens.get(index));
+    if open >= 2
+        && token_text(source, tokens[open - 1]) == ":"
+        && token_text(source, tokens[open - 2]) == ":"
+    {
+        return true;
+    }
+
+    let Some(close) = matching_angle_token(source, tokens, open) else {
+        return false;
+    };
+    if generic_parameter_group(source, tokens, open, close) {
+        return true;
+    }
+
+    let previous_is_nested = previous.is_some_and(|token| {
+        token_is_other_char(source, *token, b'<')
+            || token_is_other_char(source, *token, b',')
+            || token_is_other_char(source, *token, b'>')
+    });
+    if previous_is_nested {
+        return true;
+    }
+
+    let Some(previous) = previous else {
+        return false;
+    };
+    if previous.kind != TokenKind::Identifier && !token_is_other_char(source, *previous, b'>') {
+        return false;
+    }
+
+    let after_close = tokens.get(close + 1);
+    let type_terminator = after_close.is_none_or(|token| {
+        matches!(
+            token_text(source, *token),
+            "[" | "." | "," | ";" | ")" | "}" | "=" | ">"
+        )
+    });
+    type_terminator && generic_type_context(source, tokens, open)
+}
+
+fn generic_parameter_group(source: &str, tokens: &[Token], open: usize, close: usize) -> bool {
+    let mut depth = 0usize;
+    let mut has_parameter = false;
+    for token in tokens.iter().copied().take(close).skip(open + 1) {
+        if token_is_other_char(source, token, b'<') {
+            depth = depth.saturating_add(1);
+        } else if token_is_other_char(source, token, b'>') {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 && token_text(source, token) == ":" {
+            has_parameter = true;
+        }
+    }
+    has_parameter
+}
+
+fn generic_type_context(source: &str, tokens: &[Token], open: usize) -> bool {
+    let mut index = open;
+    while index > 0 {
+        index -= 1;
+        let token = tokens[index];
+        if token_text(source, token) == ":" {
+            return true;
+        }
+        if matches!(token_text(source, token), ";" | "{" | "}" | "(" | ")" | "=") {
+            return false;
+        }
+        if token.kind == TokenKind::FunctionKw {
+            return false;
+        }
+    }
+    false
+}
+
+fn matching_angle_token(source: &str, tokens: &[Token], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().copied().enumerate().skip(open) {
+        if token_is_other_char(source, token, b'<') {
+            depth = depth.saturating_add(1);
+        } else if token_is_other_char(source, token, b'>') {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        } else if depth > 0 && matches!(token_text(source, token), "{" | "}" | "(" | ")" | ";") {
+            return None;
+        }
+    }
+    None
+}
+
 pub fn parse_top_level_functions_with_diagnostic(
     source: &str,
 ) -> Result<Vec<ParsedFunctionSignature>, ParserDiagnostic> {
