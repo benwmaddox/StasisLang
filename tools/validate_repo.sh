@@ -18,6 +18,8 @@ if [[ -f "$HOME/.cargo/env" ]]; then
 fi
 
 "$PYTHON" tools/ci/check_stasis_src_layout.py
+"$PYTHON" tools/ci/check_action_versions.py
+"$PYTHON" -m unittest tools.ci.test_action_versions
 if command -v cc >/dev/null 2>&1; then
   mkdir -p target/audio-ring-test
   audio_test=target/audio-ring-test/stasis_audio_ring_test
