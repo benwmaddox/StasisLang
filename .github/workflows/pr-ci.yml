@@ -196,6 +196,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
+      - name: Build Stasis test executable
+        # The desktop editor's isolated tests launch the sibling CLI; make that prerequisite explicit.
+        timeout-minutes: 15
+        run: python tools/cargo_cache.py run -- cargo build -p stasis --bin stasis
+
       - name: Run Stasis main Cargo tests
         timeout-minutes: 15
         run: >-

@@ -1,6 +1,6 @@
 # PR CI critical path
 
-PR CI keeps the required `test` check as a small aggregator. The four ordinary
+PR CI keeps the required `test` check as a small aggregator. The six ordinary
 Linux lanes it requires run independently so a slow Cargo lane does not wait
 behind unrelated setup or another Cargo target:
 
@@ -9,7 +9,7 @@ behind unrelated setup or another Cargo target:
 | `pr-ci-preflight` | source, runtime, web, native, and architecture checks | hosted job |
 | `pr-ci-cargo-workspace` | workspace tests excluding `stasis` | 15 min |
 | `pr-ci-cargo-stasis-library` | Stasis executable build and library tests | 15 min per command |
-| `pr-ci-cargo-stasis-main` | all Stasis main-binary tests except the isolated provenance test | 15 min |
+| `pr-ci-cargo-stasis-main` | Stasis executable build plus all main-binary tests except the isolated provenance test | 15 min per command |
 | `pr-ci-cargo-stasis-provenance` | the slow substituted-renderer provenance test | 15 min |
 | `pr-ci-cargo-stasis-integration` | every file in `apps/stasis/tests/*.rs` | 15 min |
 
@@ -21,8 +21,10 @@ requests continue to skip the ordinary lanes.
 The Stasis main-binary suite is split by the measured slow-test boundary. The
 main lane skips exactly one fully-qualified test, while the provenance lane
 runs that test with `--exact`; the two lanes therefore cover the original set
-without overlap. The library lane retains the explicit Stasis executable build
-because its runtime-launcher tests require that sibling binary.
+without overlap. The library and main lanes each retain an explicit Stasis
+executable build because their desktop-editor runtime-launcher tests require
+that sibling binary. The builds are intentionally local to their lanes because
+hosted jobs do not share Cargo targets.
 
 ## Baseline
 

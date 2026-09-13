@@ -79,10 +79,16 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "cargo test -p stasis --bin stasis\n          toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources --",
             'cargo test -p stasis "${test_args[@]}" -- --test-threads=1',
         )
+        expected_counts = {
+            "cargo build -p stasis --bin stasis": 2,
+        }
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(self.linux_ordinary.count(command), 1)
-        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 6)
+                self.assertEqual(
+                    self.linux_ordinary.count(command),
+                    expected_counts.get(command, 1),
+                )
+        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 7)
         self.assertIn("find apps/stasis/tests", self.linux_ordinary)
         self.assertIn("needs:", self.linux)
         self.assertIn("always()", self.linux)
