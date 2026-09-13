@@ -198,7 +198,6 @@ impl ProposalTools {
         source_catalog::inspect(&self.sources, args, MAX_SOURCE_CONTEXT_BYTES)
     }
 
-    #[cfg(test)]
     fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
         self.inspect_source(args)
     }

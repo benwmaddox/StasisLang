@@ -7874,7 +7874,7 @@ fn desktop_validate_semantic_preview(
     )
     .map_err(|error| format!("candidate compile or tests failed: {error}"))?;
     desktop_require_executed_tests(&test_result)?;
-    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
+    if desktop_preview_fingerprint(root, &preview.payload)? != preview.source_fingerprint {
         return Err("project sources changed during candidate validation".into());
     }
     Ok(test_result)
@@ -8030,6 +8030,55 @@ fn desktop_publish_semantic_preview_with_progress(
         progress,
         stasis_ai::task_controller::ProgressStage::InspectingSymbols,
     );
+    let workspace = load_workspace(Some(root))?;
+    if let Some(transaction) = desktop_file_transaction(&workspace.root, &preview.payload)? {
+        let current_fingerprint = desktop_file_fingerprint(&workspace.root, &transaction)?;
+        if current_fingerprint != preview.source_fingerprint {
+            return Err(
+                "stale semantic preview: project sources changed; generate a new preview before applying"
+                    .into(),
+            );
+        }
+        let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
+        if replanned.source_fingerprint != preview.source_fingerprint
+            || replanned.plan != preview.plan
+        {
+            return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+        }
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+        );
+        let applied = transaction.apply(&workspace.root)?;
+        let committed_fingerprint =
+            desktop_file_committed_fingerprint(&workspace.root, &transaction);
+        let committed_fingerprint = match committed_fingerprint {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                report_toolchain_progress(
+                    progress,
+                    stasis_ai::task_controller::ProgressStage::RollingBack,
+                );
+                applied.rollback().map_err(|rollback| {
+                    format!("file-write fingerprint failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(format!(
+                    "file-write fingerprint failed and all writes were rolled back: {error}"
+                ));
+            }
+        };
+        return Ok((
+            format!(
+                "applied {} project file change(s)",
+                preview.plan.changed_files.len()
+            ),
+            json!({
+                "status": "files_applied",
+                "changed_files": preview.plan.changed_files.iter().map(|change| &change.file).collect::<Vec<_>>(),
+                "source_fingerprint": committed_fingerprint,
+            }),
+        ));
+    }
     if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
         return Err(
             "stale semantic preview: project sources changed; generate a new preview before applying"
