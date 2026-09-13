@@ -11,6 +11,7 @@ use crate::backend::compile_analysis::{
 };
 use crate::backend::emit::hash_global_path;
 use crate::backend::program_snapshot::ProgramSnapshot;
+use crate::backend::reachability::matches_root;
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
@@ -324,6 +325,11 @@ fn physical_param_count(
                 + 3 * usize::from(is_struct_view_type(*type_id, named_structs))
         })
         .sum()
+}
+
+fn is_host_export(function: &FunctionMeta) -> bool {
+    matches!(function.name.as_str(), "main" | "render" | "on_code_swap")
+        || matches_root(function, "tick")
 }
 
 #[derive(Debug, Clone)]
@@ -960,12 +966,7 @@ fn encode_module(
     uleb(
         functions
             .iter()
-            .filter(|(function, _)| {
-                matches!(
-                    function.name.as_str(),
-                    "main" | "tick" | "render" | "on_code_swap"
-                )
-            })
+            .filter(|(function, _)| is_host_export(function))
             .count() as u32
             + if debug_symbols {
                 globals.len() as u32
@@ -977,10 +978,7 @@ fn encode_module(
         &mut export_section,
     );
     for (index, (function, _)) in functions.iter().enumerate() {
-        if !matches!(
-            function.name.as_str(),
-            "main" | "tick" | "render" | "on_code_swap"
-        ) {
+        if !is_host_export(function) {
             continue;
         }
         string(&function.name, &mut export_section);
@@ -1114,12 +1112,7 @@ fn encode_module(
         functions
             .iter()
             .enumerate()
-            .filter(|(_, (function, _))| {
-                matches!(
-                    function.name.as_str(),
-                    "main" | "tick" | "render" | "on_code_swap"
-                )
-            })
+            .filter(|(_, (function, _))| is_host_export(function))
             .map(|(index, (function, _))| ((imports.len() + index) as u32, function.name.clone()))
             .collect()
     };
@@ -4003,6 +3996,36 @@ mod tests {
         0
     }
 
+    fn exported_function_names(module: &[u8]) -> Vec<String> {
+        let mut cursor = 8;
+        while cursor < module.len() {
+            let section_id = module[cursor];
+            cursor += 1;
+            let section_len = read_test_uleb(module, &mut cursor) as usize;
+            let section_end = cursor + section_len;
+            if section_id != 7 {
+                cursor = section_end;
+                continue;
+            }
+            let count = read_test_uleb(module, &mut cursor);
+            let mut names = Vec::new();
+            for _ in 0..count {
+                let name_len = read_test_uleb(module, &mut cursor) as usize;
+                let name = String::from_utf8(module[cursor..cursor + name_len].to_vec())
+                    .expect("valid export name");
+                cursor += name_len;
+                let kind = module[cursor];
+                cursor += 1;
+                let _index = read_test_uleb(module, &mut cursor);
+                if kind == 0 {
+                    names.push(name);
+                }
+            }
+            return names;
+        }
+        Vec::new()
+    }
+
     #[test]
     fn encodes_one_unsigned_bounds_trap_for_both_invalid_regions() {
         let mut bytes = Vec::new();
@@ -4070,6 +4093,25 @@ mod tests {
                 .windows(name.len())
                 .any(|window| window == name.as_bytes()));
         }
+    }
+
+    #[test]
+    fn parameterized_tick_is_not_a_wasm_host_export() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "web.stasis",
+            "function tick(value: i32): i32 { return value; }\n\
+             function tick(): i32 { return 7; }\n\
+             function main(): i32 { return tick(1); }\n\
+             function render(): i32 { return 0; }\n",
+        );
+        process.compile().expect("compile overloaded web tick");
+
+        let exports = exported_function_names(process.module_bytes());
+        assert_eq!(exports.iter().filter(|name| *name == "tick").count(), 1);
+        assert!(exports.iter().any(|name| name == "main"));
+        assert!(exports.iter().any(|name| name == "render"));
     }
 
     #[test]

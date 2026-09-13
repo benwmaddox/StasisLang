@@ -7,6 +7,7 @@ use crate::backend::compile_analysis::{
 use crate::backend::emit::*;
 use crate::backend::hot_render::HotRenderImageMetadata;
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
+use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{is_named_scalar_state_path, StateLayout};
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
@@ -501,7 +502,7 @@ impl AotProcess {
                 .compiler
                 .functions()
                 .iter()
-                .filter(|function| function.name == name)
+                .filter(|function| matches_root(function, name))
                 .count();
             if count > 1 {
                 return Err(format!(
@@ -519,7 +520,9 @@ impl AotProcess {
             .ok_or_else(|| "program has not compiled successfully".to_string())?
             .functions()
             .iter()
-            .filter(|function| function.name == name);
+            .filter(|function| {
+                function.name == name && (name != "tick" || function.params.is_empty())
+            });
         let function = matches
             .next()
             .ok_or_else(|| format!("function '{name}' not found"))?;
@@ -855,7 +858,8 @@ impl AotProcess {
         let mut object_paths_by_function: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut ambiguous_aliases = BTreeSet::new();
         let mut object_paths_by_function_id = BTreeMap::new();
-        let mut manifest_rows: Vec<(FunctionId, String, String, String, String, u16)> = Vec::new();
+        let mut manifest_rows: Vec<(FunctionId, String, String, String, String, u16, usize)> =
+            Vec::new();
         for artifact in &self.artifacts {
             let function = self
                 .compiler
@@ -892,11 +896,13 @@ impl AotProcess {
                 )
             })?;
             object_paths_by_function_id.insert(function.id, object_path.clone());
-            if object_paths_by_function.contains_key(&function.name) {
-                object_paths_by_function.remove(&function.name);
-                ambiguous_aliases.insert(function.name.clone());
-            } else if !ambiguous_aliases.contains(&function.name) {
-                object_paths_by_function.insert(function.name.clone(), object_path);
+            if function.name != "tick" || function.params.is_empty() {
+                if object_paths_by_function.contains_key(&function.name) {
+                    object_paths_by_function.remove(&function.name);
+                    ambiguous_aliases.insert(function.name.clone());
+                } else if !ambiguous_aliases.contains(&function.name) {
+                    object_paths_by_function.insert(function.name.clone(), object_path);
+                }
             }
             manifest_rows.push((
                 function.id,
@@ -905,6 +911,7 @@ impl AotProcess {
                 artifact.symbol_name.clone(),
                 object_file_name,
                 function.return_type,
+                function.params.len(),
             ));
         }
 
@@ -1537,7 +1544,7 @@ fn json_escape(value: &str) -> String {
 fn build_engine_bundle_manifest(
     optimization_profile: AotOptimizationProfile,
     entrypoints: &EngineEntrypoints,
-    rows: &[(FunctionId, String, String, String, String, u16)],
+    rows: &[(FunctionId, String, String, String, String, u16, usize)],
     string_literals: &BTreeMap<i32, String>,
     collection_max_lengths: &BTreeMap<String, i32>,
     hot_render_images: &[HotRenderImageMetadata],
@@ -1567,18 +1574,21 @@ fn build_engine_bundle_manifest(
     }
     out.push_str("  },\n");
     out.push_str("  \"functions\": [\n");
-    for (index, (function_id, symbol_id, name, symbol, object_file, return_type)) in
-        rows.iter().enumerate()
+    for (
+        index,
+        (function_id, symbol_id, name, symbol, object_file, return_type, parameter_count),
+    ) in rows.iter().enumerate()
     {
         let comma = if index + 1 < rows.len() { "," } else { "" };
         out.push_str(&format!(
-            "    {{\"function_id\":{},\"symbol_id\":\"{}\",\"name\":\"{}\",\"symbol\":\"{}\",\"object\":\"{}\",\"return_type\":{}}}{}\n",
+            "    {{\"function_id\":{},\"symbol_id\":\"{}\",\"name\":\"{}\",\"symbol\":\"{}\",\"object\":\"{}\",\"return_type\":{},\"parameter_count\":{}}}{}\n",
             function_id,
             json_escape(symbol_id),
             json_escape(name),
             json_escape(symbol),
             json_escape(object_file),
             return_type,
+            parameter_count,
             comma
         ));
     }
@@ -3440,6 +3450,73 @@ function end_frame(): void { return; }
             manifest.contains("\"tick\": \"tick\"") && manifest.contains("\"render\": \"render\""),
             "manifest should include required entrypoints"
         );
+
+        let _ = fs::remove_dir_all(&bundle_dir);
+    }
+
+    #[test]
+    fn aot_engine_bundle_reserves_only_zero_argument_tick() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function tick(value: i32): i32 { return value; }\n\
+             function tick(): i32 { return 7; }\n\
+             function main(): i32 { return tick(4); }\n\
+             function render(): i32 { return 0; }\n\
+             function on_code_swap(): void { return; }\n",
+        );
+        process.compile().expect("compile overloaded tick bundle");
+
+        let zero_argument_tick = process
+            .program_snapshot()
+            .expect("program snapshot")
+            .functions()
+            .iter()
+            .find(|function| function.name == "tick" && function.params.is_empty())
+            .expect("zero-argument tick");
+        let zero_argument_tick_id = zero_argument_tick.id;
+        let parameterized_tick = process
+            .program_snapshot()
+            .expect("program snapshot")
+            .functions()
+            .iter()
+            .find(|function| function.name == "tick" && !function.params.is_empty())
+            .expect("parameterized tick");
+        let parameterized_tick_id = parameterized_tick.id;
+        let zero_argument_tick_symbol = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_id == zero_argument_tick_id)
+            .expect("zero-argument tick artifact")
+            .symbol_name
+            .clone();
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let bundle_dir = std::env::temp_dir().join(format!("stasis_aot_bundle_tick_arity_{stamp}"));
+        let bundle = process
+            .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
+            .expect("write overloaded tick bundle");
+
+        assert_eq!(
+            bundle.object_paths_by_function.get("tick"),
+            bundle
+                .object_paths_by_function_id
+                .get(&zero_argument_tick_id),
+            "the host tick alias must point to tick()"
+        );
+        assert!(bundle
+            .object_paths_by_function_id
+            .contains_key(&parameterized_tick_id));
+        let manifest = fs::read_to_string(&bundle.manifest_path).expect("read manifest");
+        assert!(manifest.contains(&format!(
+            "\"name\":\"tick\",\"symbol\":\"{}\",\"object\"",
+            zero_argument_tick_symbol
+        )));
+        assert!(manifest.contains("\"parameter_count\":0"));
+        assert!(manifest.contains("\"parameter_count\":1"));
 
         let _ = fs::remove_dir_all(&bundle_dir);
     }

@@ -294,7 +294,7 @@ fn plan_workshop_function_placement(
     request: &WorkshopSymbolPlacementRequest,
     known_structs: &BTreeSet<String>,
 ) -> Result<WorkshopSymbolPlacement, String> {
-    if is_lifecycle_function(&request.name) {
+    if is_lifecycle_function(&request.name, request.params.len()) {
         return Ok(WorkshopSymbolPlacement {
             file: "src/main.stasis".to_string(),
             group: "Main".to_string(),
@@ -506,6 +506,7 @@ fn index_file_symbols(
         let owner = function_owner(
             &file.path,
             &function.name,
+            function.params.len(),
             function
                 .params
                 .first()
@@ -514,7 +515,12 @@ fn index_file_symbols(
             file_structs,
             struct_names,
         );
-        let (group_kind, group_name) = function_group(&file.path, &function.name, owner.as_deref());
+        let (group_kind, group_name) = function_group(
+            &file.path,
+            &function.name,
+            function.params.len(),
+            owner.as_deref(),
+        );
         out.push(PendingSymbol {
             group_kind,
             group_name,
@@ -825,12 +831,16 @@ fn parse_simple_top_level_symbols(source: &str) -> Result<Vec<ParsedSimpleSymbol
 fn function_owner(
     path: &str,
     function_name: &str,
+    parameter_count: usize,
     first_param_type: Option<&str>,
     return_type: &str,
     file_structs: &[String],
     struct_names: &BTreeSet<String>,
 ) -> Option<String> {
-    if is_lifecycle_function(function_name) || is_system_path(path) || is_root_path(path) {
+    if is_lifecycle_function(function_name, parameter_count)
+        || is_system_path(path)
+        || is_root_path(path)
+    {
         return None;
     }
 
@@ -854,9 +864,10 @@ fn function_owner(
 fn function_group(
     path: &str,
     function_name: &str,
+    parameter_count: usize,
     owner: Option<&str>,
 ) -> (WorkshopSymbolGroupKind, String) {
-    if is_lifecycle_function(function_name) || is_main_path(path) {
+    if is_lifecycle_function(function_name, parameter_count) || is_main_path(path) {
         return (WorkshopSymbolGroupKind::Main, "Main".to_string());
     }
     if let Some(owner) = owner {
@@ -884,8 +895,9 @@ fn format_function_signature(
     format!("{name}({params}): {return_type_name}")
 }
 
-fn is_lifecycle_function(name: &str) -> bool {
-    matches!(name, "main" | "init" | "tick" | "render" | "on_code_swap")
+fn is_lifecycle_function(name: &str, parameter_count: usize) -> bool {
+    matches!(name, "main" | "init" | "render" | "on_code_swap")
+        || (name == "tick" && parameter_count == 0)
 }
 
 fn is_main_path(path: &str) -> bool {
@@ -5214,6 +5226,24 @@ mod placement_tests {
         .expect("tick placement");
         assert_eq!(tick.file, "src/main.stasis");
         assert_eq!(tick.group, "Main");
+
+        let parameterized_tick = plan_workshop_symbol_placement(
+            &files,
+            &WorkshopSymbolPlacementRequest {
+                kind: WorkshopPlacementSymbolKind::Function,
+                name: "tick".to_string(),
+                params: vec![WorkshopFunctionParam {
+                    name: "value".to_string(),
+                    type_name: "i32".to_string(),
+                }],
+                return_type: Some("i32".to_string()),
+                owner: None,
+                system: None,
+            },
+        )
+        .expect("parameterized tick placement");
+        assert_eq!(parameterized_tick.file, "src/root.stasis");
+        assert_eq!(parameterized_tick.group, "Root");
 
         let utility = plan_workshop_symbol_placement(
             &files,

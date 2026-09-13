@@ -13,6 +13,7 @@ use crate::backend::patch_plan::{
     PatchReasonChain,
 };
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
+use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{build_state_memory_report, is_named_scalar_state_path};
 use crate::backend::state_query::{
     parse_state_query, BinaryOperator, ScalarExpression, StateQuery, StateValueReference,
@@ -1216,7 +1217,7 @@ impl JitProcess {
             .compiler
             .functions()
             .iter()
-            .filter(|function| self.is_host_export_name(&function.name))
+            .filter(|function| self.is_host_export(function))
             .map(|function| {
                 (
                     function.name.clone(),
@@ -1228,7 +1229,7 @@ impl JitProcess {
             .compiler
             .functions()
             .iter()
-            .filter(|function| self.is_host_export_name(&function.name))
+            .filter(|function| self.is_host_export(function))
             .filter_map(|function| {
                 staged_artifacts
                     .iter()
@@ -1334,9 +1335,13 @@ impl JitProcess {
         self.generation_metadata.as_ref()
     }
 
-    fn is_host_export_name(&self, name: &str) -> bool {
-        matches!(name, "main" | "tick" | "render" | "on_code_swap")
-            || self.required_emit_roots.iter().any(|root| root == name)
+    fn is_host_export(&self, function: &FunctionMeta) -> bool {
+        matches!(function.name.as_str(), "main" | "render" | "on_code_swap")
+            || matches_root(function, "tick")
+            || self
+                .required_emit_roots
+                .iter()
+                .any(|root| matches_root(function, root))
     }
 
     pub fn clif_for_function_name(&self, name: &str) -> Option<&str> {
@@ -2202,7 +2207,7 @@ impl JitProcess {
             .compiler
             .functions()
             .iter()
-            .filter(|function| self.is_host_export_name(&function.name))
+            .filter(|function| self.is_host_export(function))
         {
             *counts.entry(function.name.as_str()).or_insert(0usize) += 1;
         }
@@ -2344,7 +2349,7 @@ impl JitProcess {
             .compiler
             .functions()
             .iter()
-            .filter(|function| function.name == name);
+            .filter(|function| matches_root(function, name));
         let first = matches
             .next()
             .ok_or_else(|| format!("required engine entrypoint '{name}' not found"))?;
@@ -8826,6 +8831,48 @@ function main(): i32 { batch.update(0); return 0; }
             true,
             "expected render in package symbol map"
         );
+    }
+
+    #[test]
+    fn parameterized_tick_is_not_a_host_entry_alias() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "tick_overloads.stasis",
+            "function tick(value: i32): i32 { return value; }\n\
+             function tick(): i32 { return 7; }\n\
+             function render(): i32 { return 0; }\n\
+             function on_code_swap(): void { return; }\n",
+        );
+        process
+            .compile()
+            .expect("overloaded tick fixture should compile");
+
+        let zero_argument_tick = process
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "tick" && function.params.is_empty())
+            .expect("zero-argument tick");
+        let parameterized_tick = process
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "tick" && !function.params.is_empty())
+            .expect("parameterized tick");
+        let metadata = process.generation_metadata().expect("generation metadata");
+
+        assert!(metadata
+            .emitted_function_ids
+            .contains(&zero_argument_tick.id));
+        assert!(!metadata
+            .emitted_function_ids
+            .contains(&parameterized_tick.id));
+        assert!(metadata.host_export_signatures.contains_key("tick"));
+
+        let package = process
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect("zero-argument tick should satisfy the engine package");
+        assert_ne!(package.tick_code_ptr, 0);
     }
 
     #[test]
