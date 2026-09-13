@@ -5,7 +5,7 @@
 //! Keeping this pass in the frontend gives every backend the same concrete
 //! fixed-layout input.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::SourceFile;
 use crate::frontend::indexer::hash_text;
@@ -27,8 +27,10 @@ enum ConcreteArgument {
 
 #[derive(Debug, Clone)]
 struct GenericStructDefinition {
+    identity: String,
     file_index: usize,
     path: String,
+    module_alias: String,
     name: String,
     parameters: Vec<ParsedGenericParameter>,
     fields: Vec<crate::frontend::parser::ParsedField>,
@@ -38,6 +40,7 @@ struct GenericStructDefinition {
 #[derive(Debug, Clone)]
 struct GenericFunctionDefinition {
     file_index: usize,
+    module_alias: String,
     name: String,
     parameters: Vec<ParsedGenericParameter>,
     signature: ParsedFunctionSignature,
@@ -84,6 +87,7 @@ struct ConstantDefinition {
 struct GenericEnvironment {
     values: BTreeMap<String, i32>,
     types: BTreeMap<String, String>,
+    module_alias: Option<String>,
 }
 
 impl GenericEnvironment {
@@ -130,8 +134,11 @@ impl GenericEnvironment {
 struct Expansion {
     files: Vec<RawFile>,
     generic_structs: BTreeMap<String, GenericStructDefinition>,
+    generic_structs_by_name: BTreeMap<String, Vec<String>>,
     generic_functions: Vec<GenericFunctionDefinition>,
     generic_functions_by_name: BTreeMap<String, Vec<usize>>,
+    ordinary_function_names: BTreeMap<String, Vec<(usize, String, Vec<String>)>>,
+    visible_module_aliases: BTreeMap<usize, std::collections::BTreeSet<String>>,
     constants: BTreeMap<String, i32>,
     struct_specializations: BTreeMap<StructSpecializationKey, StructSpecialization>,
     struct_work: VecDeque<(StructSpecializationKey, usize)>,
@@ -166,14 +173,31 @@ pub(crate) fn expand_sources(files: &mut [SourceFile]) -> Result<(), String> {
 
 impl Expansion {
     fn new(files: Vec<RawFile>) -> Result<Self, String> {
-        let mut generic_structs = BTreeMap::new();
+        let mut generic_structs: BTreeMap<String, GenericStructDefinition> = BTreeMap::new();
+        let mut generic_structs_by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut generic_functions = Vec::new();
         let mut generic_functions_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut ordinary_function_names: BTreeMap<String, Vec<(usize, String, Vec<String>)>> =
+            BTreeMap::new();
         let mut constant_definitions = Vec::new();
         let mut struct_fields = BTreeMap::new();
         let mut concrete_paths = BTreeMap::new();
+        let mut visible_module_aliases = BTreeMap::new();
 
         for (file_index, file) in files.iter().enumerate() {
+            let mut visible = BTreeSet::new();
+            visible.insert(module_alias_for_path(&file.path));
+            if let Ok(imports) =
+                crate::frontend::module_graph::parse_imports(&file.path, &file.source)
+            {
+                visible.extend(
+                    imports
+                        .into_iter()
+                        .map(|import| module_alias_for_path(&import.target)),
+                );
+            }
+            visible_module_aliases.insert(file_index, visible);
+
             // This discovery pass must not take ownership of malformed-source
             // diagnostics. The canonical parser/indexer below has the source
             // span and function context needed to report those errors.
@@ -192,6 +216,9 @@ impl Expansion {
                 }
             }
             for structure in &layout.structs {
+                if !structure.generic_parameters.is_empty() {
+                    continue;
+                }
                 if let Some(existing) = struct_fields.get(&structure.name) {
                     if existing != &structure.fields {
                         return Err(format!(
@@ -214,34 +241,62 @@ impl Expansion {
                 if structure.generic_parameters.is_empty() {
                     continue;
                 }
-                if generic_structs.contains_key(&structure.name) {
-                    return Err(format!(
-                        "duplicate generic struct declaration '{}'",
-                        structure.name
-                    ));
-                }
                 let definition_range = find_struct_definition_range(
                     &file.source,
                     &structure.name,
                     &structure.generic_parameters,
                 )?;
+                if generic_structs_by_name
+                    .get(&structure.name)
+                    .into_iter()
+                    .flatten()
+                    .any(|identity| generic_structs[identity].file_index == file_index)
+                {
+                    return Err(format!(
+                        "duplicate generic struct declaration '{}'",
+                        structure.name
+                    ));
+                }
+                let identity = generic_definition_identity(
+                    &file.path,
+                    &structure.name,
+                    definition_range.start,
+                );
                 generic_structs.insert(
-                    structure.name.clone(),
+                    identity.clone(),
                     GenericStructDefinition {
+                        identity: identity.clone(),
                         file_index,
                         path: file.path.clone(),
-                        name: structure.name,
+                        module_alias: module_alias_for_path(&file.path),
+                        name: structure.name.clone(),
                         parameters: structure.generic_parameters,
                         fields: structure.fields,
                         definition_range,
                     },
                 );
+                generic_structs_by_name
+                    .entry(structure.name)
+                    .or_default()
+                    .push(identity);
             }
             let Ok(functions) = parse_top_level_functions(&file.source) else {
                 continue;
             };
             for function in functions {
                 if function.generic_parameters.is_empty() {
+                    ordinary_function_names
+                        .entry(function.name.clone())
+                        .or_default()
+                        .push((
+                            file_index,
+                            module_alias_for_path(&file.path),
+                            function
+                                .params
+                                .iter()
+                                .map(|parameter| parameter.type_name.clone())
+                                .collect(),
+                        ));
                     continue;
                 }
                 let definition = generic_functions.len();
@@ -251,6 +306,7 @@ impl Expansion {
                     .push(definition);
                 generic_functions.push(GenericFunctionDefinition {
                     file_index,
+                    module_alias: module_alias_for_path(&file.path),
                     name: function.name.clone(),
                     parameters: function.generic_parameters.clone(),
                     signature: function,
@@ -275,8 +331,11 @@ impl Expansion {
         let expansion = Self {
             files,
             generic_structs,
+            generic_structs_by_name,
             generic_functions,
             generic_functions_by_name,
+            ordinary_function_names,
+            visible_module_aliases,
             constants,
             struct_specializations: BTreeMap::new(),
             struct_work: VecDeque::new(),
@@ -321,38 +380,15 @@ impl Expansion {
         visiting: &mut Vec<String>,
     ) -> Result<(), String> {
         let resolved_type = rewrite_generic_identifiers(type_name, environment);
-        self.materialize_type(&resolved_type, &GenericEnvironment::default())?;
+        self.materialize_type(&resolved_type, environment)?;
         self.concrete_paths
             .insert(path.to_string(), resolved_type.clone());
 
-        let (struct_name, nested_environment, visit_key) = if let Some((base, arguments)) =
-            parse_type_application(&resolved_type)?
-        {
-            let Some(definition) = self.lookup_generic_struct(base).cloned() else {
-                return Ok(());
-            };
-            let resolved_arguments = self.resolve_argument_list(
-                &definition.parameters,
-                &arguments,
-                &GenericEnvironment::default(),
-            )?;
-            let nested_environment =
-                GenericEnvironment::from_parameters(&definition.parameters, &resolved_arguments)?;
-            (
-                base.to_string(),
-                nested_environment,
-                format!("{}<{}>", base, arguments.join(",")),
-            )
-        } else if self.struct_fields.contains_key(&resolved_type) {
-            (
-                resolved_type.clone(),
-                environment.clone(),
-                resolved_type.clone(),
-            )
-        } else {
-            return Ok(());
-        };
-        let Some(fields) = self.struct_fields.get(&struct_name).cloned() else {
+        let subject = split_array_suffix(&resolved_type)
+            .map_or(resolved_type.as_str(), |(element, _)| element);
+        let Some((fields, nested_environment, visit_key)) =
+            self.struct_fields_for_type(subject, environment)?
+        else {
             return Ok(());
         };
         if visiting.iter().any(|existing| existing == &visit_key) {
@@ -371,107 +407,565 @@ impl Expansion {
         Ok(())
     }
 
+    fn local_paths_for_function(
+        &mut self,
+        file_index: usize,
+        function: &ParsedFunctionSignature,
+        source: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let mut paths = self.concrete_paths.clone();
+        for parameter in &function.params {
+            let type_name = rewrite_generic_identifiers(&parameter.type_name, environment);
+            self.populate_local_type_paths(
+                &mut paths,
+                &parameter.name,
+                &type_name,
+                environment,
+                &mut Vec::new(),
+            )?;
+        }
+        if let Ok(bindings) = crate::frontend::parser::parse_typed_local_bindings(source) {
+            for binding in bindings
+                .into_iter()
+                .filter(|binding| binding.function_name == function.name)
+            {
+                let type_name = rewrite_generic_identifiers(&binding.type_name, environment);
+                self.populate_local_type_paths(
+                    &mut paths,
+                    &binding.name,
+                    &type_name,
+                    environment,
+                    &mut Vec::new(),
+                )?;
+            }
+        }
+        let _ = file_index;
+        Ok(paths)
+    }
+
+    fn populate_local_type_paths(
+        &mut self,
+        paths: &mut BTreeMap<String, String>,
+        path: &str,
+        type_name: &str,
+        environment: &GenericEnvironment,
+        visiting: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let resolved_type = rewrite_generic_identifiers(type_name, environment);
+        paths.insert(path.to_string(), resolved_type.clone());
+        let _ = self.materialize_type(&resolved_type, environment)?;
+        let subject = split_array_suffix(&resolved_type)
+            .map_or(resolved_type.as_str(), |(element, _)| element);
+        if let Some((fields, nested_environment, visit_key)) =
+            self.struct_fields_for_type(subject, environment)?
+        {
+            if visiting.iter().any(|existing| existing == &visit_key) {
+                return Ok(());
+            }
+            visiting.push(visit_key);
+            for field in fields {
+                self.populate_local_type_paths(
+                    paths,
+                    &format!("{path}.{}", field.name),
+                    &field.type_name,
+                    &nested_environment,
+                    visiting,
+                )?;
+            }
+            visiting.pop();
+        }
+        Ok(())
+    }
+
     fn seed_direct_uses(&mut self) -> Result<(), String> {
         for file_index in 0..self.files.len() {
             let source = self.files[file_index].source.clone();
             let source_without_templates = self.source_without_templates(file_index, &source)?;
-            self.collect_type_applications(
-                &source_without_templates,
-                &GenericEnvironment::default(),
-            )?;
-            for call in collect_explicit_generic_calls(&source_without_templates)? {
-                let definitions = self
-                    .generic_functions_by_name
-                    .get(&call.name)
-                    .cloned()
-                    .unwrap_or_default();
-                for definition in definitions {
-                    let parameters = self.generic_functions[definition].parameters.clone();
-                    let arguments = self.resolve_argument_list(
-                        &parameters,
-                        &call.arguments,
-                        &GenericEnvironment::default(),
-                    )?;
-                    self.schedule_function(definition, arguments)?;
+            let mut source_environment = GenericEnvironment::default();
+            source_environment.module_alias =
+                Some(module_alias_for_path(&self.files[file_index].path));
+            self.collect_type_applications(&source_without_templates, &source_environment)?;
+            let Ok(functions) = parse_top_level_functions(&source_without_templates) else {
+                continue;
+            };
+            for function in functions {
+                let Some(body) = source_without_templates.get(function.body_range.clone()) else {
+                    continue;
+                };
+                let local_paths = self.local_paths_for_function(
+                    file_index,
+                    &function,
+                    &source_without_templates,
+                    &source_environment,
+                )?;
+                for call in collect_explicit_generic_calls(body)? {
+                    let definitions = self.generic_function_candidates(
+                        &call.name,
+                        call.qualifier.as_deref(),
+                        file_index,
+                    );
+                    for definition in definitions {
+                        let generic = self.generic_functions[definition].clone();
+                        let parameters = generic.parameters.clone();
+                        let arguments = self.resolve_argument_list(
+                            &parameters,
+                            &call.arguments,
+                            &source_environment,
+                        )?;
+                        let mut actual_types = Vec::new();
+                        if let Some(qualifier) = call.qualifier.as_deref() {
+                            if let Some(type_name) = local_paths.get(qualifier) {
+                                actual_types.push(type_name.clone());
+                            }
+                        }
+                        if let Some(argument_types) = call
+                            .call_arguments
+                            .iter()
+                            .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                            .collect::<Option<Vec<_>>>()
+                        {
+                            actual_types.extend(argument_types);
+                        } else {
+                            actual_types.clear();
+                        }
+                        if !self.explicit_call_matches(&generic, &arguments, &actual_types) {
+                            continue;
+                        }
+                        self.schedule_function(definition, arguments)?;
+                    }
                 }
+                self.seed_inferred_receiver_calls(body, file_index, &local_paths)?;
+                self.seed_inferred_argument_calls(body, file_index, &local_paths)?;
             }
-            self.seed_inferred_receiver_calls(&source_without_templates)?;
-            self.seed_inferred_argument_calls(&source_without_templates)?;
         }
         Ok(())
     }
 
-    fn seed_inferred_receiver_calls(&mut self, source: &str) -> Result<(), String> {
-        for call in collect_inferred_receiver_calls(source) {
-            let Some(actual_type) = self.concrete_paths.get(&call.receiver).cloned() else {
-                continue;
-            };
-            let definitions = self
-                .generic_functions_by_name
-                .get(&call.name)
-                .cloned()
-                .unwrap_or_default();
-            for definition in definitions {
-                let generic = self.generic_functions[definition].clone();
-                let Some(receiver) = generic.signature.params.first() else {
+    fn seed_inferred_receiver_calls(
+        &mut self,
+        source: &str,
+        file_index: usize,
+        local_paths: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        for call in collect_inferred_receiver_calls(source)? {
+            let is_module_call = !self.concrete_paths.contains_key(&call.receiver)
+                && self
+                    .visible_module_aliases
+                    .get(&file_index)
+                    .is_some_and(|aliases| aliases.contains(&call.receiver));
+            if is_module_call {
+                let Some(actual_types) = call
+                    .arguments
+                    .iter()
+                    .map(|argument| self.infer_expression_type_text(argument, local_paths))
+                    .collect::<Option<Vec<_>>>()
+                else {
                     continue;
                 };
-                let mut environment = GenericEnvironment::default();
-                if !self.infer_type_pattern(
-                    &receiver.type_name,
-                    &actual_type,
-                    &generic.parameters,
-                    &mut environment,
-                )? {
+                let definitions =
+                    self.generic_function_candidates(&call.name, Some(&call.receiver), file_index);
+                if self.has_ordinary_function_candidate(
+                    &call.name,
+                    Some(&call.receiver),
+                    file_index,
+                    &actual_types,
+                ) {
                     continue;
                 }
-                let Some(arguments) = inferred_arguments(&generic.parameters, &environment) else {
+                let had_viable_definition = !definitions.is_empty();
+                let mut scheduled = false;
+                for definition in definitions.iter().copied() {
+                    let generic = self.generic_functions[definition].clone();
+                    let Some(arguments) =
+                        self.infer_generic_call_arguments(&generic, &actual_types)?
+                    else {
+                        continue;
+                    };
+                    self.schedule_function(definition, arguments)?;
+                    scheduled = true;
+                }
+                if had_viable_definition && !scheduled {
+                    return Err(format!(
+                        "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                        call.name
+                    ));
+                }
+                continue;
+            }
+            let Some(actual_type) = local_paths
+                .get(&call.receiver)
+                .or_else(|| self.concrete_paths.get(&call.receiver))
+                .cloned()
+            else {
+                continue;
+            };
+            let mut actual_types = vec![actual_type];
+            let Some(argument_types) = call
+                .arguments
+                .iter()
+                .map(|argument| self.infer_expression_type_text(argument, local_paths))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            actual_types.extend(argument_types);
+            let definitions =
+                self.generic_function_candidates(&call.name, Some(&call.receiver), file_index);
+            if self.has_ordinary_function_candidate(
+                &call.name,
+                Some(&call.receiver),
+                file_index,
+                &actual_types,
+            ) {
+                continue;
+            }
+            let had_viable_definition = !definitions.is_empty();
+            let mut scheduled = false;
+            for definition in definitions.iter().copied() {
+                let generic = self.generic_functions[definition].clone();
+                let Some(arguments) = self.infer_generic_call_arguments(&generic, &actual_types)?
+                else {
                     continue;
                 };
                 self.schedule_function(definition, arguments)?;
+                scheduled = true;
+            }
+            if had_viable_definition && !scheduled {
+                return Err(format!(
+                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    call.name
+                ));
             }
         }
         Ok(())
     }
 
-    fn seed_inferred_argument_calls(&mut self, source: &str) -> Result<(), String> {
+    fn seed_inferred_argument_calls(
+        &mut self,
+        source: &str,
+        file_index: usize,
+        local_paths: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
         for call in collect_inferred_argument_calls(source)? {
-            let definitions = self
-                .generic_functions_by_name
-                .get(&call.name)
-                .cloned()
-                .unwrap_or_default();
-            for definition in definitions {
+            let definitions = self.generic_function_candidates(&call.name, None, file_index);
+            if definitions.is_empty() {
+                continue;
+            }
+            let mut actual_types = Vec::new();
+            let Some(inferred_types) = call
+                .arguments
+                .iter()
+                .map(|argument| self.infer_expression_type_text(argument, local_paths))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            actual_types.extend(inferred_types);
+            if self.has_ordinary_function_candidate(&call.name, None, file_index, &actual_types) {
+                continue;
+            }
+            let mut scheduled = false;
+            for definition in definitions.iter().copied() {
                 let generic = self.generic_functions[definition].clone();
                 if generic.signature.params.len() != call.arguments.len() {
                     continue;
                 }
-                let mut environment = GenericEnvironment::default();
-                let mut viable = true;
-                for (parameter, argument) in generic.signature.params.iter().zip(&call.arguments) {
-                    let Some(actual_type) = self.concrete_paths.get(argument.trim()).cloned()
-                    else {
-                        viable = false;
-                        break;
-                    };
-                    if !self.infer_type_pattern(
-                        &parameter.type_name,
-                        &actual_type,
-                        &generic.parameters,
-                        &mut environment,
-                    )? {
-                        viable = false;
-                        break;
-                    }
+                if let Some(arguments) =
+                    self.infer_generic_call_arguments(&generic, &actual_types)?
+                {
+                    self.schedule_function(definition, arguments)?;
+                    scheduled = true;
                 }
-                if viable {
-                    if let Some(arguments) = inferred_arguments(&generic.parameters, &environment) {
-                        self.schedule_function(definition, arguments)?;
-                    }
-                }
+            }
+            if !scheduled {
+                return Err(format!(
+                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    call.name
+                ));
             }
         }
         Ok(())
+    }
+
+    fn infer_generic_call_arguments(
+        &mut self,
+        generic: &GenericFunctionDefinition,
+        actual_types: &[String],
+    ) -> Result<Option<Vec<ConcreteArgument>>, String> {
+        if generic.signature.params.len() != actual_types.len() {
+            return Ok(None);
+        }
+        let mut environment = GenericEnvironment::default();
+        environment.module_alias = Some(generic.module_alias.clone());
+        for (parameter, actual) in generic.signature.params.iter().zip(actual_types) {
+            if !self.infer_type_pattern(
+                &parameter.type_name,
+                actual,
+                &generic.parameters,
+                &mut environment,
+            )? {
+                return Ok(None);
+            }
+        }
+        // A symbolic extent such as N+1 is intentionally not solved during
+        // inference.  Once another occurrence has bound N, run the match
+        // again so the expression is checked rather than merely deferred.
+        for (parameter, actual) in generic.signature.params.iter().zip(actual_types) {
+            if !self.infer_type_pattern(
+                &parameter.type_name,
+                actual,
+                &generic.parameters,
+                &mut environment,
+            )? {
+                return Ok(None);
+            }
+        }
+        Ok(inferred_arguments(&generic.parameters, &environment))
+    }
+
+    fn explicit_call_matches(
+        &self,
+        generic: &GenericFunctionDefinition,
+        arguments: &[ConcreteArgument],
+        actual_types: &[String],
+    ) -> bool {
+        if actual_types.is_empty() {
+            return true;
+        }
+        if generic.signature.params.len() != actual_types.len() {
+            return false;
+        }
+        let Ok(mut environment) =
+            GenericEnvironment::from_parameters(&generic.parameters, arguments)
+        else {
+            return false;
+        };
+        environment.module_alias = Some(generic.module_alias.clone());
+        generic
+            .signature
+            .params
+            .iter()
+            .zip(actual_types)
+            .all(|(parameter, actual)| {
+                let expected = rewrite_generic_identifiers(&parameter.type_name, &environment);
+                self.types_compatible_for_environment(&expected, actual, &environment)
+            })
+    }
+
+    fn types_compatible_for_environment(
+        &self,
+        expected: &str,
+        actual: &str,
+        environment: &GenericEnvironment,
+    ) -> bool {
+        if same_type_name(expected, actual) {
+            return true;
+        }
+        let expected_array = split_array_suffix(expected);
+        let actual_array = split_array_suffix(actual);
+        if let (Some((expected_element, expected_extent)), Some((actual_element, actual_extent))) =
+            (expected_array, actual_array)
+        {
+            if !self.types_compatible_for_environment(expected_element, actual_element, environment)
+            {
+                return false;
+            }
+            if expected_extent.trim().is_empty() {
+                return true;
+            }
+            let Ok(expected_extent) =
+                evaluate_i32_expression(expected_extent, environment, &self.constants)
+            else {
+                return type_names_equivalent(expected_extent, actual_extent);
+            };
+            let Ok(actual_extent) =
+                evaluate_i32_expression(actual_extent, environment, &self.constants)
+            else {
+                return false;
+            };
+            return expected_extent == actual_extent;
+        }
+        let (Some((expected_base, expected_arguments)), Some((actual_base, actual_arguments))) = (
+            parse_type_application(expected).ok().flatten(),
+            parse_type_application(actual).ok().flatten(),
+        ) else {
+            return type_names_equivalent(expected, actual);
+        };
+        if expected_arguments.len() != actual_arguments.len() {
+            return false;
+        }
+        let expected_definition = self
+            .lookup_generic_struct_for_environment(expected_base, environment)
+            .ok()
+            .flatten();
+        let actual_definition = self
+            .lookup_generic_struct_for_environment(actual_base, environment)
+            .ok()
+            .flatten();
+        if let (Some(expected_definition), Some(actual_definition)) =
+            (expected_definition, actual_definition)
+        {
+            if expected_definition.identity != actual_definition.identity
+                || expected_definition.parameters.len() != expected_arguments.len()
+            {
+                return false;
+            }
+            return expected_definition
+                .parameters
+                .iter()
+                .zip(expected_arguments.iter().zip(actual_arguments.iter()))
+                .all(
+                    |(parameter, (expected_argument, actual_argument))| match parameter.kind {
+                        ParsedGenericParameterKind::Type => self.types_compatible_for_environment(
+                            expected_argument,
+                            actual_argument,
+                            environment,
+                        ),
+                        ParsedGenericParameterKind::I32 => {
+                            match (
+                                evaluate_i32_expression(
+                                    expected_argument,
+                                    environment,
+                                    &self.constants,
+                                ),
+                                evaluate_i32_expression(
+                                    actual_argument,
+                                    environment,
+                                    &self.constants,
+                                ),
+                            ) {
+                                (Ok(expected), Ok(actual)) => expected == actual,
+                                _ => false,
+                            }
+                        }
+                    },
+                );
+        }
+        type_names_equivalent(expected, actual)
+    }
+
+    fn infer_expression_type_text(
+        &self,
+        expression: &str,
+        local_paths: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        let mut expression = expression.trim();
+        while has_outer_parentheses(expression) {
+            expression = expression[1..expression.len() - 1].trim();
+        }
+        if let Some(type_name) = local_paths.get(expression) {
+            return Some(type_name.clone());
+        }
+        if expression == "true" || expression == "false" {
+            return Some("bool".to_string());
+        }
+        if expression.starts_with('"') && expression.ends_with('"') {
+            return Some("string".to_string());
+        }
+        if expression.parse::<i32>().is_ok()
+            || expression
+                .strip_prefix('-')
+                .is_some_and(|value| value.parse::<i32>().is_ok())
+        {
+            return Some("i32".to_string());
+        }
+        if expression.parse::<f32>().is_ok() && expression.contains('.') {
+            return Some("f32".to_string());
+        }
+        if let Some((collection, suffix)) = split_indexed_expression(expression) {
+            let collection_type = self.infer_expression_type_text(collection, local_paths)?;
+            let element_type = split_array_suffix(&collection_type)?.0.to_string();
+            if suffix.is_empty() {
+                return Some(element_type);
+            }
+            return local_paths
+                .get(&format!("{collection}[0]{suffix}"))
+                .cloned()
+                .or_else(|| self.field_type_from_text(&element_type, suffix));
+        }
+        if let Some((lhs, operator, rhs)) = split_binary_expression(expression) {
+            let lhs = self.infer_expression_type_text(lhs, local_paths)?;
+            let rhs = self.infer_expression_type_text(rhs, local_paths)?;
+            if operator == '<' || operator == '>' || operator == '=' {
+                return Some("bool".to_string());
+            }
+            if lhs == "f64" || rhs == "f64" {
+                return Some("f64".to_string());
+            }
+            if lhs == "f32" || rhs == "f32" {
+                return Some("f32".to_string());
+            }
+            return Some(lhs);
+        }
+        None
+    }
+
+    fn field_type_from_text(&self, type_name: &str, suffix: &str) -> Option<String> {
+        let mut current = type_name.trim().to_string();
+        for field_name in suffix.trim_start_matches('.').split('.') {
+            let fields = if let Some((base, arguments)) = parse_type_application(&current).ok()? {
+                let mut lookup_environment = GenericEnvironment::default();
+                let definition = self
+                    .lookup_generic_struct_for_environment(base, &lookup_environment)
+                    .ok()??;
+                lookup_environment.module_alias = Some(definition.module_alias.clone());
+                let resolved_arguments = definition
+                    .parameters
+                    .iter()
+                    .zip(arguments.iter())
+                    .map(|(parameter, argument)| match parameter.kind {
+                        ParsedGenericParameterKind::Type => Some(ConcreteArgument::Type(
+                            self.materialize_type_readonly(argument, &lookup_environment)
+                                .ok()?,
+                        )),
+                        ParsedGenericParameterKind::I32 => Some(ConcreteArgument::I32(
+                            evaluate_i32_expression(argument, &lookup_environment, &self.constants)
+                                .ok()?,
+                        )),
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let mut environment = GenericEnvironment::from_parameters(
+                    &definition.parameters,
+                    &resolved_arguments,
+                )
+                .ok()?;
+                environment.module_alias = Some(definition.module_alias.clone());
+                definition
+                    .fields
+                    .iter()
+                    .find(|field| field.name == field_name)
+                    .map(|field| {
+                        let substituted =
+                            rewrite_generic_identifiers(&field.type_name, &environment);
+                        self.materialize_type_readonly(&substituted, &environment)
+                            .unwrap_or(substituted)
+                    })
+            } else if let Some((definition, arguments)) =
+                self.generated_struct_application(&current)
+            {
+                let mut environment =
+                    GenericEnvironment::from_parameters(&definition.parameters, &arguments).ok()?;
+                environment.module_alias = Some(definition.module_alias.clone());
+                definition
+                    .fields
+                    .iter()
+                    .find(|field| field.name == field_name)
+                    .map(|field| {
+                        let substituted =
+                            rewrite_generic_identifiers(&field.type_name, &environment);
+                        self.materialize_type_readonly(&substituted, &environment)
+                            .unwrap_or(substituted)
+                    })
+            } else {
+                self.struct_fields
+                    .get(&current)
+                    .and_then(|fields| fields.iter().find(|field| field.name == field_name))
+                    .map(|field| field.type_name.clone())
+            }?;
+            current = fields;
+        }
+        Some(current)
     }
 
     fn infer_type_pattern(
@@ -507,6 +1001,18 @@ impl Expansion {
                 return Ok(false);
             }
             let pattern_extent = pattern_extent.trim();
+            let actual_extent = actual_extent.trim();
+            // A view captures only the element type.  A fixed array is
+            // compatible with a view, but its capacity is deliberately not
+            // allowed to bind a compile-time value parameter.
+            if pattern_extent.is_empty() {
+                return Ok(true);
+            }
+            // The reverse conversion is not valid for inference: a runtime
+            // view has no statically known capacity for T[N].
+            if actual_extent.is_empty() {
+                return Ok(false);
+            }
             if let Some(parameter) = parameters.iter().find(|parameter| {
                 parameter.kind == ParsedGenericParameterKind::I32
                     && parameter.name == pattern_extent
@@ -518,11 +1024,22 @@ impl Expansion {
                 )?;
                 return bind_inferred_value(environment, &parameter.name, value);
             }
-            let Some(expected) =
-                evaluate_i32_expression(pattern_extent, environment, &self.constants).ok()
-            else {
-                return Ok(false);
-            };
+            let expected =
+                match evaluate_i32_expression(pattern_extent, environment, &self.constants) {
+                    Ok(value) => value,
+                    Err(_)
+                        if expression_mentions_unbound_value(
+                            pattern_extent,
+                            parameters,
+                            environment,
+                        ) =>
+                    {
+                        // Do not solve N+1=capacity.  Another exact occurrence
+                        // may bind N later, after which the expression is checked.
+                        return Ok(true);
+                    }
+                    Err(_) => return Ok(false),
+                };
             let Some(observed) = evaluate_i32_expression(
                 actual_extent,
                 &GenericEnvironment::default(),
@@ -535,17 +1052,23 @@ impl Expansion {
         }
 
         if let Some((pattern_base, pattern_arguments)) = parse_type_application(pattern)? {
-            let Some((actual_base, actual_arguments)) = parse_type_application(actual)? else {
+            let Some((actual_identity, actual_arguments)) =
+                self.generic_application_identity(actual, environment)
+            else {
                 return Ok(false);
             };
-            if !same_type_name(pattern_base, actual_base)
-                || pattern_arguments.len() != actual_arguments.len()
-            {
+            if pattern_arguments.len() != actual_arguments.len() {
                 return Ok(false);
             }
-            let Some(definition) = self.lookup_generic_struct(pattern_base).cloned() else {
+            let Some(definition) = self
+                .lookup_generic_struct_for_environment(pattern_base, environment)?
+                .cloned()
+            else {
                 return Ok(false);
             };
+            if definition.identity != actual_identity {
+                return Ok(false);
+            }
             if definition.parameters.len() != pattern_arguments.len() {
                 return Ok(false);
             }
@@ -596,8 +1119,22 @@ impl Expansion {
                                 &self.constants,
                             )
                             .ok();
-                            if expected != observed {
-                                return Ok(false);
+                            match (expected, observed) {
+                                (Some(expected), Some(observed)) => {
+                                    if expected != observed {
+                                        return Ok(false);
+                                    }
+                                }
+                                (None, _)
+                                    if expression_mentions_unbound_value(
+                                        pattern_argument,
+                                        parameters,
+                                        environment,
+                                    ) =>
+                                {
+                                    return Ok(true)
+                                }
+                                _ => return Ok(false),
                             }
                             continue;
                         };
@@ -689,11 +1226,15 @@ impl Expansion {
             while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
                 cursor += 1;
             }
-            let name = &source[start..cursor];
-            let after_name = skip_ascii_whitespace(source, cursor);
-            if self.lookup_generic_struct(name).is_none()
+            let qualified_end = qualified_identifier_end(source, start, cursor);
+            let name = &source[start..qualified_end];
+            let after_name = skip_ascii_whitespace(source, qualified_end);
+            if self
+                .lookup_generic_struct_for_environment(name, environment)?
+                .is_none()
                 || source.as_bytes().get(after_name) != Some(&b'<')
             {
+                cursor = qualified_end;
                 continue;
             }
             let close = matching_angle(source, after_name)?;
@@ -728,13 +1269,13 @@ impl Expansion {
         }
         if let Some((base, arguments)) = parse_type_application(trimmed)? {
             let definition = self
-                .lookup_generic_struct(base)
+                .lookup_generic_struct_for_environment(base, environment)?
                 .ok_or_else(|| format!("unknown generic type '{base}'"))?
                 .clone();
             let arguments =
                 self.resolve_argument_list(&definition.parameters, &arguments, environment)?;
             let key = StructSpecializationKey {
-                definition: definition.name.clone(),
+                definition: definition.identity.clone(),
                 arguments: arguments.clone(),
             };
             return self.schedule_struct(key, &definition);
@@ -770,7 +1311,7 @@ impl Expansion {
         }
         if let Some((base, arguments)) = parse_type_application(trimmed)? {
             let definition = self
-                .lookup_generic_struct(base)
+                .lookup_generic_struct_for_environment(base, environment)?
                 .ok_or_else(|| format!("unknown generic type '{base}'"))?;
             let resolved = self.resolve_argument_list_readonly(
                 &definition.parameters,
@@ -778,7 +1319,7 @@ impl Expansion {
                 environment,
             )?;
             let key = StructSpecializationKey {
-                definition: definition.name.clone(),
+                definition: definition.identity.clone(),
                 arguments: resolved,
             };
             return self
@@ -794,11 +1335,151 @@ impl Expansion {
     }
 
     fn lookup_generic_struct(&self, name: &str) -> Option<&GenericStructDefinition> {
-        self.generic_structs.get(name).or_else(|| {
-            name.rsplit('.')
-                .next()
-                .and_then(|short| self.generic_structs.get(short))
-        })
+        if let Some(definition) = self.generic_structs.get(name) {
+            return Some(definition);
+        }
+        let short = name.rsplit('.').next().unwrap_or(name);
+        let candidates = self.generic_structs_by_name.get(short)?;
+        if let Some(module_alias) = name.rsplit_once('.').map(|(alias, _)| alias) {
+            return candidates
+                .iter()
+                .filter_map(|identity| self.generic_structs.get(identity))
+                .find(|definition| definition.module_alias == module_alias);
+        }
+        (candidates.len() == 1)
+            .then(|| self.generic_structs.get(&candidates[0]))
+            .flatten()
+    }
+
+    fn lookup_generic_struct_for_environment(
+        &self,
+        name: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<Option<&GenericStructDefinition>, String> {
+        if let Some(definition) = self.generic_structs.get(name) {
+            return Ok(Some(definition));
+        }
+        let short = name.rsplit('.').next().unwrap_or(name);
+        let Some(candidates) = self.generic_structs_by_name.get(short) else {
+            return Ok(None);
+        };
+        let qualified_alias = name.rsplit_once('.').map(|(alias, _)| alias);
+        let preferred_alias = qualified_alias.or(environment.module_alias.as_deref());
+        let matches = candidates
+            .iter()
+            .filter_map(|identity| self.generic_structs.get(identity))
+            .filter(|definition| {
+                preferred_alias.is_none_or(|alias| definition.module_alias == alias)
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] if preferred_alias.is_some() && qualified_alias.is_none() => {
+                let fallback = candidates
+                    .iter()
+                    .filter_map(|identity| self.generic_structs.get(identity))
+                    .collect::<Vec<_>>();
+                match fallback.as_slice() {
+                    [definition] => Ok(Some(*definition)),
+                    [] => Ok(None),
+                    _ => Err(format!(
+                        "ambiguous generic type '{}'; qualify the declaration with its module",
+                        name
+                    )),
+                }
+            }
+            [] => Ok(None),
+            [definition] => Ok(Some(*definition)),
+            _ => Err(format!(
+                "ambiguous generic type '{}'; qualify the declaration with its module",
+                name
+            )),
+        }
+    }
+
+    fn generated_struct_application(
+        &self,
+        type_name: &str,
+    ) -> Option<(GenericStructDefinition, Vec<ConcreteArgument>)> {
+        self.struct_specializations
+            .iter()
+            .find(|(_, specialization)| specialization.generated_name == type_name.trim())
+            .and_then(|(key, _)| {
+                self.generic_structs
+                    .get(&key.definition)
+                    .cloned()
+                    .map(|definition| (definition, key.arguments.clone()))
+            })
+    }
+
+    fn generic_application_identity(
+        &self,
+        type_name: &str,
+        environment: &GenericEnvironment,
+    ) -> Option<(String, Vec<String>)> {
+        if let Some((base, arguments)) = parse_type_application(type_name).ok().flatten() {
+            let definition = self
+                .lookup_generic_struct_for_environment(base, environment)
+                .ok()??;
+            return Some((definition.identity.clone(), arguments));
+        }
+        let (definition, arguments) = self.generated_struct_application(type_name)?;
+        Some((
+            definition.identity,
+            arguments
+                .into_iter()
+                .map(|argument| match argument {
+                    ConcreteArgument::Type(value) => value,
+                    ConcreteArgument::I32(value) => value.to_string(),
+                })
+                .collect(),
+        ))
+    }
+
+    fn struct_fields_for_type(
+        &mut self,
+        type_name: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<
+        Option<(
+            Vec<crate::frontend::parser::ParsedField>,
+            GenericEnvironment,
+            String,
+        )>,
+        String,
+    > {
+        if let Some((base, arguments)) = parse_type_application(type_name)? {
+            let Some(definition) = self
+                .lookup_generic_struct_for_environment(base, environment)?
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            let resolved_arguments =
+                self.resolve_argument_list(&definition.parameters, &arguments, environment)?;
+            let mut nested_environment =
+                GenericEnvironment::from_parameters(&definition.parameters, &resolved_arguments)?;
+            nested_environment.module_alias = Some(definition.module_alias.clone());
+            return Ok(Some((
+                definition.fields,
+                nested_environment,
+                format!("{}<{resolved_arguments:?}>", definition.identity),
+            )));
+        }
+        if let Some((definition, arguments)) = self.generated_struct_application(type_name) {
+            let mut nested_environment =
+                GenericEnvironment::from_parameters(&definition.parameters, &arguments)?;
+            nested_environment.module_alias = Some(definition.module_alias.clone());
+            return Ok(Some((
+                definition.fields,
+                nested_environment,
+                format!("{}<{arguments:?}>", definition.identity),
+            )));
+        }
+        Ok(self
+            .struct_fields
+            .get(type_name.trim())
+            .cloned()
+            .map(|fields| (fields, environment.clone(), type_name.trim().to_string())))
     }
 
     fn resolve_argument_list(
@@ -829,6 +1510,12 @@ impl Expansion {
                         ));
                     }
                     let value = self.materialize_type(argument, environment)?;
+                    if contains_void_type(&value) {
+                        return Err(format!(
+                            "generic parameter '{}' cannot be instantiated with void",
+                            parameter.name
+                        ));
+                    }
                     resolved.push(ConcreteArgument::Type(value));
                 }
             }
@@ -857,14 +1544,21 @@ impl Expansion {
                     evaluate_i32_expression(argument, environment, &self.constants)?,
                 )),
                 ParsedGenericParameterKind::Type => {
-                    Ok(ConcreteArgument::Type(if is_type_argument_text(argument) {
+                    let value = if is_type_argument_text(argument) {
                         self.materialize_type_readonly(argument, environment)?
                     } else {
                         return Err(format!(
                             "generic parameter '{}' expects a type argument, got '{}'",
                             parameter.name, argument
                         ));
-                    }))
+                    };
+                    if contains_void_type(&value) {
+                        return Err(format!(
+                            "generic parameter '{}' cannot be instantiated with void",
+                            parameter.name
+                        ));
+                    }
+                    Ok(ConcreteArgument::Type(value))
                 }
             })
             .collect()
@@ -947,10 +1641,34 @@ impl Expansion {
             .lookup_generic_struct(&key.definition)
             .ok_or_else(|| format!("unknown generic struct '{}'", key.definition))?
             .clone();
-        let environment =
+        let mut environment =
             GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
+        environment.module_alias = Some(definition.module_alias.clone());
+        let generated_name = self
+            .struct_specializations
+            .get(key)
+            .map(|specialization| specialization.generated_name.clone())
+            .ok_or_else(|| "internal error: missing struct specialization".to_string())?;
         for field in &definition.fields {
-            self.materialize_type(&field.type_name, &environment)?;
+            let materialized = self.materialize_type(&field.type_name, &environment)?;
+            if contains_void_type(&materialized) {
+                return Err(format!(
+                    "generic struct '{}<...>' field '{}' cannot contain void after substitution",
+                    definition.name, field.name
+                ));
+            }
+            if contains_view_type(&materialized) {
+                return Err(format!(
+                    "generic struct '{}<...>' field '{}' cannot store view type '{}'",
+                    definition.name, field.name, materialized
+                ));
+            }
+            if contains_type_name(&materialized, &generated_name) {
+                return Err(format!(
+                    "recursive generic struct field '{}.{}' contains '{}' by value",
+                    definition.name, field.name, materialized
+                ));
+            }
         }
         Ok(())
     }
@@ -961,7 +1679,9 @@ impl Expansion {
             .get(key.definition)
             .cloned()
             .ok_or_else(|| "internal error: missing generic function definition".to_string())?;
-        let environment = GenericEnvironment::from_parameters(&generic.parameters, &key.arguments)?;
+        let mut environment =
+            GenericEnvironment::from_parameters(&generic.parameters, &key.arguments)?;
+        environment.module_alias = Some(generic.module_alias.clone());
         let source = self.files[generic.file_index].source.clone();
         let start = generic.signature.signature_range.start;
         let end = generic.signature.body_range.end;
@@ -978,11 +1698,11 @@ impl Expansion {
         let stripped = strip_generic_declaration(original, "function")?;
 
         for call in collect_explicit_generic_calls(&stripped)? {
-            let definitions = self
-                .generic_functions_by_name
-                .get(&call.name)
-                .cloned()
-                .unwrap_or_default();
+            let definitions = self.generic_function_candidates(
+                &call.name,
+                call.qualifier.as_deref(),
+                generic.file_index,
+            );
             for definition in definitions {
                 let parameters = self.generic_functions[definition].parameters.clone();
                 let arguments =
@@ -994,35 +1714,142 @@ impl Expansion {
         let substituted = rewrite_generic_identifiers(&stripped, &environment);
         let substituted = self.rewrite_type_applications(&substituted, &environment)?;
 
-        for call in collect_plain_calls(&substituted)? {
-            let definitions = self
-                .generic_functions_by_name
-                .get(&call)
-                .cloned()
-                .unwrap_or_default();
-            for definition in definitions {
-                let parameters = self.generic_functions[definition].parameters.clone();
-                if parameters.iter().all(|parameter| match parameter.kind {
-                    ParsedGenericParameterKind::I32 => {
-                        environment.values.contains_key(&parameter.name)
-                    }
-                    ParsedGenericParameterKind::Type => {
-                        environment.types.contains_key(&parameter.name)
-                    }
-                }) {
-                    let arguments = parameters
-                        .iter()
-                        .map(|parameter| match parameter.kind {
-                            ParsedGenericParameterKind::I32 => {
-                                ConcreteArgument::I32(environment.values[&parameter.name])
-                            }
-                            ParsedGenericParameterKind::Type => {
-                                ConcreteArgument::Type(environment.types[&parameter.name].clone())
-                            }
-                        })
-                        .collect();
-                    self.schedule_function(definition, arguments)?;
+        let parsed_substituted = parse_top_level_functions(&substituted)?;
+        let specialized_signature = parsed_substituted
+            .first()
+            .ok_or_else(|| "specialized generic function has no parsed signature".to_string())?
+            .clone();
+        let local_paths = self.local_paths_for_function(
+            generic.file_index,
+            &specialized_signature,
+            &substituted,
+            &environment,
+        )?;
+
+        for call in collect_inferred_receiver_calls(&substituted)? {
+            let is_module_call = !local_paths.contains_key(&call.receiver)
+                && self
+                    .visible_module_aliases
+                    .get(&generic.file_index)
+                    .is_some_and(|aliases| aliases.contains(&call.receiver));
+            if is_module_call {
+                let Some(actual_types) = call
+                    .arguments
+                    .iter()
+                    .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                let definitions = self.generic_function_candidates(
+                    &call.name,
+                    Some(&call.receiver),
+                    generic.file_index,
+                );
+                if self.has_ordinary_function_candidate(
+                    &call.name,
+                    Some(&call.receiver),
+                    generic.file_index,
+                    &actual_types,
+                ) {
+                    continue;
                 }
+                let mut scheduled = false;
+                for definition in definitions.iter().copied() {
+                    let target = self.generic_functions[definition].clone();
+                    if let Some(arguments) =
+                        self.infer_generic_call_arguments(&target, &actual_types)?
+                    {
+                        self.schedule_function(definition, arguments)?;
+                        scheduled = true;
+                    }
+                }
+                if !definitions.is_empty() && !scheduled {
+                    return Err(format!(
+                        "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                        call.name
+                    ));
+                }
+                continue;
+            }
+            let Some(actual_type) = local_paths.get(&call.receiver).cloned() else {
+                continue;
+            };
+            let Some(argument_types) = call
+                .arguments
+                .iter()
+                .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let mut actual_types = vec![actual_type];
+            actual_types.extend(argument_types);
+            let definitions = self.generic_function_candidates(
+                &call.name,
+                Some(&call.receiver),
+                generic.file_index,
+            );
+            if self.has_ordinary_function_candidate(
+                &call.name,
+                Some(&call.receiver),
+                generic.file_index,
+                &actual_types,
+            ) {
+                continue;
+            }
+            let mut scheduled = false;
+            for definition in definitions.iter().copied() {
+                let target = self.generic_functions[definition].clone();
+                if let Some(arguments) =
+                    self.infer_generic_call_arguments(&target, &actual_types)?
+                {
+                    self.schedule_function(definition, arguments)?;
+                    scheduled = true;
+                }
+            }
+            if !definitions.is_empty() && !scheduled {
+                return Err(format!(
+                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    call.name
+                ));
+            }
+        }
+
+        for call in collect_inferred_argument_calls(&substituted)? {
+            let definitions =
+                self.generic_function_candidates(&call.name, None, generic.file_index);
+            let Some(actual_types) = call
+                .arguments
+                .iter()
+                .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            if self.has_ordinary_function_candidate(
+                &call.name,
+                None,
+                generic.file_index,
+                &actual_types,
+            ) {
+                continue;
+            }
+            let mut scheduled = false;
+            for definition in definitions.iter().copied() {
+                let target = self.generic_functions[definition].clone();
+                if let Some(arguments) =
+                    self.infer_generic_call_arguments(&target, &actual_types)?
+                {
+                    self.schedule_function(definition, arguments)?;
+                    scheduled = true;
+                }
+            }
+            if !definitions.is_empty() && !scheduled {
+                return Err(format!(
+                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    call.name
+                ));
             }
         }
 
@@ -1030,10 +1857,7 @@ impl Expansion {
             .function_specializations
             .get_mut(key)
             .ok_or_else(|| "internal error: function specialization disappeared".to_string())?;
-        let parsed = parse_top_level_functions(&substituted)?;
-        let signature = parsed
-            .first()
-            .ok_or_else(|| "specialized generic function has no parsed signature".to_string())?;
+        let signature = &specialized_signature;
         record.param_type_names = signature
             .params
             .iter()
@@ -1074,9 +1898,12 @@ impl Expansion {
             while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
                 cursor += 1;
             }
-            let name = &source[start..cursor];
-            let after = skip_ascii_whitespace(source, cursor);
-            if self.lookup_generic_struct(name).is_some()
+            let qualified_end = qualified_identifier_end(source, start, cursor);
+            let name = &source[start..qualified_end];
+            let after = skip_ascii_whitespace(source, qualified_end);
+            if self
+                .lookup_generic_struct_for_environment(name, environment)?
+                .is_some()
                 && source.as_bytes().get(after) == Some(&b'<')
             {
                 let close = matching_angle(source, after)?;
@@ -1084,7 +1911,8 @@ impl Expansion {
                 output.push_str(&replacement);
                 cursor = close + 1;
             } else {
-                output.push_str(name);
+                output.push_str(&source[start..qualified_end]);
+                cursor = qualified_end;
             }
         }
         Ok(output)
@@ -1109,7 +1937,8 @@ impl Expansion {
                 }
             }
             removals.sort_by_key(|range| (range.start, range.end));
-            let mut generated = rewrite_kept_source(self, raw, &removals, &function_names)?;
+            let mut generated =
+                rewrite_kept_source(self, file_index, raw, &removals, &function_names)?;
 
             for (key, specialization) in &self.struct_specializations {
                 let Some(definition) = self.lookup_generic_struct(&key.definition) else {
@@ -1118,8 +1947,9 @@ impl Expansion {
                 if definition.file_index != file_index {
                     continue;
                 }
-                let environment =
+                let mut environment =
                     GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
+                environment.module_alias = Some(definition.module_alias.clone());
                 let mut fields = String::new();
                 for field in &definition.fields {
                     let field_type =
@@ -1141,11 +1971,15 @@ impl Expansion {
                 if definition.file_index != file_index || specialization.source.is_empty() {
                     continue;
                 }
+                let mut environment =
+                    GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
+                environment.module_alias = Some(definition.module_alias.clone());
                 let source = rewrite_explicit_generic_calls_with_map(
                     self,
                     &specialization.source,
-                    &GenericEnvironment::default(),
+                    &environment,
                     &function_names,
+                    file_index,
                 )?;
                 let source = rename_function_declaration(
                     &source,
@@ -1227,10 +2061,94 @@ impl Expansion {
         }
         Ok(())
     }
+
+    fn generic_function_candidates(
+        &self,
+        name: &str,
+        qualifier: Option<&str>,
+        file_index: usize,
+    ) -> Vec<usize> {
+        let Some(all) = self.generic_functions_by_name.get(name) else {
+            return Vec::new();
+        };
+        if let Some(qualifier) = qualifier {
+            let is_receiver_path = self.concrete_paths.contains_key(qualifier)
+                || self
+                    .visible_module_aliases
+                    .get(&file_index)
+                    .is_none_or(|aliases| !aliases.contains(qualifier));
+            if is_receiver_path {
+                return all.clone();
+            }
+            return all
+                .iter()
+                .copied()
+                .filter(|index| self.generic_functions[*index].module_alias == qualifier)
+                .collect();
+        }
+
+        let local = all
+            .iter()
+            .copied()
+            .filter(|index| self.generic_functions[*index].file_index == file_index)
+            .collect::<Vec<_>>();
+        if !local.is_empty() {
+            return local;
+        }
+        let visible = self
+            .visible_module_aliases
+            .get(&file_index)
+            .cloned()
+            .unwrap_or_default();
+        let imported = all
+            .iter()
+            .copied()
+            .filter(|index| visible.contains(&self.generic_functions[*index].module_alias))
+            .collect::<Vec<_>>();
+        if !imported.is_empty() {
+            return imported;
+        }
+        if all.len() == 1 {
+            return all.clone();
+        }
+        Vec::new()
+    }
+
+    fn has_ordinary_function_candidate(
+        &self,
+        name: &str,
+        qualifier: Option<&str>,
+        file_index: usize,
+        actual_types: &[String],
+    ) -> bool {
+        let Some(all) = self.ordinary_function_names.get(name) else {
+            return false;
+        };
+        all.iter()
+            .filter(|(_, module_alias, _)| {
+                qualifier.is_none_or(|qualifier| *module_alias == qualifier)
+            })
+            .filter(|(candidate_file, module_alias, _)| {
+                qualifier.is_some()
+                    || *candidate_file == file_index
+                    || self
+                        .visible_module_aliases
+                        .get(&file_index)
+                        .is_some_and(|aliases| aliases.contains(module_alias))
+            })
+            .any(|(_, _, parameter_types)| {
+                parameter_types.len() == actual_types.len()
+                    && parameter_types
+                        .iter()
+                        .zip(actual_types)
+                        .all(|(parameter, actual)| ordinary_types_compatible(parameter, actual))
+            })
+    }
 }
 
 fn rewrite_kept_source(
     expansion: &Expansion,
+    file_index: usize,
     source: &str,
     removals: &[std::ops::Range<usize>],
     function_names: &BTreeMap<FunctionSpecializationKey, String>,
@@ -1243,6 +2161,7 @@ fn rewrite_kept_source(
         }
         output.push_str(&ordinary_source_piece(
             expansion,
+            file_index,
             &source[cursor..range.start],
             function_names,
         )?);
@@ -1250,6 +2169,7 @@ fn rewrite_kept_source(
     }
     output.push_str(&ordinary_source_piece(
         expansion,
+        file_index,
         &source[cursor..],
         function_names,
     )?);
@@ -1258,21 +2178,29 @@ fn rewrite_kept_source(
 
 fn ordinary_source_piece(
     expansion: &Expansion,
+    file_index: usize,
     source: &str,
     function_names: &BTreeMap<FunctionSpecializationKey, String>,
 ) -> Result<String, String> {
     let source = rewrite_i32_constants(source, &expansion.constants)?;
-    let source = expansion.rewrite_type_applications_readonly(&source)?;
+    let mut environment = GenericEnvironment::default();
+    environment.module_alias = Some(module_alias_for_path(&expansion.files[file_index].path));
+    let source = expansion.rewrite_type_applications_readonly(&source, &environment)?;
     rewrite_explicit_generic_calls_with_map(
         expansion,
         &source,
-        &GenericEnvironment::default(),
+        &environment,
         function_names,
+        file_index,
     )
 }
 
 impl Expansion {
-    fn rewrite_type_applications_readonly(&self, source: &str) -> Result<String, String> {
+    fn rewrite_type_applications_readonly(
+        &self,
+        source: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<String, String> {
         let bytes = source.as_bytes();
         let mut output = String::with_capacity(source.len());
         let mut cursor = 0usize;
@@ -1299,24 +2227,49 @@ impl Expansion {
             while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
                 cursor += 1;
             }
-            let name = &source[start..cursor];
-            let after = skip_ascii_whitespace(source, cursor);
-            if self.lookup_generic_struct(name).is_some()
+            let qualified_end = qualified_identifier_end(source, start, cursor);
+            let name = &source[start..qualified_end];
+            let after = skip_ascii_whitespace(source, qualified_end);
+            if self
+                .lookup_generic_struct_for_environment(name, environment)?
+                .is_some()
                 && source.as_bytes().get(after) == Some(&b'<')
             {
                 let close = matching_angle(source, after)?;
-                let replacement = self.materialize_type_readonly(
-                    &source[start..=close],
-                    &GenericEnvironment::default(),
-                )?;
+                let replacement =
+                    self.materialize_type_readonly(&source[start..=close], environment)?;
                 output.push_str(&replacement);
                 cursor = close + 1;
             } else {
-                output.push_str(name);
+                output.push_str(&source[start..qualified_end]);
+                cursor = qualified_end;
             }
         }
         Ok(output)
     }
+}
+
+fn generic_definition_identity(path: &str, name: &str, start: usize) -> String {
+    format!("{path}::{name}#{start}")
+}
+
+fn module_alias_for_path(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let raw = name.strip_suffix(".stasis").unwrap_or(name);
+    let mut alias = raw
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
+                char::from(byte)
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if alias.is_empty() || alias.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        alias.insert(0, '_');
+    }
+    alias
 }
 
 fn find_struct_definition_range(
@@ -1435,15 +2388,16 @@ fn rewrite_explicit_generic_calls_with_map(
     source: &str,
     environment: &GenericEnvironment,
     function_names: &BTreeMap<FunctionSpecializationKey, String>,
+    file_index: usize,
 ) -> Result<String, String> {
     let calls = collect_explicit_generic_calls(source)?;
     let mut replacements = Vec::with_capacity(calls.len());
     for call in calls {
-        let definitions = expansion
-            .generic_functions_by_name
-            .get(&call.name)
-            .cloned()
-            .unwrap_or_default();
+        let definitions = expansion.generic_function_candidates(
+            &call.name,
+            call.qualifier.as_deref(),
+            file_index,
+        );
         if definitions.is_empty() {
             return Err(format!(
                 "unknown generic function '{}' in explicit call",
@@ -1600,7 +2554,9 @@ fn reject_value_parameter_writes(
 #[derive(Debug, Clone)]
 struct ExplicitCall {
     name: String,
+    qualifier: Option<String>,
     arguments: Vec<String>,
+    call_arguments: Vec<String>,
     name_start: usize,
     end: usize,
 }
@@ -1643,9 +2599,13 @@ fn collect_explicit_generic_calls(source: &str) -> Result<Vec<ExplicitCall>, Str
         if source.as_bytes().get(after) != Some(&b'(') {
             continue;
         }
+        let call_close = find_matching_byte(source, after, b'(', b')')
+            .ok_or_else(|| "unterminated explicit generic call".to_string())?;
         calls.push(ExplicitCall {
             name: name.rsplit('.').next().unwrap_or(&name).to_string(),
+            qualifier: preceding_qualified_name(source, start),
             arguments: split_top_level_arguments(&source[open + 1..close])?,
+            call_arguments: split_top_level_arguments(&source[after + 1..call_close])?,
             name_start: start,
             end: close + 1,
         });
@@ -1654,13 +2614,47 @@ fn collect_explicit_generic_calls(source: &str) -> Result<Vec<ExplicitCall>, Str
     Ok(calls)
 }
 
+fn preceding_qualified_name(source: &str, start: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut cursor = start;
+    let mut prefix_start = start;
+    loop {
+        while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+            cursor -= 1;
+        }
+        if cursor == 0 || bytes[cursor - 1] != b'.' {
+            break;
+        }
+        cursor -= 1;
+        while cursor > 0 && is_identifier_char(bytes[cursor - 1]) {
+            cursor -= 1;
+        }
+        prefix_start = cursor;
+    }
+    (prefix_start < start).then(|| {
+        source[prefix_start..start]
+            .trim_end_matches('.')
+            .to_string()
+    })
+}
+
+fn preceded_by_keyword(source: &str, start: usize, keyword: &str) -> bool {
+    let prefix = source[..start].trim_end();
+    let Some(keyword_start) = prefix.len().checked_sub(keyword.len()) else {
+        return false;
+    };
+    &prefix[keyword_start..] == keyword
+        && (keyword_start == 0 || !is_identifier_char(prefix.as_bytes()[keyword_start - 1]))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InferredReceiverCall {
     receiver: String,
     name: String,
+    arguments: Vec<String>,
 }
 
-fn collect_inferred_receiver_calls(source: &str) -> Vec<InferredReceiverCall> {
+fn collect_inferred_receiver_calls(source: &str) -> Result<Vec<InferredReceiverCall>, String> {
     let bytes = source.as_bytes();
     let mut calls = Vec::new();
     let mut cursor = 0usize;
@@ -1706,9 +2700,14 @@ fn collect_inferred_receiver_calls(source: &str) -> Vec<InferredReceiverCall> {
             }
             let after_segment = skip_ascii_whitespace(source, segment_end);
             if source.as_bytes().get(after_segment) == Some(&b'(') {
+                let close =
+                    find_matching_byte(source, after_segment, b'(', b')').ok_or_else(|| {
+                        "unterminated receiver call while inferring generic arguments".to_string()
+                    })?;
                 calls.push(InferredReceiverCall {
                     receiver: receiver.clone(),
                     name: source[segment_start..segment_end].to_string(),
+                    arguments: split_top_level_arguments(&source[after_segment + 1..close])?,
                 });
                 found_call = true;
                 probe = segment_end;
@@ -1720,7 +2719,7 @@ fn collect_inferred_receiver_calls(source: &str) -> Vec<InferredReceiverCall> {
         }
         cursor = if found_call { probe } else { segment_end };
     }
-    calls
+    Ok(calls)
 }
 
 fn inferred_arguments(
@@ -1784,6 +2783,94 @@ fn same_type_name(left: &str, right: &str) -> bool {
     left.trim() == right.trim()
 }
 
+fn ordinary_types_compatible(parameter: &str, actual: &str) -> bool {
+    if type_names_equivalent(parameter, actual) {
+        return true;
+    }
+    let Some((parameter_element, parameter_extent)) = split_array_suffix(parameter) else {
+        return false;
+    };
+    let Some((actual_element, actual_extent)) = split_array_suffix(actual) else {
+        return false;
+    };
+    type_names_equivalent(parameter_element, actual_element)
+        && (parameter_extent.trim().is_empty()
+            || (!actual_extent.trim().is_empty()
+                && type_names_equivalent(parameter_extent, actual_extent)))
+}
+
+fn contains_view_type(type_name: &str) -> bool {
+    let trimmed = type_name.trim();
+    if trimmed == "string" {
+        return true;
+    }
+    if let Some((element, extent)) = split_array_suffix(trimmed) {
+        return extent.trim().is_empty() || contains_view_type(element);
+    }
+    parse_type_application(trimmed)
+        .ok()
+        .flatten()
+        .is_some_and(|(_, arguments)| {
+            arguments
+                .iter()
+                .any(|argument| contains_view_type(argument))
+        })
+}
+
+fn contains_void_type(type_name: &str) -> bool {
+    let trimmed = type_name.trim();
+    if trimmed == "void" {
+        return true;
+    }
+    if let Some((element, _)) = split_array_suffix(trimmed) {
+        return contains_void_type(element);
+    }
+    parse_type_application(trimmed)
+        .ok()
+        .flatten()
+        .is_some_and(|(_, arguments)| {
+            arguments
+                .iter()
+                .any(|argument| contains_void_type(argument))
+        })
+}
+
+fn contains_type_name(type_name: &str, needle: &str) -> bool {
+    let trimmed = type_name.trim();
+    if trimmed == needle {
+        return true;
+    }
+    if let Some((element, _)) = split_array_suffix(trimmed) {
+        return contains_type_name(element, needle);
+    }
+    parse_type_application(trimmed)
+        .ok()
+        .flatten()
+        .is_some_and(|(_, arguments)| {
+            arguments
+                .iter()
+                .any(|argument| contains_type_name(argument, needle))
+        })
+}
+
+fn type_names_equivalent(left: &str, right: &str) -> bool {
+    if same_type_name(left, right) {
+        return true;
+    }
+    let Some((left_base, left_arguments)) = parse_type_application(left).ok().flatten() else {
+        return false;
+    };
+    let Some((right_base, right_arguments)) = parse_type_application(right).ok().flatten() else {
+        return false;
+    };
+    left_base.rsplit('.').next() == right_base.rsplit('.').next()
+        && left_arguments.len() == right_arguments.len()
+        && left_arguments
+            .iter()
+            .zip(right_arguments.iter())
+            .all(|(left, right)| type_names_equivalent(left, right))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InferredArgumentCall {
     name: String,
@@ -1823,6 +2910,9 @@ fn collect_inferred_argument_calls(source: &str) -> Result<Vec<InferredArgumentC
         if previous == Some('.') {
             continue;
         }
+        if preceded_by_keyword(source, start, "function") {
+            continue;
+        }
         let close = find_matching_byte(source, after_name, b'(', b')')
             .ok_or_else(|| "unterminated call while inferring generic arguments".to_string())?;
         calls.push(InferredArgumentCall {
@@ -1830,37 +2920,6 @@ fn collect_inferred_argument_calls(source: &str) -> Result<Vec<InferredArgumentC
             arguments: split_top_level_arguments(&source[after_name + 1..close])?,
         });
         cursor = after_name + 1;
-    }
-    Ok(calls)
-}
-
-fn collect_plain_calls(source: &str) -> Result<Vec<String>, String> {
-    let bytes = source.as_bytes();
-    let mut calls = Vec::new();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'"' {
-            cursor = skip_string(source, cursor)?;
-            continue;
-        }
-        if starts_comment(source, cursor) {
-            cursor = skip_comment(source, cursor)?;
-            continue;
-        }
-        if !is_identifier_start(bytes[cursor]) {
-            cursor += 1;
-            continue;
-        }
-        let start = cursor;
-        cursor += 1;
-        while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
-            cursor += 1;
-        }
-        let name = source[start..cursor].to_string();
-        let after = skip_ascii_whitespace(source, cursor);
-        if source.as_bytes().get(after) == Some(&b'(') {
-            calls.push(name);
-        }
     }
     Ok(calls)
 }
@@ -1980,6 +3039,124 @@ fn split_array_suffix(source: &str) -> Option<(&str, &str)> {
         trimmed[..open].trim(),
         trimmed[open + 1..trimmed.len() - 1].trim(),
     ))
+}
+
+fn has_outer_parentheses(source: &str) -> bool {
+    let trimmed = source.trim();
+    if trimmed.len() < 2
+        || !trimmed.starts_with('(')
+        || !trimmed.ends_with(')')
+        || find_matching_byte(trimmed, 0, b'(', b')') != Some(trimmed.len() - 1)
+    {
+        return false;
+    }
+    true
+}
+
+fn split_indexed_expression(source: &str) -> Option<(&str, &str)> {
+    let trimmed = source.trim();
+    let bytes = trimmed.as_bytes();
+    let mut depth = 0i32;
+    let mut open = None;
+    let mut close = None;
+    for index in 0..bytes.len() {
+        match bytes[index] {
+            b'[' => {
+                if depth == 0 {
+                    open = Some(index);
+                }
+                depth += 1;
+            }
+            b']' => {
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+                if depth == 0 {
+                    close = Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    let (open, close) = open.zip(close)?;
+    let collection = trimmed[..open].trim();
+    let suffix = trimmed[close + 1..].trim();
+    (!collection.is_empty() && (suffix.is_empty() || suffix.starts_with('.')))
+        .then_some((collection, suffix))
+}
+
+fn split_binary_expression(source: &str) -> Option<(&str, char, &str)> {
+    let bytes = source.as_bytes();
+    let mut paren = 0i32;
+    let mut bracket = 0i32;
+    let mut angle = 0i32;
+    let mut candidate: Option<(usize, char, usize)> = None;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b'[' => bracket += 1,
+            b']' => bracket -= 1,
+            b'<' if paren == 0 && bracket == 0 => angle += 1,
+            b'>' if paren == 0 && bracket == 0 && angle > 0 => angle -= 1,
+            b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'='
+                if paren == 0 && bracket == 0 && angle == 0 =>
+            {
+                let byte = bytes[index];
+                let unary = index == 0
+                    || matches!(
+                        bytes[index.saturating_sub(1)],
+                        b'(' | b'[' | b',' | b'+' | b'-' | b'*' | b'/' | b'%'
+                    );
+                if !unary {
+                    let width: usize =
+                        if byte == b'=' && bytes.get(index + 1).copied() == Some(b'=') {
+                            2
+                        } else {
+                            1
+                        };
+                    let precedence = match byte {
+                        b'<' | b'>' | b'=' => 1,
+                        b'+' | b'-' => 2,
+                        _ => 3,
+                    };
+                    if candidate.is_none_or(|(_, _, old_precedence)| precedence <= old_precedence) {
+                        candidate = Some((index, byte as char, width));
+                    }
+                    index += width;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    let (index, operator, width) = candidate?;
+    let lhs = source[..index].trim();
+    let rhs = source[index + width..].trim();
+    (!lhs.is_empty() && !rhs.is_empty()).then_some((lhs, operator, rhs))
+}
+
+fn expression_mentions_unbound_value(
+    source: &str,
+    parameters: &[ParsedGenericParameter],
+    environment: &GenericEnvironment,
+) -> bool {
+    let Ok(tokens) = tokenize_constant_expression(source) else {
+        return false;
+    };
+    tokens.into_iter().any(|token| {
+        let ConstantToken::Identifier(name) = token else {
+            return false;
+        };
+        parameters.iter().any(|parameter| {
+            parameter.kind == ParsedGenericParameterKind::I32
+                && parameter.name == name
+                && !environment.values.contains_key(&name)
+        })
+    })
 }
 
 fn is_type_argument_text(source: &str) -> bool {
@@ -2432,6 +3609,28 @@ fn is_identifier_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+fn qualified_identifier_end(source: &str, _start: usize, mut cursor: usize) -> usize {
+    let bytes = source.as_bytes();
+    loop {
+        let dot = skip_ascii_whitespace(source, cursor);
+        if bytes.get(dot) != Some(&b'.') {
+            return cursor;
+        }
+        let segment_start = skip_ascii_whitespace(source, dot + 1);
+        if !bytes
+            .get(segment_start)
+            .copied()
+            .is_some_and(is_identifier_start)
+        {
+            return cursor;
+        }
+        cursor = segment_start + 1;
+        while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
+            cursor += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2683,5 +3882,281 @@ mod tests {
             .expect("application");
         assert_eq!(parsed.0, "Outer");
         assert_eq!(parsed.1, vec!["Inner<4>".to_string(), "8".to_string()]);
+    }
+
+    #[test]
+    fn specializes_type_and_mixed_parameters_from_a_receiver() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             global integers: Buffer<i32, 4>;\n\
+             global floats: Buffer<f32, 8>;\n\
+             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n\
+             function main(): i32 { return integers.capacity() + floats.capacity(); }\n",
+        );
+        process
+            .compile()
+            .expect("mixed type/value receiver inference");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("mixed generic receiver calls execute"),
+            12
+        );
+    }
+
+    #[test]
+    fn infers_type_from_fixed_array_for_a_view_without_capturing_capacity() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "global values: i32[6];\n\
+             function element<T: type>(items: T[]): T { return items[0]; }\n\
+             function main(): i32 { return element(values); }\n",
+        );
+        process
+            .compile()
+            .expect("fixed array to generic view inference");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("generic view call executes"),
+            0
+        );
+    }
+
+    #[test]
+    fn rejects_runtime_view_when_a_fixed_extent_is_required_for_inference() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "global values: i32[];\n\
+             function extent<T: type, N: i32>(items: T[N]): i32 { return N; }\n\
+             function main(): i32 { return extent(values); }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("runtime view cannot infer a fixed extent");
+        assert!(format!("{error:?}").contains("could not infer"));
+    }
+
+    #[test]
+    fn forwards_inferred_type_and_extent_bindings_through_generic_helpers() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "global values: i32[6];\n\
+             function extent<T: type, N: i32>(items: T[N]): i32 { return N; }\n\
+             function forward<U: type, M: i32>(items: U[M]): i32 { return extent(items); }\n\
+             function main(): i32 { return forward(values); }\n",
+        );
+        process.compile().expect("generic forwarding inference");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("forwarded generic call executes"),
+            6
+        );
+    }
+
+    #[test]
+    fn forwards_inferred_bindings_through_specialized_struct_parameters() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             global values: Buffer<i32, 6>;\n\
+             function extent<T: type, N: i32>(items: Buffer<T, N>): i32 { return N; }\n\
+             function forward<U: type, M: i32>(items: Buffer<U, M>): i32 { return extent(items); }\n\
+             function main(): i32 { return forward(values); }\n",
+        );
+        process
+            .compile()
+            .expect("specialized struct parameter inference forwards");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("forwarded specialized struct call executes"),
+            6
+        );
+    }
+
+    #[test]
+    fn preserves_nested_generic_struct_element_paths() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "struct Item<T: type> { value: T; }\n\
+             struct Box<T: type, N: i32> { items: Item<T>[N]; }\n\
+             global values: Box<i32, 2>;\n\
+             function first<T: type, N: i32>(self: Box<T, N>): T { return self.items[0].value; }\n\
+             function main(): i32 { return values.first(); }\n",
+        );
+        process
+            .compile()
+            .expect("nested generic struct element paths compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("nested generic struct element path executes"),
+            0
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_repeated_type_bindings() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "global integer: i32;\n\
+             global float: f32;\n\
+             function same<T: type>(left: T, right: T): T { return left; }\n\
+             function main(): i32 { return same(integer, float); }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("repeated generic type bindings must agree");
+        assert!(format!("{error:?}").contains("could not infer"));
+    }
+
+    #[test]
+    fn keeps_same_named_generic_declarations_distinct_across_modules() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "import \"left/left_box.stasis\";\n\
+             import \"right/right_box.stasis\";\n\
+             global left_value: left_box.Buffer<i32, 4>;\n\
+             global right_value: right_box.Buffer<f32, 8>;\n\
+             function main(): i32 { return left_box.capacity::<i32, 4>(left_value) + right_box.capacity::<f32, 8>(right_value); }\n",
+        );
+        process.upsert_file(
+            "left/left_box.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+        process.upsert_file(
+            "right/right_box.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+        process
+            .compile()
+            .expect("same-named generic declarations remain module-local");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("module-local generic receiver calls execute"),
+            12
+        );
+    }
+
+    #[test]
+    fn rejects_view_and_void_substitutions_in_stored_generic_fields() {
+        let mut view = crate::compiler::Compiler::new();
+        view.upsert_file(
+            "view.stasis",
+            "struct Box<T: type> { value: T; }\n\
+             global invalid: Box<i32[]>;\n\
+             function main(): i32 { return 0; }\n",
+        );
+        let error = view
+            .check()
+            .expect_err("a stored generic field cannot contain an array view");
+        assert!(format!("{error:?}").contains("cannot store view type"));
+
+        let mut void = crate::compiler::Compiler::new();
+        void.upsert_file(
+            "void.stasis",
+            "struct Box<T: type> { value: T; }\n\
+             global invalid: Box<void>;\n\
+             function main(): i32 { return 0; }\n",
+        );
+        let error = void
+            .check()
+            .expect_err("void is not a storable generic type argument");
+        assert!(format!("{error:?}").contains("cannot be instantiated with void"));
+    }
+
+    #[test]
+    fn rejects_recursive_generic_struct_storage() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "recursive.stasis",
+            "struct Node<T: type> { next: Node<T>; }\n\
+             global root: Node<i32>;\n\
+             function main(): i32 { return 0; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("recursive generic structs cannot be stored by value");
+        assert!(format!("{error:?}").contains("recursive generic struct field"));
+    }
+
+    #[test]
+    fn does_not_solve_symbolic_extent_equations_during_inference() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "global values: i32[6];\n\
+             function shifted<N: i32>(items: i32[N + 1]): i32 { return N; }\n\
+             function main(): i32 { return shifted(values); }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("N + 1 must not be solved from an array capacity");
+        assert!(format!("{error:?}").contains("could not infer"));
+    }
+
+    #[test]
+    fn rejects_explicit_generic_calls_against_a_same_named_type_from_another_module() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"left/left_box.stasis\";\n\
+             import \"right/right_box.stasis\";\n\
+             global left_value: left_box.Buffer<i32, 4>;\n\
+             function main(): i32 { return right_box.capacity::<i32, 4>(left_value); }\n",
+        );
+        compiler.upsert_file(
+            "left/left_box.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+        compiler.upsert_file(
+            "right/right_box.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("generic receiver types remain nominal across modules");
+        assert!(format!("{error:?}").contains("missing specialization"));
+    }
+
+    #[test]
+    fn infers_generic_arguments_for_a_qualified_module_call() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "import \"left/left_box.stasis\";\n\
+             global left_value: left_box.Buffer<i32, 4>;\n\
+             function main(): i32 { return left_box.capacity(left_value); }\n",
+        );
+        process.upsert_file(
+            "left/left_box.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+        process
+            .compile()
+            .expect("qualified module calls infer generic arguments");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("qualified inferred generic call executes"),
+            4
+        );
     }
 }
