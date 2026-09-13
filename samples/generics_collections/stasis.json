@@ -1,0 +1,8 @@
+{
+  "manifest_version": 1,
+  "name": "generics_collections",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain"
+}

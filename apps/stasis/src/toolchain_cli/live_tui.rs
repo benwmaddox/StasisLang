@@ -5903,7 +5903,7 @@ mod tests {
             }));
 
         let source = fs::read_to_string(stdlib.join("rig2d.stasis")).expect("read rig2d source");
-        assert!(source.contains("bones: RigBone2D[RIG2D_BONE_CAPACITY];"));
+        assert!(source.contains("bones: RigBone2D[N];"));
         let (_, items) = read_stdlib_api_items(&root, &stdlib.join("rig2d.stasis"))
             .expect("read canonical rig2d API");
         let rendered = serde_json::to_string(&items).expect("rig2d API JSON");
@@ -5911,11 +5911,11 @@ mod tests {
             "RIG2D_BONE_CAPACITY",
             "RigBone2D",
             "Rig2D",
-            "add_bone(self: Rig2D",
-            "blend_local(self: Rig2D",
-            "reset_pose(self: Rig2D",
-            "solve(self: Rig2D",
-            "world_angle(self: Rig2D",
+            "add_bone<N: i32>(self: Rig2D<N>",
+            "blend_local<N: i32>(self: Rig2D<N>",
+            "reset_pose<N: i32>(self: Rig2D<N>",
+            "solve<N: i32>(self: Rig2D<N>",
+            "world_angle<N: i32>(self: Rig2D<N>",
         ] {
             assert!(
                 rendered.contains(public),

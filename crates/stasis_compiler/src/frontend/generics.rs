@@ -881,6 +881,9 @@ impl Expansion {
         if let Some(type_name) = local_paths.get(expression) {
             return Some(type_name.clone());
         }
+        if self.constants.contains_key(expression) {
+            return Some("i32".to_string());
+        }
         if expression == "true" || expression == "false" {
             return Some("bool".to_string());
         }
@@ -897,17 +900,6 @@ impl Expansion {
         if expression.parse::<f32>().is_ok() && expression.contains('.') {
             return Some("f32".to_string());
         }
-        if let Some((collection, suffix)) = split_indexed_expression(expression) {
-            let collection_type = self.infer_expression_type_text(collection, local_paths)?;
-            let element_type = split_array_suffix(&collection_type)?.0.to_string();
-            if suffix.is_empty() {
-                return Some(element_type);
-            }
-            return local_paths
-                .get(&format!("{collection}[0]{suffix}"))
-                .cloned()
-                .or_else(|| self.field_type_from_text(&element_type, suffix));
-        }
         if let Some((lhs, operator, rhs)) = split_binary_expression(expression) {
             let lhs = self.infer_expression_type_text(lhs, local_paths)?;
             let rhs = self.infer_expression_type_text(rhs, local_paths)?;
@@ -921,6 +913,17 @@ impl Expansion {
                 return Some("f32".to_string());
             }
             return Some(lhs);
+        }
+        if let Some((collection, suffix)) = split_indexed_expression(expression) {
+            let collection_type = self.infer_expression_type_text(collection, local_paths)?;
+            let element_type = split_array_suffix(&collection_type)?.0.to_string();
+            if suffix.is_empty() {
+                return Some(element_type);
+            }
+            return local_paths
+                .get(&format!("{collection}[0]{suffix}"))
+                .cloned()
+                .or_else(|| self.field_type_from_text(&element_type, suffix));
         }
         None
     }
