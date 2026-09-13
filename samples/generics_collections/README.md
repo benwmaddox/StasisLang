@@ -4,19 +4,25 @@ This sample is a small, allocation-free consumer of Stasis compile-time
 generic parameters. Run it from a checkout with:
 
 ```text
-stasis --workspace samples/generics_collections prepare
+stasis --workspace samples/generics_collections vendor status
 stasis --workspace samples/generics_collections fmt --check
 stasis --workspace samples/generics_collections check
 stasis --workspace samples/generics_collections test
 stasis --workspace samples/generics_collections run --headless --ticks 1
+stasis --workspace samples/generics_collections package --target desktop --development-build
+stasis --workspace samples/generics_collections package --target web --development-build
+stasis --workspace samples/generics_collections package-mobile --target android-arm64 --out build/android-arm64 --development-build
 ```
 
-The production compiler seam also checks the entry point through JIT, AOT
-object generation, and the scalar `wasm_entry.stasis` through WebAssembly
-execution. The full entry intentionally keeps receiver-owned struct-array
-coverage in the JIT/AOT path because the current Wasm contract rejects that
-backend-specific shape; the standalone Wasm fixture keeps the scalar generic
-contract covered without hiding that boundary.
+The production compiler seam also checks the entry point through JIT and AOT
+object generation. The manifest's Web entry is the standalone
+`src/wasm_entry.stasis` scalar fixture, so the packaged `game.wasm` executes a
+generic collection without claiming the current Wasm backend's unsupported
+receiver-owned struct-array view. The full entry keeps that struct-array
+coverage in the JIT/AOT path and the boundary remains explicit. The Android
+package uses the same full entry and valid frame lifecycle as native runs.
+`vendor/stasis` is the recorded, hash-checked graphics/runtime snapshot used
+by native and mobile packaging.
 
 ```text
 python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_jit_aot_wasm -- --nocapture

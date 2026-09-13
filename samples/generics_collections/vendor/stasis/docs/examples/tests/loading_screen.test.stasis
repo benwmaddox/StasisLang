@@ -1,0 +1,90 @@
+import "../src/loading_screen.stasis";
+
+global state: LoadingGate;
+
+test `content IO gate waits for a loading frame and a later tick`(): bool {
+    state.prepare_loading(2);
+    if (state.begin_loading_batch(1) || state.begin_loading_batch(2)) {
+        return false;
+    }
+    state.loading_frame_submitted(2);
+    if (state.begin_loading_batch(2)) {
+        return false;
+    }
+    return state.begin_loading_batch(3) && !state.begin_loading_batch(4);
+}
+
+test `successful batch enters gameplay only after all operations settle`(): bool {
+    state.prepare_loading(2);
+    state.loading_frame_submitted(0);
+    state.begin_loading_batch(1);
+    state.settle_loading(1, 0);
+    if (state.phase != LoadingPhase.Loading) {
+        return false;
+    }
+    state.settle_loading(2, 0);
+    return state.phase == LoadingPhase.Gameplay;
+}
+
+test `failed and cancelled operations settle instead of waiting for readiness`(): bool {
+    state.prepare_loading(2);
+    state.loading_frame_submitted(0);
+    state.begin_loading_batch(1);
+    state.settle_loading(0, 1);
+    if (state.phase != LoadingPhase.Loading) {
+        return false;
+    }
+    state.settle_loading(1, 1);
+    if (state.phase != LoadingPhase.Error) {
+        return false;
+    }
+    state.prepare_loading(2);
+    return !state.frame_submitted && !state.begin_loading_batch(5);
+}
+
+test `later in-memory levels reuse the loaded batch`(): bool {
+    gate.phase = LoadingPhase.Gameplay;
+    gate.loaded = 2;
+    level_number = 1;
+    next_level();
+    return level_number == 2 && gate.loaded == 2 && gate.phase == LoadingPhase.Gameplay;
+}
+
+test `main and ticks before render perform no content requests`(): bool {
+    main();
+    tick();
+    tick();
+    if (hero.request != 0 || music.request != 0 || gate.phase != LoadingPhase.AwaitingFrame) {
+        return false;
+    }
+    if (hero.state != AssetState.None || music.state != AssetState.None) {
+        return false;
+    }
+    render();
+    return gate.frame_submitted && !gate.begin_loading_batch(loading_tick) && gate.begin_loading_batch(loading_tick + 1);
+}
+
+test `public asset failure states settle the real polling path`(): bool {
+    gate.prepare_loading(2);
+    gate.loading_frame_submitted(0);
+    gate.begin_loading_batch(1);
+    hero.request = 0;
+    hero.state = AssetState.Failed;
+    music.request = 0;
+    music.state = AssetState.Cancelled;
+    poll_content_batch();
+    return gate.phase == LoadingPhase.Error && gate.failed == 2;
+}
+
+test `unsettled requests exhaust the tick budget into a terminal error`(): bool {
+    gate.prepare_loading(2);
+    gate.loading_frame_submitted(0);
+    gate.begin_loading_batch(1);
+    gate.waited_ticks = 599;
+    hero.request = 0;
+    hero.state = AssetState.Pending;
+    music.request = 0;
+    music.state = AssetState.Pending;
+    poll_content_batch();
+    return gate.phase == LoadingPhase.Error && gate.failed == 2;
+}

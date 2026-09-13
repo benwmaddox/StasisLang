@@ -1,6 +1,6 @@
 # Spec Implementation Status (Rust Compiler)
 
-Last updated: 2026-08-22
+Last updated: 2026-09-13
 
 This document tracks how much of `docs/spec.md` is implemented in the Rust compiler/runtime pipeline.
 It is intended to be concrete and release-oriented (JIT + AOT).
@@ -22,6 +22,7 @@ Status legend:
 | 4. Types (overall) | Partial | Primitive scalar types are compiler-owned builtins with explicit layouts. Remaining gaps are in richer composite/type-analysis coverage rather than primitive identity or storage width. |
 | 4.1 Primitive Types | Implemented | `i32`, `u8`, `u16`, `u32`, `f32`, `f64`, `bool`, and `void` have compiler-owned identities. Unsigned state storage uses true 1/2/4-byte layouts with a zero-extended 32-bit call lane. |
 | 4.2 Composite Types | Implemented | Fixed arrays `Type[N]`, views `Type[]`, structs, enums, and string buffer forms (`ascii[N]`, `ascii[]`, `utf8[N]`, `utf8[]`) are implemented enough to run samples (including Brickout Revenge). |
+| 4.2.2 Generic Types and Compile-Time Value Parameters | Partial | Generic structs/functions with `T: type` and `N: i32` specialize through the ordinary fixed-storage/JIT/AOT/Wasm paths. The bounded contract, packaging lane, and current Wasm receiver-owned `Entity[]` boundary are recorded in [`docs/generics.md`](generics.md). |
 | 4.3 Numeric Conversion Semantics | Implemented (bounded profile) | `from_*`/`to_*` conversions cover `i32`/`f32`/`f64`; unsigned arithmetic is modular and uses unsigned division/comparison. Strict replay math is Q16.16 through compiler-lowered `fixed32_*` intrinsics with wrapping overflow and toward-zero rounding. Ordinary floats remain explicitly outside cross-architecture bit-determinism guarantees. |
 | 4.4 Local Type Inference | Implemented | Local inference for `let name = <expr>` is supported; typed `let name: Type = ...` is supported. |
 | 5. Operators and Expressions | Partial | Implemented for `i32`/`f32`/`f64`/`bool` forms required by current samples/tests. |

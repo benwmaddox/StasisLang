@@ -23,6 +23,14 @@ function wasm_buffer_first<T: type, N: i32>(self: WasmBuffer<T, N>): T {
 
 global wasm_values: WasmBuffer<i32, 4>;
 
+function tick(): i32 {
+    return 0;
+}
+
+function render(): void {
+    return;
+}
+
 function main(): i32 {
     wasm_values.count = 0;
     if (!wasm_buffer_append(wasm_values, 7)) {

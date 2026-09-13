@@ -1,0 +1,57 @@
+struct SnakeState {
+    head_x: i32;
+    head_y: i32;
+    direction_x: i32;
+    direction_y: i32;
+    queued_x: i32;
+    queued_y: i32;
+    has_queued_turn: bool;
+}
+
+global snake: SnakeState;
+
+function reset_snake(): void {
+    snake.head_x = 4;
+    snake.head_y = 4;
+    snake.direction_x = 1;
+    snake.direction_y = 0;
+    snake.queued_x = 0;
+    snake.queued_y = 0;
+    snake.has_queued_turn = false;
+}
+
+function queue_turn(x: i32, y: i32): bool {
+    let horizontal: bool =(x == -1 || x == 1) && y == 0;
+    let vertical: bool = x == 0 &&(y == -1 || y == 1);
+    if (!horizontal && !vertical) {
+        return false;
+    }
+    snake.queued_x = x;
+    snake.queued_y = y;
+    snake.has_queued_turn = true;
+    return true;
+}
+
+function main(): i32 {
+    reset_snake();
+    return 0;
+}
+
+function tick(): i32 {
+    if (snake.has_queued_turn) {
+        let reverses_x: bool = snake.queued_x == -snake.direction_x;
+        let reverses_y: bool = snake.queued_y == -snake.direction_y;
+        if (!reverses_x && !reverses_y) {
+            snake.direction_x = snake.queued_x;
+            snake.direction_y = snake.queued_y;
+        }
+        snake.has_queued_turn = false;
+    }
+    snake.head_x += snake.direction_x;
+    snake.head_y += snake.direction_y;
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}
