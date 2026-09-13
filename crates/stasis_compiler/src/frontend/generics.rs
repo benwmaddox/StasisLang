@@ -2455,6 +2455,8 @@ fn generic_definition_identity(path: &str, name: &str) -> String {
 }
 
 fn generic_function_identity(path: &str, signature: &ParsedFunctionSignature) -> String {
+    // Keep source offsets out of the identity: edits to constants or comments
+    // before a declaration must not orphan an otherwise reusable specialization.
     let mut identity = format!("{path}::{}|", signature.name);
     for parameter in &signature.generic_parameters {
         identity.push_str(match parameter.kind {
