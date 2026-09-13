@@ -10,6 +10,12 @@ pub const TYPE_ID_U8: TypeId = 5;
 pub const TYPE_ID_U16: TypeId = 6;
 pub const TYPE_ID_U32: TypeId = 7;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GenericArgument {
+    Type(TypeId),
+    I32(i32),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BuiltinType {
     Void,
@@ -26,11 +32,24 @@ enum BuiltinType {
 enum TypeKey {
     Builtin(BuiltinType),
     Named(String),
-    ArrayFixed { element: TypeId, max_len: u32 },
-    ArrayView { element: TypeId },
-    AsciiFixed { max_len: u32 },
+    InstantiatedNominal {
+        definition: String,
+        arguments: Vec<GenericArgument>,
+    },
+    ArrayFixed {
+        element: TypeId,
+        max_len: u32,
+    },
+    ArrayView {
+        element: TypeId,
+    },
+    AsciiFixed {
+        max_len: u32,
+    },
     AsciiView,
-    Utf8Fixed { max_len: u32 },
+    Utf8Fixed {
+        max_len: u32,
+    },
     Utf8View,
 }
 
@@ -92,6 +111,65 @@ impl TypeTable {
 
     pub fn resolve_or_intern(&mut self, type_name: &str) -> Result<TypeId, String> {
         self.resolve_or_intern_inner(type_name.trim())
+    }
+
+    pub fn intern_instantiated_nominal(
+        &mut self,
+        definition: &str,
+        arguments: &[GenericArgument],
+    ) -> Result<TypeId, String> {
+        let definition = definition.trim();
+        if definition.is_empty() {
+            return Err("generic type definition cannot be empty".to_string());
+        }
+        if arguments.is_empty() {
+            return Err(format!(
+                "generic type '{definition}' requires at least one argument"
+            ));
+        }
+        let key = TypeKey::InstantiatedNominal {
+            definition: definition.to_string(),
+            arguments: arguments.to_vec(),
+        };
+        let display_name = format!(
+            "{}<{}>",
+            definition,
+            arguments
+                .iter()
+                .map(|argument| match argument {
+                    GenericArgument::Type(type_id) => self
+                        .type_info(*type_id)
+                        .map_or_else(|| format!("type{type_id}"), |info| info.name.clone()),
+                    GenericArgument::I32(value) => value.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        self.intern_with_info(
+            key,
+            TypeInfo {
+                name: display_name,
+                category: TypeCategory::Named,
+                layout: TypeLayout {
+                    header_i32_words: 0,
+                    payload_size_bytes: None,
+                    static_size_bytes: None,
+                },
+            },
+        )
+    }
+
+    pub fn instantiated_nominal_identity(
+        &self,
+        type_id: TypeId,
+    ) -> Option<(String, Vec<GenericArgument>)> {
+        match self.type_key(type_id)? {
+            TypeKey::InstantiatedNominal {
+                definition,
+                arguments,
+            } => Some((definition.clone(), arguments.clone())),
+            _ => None,
+        }
     }
 
     pub fn ensure_ascii_view_id(&mut self) -> Result<TypeId, String> {
@@ -342,6 +420,15 @@ impl TypeTable {
         }
         if type_name == "string" {
             return self.by_key.get(&TypeKey::Utf8View).copied();
+        }
+
+        if let Some((index, _)) = self
+            .types
+            .iter()
+            .enumerate()
+            .find(|(_, type_info)| type_info.name == type_name)
+        {
+            return TypeId::try_from(index).ok();
         }
 
         let split = split_array_suffix(type_name).ok()?;
@@ -636,6 +723,28 @@ mod tests {
         assert_eq!(fixed_4_info.layout.header_i32_words, 1);
         assert_eq!(fixed_4_info.layout.payload_size_bytes, Some(16));
         assert_eq!(fixed_4_info.layout.static_size_bytes, Some(20));
+    }
+
+    #[test]
+    fn interns_nominal_value_applications_by_canonical_arguments() {
+        let mut table = TypeTable::new();
+        let first = table
+            .intern_instantiated_nominal("Buffer", &[GenericArgument::I32(12)])
+            .expect("Buffer<12>");
+        let spelled_equivalent = table
+            .intern_instantiated_nominal("Buffer", &[GenericArgument::I32(12)])
+            .expect("Buffer<12> again");
+        let different = table
+            .intern_instantiated_nominal("Buffer", &[GenericArgument::I32(24)])
+            .expect("Buffer<24>");
+
+        assert_eq!(first, spelled_equivalent);
+        assert_ne!(first, different);
+        assert_eq!(table.resolve("Buffer<12>"), Some(first));
+        assert_eq!(
+            table.instantiated_nominal_identity(first),
+            Some(("Buffer".to_string(), vec![GenericArgument::I32(12)]))
+        );
     }
 
     #[test]
