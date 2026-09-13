@@ -79,6 +79,8 @@ $wrapperCargo = $wrapperCargo.Replace('../../../crates/stasis_ai', '../stasis-ai
 Set-Content -NoNewline -Path $wrapperManifest -Value $wrapperCargo
 
 $env:CARGO_INCREMENTAL = "0"
+$codexTargetRoot = Join-Path $scriptRoot "target"
+$env:CARGO_TARGET_DIR = $codexTargetRoot
 $profileArgs = @()
 $profileDir = "debug"
 if ($Release) {
