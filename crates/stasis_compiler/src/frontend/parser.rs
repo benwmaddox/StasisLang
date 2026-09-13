@@ -1746,6 +1746,15 @@ fn parse_type_name(
     let base = expect(tokens, cursor, TokenKind::Identifier)?;
     let mut next = cursor + 1;
     let mut end = base.end;
+    while tokens
+        .get(next)
+        .copied()
+        .is_some_and(|token| token_is_other_char(source, token, b'.'))
+    {
+        let segment = expect(tokens, next + 1, TokenKind::Identifier)?;
+        end = segment.end;
+        next += 2;
+    }
     if tokens
         .get(next)
         .copied()
@@ -2363,6 +2372,16 @@ function tick(): i32 {
         assert_eq!(functions[0].generic_parameters[0].name, "N");
         assert_eq!(functions[0].params[0].type_name, "Buffer<N>");
         assert_eq!(layout.globals[0].type_name, "Buffer<4>");
+    }
+
+    #[test]
+    fn parses_module_qualified_generic_type_applications() {
+        let source =
+            "global sample: left_box.Buffer<i32, 4>;\nfunction use(value: left_box.Buffer<i32, 4>): void { return; }\n";
+        let layout = parse_top_level_type_layout(source).expect("qualified generic layout");
+        assert_eq!(layout.globals[0].type_name, "left_box.Buffer<i32, 4>");
+        let functions = parse_top_level_functions(source).expect("qualified generic function");
+        assert_eq!(functions[0].params[0].type_name, "left_box.Buffer<i32, 4>");
     }
 
     #[test]
