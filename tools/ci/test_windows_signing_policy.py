@@ -27,68 +27,28 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             source = (ROOT / workflow).read_text(encoding="utf-8")
             self.assertIn("tools/windows/stasis-signing.ps1", source)
 
-    def test_nightly_publication_requires_and_verifies_production_signing(self):
+    def test_nightly_publication_allows_unsigned_windows_artifacts(self):
         source = (ROOT / ".github/workflows/nightly-release.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("release_preconditions:", source)
-        self.assertIn("Require production Windows signing configuration", source)
-        self.assertIn("owned by Maddox task #525", source)
-        self.assertIn("needs: [detect, mobile_network_support, release_preconditions]", source)
-        self.assertIn("STASIS_SIGNING_PROFILE: production", source)
-        self.assertIn("STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY: '1'", source)
-        self.assertIn("'tools/windows/stasis-signing.ps1'", source)
-        self.assertIn("'tools/windows/stasis-signing-identity.ps1'", source)
-        self.assertIn('$expectedThumbprint = "67132CE8553062F2145A1EBD7A88166910CDA7A6"', source)
-        self.assertNotIn('"TrustedPeople"', source)
-        self.assertIn("STASIS_SIGNING_TIMESTAMP_URLS", source)
-        self.assertIn("STASIS_SIGNING_TIMEOUT_SECONDS", source)
-        self.assertIn("http://timestamp.acs.microsoft.com/;http://timestamp.digicert.com", source)
-        self.assertIn("Invoke-BoundedSigningCommand sign $_", source)
-        self.assertIn("Invoke-BoundedSigningCommand verify $_", source)
-        self.assertIn('Invoke-BoundedPowerShellCommand "pinned signer identity validation"', source)
-        self.assertNotIn("temporary signer trust", source)
-        signing_step = source.split(
-            "- name: Authenticode sign Stasis Windows binaries", 1
+        self.assertNotIn("release_preconditions:", source)
+        self.assertIn("needs: [detect, mobile_network_support]", source)
+        self.assertIn("Nightly Windows artifacts are intentionally unsigned", source)
+        self.assertNotIn("STASIS_SIGNING_PFX_BASE64", source)
+        self.assertNotIn("STASIS_SIGNING_PROFILE", source)
+        self.assertNotIn("Authenticode sign Stasis Windows binaries", source)
+        self.assertNotIn("Invoke-BoundedSigningCommand", source)
+        self.assertNotIn("stasis-signing-identity.ps1", source)
+        self.assertIn("tools/windows/stasis-signing.ps1", source)
+        signing_region = source.split(
+            "- name: Build stasis_graphics runtime (unix)", 1
         )[1].split("- name: Assemble bundle (unix)", 1)[0]
-        self.assertIn("timeout-minutes: 15", signing_step)
-        self.assertIn("$process.WaitForExit(90000)", signing_step)
-        self.assertIn("$process.Kill()", signing_step)
-        self.assertIn("$process.WaitForExit(5000)", signing_step)
-        self.assertIn('Write-Host "Starting $label"', signing_step)
-        self.assertIn("$startInfo.UseShellExecute = $false", signing_step)
-        self.assertIn("$startInfo.ArgumentList.Add($argument)", signing_step)
-        self.assertIn("$process.ExitCode -ne 0", signing_step)
-        self.assertNotIn("Remove nightly signing root trust", source)
-        self.assertNotIn("runner.os == 'Windows' && env.STASIS_SIGNING_PFX_BASE64 != ''", source)
+        self.assertNotIn("stasis-signing.ps1", signing_region)
         extracted_verification_step = source.split(
             "- name: Verify extracted Windows editor toolchain", 1
         )[1].split("- name: Smoke test bundled graphics runtime (windows)", 1)[0]
-        self.assertIn('$env:STASIS_SIGNING_TIMEOUT_SECONDS = "30"', extracted_verification_step)
-        self.assertIn("& pwsh -NoProfile -File tools/windows/stasis-signing.ps1 verify", extracted_verification_step)
-        self.assertNotIn("& powershell.exe", extracted_verification_step)
-
-        identity_source = (ROOT / "tools/windows/stasis-signing-identity.ps1").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("Get-Command openssl.exe", identity_source)
-        self.assertIn("'env:STASIS_SIGNING_PFX_PASSWORD'", identity_source)
-        self.assertNotIn("'-legacy'", identity_source)
-        self.assertIn("$publicCertificate.Thumbprint -ne $ExpectedThumbprint", identity_source)
-        self.assertIn("$publicCertificate.Subject -ne $publicCertificate.Issuer", identity_source)
-        self.assertIn("$process.WaitForExit(30000)", identity_source)
-        self.assertIn("$process.Kill()", identity_source)
-        for forbidden in ("Get-AuthenticodeSignature", "certutil", "certmgr", "X509Store", "CertAddEncodedCertificateToStore"):
-            self.assertNotIn(forbidden.lower(), identity_source.lower())
-        self.assertNotIn("X509Certificate2]::new", signing_step)
-
-        signing_source = (ROOT / "tools/windows/stasis-signing.ps1").read_text(encoding="utf-8")
-        self.assertIn("STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY", signing_source)
-        self.assertIn("0x800B0109", signing_source)
-        self.assertIn("Number of errors:", signing_source)
-        self.assertIn("Number of warnings:", signing_source)
-        self.assertIn("TRUST_E_BAD_DIGEST", signing_source)
-        self.assertIn("'/tw', '/v'", signing_source)
+        self.assertNotIn("stasis-signing.ps1 verify", extracted_verification_step)
+        self.assertIn("test_network_supervision.ps1", extracted_verification_step)
 
     def test_cargo_runner_routes_signtool_through_policy_entrypoint(self):
         source = (ROOT / ".cargo/stasis-sign-and-run.cmd").read_text(encoding="utf-8")

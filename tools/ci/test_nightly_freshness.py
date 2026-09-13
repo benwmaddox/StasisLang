@@ -41,7 +41,8 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         ):
             self.assertIn(f'$validationRoot/{relative}', self.release)
         self.assertIn("extracted editor fingerprint mismatch", self.release)
-        self.assertIn("extracted Authenticode verification failed", self.release)
+        self.assertIn("Nightly Windows artifacts are intentionally unsigned", self.release)
+        self.assertNotIn("extracted Authenticode verification failed", self.release)
         self.assertIn("tools/ci/test_editor_windows.ps1", self.release)
         smoke = (ROOT / "tools/ci/test_editor_windows.ps1").read_text(
             encoding="utf-8"

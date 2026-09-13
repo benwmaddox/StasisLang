@@ -136,7 +136,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
     def test_support_job_is_fail_closed_and_uses_pinned_targets(self):
         self.assertIn("mobile_network_support:", self.workflow)
         self.assertIn(
-            "needs: [detect, mobile_network_support, release_preconditions]",
+            "needs: [detect, mobile_network_support]",
             self.workflow,
         )
         self.assertIn("os: ubuntu-latest", self.workflow)
