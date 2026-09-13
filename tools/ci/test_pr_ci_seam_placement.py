@@ -61,7 +61,9 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             for name in (
                 "pr-ci-preflight",
                 "pr-ci-cargo-workspace",
-                "pr-ci-cargo-stasis-unit",
+                "pr-ci-cargo-stasis-library",
+                "pr-ci-cargo-stasis-main",
+                "pr-ci-cargo-stasis-provenance",
                 "pr-ci-cargo-stasis-integration",
             )
         )
@@ -71,16 +73,29 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         commands = (
             "cargo test --workspace --exclude stasis --all-targets -- --test-threads=1",
             "cargo build -p stasis --bin stasis",
-            "cargo test -p stasis --lib --bins -- --test-threads=1",
+            "cargo test -p stasis --lib -- --test-threads=1",
+            "cargo test -p stasis --bin stasis --",
+            "--skip toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources",
+            "cargo test -p stasis --bin stasis\n          toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources --",
             'cargo test -p stasis "${test_args[@]}" -- --test-threads=1',
         )
         for command in commands:
             with self.subTest(command=command):
                 self.assertEqual(self.linux_ordinary.count(command), 1)
-        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 4)
+        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 6)
         self.assertIn("find apps/stasis/tests", self.linux_ordinary)
         self.assertIn("needs:", self.linux)
         self.assertIn("always()", self.linux)
+        for lane in (
+            "pr-ci-preflight",
+            "pr-ci-cargo-workspace",
+            "pr-ci-cargo-stasis-library",
+            "pr-ci-cargo-stasis-main",
+            "pr-ci-cargo-stasis-provenance",
+            "pr-ci-cargo-stasis-integration",
+        ):
+            with self.subTest(lane=lane):
+                self.assertIn(f"needs.{lane}.result", self.linux)
         redundant_commands = (
             "--test host_frame_jit_seam",
             "gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace",
