@@ -36,7 +36,37 @@ concurrency:
 
 jobs:
   test:
+    if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    needs:
+      - pr-ci-preflight
+      - pr-ci-cargo-workspace
+      - pr-ci-cargo-stasis-library
+      - pr-ci-cargo-stasis-test-harness
+      - pr-ci-cargo-stasis-main
+      - pr-ci-cargo-stasis-provenance
+      - pr-ci-cargo-stasis-integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required PR CI lanes
+        env:
+          PREFLIGHT_RESULT: ${{ needs.pr-ci-preflight.result }}
+          WORKSPACE_RESULT: ${{ needs.pr-ci-cargo-workspace.result }}
+          STASIS_LIBRARY_RESULT: ${{ needs.pr-ci-cargo-stasis-library.result }}
+          STASIS_TEST_HARNESS_RESULT: ${{ needs.pr-ci-cargo-stasis-test-harness.result }}
+          STASIS_MAIN_RESULT: ${{ needs.pr-ci-cargo-stasis-main.result }}
+          STASIS_PROVENANCE_RESULT: ${{ needs.pr-ci-cargo-stasis-provenance.result }}
+          STASIS_INTEGRATION_RESULT: ${{ needs.pr-ci-cargo-stasis-integration.result }}
+        run: |
+          for result in "$PREFLIGHT_RESULT" "$WORKSPACE_RESULT" "$STASIS_LIBRARY_RESULT" "$STASIS_TEST_HARNESS_RESULT" "$STASIS_MAIN_RESULT" "$STASIS_PROVENANCE_RESULT" "$STASIS_INTEGRATION_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "A required PR CI lane finished with result: $result"
+              exit 1
+            fi
+          done
+
+  pr-ci-preflight:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI preflight
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -120,10 +150,32 @@ jobs:
           python -m unittest tools.ci.test_run_architecture_characterization
           python tools/ci/run_architecture_characterization.py --run-fast
 
+  pr-ci-cargo-workspace:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI workspace Cargo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
       - name: Run workspace Cargo tests
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
         timeout-minutes: 15
         run: python tools/cargo_cache.py run -- cargo test --workspace --exclude stasis --all-targets -- --test-threads=1
+
+  pr-ci-cargo-stasis-library:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI Stasis library Cargo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Build Stasis test executable
         # Some isolated app tests launch the sibling CLI; make that prerequisite explicit.
@@ -131,9 +183,105 @@ jobs:
         run: python tools/cargo_cache.py run -- cargo build -p stasis --bin stasis
 
       - name: Run Stasis unit Cargo tests
-        # Keep the large app unit target separate from its integration binaries so every command stays bounded.
+        # The library tests need the sibling CLI built by the preceding step.
         timeout-minutes: 15
-        run: python tools/cargo_cache.py run -- cargo test -p stasis --lib --bins -- --test-threads=1
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --lib -- --test-threads=1
+
+  pr-ci-cargo-stasis-main:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI Stasis main Cargo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Build Stasis test executable
+        # The desktop editor's isolated tests launch the sibling CLI; make that prerequisite explicit.
+        timeout-minutes: 15
+        run: python tools/cargo_cache.py run -- cargo build -p stasis --bin stasis
+
+      - name: Run Stasis main Cargo tests
+        timeout-minutes: 15
+        run: >-
+          python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis --
+          --skip toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources
+          --test-threads=1
+
+  pr-ci-cargo-stasis-test-harness:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI Stasis test harness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Build Stasis provenance test harness
+        # Compile the full main test target once so the slow provenance test does not recompile it.
+        timeout-minutes: 15
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis --no-run
+
+      - name: Stage Stasis provenance test harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_binary="$(find build/codex-cargo-target/debug/deps -maxdepth 1 -type f -name 'stasis-*' -executable -print -quit)"
+          test -n "$test_binary"
+          mkdir -p target/pr-ci-stasis
+          cp "$test_binary" target/pr-ci-stasis/provenance-test-harness
+
+      - name: Upload Stasis provenance test harness
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: stasis-provenance-test-harness
+          if-no-files-found: error
+          path: target/pr-ci-stasis/provenance-test-harness
+
+  pr-ci-cargo-stasis-provenance:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI Stasis provenance Cargo
+    needs: pr-ci-cargo-stasis-test-harness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Download Stasis provenance test harness
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stasis-provenance-test-harness
+          path: target/pr-ci-stasis
+
+      - name: Prepare Stasis provenance test harness
+        shell: bash
+        run: chmod +x target/pr-ci-stasis/provenance-test-harness
+
+      - name: Run isolated Stasis provenance Cargo test
+        timeout-minutes: 15
+        run: >-
+          ./target/pr-ci-stasis/provenance-test-harness
+          toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources
+          --exact --test-threads=1
+
+  pr-ci-cargo-stasis-integration:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: PR CI Stasis integration Cargo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Run Stasis integration Cargo tests
         timeout-minutes: 15
