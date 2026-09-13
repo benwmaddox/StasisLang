@@ -638,7 +638,10 @@ impl JitProcess {
                 .expect("accepted compiler project root remains valid");
         }
         for file in self.compiler.files() {
-            candidate.upsert_file(file.path.clone(), file.content.clone());
+            // `content` is the expanded backend source for generic programs.  A
+            // staged candidate must start from the user-authored source so the
+            // generic expansion pass can rebuild every module consistently.
+            candidate.upsert_file(file.path.clone(), file.original_content.clone());
         }
         candidate.active_compiler = self.active_compiler.clone();
         candidate.artifacts = self.artifacts.clone();
@@ -712,7 +715,7 @@ impl JitProcess {
             .files()
             .iter()
             .filter(|file| file.path != root_source_path)
-            .map(|file| (file.path.clone(), file.hash))
+            .map(|file| (file.path.clone(), hash_text(&file.original_content)))
             .collect();
         let tracked_paths: BTreeSet<String> =
             tracked.iter().map(|(path, _)| path.clone()).collect();
@@ -837,7 +840,10 @@ impl JitProcess {
         self.compiler
             .set_analysis_required_roots(&self.required_emit_roots);
         for file in pending_files {
-            self.compiler.upsert_file(file.path, file.content);
+            // Preserve pending edits in source form.  Re-inserting expanded
+            // generic output here would discard the template and make the next
+            // retry depend on a stale specialization set.
+            self.compiler.upsert_file(file.path, file.original_content);
         }
         self.program_snapshot = self.active_program_snapshot.clone();
         self.staged_string_literals = self.active_string_literals.clone();
@@ -4043,6 +4049,105 @@ function main(): i32 {
                 .execute_i32_noarg_by_name("main")
                 .expect("execute changed local layout"),
             3
+        );
+    }
+
+    #[test]
+    fn generic_body_edits_rejit_specializations_and_callers_but_reuse_unrelated_code() {
+        fn source(body: &str) -> String {
+            format!(
+                "function value<N: i32>(): i32 {{ {body} }}\nfunction unrelated(): i32 {{ return 5; }}\nfunction main(): i32 {{ return value::<4>() + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic.stasis", source("return N;"));
+        process.compile().expect("generic baseline compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(9));
+        let old_unrelated_ptr = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "unrelated")
+            .expect("unrelated baseline artifact")
+            .code_ptr;
+
+        process.upsert_file("generic.stasis", source("return N + 1;"));
+        let report = process.compile().expect("generic body edit compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(10));
+        assert_eq!(
+            process
+                .artifacts()
+                .iter()
+                .find(|artifact| artifact.function_key.name == "unrelated")
+                .expect("unrelated retained artifact")
+                .code_ptr,
+            old_unrelated_ptr,
+            "unrelated reachable code should be reused"
+        );
+        assert!(
+            report.emit.emitted_functions >= 2,
+            "generic specialization and its caller must be re-emitted: {report:?}"
+        );
+        let metadata = process.generation_metadata().expect("generation metadata");
+        let emitted_names = metadata
+            .emitted_function_ids
+            .iter()
+            .filter_map(|id| {
+                process
+                    .compiler
+                    .functions()
+                    .iter()
+                    .find(|function| function.id == *id)
+            })
+            .map(|function| function.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            emitted_names
+                .iter()
+                .any(|name| name.starts_with("__stasis_function_")),
+            "specialized value function was not re-emitted: {emitted_names:?}"
+        );
+        assert!(emitted_names.contains("main"));
+        assert!(!emitted_names.contains("unrelated"));
+    }
+
+    #[test]
+    fn equivalent_generic_argument_spelling_reuses_specialization_and_callers() {
+        fn source(argument: &str) -> String {
+            format!(
+                "const CAPACITY: i32 = {argument};\nfunction value<N: i32>(): i32 {{ return N; }}\nfunction main(): i32 {{ return value::<CAPACITY>(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic.stasis", source("24"));
+        process
+            .compile()
+            .expect("canonical generic baseline compiles");
+        let first_metadata = process
+            .generation_metadata()
+            .expect("baseline generation metadata")
+            .clone();
+        let first_ptrs = process.function_code_ptrs();
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(24));
+
+        process.upsert_file("generic.stasis", source("12 + 12"));
+        let report = process
+            .compile()
+            .expect("equivalent generic argument spelling compiles");
+        assert_eq!(
+            report.emit.emitted_functions, 0,
+            "equivalent spelling should reuse all code: {report:?}"
+        );
+        assert_eq!(process.function_code_ptrs(), first_ptrs);
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(24));
+        assert_eq!(
+            process
+                .generation_metadata()
+                .expect("updated generation metadata")
+                .source_revision,
+            first_metadata.source_revision,
+            "equivalent source spellings should retain the semantic revision"
         );
     }
 
@@ -8668,6 +8773,77 @@ function main(): i32 { batch.update(0); return 0; }
             &snapshot.data_flow_summaries_shared(),
             &active.compiler.data_flow_summaries_shared(),
         ));
+    }
+
+    #[test]
+    fn staged_candidate_reexpands_generic_imports_from_original_sources() {
+        let mut active = JitProcess::new();
+        active.upsert_file(
+            "main.stasis",
+            "import \"lib/generic.stasis\";\nfunction main(): i32 { return generic.capacity::<4>(); }\n",
+        );
+        active.upsert_file(
+            "lib/generic.stasis",
+            "function capacity<N: i32>(): i32 { return N; }\n",
+        );
+        active.compile().expect("generic baseline compiles");
+        assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(4));
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "main.stasis",
+            "import \"lib/generic.stasis\";\nfunction main(): i32 { return generic.capacity::<8>(); }\n",
+        );
+        candidate
+            .compile()
+            .expect("candidate must retain imported generic templates");
+        assert_eq!(candidate.execute_i32_noarg_by_name("main"), Ok(8));
+    }
+
+    #[test]
+    fn imported_generic_source_watcher_compares_source_hashes() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis_jit_generic_watch_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create watcher root");
+        let helper_path = root.join("generic.stasis");
+        let initial_source = "function capacity<N: i32>(): i32 { return N; }\n";
+        std::fs::write(&helper_path, initial_source).expect("write initial generic source");
+
+        let result = (|| {
+            let mut process = JitProcess::new();
+            process
+                .set_project_root(root.to_string_lossy().into_owned())
+                .expect("set watcher project root");
+            process.upsert_file(
+                "main.stasis",
+                "import \"generic.stasis\";\nfunction main(): i32 { return generic.capacity::<4>(); }\n",
+            );
+            process.upsert_file("generic.stasis", initial_source);
+            process
+                .compile()
+                .expect("generic watcher baseline compiles");
+            assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(4));
+            assert!(
+                !process.refresh_imported_sources_from_disk("main.stasis"),
+                "unchanged generic source must not trigger a refresh"
+            );
+
+            let changed_source =
+                "function capacity<N: i32>(): i32 { return N + 1; }\n// source edit\n";
+            std::fs::write(&helper_path, changed_source).expect("write changed generic source");
+            assert!(process.refresh_imported_sources_from_disk("main.stasis"));
+            process.compile().expect("changed generic source compiles");
+            assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(5));
+            Ok::<(), String>(())
+        })();
+        let _ = std::fs::remove_dir_all(&root);
+        result.expect("generic source watcher regression");
     }
 
     #[cfg(windows)]

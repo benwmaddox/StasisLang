@@ -3237,9 +3237,10 @@ mod tests {
             .expect("Cargo deps directory")
             .to_path_buf();
         let (_, runtime_dll) = ensure_test_dynload_artifacts(&deps_dir);
-        if !optional_signer_is_usable(&runtime_dll) {
+        if !test_signing_configured() && !signed_execution_required() {
             return;
         }
+        validate_configured_signer(&runtime_dll);
         let mut process = AotProcess::new();
         process.upsert_file(
             "external_url.stasis",
