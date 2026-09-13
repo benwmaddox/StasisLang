@@ -11,8 +11,9 @@ use crate::compiler::SourceFile;
 use crate::frontend::indexer::hash_text;
 use crate::frontend::lexer::{lex, TokenKind};
 use crate::frontend::parser::{
-    parse_top_level_functions, parse_top_level_struct_definitions, parse_top_level_type_layout,
-    ParsedFunctionSignature, ParsedGenericParameter, ParsedGenericParameterKind,
+    parse_top_level_extern_functions, parse_top_level_functions,
+    parse_top_level_struct_definitions, parse_top_level_type_layout, ParsedFunctionSignature,
+    ParsedGenericParameter, ParsedGenericParameterKind,
 };
 
 const MAX_SPECIALIZATIONS: usize = 4096;
@@ -280,6 +281,17 @@ impl Expansion {
                     .or_default()
                     .push(identity);
             }
+            if let Ok(externs) = parse_top_level_extern_functions(&file.source) {
+                if let Some(extern_decl) = externs
+                    .iter()
+                    .find(|declaration| !declaration.generic_parameters.is_empty())
+                {
+                    return Err(format!(
+                        "generic extern function '{}' cannot be a host declaration; use a concrete wrapper",
+                        extern_decl.name
+                    ));
+                }
+            }
             let Ok(functions) = parse_top_level_functions(&file.source) else {
                 continue;
             };
@@ -298,6 +310,22 @@ impl Expansion {
                                 .collect(),
                         ));
                     continue;
+                }
+                if is_concrete_only_function_name(&function.name) {
+                    return Err(format!(
+                        "generic function '{}' cannot be a lifecycle or host entry; use a concrete wrapper",
+                        function.name
+                    ));
+                }
+                if function
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation.name == "extern")
+                {
+                    return Err(format!(
+                        "generic function '{}' cannot be an extern declaration; use a concrete wrapper",
+                        function.name
+                    ));
                 }
                 let definition = generic_functions.len();
                 generic_functions_by_name
@@ -1918,7 +1946,7 @@ impl Expansion {
         Ok(output)
     }
 
-    fn write_sources(&self, files: &mut [SourceFile]) -> Result<(), String> {
+    fn write_sources(&mut self, files: &mut [SourceFile]) -> Result<(), String> {
         let function_names = self.function_names()?;
         for (file_index, file) in files.iter_mut().enumerate() {
             let raw = &self.files[file_index].source;
@@ -1939,6 +1967,15 @@ impl Expansion {
             removals.sort_by_key(|range| (range.start, range.end));
             let mut generated =
                 rewrite_kept_source(self, file_index, raw, &removals, &function_names)?;
+            generated = self.rewrite_inferred_generic_calls(
+                file_index,
+                &generated,
+                &GenericEnvironment {
+                    module_alias: Some(module_alias_for_path(&self.files[file_index].path)),
+                    ..GenericEnvironment::default()
+                },
+                &function_names,
+            )?;
 
             for (key, specialization) in &self.struct_specializations {
                 let Some(definition) = self.lookup_generic_struct(&key.definition) else {
@@ -1966,8 +2003,13 @@ impl Expansion {
                 ));
             }
 
-            for (key, specialization) in &self.function_specializations {
-                let definition = &self.generic_functions[specialization.definition];
+            let function_specializations = self
+                .function_specializations
+                .iter()
+                .map(|(key, specialization)| (key.clone(), specialization.clone()))
+                .collect::<Vec<_>>();
+            for (key, specialization) in function_specializations {
+                let definition = self.generic_functions[specialization.definition].clone();
                 if definition.file_index != file_index || specialization.source.is_empty() {
                     continue;
                 }
@@ -1981,10 +2023,16 @@ impl Expansion {
                     &function_names,
                     file_index,
                 )?;
+                let source = self.rewrite_inferred_generic_calls(
+                    file_index,
+                    &source,
+                    &environment,
+                    &function_names,
+                )?;
                 let source = rename_function_declaration(
                     &source,
                     &definition.name,
-                    function_names.get(key).ok_or_else(|| {
+                    function_names.get(&key).ok_or_else(|| {
                         "missing generic function specialization name".to_string()
                     })?,
                 )?;
@@ -1996,6 +2044,159 @@ impl Expansion {
             file.hash = hash_text(&file.content);
         }
         Ok(())
+    }
+
+    fn rewrite_inferred_generic_calls(
+        &mut self,
+        file_index: usize,
+        source: &str,
+        environment: &GenericEnvironment,
+        function_names: &BTreeMap<FunctionSpecializationKey, String>,
+    ) -> Result<String, String> {
+        let functions = parse_top_level_functions(source)?;
+        let mut replacements = Vec::new();
+        for function in functions {
+            let Some(body) = source.get(function.body_range.clone()) else {
+                return Err(format!(
+                    "function '{}' has invalid body range while rewriting generic calls",
+                    function.name
+                ));
+            };
+            let local_paths =
+                self.local_paths_for_function(file_index, &function, source, environment)?;
+            let body_offset = function.body_range.start;
+
+            for call in collect_inferred_receiver_calls(body)? {
+                let is_module_call = !local_paths.contains_key(&call.receiver)
+                    && self
+                        .visible_module_aliases
+                        .get(&file_index)
+                        .is_some_and(|aliases| aliases.contains(&call.receiver));
+                let mut actual_types = Vec::new();
+                if !is_module_call {
+                    let Some(receiver_type) = local_paths.get(&call.receiver).cloned() else {
+                        continue;
+                    };
+                    actual_types.push(receiver_type);
+                }
+                let Some(argument_types) = call
+                    .arguments
+                    .iter()
+                    .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                actual_types.extend(argument_types);
+                let definitions =
+                    self.generic_function_candidates(&call.name, Some(&call.receiver), file_index);
+                if definitions.is_empty()
+                    || self.has_ordinary_function_candidate(
+                        &call.name,
+                        Some(&call.receiver),
+                        file_index,
+                        &actual_types,
+                    )
+                {
+                    continue;
+                }
+                let targets = self.inferred_generic_target_names(
+                    &call.name,
+                    Some(&call.receiver),
+                    &actual_types,
+                    &definitions,
+                    function_names,
+                )?;
+                let target = match targets.as_slice() {
+                    [target] => target.clone(),
+                    [] => continue,
+                    _ => {
+                        return Err(format!(
+                            "ambiguous inferred generic call '{}'; specify explicit arguments",
+                            call.name
+                        ));
+                    }
+                };
+                replacements.push((
+                    body_offset + call.name_start,
+                    body_offset + call.name_end,
+                    target,
+                ));
+            }
+
+            for call in collect_inferred_argument_calls(body)? {
+                let definitions = self.generic_function_candidates(&call.name, None, file_index);
+                if definitions.is_empty() {
+                    continue;
+                }
+                let Some(actual_types) = call
+                    .arguments
+                    .iter()
+                    .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                if self.has_ordinary_function_candidate(&call.name, None, file_index, &actual_types)
+                {
+                    continue;
+                }
+                let targets = self.inferred_generic_target_names(
+                    &call.name,
+                    None,
+                    &actual_types,
+                    &definitions,
+                    function_names,
+                )?;
+                let target = match targets.as_slice() {
+                    [target] => target.clone(),
+                    [] => continue,
+                    _ => {
+                        return Err(format!(
+                            "ambiguous inferred generic call '{}'; specify explicit arguments",
+                            call.name
+                        ));
+                    }
+                };
+                replacements.push((
+                    body_offset + call.name_start,
+                    body_offset + call.name_end,
+                    target,
+                ));
+            }
+        }
+        replacements.sort_by_key(|(start, _, _)| *start);
+        apply_replacements(source, &replacements)
+    }
+
+    fn inferred_generic_target_names(
+        &mut self,
+        name: &str,
+        qualifier: Option<&str>,
+        actual_types: &[String],
+        definitions: &[usize],
+        function_names: &BTreeMap<FunctionSpecializationKey, String>,
+    ) -> Result<Vec<String>, String> {
+        let mut targets = BTreeSet::new();
+        for definition in definitions {
+            let generic = self.generic_functions[*definition].clone();
+            let Some(arguments) = self.infer_generic_call_arguments(&generic, actual_types)? else {
+                continue;
+            };
+            let key = FunctionSpecializationKey {
+                definition: *definition,
+                arguments,
+            };
+            let Some(target) = function_names.get(&key) else {
+                return Err(format!(
+                    "missing specialization for inferred generic call '{}{}'",
+                    qualifier.map_or(String::new(), |value| format!("{value}.")),
+                    name
+                ));
+            };
+            targets.insert(target.clone());
+        }
+        Ok(targets.into_iter().collect())
     }
 
     fn function_names(&self) -> Result<BTreeMap<FunctionSpecializationKey, String>, String> {
@@ -2018,7 +2219,12 @@ impl Expansion {
 
         let mut names = BTreeMap::new();
         for keys in groups.into_values() {
-            let needs_mangled_names = keys.len() > 1;
+            // Every concrete generic function gets a canonical name that
+            // carries its defining declaration and evaluated arguments.  A
+            // specialization must not reuse the template's source name when
+            // it is the only instance in this compilation: doing so makes
+            // incremental snapshots treat `f<4>` and `f<8>` as one function.
+            let needs_mangled_names = true;
             for key in keys {
                 let specialization = self
                     .function_specializations
@@ -2270,6 +2476,18 @@ fn module_alias_for_path(path: &str) -> String {
         alias.insert(0, '_');
     }
     alias
+}
+
+fn is_concrete_only_function_name(name: &str) -> bool {
+    matches!(
+        name,
+        "main"
+            | "tick"
+            | "render"
+            | "on_code_swap"
+            | "gfx_cmd_construction_reset"
+            | "gfx_cmd_construction_finish"
+    )
 }
 
 fn find_struct_definition_range(
@@ -2652,6 +2870,8 @@ struct InferredReceiverCall {
     receiver: String,
     name: String,
     arguments: Vec<String>,
+    name_start: usize,
+    name_end: usize,
 }
 
 fn collect_inferred_receiver_calls(source: &str) -> Result<Vec<InferredReceiverCall>, String> {
@@ -2708,6 +2928,8 @@ fn collect_inferred_receiver_calls(source: &str) -> Result<Vec<InferredReceiverC
                     receiver: receiver.clone(),
                     name: source[segment_start..segment_end].to_string(),
                     arguments: split_top_level_arguments(&source[after_segment + 1..close])?,
+                    name_start: segment_start,
+                    name_end: segment_end,
                 });
                 found_call = true;
                 probe = segment_end;
@@ -2875,6 +3097,8 @@ fn type_names_equivalent(left: &str, right: &str) -> bool {
 struct InferredArgumentCall {
     name: String,
     arguments: Vec<String>,
+    name_start: usize,
+    name_end: usize,
 }
 
 fn collect_inferred_argument_calls(source: &str) -> Result<Vec<InferredArgumentCall>, String> {
@@ -2918,6 +3142,8 @@ fn collect_inferred_argument_calls(source: &str) -> Result<Vec<InferredArgumentC
         calls.push(InferredArgumentCall {
             name: source[start..cursor].to_string(),
             arguments: split_top_level_arguments(&source[after_name + 1..close])?,
+            name_start: start,
+            name_end: cursor,
         });
         cursor = after_name + 1;
     }
@@ -3649,11 +3875,11 @@ mod tests {
         assert!(compiler
             .functions()
             .iter()
-            .any(|function| function.name == "clear"));
+            .any(|function| function.name.starts_with("__stasis_function_")));
         assert!(compiler
             .functions()
             .iter()
-            .any(|function| function.name == "capacity"));
+            .any(|function| function.name.starts_with("__stasis_function_")));
     }
 
     #[test]
@@ -3744,19 +3970,83 @@ mod tests {
 
     #[test]
     fn lowers_value_generic_storage_through_aot_and_wasm() {
-        let source = "struct Buffer<N: i32> { values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction main(): i32 { samples.values[0] = 7; return samples.values[0]; }\n";
+        let source = "struct Buffer<N: i32> { values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction value<N: i32>(): i32 { return N; }\nfunction dead(): i32 { return value::<99>(); }\nfunction main(): i32 { samples.values[0] = 7; return samples.values[0] + value::<4>() + value::<8>(); }\n";
 
         let mut aot = crate::backend::aot::AotProcess::new();
+        aot.set_required_emit_roots(&["main".to_string()]);
         aot.upsert_file("main.stasis", source);
         let report = aot.compile().expect("generic AOT compile");
-        assert_eq!(report.emit.emitted_functions, 1);
-        assert_eq!(aot.artifacts().len(), 1);
+        assert_eq!(report.emit.emitted_functions, 3);
+        assert_eq!(aot.artifacts().len(), 3);
+        assert!(aot
+            .artifacts()
+            .iter()
+            .all(|artifact| artifact.object_bytes_len > 0));
 
         let mut wasm = crate::backend::wasm::WasmProcess::new();
         wasm.set_required_emit_roots(&["main".to_string()]);
         wasm.upsert_file("main.stasis", source);
         wasm.compile().expect("generic Wasm compile");
         assert!(wasm.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_generic_parity_{}_{}.wasm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(&wasm_path, wasm.module_bytes()).expect("write generic parity wasm");
+        let output = std::process::Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for generic parity wasm");
+        let _ = std::fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "19");
+
+        let mut jit = crate::backend::jit::JitProcess::new();
+        jit.set_required_emit_roots(&["main".to_string()]);
+        jit.upsert_file("main.stasis", source);
+        jit.compile().expect("generic JIT compile");
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("generic JIT execution"),
+            19
+        );
+        assert_eq!(jit.artifacts().len(), 3);
+    }
+
+    #[test]
+    fn rejects_generic_host_entries_and_externs() {
+        let mut host_entry = crate::compiler::Compiler::new();
+        host_entry.upsert_file(
+            "main.stasis",
+            "function main<N: i32>(): i32 { return N; }\n",
+        );
+        let error = host_entry
+            .check()
+            .expect_err("generic host entry must require a concrete wrapper");
+        assert!(format!("{error:?}").contains("cannot be a lifecycle or host entry"));
+
+        let mut extern_function = crate::compiler::Compiler::new();
+        extern_function.upsert_file(
+            "main.stasis",
+            "extern function host<N: i32>(): i32;\nfunction main(): i32 { return 0; }\n",
+        );
+        let error = extern_function
+            .check()
+            .expect_err("generic extern must require a concrete wrapper");
+        assert!(format!("{error:?}").contains("cannot be a host declaration"));
     }
 
     #[test]
