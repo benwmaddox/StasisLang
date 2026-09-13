@@ -62,6 +62,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
                 "pr-ci-preflight",
                 "pr-ci-cargo-workspace",
                 "pr-ci-cargo-stasis-library",
+                "pr-ci-cargo-stasis-test-harness",
                 "pr-ci-cargo-stasis-main",
                 "pr-ci-cargo-stasis-provenance",
                 "pr-ci-cargo-stasis-integration",
@@ -74,9 +75,9 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "cargo test --workspace --exclude stasis --all-targets -- --test-threads=1",
             "cargo build -p stasis --bin stasis",
             "cargo test -p stasis --lib -- --test-threads=1",
-            "cargo test -p stasis --bin stasis --",
-            "--skip toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources",
-            "cargo test -p stasis --bin stasis\n          toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources --",
+            "cargo test -p stasis --bin stasis --\n          --skip toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources\n          --test-threads=1",
+            "cargo test -p stasis --bin stasis --no-run",
+            "./target/pr-ci-stasis/provenance-test-harness\n          toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources",
             'cargo test -p stasis "${test_args[@]}" -- --test-threads=1',
         )
         expected_counts = {
@@ -88,7 +89,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
                     self.linux_ordinary.count(command),
                     expected_counts.get(command, 1),
                 )
-        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 7)
+        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 8)
         self.assertIn("find apps/stasis/tests", self.linux_ordinary)
         self.assertIn("needs:", self.linux)
         self.assertIn("always()", self.linux)
@@ -96,12 +97,15 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "pr-ci-preflight",
             "pr-ci-cargo-workspace",
             "pr-ci-cargo-stasis-library",
+            "pr-ci-cargo-stasis-test-harness",
             "pr-ci-cargo-stasis-main",
             "pr-ci-cargo-stasis-provenance",
             "pr-ci-cargo-stasis-integration",
         ):
             with self.subTest(lane=lane):
                 self.assertIn(f"needs.{lane}.result", self.linux)
+        self.assertIn("actions/upload-artifact@", self.linux_ordinary)
+        self.assertIn("actions/download-artifact@", self.linux_ordinary)
         redundant_commands = (
             "--test host_frame_jit_seam",
             "gfx_cmd_capacity_overflow_matches_jit_and_linked_aot_trace",

@@ -1,6 +1,6 @@
 # PR CI critical path
 
-PR CI keeps the required `test` check as a small aggregator. The six ordinary
+PR CI keeps the required `test` check as a small aggregator. The seven ordinary
 Linux lanes it requires run independently so a slow Cargo lane does not wait
 behind unrelated setup or another Cargo target:
 
@@ -10,7 +10,8 @@ behind unrelated setup or another Cargo target:
 | `pr-ci-cargo-workspace` | workspace tests excluding `stasis` | 15 min |
 | `pr-ci-cargo-stasis-library` | Stasis executable build and library tests | 15 min per command |
 | `pr-ci-cargo-stasis-main` | Stasis executable build plus all main-binary tests except the isolated provenance test | 15 min per command |
-| `pr-ci-cargo-stasis-provenance` | the slow substituted-renderer provenance test | 15 min |
+| `pr-ci-cargo-stasis-test-harness` | compile and publish the immutable Stasis main test harness | 15 min |
+| `pr-ci-cargo-stasis-provenance` | run the slow substituted-renderer provenance test from the published harness | 15 min |
 | `pr-ci-cargo-stasis-integration` | every file in `apps/stasis/tests/*.rs` | 15 min |
 
 The aggregator fails unless every required lane reports `success`. It retains
@@ -25,6 +26,13 @@ without overlap. The library and main lanes each retain an explicit Stasis
 executable build because their desktop-editor runtime-launcher tests require
 that sibling binary. The builds are intentionally local to their lanes because
 hosted jobs do not share Cargo targets.
+
+The provenance lane depends only on the independent test-harness lane. That
+lane compiles the full main test target once and publishes the resulting test
+executable; provenance downloads and runs that immutable executable directly.
+This removes the roughly three-minute clean compile from the 15-minute test
+step while still executing the exact slow test once and leaving the remaining
+main-binary tests in the main lane.
 
 ## Baseline
 
