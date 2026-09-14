@@ -79,7 +79,7 @@ $wrapperCargo = $wrapperCargo.Replace('../../../crates/stasis_ai', '../stasis-ai
 Set-Content -NoNewline -Path $wrapperManifest -Value $wrapperCargo
 
 $env:CARGO_INCREMENTAL = "0"
-$codexTargetRoot = Join-Path $scriptRoot "target"
+$codexTargetRoot = Join-Path $codexRustRoot "target"
 $env:CARGO_TARGET_DIR = $codexTargetRoot
 $profileArgs = @()
 $profileDir = "debug"
@@ -111,25 +111,10 @@ foreach ($abi in $Abis) {
     Set-Item -Path "Env:AR_$targetEnvName" -Value (Join-Path $toolchain "llvm-ar.exe")
 
     # Keep this upstream workspace's outputs isolated, while applying the repository signer.
-    $previousCargoTarget = $env:CARGO_TARGET_DIR
-    try {
-        $env:CARGO_TARGET_DIR = Join-Path $codexRustRoot "target"
-        & python (Join-Path $repoRoot "tools/cargo_cache.py") run -- cargo +1.95.0 build --manifest-path (Join-Path $wrapperRoot "Cargo.toml") --target $rustTarget @profileArgs
-    } finally {
-        $env:CARGO_TARGET_DIR = $previousCargoTarget
-    }
+    & python (Join-Path $repoRoot "tools/cargo_cache.py") run -- cargo +1.95.0 build --manifest-path (Join-Path $wrapperRoot "Cargo.toml") --target $rustTarget @profileArgs
     if ($LASTEXITCODE -ne 0) { throw "Codex Android native build failed with exit code $LASTEXITCODE" }
 
-    $targetRoot = if ($env:CARGO_TARGET_DIR) {
-        if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
-            [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
-        } else {
-            [System.IO.Path]::GetFullPath((Join-Path $cargoInvocationRoot $env:CARGO_TARGET_DIR))
-        }
-    } else {
-        Join-Path $codexRustRoot "target"
-    }
-    $source = Join-Path $targetRoot "$rustTarget\$profileDir\libstasis_codex_android.so"
+    $source = Join-Path $codexTargetRoot "$rustTarget\$profileDir\libstasis_codex_android.so"
     if (-not (Test-Path $source)) { throw "Codex Android library was not produced: $source" }
     $destDir = Join-Path $scriptRoot "app\src\workshop\jniLibs\$abi"
     New-Item -ItemType Directory -Force $destDir | Out-Null
