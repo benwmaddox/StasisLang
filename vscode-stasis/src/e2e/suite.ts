@@ -334,6 +334,25 @@ export async function run(): Promise<void> {
   const grammar = fs.readFileSync(grammarPath, "utf8");
   assert.match(grammar, /entity\.name\.function\.stasis/, "the color grammar scopes function names");
   assert.match(grammar, /storage\.type\.builtin\.stasis/, "the color grammar scopes built-in types");
+  assert.match(
+    grammar,
+    /meta\.type\.parameters\.stasis/,
+    "the color grammar scopes generic struct parameters",
+  );
+  assert.match(
+    grammar,
+    /meta\.type\.application\.stasis/,
+    "the color grammar scopes generic type applications",
+  );
+  const functionGrammar = grammar.match(
+    /"name": "meta\.declaration\.function\.stasis"[\s\S]*?"match": "([^"]+)"/u,
+  )?.[1];
+  assert.equal(typeof functionGrammar, "string");
+  assert.doesNotMatch(
+    functionGrammar as string,
+    /<|>/u,
+    "the color grammar does not advertise generic function names",
+  );
 
   const formatUri = vscode.Uri.file(
     path.join(projectRoot, `format-input-${process.pid}.stasis`),

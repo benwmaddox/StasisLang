@@ -5911,11 +5911,11 @@ mod tests {
             "RIG2D_BONE_CAPACITY",
             "RigBone2D",
             "Rig2D",
-            "add_bone<N: i32>(self: Rig2D<N>",
-            "blend_local<N: i32>(self: Rig2D<N>",
-            "reset_pose<N: i32>(self: Rig2D<N>",
-            "solve<N: i32>(self: Rig2D<N>",
-            "world_angle<N: i32>(self: Rig2D<N>",
+            "add_bone(self: Rig2D<N>",
+            "blend_local(self: Rig2D<N>",
+            "reset_pose(self: Rig2D<N>",
+            "solve(self: Rig2D<N>",
+            "world_angle(self: Rig2D<N>",
         ] {
             assert!(
                 rendered.contains(public),

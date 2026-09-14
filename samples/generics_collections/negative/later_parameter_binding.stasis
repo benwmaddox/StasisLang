@@ -1,0 +1,7 @@
+function identity(marker: i32, value: T): T {
+    return value;
+}
+
+function main(): i32 {
+    return identity(0, 4);
+}

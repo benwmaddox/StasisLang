@@ -146,6 +146,7 @@ struct Expansion {
     function_specializations: BTreeMap<FunctionSpecializationKey, FunctionSpecialization>,
     function_work: VecDeque<(FunctionSpecializationKey, usize)>,
     struct_fields: BTreeMap<String, Vec<crate::frontend::parser::ParsedField>>,
+    known_type_names: BTreeSet<String>,
     concrete_paths: BTreeMap<String, String>,
     active_depth: Option<usize>,
 }
@@ -159,6 +160,7 @@ pub(crate) fn expand_sources(files: &mut [SourceFile]) -> Result<(), String> {
         })
         .collect::<Vec<_>>();
     let mut expansion = Expansion::new(raw_files)?;
+    expansion.reject_explicit_generic_calls()?;
     if expansion.generic_structs.is_empty() && expansion.generic_functions.is_empty() {
         for file in files {
             file.content = file.original_content.clone();
@@ -173,17 +175,30 @@ pub(crate) fn expand_sources(files: &mut [SourceFile]) -> Result<(), String> {
 }
 
 impl Expansion {
+    fn reject_explicit_generic_calls(&self) -> Result<(), String> {
+        for (file_index, file) in self.files.iter().enumerate() {
+            reject_explicit_generic_calls(&file.source, |name, qualifier| {
+                !self
+                    .generic_function_candidates(name, qualifier, file_index)
+                    .is_empty()
+            })?;
+        }
+        Ok(())
+    }
+
     fn new(files: Vec<RawFile>) -> Result<Self, String> {
         let mut generic_structs: BTreeMap<String, GenericStructDefinition> = BTreeMap::new();
         let mut generic_structs_by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut generic_functions = Vec::new();
-        let mut generic_functions_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        let mut ordinary_function_names: BTreeMap<String, Vec<(usize, String, Vec<String>)>> =
+        let generic_functions = Vec::new();
+        let generic_functions_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let ordinary_function_names: BTreeMap<String, Vec<(usize, String, Vec<String>)>> =
             BTreeMap::new();
         let mut constant_definitions = Vec::new();
         let mut struct_fields = BTreeMap::new();
+        let mut known_type_names = BTreeSet::new();
         let mut concrete_paths = BTreeMap::new();
         let mut visible_module_aliases = BTreeMap::new();
+        let mut parsed_functions = Vec::new();
 
         for (file_index, file) in files.iter().enumerate() {
             let mut visible = BTreeSet::new();
@@ -217,6 +232,7 @@ impl Expansion {
                 }
             }
             for structure in &layout.structs {
+                known_type_names.insert(structure.name.clone());
                 if !structure.generic_parameters.is_empty() {
                     continue;
                 }
@@ -292,49 +308,16 @@ impl Expansion {
                 continue;
             };
             for function in functions {
-                if function.generic_parameters.is_empty() {
-                    ordinary_function_names
-                        .entry(function.name.clone())
-                        .or_default()
-                        .push((
-                            file_index,
-                            module_alias_for_path(&file.path),
-                            function
-                                .params
-                                .iter()
-                                .map(|parameter| parameter.type_name.clone())
-                                .collect(),
-                        ));
-                    continue;
-                }
-                if is_concrete_only_function_name(&function.name) {
+                if !function.generic_parameters.is_empty() {
                     return Err(format!(
-                        "generic function '{}' cannot be a lifecycle or host entry; use a concrete wrapper",
-                        function.name
+                        "generic function declaration '{}<...>' is no longer supported; remove the function generic parameter list and bind parameters through the first parameter's generic struct",
+                        function.name,
                     ));
                 }
-                if function
-                    .annotations
-                    .iter()
-                    .any(|annotation| annotation.name == "extern")
-                {
-                    return Err(format!(
-                        "generic function '{}' cannot be an extern declaration; use a concrete wrapper",
-                        function.name
-                    ));
-                }
-                let definition = generic_functions.len();
-                generic_functions_by_name
-                    .entry(function.name.clone())
-                    .or_default()
-                    .push(definition);
-                generic_functions.push(GenericFunctionDefinition {
-                    file_index,
-                    module_alias: module_alias_for_path(&file.path),
-                    name: function.name.clone(),
-                    parameters: function.generic_parameters.clone(),
-                    signature: function,
-                });
+                parsed_functions.push((file_index, module_alias_for_path(&file.path), function));
+            }
+            for enumeration in &layout.enums {
+                known_type_names.insert(enumeration.name.clone());
             }
         }
 
@@ -352,7 +335,7 @@ impl Expansion {
             }
         }
 
-        let expansion = Self {
+        let mut expansion = Self {
             files,
             generic_structs,
             generic_structs_by_name,
@@ -366,10 +349,423 @@ impl Expansion {
             function_specializations: BTreeMap::new(),
             function_work: VecDeque::new(),
             struct_fields,
+            known_type_names,
             concrete_paths,
             active_depth: None,
         };
+        for (file_index, module_alias, function) in parsed_functions {
+            let parameters = expansion.receiver_generic_parameters(file_index, &function)?;
+            if let Some(parameters) = parameters {
+                if is_concrete_only_function_name(&function.name) {
+                    return Err(format!(
+                        "generic function '{}' cannot be a lifecycle or host entry; use a concrete wrapper",
+                        function.name
+                    ));
+                }
+                let definition = expansion.generic_functions.len();
+                expansion
+                    .generic_functions_by_name
+                    .entry(function.name.clone())
+                    .or_default()
+                    .push(definition);
+                expansion.generic_functions.push(GenericFunctionDefinition {
+                    file_index,
+                    module_alias,
+                    name: function.name.clone(),
+                    parameters,
+                    signature: function,
+                });
+            } else {
+                expansion.validate_unbound_function_signature(&function, file_index)?;
+                expansion
+                    .ordinary_function_names
+                    .entry(function.name.clone())
+                    .or_default()
+                    .push((
+                        file_index,
+                        module_alias,
+                        function
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.type_name.clone())
+                            .collect(),
+                    ));
+            }
+        }
         Ok(expansion)
+    }
+
+    fn receiver_generic_parameters(
+        &self,
+        file_index: usize,
+        function: &ParsedFunctionSignature,
+    ) -> Result<Option<Vec<ParsedGenericParameter>>, String> {
+        let Some(first) = function.params.first() else {
+            return Ok(None);
+        };
+        let Some((base, arguments)) = parse_type_application(&first.type_name)? else {
+            return Ok(None);
+        };
+        let mut lookup_environment = GenericEnvironment::default();
+        lookup_environment.module_alias = Some(module_alias_for_path(&self.files[file_index].path));
+        let Some(definition) =
+            self.lookup_generic_struct_for_environment(base, &lookup_environment)?
+        else {
+            return Ok(None);
+        };
+        if definition.parameters.len() != arguments.len() {
+            return Err(format!(
+                "first parameter of generic function '{}' must apply '{}' with {} arguments; got {}",
+                function.name,
+                base,
+                definition.parameters.len(),
+                arguments.len()
+            ));
+        }
+        let mut parameters = Vec::new();
+        for (argument, parameter) in arguments.iter().zip(&definition.parameters) {
+            self.collect_receiver_generic_parameters(
+                argument,
+                parameter.kind,
+                file_index,
+                &mut parameters,
+            )?;
+        }
+        if parameters.is_empty() {
+            return Ok(None);
+        }
+        if let Some(conflict) = function.params.iter().find(|parameter| {
+            parameters
+                .iter()
+                .any(|generic| generic.name == parameter.name)
+        }) {
+            return Err(format!(
+                "receiver generic name '{}' conflicts with an ordinary function parameter",
+                conflict.name
+            ));
+        }
+        self.validate_receiver_signature(function, &parameters, file_index)?;
+        self.validate_receiver_body(function, &parameters, file_index)?;
+        Ok(Some(parameters))
+    }
+
+    fn collect_receiver_generic_parameters(
+        &self,
+        argument: &str,
+        kind: ParsedGenericParameterKind,
+        file_index: usize,
+        parameters: &mut Vec<ParsedGenericParameter>,
+    ) -> Result<(), String> {
+        let argument = argument.trim();
+        match kind {
+            ParsedGenericParameterKind::Type => {
+                if let Some((base, arguments)) = parse_type_application(argument)? {
+                    let mut lookup_environment = GenericEnvironment::default();
+                    lookup_environment.module_alias =
+                        Some(module_alias_for_path(&self.files[file_index].path));
+                    let Some(definition) =
+                        self.lookup_generic_struct_for_environment(base, &lookup_environment)?
+                    else {
+                        return Ok(());
+                    };
+                    if definition.parameters.len() != arguments.len() {
+                        return Err(format!(
+                            "nested receiver generic type '{}' has {} arguments; expected {}",
+                            base,
+                            arguments.len(),
+                            definition.parameters.len()
+                        ));
+                    }
+                    for (nested, parameter) in arguments.iter().zip(&definition.parameters) {
+                        self.collect_receiver_generic_parameters(
+                            nested,
+                            parameter.kind,
+                            file_index,
+                            parameters,
+                        )?;
+                    }
+                    return Ok(());
+                }
+                if let Some((element, extent)) = split_array_suffix(argument) {
+                    self.collect_receiver_generic_parameters(
+                        element,
+                        ParsedGenericParameterKind::Type,
+                        file_index,
+                        parameters,
+                    )?;
+                    if !extent.trim().is_empty() {
+                        self.collect_receiver_generic_parameters(
+                            extent,
+                            ParsedGenericParameterKind::I32,
+                            file_index,
+                            parameters,
+                        )?;
+                    }
+                    return Ok(());
+                }
+                if is_identifier_text(argument) && !self.is_known_concrete_type(argument) {
+                    add_receiver_parameter(parameters, argument, ParsedGenericParameterKind::Type)?;
+                } else if !is_type_argument_text(argument) {
+                    return Err(format!(
+                        "receiver generic type argument '{}' is not a type expression",
+                        argument
+                    ));
+                }
+            }
+            ParsedGenericParameterKind::I32 => {
+                if is_identifier_text(argument) && !self.constants.contains_key(argument) {
+                    add_receiver_parameter(parameters, argument, ParsedGenericParameterKind::I32)?;
+                } else if evaluate_i32_expression(
+                    argument,
+                    &GenericEnvironment::default(),
+                    &self.constants,
+                )
+                .is_err()
+                {
+                    return Err(format!(
+                        "receiver generic i32 argument '{}' must be a checked constant or identifier",
+                        argument
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_known_concrete_type(&self, name: &str) -> bool {
+        let short_name = name.rsplit('.').next().unwrap_or(name);
+        matches!(
+            name,
+            "void"
+                | "i32"
+                | "f32"
+                | "bool"
+                | "f64"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "ascii"
+                | "utf8"
+                | "string"
+        ) || self.known_type_names.contains(name)
+            || self.known_type_names.contains(short_name)
+            || self.struct_fields.contains_key(name)
+            || self.lookup_generic_struct(name).is_some()
+            || self
+                .struct_fields
+                .keys()
+                .any(|candidate| candidate.rsplit('.').next() == Some(name))
+    }
+
+    fn is_generic_placeholder_name(&self, name: &str) -> bool {
+        let short_name = name.rsplit('.').next().unwrap_or(name);
+        (short_name.len() == 1
+            && short_name
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_uppercase))
+            || self.generic_structs.values().any(|definition| {
+                definition
+                    .parameters
+                    .iter()
+                    .any(|parameter| parameter.name == short_name)
+            })
+    }
+
+    fn validate_receiver_signature(
+        &self,
+        function: &ParsedFunctionSignature,
+        parameters: &[ParsedGenericParameter],
+        file_index: usize,
+    ) -> Result<(), String> {
+        for parameter in function.params.iter().skip(1) {
+            self.validate_receiver_type_expression(
+                &parameter.type_name,
+                parameters,
+                &function.name,
+                file_index,
+            )?;
+        }
+        self.validate_receiver_type_expression(
+            &function.return_type_name,
+            parameters,
+            &function.name,
+            file_index,
+        )?;
+        Ok(())
+    }
+
+    fn validate_receiver_body(
+        &self,
+        function: &ParsedFunctionSignature,
+        parameters: &[ParsedGenericParameter],
+        file_index: usize,
+    ) -> Result<(), String> {
+        let Ok(bindings) =
+            crate::frontend::parser::parse_typed_local_bindings(&self.files[file_index].source)
+        else {
+            // Leave malformed-body diagnostics to the canonical parser.
+            return Ok(());
+        };
+        for binding in bindings.into_iter().filter(|binding| {
+            binding.function_name == function.name
+                && binding.name_range.start >= function.body_range.start
+                && binding.name_range.end <= function.body_range.end
+        }) {
+            self.validate_receiver_type_expression(
+                &binding.type_name,
+                parameters,
+                &function.name,
+                file_index,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_unbound_function_signature(
+        &self,
+        function: &ParsedFunctionSignature,
+        file_index: usize,
+    ) -> Result<(), String> {
+        let no_parameters = [];
+        for parameter in &function.params {
+            self.validate_receiver_type_expression(
+                &parameter.type_name,
+                &no_parameters,
+                &function.name,
+                file_index,
+            )?;
+        }
+        self.validate_receiver_type_expression(
+            &function.return_type_name,
+            &no_parameters,
+            &function.name,
+            file_index,
+        )
+    }
+
+    fn validate_receiver_type_expression(
+        &self,
+        type_name: &str,
+        parameters: &[ParsedGenericParameter],
+        function_name: &str,
+        file_index: usize,
+    ) -> Result<(), String> {
+        let type_name = type_name.trim();
+        if let Some((element, extent)) = split_array_suffix(type_name) {
+            self.validate_receiver_type_expression(element, parameters, function_name, file_index)?;
+            if !extent.trim().is_empty() {
+                self.validate_receiver_i32_expression(extent, parameters, function_name)?;
+            }
+            return Ok(());
+        }
+        if let Some((base, arguments)) = parse_type_application(type_name)? {
+            let mut environment = GenericEnvironment::default();
+            environment.module_alias = Some(module_alias_for_path(&self.files[file_index].path));
+            let Some(definition) =
+                self.lookup_generic_struct_for_environment(base, &environment)?
+            else {
+                return Err(format!(
+                    "generic name in function '{}' uses unknown type '{}'; bind it through the first parameter's generic struct",
+                    function_name, base
+                ));
+            };
+            if definition.parameters.len() != arguments.len() {
+                return Err(format!(
+                    "generic receiver function '{}' applies '{}' with {} arguments; expected {}",
+                    function_name,
+                    base,
+                    arguments.len(),
+                    definition.parameters.len()
+                ));
+            }
+            for (argument, parameter) in arguments.iter().zip(&definition.parameters) {
+                self.validate_receiver_argument(
+                    argument,
+                    parameter.kind,
+                    parameters,
+                    function_name,
+                    file_index,
+                )?;
+            }
+            return Ok(());
+        }
+        if is_identifier_text(type_name) {
+            if let Some(parameter) = parameters
+                .iter()
+                .find(|parameter| parameter.name == type_name)
+            {
+                if parameter.kind != ParsedGenericParameterKind::Type {
+                    return Err(format!(
+                        "generic receiver function '{}' uses i32 binding '{}' as a type",
+                        function_name, type_name
+                    ));
+                }
+                return Ok(());
+            }
+            if !self.is_known_concrete_type(type_name)
+                && self.is_generic_placeholder_name(type_name)
+            {
+                return Err(format!(
+                    "generic name '{}' in function '{}' is not bound by the first parameter's generic struct",
+                    type_name, function_name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_receiver_argument(
+        &self,
+        argument: &str,
+        kind: ParsedGenericParameterKind,
+        parameters: &[ParsedGenericParameter],
+        function_name: &str,
+        file_index: usize,
+    ) -> Result<(), String> {
+        match kind {
+            ParsedGenericParameterKind::Type => self.validate_receiver_type_expression(
+                argument,
+                parameters,
+                function_name,
+                file_index,
+            ),
+            ParsedGenericParameterKind::I32 => {
+                self.validate_receiver_i32_expression(argument, parameters, function_name)
+            }
+        }
+    }
+
+    fn validate_receiver_i32_expression(
+        &self,
+        expression: &str,
+        parameters: &[ParsedGenericParameter],
+        function_name: &str,
+    ) -> Result<(), String> {
+        let Ok(tokens) = tokenize_constant_expression(expression) else {
+            return Err(format!(
+                "generic receiver function '{}' has an invalid i32 expression '{}'; bind it through the first parameter's generic struct",
+                function_name, expression.trim()
+            ));
+        };
+        for token in tokens {
+            let ConstantToken::Identifier(identifier) = token else {
+                continue;
+            };
+            if self.constants.contains_key(&identifier)
+                || parameters.iter().any(|parameter| {
+                    parameter.name == identifier
+                        && parameter.kind == ParsedGenericParameterKind::I32
+                })
+            {
+                continue;
+            }
+            return Err(format!(
+                "generic name '{}' in function '{}' is not bound by the first parameter's generic struct",
+                identifier, function_name
+            ));
+        }
+        Ok(())
     }
 
     fn populate_concrete_paths(&mut self) -> Result<(), String> {
@@ -523,42 +919,6 @@ impl Expansion {
                     &source_without_templates,
                     &source_environment,
                 )?;
-                for call in collect_explicit_generic_calls(body)? {
-                    let definitions = self.generic_function_candidates(
-                        &call.name,
-                        call.qualifier.as_deref(),
-                        file_index,
-                    );
-                    for definition in definitions {
-                        let generic = self.generic_functions[definition].clone();
-                        let parameters = generic.parameters.clone();
-                        let arguments = self.resolve_argument_list(
-                            &parameters,
-                            &call.arguments,
-                            &source_environment,
-                        )?;
-                        let mut actual_types = Vec::new();
-                        if let Some(qualifier) = call.qualifier.as_deref() {
-                            if let Some(type_name) = local_paths.get(qualifier) {
-                                actual_types.push(type_name.clone());
-                            }
-                        }
-                        if let Some(argument_types) = call
-                            .call_arguments
-                            .iter()
-                            .map(|argument| self.infer_expression_type_text(argument, &local_paths))
-                            .collect::<Option<Vec<_>>>()
-                        {
-                            actual_types.extend(argument_types);
-                        } else {
-                            actual_types.clear();
-                        }
-                        if !self.explicit_call_matches(&generic, &arguments, &actual_types) {
-                            continue;
-                        }
-                        self.schedule_function(definition, arguments)?;
-                    }
-                }
                 self.seed_inferred_receiver_calls(body, file_index, &local_paths)?;
                 self.seed_inferred_argument_calls(body, file_index, &local_paths)?;
             }
@@ -611,7 +971,7 @@ impl Expansion {
                 }
                 if had_viable_definition && !scheduled {
                     return Err(format!(
-                        "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                        "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                         call.name
                     ));
                 }
@@ -657,7 +1017,7 @@ impl Expansion {
             }
             if had_viable_definition && !scheduled {
                 return Err(format!(
-                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                     call.name
                 ));
             }
@@ -704,7 +1064,7 @@ impl Expansion {
             }
             if !scheduled {
                 return Err(format!(
-                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                     call.name
                 ));
             }
@@ -722,151 +1082,40 @@ impl Expansion {
         }
         let mut environment = GenericEnvironment::default();
         environment.module_alias = Some(generic.module_alias.clone());
-        for (parameter, actual) in generic.signature.params.iter().zip(actual_types) {
+        // Generic names are definitionally owned by the first parameter.  It
+        // is the only parameter allowed to introduce bindings; all remaining
+        // parameters merely validate the already-substituted signature.
+        let Some((first_parameter, first_actual)) =
+            generic.signature.params.first().zip(actual_types.first())
+        else {
+            return Ok(None);
+        };
+        if !self.infer_type_pattern(
+            &first_parameter.type_name,
+            first_actual,
+            &generic.parameters,
+            &mut environment,
+        )? {
+            return Ok(None);
+        }
+        for (parameter, actual) in generic.signature.params.iter().zip(actual_types).skip(1) {
+            let before_validation = environment.clone();
+            let mut validation_environment = environment.clone();
             if !self.infer_type_pattern(
                 &parameter.type_name,
                 actual,
                 &generic.parameters,
-                &mut environment,
+                &mut validation_environment,
             )? {
                 return Ok(None);
             }
-        }
-        // A symbolic extent such as N+1 is intentionally not solved during
-        // inference.  Once another occurrence has bound N, run the match
-        // again so the expression is checked rather than merely deferred.
-        for (parameter, actual) in generic.signature.params.iter().zip(actual_types) {
-            if !self.infer_type_pattern(
-                &parameter.type_name,
-                actual,
-                &generic.parameters,
-                &mut environment,
-            )? {
+            if validation_environment.types != before_validation.types
+                || validation_environment.values != before_validation.values
+            {
                 return Ok(None);
             }
         }
         Ok(inferred_arguments(&generic.parameters, &environment))
-    }
-
-    fn explicit_call_matches(
-        &self,
-        generic: &GenericFunctionDefinition,
-        arguments: &[ConcreteArgument],
-        actual_types: &[String],
-    ) -> bool {
-        if actual_types.is_empty() {
-            return true;
-        }
-        if generic.signature.params.len() != actual_types.len() {
-            return false;
-        }
-        let Ok(mut environment) =
-            GenericEnvironment::from_parameters(&generic.parameters, arguments)
-        else {
-            return false;
-        };
-        environment.module_alias = Some(generic.module_alias.clone());
-        generic
-            .signature
-            .params
-            .iter()
-            .zip(actual_types)
-            .all(|(parameter, actual)| {
-                let expected = rewrite_generic_identifiers(&parameter.type_name, &environment);
-                self.types_compatible_for_environment(&expected, actual, &environment)
-            })
-    }
-
-    fn types_compatible_for_environment(
-        &self,
-        expected: &str,
-        actual: &str,
-        environment: &GenericEnvironment,
-    ) -> bool {
-        if same_type_name(expected, actual) {
-            return true;
-        }
-        let expected_array = split_array_suffix(expected);
-        let actual_array = split_array_suffix(actual);
-        if let (Some((expected_element, expected_extent)), Some((actual_element, actual_extent))) =
-            (expected_array, actual_array)
-        {
-            if !self.types_compatible_for_environment(expected_element, actual_element, environment)
-            {
-                return false;
-            }
-            if expected_extent.trim().is_empty() {
-                return true;
-            }
-            let Ok(expected_extent) =
-                evaluate_i32_expression(expected_extent, environment, &self.constants)
-            else {
-                return type_names_equivalent(expected_extent, actual_extent);
-            };
-            let Ok(actual_extent) =
-                evaluate_i32_expression(actual_extent, environment, &self.constants)
-            else {
-                return false;
-            };
-            return expected_extent == actual_extent;
-        }
-        let (Some((expected_base, expected_arguments)), Some((actual_base, actual_arguments))) = (
-            parse_type_application(expected).ok().flatten(),
-            parse_type_application(actual).ok().flatten(),
-        ) else {
-            return type_names_equivalent(expected, actual);
-        };
-        if expected_arguments.len() != actual_arguments.len() {
-            return false;
-        }
-        let expected_definition = self
-            .lookup_generic_struct_for_environment(expected_base, environment)
-            .ok()
-            .flatten();
-        let actual_definition = self
-            .lookup_generic_struct_for_environment(actual_base, environment)
-            .ok()
-            .flatten();
-        if let (Some(expected_definition), Some(actual_definition)) =
-            (expected_definition, actual_definition)
-        {
-            if expected_definition.identity != actual_definition.identity
-                || expected_definition.parameters.len() != expected_arguments.len()
-            {
-                return false;
-            }
-            return expected_definition
-                .parameters
-                .iter()
-                .zip(expected_arguments.iter().zip(actual_arguments.iter()))
-                .all(
-                    |(parameter, (expected_argument, actual_argument))| match parameter.kind {
-                        ParsedGenericParameterKind::Type => self.types_compatible_for_environment(
-                            expected_argument,
-                            actual_argument,
-                            environment,
-                        ),
-                        ParsedGenericParameterKind::I32 => {
-                            match (
-                                evaluate_i32_expression(
-                                    expected_argument,
-                                    environment,
-                                    &self.constants,
-                                ),
-                                evaluate_i32_expression(
-                                    actual_argument,
-                                    environment,
-                                    &self.constants,
-                                ),
-                            ) {
-                                (Ok(expected), Ok(actual)) => expected == actual,
-                                _ => false,
-                            }
-                        }
-                    },
-                );
-        }
-        type_names_equivalent(expected, actual)
     }
 
     fn infer_expression_type_text(
@@ -1724,20 +1973,6 @@ impl Expansion {
         reject_value_parameter_writes(body, &generic.parameters)?;
         let stripped = strip_generic_declaration(original, "function")?;
 
-        for call in collect_explicit_generic_calls(&stripped)? {
-            let definitions = self.generic_function_candidates(
-                &call.name,
-                call.qualifier.as_deref(),
-                generic.file_index,
-            );
-            for definition in definitions {
-                let parameters = self.generic_functions[definition].parameters.clone();
-                let arguments =
-                    self.resolve_argument_list(&parameters, &call.arguments, &environment)?;
-                self.schedule_function(definition, arguments)?;
-            }
-        }
-
         let substituted = rewrite_generic_identifiers(&stripped, &environment);
         let substituted = self.rewrite_type_applications(&substituted, &environment)?;
 
@@ -1793,7 +2028,7 @@ impl Expansion {
                 }
                 if !definitions.is_empty() && !scheduled {
                     return Err(format!(
-                        "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                        "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                         call.name
                     ));
                 }
@@ -1837,7 +2072,7 @@ impl Expansion {
             }
             if !definitions.is_empty() && !scheduled {
                 return Err(format!(
-                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                     call.name
                 ));
             }
@@ -1874,7 +2109,7 @@ impl Expansion {
             }
             if !definitions.is_empty() && !scheduled {
                 return Err(format!(
-                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                     call.name
                 ));
             }
@@ -1964,8 +2199,7 @@ impl Expansion {
                 }
             }
             removals.sort_by_key(|range| (range.start, range.end));
-            let mut generated =
-                rewrite_kept_source(self, file_index, raw, &removals, &function_names)?;
+            let mut generated = rewrite_kept_source(self, file_index, raw, &removals)?;
             generated = self.rewrite_inferred_generic_calls(
                 file_index,
                 &generated,
@@ -2015,16 +2249,9 @@ impl Expansion {
                 let mut environment =
                     GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
                 environment.module_alias = Some(definition.module_alias.clone());
-                let source = rewrite_explicit_generic_calls_with_map(
-                    self,
-                    &specialization.source,
-                    &environment,
-                    &function_names,
-                    file_index,
-                )?;
                 let source = self.rewrite_inferred_generic_calls(
                     file_index,
-                    &source,
+                    &specialization.source,
                     &environment,
                     &function_names,
                 )?;
@@ -2111,7 +2338,7 @@ impl Expansion {
                     [] => continue,
                     _ => {
                         return Err(format!(
-                            "ambiguous inferred generic call '{}'; specify explicit arguments",
+                            "ambiguous inferred generic call '{}'; generic arguments must be inferred from the first parameter",
                             call.name
                         ));
                     }
@@ -2152,7 +2379,7 @@ impl Expansion {
                     [] => continue,
                     _ => {
                         return Err(format!(
-                            "ambiguous inferred generic call '{}'; specify explicit arguments",
+                            "ambiguous inferred generic call '{}'; generic arguments must be inferred from the first parameter",
                             call.name
                         ));
                     }
@@ -2355,7 +2582,6 @@ fn rewrite_kept_source(
     file_index: usize,
     source: &str,
     removals: &[std::ops::Range<usize>],
-    function_names: &BTreeMap<FunctionSpecializationKey, String>,
 ) -> Result<String, String> {
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0usize;
@@ -2367,7 +2593,6 @@ fn rewrite_kept_source(
             expansion,
             file_index,
             &source[cursor..range.start],
-            function_names,
         )?);
         cursor = range.end;
     }
@@ -2375,7 +2600,6 @@ fn rewrite_kept_source(
         expansion,
         file_index,
         &source[cursor..],
-        function_names,
     )?);
     Ok(output)
 }
@@ -2384,19 +2608,11 @@ fn ordinary_source_piece(
     expansion: &Expansion,
     file_index: usize,
     source: &str,
-    function_names: &BTreeMap<FunctionSpecializationKey, String>,
 ) -> Result<String, String> {
     let source = rewrite_i32_constants(source, &expansion.constants)?;
     let mut environment = GenericEnvironment::default();
     environment.module_alias = Some(module_alias_for_path(&expansion.files[file_index].path));
-    let source = expansion.rewrite_type_applications_readonly(&source, &environment)?;
-    rewrite_explicit_generic_calls_with_map(
-        expansion,
-        &source,
-        &environment,
-        function_names,
-        file_index,
-    )
+    expansion.rewrite_type_applications_readonly(&source, &environment)
 }
 
 impl Expansion {
@@ -2455,6 +2671,103 @@ impl Expansion {
 
 fn generic_definition_identity(path: &str, name: &str) -> String {
     format!("{path}::{name}")
+}
+
+fn add_receiver_parameter(
+    parameters: &mut Vec<ParsedGenericParameter>,
+    name: &str,
+    kind: ParsedGenericParameterKind,
+) -> Result<(), String> {
+    if let Some(existing) = parameters.iter().find(|parameter| parameter.name == name) {
+        if existing.kind != kind {
+            return Err(format!(
+                "receiver generic name '{}' is bound with conflicting type and i32 kinds",
+                name
+            ));
+        }
+        return Ok(());
+    }
+    parameters.push(ParsedGenericParameter {
+        name: name.to_string(),
+        kind,
+    });
+    Ok(())
+}
+
+fn is_identifier_text(source: &str) -> bool {
+    let bytes = source.trim().as_bytes();
+    let Some(first) = bytes.first().copied() else {
+        return false;
+    };
+    is_identifier_start(first) && bytes.iter().copied().all(is_identifier_char)
+}
+
+fn reject_explicit_generic_calls(
+    source: &str,
+    mut is_generic: impl FnMut(&str, Option<&str>) -> bool,
+) -> Result<(), String> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' {
+            cursor = skip_string(source, cursor)?;
+            continue;
+        }
+        if starts_comment(source, cursor) {
+            cursor = skip_comment(source, cursor)?;
+            continue;
+        }
+        if !is_identifier_start(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
+            cursor += 1;
+        }
+        if preceded_by_keyword(source, start, "function") {
+            continue;
+        }
+        let after_name = skip_ascii_whitespace(source, cursor);
+        let (open, legacy) = if source.as_bytes().get(cursor) == Some(&b'<') {
+            // Keep ordinary a < b > (c) expressions intact. The direct
+            // generic-call spelling is recognized only when the angle group
+            // is attached to the callee; the unambiguous :: <...> form
+            // remains whitespace-tolerant for migration diagnostics.
+            (cursor, false)
+        } else if source.as_bytes().get(after_name) == Some(&b':')
+            && source.as_bytes().get(after_name + 1) == Some(&b':')
+        {
+            let open = skip_ascii_whitespace(source, after_name + 2);
+            (open, true)
+        } else {
+            continue;
+        };
+        if source.as_bytes().get(open) != Some(&b'<') {
+            continue;
+        }
+        let close = matching_angle(source, open)?;
+        let after = skip_ascii_whitespace(source, close + 1);
+        if source.as_bytes().get(after) != Some(&b'(') {
+            continue;
+        }
+        let name = source[start..cursor].to_string();
+        let qualifier = preceding_qualified_name(source, start);
+        if !is_generic(&name, qualifier.as_deref()) {
+            cursor = after + 1;
+            continue;
+        }
+        let callee = preceding_qualified_name(source, start)
+            .map(|qualifier| format!("{}{}", qualifier, &source[start..cursor]))
+            .unwrap_or_else(|| source[start..cursor].to_string());
+        let spelling = if legacy { ":: <...>" } else { "<...>" };
+        return Err(format!(
+            "explicit generic function call '{}' using {} is not supported; remove the explicit arguments and infer from the first parameter's generic struct",
+            callee, spelling
+        ));
+    }
+    Ok(())
 }
 
 fn generic_function_identity(path: &str, signature: &ParsedFunctionSignature) -> String {
@@ -2618,62 +2931,6 @@ fn rewrite_generic_identifiers(source: &str, environment: &GenericEnvironment) -
     output
 }
 
-fn rewrite_explicit_generic_calls_with_map(
-    expansion: &Expansion,
-    source: &str,
-    environment: &GenericEnvironment,
-    function_names: &BTreeMap<FunctionSpecializationKey, String>,
-    file_index: usize,
-) -> Result<String, String> {
-    let calls = collect_explicit_generic_calls(source)?;
-    let mut replacements = Vec::with_capacity(calls.len());
-    for call in calls {
-        let definitions = expansion.generic_function_candidates(
-            &call.name,
-            call.qualifier.as_deref(),
-            file_index,
-        );
-        if definitions.is_empty() {
-            return Err(format!(
-                "unknown generic function '{}' in explicit call",
-                call.name
-            ));
-        }
-        let mut targets = Vec::new();
-        for definition in definitions {
-            let parameters = &expansion.generic_functions[definition].parameters;
-            let arguments = expansion.resolve_argument_list_readonly(
-                parameters,
-                &call.arguments,
-                environment,
-            )?;
-            let key = FunctionSpecializationKey {
-                definition,
-                arguments,
-            };
-            if let Some(target) = function_names.get(&key) {
-                if !targets.iter().any(|existing| existing == target) {
-                    targets.push(target.clone());
-                }
-            }
-        }
-        let target = match targets.as_slice() {
-            [target] => target.clone(),
-            [] => {
-                return Err(format!(
-                    "missing specialization for explicit generic call '{}::<...>'",
-                    call.name
-                ));
-            }
-            _ => {
-                return Err(format!("ambiguous explicit generic call '{}'", call.name));
-            }
-        };
-        replacements.push((call.name_start, call.end, target));
-    }
-    apply_replacements(source, &replacements)
-}
-
 fn rename_function_declaration(
     source: &str,
     old_name: &str,
@@ -2786,69 +3043,6 @@ fn reject_value_parameter_writes(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct ExplicitCall {
-    name: String,
-    qualifier: Option<String>,
-    arguments: Vec<String>,
-    call_arguments: Vec<String>,
-    name_start: usize,
-    end: usize,
-}
-
-fn collect_explicit_generic_calls(source: &str) -> Result<Vec<ExplicitCall>, String> {
-    let bytes = source.as_bytes();
-    let mut calls = Vec::new();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'"' {
-            cursor = skip_string(source, cursor)?;
-            continue;
-        }
-        if starts_comment(source, cursor) {
-            cursor = skip_comment(source, cursor)?;
-            continue;
-        }
-        if !is_identifier_start(bytes[cursor]) {
-            cursor += 1;
-            continue;
-        }
-        let start = cursor;
-        cursor += 1;
-        while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
-            cursor += 1;
-        }
-        let name = source[start..cursor].to_string();
-        let after_name = skip_ascii_whitespace(source, cursor);
-        if source.as_bytes().get(after_name) != Some(&b':')
-            || source.as_bytes().get(after_name + 1) != Some(&b':')
-        {
-            continue;
-        }
-        let open = skip_ascii_whitespace(source, after_name + 2);
-        if source.as_bytes().get(open) != Some(&b'<') {
-            continue;
-        }
-        let close = matching_angle(source, open)?;
-        let after = skip_ascii_whitespace(source, close + 1);
-        if source.as_bytes().get(after) != Some(&b'(') {
-            continue;
-        }
-        let call_close = find_matching_byte(source, after, b'(', b')')
-            .ok_or_else(|| "unterminated explicit generic call".to_string())?;
-        calls.push(ExplicitCall {
-            name: name.rsplit('.').next().unwrap_or(&name).to_string(),
-            qualifier: preceding_qualified_name(source, start),
-            arguments: split_top_level_arguments(&source[open + 1..close])?,
-            call_arguments: split_top_level_arguments(&source[after + 1..call_close])?,
-            name_start: start,
-            end: close + 1,
-        });
-        cursor = close + 1;
-    }
-    Ok(calls)
-}
-
 fn preceding_qualified_name(source: &str, start: usize) -> Option<String> {
     let bytes = source.as_bytes();
     let mut cursor = start;
@@ -2875,9 +3069,10 @@ fn preceding_qualified_name(source: &str, start: usize) -> Option<String> {
 
 fn preceded_by_keyword(source: &str, start: usize, keyword: &str) -> bool {
     let prefix = source[..start].trim_end();
-    let Some(keyword_start) = prefix.len().checked_sub(keyword.len()) else {
+    if !prefix.ends_with(keyword) {
         return false;
-    };
+    }
+    let keyword_start = prefix.len() - keyword.len();
     &prefix[keyword_start..] == keyword
         && (keyword_start == 0 || !is_identifier_char(prefix.as_bytes()[keyword_start - 1]))
 }
@@ -3883,7 +4078,7 @@ mod tests {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "main.stasis",
-            "struct Buffer<N: i32> { count: i32; values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction clear<N: i32>(self: Buffer<N>): void { self.count = 0; }\nfunction capacity<N: i32>(): i32 { return N; }\nfunction reset(): void { samples.clear(); }\nfunction main(): i32 { reset(); return capacity::<4>(); }\n",
+            "struct Buffer<N: i32> { count: i32; values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction clear(self: Buffer<N>): void { self.count = 0; }\nfunction capacity(buffer: Buffer<N>): i32 { return N; }\nfunction reset(): void { samples.clear(); }\nfunction main(): i32 { reset(); return capacity(samples); }\n",
         );
         compiler.check().expect("generic program compiles");
         let file = &compiler.files()[0];
@@ -3904,7 +4099,7 @@ mod tests {
         let mut process = crate::backend::jit::JitProcess::new();
         process.upsert_file(
             "main.stasis",
-            "struct Buffer<N: i32> { count: i32; values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction clear<N: i32>(self: Buffer<N>): void { self.count = 0; }\nfunction capacity<N: i32>(): i32 { return N; }\nfunction main(): i32 { samples.clear(); return capacity::<4>(); }\n",
+            "struct Buffer<N: i32> { count: i32; values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction clear(self: Buffer<N>): void { self.count = 0; }\nfunction capacity(buffer: Buffer<N>): i32 { return N; }\nfunction main(): i32 { samples.clear(); return capacity(samples); }\n",
         );
         process.compile().expect("generic JIT program compiles");
         assert_eq!(
@@ -3916,19 +4111,19 @@ mod tests {
     }
 
     #[test]
-    fn keeps_multiple_explicit_value_function_specializations_distinct() {
+    fn keeps_multiple_receiver_value_specializations_distinct() {
         let mut process = crate::backend::jit::JitProcess::new();
         process.upsert_file(
             "main.stasis",
-            "function capacity<N: i32>(): i32 { return N; }\nfunction main(): i32 { return capacity::<4>() + capacity::<8>(); }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal first: Buffer<4>;\nglobal second: Buffer<8>;\nfunction capacity(buffer: Buffer<N>): i32 { return N; }\nfunction main(): i32 { return capacity(first) + second.capacity(); }\n",
         );
         process
             .compile()
-            .expect("multiple explicit generic calls compile");
+            .expect("multiple receiver-inferred generic calls compile");
         assert_eq!(
             process
                 .execute_i32_noarg_by_name("main")
-                .expect("multiple explicit generic calls execute"),
+                .expect("multiple receiver-inferred generic calls execute"),
             12
         );
     }
@@ -3938,7 +4133,7 @@ mod tests {
         let mut process = crate::backend::jit::JitProcess::new();
         process.upsert_file(
             "main.stasis",
-            "struct Buffer<N: i32> { value: i32; }\nglobal first: Buffer<4>;\nglobal second: Buffer<8>;\nfunction capacity<N: i32>(self: Buffer<N>): i32 { return N; }\nfunction main(): i32 { return first.capacity() + second.capacity(); }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal first: Buffer<4>;\nglobal second: Buffer<8>;\nfunction capacity(buffer: Buffer<N>): i32 { return N; }\nfunction main(): i32 { return first.capacity() + second.capacity(); }\n",
         );
         process
             .compile()
@@ -3952,42 +4147,34 @@ mod tests {
     }
 
     #[test]
-    fn infers_value_arguments_from_exact_fixed_array_arguments() {
-        let mut process = crate::backend::jit::JitProcess::new();
-        process.upsert_file(
+    fn rejects_generic_names_bound_only_by_a_fixed_array_view() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
             "main.stasis",
-            "global values: i32[6];\nfunction extent<N: i32>(items: i32[N]): i32 { return N; }\nfunction main(): i32 { return extent(values); }\n",
+            "global values: i32[6];\nfunction extent(items: i32[N]): i32 { return N; }\nfunction main(): i32 { return extent(values); }\n",
         );
-        process.compile().expect("fixed-array generic inference");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("fixed-array inferred generic call executes"),
-            6
-        );
+        let error = compiler
+            .check()
+            .expect_err("fixed-array-only generic binding must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
-    fn infers_value_arguments_from_nested_fixed_array_arguments() {
-        let mut process = crate::backend::jit::JitProcess::new();
-        process.upsert_file(
+    fn rejects_generic_names_bound_only_by_a_nested_fixed_array_view() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
             "main.stasis",
-            "struct State { values: i32[5]; }\nglobal state: State;\nfunction extent<N: i32>(items: i32[N]): i32 { return N; }\nfunction main(): i32 { return extent(state.values); }\n",
+            "struct State { values: i32[5]; }\nglobal state: State;\nfunction extent(items: i32[N]): i32 { return N; }\nfunction main(): i32 { return extent(state.values); }\n",
         );
-        process
-            .compile()
-            .expect("nested fixed-array generic inference");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("nested fixed-array inferred generic call executes"),
-            5
-        );
+        let error = compiler
+            .check()
+            .expect_err("nested fixed-array-only generic binding must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
     fn lowers_value_generic_storage_through_aot_and_wasm() {
-        let source = "struct Buffer<N: i32> { values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction value<N: i32>(): i32 { return N; }\nfunction dead(): i32 { return value::<99>(); }\nfunction main(): i32 { samples.values[0] = 7; return samples.values[0] + value::<4>() + value::<8>(); }\n";
+        let source = "struct Buffer<N: i32> { values: i32[N]; }\nglobal samples: Buffer<4>;\nglobal other: Buffer<8>;\nfunction value(buffer: Buffer<N>): i32 { return buffer.values[0] + N; }\nfunction main(): i32 { samples.values[0] = 7; return value(samples) + value(other); }\n";
 
         let mut aot = crate::backend::aot::AotProcess::new();
         aot.set_required_emit_roots(&["main".to_string()]);
@@ -4048,7 +4235,7 @@ mod tests {
         let mut host_entry = crate::compiler::Compiler::new();
         host_entry.upsert_file(
             "main.stasis",
-            "function main<N: i32>(): i32 { return N; }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal main_buffer: Buffer<4>;\nfunction main(buffer: Buffer<N>): i32 { return N; }\n",
         );
         let error = host_entry
             .check()
@@ -4109,7 +4296,7 @@ mod tests {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "offset.stasis",
-            "function offset<N: i32>(): i32 { return N; }\nfunction main(): i32 { return offset::<-2147483648>(); }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal minimum: Buffer<-2147483648>;\nfunction offset(buffer: Buffer<N>): i32 { return N; }\nfunction main(): i32 { return offset(minimum); }\n",
         );
         compiler.check().expect("minimum i32 value is valid");
 
@@ -4125,16 +4312,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_expanding_generic_recursion_at_the_deterministic_depth_limit() {
+    fn rejects_explicit_generic_calls_before_specialization() {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "recursive.stasis",
-            "function loop<N: i32>(): i32 { return loop::<N + 1>(); }\nfunction main(): i32 { return loop::<0>(); }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal buffer: Buffer<4>;\nfunction loop(value: Buffer<N>): i32 { return loop::<N + 1>(value); }\nfunction main(): i32 { return loop(buffer); }\n",
         );
         let error = compiler
             .check()
-            .expect_err("expanding generic recursion must be bounded");
-        assert!(format!("{error:?}").contains("generic instantiation depth exceeded"));
+            .expect_err("explicit generic call must be rejected");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
     }
 
     #[test]
@@ -4142,7 +4329,7 @@ mod tests {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "write.stasis",
-            "function mutate<N: i32>(): void { N = 3; return; }\nfunction main(): i32 { mutate::<4>(); return 0; }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal buffer: Buffer<4>;\nfunction mutate(value: Buffer<N>): void { N = 3; return; }\nfunction main(): i32 { mutate(buffer); return 0; }\n",
         );
         let error = compiler
             .check()
@@ -4199,7 +4386,7 @@ mod tests {
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
              global integers: Buffer<i32, 4>;\n\
              global floats: Buffer<f32, 8>;\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n\
              function main(): i32 { return integers.capacity() + floats.capacity(); }\n",
         );
         process
@@ -4214,23 +4401,18 @@ mod tests {
     }
 
     #[test]
-    fn infers_type_from_fixed_array_for_a_view_without_capturing_capacity() {
-        let mut process = crate::backend::jit::JitProcess::new();
-        process.upsert_file(
+    fn rejects_generic_names_bound_only_by_a_runtime_view() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
             "main.stasis",
             "global values: i32[6];\n\
-             function element<T: type>(items: T[]): T { return items[0]; }\n\
+             function element(items: T[]): T { return items[0]; }\n\
              function main(): i32 { return element(values); }\n",
         );
-        process
-            .compile()
-            .expect("fixed array to generic view inference");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("generic view call executes"),
-            0
-        );
+        let error = compiler
+            .check()
+            .expect_err("runtime-view-only generic binding must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
@@ -4239,32 +4421,29 @@ mod tests {
         compiler.upsert_file(
             "main.stasis",
             "global values: i32[];\n\
-             function extent<T: type, N: i32>(items: T[N]): i32 { return N; }\n\
+             function extent(items: T[N]): i32 { return N; }\n\
              function main(): i32 { return extent(values); }\n",
         );
         let error = compiler
             .check()
             .expect_err("runtime view cannot infer a fixed extent");
-        assert!(format!("{error:?}").contains("could not infer"));
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
-    fn forwards_inferred_type_and_extent_bindings_through_generic_helpers() {
-        let mut process = crate::backend::jit::JitProcess::new();
-        process.upsert_file(
+    fn rejects_generic_helpers_not_bound_by_the_first_parameter() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
             "main.stasis",
             "global values: i32[6];\n\
-             function extent<T: type, N: i32>(items: T[N]): i32 { return N; }\n\
-             function forward<U: type, M: i32>(items: U[M]): i32 { return extent(items); }\n\
+             function extent(items: T[N]): i32 { return N; }\n\
+             function forward(items: T[N]): i32 { return extent(items); }\n\
              function main(): i32 { return forward(values); }\n",
         );
-        process.compile().expect("generic forwarding inference");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("forwarded generic call executes"),
-            6
-        );
+        let error = compiler
+            .check()
+            .expect_err("raw-view generic helper must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
@@ -4274,8 +4453,8 @@ mod tests {
             "main.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
              global values: Buffer<i32, 6>;\n\
-             function extent<T: type, N: i32>(items: Buffer<T, N>): i32 { return N; }\n\
-             function forward<U: type, M: i32>(items: Buffer<U, M>): i32 { return extent(items); }\n\
+             function extent(items: Buffer<T, N>): i32 { return N; }\n\
+             function forward(items: Buffer<U, M>): i32 { return extent(items); }\n\
              function main(): i32 { return forward(values); }\n",
         );
         process
@@ -4297,7 +4476,7 @@ mod tests {
             "struct Item<T: type> { value: T; }\n\
              struct Box<T: type, N: i32> { items: Item<T>[N]; }\n\
              global values: Box<i32, 2>;\n\
-             function first<T: type, N: i32>(self: Box<T, N>): T { return self.items[0].value; }\n\
+             function first(self: Box<T, N>): T { return self.items[0].value; }\n\
              function main(): i32 { return values.first(); }\n",
         );
         process
@@ -4316,14 +4495,15 @@ mod tests {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "main.stasis",
-            "global integer: i32;\n\
+            "struct Box<T: type> { value: T; }\n\
+             global integer: Box<i32>;\n\
              global float: f32;\n\
-             function same<T: type>(left: T, right: T): T { return left; }\n\
+             function same(left: Box<T>, right: T): T { return left.value; }\n\
              function main(): i32 { return same(integer, float); }\n",
         );
         let error = compiler
             .check()
-            .expect_err("repeated generic type bindings must agree");
+            .expect_err("later generic bindings must agree with the receiver");
         assert!(format!("{error:?}").contains("could not infer"));
     }
 
@@ -4336,17 +4516,17 @@ mod tests {
              import \"right/right_box.stasis\";\n\
              global left_value: left_box.Buffer<i32, 4>;\n\
              global right_value: right_box.Buffer<f32, 8>;\n\
-             function main(): i32 { return left_box.capacity::<i32, 4>(left_value) + right_box.capacity::<f32, 8>(right_value); }\n",
+             function main(): i32 { return left_box.capacity(left_value) + right_box.capacity(right_value); }\n",
         );
         process.upsert_file(
             "left/left_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         process.upsert_file(
             "right/right_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         process
             .compile()
@@ -4402,18 +4582,18 @@ mod tests {
     }
 
     #[test]
-    fn does_not_solve_symbolic_extent_equations_during_inference() {
+    fn rejects_symbolic_extent_generic_names_not_bound_by_the_receiver() {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "main.stasis",
             "global values: i32[6];\n\
-             function shifted<N: i32>(items: i32[N + 1]): i32 { return N; }\n\
+             function shifted(items: i32[N + 1]): i32 { return N; }\n\
              function main(): i32 { return shifted(values); }\n",
         );
         let error = compiler
             .check()
             .expect_err("N + 1 must not be solved from an array capacity");
-        assert!(format!("{error:?}").contains("could not infer"));
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
@@ -4429,17 +4609,17 @@ mod tests {
         compiler.upsert_file(
             "left/left_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         compiler.upsert_file(
             "right/right_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         let error = compiler
             .check()
             .expect_err("generic receiver types remain nominal across modules");
-        assert!(format!("{error:?}").contains("missing specialization"));
+        assert!(format!("{error:?}").contains("explicit generic function call"));
     }
 
     #[test]
@@ -4454,7 +4634,7 @@ mod tests {
         process.upsert_file(
             "left/left_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         process
             .compile()
@@ -4465,5 +4645,61 @@ mod tests {
                 .expect("qualified inferred generic call executes"),
             4
         );
+    }
+
+    #[test]
+    fn rejects_legacy_function_declarations_with_a_migration_diagnostic() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "legacy.stasis",
+            "function capacity<N: i32>(value: i32): i32 { return N + value; }\nfunction main(): i32 { return 0; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("legacy function generic declarations must fail");
+        assert!(format!("{error:?}").contains("generic function declaration"));
+        assert!(!format!("{error:?}").contains("specify explicit"));
+    }
+
+    #[test]
+    fn rejects_body_only_generic_type_names() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "body_only.stasis",
+            "struct Buffer<N: i32> { value: i32; }\nglobal buffer: Buffer<4>;\nfunction body_only(value: Buffer<N>): i32 { let unknown: U = 0; return N; }\nfunction main(): i32 { return body_only(buffer); }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("body-only generic names must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
+    }
+
+    #[test]
+    fn rejects_direct_and_turbofish_generic_calls_without_confusing_comparisons() {
+        let direct = reject_explicit_generic_calls("capacity<i32>(value);", |name, qualifier| {
+            name == "capacity" && qualifier.is_none()
+        })
+        .expect_err("direct generic call must be rejected");
+        assert!(direct.contains("using <...>"));
+
+        let turbofish =
+            reject_explicit_generic_calls("module.capacity :: <i32>(value);", |name, qualifier| {
+                name == "capacity" && qualifier == Some("module")
+            })
+            .expect_err("turbofish generic call must be rejected");
+        assert!(turbofish.contains("using :: <...>"));
+
+        reject_explicit_generic_calls("a < b > (c);", |_, _| true)
+            .expect("comparison expression must remain ordinary syntax");
+    }
+
+    #[test]
+    fn explicit_call_scanner_handles_utf8_source() {
+        let error =
+            reject_explicit_generic_calls("// 世\ncapacity<i32>(value);", |name, qualifier| {
+                name == "capacity" && qualifier.is_none()
+            })
+            .expect_err("generic call after UTF-8 source must still be diagnosed");
+        assert!(error.contains("explicit generic function call"));
     }
 }

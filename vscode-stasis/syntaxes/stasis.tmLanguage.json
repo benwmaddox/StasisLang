@@ -69,6 +69,18 @@
         },
         {
           "name": "meta.declaration.type.stasis",
+          "begin": "\\b(struct)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)\\b\\s*(?=<)",
+          "beginCaptures": {
+            "1": { "name": "keyword.declaration.stasis" },
+            "2": { "name": "entity.name.type.stasis" }
+          },
+          "end": "(?=\\{)",
+          "patterns": [
+            { "include": "#generic-parameters" }
+          ]
+        },
+        {
+          "name": "meta.declaration.type.stasis",
           "match": "\\b(struct|enum)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
           "captures": {
             "1": { "name": "keyword.declaration.stasis" },
@@ -108,14 +120,80 @@
     },
     "types": {
       "patterns": [
-        { "name": "storage.type.builtin.stasis", "match": "\\b(void|bool|u8|u16|u32|i32|f32|f64|string|ascii|utf8)\\b" },
         {
           "name": "meta.type.annotation.stasis",
-          "match": "(:)\\s*([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "begin": "(:)\\s*(?=[A-Za-z_][A-Za-z0-9_]*)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.separator.type.stasis" }
+          },
+          "end": "(?=[;,)=\\{]|=|\\bin\\b)",
+          "patterns": [
+            { "include": "#type-name" }
+          ]
+        }
+      ]
+    },
+    "generic-parameters": {
+      "name": "meta.type.parameters.stasis",
+      "begin": "(<)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.typeparameters.begin.stasis" }
+      },
+      "end": "(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.typeparameters.end.stasis" }
+      },
+      "patterns": [
+        {
+          "name": "entity.name.type.parameter.stasis",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*:)",
           "captures": {
-            "1": { "name": "punctuation.separator.type.stasis" },
-            "2": { "name": "entity.name.type.stasis" }
+            "0": { "name": "entity.name.type.parameter.stasis" }
           }
+        },
+        {
+          "name": "storage.type.generic-constraint.stasis",
+          "match": "\\b(type|i32)\\b"
+        },
+        {
+          "name": "punctuation.separator.typeparameters.stasis",
+          "match": ","
+        }
+      ]
+    },
+    "type-name": {
+      "patterns": [
+        {
+          "name": "storage.type.builtin.stasis",
+          "match": "\\b(void|bool|u8|u16|u32|i32|f32|f64|string|ascii|utf8)\\b"
+        },
+        { "include": "#generic-type-application" },
+        {
+          "name": "entity.name.type.stasis",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "generic-type-application": {
+      "name": "meta.type.application.stasis",
+      "begin": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(<)",
+      "beginCaptures": {
+        "1": { "name": "entity.name.type.stasis" },
+        "2": { "name": "punctuation.definition.typearguments.begin.stasis" }
+      },
+      "end": "(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.typearguments.end.stasis" }
+      },
+      "patterns": [
+        { "include": "#type-name" },
+        {
+          "name": "constant.numeric.integer.stasis",
+          "match": "(?<![A-Za-z0-9_])-?[0-9]+(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "punctuation.separator.typearguments.stasis",
+          "match": ","
         }
       ]
     },

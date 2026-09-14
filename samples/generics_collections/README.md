@@ -44,18 +44,20 @@ changing the count. `Ring` wraps `head` and its write slot modulo `N` and
 rejects empty drops. `EntityPool` reuses the last released slot and only copies
 scalar fields, which is the supported struct-view shape in this sample.
 
-Scalar `i32` and `f32` elements support assignment and return through generic
-helpers. `Entity` is accessed through indexed field paths and an `Entity[]`
-view; the sample deliberately does not claim a general deep-copy operation for
-arbitrary composite `T`. `first_value<T>(T[])` accepts fixed arrays of
-different capacities through the existing fixed-array-to-view rule.
+Scalar `i32` and `f32` elements support assignment and return through
+receiver-bound helpers. `Entity` is accessed through indexed field paths and an
+`Entity[]` view; the sample deliberately does not claim a general deep-copy
+operation for arbitrary composite `T`. The concrete `first_value(i32[])`
+demonstrates the existing fixed-array-to-view rule without introducing a raw
+view-only generic.
 
 `Nested<T, N>` demonstrates a legal generic container containing another
 generic container. The two integer buffers use capacities 4 and 8 and are
-mutated independently. `apply_offset<N>` and `apply_mode<N>` demonstrate that
-an `i32` generic value is a compile-time parameter rather than inherently a
-capacity. `buffer_capacity` is exercised with both inferred parameters and the
-explicit `::<f32, 3>` form.
+mutated independently. `CompileValue<N>` binds the compile-time value used by
+`apply_offset` and `apply_mode`, demonstrating that an `i32` generic value is
+not inherently a capacity. `buffer_capacity` is exercised in both free and
+receiver-style call paths; function calls never carry explicit generic
+arguments.
 
 `live_edit_helper.stasis` is intentionally tiny: `live_edit_tick` increments
 `live_edit_state` before calling the helper. During a live session, change only

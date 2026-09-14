@@ -124,7 +124,7 @@ fn negative_generic_collection_fixtures_keep_expected_diagnostics() {
             include_str!(
                 "../../../samples/generics_collections/negative/unresolved_capacity.stasis"
             ),
-            "could not infer",
+            "first parameter",
         ),
         (
             "layout_overflow",
@@ -137,6 +137,34 @@ fn negative_generic_collection_fixtures_keep_expected_diagnostics() {
                 "../../../samples/generics_collections/negative/ambiguous_receiver.stasis"
             ),
             "ambiguous",
+        ),
+        (
+            "legacy_function_generic",
+            include_str!(
+                "../../../samples/generics_collections/negative/legacy_function_generic.stasis"
+            ),
+            "no longer supported",
+        ),
+        (
+            "explicit_turbofish_call",
+            include_str!(
+                "../../../samples/generics_collections/negative/explicit_turbofish_call.stasis"
+            ),
+            "explicit generic function call",
+        ),
+        (
+            "explicit_angle_call",
+            include_str!(
+                "../../../samples/generics_collections/negative/explicit_angle_call.stasis.invalid"
+            ),
+            "explicit generic function call",
+        ),
+        (
+            "later_parameter_binding",
+            include_str!(
+                "../../../samples/generics_collections/negative/later_parameter_binding.stasis"
+            ),
+            "first parameter",
         ),
     ];
     for (name, source, expected) in fixtures {
