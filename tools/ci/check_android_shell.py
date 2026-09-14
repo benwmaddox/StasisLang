@@ -910,6 +910,14 @@ def main() -> int:
     assert "WorkshopCompilerOwnedLibrary.refreshedFiles()" in activity
     assert "migrateUnmodifiedBundledTemplateSources()" in activity
     assert "WorkshopBundledSourceUpgrade.shouldReplace(" in activity
+    assert activity.count("loadAndMigrateActiveBundledProject()") == 3
+    activate_project = activity[
+        activity.index("boolean activateProject("):
+        activity.index("private void shutdownGameAudio()")
+    ]
+    assert activate_project.index("loadAndMigrateActiveBundledProject()") < activate_project.index(
+        "ensureActiveProjectBaseline(snapshot)"
+    )
     assert "templateSelector.getSelectedItem()" in activity
     assert "createFromTemplate" in activity
     assert "Switch Project" in activity

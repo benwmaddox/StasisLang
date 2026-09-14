@@ -432,9 +432,7 @@ public final class MainActivity extends Activity {
 
         ProjectSnapshot project = loadBundledProject();
         try {
-            if (migrateUnmodifiedBundledTemplateSources()) project = loadBundledProject();
-            if (migrateBundledPongBallSpeed()) project = loadBundledProject();
-            if (migrateBundledPongProductionRenderer()) project = loadBundledProject();
+            project = loadAndMigrateActiveBundledProject();
             ensureActiveProjectBaseline(project);
         } catch (IOException error) {
             projectRegistryError = "baseline: " + error.getMessage();
@@ -2921,7 +2919,7 @@ public final class MainActivity extends Activity {
             gameRuntimeActive = false;
             lastCompileResult = "CompileNotRun";
             reviewedGitHubChangeFingerprint = "";
-            ProjectSnapshot snapshot = loadBundledProject();
+            ProjectSnapshot snapshot = loadAndMigrateActiveBundledProject();
             ensureActiveProjectBaseline(snapshot);
             rebuildSymbolList(snapshot);
             if (snapshot.firstSymbol != null) showSymbol(snapshot.firstSymbol);
@@ -11261,6 +11259,14 @@ public final class MainActivity extends Activity {
             changed = true;
         }
         return changed;
+    }
+
+    private ProjectSnapshot loadAndMigrateActiveBundledProject() throws IOException {
+        ProjectSnapshot project = loadBundledProject();
+        if (migrateUnmodifiedBundledTemplateSources()) project = loadBundledProject();
+        if (migrateBundledPongBallSpeed()) project = loadBundledProject();
+        if (migrateBundledPongProductionRenderer()) project = loadBundledProject();
+        return project;
     }
 
     private void materializeTemplateFile(AssetManager assets, String assetPath, File file,
