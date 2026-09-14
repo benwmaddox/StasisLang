@@ -5832,8 +5832,10 @@ function render(): void {{ {draws} return; }}
         assert!(
             STASIS_GRAPHICS_SOURCE.contains("stasis_display_font_raster_scale(g_pixel_scale)")
                 && STASIS_GRAPHICS_SOURCE
-                    .contains("stasis_display_scaled_extent(font->font_size, pixel_scale)"),
-            "font preparation must derive from the bounded high-quality backing scale"
+                    .contains("stasis_display_font_scaled_extent_for_backing(")
+                && STASIS_GRAPHICS_SOURCE.contains("g_display_metrics.logical_w,")
+                && STASIS_GRAPHICS_SOURCE.contains("g_display_metrics.drawable_w,"),
+            "font preparation must derive from the exact bounded backing ratio"
         );
         let capture_start = graphics_source
             .find("static int stasis_gfx_dump_image(")
