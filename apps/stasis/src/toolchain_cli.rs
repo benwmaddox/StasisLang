@@ -5048,8 +5048,8 @@ fn web_index_html(
     let viewport = viewport.unwrap_or(DEFAULT_WEB_VIEWPORT);
     let (hud_style, hud) = if development_build {
         (
-            "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }",
-            r#"<div id="stasis-hud" role="status">Starting Wasm...</div>"#,
+            "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; } #stasis-hud[hidden] { display: none !important; }",
+            r#"<div id="stasis-hud" role="status" aria-live="polite" aria-hidden="true" hidden>Starting Wasm...</div>"#,
         )
     } else {
         ("", "")
@@ -9241,6 +9241,8 @@ mod tests {
 
         let development = web_index_html("development-game", true, None, None);
         assert!(development.contains(r#"id="stasis-hud""#));
+        assert!(development.contains(r#"aria-live="polite" aria-hidden="true" hidden"#));
+        assert!(development.contains("#stasis-hud[hidden] { display: none !important; }"));
         assert!(development.contains(r#"<h1 id="stasis-loading-title">development-game</h1>"#));
         for html in [&release, &development] {
             assert!(!html.contains("__STASIS_"));
