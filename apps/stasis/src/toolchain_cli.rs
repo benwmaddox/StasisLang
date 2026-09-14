@@ -1379,9 +1379,12 @@ fn execute(
                 _ => None,
             });
             let vendor_gate = match &other {
-                ToolchainCommand::Fmt { .. } => VendorGate::Inspect,
-                ToolchainCommand::Vendor { .. } => VendorGate::Inspect,
-                ToolchainCommand::Prepare => VendorGate::Inspect,
+                ToolchainCommand::Fmt { .. }
+                | ToolchainCommand::Vendor { .. }
+                | ToolchainCommand::Prepare
+                | ToolchainCommand::Check
+                | ToolchainCommand::Test { .. }
+                | ToolchainCommand::Record { .. } => VendorGate::Inspect,
                 ToolchainCommand::Symbol { command } if command.is_read_only() => {
                     VendorGate::ReadOnly
                 }
@@ -10470,6 +10473,78 @@ mod tests {
         }
         assert!(PROJECT_PRE_COMMIT_HOOK.contains("stasis format src tests"));
         assert!(!PROJECT_PRE_COMMIT_HOOK.contains("if ! stasis format;"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn local_validation_preserves_nightly_vendor_pin_and_snapshot() {
+        let root = temp_dir("validation_preserves_vendor");
+        create_project(root.clone(), "validation_preserves_vendor".into()).expect("create project");
+        let manifest_path = root.join(MANIFEST_NAME);
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest")).unwrap();
+        fs::write(
+            root.join("vendor/stasis/docs/README.md"),
+            "pinned nightly documentation\n",
+        )
+        .expect("write pinned vendor documentation");
+        manifest["vendor"]["stasis"]["release_id"] = json!("nightly-20260909-299");
+        manifest["vendor"]["stasis"]["sha256"] =
+            json!(directory_sha256(&root.join("vendor/stasis")).unwrap());
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize pinned manifest"),
+        )
+        .expect("write pinned manifest");
+
+        let original_manifest = fs::read(&manifest_path).expect("read pinned manifest");
+        let original_vendor = directory_sha256(&root.join("vendor/stasis")).unwrap();
+        let assert_preserved = || {
+            assert_eq!(
+                fs::read(&manifest_path).expect("read manifest after validation"),
+                original_manifest
+            );
+            assert_eq!(
+                directory_sha256(&root.join("vendor/stasis")).unwrap(),
+                original_vendor
+            );
+        };
+
+        execute(ToolchainCommand::Check, Some(root.clone()), false)
+            .expect("check against pinned vendor");
+        assert_preserved();
+
+        execute(
+            ToolchainCommand::Test { path: None },
+            Some(root.clone()),
+            false,
+        )
+        .expect("test against pinned vendor");
+        assert_preserved();
+
+        let error = execute(
+            ToolchainCommand::Record {
+                args: record::RecordArgs {
+                    entry: None,
+                    output: root.join("recording"),
+                    width: 1,
+                    height: 1,
+                    fps: 0,
+                    frames: Some(1),
+                    duration: None,
+                    input_script: None,
+                    before_tick: None,
+                    replay: None,
+                    record_replay: None,
+                },
+            },
+            Some(root.clone()),
+            false,
+        )
+        .expect_err("invalid recording bounds should fail before runtime work");
+        assert!(error.contains("--fps must be between"), "{error}");
+        assert_preserved();
+
         remove_temp(&root);
     }
 
