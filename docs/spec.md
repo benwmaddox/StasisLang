@@ -129,6 +129,65 @@ Rules:
 - Mutations must keep header values synchronized with payload contents.
 - Invalid updates that break these invariants are compile-time errors (when statically known) or runtime errors through checked runtime helpers.
 
+### 4.2.2 Generic Types and Compile-Time Value Parameters
+
+Generic structs and functions may declare ordered type and compile-time value
+parameters:
+
+```stasis
+struct Buffer<T: type, N: i32> {
+    count: i32;
+    values: T[N];
+}
+
+function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 {
+    return N;
+}
+```
+
+`T: type` is substituted with a concrete supported type. `N: i32` is a checked,
+compile-time signed 32-bit value, not a runtime parameter and not inherently an
+array capacity. Value arguments may use literals, named constants, enclosing
+generic values, parentheses, unary signs, and checked integer `+`, `-`, `*`,
+`/`, and `%` expressions. Overflow, division by zero, and an invalid
+substituted fixed-array extent are diagnostics. Ordinary runtime parameters
+remain runtime values.
+
+Generic applications use angle brackets in type positions. In expression
+positions, an explicit call uses `::<...>` so comparisons and shifts retain
+their existing parsing:
+
+```stasis
+global samples: Buffer<f32, 128>;
+let size: i32 = samples.capacity();
+let explicit_size: i32 = capacity::<f32, 128>(samples);
+```
+
+The complete explicit argument list is required in v1. Inferred arguments are
+bound by structural matching against ordinary argument types. A fixed array
+can infer its element type through a `T[]` view, but a view does not infer a
+capacity parameter. Conflicting or ambiguous bindings are compile-time errors.
+
+Each specialization has nominal identity based on its defining declaration and
+canonical ordered arguments. Equal evaluated value expressions share identity;
+different arguments do not. Generic structs use the existing concrete layout,
+alignment, fixed-array header, SoA field-path, backing, and state-inspection
+rules. Generic syntax never adds allocation, resizing, runtime array length, or
+implicit deep copies. Struct and element parameters remain caller-backed views.
+
+Operations depending on `T` are checked after substitution by the ordinary
+semantic checker. Generics do not add traits, implicit operators, conversions,
+memcpy, or field contracts. Generic enums, aliases, defaults, variadic and
+higher-kinded parameters, runtime value arguments, non-`i32` value parameters,
+and arbitrary unsupported composite copies are deferred.
+
+The current reference coverage and backend boundary are recorded in
+[`docs/generics.md`](generics.md). The full bounded collection sample runs
+through JIT and native AOT. Web packaging selects its scalar generic entry
+fixture because the current Wasm backend does not support the full sample's
+receiver-owned `Entity[]` view; that unsupported shape remains an explicit
+compile-time boundary rather than a fallback.
+
 ### 4.3 Numeric Conversion Semantics
 
 Unsigned integers use exact fixed-width storage: `u8` is 1 byte, `u16` is 2 bytes, and

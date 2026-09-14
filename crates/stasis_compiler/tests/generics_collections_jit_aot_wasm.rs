@@ -1,3 +1,4 @@
+use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::compiler::Compiler;
@@ -13,7 +14,8 @@ const WASM_ENTRY: &str =
 const TEST_PATH: &str = "samples/generics_collections/tests/generics_collections.test.stasis";
 const TESTS: &str =
     include_str!("../../../samples/generics_collections/tests/generics_collections.test.stasis");
-const RIG2D_IMPORT: &str = "/.stasis_cache/toolchain/src/stdlib/rig2d.stasis";
+const RIG2D_IMPORT: &str = "/vendor/stasis/stdlib/rig2d.stasis";
+const GRAPHICS_IMPORT: &str = "/vendor/stasis/stdlib/graphics.stasis";
 const WASM_ROOT: &str = "main";
 
 fn repository_root() -> PathBuf {
@@ -24,7 +26,9 @@ fn repository_root() -> PathBuf {
 }
 
 fn repository_entry() -> String {
-    ENTRY.replace(RIG2D_IMPORT, "../../../src/stdlib/rig2d.stasis")
+    ENTRY
+        .replace(RIG2D_IMPORT, "../../../src/stdlib/rig2d.stasis")
+        .replace(GRAPHICS_IMPORT, "../../../src/stdlib/graphics.stasis")
 }
 
 #[test]
@@ -94,6 +98,17 @@ fn generic_collection_sample_tests_pass_in_the_production_jit_shape() {
             test.display_name
         );
     }
+}
+
+#[test]
+fn generic_collection_aot_accepts_vendor_graphics_after_expansion() {
+    let sample_root = repository_root().join("samples/generics_collections");
+    let mut aot = AotProcess::new();
+    aot.set_import_base_dir(&sample_root);
+    aot.set_required_emit_roots(&["main".to_string(), "render".to_string()]);
+    aot.upsert_file("src/main.stasis", ENTRY);
+    aot.compile()
+        .expect("generic collection AOT must preserve vendor graphics provenance");
 }
 
 #[test]

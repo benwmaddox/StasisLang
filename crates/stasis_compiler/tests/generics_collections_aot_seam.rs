@@ -10,7 +10,9 @@ const ENTRY_PATH: &str = "samples/generics_collections/src/main.stasis";
 #[cfg(windows)]
 const ENTRY: &str = include_str!("../../../samples/generics_collections/src/main.stasis");
 #[cfg(windows)]
-const RIG2D_IMPORT: &str = "/.stasis_cache/toolchain/src/stdlib/rig2d.stasis";
+const RIG2D_IMPORT: &str = "/vendor/stasis/stdlib/rig2d.stasis";
+#[cfg(windows)]
+const GRAPHICS_IMPORT: &str = "/vendor/stasis/stdlib/graphics.stasis";
 #[cfg(windows)]
 const ROOT: &str = "main";
 
@@ -24,7 +26,9 @@ fn repository_root() -> PathBuf {
 
 #[cfg(windows)]
 fn repository_entry() -> String {
-    ENTRY.replace(RIG2D_IMPORT, "../../../src/stdlib/rig2d.stasis")
+    ENTRY
+        .replace(RIG2D_IMPORT, "../../../src/stdlib/rig2d.stasis")
+        .replace(GRAPHICS_IMPORT, "../../../src/stdlib/graphics.stasis")
 }
 
 #[cfg(windows)]
@@ -87,9 +91,10 @@ fn generic_collection_sample_links_and_runs_in_aot() {
     aot.compile()
         .expect("compile generic collection AOT sample");
 
-    let output_dir = root
-        .join("target")
-        .join(format!("generic-collections-aot-{}", std::process::id()));
+    let output_dir = std::env::temp_dir().join(format!(
+        "stasis-generic-collections-aot-{}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&output_dir);
     fs::create_dir_all(&output_dir).expect("create AOT evidence directory");
     let (import, runtime) = dynload_artifacts();
