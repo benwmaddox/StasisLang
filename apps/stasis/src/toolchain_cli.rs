@@ -30,12 +30,12 @@ use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::types::{TYPE_ID_F32, TYPE_ID_I32};
 use stasis_compiler::frontend::workshop::{
-    find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
-    plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
-    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
-    write_workshop_semantic_receipt, WorkshopExposure, WorkshopSemanticEdit,
-    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
-    WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    classify_workshop_reload, find_workshop_references, find_workshop_symbols,
+    load_workshop_edit_workspace, plan_workshop_semantic_edits, workshop_direct_import_files,
+    workshop_reachable_files, workshop_source_hash, workshop_source_items,
+    write_workshop_semantic_plan, write_workshop_semantic_receipt, WorkshopExposure,
+    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
+    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_jit::AotTarget;
 pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
@@ -66,6 +66,8 @@ mod source_catalog;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
+const MAX_DESKTOP_FILE_WRITES: usize = 8;
+const MAX_DESKTOP_FILE_WRITE_BYTES: usize = 1024 * 1024;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const GFX_CMD_NAME: &str = "gfx_cmd";
@@ -7294,6 +7296,22 @@ fn desktop_preview_semantic_batch(
     payload: Value,
 ) -> Result<DesktopSemanticPreview, String> {
     let workspace = load_workspace(Some(root))?;
+    if let Some(transaction) = desktop_file_transaction(&workspace.root, &payload)? {
+        let source_fingerprint = desktop_file_fingerprint(&workspace.root, &transaction)?;
+        let changes = transaction.changes();
+        let mut reload = classify_workshop_reload(&[], &[])?;
+        reload.reason = "Non-source project files are updated atomically after review.".into();
+        return Ok(DesktopSemanticPreview {
+            payload,
+            source_fingerprint,
+            plan: WorkshopSemanticEditPlan {
+                schema_version: 1,
+                edits: Vec::new(),
+                changed_files: changes,
+                reload,
+            },
+        });
+    }
     let source_fingerprint = desktop_source_fingerprint(root, &[])?;
     let files =
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
@@ -7315,6 +7333,520 @@ fn desktop_preview_semantic_batch(
         source_fingerprint,
         plan,
     })
+}
+
+#[derive(Clone, Debug)]
+struct DesktopFileWrite {
+    relative: String,
+    target: PathBuf,
+    before: String,
+    before_exists: bool,
+    content: String,
+}
+
+#[derive(Clone, Debug)]
+struct DesktopFileTransaction {
+    writes: Vec<DesktopFileWrite>,
+}
+
+struct AppliedDesktopFileTransaction {
+    backups: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl DesktopFileTransaction {
+    fn changes(&self) -> Vec<stasis_compiler::frontend::workshop::WorkshopSemanticFileChange> {
+        self.writes
+            .iter()
+            .map(
+                |write| stasis_compiler::frontend::workshop::WorkshopSemanticFileChange {
+                    file: write.relative.clone(),
+                    before_hash: workshop_source_hash(&write.before),
+                    after_hash: workshop_source_hash(&write.content),
+                    before_source: write.before.clone(),
+                    after_source: write.content.clone(),
+                },
+            )
+            .collect()
+    }
+
+    fn apply(&self, root: &Path) -> Result<AppliedDesktopFileTransaction, String> {
+        let mut backups = Vec::with_capacity(self.writes.len() * 2);
+        for write in &self.writes {
+            if let Err(error) = validate_desktop_file_target(root, &write.relative) {
+                restore_desktop_file_writes(&backups)?;
+                return Err(error);
+            }
+            let prior = match fs::read(&write.target) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    restore_desktop_file_writes(&backups)?;
+                    return Err(format!(
+                        "failed reading {}: {error}",
+                        write.target.display()
+                    ));
+                }
+            };
+            let expected = write.before_exists.then_some(write.before.as_bytes());
+            if prior.as_deref() != expected {
+                restore_desktop_file_writes(&backups)?;
+                return Err(format!(
+                    "file-write target changed after preview: {}",
+                    write.relative
+                ));
+            }
+            if let Some(parent) = write.target.parent() {
+                if let Err(error) = fs::create_dir_all(parent) {
+                    restore_desktop_file_writes(&backups)?;
+                    return Err(format!("failed creating {}: {error}", parent.display()));
+                }
+            }
+            backups.push((write.target.clone(), prior));
+            if let Err(error) = fs::write(&write.target, write.content.as_bytes()) {
+                restore_desktop_file_writes(&backups)?;
+                return Err(format!(
+                    "failed writing {}: {error}",
+                    write.target.display()
+                ));
+            }
+        }
+        if let Err(error) = validate_desktop_file_transaction(root, self) {
+            restore_desktop_file_writes(&backups)?;
+            return Err(error);
+        }
+        if let Err(error) = sync_desktop_file_assets(root, self, &mut backups) {
+            restore_desktop_file_writes(&backups)?;
+            return Err(error);
+        }
+        Ok(AppliedDesktopFileTransaction { backups })
+    }
+}
+
+impl AppliedDesktopFileTransaction {
+    fn rollback(self) -> Result<(), String> {
+        restore_desktop_file_writes(&self.backups)
+    }
+}
+
+fn desktop_file_transaction(
+    root: &Path,
+    payload: &Value,
+) -> Result<Option<DesktopFileTransaction>, String> {
+    let Some(object) = payload.as_object() else {
+        return Ok(None);
+    };
+    let Some(file_writes) = object.get("file_writes") else {
+        return Ok(None);
+    };
+    if object.len() != 2 || !object.contains_key("schema_version") {
+        return Err(
+            "proposed file-write payload accepts only schema_version and file_writes".into(),
+        );
+    }
+    if payload.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err("invalid proposed file-write schema version".into());
+    }
+    let mut writes = file_writes
+        .as_array()
+        .filter(|writes| !writes.is_empty() && writes.len() <= MAX_DESKTOP_FILE_WRITES)
+        .ok_or_else(|| {
+            format!(
+                "proposed file edit must contain 1..={} writes",
+                MAX_DESKTOP_FILE_WRITES
+            )
+        })?
+        .iter()
+        .map(|write| desktop_file_write(root, write))
+        .collect::<Result<Vec<_>, _>>()?;
+    writes.sort_by(|left, right| left.relative.cmp(&right.relative));
+    if writes
+        .windows(2)
+        .any(|pair| pair[0].relative.eq_ignore_ascii_case(&pair[1].relative))
+    {
+        return Err("proposed file edit contains a duplicate path".into());
+    }
+    derive_asset_manifest_write(root, &mut writes)?;
+    Ok(Some(DesktopFileTransaction { writes }))
+}
+
+fn desktop_file_write(root: &Path, value: &Value) -> Result<DesktopFileWrite, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "each proposed file write must be an object".to_string())?;
+    if object.len() != 2 || !object.contains_key("path") || !object.contains_key("content") {
+        return Err("each proposed file write accepts only path and content".into());
+    }
+    let relative = object["path"]
+        .as_str()
+        .ok_or_else(|| "file-write path must be a string".to_string())?
+        .replace('\\', "/");
+    let content = object["content"]
+        .as_str()
+        .ok_or_else(|| "file-write content must be a string".to_string())?;
+    if content.len() > MAX_DESKTOP_FILE_WRITE_BYTES {
+        return Err(format!(
+            "file-write content exceeds {} UTF-8 bytes",
+            MAX_DESKTOP_FILE_WRITE_BYTES
+        ));
+    }
+    let target = validate_desktop_file_target(root, &relative)?;
+    if target
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+    {
+        gauntlet::assets::validate_svg(content)?;
+    }
+    let (before, before_exists) = match fs::read(&target) {
+        Ok(bytes) => (
+            String::from_utf8(bytes)
+                .map_err(|_| format!("file-write preview requires UTF-8 text: {relative}"))?,
+            true,
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (String::new(), false),
+        Err(error) => return Err(format!("failed reading {}: {error}", target.display())),
+    };
+    if before == content {
+        return Err(format!("file write made no change: {relative}"));
+    }
+    Ok(DesktopFileWrite {
+        relative,
+        target,
+        before,
+        before_exists,
+        content: content.to_string(),
+    })
+}
+
+fn validate_desktop_file_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    if relative.is_empty() || relative.len() > 512 || relative.contains(':') {
+        return Err("file-write path must be a bounded project-relative path".into());
+    }
+    let path = Path::new(relative);
+    let components = path.components().collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("file-write path escapes the project: {relative}"));
+    }
+    let names = components
+        .iter()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if names
+        .iter()
+        .any(|name| matches!(name.as_str(), ".git" | ".stasis_cache" | ".codex" | ".env"))
+        || names
+            .first()
+            .is_some_and(|name| matches!(name.as_str(), "build" | "target"))
+    {
+        return Err(format!("file-write path is host-controlled: {relative}"));
+    }
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stasis"))
+    {
+        return Err("use propose_semantic_edit for Stasis source files".into());
+    }
+    let target = root.join(path);
+    let mut cursor = root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            unreachable!("validated normal component")
+        };
+        cursor.push(name);
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
+                return Err(format!(
+                    "file-write path crosses a link or reparse point: {relative}"
+                ));
+            }
+            Ok(metadata) if index + 1 < components.len() && !metadata.is_dir() => {
+                return Err(format!(
+                    "file-write path crosses a non-directory: {relative}"
+                ));
+            }
+            Ok(metadata) if index + 1 == components.len() && !metadata.is_file() => {
+                return Err(format!(
+                    "file-write target is not a regular file: {relative}"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(format!("failed inspecting {}: {error}", cursor.display())),
+        }
+    }
+    Ok(target)
+}
+
+fn derive_asset_manifest_write(
+    root: &Path,
+    writes: &mut Vec<DesktopFileWrite>,
+) -> Result<(), String> {
+    if !writes
+        .iter()
+        .any(|write| is_desktop_asset_path(&write.relative))
+    {
+        return Ok(());
+    }
+    if writes.iter().any(|write| {
+        write
+            .relative
+            .eq_ignore_ascii_case(DEFAULT_ASSET_MANIFEST_PATH)
+    }) {
+        return Ok(());
+    }
+    let manifest_path = root.join(DEFAULT_ASSET_MANIFEST_PATH);
+    let before = match fs::read_to_string(&manifest_path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("failed reading asset manifest: {error}")),
+    };
+    let mut manifest: Value = serde_json::from_str(&before)
+        .map_err(|error| format!("invalid asset manifest: {error}"))?;
+    let Some(assets) = manifest.get_mut("assets").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for write in writes.iter() {
+        for asset in assets.iter_mut().filter(|asset| {
+            asset.get("path").and_then(Value::as_str) == Some(write.relative.as_str())
+        }) {
+            asset["content_sha256"] =
+                json!(format!("{:x}", Sha256::digest(write.content.as_bytes())));
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let mut content = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("failed encoding asset manifest: {error}"))?;
+    content.push('\n');
+    writes.push(DesktopFileWrite {
+        relative: DEFAULT_ASSET_MANIFEST_PATH.replace('\\', "/"),
+        target: manifest_path,
+        before,
+        before_exists: true,
+        content,
+    });
+    writes.sort_by(|left, right| left.relative.cmp(&right.relative));
+    Ok(())
+}
+
+fn desktop_file_fingerprint(
+    root: &Path,
+    transaction: &DesktopFileTransaction,
+) -> Result<String, String> {
+    let mut inputs = desktop_validation_inputs(root, &[])?;
+    for write in &transaction.writes {
+        inputs.insert(
+            write.relative.clone(),
+            if write.before_exists {
+                workshop_source_hash(&write.before)
+            } else {
+                "missing".into()
+            },
+        );
+    }
+    Ok(desktop_inputs_fingerprint(&inputs))
+}
+
+fn desktop_file_committed_fingerprint(
+    root: &Path,
+    transaction: &DesktopFileTransaction,
+) -> Result<String, String> {
+    let mut inputs = desktop_validation_inputs(root, &[])?;
+    for write in &transaction.writes {
+        inputs.insert(write.relative.clone(), workshop_source_hash(&write.content));
+    }
+    Ok(desktop_inputs_fingerprint(&inputs))
+}
+
+fn validate_desktop_file_transaction(
+    root: &Path,
+    transaction: &DesktopFileTransaction,
+) -> Result<(), String> {
+    load_workspace(Some(root))?;
+    let touches_assets = transaction
+        .writes
+        .iter()
+        .any(|write| is_desktop_asset_path(&write.relative));
+    if touches_assets && root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        load_project_asset_manifest(root, AssetLimits::default())
+            .map_err(|error| format!("file-write asset validation failed: {error}"))?;
+    }
+    Ok(())
+}
+
+fn sync_desktop_file_assets(
+    root: &Path,
+    transaction: &DesktopFileTransaction,
+    backups: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
+) -> Result<(), String> {
+    let asset_writes = transaction
+        .writes
+        .iter()
+        .filter(|write| {
+            is_desktop_asset_path(&write.relative)
+                && !write
+                    .relative
+                    .eq_ignore_ascii_case(DEFAULT_ASSET_MANIFEST_PATH)
+        })
+        .collect::<Vec<_>>();
+    if asset_writes.is_empty() {
+        return Ok(());
+    }
+    let cache_root = root.join(".stasis_cache");
+    match fs::symlink_metadata(&cache_root) {
+        Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
+            return Err(format!(
+                "asset cache root is a link or reparse point: {}",
+                cache_root.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(format!(
+                "asset cache root is not a directory: {}",
+                cache_root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "failed inspecting asset cache root {}: {error}",
+                cache_root.display()
+            ));
+        }
+    }
+    let prepared_root = root.join(".stasis_cache/play-assets");
+    match fs::symlink_metadata(&prepared_root) {
+        Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
+            return Err(format!(
+                "prepared asset root is a link or reparse point: {}",
+                prepared_root.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(format!(
+                "prepared asset root is not a directory: {}",
+                prepared_root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "failed inspecting prepared asset root {}: {error}",
+                prepared_root.display()
+            ));
+        }
+    }
+    for write in asset_writes {
+        let target = validate_desktop_prepared_asset_target(&prepared_root, &write.relative)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed creating prepared asset directory: {error}"))?;
+        }
+        let prior = match fs::read(&target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "failed reading prepared asset {}: {error}",
+                    target.display()
+                ));
+            }
+        };
+        backups.push((target.clone(), prior));
+        fs::write(&target, write.content.as_bytes()).map_err(|error| {
+            format!(
+                "failed syncing prepared asset {}: {error}",
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn is_desktop_asset_path(relative: &str) -> bool {
+    let relative = relative.to_ascii_lowercase();
+    relative == "assets" || relative.starts_with("assets/")
+}
+
+fn desktop_path_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn validate_desktop_prepared_asset_target(
+    prepared_root: &Path,
+    relative: &str,
+) -> Result<PathBuf, String> {
+    let target = prepared_root.join(relative);
+    let mut cursor = prepared_root.to_path_buf();
+    let components = Path::new(relative).components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(format!(
+                "prepared asset path is not project-relative: {relative}"
+            ));
+        };
+        cursor.push(name);
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
+                return Err(format!(
+                    "prepared asset path crosses a link or reparse point: {relative}"
+                ));
+            }
+            Ok(metadata) if index + 1 < components.len() && !metadata.is_dir() => {
+                return Err(format!(
+                    "prepared asset path crosses a non-directory: {relative}"
+                ));
+            }
+            Ok(metadata) if index + 1 == components.len() && !metadata.is_file() => {
+                return Err(format!(
+                    "prepared asset target is not a regular file: {relative}"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "failed inspecting prepared asset path {}: {error}",
+                    cursor.display()
+                ));
+            }
+        }
+    }
+    Ok(target)
+}
+
+fn restore_desktop_file_writes(backups: &[(PathBuf, Option<Vec<u8>>)]) -> Result<(), String> {
+    for (path, prior) in backups.iter().rev() {
+        match prior {
+            Some(bytes) => fs::write(path, bytes)
+                .map_err(|error| format!("failed restoring {}: {error}", path.display()))?,
+            None if path.exists() => fs::remove_file(path)
+                .map_err(|error| format!("failed removing {}: {error}", path.display()))?,
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 fn desktop_validate_semantic_preview(
@@ -7342,7 +7874,7 @@ fn desktop_validate_semantic_preview(
     )
     .map_err(|error| format!("candidate compile or tests failed: {error}"))?;
     desktop_require_executed_tests(&test_result)?;
-    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
+    if desktop_preview_fingerprint(root, &preview.payload)? != preview.source_fingerprint {
         return Err("project sources changed during candidate validation".into());
     }
     Ok(test_result)
@@ -7366,7 +7898,11 @@ fn desktop_apply_semantic_preview_with_progress(
         progress,
         stasis_ai::task_controller::ProgressStage::InspectingSymbols,
     );
-    let current_fingerprint = desktop_source_fingerprint(root, &[])?;
+    let file_transaction = desktop_file_transaction(root, &preview.payload)?;
+    let current_fingerprint = match &file_transaction {
+        Some(transaction) => desktop_file_fingerprint(root, transaction)?,
+        None => desktop_source_fingerprint(root, &[])?,
+    };
     if current_fingerprint != preview.source_fingerprint {
         return Err("stale semantic preview: project sources changed; generate a new preview before applying".into());
     }
@@ -7375,6 +7911,41 @@ fn desktop_apply_semantic_preview_with_progress(
     if replanned.source_fingerprint != preview.source_fingerprint || replanned.plan != preview.plan
     {
         return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+    }
+
+    if let Some(transaction) = file_transaction {
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+        );
+        let applied = transaction.apply(root)?;
+        let committed_fingerprint = desktop_file_committed_fingerprint(root, &transaction);
+        let committed_fingerprint = match committed_fingerprint {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                report_toolchain_progress(
+                    progress,
+                    stasis_ai::task_controller::ProgressStage::RollingBack,
+                );
+                applied.rollback().map_err(|rollback| {
+                    format!("file-write fingerprint failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(format!(
+                    "file-write fingerprint failed and all writes were rolled back: {error}"
+                ));
+            }
+        };
+        return Ok((
+            format!(
+                "applied {} project file change(s)",
+                preview.plan.changed_files.len()
+            ),
+            json!({
+                "status": "files_applied",
+                "changed_files": preview.plan.changed_files.iter().map(|change| &change.file).collect::<Vec<_>>(),
+                "source_fingerprint": committed_fingerprint,
+            }),
+        ));
     }
 
     let workspace = load_workspace(Some(root))?;
@@ -7459,6 +8030,55 @@ fn desktop_publish_semantic_preview_with_progress(
         progress,
         stasis_ai::task_controller::ProgressStage::InspectingSymbols,
     );
+    let workspace = load_workspace(Some(root))?;
+    if let Some(transaction) = desktop_file_transaction(&workspace.root, &preview.payload)? {
+        let current_fingerprint = desktop_file_fingerprint(&workspace.root, &transaction)?;
+        if current_fingerprint != preview.source_fingerprint {
+            return Err(
+                "stale semantic preview: project sources changed; generate a new preview before applying"
+                    .into(),
+            );
+        }
+        let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
+        if replanned.source_fingerprint != preview.source_fingerprint
+            || replanned.plan != preview.plan
+        {
+            return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+        }
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+        );
+        let applied = transaction.apply(&workspace.root)?;
+        let committed_fingerprint =
+            desktop_file_committed_fingerprint(&workspace.root, &transaction);
+        let committed_fingerprint = match committed_fingerprint {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                report_toolchain_progress(
+                    progress,
+                    stasis_ai::task_controller::ProgressStage::RollingBack,
+                );
+                applied.rollback().map_err(|rollback| {
+                    format!("file-write fingerprint failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(format!(
+                    "file-write fingerprint failed and all writes were rolled back: {error}"
+                ));
+            }
+        };
+        return Ok((
+            format!(
+                "applied {} project file change(s)",
+                preview.plan.changed_files.len()
+            ),
+            json!({
+                "status": "files_applied",
+                "changed_files": preview.plan.changed_files.iter().map(|change| &change.file).collect::<Vec<_>>(),
+                "source_fingerprint": committed_fingerprint,
+            }),
+        ));
+    }
     if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
         return Err(
             "stale semantic preview: project sources changed; generate a new preview before applying"
@@ -7553,6 +8173,14 @@ fn desktop_source_fingerprint(root: &Path, relevant_tests: &[String]) -> Result<
         root,
         relevant_tests,
     )?))
+}
+
+fn desktop_preview_fingerprint(root: &Path, payload: &Value) -> Result<String, String> {
+    let workspace = load_workspace(Some(root))?;
+    match desktop_file_transaction(&workspace.root, payload)? {
+        Some(transaction) => desktop_file_fingerprint(&workspace.root, &transaction),
+        None => desktop_source_fingerprint(&workspace.root, &[]),
+    }
 }
 
 fn desktop_require_executed_tests(receipt: &Value) -> Result<(), String> {
@@ -9582,6 +10210,131 @@ mod tests {
                 .map(|change| change.file.as_str())
                 .collect::<Vec<_>>(),
             ["src/main.stasis", "src/values.stasis"]
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_file_write_preview_is_non_mutating_and_updates_tracked_asset() {
+        let root = desktop_editor_fixture("file_write_preview_apply");
+        fs::create_dir_all(root.join("assets/generated")).unwrap();
+        let svg_path = root.join("assets/generated/brown-background.svg");
+        let original = "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><rect width='64' height='64' fill='#246'/></svg>";
+        fs::write(&svg_path, original).unwrap();
+        let original_hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+        fs::write(
+            root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            format!(r#"{{"schema":"stasis-assets","version":2,"display":null,"dynamic_assets":[],"assets":[{{"id":"brown-background","path":"assets/generated/brown-background.svg","content_sha256":"{original_hash}","format":{{"kind":"sprite","encoding":"svg","width":64,"height":64}},"dependencies":[]}}]}}"#),
+        )
+        .unwrap();
+        let prepared_svg_path =
+            root.join(".stasis_cache/play-assets/assets/generated/brown-background.svg");
+        fs::create_dir_all(prepared_svg_path.parent().unwrap()).unwrap();
+        fs::write(&prepared_svg_path, original).unwrap();
+        let payload = json!({
+            "schema_version": 1,
+            "file_writes": [{
+                    "path": "assets/generated/brown-background.svg",
+                    "content": "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><rect width='64' height='64' fill='#5b3825'/></svg>"
+            }]
+        });
+
+        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
+        assert_eq!(fs::read_to_string(&svg_path).unwrap(), original);
+        assert_eq!(preview.plan.edits, Vec::new());
+        assert_eq!(preview.plan.changed_files.len(), 2);
+        assert!(preview
+            .plan
+            .changed_files
+            .iter()
+            .any(|change| change.file == "assets/generated/brown-background.svg"));
+
+        let (_, receipt) = desktop_apply_semantic_preview(&root, &preview).unwrap();
+        assert_eq!(receipt["status"], "files_applied");
+        assert!(fs::read_to_string(&svg_path)
+            .unwrap()
+            .contains("fill='#5b3825'"));
+        assert!(fs::read_to_string(&prepared_svg_path)
+            .unwrap()
+            .contains("fill='#5b3825'"));
+        let manifest = load_project_asset_manifest(&root, AssetLimits::default()).unwrap();
+        let asset = manifest
+            .assets
+            .iter()
+            .find(|asset| asset.entry.id == "brown-background")
+            .unwrap();
+        assert_eq!(asset.entry.content_sha256, sha256_file(&svg_path).unwrap());
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_file_write_rejects_source_internal_escape_and_active_svg() {
+        let root = desktop_editor_fixture("file_write_rejections");
+        for (path, content, message) in [
+            ("../outside.txt", "no", "escapes the project"),
+            (".stasis_cache/state.json", "no", "host-controlled"),
+            (
+                "src/main.stasis",
+                "function main(): i32 { return 2; }",
+                "propose_semantic_edit",
+            ),
+            (
+                "assets/generated/unsafe.svg",
+                "<svg><script>alert(1)</script></svg>",
+                "forbidden",
+            ),
+        ] {
+            let error = desktop_preview_semantic_batch(
+                &root,
+                json!({"schema_version": 1, "file_writes": [{"path": path, "content": content}]}),
+            )
+            .unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_file_write_rejects_stale_preview_and_rolls_back_invalid_manifest() {
+        let root = desktop_editor_fixture("file_write_stale_rollback");
+        let note = root.join("notes.txt");
+        fs::write(&note, "before\n").unwrap();
+        let preview = desktop_preview_semantic_batch(
+            &root,
+            json!({"schema_version": 1, "file_writes": [{"path": "notes.txt", "content": "after\n"}]}),
+        )
+        .unwrap();
+        fs::write(&note, "changed elsewhere\n").unwrap();
+        assert!(desktop_apply_semantic_preview(&root, &preview)
+            .unwrap_err()
+            .contains("stale semantic preview"));
+        assert_eq!(fs::read_to_string(&note).unwrap(), "changed elsewhere\n");
+
+        let missing = desktop_preview_semantic_batch(
+            &root,
+            json!({"schema_version": 1, "file_writes": [{"path": "new.txt", "content": "created\n"}]}),
+        )
+        .unwrap();
+        fs::write(root.join("new.txt"), "").unwrap();
+        assert!(desktop_apply_semantic_preview(&root, &missing)
+            .unwrap_err()
+            .contains("stale semantic preview"));
+        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "");
+
+        let original_manifest = fs::read_to_string(root.join(MANIFEST_NAME)).unwrap();
+        let invalid = desktop_preview_semantic_batch(
+            &root,
+            json!({"schema_version": 1, "file_writes": [
+                {"path": "notes.txt", "content": "transactional\n"},
+                {"path": MANIFEST_NAME, "content": "{}"}
+            ]}),
+        )
+        .unwrap();
+        assert!(desktop_apply_semantic_preview(&root, &invalid).is_err());
+        assert_eq!(fs::read_to_string(&note).unwrap(), "changed elsewhere\n");
+        assert_eq!(
+            fs::read_to_string(root.join(MANIFEST_NAME)).unwrap(),
+            original_manifest
         );
         remove_temp(&root);
     }
