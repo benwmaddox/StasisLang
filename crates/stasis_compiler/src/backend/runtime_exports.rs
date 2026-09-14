@@ -41,6 +41,7 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_gfx_dump_png",
     "stasis_jit_gfx_load_sprite",
     "stasis_jit_gfx_release_sprite",
+    "stasis_jit_gfx_release_font",
     "stasis_jit_gfx_measure_text_cached",
     "stasis_jit_gfx_measure_text_cached_height",
     "stasis_jit_sprite_load_from",
@@ -125,6 +126,7 @@ mod tests {
         assert!(is_aot_runtime_export_symbol(
             "stasis_jit_gfx_release_sprite"
         ));
+        assert!(is_aot_runtime_export_symbol("stasis_jit_gfx_release_font"));
         assert!(is_aot_runtime_export_symbol("stasis_jit_audio_load_music"));
         assert!(is_aot_runtime_export_symbol(
             "stasis_jit_network_host_random_seed"

@@ -3089,6 +3089,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_release_sprite" | "stasis_gfx_release_sprite" | "stasis_jit_gfx_release_sprite" => {
             function_address(stasis_dynload::stasis_jit_gfx_release_sprite as *const ())
         }
+        "gfx_release_font" | "stasis_gfx_release_font" | "stasis_jit_gfx_release_font" => {
+            function_address(stasis_dynload::stasis_jit_gfx_release_font as *const ())
+        }
         "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
             function_address(stasis_dynload::stasis_jit_gfx_dump_bmp as *const ())
         }
@@ -3660,6 +3663,7 @@ mod tests {
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_poll").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_take_handle").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_cancel").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_gfx_release_font").is_some());
     }
 
     #[test]

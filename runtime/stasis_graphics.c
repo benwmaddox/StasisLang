@@ -307,6 +307,7 @@ STASIS_EXPORT void stasis_host_set_performance_metrics_enabled(int enabled);
 STASIS_EXPORT int stasis_set_fullscreen(int fullscreen);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, float x, float y, float w, float h, int rot_degrees, int a);
 STASIS_EXPORT void stasis_gfx_release_sprite(int handle);
+STASIS_EXPORT void stasis_gfx_release_font(int handle);
 STASIS_EXPORT void stasis_audio_release(int asset_handle);
 STASIS_EXPORT void stasis_gfx_submit_u8(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8);
 STASIS_EXPORT int stasis_test_get_render_submission_state(int32_t* out_i32, int32_t capacity);
@@ -506,6 +507,9 @@ static int g_asset_task_next_id = 1;
 
 /* Font rendering with stb_truetype. */
 #define MAX_FONTS 32
+#define FONT_HANDLE_INDEX_BITS 6
+#define FONT_HANDLE_INDEX_MASK ((1u << FONT_HANDLE_INDEX_BITS) - 1u)
+#define FONT_HANDLE_GENERATION_MASK 0x01ffffffu
 #define FONT_FIRST_CHAR 32
 #define FONT_NUM_CHARS 95
 
@@ -526,6 +530,9 @@ typedef struct {
     int needs_reraster;
     uint32_t surface_generation;
     uint32_t renderer_generation;
+    uint32_t generation;
+    int retired;         /* generation wrapped; never reuse this slot */
+    int ref_count;       /* callers sharing this exact font acquisition */
     char source_path[1024];
     uint64_t source_size;
 } StasisFont;
@@ -543,6 +550,24 @@ static void stasis_release_font(StasisFont* font) {
         font->ttf_buffer = NULL;
     }
     memset(font, 0, sizeof(*font));
+}
+
+static StasisFont* stasis_font_get(int handle) {
+    if (handle <= 0) return NULL;
+    const uint32_t raw = (uint32_t)handle;
+    const int idx = (int)(raw & FONT_HANDLE_INDEX_MASK) - 1;
+    const uint32_t generation =
+        (raw >> FONT_HANDLE_INDEX_BITS) & FONT_HANDLE_GENERATION_MASK;
+    if (idx < 0 || idx >= MAX_FONTS) return NULL;
+    StasisFont* font = &g_fonts[idx];
+    if (!font->active || font->retired || font->generation != generation) return NULL;
+    return font;
+}
+
+static int stasis_font_handle_for_slot(int slot) {
+    if (slot < 0 || slot >= (int)FONT_HANDLE_INDEX_MASK) return 0;
+    const uint32_t generation = g_fonts[slot].generation & FONT_HANDLE_GENERATION_MASK;
+    return (int)((generation << FONT_HANDLE_INDEX_BITS) | (uint32_t)(slot + 1));
 }
 
 static const char* stasis_renderer_reason_name(StasisRendererResourceReason reason) {
@@ -4616,7 +4641,7 @@ static void stasis_log_font_preparation(const StasisFont* font, int replaces_exi
     int handle = 0;
     for (int i = 0; i < MAX_FONTS; i++) {
         if (&g_fonts[i] == font) {
-            handle = i + 1;
+            handle = stasis_font_handle_for_slot(i);
             break;
         }
     }
@@ -6495,8 +6520,13 @@ STASIS_EXPORT void stasis_shutdown(void) {
     memset(&g_sprite_fallback, 0, sizeof(g_sprite_fallback));
     g_sprite_fallback.page_index = -1;
 
+    /* Preserve generation counters across shutdown/reinitialize cycles so a
+       stale handle from the prior renderer session cannot alias a new font. */
     for (int i = 0; i < MAX_FONTS; i++) {
-        stasis_release_font(&g_fonts[i]);
+        if (g_fonts[i].active) {
+            g_fonts[i].ref_count = 1;
+            stasis_gfx_release_font(stasis_font_handle_for_slot(i));
+        }
     }
     stasis_reset_text_cache();
     if (g_renderer) {
@@ -6724,6 +6754,8 @@ typedef struct {
 
 typedef struct {
     int active;
+    uint32_t generation;
+    int retired;
     int font_handle;
     uint32_t hash;
     int text_off;
@@ -6737,6 +6769,9 @@ typedef struct {
 } StasisTextRun;
 
 #define STASIS_MAX_TEXT_RUNS 1024
+#define STASIS_TEXT_RUN_HANDLE_INDEX_BITS 11
+#define STASIS_TEXT_RUN_HANDLE_INDEX_MASK ((1u << STASIS_TEXT_RUN_HANDLE_INDEX_BITS) - 1u)
+#define STASIS_TEXT_RUN_HANDLE_GENERATION_MASK 0x000fffffu
 #define STASIS_TEXT_RUN_MAX_BYTES 262144
 #define STASIS_TEXT_RUN_MAX_QUADS 65536
 #define STASIS_TEXT_GEOMETRY_BATCH_QUADS 256
@@ -6751,7 +6786,6 @@ static StasisTextQuad g_text_run_quads[STASIS_TEXT_RUN_MAX_QUADS];
 static int g_text_run_quads_used = 0;
 static unsigned char g_dynamic_text_bytes[STASIS_MAX_DYNAMIC_TEXT_RUNS][STASIS_DYNAMIC_TEXT_MAX_BYTES];
 static StasisTextQuad g_dynamic_text_quads[STASIS_MAX_DYNAMIC_TEXT_RUNS][STASIS_DYNAMIC_TEXT_MAX_QUADS];
-static int g_dynamic_text_runs_used = 0;
 static SDL_Vertex g_text_geometry_vertices[STASIS_TEXT_GEOMETRY_BATCH_QUADS * 4];
 static int g_text_geometry_indices[STASIS_TEXT_GEOMETRY_BATCH_QUADS * 6];
 static bool g_text_geometry_indices_ready = false;
@@ -6788,11 +6822,40 @@ static int stasis_text_is_valid_utf8(const unsigned char* text, int len) {
     return 1;
 }
 
+static StasisTextRun* stasis_text_run_get(int handle) {
+    if (handle <= 0) return NULL;
+    const uint32_t raw = (uint32_t)handle;
+    const int slot = (int)(raw & STASIS_TEXT_RUN_HANDLE_INDEX_MASK) - 1;
+    const uint32_t generation =
+        (raw >> STASIS_TEXT_RUN_HANDLE_INDEX_BITS) & STASIS_TEXT_RUN_HANDLE_GENERATION_MASK;
+    if (slot < 0 || slot >= STASIS_MAX_TEXT_RUNS) return NULL;
+    StasisTextRun* run = &g_text_runs[slot];
+    if (!run->active || run->retired || run->generation != generation) return NULL;
+    return run;
+}
+
+static int stasis_text_run_handle_for_slot(int slot) {
+    if (slot < 0 || slot >= STASIS_MAX_TEXT_RUNS) return 0;
+    const uint32_t generation =
+        g_text_runs[slot].generation & STASIS_TEXT_RUN_HANDLE_GENERATION_MASK;
+    return (int)((generation << STASIS_TEXT_RUN_HANDLE_INDEX_BITS) | (uint32_t)(slot + 1));
+}
+
 static void stasis_reset_text_cache(void) {
-    memset(g_text_runs, 0, sizeof(g_text_runs));
+    for (int slot = 0; slot < STASIS_MAX_TEXT_RUNS; slot++) {
+        StasisTextRun* run = &g_text_runs[slot];
+        uint32_t generation = run->generation;
+        int retired = run->retired;
+        if (run->active && !retired) {
+            generation = (generation + 1u) & STASIS_TEXT_RUN_HANDLE_GENERATION_MASK;
+            retired = generation == 0u ? 1 : 0;
+        }
+        memset(run, 0, sizeof(*run));
+        run->generation = generation;
+        run->retired = retired;
+    }
     g_text_run_bytes_used = 0;
     g_text_run_quads_used = 0;
-    g_dynamic_text_runs_used = 0;
 }
 
 static uint32_t fnv1a_u32(const unsigned char* data, int len) {
@@ -6817,8 +6880,13 @@ static int stasis_build_font_atlas(StasisFont* font) {
 
     const int replaces_existing = font->raster_size > 0 && font->atlas_size > 0;
 
-    const float pixel_scale = g_pixel_scale < 1.0f ? 1.0f : g_pixel_scale;
-    const int raster_size = stasis_current_scaled_extent(font->font_size);
+    const float pixel_scale = stasis_display_font_raster_scale(g_pixel_scale);
+    const int raster_size = stasis_display_font_scaled_extent_for_backing(
+        font->font_size,
+        g_display_metrics.logical_w,
+        g_display_metrics.logical_h,
+        g_display_metrics.drawable_w,
+        g_display_metrics.drawable_h);
     int atlas_size = stasis_display_font_atlas_extent(pixel_scale);
     size_t atlas_pixels = 0;
     unsigned char* atlas_bitmap = NULL;
@@ -6872,6 +6940,7 @@ static int stasis_build_font_atlas(StasisFont* font) {
             return 0;
         }
         SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
         if (!SDL_UpdateTexture(texture, NULL, rgba, atlas_size * 4)) {
             SDL_DestroyTexture(texture);
             free(rgba);
@@ -6962,9 +7031,8 @@ static int stasis_rebuild_text_runs(void) {
     for (int i = 0; i < STASIS_MAX_TEXT_RUNS; i++) {
         StasisTextRun* run = &g_text_runs[i];
         if (!run->active) continue;
-        if (run->font_handle <= 0 || run->font_handle > MAX_FONTS) return 0;
-        StasisFont* font = &g_fonts[run->font_handle - 1];
-        if (!font->active) return 0;
+        StasisFont* font = stasis_font_get(run->font_handle);
+        if (!font) return 0;
         if (run->replaceable) {
             if (run->dynamic_slot < 0 || run->dynamic_slot >= STASIS_MAX_DYNAMIC_TEXT_RUNS) return 0;
             if (!stasis_build_text_run_quads_into(
@@ -6975,10 +7043,43 @@ static int stasis_rebuild_text_runs(void) {
     return 1;
 }
 
+static int stasis_release_text_runs_for_font(int font_handle) {
+    for (int slot = 0; slot < STASIS_MAX_TEXT_RUNS; slot++) {
+        StasisTextRun* run = &g_text_runs[slot];
+        if (!run->active || run->font_handle != font_handle) continue;
+        const uint32_t generation =
+            (run->generation + 1u) & STASIS_TEXT_RUN_HANDLE_GENERATION_MASK;
+        const int retired = generation == 0u ? 1 : 0;
+        memset(run, 0, sizeof(*run));
+        run->generation = generation;
+        run->retired = retired;
+    }
+
+    unsigned char* compacted = (unsigned char*)malloc(STASIS_TEXT_RUN_MAX_BYTES);
+    if (!compacted) return 0;
+    int next_byte = 0;
+    for (int slot = 0; slot < STASIS_MAX_TEXT_RUNS; slot++) {
+        StasisTextRun* run = &g_text_runs[slot];
+        if (!run->active || run->replaceable) continue;
+        const int bytes = run->text_len + 1;
+        if (run->text_off < 0 || bytes <= 1 ||
+            run->text_off > g_text_run_bytes_used - bytes ||
+            next_byte > STASIS_TEXT_RUN_MAX_BYTES - bytes) {
+            free(compacted);
+            return 0;
+        }
+        memcpy(compacted + next_byte, g_text_run_bytes + run->text_off, (size_t)bytes);
+        run->text_off = next_byte;
+        next_byte += bytes;
+    }
+    memcpy(g_text_run_bytes, compacted, (size_t)next_byte);
+    free(compacted);
+    g_text_run_bytes_used = next_byte;
+    return stasis_rebuild_text_runs();
+}
+
 static int stasis_ensure_font_ready(int font_handle) {
-    if (font_handle <= 0 || font_handle > MAX_FONTS) return 0;
-    StasisFont* font = &g_fonts[font_handle - 1];
-    if (!font->active) return 0;
+    if (!stasis_font_get(font_handle)) return 0;
 
     int rebuilt_density_fonts = 0;
     for (int i = 0; i < MAX_FONTS; i++) {
@@ -7029,7 +7130,7 @@ static int stasis_restore_renderer_resources(void) {
         if (!stasis_build_font_atlas(font)) {
             stasis_host_report_runtime_error("Renderer restore failed for a font atlas");
             SDL_Log("Stasis renderer restore failed: stage=font handle=%d path=<retained-font-bytes> logical=%dx%d raster=%dx%d backend=%s surface_generation=%u renderer_generation=%u reason=%s failure=atlas_rebuild_failed",
-                i + 1, font->font_size, font->font_size, font->raster_size,
+                stasis_font_handle_for_slot(i), font->font_size, font->font_size, font->raster_size,
                 font->raster_size, "sdl",
                 g_resource_lifecycle.surface_generation,
                 g_resource_lifecycle.renderer_generation,
@@ -7062,7 +7163,7 @@ static int stasis_restore_renderer_resources(void) {
 static int stasis_find_or_alloc_text_run_slot(int font_handle, uint32_t hash, const char* text, int len) {
     int free_slot = -1;
     for (int i = 0; i < STASIS_MAX_TEXT_RUNS; i++) {
-        if (!g_text_runs[i].active) {
+        if (!g_text_runs[i].active && !g_text_runs[i].retired) {
             if (free_slot < 0) free_slot = i;
             continue;
         }
@@ -7076,6 +7177,21 @@ static int stasis_find_or_alloc_text_run_slot(int font_handle, uint32_t hash, co
         }
     }
     return free_slot;
+}
+
+static int stasis_find_free_dynamic_text_slot(void) {
+    int used[STASIS_MAX_DYNAMIC_TEXT_RUNS] = {0};
+    for (int slot = 0; slot < STASIS_MAX_TEXT_RUNS; slot++) {
+        const StasisTextRun* run = &g_text_runs[slot];
+        if (!run->active || !run->replaceable) continue;
+        if (run->dynamic_slot >= 0 && run->dynamic_slot < STASIS_MAX_DYNAMIC_TEXT_RUNS) {
+            used[run->dynamic_slot] = 1;
+        }
+    }
+    for (int slot = 0; slot < STASIS_MAX_DYNAMIC_TEXT_RUNS; slot++) {
+        if (!used[slot]) return slot;
+    }
+    return -1;
 }
 
 static void stasis_prepare_text_geometry_indices(void) {
@@ -7155,11 +7271,10 @@ static void stasis_draw_cached_text_sdl(
 
 /* Cache a text run and return a 1-based handle (0 on failure). */
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
-    if (font_handle <= 0 || font_handle > MAX_FONTS) return 0;
     if (!text) return 0;
     if (!stasis_ensure_font_ready(font_handle)) return 0;
-    StasisFont* font = &g_fonts[font_handle - 1];
-    if (!font->active) return 0;
+    StasisFont* font = stasis_font_get(font_handle);
+    if (!font) return 0;
 
     const int len = (int)strlen(text);
     if (len <= 0) return 0;
@@ -7170,7 +7285,7 @@ STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
     const int slot = stasis_find_or_alloc_text_run_slot(font_handle, hash, text, len);
     if (slot < 0) return 0;
     if (g_text_runs[slot].active) {
-        return slot + 1;
+        return stasis_text_run_handle_for_slot(slot);
     }
 
     const int bytes_needed = len + 1;
@@ -7182,6 +7297,11 @@ STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
     g_text_run_bytes_used += bytes_needed;
 
     StasisTextRun* run = &g_text_runs[slot];
+    const uint32_t generation = run->generation;
+    const int retired = run->retired;
+    memset(run, 0, sizeof(*run));
+    run->generation = generation;
+    run->retired = retired;
     run->active = 1;
     run->font_handle = font_handle;
     run->hash = hash;
@@ -7189,39 +7309,42 @@ STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
     run->text_len = len;
     if (!stasis_build_text_run_quads(run, font)) {
         memset(run, 0, sizeof(*run));
+        run->generation = generation;
+        run->retired = retired;
         return 0;
     }
 
-    return slot + 1;
+    return stasis_text_run_handle_for_slot(slot);
 }
 
 /* Replaceable runs own bounded storage and never enter the immutable dedup cache. */
 STASIS_EXPORT int stasis_gfx_replace_text(int run_handle, int font_handle, const char* text) {
-    if (font_handle <= 0 || font_handle > MAX_FONTS || !text) return 0;
+    if (!text) return 0;
     if (!stasis_ensure_font_ready(font_handle)) return 0;
-    StasisFont* font = &g_fonts[font_handle - 1];
-    if (!font->active) return 0;
+    StasisFont* font = stasis_font_get(font_handle);
+    if (!font) return 0;
     const int len = (int)strlen(text);
     if (len <= 0 || len >= STASIS_DYNAMIC_TEXT_MAX_BYTES) return 0;
     if (!stasis_text_is_valid_utf8((const unsigned char*)text, len)) return 0;
 
     int slot = -1;
     int dynamic_slot = -1;
-    if (run_handle > 0 && run_handle <= STASIS_MAX_TEXT_RUNS &&
-        g_text_runs[run_handle - 1].active && g_text_runs[run_handle - 1].replaceable) {
-        slot = run_handle - 1;
-        dynamic_slot = g_text_runs[slot].dynamic_slot;
+    StasisTextRun* existing = stasis_text_run_get(run_handle);
+    if (existing && existing->replaceable) {
+        slot = (int)(existing - g_text_runs);
+        dynamic_slot = existing->dynamic_slot;
     } else {
-        if (g_dynamic_text_runs_used >= STASIS_MAX_DYNAMIC_TEXT_RUNS) return 0;
         for (int i = 0; i < STASIS_MAX_TEXT_RUNS; i++) {
-            if (!g_text_runs[i].active) { slot = i; break; }
+            if (!g_text_runs[i].active && !g_text_runs[i].retired) { slot = i; break; }
         }
         if (slot < 0) return 0;
-        dynamic_slot = g_dynamic_text_runs_used;
+        dynamic_slot = stasis_find_free_dynamic_text_slot();
+        if (dynamic_slot < 0) return 0;
     }
 
     StasisTextRun candidate;
     memset(&candidate, 0, sizeof(candidate));
+    candidate.generation = g_text_runs[slot].generation;
     candidate.active = 1;
     candidate.font_handle = font_handle;
     candidate.hash = fnv1a_u32((const unsigned char*)text, len);
@@ -7236,19 +7359,16 @@ STASIS_EXPORT int stasis_gfx_replace_text(int run_handle, int font_handle, const
     memcpy(g_dynamic_text_quads[dynamic_slot], candidate_quads,
         (size_t)candidate.quad_count * sizeof(StasisTextQuad));
     g_text_runs[slot] = candidate;
-    if (dynamic_slot == g_dynamic_text_runs_used) g_dynamic_text_runs_used++;
-    return slot + 1;
+    return stasis_text_run_handle_for_slot(slot);
 }
 
 static void stasis_draw_text_cached_internal(int run_handle, float x, float y, float r, float g, float b, float a) {
-    if (run_handle <= 0 || run_handle > STASIS_MAX_TEXT_RUNS) return;
-    StasisTextRun* run = &g_text_runs[run_handle - 1];
-    if (!run->active) return;
-    if (run->font_handle <= 0 || run->font_handle > MAX_FONTS) return;
+    StasisTextRun* run = stasis_text_run_get(run_handle);
+    if (!run) return;
     if (!stasis_ensure_font_ready(run->font_handle)) return;
 
-    StasisFont* font = &g_fonts[run->font_handle - 1];
-    if (!font->active) return;
+    StasisFont* font = stasis_font_get(run->font_handle);
+    if (!font) return;
 
     if (true) {
         if (!font->sdl_texture || !g_renderer) return;
@@ -7274,17 +7394,15 @@ STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y,
 }
 
 STASIS_EXPORT float stasis_gfx_measure_text_cached(int run_handle) {
-    if (run_handle <= 0 || run_handle > STASIS_MAX_TEXT_RUNS) return 0.0f;
-    StasisTextRun* run = &g_text_runs[run_handle - 1];
-    if (!run->active) return 0.0f;
+    StasisTextRun* run = stasis_text_run_get(run_handle);
+    if (!run) return 0.0f;
     if (!stasis_ensure_font_ready(run->font_handle)) return 0.0f;
     return run->width;
 }
 
 STASIS_EXPORT float stasis_gfx_measure_text_cached_height(int run_handle) {
-    if (run_handle <= 0 || run_handle > STASIS_MAX_TEXT_RUNS) return 0.0f;
-    StasisTextRun* run = &g_text_runs[run_handle - 1];
-    if (!run->active) return 0.0f;
+    StasisTextRun* run = stasis_text_run_get(run_handle);
+    if (!run) return 0.0f;
     if (!stasis_ensure_font_ready(run->font_handle)) return 0.0f;
     return run->height;
 }
@@ -7344,19 +7462,22 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
             if (g_fonts[i].source_size == (uint64_t)size && g_fonts[i].ttf_buffer &&
                 memcmp(g_fonts[i].ttf_buffer, ttf_buffer, size) == 0) {
                 free(ttf_buffer);
-                return i + 1;
+                if (g_fonts[i].ref_count == INT_MAX) {
+                    stasis_report_runtime_errorf("Font reference count overflow: %s", path);
+                    return 0;
+                }
+                g_fonts[i].ref_count++;
+                return stasis_font_handle_for_slot(i);
             }
-            stasis_release_font(&g_fonts[i]);
-            stasis_reset_text_cache();
-            slot = i;
-            break;
         }
     }
 
-    /* Find free slot */
+    /* Find a free, non-retired slot. A changed file is published as a new
+       generation instead of destroying the last usable font before the new
+       atlas has been built. Callers can explicitly release the old handle. */
     if (slot == -1) {
         for (int i = 0; i < MAX_FONTS; i++) {
-            if (!g_fonts[i].active) {
+            if (!g_fonts[i].active && !g_fonts[i].retired) {
                 slot = i;
                 break;
             }
@@ -7371,7 +7492,9 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
 
     /* Initialize font */
     StasisFont* font = &g_fonts[slot];
+    const uint32_t generation = font->generation;
     memset(font, 0, sizeof(*font));
+    font->generation = generation;
     if (!stbtt_InitFont(&font->font_info, ttf_buffer, 0)) {
         free(ttf_buffer);
         stasis_report_runtime_errorf("Font data is invalid: %s", path);
@@ -7385,27 +7508,52 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     font->source_size = (uint64_t)size;
     stbtt_GetFontVMetrics(&font->font_info, &font->ascent, &font->descent, &font->line_gap);
     font->active = true;
+    font->ref_count = 1;
     if (!stasis_build_font_atlas(font)) {
         stasis_report_runtime_errorf("Font atlas creation failed: %s", path);
         font->active = false;
         free(ttf_buffer);
         memset(font, 0, sizeof(*font));
+        font->generation = generation;
         return 0;
     }
     SDL_Log("stasis_load_font: loaded %s logical_size=%d raster_size=%d scale=%.2f handle=%d",
-        resolved, font_size, font->raster_size, font->pixel_scale, slot + 1);
+        resolved, font_size, font->raster_size, font->pixel_scale,
+        stasis_font_handle_for_slot(slot));
 
-    return slot + 1; /* Return 1-based handle */
+    return stasis_font_handle_for_slot(slot);
+}
+
+STASIS_EXPORT void stasis_gfx_release_font(int handle) {
+    StasisFont* font = stasis_font_get(handle);
+    if (!font) return;
+    if (font->ref_count > 1) {
+        font->ref_count--;
+        return;
+    }
+
+    const int slot = (int)(((uint32_t)handle & FONT_HANDLE_INDEX_MASK) - 1u);
+    const uint32_t next_generation =
+        (font->generation + 1u) & FONT_HANDLE_GENERATION_MASK;
+    /* Runs for this font are invalidated generation-safely. Compacting and
+       rebuilding reclaims their bounded storage while preserving unrelated
+       cached runs. A corrupt cache fails closed by invalidating every run. */
+    if (!stasis_release_text_runs_for_font(handle)) stasis_reset_text_cache();
+    stasis_release_font(font);
+    font->generation = next_generation;
+    font->retired = next_generation == 0u ? 1 : 0;
+    if (font->retired) {
+        SDL_Log("stasis_gfx_release_font: retired slot=%d after generation wrap", slot);
+    }
 }
 
 /* Draw text string using loaded font */
 STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, float y,
                                     float r, float g, float b, float a) {
-    if (font_handle <= 0 || font_handle > MAX_FONTS) return;
     if (!stasis_ensure_font_ready(font_handle)) return;
 
-    StasisFont* font = &g_fonts[font_handle - 1];
-    if (!font->active || !text) return;
+    StasisFont* font = stasis_font_get(font_handle);
+    if (!font || !text) return;
 
     if (true) {
         if (!font->sdl_texture) return;
@@ -7471,11 +7619,11 @@ STASIS_EXPORT void stasis_draw_text(int font_handle, const char* text, float x, 
 
 /* Measure text width for layout */
 STASIS_EXPORT float stasis_measure_text(int font_handle, const char* text) {
-    if (font_handle <= 0 || font_handle > MAX_FONTS || !text) return 0.0f;
+    if (!text) return 0.0f;
     if (!stasis_ensure_font_ready(font_handle)) return 0.0f;
 
-    StasisFont* font = &g_fonts[font_handle - 1];
-    if (!font->active) return 0.0f;
+    StasisFont* font = stasis_font_get(font_handle);
+    if (!font) return 0.0f;
 
     float pos_x = 0.0f, pos_y = 0.0f;
 

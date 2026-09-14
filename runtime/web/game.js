@@ -1676,7 +1676,7 @@
     const family = `stasis-font-${handle}`;
     const font = new FontFace(family, `url(${assetValue(pathId)})`);
     const fontInfo = {
-      family, size, renderSize: size, baseline: size, ready: false, pendingRuns: [],
+      face: font, family, size, renderSize: size, baseline: size, ready: false, pendingRuns: [],
       source: assetValue(pathId), metadata: assetMetadata(pathId),
       densityTier: display.densityTier, densityGeneration: display.densityGeneration,
       cacheKey: [assetValue(pathId), size, display.densityTier, RASTER_OPTIONS].join(":")
@@ -1685,6 +1685,7 @@
     const load = Promise.resolve()
       .then(() => font.load())
       .then(loaded => {
+        if (fonts.get(handle) !== fontInfo) return loaded;
         document.fonts.add(loaded);
         if (document.body?.dataset) {
           document.body.dataset.fontSource = fontInfo.source;
@@ -1695,6 +1696,28 @@
       });
     fontLoads.set(handle, load);
     return handle;
+  };
+  const releaseFont = handle => {
+    const font = fonts.get(handle);
+    if (!font) return;
+    for (const [runHandle, run] of cachedText) {
+      if (run.font !== handle) continue;
+      cachedText.delete(runHandle);
+      cachedTextBytes = Math.max(0, cachedTextBytes - run.bytes);
+      for (const [key, immutableHandle] of immutableTextHandles) {
+        if (immutableHandle === runHandle) immutableTextHandles.delete(key);
+      }
+    }
+    for (const [key, resource] of preparedText) {
+      if (resource.fontHandle !== handle) continue;
+      preparedText.delete(key);
+      preparedTextBytes = Math.max(0, preparedTextBytes - resource.byteLength);
+      gpuBatcher?.releaseResource(resource);
+    }
+    font.pendingRuns.length = 0;
+    fontLoads.delete(handle);
+    if (font.face && document.fonts?.delete) document.fonts.delete(font.face);
+    fonts.delete(handle);
   };
   const measureText = (fontHandle, textId) => {
     const font = fonts.get(fontHandle);
@@ -2141,6 +2164,9 @@
     gfx_release_sprite: handle => releaseSprite(handle),
     stasis_gfx_release_sprite: handle => releaseSprite(handle),
     stasis_jit_gfx_release_sprite: handle => releaseSprite(handle),
+    gfx_release_font: handle => releaseFont(handle),
+    stasis_gfx_release_font: handle => releaseFont(handle),
+    stasis_jit_gfx_release_font: handle => releaseFont(handle),
     stasis_jit_asset_request_sprite: (pathId, width, height) => requestSprite(pathId, width, height),
     // @stasis-feature audio begin
     stasis_jit_asset_request_audio: pathId => requestAudio(pathId),
@@ -2165,6 +2191,7 @@
         && setViewField(base, index, "height", height) ? 1 : 0;
     },
     stasis_jit_gfx_cache_text: (font, textId) => {
+      if (!fonts.has(font)) return 0;
       const value = runtimeTextValue(textId);
       if (!value) return 0;
       const { text, bytes } = value;
@@ -2193,7 +2220,8 @@
         immutableTextHandles.set(key, handle);
         cachedTextBytes += bytes;
       }
-      const fontInfo = fonts.get(font) || { size: 16 };
+      const fontInfo = fonts.get(font);
+      if (!fontInfo) return 0;
       const run = { base, index, font, text, handle, generation: 0 };
       const loaded = setViewField(base, index, "font", font)
         && setViewField(base, index, "handle", handle)
@@ -2810,7 +2838,9 @@
     return true;
   };
   const preparedTextResource = (fontHandle, text) => {
-    const font = fonts.get(fontHandle) || {
+    const loadedFont = fonts.get(fontHandle);
+    if (!loadedFont && fontHandle !== 0) return null;
+    const font = loadedFont || {
       family: "ui-monospace, Consolas, monospace", size: 18, renderSize: 18, baseline: 18,
       densityGeneration: display.densityGeneration
     };
@@ -2864,6 +2894,7 @@
     const renderer = getGpuBatcher();
     if (!renderer) return;
     const resource = preparedTextResource(fontHandle, text);
+    if (!resource) return;
     try {
       const entry = renderer.atlasFor(resource, null);
       if (!entry) throw new Error("WebGL2 text atlas allocation failed");
@@ -3206,9 +3237,7 @@
       const offset = i32[baseI + 1];
       const cached = offset < 0 ? cachedText.get(-offset) : null;
       const fontHandle = cached ? cached.font : i32[baseI];
-      const font = fonts.get(fontHandle) || {
-        family: "ui-monospace", size: 18, renderSize: 18, baseline: 18
-      };
+      if (fontHandle !== 0 && !fonts.has(fontHandle)) return;
       let text = cached ? cached.text : "";
       if (!cached && game.memory.gfx_cmd_u8) {
         const bytesLayout = game.memory.gfx_cmd_u8;

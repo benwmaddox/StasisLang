@@ -21,6 +21,13 @@ device-local resources. Renderer/context creation, `SDL_RENDER_TARGETS_RESET`, a
 `renderer_generation`. Generations skip zero. A sprite atlas region, same-path
 missing-resource placeholder region, font atlas, or text texture can be submitted
 only when its renderer generation matches.
+
+Live font handles retain their source bytes and logical size across density,
+surface, and renderer resets. Native font atlases rasterize at a bounded minimum
+2x backing scale (or the higher current density up to 8x), then draw down with
+linear filtering while all measurements and quads remain in logical units.
+Explicit `release_font` destroys the atlas and source bytes, generation-invalidates
+the handle, and removes only cached text owned by that font.
 Android pause/resume is a visibility transition: the Workshop asks GLSurfaceView to
 preserve its EGL context and retains textures when that context survives. A later
 `onSurfaceCreated` callback is the authoritative signal that the context was lost.

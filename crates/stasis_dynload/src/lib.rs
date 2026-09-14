@@ -1097,7 +1097,7 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
 
-const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 3;
+const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DesktopRect {
@@ -1903,6 +1903,7 @@ struct StasisGraphicsAssetsApi {
     stasis_asset_task_take_handle: Option<usize>,
     stasis_asset_task_cancel: Option<usize>,
     stasis_gfx_release_sprite: usize,
+    stasis_gfx_release_font: usize,
     stasis_gfx_dump_bmp: usize,
     stasis_gfx_dump_png: Option<usize>,
     stasis_host_schedule_screenshot: Option<usize>,
@@ -1983,6 +1984,7 @@ impl StasisGraphicsAssetsApi {
             stasis_asset_task_take_handle: lib.symbol_address("stasis_asset_task_take_handle").ok(),
             stasis_asset_task_cancel: lib.symbol_address("stasis_asset_task_cancel").ok(),
             stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,
+            stasis_gfx_release_font: lib.symbol_address("stasis_gfx_release_font")?,
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
             // PNG capture was added after the original asset ABI. Keep older runtimes usable for
             // all pre-existing calls and report PNG as unsupported.
@@ -5206,6 +5208,7 @@ pub struct EmbeddedGraphicsHost {
     pub load_sprite: fn(&[u8], i32, i32) -> i32,
     pub release_sprite: fn(i32),
     pub load_font: fn(&[u8], i32) -> i32,
+    pub release_font: fn(i32),
     pub measure_text: fn(i32, &[u8]) -> f32,
     pub cache_text: fn(i32, &[u8]) -> i32,
     pub replace_text: fn(i32, i32, &[u8]) -> i32,
@@ -5503,6 +5506,23 @@ pub extern "C" fn stasis_jit_gfx_release_sprite(handle: i32) {
     #[cfg(not(windows))]
     let callback: extern "C" fn(i32) =
         unsafe { std::mem::transmute(api.stasis_gfx_release_sprite) };
+    callback(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_release_font(handle: i32) {
+    if let Some(host) = embedded_graphics_host() {
+        (host.release_font)(handle);
+        return;
+    }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) =
+        unsafe { std::mem::transmute(api.stasis_gfx_release_font) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(api.stasis_gfx_release_font) };
     callback(handle);
 }
 
@@ -6423,6 +6443,11 @@ pub extern "C" fn stasis_get_time_us() -> i32 {
 #[no_mangle]
 pub extern "C" fn stasis_gfx_cache_text(font: i32, text_id: i32) -> i32 {
     stasis_jit_gfx_cache_text(font, text_id)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_gfx_release_font(handle: i32) {
+    stasis_jit_gfx_release_font(handle);
 }
 
 #[no_mangle]
@@ -7904,6 +7929,8 @@ mod tests {
         1
     }
 
+    fn test_font_release(_: i32) {}
+
     fn test_measure_text(_: i32, _: &[u8]) -> f32 {
         1.0
     }
@@ -8140,6 +8167,7 @@ mod tests {
             load_sprite: test_sprite_load,
             release_sprite: test_sprite_release,
             load_font: test_font_load,
+            release_font: test_font_release,
             measure_text: test_measure_text,
             cache_text: test_cache_text,
             replace_text: test_replace_text,
@@ -8179,6 +8207,7 @@ mod tests {
             load_sprite: test_sprite_load,
             release_sprite: test_sprite_release,
             load_font: test_font_load,
+            release_font: test_font_release,
             measure_text: test_measure_text,
             cache_text: test_cache_text,
             replace_text: test_replace_text,

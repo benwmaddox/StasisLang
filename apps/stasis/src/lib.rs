@@ -5830,8 +5830,12 @@ function render(): void {{ {draws} return; }}
             "successful replacements must publish current preparation receipts"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("stasis_current_scaled_extent(font->font_size)"),
-            "resource preparation must derive from the full-backing density scale"
+            STASIS_GRAPHICS_SOURCE.contains("stasis_display_font_raster_scale(g_pixel_scale)")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("stasis_display_font_scaled_extent_for_backing(")
+                && STASIS_GRAPHICS_SOURCE.contains("g_display_metrics.logical_w,")
+                && STASIS_GRAPHICS_SOURCE.contains("g_display_metrics.drawable_w,"),
+            "font preparation must derive from the exact bounded backing ratio"
         );
         let capture_start = graphics_source
             .find("static int stasis_gfx_dump_image(")
@@ -6509,6 +6513,27 @@ function render(): void {{ {draws} return; }}
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
                 "sprite lifetime ownership should contain {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn font_release_is_generation_safe_and_keeps_unrelated_text_runs() {
+        for required in [
+            "stasis_gfx_release_font",
+            "FONT_HANDLE_INDEX_BITS",
+            "FONT_HANDLE_GENERATION_MASK",
+            "stasis_font_get(handle)",
+            "!g_fonts[i].active && !g_fonts[i].retired",
+            "stasis_release_text_runs_for_font(handle)",
+            "STASIS_TEXT_RUN_HANDLE_GENERATION_MASK",
+            "stasis_text_run_get(run_handle)",
+            "SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR)",
+            "stasis_display_font_raster_scale(g_pixel_scale)",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "font lifetime and raster quality should contain {required}"
             );
         }
     }

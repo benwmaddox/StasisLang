@@ -3816,7 +3816,7 @@ function end_frame(): void { return; }
         let mut process = AotProcess::new();
         process.upsert_file(
             "tests/stasis/compiler/runtime_string_shims.stasis",
-            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\nextern function gfx_release_sprite(handle: i32): void;\nextern function load_font(path: string, size: i32): i32;\nextern function measure_text(font: i32, text: string): f32;\nfunction @extern(\"stasis_gfx_cache_text\") gfx_cache_text(font: i32, text: string): i32;\nextern function storage_load_i32(scope: string, key: string, fallback: i32): i32;\nextern function storage_save_i32(scope: string, key: string, value: i32): bool;\nfunction @extern(\"stasis_jit_storage_load_ascii\") storage_load_ascii(scope: string, key: string, out: ascii[], capacity: i32): i32;\nfunction @extern(\"stasis_jit_storage_save_ascii\") storage_save_ascii(scope: string, key: string, value: ascii[], length: i32): i32;\nfunction @extern(\"stasis_jit_clipboard_load_ascii\") clipboard_load_ascii(out: ascii[], capacity: i32): i32;\nfunction @extern(\"stasis_jit_clipboard_save_ascii\") clipboard_save_ascii(value: ascii[], length: i32): i32;\nfunction main(): i32 { gfx_release_sprite(0); return 0; }\n",
+            "extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;\nextern function gfx_release_sprite(handle: i32): void;\nfunction @extern(\"stasis_jit_gfx_release_font\") gfx_release_font(handle: i32): void;\nextern function load_font(path: string, size: i32): i32;\nextern function measure_text(font: i32, text: string): f32;\nfunction @extern(\"stasis_gfx_cache_text\") gfx_cache_text(font: i32, text: string): i32;\nextern function storage_load_i32(scope: string, key: string, fallback: i32): i32;\nextern function storage_save_i32(scope: string, key: string, value: i32): bool;\nfunction @extern(\"stasis_jit_storage_load_ascii\") storage_load_ascii(scope: string, key: string, out: ascii[], capacity: i32): i32;\nfunction @extern(\"stasis_jit_storage_save_ascii\") storage_save_ascii(scope: string, key: string, value: ascii[], length: i32): i32;\nfunction @extern(\"stasis_jit_clipboard_load_ascii\") clipboard_load_ascii(out: ascii[], capacity: i32): i32;\nfunction @extern(\"stasis_jit_clipboard_save_ascii\") clipboard_save_ascii(value: ascii[], length: i32): i32;\nfunction main(): i32 { gfx_release_sprite(0); gfx_release_font(0); return 0; }\n",
         );
         process.compile().expect("compile");
 
@@ -3838,6 +3838,10 @@ function end_frame(): void { return; }
         assert_eq!(
             resolved.get("gfx_release_sprite").copied(),
             Some("stasis_jit_gfx_release_sprite")
+        );
+        assert_eq!(
+            resolved.get("gfx_release_font").copied(),
+            Some("stasis_jit_gfx_release_font")
         );
         assert_eq!(
             resolved.get("load_font").copied(),

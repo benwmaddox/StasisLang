@@ -115,6 +115,7 @@ int stasis_jit_asset_task_poll(int32_t task);
 int stasis_jit_asset_task_take_handle(int32_t task);
 void stasis_jit_asset_task_cancel(int32_t task);
 void stasis_jit_gfx_release_sprite(int32_t handle);
+void stasis_jit_gfx_release_font(int32_t handle);
 int stasis_jit_gfx_dump_bmp(int32_t path);
 int stasis_jit_gfx_dump_png(int32_t path);
 int stasis_jit_gfx_cache_text(int32_t font, int32_t text);
