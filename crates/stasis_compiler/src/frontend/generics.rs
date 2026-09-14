@@ -787,6 +787,7 @@ impl Expansion {
                 &type_name,
                 &GenericEnvironment::default(),
                 &mut Vec::new(),
+                0,
             )?;
         }
         Ok(())
@@ -798,6 +799,7 @@ impl Expansion {
         type_name: &str,
         environment: &GenericEnvironment,
         visiting: &mut Vec<String>,
+        generic_depth: usize,
     ) -> Result<(), String> {
         let resolved_type = rewrite_generic_identifiers(type_name, environment);
         self.materialize_type(&resolved_type, environment)?;
@@ -814,6 +816,13 @@ impl Expansion {
         if visiting.iter().any(|existing| existing == &visit_key) {
             return Ok(());
         }
+        let is_generic = visit_key.starts_with("generic:");
+        if is_generic && generic_depth > MAX_INSTANTIATION_DEPTH {
+            return Err(format!(
+                "generic instantiation depth exceeded (maximum {})",
+                MAX_INSTANTIATION_DEPTH
+            ));
+        }
         visiting.push(visit_key);
         for field in fields {
             self.populate_concrete_type(
@@ -821,6 +830,7 @@ impl Expansion {
                 &field.type_name,
                 &nested_environment,
                 visiting,
+                generic_depth + usize::from(is_generic),
             )?;
         }
         visiting.pop();
@@ -843,6 +853,7 @@ impl Expansion {
                 &type_name,
                 environment,
                 &mut Vec::new(),
+                0,
             )?;
         }
         if let Ok(bindings) = crate::frontend::parser::parse_typed_local_bindings(source) {
@@ -857,6 +868,7 @@ impl Expansion {
                     &type_name,
                     environment,
                     &mut Vec::new(),
+                    0,
                 )?;
             }
         }
@@ -871,6 +883,7 @@ impl Expansion {
         type_name: &str,
         environment: &GenericEnvironment,
         visiting: &mut Vec<String>,
+        generic_depth: usize,
     ) -> Result<(), String> {
         let resolved_type = rewrite_generic_identifiers(type_name, environment);
         paths.insert(path.to_string(), resolved_type.clone());
@@ -883,6 +896,13 @@ impl Expansion {
             if visiting.iter().any(|existing| existing == &visit_key) {
                 return Ok(());
             }
+            let is_generic = visit_key.starts_with("generic:");
+            if is_generic && generic_depth > MAX_INSTANTIATION_DEPTH {
+                return Err(format!(
+                    "generic instantiation depth exceeded (maximum {})",
+                    MAX_INSTANTIATION_DEPTH
+                ));
+            }
             visiting.push(visit_key);
             for field in fields {
                 self.populate_local_type_paths(
@@ -891,6 +911,7 @@ impl Expansion {
                     &field.type_name,
                     &nested_environment,
                     visiting,
+                    generic_depth + usize::from(is_generic),
                 )?;
             }
             visiting.pop();
@@ -1738,7 +1759,7 @@ impl Expansion {
             return Ok(Some((
                 definition.fields,
                 nested_environment,
-                format!("{}<{resolved_arguments:?}>", definition.identity),
+                format!("generic:{}<{resolved_arguments:?}>", definition.identity),
             )));
         }
         if let Some((definition, arguments)) = self.generated_struct_application(type_name) {
@@ -1748,7 +1769,7 @@ impl Expansion {
             return Ok(Some((
                 definition.fields,
                 nested_environment,
-                format!("{}<{arguments:?}>", definition.identity),
+                format!("generic:{}<{arguments:?}>", definition.identity),
             )));
         }
         Ok(self
@@ -4579,6 +4600,35 @@ mod tests {
             .check()
             .expect_err("recursive generic structs cannot be stored by value");
         assert!(format!("{error:?}").contains("recursive generic struct field"));
+    }
+
+    #[test]
+    fn accepts_finite_nested_specializations_of_the_same_generic_struct() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "finite_nested.stasis",
+            "struct Box<T: type> { value: T; }\n\
+             global nested: Box<Box<i32>>;\n\
+             function main(): i32 { return nested.value.value; }\n",
+        );
+        compiler
+            .check()
+            .expect("finite nesting of one generic definition is valid");
+    }
+
+    #[test]
+    fn rejects_expanding_recursive_generic_struct_storage_without_overflowing() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "expanding_recursive.stasis",
+            "struct Node<N: i32> { next: Node<N + 1>; }\n\
+             global root: Node<0>;\n\
+             function main(): i32 { return 0; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("expanding recursive generic structs cannot be stored by value");
+        assert!(format!("{error:?}").contains("generic instantiation depth exceeded"));
     }
 
     #[test]

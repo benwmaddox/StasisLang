@@ -8,12 +8,15 @@ use std::process::Command;
 
 const ENTRY_PATH: &str = "samples/generics_collections/src/main.stasis";
 const ENTRY: &str = include_str!("../../../samples/generics_collections/src/main.stasis");
-const WASM_ENTRY_PATH: &str = "samples/generics_collections/src/wasm_entry.stasis";
-const WASM_ENTRY: &str =
-    include_str!("../../../samples/generics_collections/src/wasm_entry.stasis");
 const TEST_PATH: &str = "samples/generics_collections/tests/generics_collections.test.stasis";
 const TESTS: &str =
     include_str!("../../../samples/generics_collections/tests/generics_collections.test.stasis");
+const PARITY_ORACLE_PATH: &str = "tests/stasis/seams/generics_parity_oracle.stasis";
+const PARITY_ORACLE: &str =
+    include_str!("../../../tests/stasis/seams/generics_parity_oracle.stasis");
+const PARITY_ORACLE_MODULE_PATH: &str = "tests/stasis/seams/generics_parity_module.stasis";
+const PARITY_ORACLE_MODULE: &str =
+    include_str!("../../../tests/stasis/seams/generics_parity_module.stasis");
 const RIG2D_IMPORT: &str = "/vendor/stasis/stdlib/rig2d.stasis";
 const GRAPHICS_IMPORT: &str = "/vendor/stasis/stdlib/graphics.stasis";
 const WASM_ROOT: &str = "main";
@@ -31,13 +34,226 @@ fn repository_entry() -> String {
         .replace(GRAPHICS_IMPORT, "../../../src/stdlib/graphics.stasis")
 }
 
+fn compile_wasm_fixture(
+    path: &str,
+    source: &str,
+    roots: &[&str],
+    imported_files: &[(&str, &str)],
+) -> WasmProcess {
+    let mut wasm = WasmProcess::new();
+    wasm.set_project_root(repository_root().to_string_lossy())
+        .expect("set focused Wasm fixture project root");
+    wasm.set_required_emit_roots(
+        &roots
+            .iter()
+            .map(|root| (*root).to_string())
+            .collect::<Vec<_>>(),
+    );
+    wasm.upsert_file(path, source);
+    for (import_path, import_source) in imported_files {
+        wasm.upsert_file(*import_path, *import_source);
+    }
+    wasm.compile().expect("compile focused Wasm fixture");
+    wasm
+}
+
+fn run_wasm_node(module: &WasmProcess, script: &str, label: &str) -> String {
+    let wasm_path = std::env::temp_dir().join(format!(
+        "stasis_generics_focused_{}_{}.wasm",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::write(&wasm_path, module.module_bytes()).expect("write focused Wasm fixture");
+    let output = Command::new("node")
+        .args(["-e", script])
+        .arg(&wasm_path)
+        .output()
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
+    let _ = std::fs::remove_file(&wasm_path);
+    assert!(
+        output.status.success(),
+        "{label} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("focused Wasm fixture output is UTF-8")
+}
+
+const STATIC_NAMED_STRUCT_VIEW_BOUNDS: &str = r#"
+struct StaticItem {
+    score: i32;
+}
+
+global static_items: StaticItem[3];
+
+function item_score(item: StaticItem): i32 {
+    return item.score;
+}
+
+function static_copy_source(source: i32): i32 {
+    static_items[0] = static_items[source];
+    return item_score(static_items[0]);
+}
+
+function main(): i32 {
+    static_items[0].score = 10;
+    static_items[1].score = 11;
+    static_items[2].score = 12;
+    return item_score(static_items[0]);
+}
+
+function render(index: i32): i32 {
+    return static_copy_source(index);
+}
+"#;
+
+const RECEIVER_FOREACH_AND_METADATA: &str = r#"
+struct ReceiverItem {
+    score: i32;
+}
+
+struct ReceiverBox {
+    items: ReceiverItem[2];
+}
+
+struct ReceiverOuter {
+    inner: ReceiverBox;
+}
+
+global direct_box: ReceiverBox;
+global nested_box: ReceiverOuter;
+
+function direct_total(self: ReceiverBox): i32 {
+    let total: i32 = 0;
+    foreach (let item, i in self.items) {
+        total += item.score + i;
+    }
+    return total + self.items.max_length;
+}
+
+function nested_total(self: ReceiverOuter): i32 {
+    let total: i32 = 0;
+    foreach (let item, i in self.inner.items) {
+        total += item.score + i;
+    }
+    return total + self.inner.items.max_length;
+}
+
+function main(): i32 {
+    direct_box.items[0].score = 5;
+    direct_box.items[1].score = 7;
+    nested_box.inner.items[0].score = 10;
+    nested_box.inner.items[1].score = 20;
+    return direct_total(direct_box);
+}
+
+function render(index: i32): i32 {
+    if (index == 0) {
+        return direct_total(direct_box);
+    }
+    return nested_total(nested_box);
+}
+"#;
+
+const SCRATCH_CLOBBER_GUARD: &str = r#"
+struct ScratchItem {
+    value: i32;
+}
+
+struct ScratchBox {
+    items: ScratchItem[2];
+}
+
+global scratch_left: ScratchBox;
+global scratch_right: ScratchBox;
+global lhs_index_calls: i32;
+global rhs_index_calls: i32;
+
+function next_lhs_index(): i32 {
+    lhs_index_calls += 1;
+    return 1;
+}
+
+function next_rhs_index(): i32 {
+    rhs_index_calls += 1;
+    return 0;
+}
+
+function item_value(item: ScratchItem): i32 {
+    return item.value;
+}
+
+function bump_from_other(self: ScratchBox): void {
+    self.items[next_lhs_index()].value += item_value(scratch_right.items[next_rhs_index()]);
+}
+
+function main(): i32 {
+    scratch_left.items[0].value = 10;
+    scratch_left.items[1].value = 20;
+    scratch_right.items[0].value = 100;
+    scratch_right.items[1].value = 200;
+    lhs_index_calls = 0;
+    rhs_index_calls = 0;
+    bump_from_other(scratch_left);
+    return scratch_left.items[1].value
+        + scratch_right.items[0].value
+        + lhs_index_calls * 100
+        + rhs_index_calls;
+}
+"#;
+
+const INDEXED_VIEW_OVERLOADS: &str = r#"
+import "generics_parity_module.stasis";
+
+struct IndexedItem {
+    score: i32;
+}
+
+struct IndexedOther {
+    score: i32;
+}
+
+struct IndexedBox {
+    items: IndexedItem[2];
+}
+
+global indexed_box: IndexedBox;
+global qualified_value: generics_parity_module.OracleQualified<4>;
+
+function inspect(item: IndexedItem): i32 {
+    return item.score;
+}
+
+function inspect(item: IndexedOther): i32 {
+    return 1000 + item.score;
+}
+
+function inspect_local(items: IndexedItem[]): i32 {
+    return inspect(items[0]);
+}
+
+function inspect_receiver(self: IndexedBox): i32 {
+    return inspect(self.items[0]);
+}
+
+function main(): i32 {
+    indexed_box.items[0].score = 7;
+    qualified_value.value = 6;
+    return inspect_local(indexed_box.items)
+        + inspect_receiver(indexed_box)
+        + generics_parity_module.oracle_qualified_score(qualified_value);
+}
+"#;
+
 #[test]
-fn generic_collection_scalar_fixture_executes_in_wasm() {
+fn generic_collection_shared_fixture_executes_in_wasm() {
     let mut wasm = WasmProcess::new();
     wasm.set_project_root(repository_root().to_string_lossy())
         .expect("set sample Wasm project root");
     wasm.set_required_emit_roots(&[WASM_ROOT.to_string()]);
-    wasm.upsert_file(WASM_ENTRY_PATH, WASM_ENTRY);
+    wasm.upsert_file(ENTRY_PATH, repository_entry());
     wasm.compile()
         .expect("compile generic collection Wasm sample");
     assert!(
@@ -69,6 +285,172 @@ fn generic_collection_scalar_fixture_executes_in_wasm() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "0");
+}
+
+#[test]
+fn backend_neutral_generics_oracle_matches_jit_aot_and_wasm() {
+    const EXPECTED_DIGEST: i32 = 685;
+    const ROOTS: &[&str] = &["main", "tick", "render"];
+
+    let mut jit = JitProcess::new();
+    jit.set_required_emit_roots(
+        &ROOTS
+            .iter()
+            .map(|root| (*root).to_string())
+            .collect::<Vec<_>>(),
+    );
+    jit.upsert_file(PARITY_ORACLE_PATH, PARITY_ORACLE);
+    jit.upsert_file(PARITY_ORACLE_MODULE_PATH, PARITY_ORACLE_MODULE);
+    jit.compile()
+        .expect("compile shared generics oracle for JIT");
+    assert_eq!(
+        jit.execute_i32_noarg_by_name("main")
+            .expect("execute shared generics oracle in JIT"),
+        EXPECTED_DIGEST
+    );
+    assert_eq!(
+        jit.execute_i32_noarg_by_name("tick")
+            .expect("read shared generics oracle digest in JIT"),
+        EXPECTED_DIGEST
+    );
+
+    let mut aot = AotProcess::new();
+    aot.set_required_emit_roots(
+        &ROOTS
+            .iter()
+            .map(|root| (*root).to_string())
+            .collect::<Vec<_>>(),
+    );
+    aot.upsert_file(PARITY_ORACLE_PATH, PARITY_ORACLE);
+    aot.upsert_file(PARITY_ORACLE_MODULE_PATH, PARITY_ORACLE_MODULE);
+    aot.compile()
+        .expect("compile shared generics oracle to a native AOT object");
+
+    let mut wasm = WasmProcess::new();
+    wasm.set_required_emit_roots(
+        &ROOTS
+            .iter()
+            .map(|root| (*root).to_string())
+            .collect::<Vec<_>>(),
+    );
+    wasm.upsert_file(PARITY_ORACLE_PATH, PARITY_ORACLE);
+    wasm.upsert_file(PARITY_ORACLE_MODULE_PATH, PARITY_ORACLE_MODULE);
+    wasm.compile()
+        .expect("compile shared generics oracle for Wasm");
+    let wasm_path = std::env::temp_dir().join(format!(
+        "stasis_generics_parity_oracle_{}_{}.wasm",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::write(&wasm_path, wasm.module_bytes()).expect("write shared generics oracle Wasm");
+    let output = Command::new("node")
+        .args([
+            "-e",
+            "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => { const e=instance.exports; const trapped=(index)=>{try{e.render(index);return false;}catch(error){return error instanceof WebAssembly.RuntimeError;}}; process.stdout.write([e.main(),e.tick(),e.render(0),e.render(2),trapped(-1),trapped(3)].join(',')); }).catch((error) => { console.error(error); process.exit(1); });",
+        ])
+        .arg(&wasm_path)
+        .output()
+        .expect("run shared generics oracle Wasm in Node");
+    let _ = std::fs::remove_file(&wasm_path);
+    assert!(
+        output.status.success(),
+        "Node failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{EXPECTED_DIGEST},{EXPECTED_DIGEST},10,10,true,true")
+    );
+}
+
+#[test]
+fn static_named_struct_views_trap_at_bounds_including_copy_sources() {
+    let wasm = compile_wasm_fixture(
+        "focused/static_named_struct_view_bounds.stasis",
+        STATIC_NAMED_STRUCT_VIEW_BOUNDS,
+        &["main", "render"],
+        &[],
+    );
+    let output = run_wasm_node(
+        &wasm,
+        "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => { const e=instance.exports; const trapped=(index)=>{try{e.render(index);return false;}catch(error){return error instanceof WebAssembly.RuntimeError;}}; process.stdout.write([e.main(),e.render(2),trapped(-1),trapped(3)].join(',')); }).catch((error) => { console.error(error); process.exit(1); });",
+        "static named-struct view bounds",
+    );
+    assert_eq!(output, "10,12,true,true");
+}
+
+#[test]
+fn receiver_named_struct_views_support_foreach_and_max_length() {
+    let wasm = compile_wasm_fixture(
+        "focused/receiver_foreach_and_metadata.stasis",
+        RECEIVER_FOREACH_AND_METADATA,
+        &["main", "render"],
+        &[],
+    );
+    let output = run_wasm_node(
+        &wasm,
+        "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => { const e=instance.exports; process.stdout.write([e.main(),e.render(0),e.render(1)].join(',')); }).catch((error) => { console.error(error); process.exit(1); });",
+        "receiver foreach and metadata",
+    );
+    assert_eq!(output, "15,15,33");
+}
+
+#[test]
+fn receiver_compound_assignment_preserves_nested_view_indices_and_owners() {
+    let wasm = compile_wasm_fixture(
+        "focused/scratch_clobber_guard.stasis",
+        SCRATCH_CLOBBER_GUARD,
+        &["main"],
+        &[],
+    );
+    let output = run_wasm_node(
+        &wasm,
+        "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+        "receiver compound scratch guard",
+    );
+    assert_eq!(output, "321");
+}
+
+#[test]
+fn indexed_named_struct_elements_resolve_local_receiver_and_qualified_calls() {
+    let wasm = compile_wasm_fixture(
+        "tests/stasis/seams/focused/indexed_view_overloads.stasis",
+        INDEXED_VIEW_OVERLOADS,
+        &["main"],
+        &[(
+            "tests/stasis/seams/focused/generics_parity_module.stasis",
+            PARITY_ORACLE_MODULE,
+        )],
+    );
+    let output = run_wasm_node(
+        &wasm,
+        "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+        "indexed named-struct calls",
+    );
+    assert_eq!(output, "24");
+}
+
+#[test]
+fn rejects_named_struct_array_returns_at_the_wasm_abi_boundary() {
+    let mut wasm = WasmProcess::new();
+    wasm.set_project_root(repository_root().to_string_lossy())
+        .expect("set named-array return fixture project root");
+    wasm.set_required_emit_roots(&["expose_items".into()]);
+    wasm.upsert_file(
+        "negative/named_array_return.stasis",
+        include_str!("../../../samples/generics_collections/negative/named_array_return.stasis"),
+    );
+    let error = wasm
+        .compile()
+        .expect_err("named-struct array return must remain outside the WebAssembly ABI");
+    assert!(
+        format!("{error:?}")
+            .contains("web named-struct array and struct-view returns are unsupported"),
+        "unexpected named-array return diagnostic: {error:?}"
+    );
 }
 
 #[test]
@@ -118,6 +500,27 @@ fn negative_generic_collection_fixtures_keep_expected_diagnostics() {
             "runtime_capacity",
             include_str!("../../../samples/generics_collections/negative/runtime_capacity.stasis"),
             "compile-time",
+        ),
+        (
+            "wrong_generic_kind",
+            include_str!(
+                "../../../samples/generics_collections/negative/wrong_generic_kind.stasis"
+            ),
+            "expects a type argument",
+        ),
+        (
+            "wrong_generic_arity",
+            include_str!(
+                "../../../samples/generics_collections/negative/wrong_generic_arity.stasis"
+            ),
+            "generic argument arity mismatch",
+        ),
+        (
+            "expanding_recursion",
+            include_str!(
+                "../../../samples/generics_collections/negative/expanding_recursion.stasis"
+            ),
+            "generic instantiation depth exceeded",
         ),
         (
             "unresolved_capacity",

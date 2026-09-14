@@ -1,0 +1,9 @@
+struct ExpandingNode<N: i32> {
+    next: ExpandingNode<N + 1>;
+}
+
+global invalid: ExpandingNode<0>;
+
+function main(): i32 {
+    return 0;
+}
