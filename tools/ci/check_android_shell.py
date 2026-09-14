@@ -204,8 +204,9 @@ def main() -> int:
     assert 'Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $scriptRoot "app") "src") "workshop") "jniLibs") $abi' in rust_bridge_script
     assert "cargo_cache.py" in rust_bridge_script
     assert 'crates\\stasis_ai\\src\\*' in codex_native_script
-    assert '$codexTargetRoot = Join-Path $scriptRoot "target"' in codex_native_script
+    assert '$codexTargetRoot = Join-Path $codexRustRoot "target"' in codex_native_script
     assert '$env:CARGO_TARGET_DIR = $codexTargetRoot' in codex_native_script
+    assert 'Join-Path $codexTargetRoot "$rustTarget\\$profileDir\\libstasis_codex_android.so"' in codex_native_script
     assert 'build_rust_bridge.ps1") -Release' in debug_script
     assert ":app:assembleWorkshopDebug" in debug_script
     assert "package-mobile" in release_script
@@ -905,6 +906,18 @@ def main() -> int:
     assert "WorkshopProjectRegistry.initialize(this," in activity
     assert "New Project From Selected Template" in activity
     assert "WorkshopTemplateCatalog.list()" in activity
+    assert "refreshCompilerOwnedLibrary(assets, template, projectRoot);" in activity
+    assert "WorkshopCompilerOwnedLibrary.refreshedFiles()" in activity
+    assert "migrateUnmodifiedBundledTemplateSources()" in activity
+    assert "WorkshopBundledSourceUpgrade.shouldReplace(" in activity
+    assert activity.count("loadAndMigrateActiveBundledProject()") == 3
+    activate_project = activity[
+        activity.index("boolean activateProject("):
+        activity.index("private void shutdownGameAudio()")
+    ]
+    assert activate_project.index("loadAndMigrateActiveBundledProject()") < activate_project.index(
+        "ensureActiveProjectBaseline(snapshot)"
+    )
     assert "templateSelector.getSelectedItem()" in activity
     assert "createFromTemplate" in activity
     assert "Switch Project" in activity

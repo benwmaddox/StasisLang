@@ -432,8 +432,7 @@ public final class MainActivity extends Activity {
 
         ProjectSnapshot project = loadBundledProject();
         try {
-            if (migrateBundledPongBallSpeed()) project = loadBundledProject();
-            if (migrateBundledPongProductionRenderer()) project = loadBundledProject();
+            project = loadAndMigrateActiveBundledProject();
             ensureActiveProjectBaseline(project);
         } catch (IOException error) {
             projectRegistryError = "baseline: " + error.getMessage();
@@ -2920,7 +2919,7 @@ public final class MainActivity extends Activity {
             gameRuntimeActive = false;
             lastCompileResult = "CompileNotRun";
             reviewedGitHubChangeFingerprint = "";
-            ProjectSnapshot snapshot = loadBundledProject();
+            ProjectSnapshot snapshot = loadAndMigrateActiveBundledProject();
             ensureActiveProjectBaseline(snapshot);
             rebuildSymbolList(snapshot);
             if (snapshot.firstSymbol != null) showSymbol(snapshot.firstSymbol);
@@ -10633,7 +10632,7 @@ public final class MainActivity extends Activity {
         String templateId = activeProject == null ? WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID
                 : activeProject.templateId;
         String expectedReady = "format=3\ntemplate_id=" + templateId
-                + "\nrenderer=gfx_cmd\nrenderer_schema=7\n";
+                + "\nrenderer=gfx_cmd\nrenderer_schema=8\n";
         boolean readyExists = readyFile.isFile();
         boolean readyMatches = readyExists && expectedReady.equals(readTextFile(readyFile));
         WorkshopProjectBaselinePolicy.Action action = WorkshopProjectBaselinePolicy.requiredAction(
@@ -11187,6 +11186,7 @@ public final class MainActivity extends Activity {
             try {
                 WorkshopTemplateCatalog.Template template = activeWorkshopTemplate();
                 materializeTemplateProject(assets, template, projectRoot, true);
+                refreshCompilerOwnedLibrary(assets, template, projectRoot);
             } catch (IOException ignored) {
                 // Registry validation normally prevents an unknown template from reaching this path.
             }
@@ -11224,6 +11224,49 @@ public final class MainActivity extends Activity {
             materializeTemplateFile(assets, template.assetRoot + file, new File(root, file),
                     template.replaceExistingFiles, bestEffort);
         }
+    }
+
+    private void refreshCompilerOwnedLibrary(AssetManager assets,
+            WorkshopTemplateCatalog.Template template, File root) throws IOException {
+        for (WorkshopTemplateCatalog.DirectoryMount mount : template.directoryMounts) {
+            if (!"stasis_stdlib".equals(mount.assetDirectory)) continue;
+            for (String relativePath : WorkshopCompilerOwnedLibrary.refreshedFiles()) {
+                ensureProjectFile(assets, mount.assetDirectory + "/" + relativePath,
+                        new File(root, mount.projectDirectory + "/" + relativePath), true);
+            }
+        }
+    }
+
+    private boolean migrateUnmodifiedBundledTemplateSources() throws IOException {
+        if (activeProject == null || !"sample".equals(activeProject.origin)) return false;
+        File baselineRoot = activeProjectBaselineRoot();
+        if (!new File(baselineRoot, PROJECT_BASELINE_READY).isFile()) return false;
+
+        WorkshopTemplateCatalog.Template template = activeWorkshopTemplate();
+        ArrayList<String> paths = new ArrayList<>();
+        paths.addAll(Arrays.asList(template.sourceFiles));
+        paths.addAll(Arrays.asList(template.testFiles));
+        boolean changed = false;
+        for (String path : paths) {
+            File projectFile = new File(projectRoot(), path.replace('/', File.separatorChar));
+            File baselineFile = new File(baselineRoot, path.replace('/', File.separatorChar));
+            if (!projectFile.isFile() || !baselineFile.isFile()) continue;
+            if (!WorkshopBundledSourceUpgrade.shouldReplace(
+                    readTextFile(projectFile), readTextFile(baselineFile))) continue;
+            String packaged = readAsset(getAssets(), template.assetRoot + path);
+            if (packaged.equals(readTextFile(projectFile))) continue;
+            writeTextFile(projectFile, packaged);
+            changed = true;
+        }
+        return changed;
+    }
+
+    private ProjectSnapshot loadAndMigrateActiveBundledProject() throws IOException {
+        ProjectSnapshot project = loadBundledProject();
+        if (migrateUnmodifiedBundledTemplateSources()) project = loadBundledProject();
+        if (migrateBundledPongBallSpeed()) project = loadBundledProject();
+        if (migrateBundledPongProductionRenderer()) project = loadBundledProject();
+        return project;
     }
 
     private void materializeTemplateFile(AssetManager assets, String assetPath, File file,
