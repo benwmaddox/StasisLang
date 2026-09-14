@@ -737,7 +737,7 @@ fn controlled_id(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-fn validate_svg(source: &str) -> Result<(), String> {
+pub(crate) fn validate_svg(source: &str) -> Result<(), String> {
     if source.len() > MAX_TEXT_ASSET_BYTES || !source.trim_start().starts_with("<svg") {
         return Err("SVG must start with <svg and be no larger than 256 KiB".to_string());
     }

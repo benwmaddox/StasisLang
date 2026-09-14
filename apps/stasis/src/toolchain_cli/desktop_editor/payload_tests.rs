@@ -124,7 +124,11 @@ fn desktop_editor_initial_http_payload_uses_the_real_dispatch_path() {
     assert!(content.contains("\tinspect_source\tselector\t"));
     assert!(content.contains("Catalog IDs are hypermedia leads"));
     assert!(content.contains("f6 lists that file's symbols"));
-    assert!(content.ends_with(expected_catalog.as_str().unwrap()));
+    let expected_context_prefix = format!("context:\n{}", expected_catalog.as_str().unwrap());
+    assert!(content.contains(expected_context_prefix.as_str()));
+    assert!(content.contains("task_id:\"one\"\n"));
+    assert!(content.contains("project_summary:\"Project\"\n"));
+    assert!(content.contains("assets:[]\n"));
     assert!(expected_catalog
         .as_str()
         .unwrap()
