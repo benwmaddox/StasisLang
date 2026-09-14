@@ -9,15 +9,16 @@ use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
 use stasis_compiler::frontend::parser::{completion_expected_type, parse_top_level_functions};
 use stasis_compiler::frontend::workshop::{
-    find_workshop_references, organize_workshop_imports, plan_workshop_rename,
-    prepare_workshop_rename, workshop_base_type_name, workshop_call_hierarchy,
-    workshop_completion_items, workshop_folding_ranges, workshop_inlay_hints,
-    workshop_inlay_hints_from_local_types, workshop_linked_edit_ranges, workshop_reachable_files,
-    workshop_selection_ranges, workshop_semantic_tokens, workshop_source_items, workshop_symbols,
-    workshop_type_hierarchy, WorkshopCallHierarchyEdge, WorkshopCompletionItem,
-    WorkshopCompletionScope, WorkshopHierarchyItem, WorkshopInlayHint, WorkshopInlayHintKind,
-    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol,
-    WorkshopSymbolKind, WorkshopTypeHierarchyEdge,
+    find_workshop_generic_parameter_references_at, find_workshop_references,
+    organize_workshop_imports, plan_workshop_rename, prepare_workshop_rename,
+    workshop_base_type_name, workshop_call_hierarchy, workshop_completion_items,
+    workshop_folding_ranges, workshop_inlay_hints, workshop_inlay_hints_from_local_types,
+    workshop_linked_edit_ranges, workshop_reachable_files, workshop_selection_ranges,
+    workshop_semantic_tokens, workshop_source_items, workshop_symbols, workshop_type_hierarchy,
+    WorkshopCallHierarchyEdge, WorkshopCompletionItem, WorkshopCompletionScope,
+    WorkshopHierarchyItem, WorkshopInlayHint, WorkshopInlayHintKind, WorkshopSourceFile,
+    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol, WorkshopSymbolKind,
+    WorkshopTypeHierarchyEdge,
 };
 pub use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopReference, WorkshopReferenceKind,
@@ -946,7 +947,7 @@ impl LanguageService {
         };
         let mut signatures = matches
             .iter()
-            .filter_map(|item| hover_signature(&document.text, &range, item))
+            .filter_map(|item| hover_signature(item))
             .collect::<Vec<_>>();
         signatures.sort();
         signatures.dedup();
@@ -1001,21 +1002,10 @@ impl LanguageService {
             .filter(|item| item.text == call.target && workshop_completion_visible(item, &context))
             .filter_map(|item| {
                 let signature = item_signature(item)?;
-                let label = call
-                    .generic_arguments
-                    .as_deref()
-                    .and_then(|arguments| {
-                        specialize_generic_signature(
-                            &signature,
-                            &item.generic_parameters,
-                            arguments,
-                        )
-                    })
-                    .unwrap_or(signature);
                 Some(SignatureInformation {
-                    parameters: signature_parameters(&label),
+                    parameters: signature_parameters(&signature),
                     documentation: documentation_for_completion(index, item),
-                    label,
+                    label: signature,
                 })
             })
             .collect::<Vec<_>>();
@@ -1064,11 +1054,20 @@ impl LanguageService {
         });
         if !has_scoped_candidate {
             if let Some(locations) = self.language_index.as_ref().and_then(|index| {
-                index
-                    .definitions
-                    .definition(&symbol)
-                    .and_then(|resolution| {
-                        remap_definition_locations(&project_root, &snapshot, index, &resolution)
+                receiver_function_reference_symbols(&index.workshop_items, &symbol)
+                    .into_iter()
+                    .find_map(|candidate| {
+                        index
+                            .definitions
+                            .definition(&candidate)
+                            .and_then(|resolution| {
+                                remap_definition_locations(
+                                    &project_root,
+                                    &snapshot,
+                                    index,
+                                    &resolution,
+                                )
+                            })
                     })
             }) {
                 return Ok(locations);
@@ -1087,27 +1086,31 @@ impl LanguageService {
         )? {
             return Ok(vec![location]);
         }
-        if let Some(resolution) = index.definitions.definition(&symbol) {
-            if let Some(locations) =
-                remap_definition_locations(&project_root, &snapshot, index, &resolution)
-            {
-                return Ok(locations);
+        for candidate in receiver_function_reference_symbols(&index.workshop_items, &symbol) {
+            if let Some(resolution) = index.definitions.definition(&candidate) {
+                if let Some(locations) =
+                    remap_definition_locations(&project_root, &snapshot, index, &resolution)
+                {
+                    return Ok(locations);
+                }
             }
         }
-        Ok(
-            find_workshop_references(&self.language_index()?.files, &symbol, 256)?
-                .into_iter()
-                .filter_map(|reference| {
-                    (reference.kind == WorkshopReferenceKind::Definition).then(|| {
-                        LanguageLocation {
-                            path: absolute_source_path(&project_root, &reference.file),
-                            range: reference.source_span.start as usize
-                                ..reference.source_span.end as usize,
-                        }
-                    })
-                })
-                .collect(),
-        )
+        let mut locations = Vec::new();
+        for candidate in receiver_function_reference_symbols(&index.workshop_items, &symbol) {
+            for reference in find_workshop_references(&index.files, &candidate, 256)? {
+                if reference.kind != WorkshopReferenceKind::Definition {
+                    continue;
+                }
+                let location = LanguageLocation {
+                    path: absolute_source_path(&project_root, &reference.file),
+                    range: reference.source_span.start as usize..reference.source_span.end as usize,
+                };
+                if !locations.contains(&location) {
+                    locations.push(location);
+                }
+            }
+        }
+        Ok(locations)
     }
 
     pub fn references(
@@ -1184,8 +1187,64 @@ impl LanguageService {
     ) -> Result<RenamePlan, String> {
         let snapshot = self.documents.snapshot();
         let relative = canonical_source_path(Some(&self.project_root), path)?;
-        let files = self.current_language_index()?.files.clone();
-        let (after, plan) = plan_workshop_rename(&files, &relative, byte_offset, new_name)?;
+        let index = self.current_language_index()?;
+        let files = index.files.clone();
+        let workshop_items = index.workshop_items.clone();
+        let (mut after, mut plan) = plan_workshop_rename(&files, &relative, byte_offset, new_name)?;
+        let mut receiver_edits = Vec::new();
+        if matches!(plan.kind.as_str(), "function" | "method") {
+            for candidate in receiver_function_reference_symbols(&workshop_items, &plan.old_name) {
+                if candidate == plan.old_name {
+                    continue;
+                }
+                for reference in find_workshop_references(&files, &candidate, 256)? {
+                    let start = reference
+                        .source_span
+                        .end
+                        .checked_sub(
+                            u32::try_from(plan.old_name.len())
+                                .map_err(|_| "rename target name length exceeds u32".to_string())?,
+                        )
+                        .ok_or_else(|| {
+                            "receiver rename reference is shorter than its name".to_string()
+                        })? as usize;
+                    let end = reference.source_span.end as usize;
+                    let Some(file) = files.iter().find(|file| file.path == reference.file) else {
+                        continue;
+                    };
+                    if file.source.get(start..end) != Some(plan.old_name.as_str()) {
+                        continue;
+                    }
+                    if plan.edits.iter().any(|edit| {
+                        edit.file == reference.file
+                            && edit.source_span.start as usize == start
+                            && edit.source_span.end as usize == end
+                    }) || receiver_edits.iter().any(
+                        |edit: &stasis_compiler::frontend::workshop::WorkshopRenameEdit| {
+                            edit.file == reference.file
+                                && edit.source_span.start as usize == start
+                                && edit.source_span.end as usize == end
+                        },
+                    ) {
+                        continue;
+                    }
+                    receiver_edits.push(stasis_compiler::frontend::workshop::WorkshopRenameEdit {
+                        file: reference.file,
+                        source_span: stasis_compiler::frontend::workshop::WorkshopSourceSpan {
+                            start: u32::try_from(start)
+                                .map_err(|_| "receiver rename start exceeds u32".to_string())?,
+                            end: u32::try_from(end)
+                                .map_err(|_| "receiver rename end exceeds u32".to_string())?,
+                        },
+                        new_text: plan.new_name.clone(),
+                    });
+                }
+            }
+        }
+        if !receiver_edits.is_empty() {
+            plan.edits.extend(receiver_edits);
+            after = apply_workshop_rename_edits(&files, &plan.edits)?;
+        }
         let mut validator = Compiler::new();
         validator.set_project_root(self.project_root.clone())?;
         for file in &after {
@@ -1699,21 +1758,45 @@ impl LanguageService {
             .ok_or_else(|| format!("navigation document is not indexed: '{path}'"))?;
         let symbol = reference_symbol_at(&document.text, byte_offset)
             .ok_or_else(|| "no Stasis symbol at navigation position".to_string())?;
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
         let project_root = self.project_root.clone();
         let index = self.language_index()?;
-        Ok(find_workshop_references(&index.files, &symbol, 256)?
-            .into_iter()
-            .map(|reference| {
-                (
-                    reference.kind,
-                    LanguageLocation {
-                        path: absolute_source_path(&project_root, &reference.file),
-                        range: reference.source_span.start as usize
-                            ..reference.source_span.end as usize,
-                    },
-                )
-            })
-            .collect())
+        let mut references = Vec::new();
+        if let Some(scoped) = find_workshop_generic_parameter_references_at(
+            &index.files,
+            &relative,
+            byte_offset,
+            256,
+        )? {
+            return Ok(scoped
+                .into_iter()
+                .map(|reference| {
+                    (
+                        reference.kind,
+                        LanguageLocation {
+                            path: absolute_source_path(&project_root, &reference.file),
+                            range: reference.source_span.start as usize
+                                ..reference.source_span.end as usize,
+                        },
+                    )
+                })
+                .collect());
+        }
+        for candidate in receiver_function_reference_symbols(&index.workshop_items, &symbol) {
+            for reference in find_workshop_references(&index.files, &candidate, 256)? {
+                let location = LanguageLocation {
+                    path: absolute_source_path(&project_root, &reference.file),
+                    range: reference.source_span.start as usize..reference.source_span.end as usize,
+                };
+                if !references
+                    .iter()
+                    .any(|(kind, existing)| *kind == reference.kind && *existing == location)
+                {
+                    references.push((reference.kind, location));
+                }
+            }
+        }
+        Ok(references)
     }
 
     fn language_index(&mut self) -> Result<&LanguageIndex, String> {
@@ -2118,12 +2201,7 @@ fn completion_insert_text(
         return (item.text.clone(), false);
     };
     let parameters = signature_parameters(signature);
-    let parameters = if item.kind == "method"
-        && item.text.contains('.')
-        && parameters
-            .first()
-            .is_some_and(|parameter| parameter.label.starts_with("self:"))
-    {
+    let parameters = if item.kind == "method" && item.text.contains('.') && !parameters.is_empty() {
         &parameters[1..]
     } else {
         &parameters
@@ -2464,126 +2542,79 @@ fn item_signature(item: &WorkshopCompletionItem) -> Option<String> {
         .filter(|signature| signature.contains('('))
 }
 
-fn hover_signature(
-    source: &str,
-    symbol_range: &Range<usize>,
-    item: &WorkshopCompletionItem,
-) -> Option<String> {
-    let signature = item_signature(item)?;
-    if item.generic_parameters.is_empty() {
-        return Some(signature);
+fn receiver_function_reference_symbols(
+    items: &[WorkshopCompletionItem],
+    symbol: &str,
+) -> Vec<String> {
+    let function_name = symbol.rsplit('.').next().unwrap_or(symbol);
+    let has_receiver_function = items.iter().any(|item| {
+        item.kind == "function"
+            && item.text == function_name
+            && item.owner.is_some()
+            && item.signature.is_some()
+    });
+    if !has_receiver_function {
+        return vec![symbol.to_string()];
     }
-    let Some(arguments) = explicit_generic_arguments(source, symbol_range.end)
-        .or_else(|| concrete_generic_arguments(item))
-    else {
-        return Some(signature);
-    };
-    specialize_generic_signature(&signature, &item.generic_parameters, &arguments)
-        .or(Some(signature))
+
+    let mut symbols = BTreeSet::from([function_name.to_string()]);
+    symbols.extend(
+        items
+            .iter()
+            .filter(|item| {
+                item.kind == "method"
+                    && item.text.rsplit('.').next() == Some(function_name)
+                    && item.signature.is_some()
+            })
+            .map(|item| item.text.clone()),
+    );
+    symbols.into_iter().collect()
 }
 
-fn explicit_generic_arguments(source: &str, start: usize) -> Option<Vec<String>> {
-    let suffix = source.get(start..)?.trim_start();
-    let generic = suffix.strip_prefix("::")?;
-    if !generic.starts_with('<') {
-        return None;
+fn apply_workshop_rename_edits(
+    files: &[WorkshopSourceFile],
+    edits: &[stasis_compiler::frontend::workshop::WorkshopRenameEdit],
+) -> Result<Vec<WorkshopSourceFile>, String> {
+    let mut edits_by_file = BTreeMap::<String, Vec<(usize, usize, String)>>::new();
+    for edit in edits {
+        edits_by_file.entry(edit.file.clone()).or_default().push((
+            edit.source_span.start as usize,
+            edit.source_span.end as usize,
+            edit.new_text.clone(),
+        ));
     }
-    let close = matching_angle_text(generic, 0)?;
-    let arguments = split_generic_arguments(&generic[1..close]);
-    (!arguments.is_empty()).then_some(arguments)
-}
 
-fn concrete_generic_arguments(item: &WorkshopCompletionItem) -> Option<Vec<String>> {
-    let owner = item.owner.as_deref()?;
-    let open = owner.find('<')?;
-    let close = matching_angle_text(&owner[open..], 0)?;
-    let arguments = split_generic_arguments(&owner[open + 1..open + close]);
-    (!arguments.is_empty()).then_some(arguments)
-}
-
-fn split_generic_arguments(arguments: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0usize;
-    for (index, character) in arguments.char_indices() {
-        match character {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let argument = arguments[start..index].trim();
-                if !argument.is_empty() {
-                    values.push(argument.to_string());
-                }
-                start = index + character.len_utf8();
+    let mut after = files.to_vec();
+    for file in &mut after {
+        let Some(mut file_edits) = edits_by_file.remove(&file.path) else {
+            continue;
+        };
+        file_edits.sort_by_key(|(start, end, _)| (*start, *end));
+        let mut next_start = file.source.len();
+        for (start, end, new_text) in file_edits.into_iter().rev() {
+            if start > end
+                || end > file.source.len()
+                || !file.source.is_char_boundary(start)
+                || !file.source.is_char_boundary(end)
+                || end > next_start
+            {
+                return Err(format!(
+                    "rename edits overlap or are outside indexed file '{}'",
+                    file.path
+                ));
             }
-            _ => {}
+            file.source.replace_range(start..end, &new_text);
+            next_start = start;
         }
     }
-    let argument = arguments[start..].trim();
-    if !argument.is_empty() {
-        values.push(argument.to_string());
+    if let Some(file) = edits_by_file.keys().next() {
+        return Err(format!("rename edit targets unknown indexed file '{file}'"));
     }
-    values
+    Ok(after)
 }
 
-fn specialize_generic_signature(
-    signature: &str,
-    parameters: &[stasis_compiler::frontend::workshop::WorkshopGenericParameter],
-    arguments: &[String],
-) -> Option<String> {
-    let open = signature.find('<')?;
-    let close = matching_angle_text(&signature[open..], 0)? + open;
-    let rendered = arguments.join(", ");
-    let mut remainder = signature[close + 1..].to_string();
-    for (parameter, argument) in parameters.iter().zip(arguments) {
-        remainder = replace_signature_identifier(&remainder, &parameter.name, argument);
-    }
-    Some(format!("{}<{}>{}", &signature[..open], rendered, remainder))
-}
-
-fn replace_signature_identifier(source: &str, identifier: &str, replacement: &str) -> String {
-    if identifier.is_empty() {
-        return source.to_string();
-    }
-    let mut output = String::with_capacity(source.len());
-    let mut cursor = 0usize;
-    while let Some(relative) = source[cursor..].find(identifier) {
-        let start = cursor + relative;
-        let end = start + identifier.len();
-        let before = source[..start].chars().next_back();
-        let after = source[end..].chars().next();
-        let boundary = before
-            .is_none_or(|character| !(character.is_ascii_alphanumeric() || character == '_'))
-            && after
-                .is_none_or(|character| !(character.is_ascii_alphanumeric() || character == '_'));
-        if boundary {
-            output.push_str(&source[cursor..start]);
-            output.push_str(replacement);
-        } else {
-            output.push_str(&source[cursor..end]);
-        }
-        cursor = end;
-    }
-    output.push_str(&source[cursor..]);
-    output
-}
-
-fn matching_angle_text(text: &str, open: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    for index in open..bytes.len() {
-        match bytes[index] {
-            b'<' => depth += 1,
-            b'>' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+fn hover_signature(item: &WorkshopCompletionItem) -> Option<String> {
+    item_signature(item)
 }
 
 fn documentation_for_completion(
@@ -2862,7 +2893,6 @@ fn language_symbol(project_root: &str, symbol: &WorkshopSymbol) -> LanguageSymbo
 struct CallContext {
     target: String,
     active_parameter: usize,
-    generic_arguments: Option<Vec<String>>,
 }
 
 fn call_context(source: &str, byte_offset: usize) -> Result<Option<CallContext>, String> {
@@ -2887,7 +2917,6 @@ fn call_context(source: &str, byte_offset: usize) -> Result<Option<CallContext>,
     let Some(mut target_end_index) = open_index.checked_sub(1) else {
         return Ok(None);
     };
-    let mut generic_arguments = None;
     if token_text(prefix, tokens[target_end_index]) == ">" {
         let mut depth = 0usize;
         let mut index = target_end_index;
@@ -2906,12 +2935,11 @@ fn call_context(source: &str, byte_offset: usize) -> Result<Option<CallContext>,
                     {
                         return Ok(None);
                     }
-                    generic_arguments = Some(generic_call_arguments(
-                        prefix,
-                        &tokens,
-                        index,
-                        target_end_index,
-                    ));
+                    // Keep recognizing the legacy `name::<args>(...)` shape so
+                    // signature help can still point at the ordinary canonical
+                    // function signature while the compiler reports the
+                    // migration diagnostic.  The arguments are deliberately
+                    // not retained or substituted into the label.
                     target_end_index = index - 3;
                     break;
                 }
@@ -2947,36 +2975,7 @@ fn call_context(source: &str, byte_offset: usize) -> Result<Option<CallContext>,
     Ok(Some(CallContext {
         target: prefix[tokens[target_start_index].start..tokens[target_end_index].end].to_string(),
         active_parameter,
-        generic_arguments,
     }))
-}
-
-fn generic_call_arguments(
-    source: &str,
-    tokens: &[Token],
-    open: usize,
-    close: usize,
-) -> Vec<String> {
-    let mut arguments = Vec::new();
-    let mut start = tokens[open].end;
-    let mut depth = 0usize;
-    for index in open + 1..close {
-        let token = tokens[index];
-        match token_text(source, token) {
-            "<" => depth += 1,
-            ">" => depth = depth.saturating_sub(1),
-            "," if depth == 0 => {
-                arguments.push(source[start..token.start].trim().to_string());
-                start = token.end;
-            }
-            _ => {}
-        }
-    }
-    let last = source[start..tokens[close].start].trim();
-    if !last.is_empty() {
-        arguments.push(last.to_string());
-    }
-    arguments
 }
 
 fn signature_parameters(signature: &str) -> Vec<SignatureParameter> {
@@ -3701,27 +3700,73 @@ function main(): i32 {
     }
 
     #[test]
-    fn generic_hover_signature_help_and_parameter_navigation_use_shared_metadata() {
+    fn receiver_bound_generic_hover_signature_help_and_rename_use_canonical_metadata() {
         let root = std::env::temp_dir().join("stasis-language-service-generics");
         let path = root.join("src/main.stasis");
         let path_text = path.to_string_lossy().replace('\\', "/");
-        let source = "struct Buffer<N: i32> { values: i32[N]; }\nfunction clear<N: i32>(self: Buffer<N>): void { let count: i32 = N; return; }\nglobal samples: Buffer<4>;\nfunction main(): void { clear::<4>(samples); }\n";
+        let source = "struct Buffer<N: i32> { values: i32[N]; }\nfunction clear(buffer: Buffer<N>): void { let count: i32 = N; return; }\nglobal samples: Buffer<4>;\nfunction main(): void { clear(samples); samples.clear(); }\n";
         let mut service = LanguageService::new(root.to_string_lossy()).expect("service");
         service.set_disk_document(path_text.clone(), source);
 
-        let call = source.find("clear::<4>").expect("explicit generic call");
-        let hover = service
-            .hover(&path_text, call + 2)
+        let free_call = source
+            .find("clear(samples)")
+            .expect("free receiver-bound call");
+        let free_hover = service
+            .hover(&path_text, free_call + 2)
             .expect("generic hover")
             .expect("generic hover info");
-        assert_eq!(hover.signatures, vec!["clear<4>(self: Buffer<4>): void"]);
+        assert_eq!(
+            free_hover.signatures,
+            vec!["clear(buffer: Buffer<N>): void"]
+        );
 
-        let signature_cursor = call + source[call..].find('(').expect("call open") + 1;
-        let help = service
-            .signature_help(&path_text, signature_cursor)
-            .expect("generic signature help")
-            .expect("generic call signature");
-        assert_eq!(help.signatures[0].label, "clear<4>(self: Buffer<4>): void");
+        let dot_call = source
+            .find("samples.clear()")
+            .expect("dot receiver-bound call");
+        let dot_hover = service
+            .hover(&path_text, dot_call + "samples.".len() + 2)
+            .expect("dot generic hover")
+            .expect("dot generic hover info");
+        assert_eq!(dot_hover.signatures, free_hover.signatures);
+
+        let free_definition = service
+            .definition(&path_text, free_call + 2)
+            .expect("free receiver-bound definition");
+        let dot_definition = service
+            .definition(&path_text, dot_call + "samples.".len() + 2)
+            .expect("dot receiver-bound definition");
+        assert_eq!(free_definition, dot_definition);
+
+        let free_references = service
+            .references(&path_text, free_call + 2, true)
+            .expect("free receiver-bound references");
+        let dot_references = service
+            .references(&path_text, dot_call + "samples.".len() + 2, true)
+            .expect("dot receiver-bound references");
+        assert_eq!(free_references, dot_references);
+
+        let clear_declaration =
+            source.find("function clear").expect("function declaration") + "function ".len();
+        let prepared = service
+            .prepare_rename(&path_text, clear_declaration)
+            .expect("receiver-bound function rename preparation");
+        assert_eq!(prepared.kind, "function");
+        let renamed = service
+            .rename(&path_text, clear_declaration, "reset")
+            .expect("receiver-bound function rename");
+        assert_eq!(renamed.kind, "function");
+        assert!(renamed.edits.len() >= 3);
+
+        for (call, cursor_offset) in [
+            (free_call, "clear(".len()),
+            (dot_call, "samples.clear(".len()),
+        ] {
+            let help = service
+                .signature_help(&path_text, call + cursor_offset)
+                .expect("generic signature help")
+                .expect("generic call signature");
+            assert_eq!(help.signatures[0].label, "clear(buffer: Buffer<N>): void");
+        }
 
         let parameter = source.find("Buffer<N>").expect("generic use") + "Buffer<".len();
         let prepared = service
@@ -3733,7 +3778,38 @@ function main(): i32 {
             .rename(&path_text, parameter, "Count")
             .expect("generic parameter rename");
         assert_eq!(renamed.kind, "generic_parameter");
-        assert!(renamed.edits.len() >= 3);
+        assert_eq!(renamed.edits.len(), 2);
+    }
+
+    #[test]
+    fn legacy_explicit_generic_call_keeps_the_canonical_signature_context() {
+        let source = "clear::<4>(samples)";
+        let cursor = source.find('(').expect("legacy call open") + 1;
+        let call = call_context(source, cursor)
+            .expect("legacy call context")
+            .expect("legacy call");
+        assert_eq!(call.target, "clear");
+        assert_eq!(call.active_parameter, 0);
+    }
+
+    #[test]
+    fn canonical_method_completion_omits_the_bound_receiver_argument() {
+        let item = WorkshopCompletionItem {
+            text: "samples.append".to_string(),
+            kind: "method".to_string(),
+            detail: "append(buffer: Buffer<T>, value: T): bool".to_string(),
+            file: "src/main.stasis".to_string(),
+            owner: Some("Buffer<T>".to_string()),
+            signature: Some("append(buffer: Buffer<T>, value: T): bool".to_string()),
+            type_name: None,
+            generic_parameters: Vec::new(),
+            scope: None,
+            exposure: stasis_compiler::frontend::workshop::WorkshopExposure::Public,
+        };
+        assert_eq!(
+            completion_insert_text(&item, "samples.", "samples.".len()),
+            ("samples.append(${1:value})".to_string(), true)
+        );
     }
 
     #[test]
@@ -3880,6 +3956,68 @@ function main(): i32 {
             .expect("workspace symbols");
         assert_eq!(workspace.len(), 1);
         assert_eq!(workspace[0].name, "spawn_enemy");
+    }
+
+    #[test]
+    fn generic_references_are_scoped_by_the_requested_position() {
+        let root = std::env::temp_dir().join("stasis-language-service-generic-references");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = concat!(
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n",
+            "function first(value: Buffer<T, N>): i32 { return N; }\n",
+            "function second(value: Buffer<T, N>): i32 { return N; }",
+        );
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+
+        for function in ["first", "second"] {
+            let declaration = source
+                .find(&format!("function {function}(value: Buffer<T, N>"))
+                .expect("generic function")
+                + format!("function {function}(value: Buffer<T, ").len();
+            let references = service
+                .references(&path_text, declaration, true)
+                .expect("scoped generic references");
+            assert_eq!(references.len(), 2);
+            let function_start = source
+                .find(&format!("function {function}"))
+                .expect("function start");
+            let function_end = source[function_start..]
+                .find('}')
+                .map(|offset| function_start + offset + 1)
+                .expect("function end");
+            assert!(references.iter().all(|reference| {
+                function_start <= reference.range.start && reference.range.end <= function_end
+            }));
+        }
+    }
+
+    #[test]
+    fn generic_reference_probe_preserves_non_generic_member_references() {
+        let root = std::env::temp_dir().join("stasis-language-service-member-references");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = concat!(
+            "struct Enemy { hp: i32; }\n",
+            "global foe: Enemy;\n",
+            "function main(): i32 { foe . hp = 3; return foe . hp; }",
+        );
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let member = source.rfind("foe . hp").expect("member reference") + "foe . ".len();
+
+        let references = service
+            .references(&path_text, member, true)
+            .expect("non-generic member references");
+        assert!(references.len() >= 3);
+        assert!(references.iter().all(|reference| {
+            let text = source[reference.range.clone()]
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            matches!(text.as_str(), "hp" | "foe.hp")
+        }));
     }
 
     #[test]

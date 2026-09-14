@@ -113,6 +113,41 @@ test("packaged toolchain paths cannot escape the immutable bundle", async () => 
   }
 });
 
+test("Stasis grammar scopes receiver-bound generic types without making function names generic", () => {
+  const grammar = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "..", "syntaxes", "stasis.tmLanguage.json"), "utf8"),
+  ) as {
+    repository: {
+      declarations: { patterns: Array<Record<string, unknown>> };
+      "generic-type-application": Record<string, unknown>;
+      operators: { patterns: Array<Record<string, unknown>> };
+    };
+  };
+  const genericStruct = grammar.repository.declarations.patterns.find(
+    pattern => pattern.begin === "\\b(struct)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)\\b\\s*(?=<)",
+  );
+  assert.ok(genericStruct, "generic struct declarations have a dedicated context");
+  assert.equal(genericStruct?.end, "(?=\\{)");
+  assert.equal(
+    grammar.repository["generic-type-application"].begin,
+    "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(<)",
+  );
+
+  const functionDeclaration = grammar.repository.declarations.patterns.find(
+    pattern => pattern.name === "meta.declaration.function.stasis",
+  );
+  assert.equal(typeof functionDeclaration?.match, "string");
+  assert.doesNotMatch(functionDeclaration?.match as string, /<|>/u);
+
+  const operatorPattern = grammar.repository.operators.patterns.find(
+    pattern => typeof pattern.match === "string",
+  );
+  assert.match(operatorPattern?.match as string, /<=/u);
+  assert.match(operatorPattern?.match as string, />=/u);
+  assert.match(operatorPattern?.match as string, /\|</u);
+  assert.match(operatorPattern?.match as string, /\|>/u);
+});
+
 test("packaged toolchain rejects changed binaries before launch", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "stasis-vsix-hash-"));
   try {
