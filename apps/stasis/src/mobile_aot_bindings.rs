@@ -301,7 +301,15 @@ pub fn mobile_aot_function_for(
         .ok_or_else(|| "mobile AOT manifest missing functions array".to_string())?;
     let function = functions
         .iter()
-        .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(function_name))
+        .find(|entry| {
+            entry.get("name").and_then(serde_json::Value::as_str) == Some(function_name)
+                && (function_name != "tick"
+                    || entry
+                        .get("parameter_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                        == 0)
+        })
         .ok_or_else(|| format!("mobile AOT manifest missing function '{function_name}'"))?;
     let symbol = function
         .get("symbol")
@@ -324,6 +332,26 @@ fn mobile_aot_c_return_type(function: &serde_json::Value) -> Result<&'static str
         Some(4) => Ok("double"),
         Some(_) => Ok("int32_t"),
         None => Err("mobile AOT function missing return_type".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mobile_tick_lookup_uses_zero_argument_manifest_row() {
+        let manifest = serde_json::json!({
+            "functions": [
+                {"name": "tick", "symbol": "tick_with_arg", "return_type": 1, "parameter_count": 1},
+                {"name": "tick", "symbol": "tick_noarg", "return_type": 1, "parameter_count": 0}
+            ]
+        });
+
+        assert_eq!(
+            mobile_aot_function_for(&manifest, "tick").expect("zero-argument tick"),
+            ("tick_noarg".to_string(), 1)
+        );
     }
 }
 
