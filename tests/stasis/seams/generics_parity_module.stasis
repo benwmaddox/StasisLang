@@ -1,0 +1,7 @@
+struct OracleQualified<N: i32> {
+    value: i32;
+}
+
+function oracle_qualified_score(self: OracleQualified<N>): i32 {
+    return N + self.value;
+}

@@ -73,22 +73,22 @@ The existing ownership and view rules remain authoritative:
 ## Backend and packaging contract
 
 The compiler specializes once and sends the concrete result through the normal
-backend paths. The full collection workload is intentionally kept as a native
-JIT/AOT fixture because the current Wasm backend does not support the
-receiver-owned `Entity[]` view used by the entity-pool portion. The sample uses
-the hash-checked `vendor/stasis` snapshot for native and mobile packaging. Its
-`stasis.json` selects `src/wasm_entry.stasis` for Web packaging; that scalar
-fixture exercises the same generic collection contract and executes in the
-produced `game.wasm`. Android uses the same full entry and renderer lifecycle
-as native packaging.
+backend paths. JIT, native AOT, and Wasm support bounded named-struct-array
+views for internal calls, including fixed-to-view conversion, receiver-owned
+fields, forwarded views, indexed element calls, field mutation, `foreach`, and
+`max_length`. The sample uses the hash-checked `vendor/stasis` snapshot for
+native and mobile packaging. Its `stasis.json` still selects
+`src/wasm_entry.stasis` for Web packaging until the separate package migration
+slice changes that entry. Android uses the same full entry and renderer
+lifecycle as native packaging.
 
 | Surface | Executable coverage | Result required for a green run |
 | --- | --- | --- |
 | Syntax, receiver binding, free/dot calls, scalar storage, nesting, bounds | `generics_collections_jit_aot_wasm::generic_collection_sample_tests_pass_in_the_production_jit_shape`; the two sample tests | Both tests return true. |
 | Generic expansion and graphics provenance | `generics_collections_jit_aot_wasm::generic_collection_aot_accepts_vendor_graphics_after_expansion` | Generic constant rewriting does not invalidate the compiler-owned vendor graphics module. |
 | Negative diagnostics | `generics_collections_jit_aot_wasm::negative_generic_collection_fixtures_keep_expected_diagnostics` | Runtime capacities, unresolved values, layout overflow, ambiguous receivers, and unsupported composite copies fail with stable diagnostics. |
-| JIT and Wasm execution | `generics_collections_jit_aot_wasm::generic_collection_scalar_fixture_executes_in_wasm` | The module has a valid Wasm header and Node observes `main() == 0`. |
-| Linked native AOT | `generics_collections_aot_seam::generic_collection_sample_links_and_runs_in_aot` on Windows | The linked executable observes `main() == 0`; the existing unsigned-host policy may skip only when Application Control returns 4551 and signing is not required. |
+| JIT, AOT, and Wasm parity | `generics_collections_jit_aot_wasm::backend_neutral_generics_oracle_matches_jit_aot_and_wasm` | JIT and Node/Wasm observe the independent digest; Windows also links and executes the AOT object and checks the same digest. |
+| Receiver and forwarded named-struct views | `generics_collections_jit_aot_wasm::indexed_named_struct_elements_resolve_local_receiver_and_qualified_calls`; Wasm backend receiver-view tests | Internal indexed calls, whole-element field-wise copies, owner isolation, `foreach`, and `max_length` execute against caller-backed storage. |
 | Incremental state and swap | `development_swap::tests::generic_collection_capacity_swap_migrates_state_and_allows_retry_after_rejection` | Compatible state migrates and a rejected candidate leaves the active state retryable. |
 | Packaged Web | `apps/stasis/tests/generics_collections_package.rs` | `package --target web --development-build` emits `game.wasm`, and Node executes its scalar entry with result 0. |
 | Android AOT link | The `android-package-link` slow CI lane and the generated `android` Gradle project | The generic arm64 package links `libmain.so`; its bundle and link map agree. The x86_64 development APK is the emulator lane and must present valid frames. |
@@ -102,10 +102,11 @@ defaults, variadic or higher-kinded parameters, traits, runtime value arguments,
 non-`i32` value parameters, symbolic equation solving, or arbitrary
 composite-element copying. Lifecycle and host entries remain concrete.
 
-Web packaging must use the sample's scalar `wasm_entry.stasis` until the
-receiver-owned struct-array view is supported by that backend. This is a
-backend boundary, not a fallback execution mode: unsupported generic shapes
-must remain compile-time errors.
+Wasm host imports, exports, and aggregate returns remain scalar-only ABI
+boundaries. The sample's scalar `wasm_entry.stasis` remains a packaging choice
+until the separate Web-package migration changes it; it is no longer required
+by the internal Wasm named-struct-array view representation. Unsupported host
+aggregate shapes remain compile-time errors.
 
 ## Acceptance matrix
 
