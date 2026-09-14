@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::backend::reachability::compute_reachable_function_ids;
+use crate::backend::reachability::{compute_reachable_function_ids, matches_root};
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::identity::SymbolId;
 
@@ -363,7 +363,14 @@ impl CurrentGraph {
             .collect();
         let host_entries = functions
             .iter()
-            .filter(|function| required_names.contains(function.name.as_str()))
+            .filter(|function| {
+                required_names.contains(function.name.as_str())
+                    && LIFECYCLE_ROOTS
+                        .iter()
+                        .copied()
+                        .chain(required_roots.iter().map(String::as_str))
+                        .any(|root| matches_root(function, root))
+            })
             .filter_map(|function| key_by_id.get(&function.id).cloned())
             .collect();
         let mut by_key = BTreeMap::new();

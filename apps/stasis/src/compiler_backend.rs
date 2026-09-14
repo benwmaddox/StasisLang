@@ -96,8 +96,18 @@ struct SelfHostObjectBundle {
 struct EngineFunctionEntry {
     path: String,
     name: String,
+    parameter_count: usize,
     symbol_id: String,
     fn_id: FnId,
+}
+
+fn is_zero_argument_tick(entry: &EngineFunctionEntry) -> bool {
+    entry.name == "tick" && entry.parameter_count == 0
+}
+
+fn is_host_lifecycle_entry(entry: &EngineFunctionEntry) -> bool {
+    matches!(entry.name.as_str(), "main" | "render" | "on_code_swap")
+        || is_zero_argument_tick(entry)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -106,6 +116,8 @@ struct EngineBundleManifestFunctionRow {
     symbol_id: String,
     name: String,
     symbol: String,
+    #[serde(default)]
+    parameter_count: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -526,6 +538,7 @@ fn snapshot_function_entries(snapshot: &ProgramSnapshot) -> Vec<EngineFunctionEn
                 .map(|file| EngineFunctionEntry {
                     path: file.path.clone(),
                     name: function.name.clone(),
+                    parameter_count: function.params.len(),
                     symbol_id: function.symbol_id.to_string(),
                     fn_id: FnId(function.id),
                 })
@@ -653,7 +666,7 @@ impl IncrementalCompilerBackend {
                     .program_snapshot()
                     .expect("compiled JIT candidate snapshot"),
             );
-            let engine = entries.iter().any(|entry| entry.name == "tick")
+            let engine = entries.iter().any(is_zero_argument_tick)
                 && entries.iter().any(|entry| entry.name == "render");
             if engine {
                 return self.compile_engine_mode_contract_request(
@@ -703,7 +716,7 @@ impl IncrementalCompilerBackend {
                 .program_snapshot()
                 .expect("compiled AOT candidate snapshot"),
         );
-        let has_tick_entrypoint = function_entries.iter().any(|entry| entry.name == "tick");
+        let has_tick_entrypoint = function_entries.iter().any(is_zero_argument_tick);
         let has_render_entrypoint = function_entries.iter().any(|entry| entry.name == "render");
         let has_on_code_swap_entrypoint = function_entries
             .iter()
@@ -975,10 +988,7 @@ impl IncrementalCompilerBackend {
                 }
             }
             let fn_id = entry.fn_id;
-            if matches!(
-                entry.name.as_str(),
-                "main" | "tick" | "render" | "on_code_swap"
-            ) {
+            if is_host_lifecycle_entry(entry) {
                 if let Some(previous) = lifecycle_fn_id_by_name.insert(entry.name.clone(), fn_id) {
                     if previous != fn_id {
                         return CompileResult::failed(
@@ -1133,10 +1143,8 @@ impl IncrementalCompilerBackend {
                 continue;
             }
             let fn_id = entry.fn_id;
-            if matches!(
-                entry.name.as_str(),
-                "main" | "tick" | "render" | "on_code_swap"
-            ) && host_aliases.insert(entry.name.clone(), fn_id).is_some()
+            if is_host_lifecycle_entry(entry)
+                && host_aliases.insert(entry.name.clone(), fn_id).is_some()
             {
                 return Err(format!("host ABI alias '{}' is ambiguous", entry.name));
             }
@@ -3397,7 +3405,7 @@ fn resolve_engine_bundle_symbol(
     manifest
         .functions
         .iter()
-        .find(|row| row.name == name)
+        .find(|row| row.name == name && (name != "tick" || row.parameter_count == 0))
         .map(|row| row.symbol.clone())
         .ok_or_else(|| format!("engine bundle manifest is missing required symbol {name}"))
 }
@@ -3918,7 +3926,7 @@ fn package_engine_bundle_release(
     let tick_symbol = manifest
         .functions
         .iter()
-        .find(|row| row.name == "tick")
+        .find(|row| row.name == "tick" && row.parameter_count == 0)
         .map(|row| row.symbol.clone());
     let render_symbol = manifest
         .functions
@@ -7137,7 +7145,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
     let include_on_code_swap = function_entries
         .iter()
         .any(|entry| entry.name == "on_code_swap");
-    let use_engine_mode_contracts = function_entries.iter().any(|entry| entry.name == "tick")
+    let use_engine_mode_contracts = function_entries.iter().any(is_zero_argument_tick)
         && function_entries.iter().any(|entry| entry.name == "render");
 
     let mut summary = if use_engine_mode_contracts {
