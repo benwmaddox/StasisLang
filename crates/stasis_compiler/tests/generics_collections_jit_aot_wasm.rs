@@ -49,7 +49,13 @@ fn linker_path() -> PathBuf {
         assert!(path.is_file(), "STASIS_AOT_LINKER must name a linker file");
         return path;
     }
-    for candidate in ["link.exe", "lld-link.exe"] {
+    if let Some(path) = cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "link.exe")
+        .map(|tool| tool.path().to_path_buf())
+        .filter(|path| path.is_file())
+    {
+        return path;
+    }
+    for candidate in ["lld-link.exe", "link.exe"] {
         if let Ok(output) = Command::new("where.exe").arg(candidate).output() {
             if let Some(path) = output
                 .status
@@ -64,16 +70,20 @@ fn linker_path() -> PathBuf {
                         .collect::<Vec<_>>()
                 })
                 .map(PathBuf::from)
-                .find(|path| path.is_file())
+                .find(|path| {
+                    path.is_file()
+                        && !path
+                            .to_string_lossy()
+                            .replace('/', "\\")
+                            .to_ascii_lowercase()
+                            .ends_with("\\git\\usr\\bin\\link.exe")
+                })
             {
                 return path;
             }
         }
     }
-    cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "link.exe")
-        .map(|tool| tool.path().to_path_buf())
-        .filter(|path| path.is_file())
-        .expect("MSVC link.exe or lld-link.exe is required for linked AOT execution")
+    panic!("MSVC link.exe or lld-link.exe is required for linked AOT execution")
 }
 
 #[cfg(windows)]
