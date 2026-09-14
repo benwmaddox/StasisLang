@@ -2,6 +2,21 @@
   "use strict";
   const canvas = document.getElementById("stasis-canvas");
   const hud = document.getElementById("stasis-hud");
+  const performanceHudQueryEnabled = () => {
+    if (!globalThis.location || typeof globalThis.location.search !== "string"
+      || typeof URLSearchParams !== "function") return false;
+    const value = new URLSearchParams(globalThis.location.search).get("stasis-hud");
+    return ["1", "true", "on"].includes(String(value || "").trim().toLowerCase());
+  };
+  let performanceHudVisible = performanceHudQueryEnabled();
+  const setPerformanceHudVisible = visible => {
+    performanceHudVisible = Boolean(visible);
+    if (!hud) return;
+    hud.hidden = !performanceHudVisible;
+    if (hud.dataset) hud.dataset.visible = String(performanceHudVisible);
+    if (typeof hud.setAttribute === "function") hud.setAttribute("aria-hidden", String(!performanceHudVisible));
+  };
+  setPerformanceHudVisible(performanceHudVisible);
   const errorBox = document.getElementById("stasis-error");
   const loadingBox = document.getElementById("stasis-loading");
   const loadingStatus = document.getElementById("stasis-loading-status");
@@ -3597,6 +3612,11 @@
   }
   addEventListener("keydown", event => {
     if (!event.repeat && !keys.has(event.code)) markExternalActionGesture();
+    if (event.code === "F3" && hud) {
+      setPerformanceHudVisible(!performanceHudVisible);
+      event.preventDefault();
+      return;
+    }
     keys.add(event.code);
     // @stasis-feature audio begin
     void enableWebAudio();

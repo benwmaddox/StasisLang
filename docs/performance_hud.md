@@ -31,6 +31,10 @@ recover after a transient spike. Workload details (commands, lines,
 rectangles, sprites, text, instances, batches, draws, and uploaded bytes when
 available) explain why a phase is expensive.
 
-The desktop HUD is toggled with **F3**. Android keeps its three-finger toggle;
-iOS uses the same three-finger gesture in the shared SDL event path. Metrics
-collection is disabled while the HUD is hidden.
+The Web development HUD is hidden by default. Press **F3** to toggle it, or add
+`?stasis-hud=1` to the package URL to start it visible for automation and
+mobile-browser testing. The toggle changes only the diagnostic overlay:
+performance timing and body-dataset telemetry continue to update while it is
+hidden. Release packages do not include the HUD. Desktop uses **F3**, Android
+keeps its three-finger toggle, and iOS uses the same three-finger gesture in the
+shared SDL event path.
