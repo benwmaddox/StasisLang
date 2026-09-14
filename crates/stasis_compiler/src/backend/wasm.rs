@@ -1757,6 +1757,19 @@ fn encode_statements(
                             )?;
                             continue;
                         }
+                        if suffix.is_empty()
+                            && receiver_struct_collection_candidates(collection_path, context)?
+                                .is_some()
+                        {
+                            encode_receiver_struct_collection_copy(
+                                collection_path,
+                                index,
+                                expression,
+                                context,
+                                out,
+                            )?;
+                            continue;
+                        }
                     }
                 }
                 if *op != AssignOp::Set
@@ -3187,8 +3200,6 @@ fn encode_receiver_struct_collection_field_address(
     else {
         return Ok(None);
     };
-    let field_type = receiver_struct_collection_field_type(collection_path, suffix, context)?
-        .expect("receiver candidates imply a field type");
     let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
     if !is_web_index_type(index_type, context) {
         return Err(format!(
@@ -3197,6 +3208,45 @@ fn encode_receiver_struct_collection_field_address(
     }
     out.push(0x21);
     uleb(context.scratch_index, out);
+
+    let field_type = encode_receiver_struct_collection_field_address_for_index_local(
+        collection_path,
+        receiver,
+        &candidates,
+        suffix,
+        context.scratch_index,
+        out,
+    )?;
+    Ok(Some(field_type))
+}
+
+fn encode_receiver_struct_collection_field_address_for_index_local(
+    collection_path: &str,
+    receiver: &LocalBinding,
+    candidates: &[ReceiverStructCollectionCandidate<'_>],
+    suffix: &str,
+    index_local: u32,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let field_type = candidates[0]
+        .collection
+        .fields
+        .get(suffix)
+        .map(|field| field.type_id)
+        .ok_or_else(|| {
+            format!("unknown web receiver named-struct field '{collection_path}.{suffix}'")
+        })?;
+    if candidates.iter().any(|candidate| {
+        candidate
+            .collection
+            .fields
+            .get(suffix)
+            .is_none_or(|field| field.type_id != field_type)
+    }) {
+        return Err(format!(
+            "web receiver named-struct field '{collection_path}.{suffix}' has ambiguous layouts"
+        ));
+    }
 
     fn select(
         receiver: &LocalBinding,
@@ -3241,8 +3291,8 @@ fn encode_receiver_struct_collection_field_address(
         out.push(0x0b);
     }
 
-    select(receiver, context.scratch_index, suffix, &candidates, out);
-    Ok(Some(field_type))
+    select(receiver, index_local, suffix, candidates, out);
+    Ok(field_type)
 }
 
 #[derive(Clone, Copy)]
@@ -3649,6 +3699,69 @@ fn encode_local_struct_collection_copy(
             "struct collection field assignment",
         )?;
         encode_memory_store(target_field.type_id, out)?;
+    }
+    Ok(())
+}
+
+fn encode_receiver_struct_collection_copy(
+    collection_path: &str,
+    target_index: &SimpleExpr,
+    source: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((receiver, candidates)) =
+        receiver_struct_collection_candidates(collection_path, context)?
+    else {
+        return Err(format!(
+            "unknown web receiver named-struct array '{collection_path}'"
+        ));
+    };
+    let target_type = candidates[0].collection.type_id;
+    let source_type = encode_struct_view_expr(source, context, out)?;
+    require_same_struct_type(target_type, source_type, "collection assignment")?;
+    for local in [
+        context.saved_view_len,
+        context.saved_view_start,
+        context.saved_view_owner,
+    ] {
+        out.push(0x21);
+        uleb(local, out);
+    }
+    let index_type = encode_expr_as(target_index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(index_type, context) {
+        return Err("web struct collection index must be i32-compatible".to_string());
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+
+    let source_binding = LocalBinding {
+        index: context.saved_view_owner,
+        type_id: source_type,
+        struct_view: Some(StructViewBinding {
+            index: context.saved_view_start,
+            len: context.saved_view_len,
+        }),
+    };
+    let fields = context.named_structs.get(&target_type).ok_or_else(|| {
+        format!("web named-struct array element {target_type} has no field layout")
+    })?;
+    for suffix in fields.keys() {
+        let target_field = encode_receiver_struct_collection_field_address_for_index_local(
+            collection_path,
+            receiver,
+            &candidates,
+            suffix,
+            context.scratch_index,
+            out,
+        )?;
+        let source_field_type = encode_struct_field_load(&source_binding, suffix, context, out)?;
+        require_same_type(
+            target_field,
+            source_field_type,
+            "struct collection field assignment",
+        )?;
+        encode_memory_store(target_field, out)?;
     }
     Ok(())
 }
@@ -5814,6 +5927,10 @@ function view_copy_first(items: ViewItem[]): void {
     items[1] = items[0];
 }
 
+function view_copy_receiver(self: ViewBox): void {
+    self.items[0] = self.items[1];
+}
+
 function view_item_value(item: ViewItem): i32 {
     return item.value;
 }
@@ -5831,6 +5948,7 @@ function main(): i32 {
     view_right.view_fill(20);
     view_nested.inner.view_fill(30);
     view_copy_first(view_left.items);
+    view_right.view_copy_receiver();
     return view_left.view_box_score() + view_right.view_box_score() + view_nested.view_nested_score();
 }
 "#,
@@ -5864,7 +5982,7 @@ function main(): i32 {
             "Node failed:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "188");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "190");
     }
 
     #[test]

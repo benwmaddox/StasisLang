@@ -3,6 +3,10 @@ use stasis_compiler::backend::jit::JitProcess;
 use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::compiler::Compiler;
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
+#[cfg(windows)]
+use stasis_jit::{AotLinkConfig, AotTarget};
+#[cfg(windows)]
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,11 +25,117 @@ const RIG2D_IMPORT: &str = "/vendor/stasis/stdlib/rig2d.stasis";
 const GRAPHICS_IMPORT: &str = "/vendor/stasis/stdlib/graphics.stasis";
 const WASM_ROOT: &str = "main";
 
+#[cfg(windows)]
+struct AotTree(PathBuf);
+
+#[cfg(windows)]
+impl Drop for AotTree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .expect("canonical repository root")
+}
+
+#[cfg(windows)]
+fn linker_path() -> PathBuf {
+    if let Some(explicit) = std::env::var_os("STASIS_AOT_LINKER") {
+        let path = PathBuf::from(explicit);
+        assert!(path.is_file(), "STASIS_AOT_LINKER must name a linker file");
+        return path;
+    }
+    for candidate in ["link.exe", "lld-link.exe"] {
+        if let Ok(output) = Command::new("where.exe").arg(candidate).output() {
+            if let Some(path) = output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout))
+                .into_iter()
+                .flat_map(|lines| {
+                    lines
+                        .lines()
+                        .map(str::trim)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .map(PathBuf::from)
+                .find(|path| path.is_file())
+            {
+                return path;
+            }
+        }
+    }
+    cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "link.exe")
+        .map(|tool| tool.path().to_path_buf())
+        .filter(|path| path.is_file())
+        .expect("MSVC link.exe or lld-link.exe is required for linked AOT execution")
+}
+
+#[cfg(windows)]
+fn dynload_artifacts() -> (PathBuf, PathBuf) {
+    let deps = std::env::current_exe()
+        .expect("test executable")
+        .parent()
+        .expect("Cargo deps directory")
+        .to_path_buf();
+    let artifacts = [&deps, deps.parent().expect("Cargo profile directory")]
+        .into_iter()
+        .find_map(|directory| {
+            let import = directory.join("stasis_dynload.dll.lib");
+            let runtime = directory.join("stasis_dynload.dll");
+            (import.is_file() && runtime.is_file()).then_some((import, runtime))
+        })
+        .expect("fresh stasis_dynload DLL and import library in the Cargo target");
+    artifacts
+}
+
+#[cfg(windows)]
+fn run_linked_aot_oracle(aot: &AotProcess, expected_digest: i32) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join("target"));
+    let tree = AotTree(target.join(format!(
+        "generics-parity-oracle-aot-{}-{stamp}",
+        std::process::id()
+    )));
+    fs::create_dir_all(&tree.0).expect("create linked-AOT oracle directory");
+    let (import, runtime) = dynload_artifacts();
+    fs::copy(runtime, tree.0.join("stasis_dynload.dll")).expect("copy linked-AOT runtime");
+    let executable = tree.0.join("generics_parity_oracle.exe");
+    aot.link_executable_for_i32_noarg_function(
+        "main",
+        &executable,
+        &AotLinkConfig {
+            linker_path: Some(linker_path()),
+            runtime_lib_paths: vec![import],
+            target: AotTarget::Native,
+        },
+    )
+    .expect("link shared generics oracle AOT executable");
+    let status = Command::new(repository_root().join(".cargo/stasis-sign-and-run.cmd"))
+        .arg(executable.file_name().expect("linked executable name"))
+        .current_dir(&tree.0)
+        .status()
+        .expect("run linked shared generics oracle AOT executable");
+    let aot_code = status.code().expect("linked AOT process exit code");
+    let signed_execution_required =
+        std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").is_some_and(|value| value == "1");
+    if aot_code == 4551 && !signed_execution_required {
+        eprintln!(
+            "skipping linked AOT execution parity: Windows Application Control returned 4551 and signed execution is not required"
+        );
+    } else {
+        assert_eq!(aot_code, expected_digest, "JIT/AOT result parity");
+    }
 }
 
 fn repository_entry() -> String {
@@ -325,6 +435,8 @@ fn backend_neutral_generics_oracle_matches_jit_aot_and_wasm() {
     aot.upsert_file(PARITY_ORACLE_MODULE_PATH, PARITY_ORACLE_MODULE);
     aot.compile()
         .expect("compile shared generics oracle to a native AOT object");
+    #[cfg(windows)]
+    run_linked_aot_oracle(&aot, EXPECTED_DIGEST);
 
     let mut wasm = WasmProcess::new();
     wasm.set_required_emit_roots(
