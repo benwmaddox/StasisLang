@@ -112,13 +112,20 @@ default.
 
 The vendor release and hash describe the exact checked-in `vendor/stasis` snapshot.
 `manifest_version` versions the JSON schema and is independent of the selected toolchain release.
-On every normal project command, Stasis verifies the on-disk tree against the selected executable.
-A content mismatch stages its matching public stdlib and internal host-ABI modules together and publishes the vendor tree and
-manifest as one rollback-capable transaction. The recorded release ID changes only with that vendor content;
-building or selecting an executable with a different release ID does not rewrite an unchanged snapshot.
-The content hash still detects rebuilt development executables whose release ID did not change and repairs edited or missing vendor files. Stasis owns `vendor/stasis`;
-Git is the review and rollback mechanism, so synchronization does not prompt. Review and commit the
-vendor and manifest changes together with the compiler upgrade.
+Mutating project commands verify the on-disk tree against the selected executable. A content mismatch
+stages its matching public stdlib and internal host-ABI modules together and publishes the vendor tree
+and manifest as one rollback-capable transaction. The recorded release ID changes only with that vendor
+content; building or selecting an executable with a different release ID does not rewrite an unchanged
+snapshot. The content hash still detects rebuilt development executables whose release ID did not change
+and repairs edited or missing vendor files. Stasis owns `vendor/stasis`; Git is the review and rollback
+mechanism, so synchronization does not prompt. Review and commit the vendor and manifest changes
+together with the compiler upgrade.
+
+The local validation commands `stasis check`, `stasis test`, and `stasis record` deliberately use the
+selected executable against the existing checked-in snapshot without reconciling `stasis.json` or
+`vendor/stasis`. This lets a local checkout validate a project pinned to an older published nightly
+while the local compiler is newer, without changing the project's release or CI pin. Run the explicit
+`stasis vendor update` command when the project should adopt the selected executable's vendor snapshot.
 
 The semantic symbol queries `list`, `find`, `read`, and `references` are strictly read-only. They
 never reconcile, create, or rewrite the project manifest, vendor tree, or toolchain state. If a
@@ -292,8 +299,9 @@ restore release assets.
 `verify` remains reserved for a future non-presenting batch verifier. `replay` performs verification
 while presenting every reconstructed tick.
 
-Formatting checks and formatting writes leave `stasis.json` and `vendor/stasis` unchanged,
-even when the selected toolchain differs from the project's vendor pin. Generated commit hooks
+Validation commands (`check`, `test`, and `record`) and formatting checks and writes leave
+`stasis.json` and `vendor/stasis` unchanged, even when the selected toolchain differs from the
+project's vendor pin. Generated commit hooks
 format explicit `src` and `tests` paths so older formatters also avoid workspace synchronization.
 Release changes remain separate from formatting.
 
