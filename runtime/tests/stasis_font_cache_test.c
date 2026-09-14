@@ -108,6 +108,12 @@ int main(void) {
 
     int fixed_run = stasis_gfx_cache_text(first, "score 0");
     CHECK(fixed_run > 0);
+    for (int i = 0; i < 16; i++) stasis_gfx_release_font(first);
+    CHECK(stasis_gfx_measure_text_cached(fixed_run) > 0.0f);
+    int shared_first = stasis_load_font(STASIS_TEST_FONT_PATH, 18);
+    CHECK(shared_first == first);
+    stasis_gfx_release_font(shared_first);
+    CHECK(stasis_gfx_measure_text_cached(fixed_run) > 0.0f);
     CHECK(stasis_gfx_cache_text(first, "score 0") == fixed_run);
     int dynamic_run = stasis_gfx_replace_text(fixed_run, first, "score 0");
     CHECK(dynamic_run > 0 && dynamic_run != fixed_run);
@@ -152,6 +158,8 @@ int main(void) {
     stasis_gfx_release_font(large);
     CHECK(stasis_gfx_measure_text_cached(retained_fixed_run) > 0.0f);
     CHECK(stasis_gfx_measure_text_cached(appended_after_compaction) > 0.0f);
+    stasis_gfx_release_font(large);
+    stasis_gfx_release_font(second_size);
     int reused = stasis_load_font(STASIS_TEST_FONT_PATH, 19);
     CHECK(reused > 0);
     CHECK(reused != first);

@@ -286,6 +286,27 @@ static float stasis_display_font_raster_scale(float pixel_scale) {
     return pixel_scale;
 }
 
+static int stasis_display_font_scaled_extent_for_backing(
+    int logical_extent,
+    int logical_w,
+    int logical_h,
+    int drawable_w,
+    int drawable_h
+) {
+    if (logical_extent <= 0) return 0;
+    if (logical_extent >= 65536) return 65536;
+    StasisDisplayPreparationScale scale = stasis_display_preparation_scale(
+        logical_w, logical_h, drawable_w, drawable_h);
+    if (scale.numerator < 2 * scale.denominator) {
+        scale.numerator = 2;
+        scale.denominator = 1;
+    }
+    const int64_t scaled =
+        ((int64_t)logical_extent * scale.numerator + scale.denominator - 1) /
+        scale.denominator;
+    return scaled > 65536 ? 65536 : (int)scaled;
+}
+
 static int stasis_display_font_atlas_extent(float pixel_scale) {
     if (pixel_scale <= 1.0f) return STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT;
     if (pixel_scale <= 4.0f) return 1024;

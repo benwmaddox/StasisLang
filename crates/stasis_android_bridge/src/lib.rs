@@ -981,6 +981,7 @@ struct EmbeddedFont {
     generation: u32,
     retired: bool,
     active: bool,
+    ref_count: usize,
     path: PathBuf,
     size: i32,
 }
@@ -1385,12 +1386,17 @@ fn embedded_load_font(path: &[u8], size: i32) -> i32 {
         );
         return 0;
     }
-    if let Some(font) = catalog
+    if let Some(index) = catalog
         .fonts
         .iter()
-        .find(|font| font.active && font.path == absolute && font.size == size)
+        .position(|font| font.active && font.path == absolute && font.size == size)
     {
-        return font.handle;
+        let Some(ref_count) = catalog.fonts[index].ref_count.checked_add(1) else {
+            set_embedded_resource_error(catalog, "font reference count overflow".to_string());
+            return 0;
+        };
+        catalog.fonts[index].ref_count = ref_count;
+        return catalog.fonts[index].handle;
     }
     if let Some(index) = catalog
         .fonts
@@ -1401,6 +1407,7 @@ fn embedded_load_font(path: &[u8], size: i32) -> i32 {
         let handle = ((font.generation << FONT_HANDLE_INDEX_BITS) | (index as u32 + 1)) as i32;
         font.handle = handle;
         font.active = true;
+        font.ref_count = 1;
         font.path = absolute;
         font.size = size;
         return handle;
@@ -1416,6 +1423,7 @@ fn embedded_load_font(path: &[u8], size: i32) -> i32 {
         generation: 0,
         retired: false,
         active: true,
+        ref_count: 1,
         path: absolute,
         size,
     });
@@ -1439,8 +1447,13 @@ fn embedded_release_font(handle: i32) {
     else {
         return;
     };
+    if catalog.fonts[index].ref_count > 1 {
+        catalog.fonts[index].ref_count -= 1;
+        return;
+    }
     let next_generation = (catalog.fonts[index].generation + 1) & FONT_HANDLE_GENERATION_MASK;
     catalog.fonts[index].active = false;
+    catalog.fonts[index].ref_count = 0;
     catalog.fonts[index].handle = 0;
     catalog.fonts[index].generation = next_generation;
     catalog.fonts[index].retired = next_generation == 0;
@@ -7626,6 +7639,7 @@ function on_code_swap(): void {}\n";
                 generation: 0,
                 retired: false,
                 active: true,
+                ref_count: 1,
                 path: root.join("assets/font.ttf"),
                 size: 18,
             });
@@ -7667,6 +7681,7 @@ function on_code_swap(): void {}\n";
                 generation: 0,
                 retired: false,
                 active: true,
+                ref_count: 2,
                 path: root.join("assets/first.ttf"),
                 size: 18,
             });
@@ -7675,6 +7690,7 @@ function on_code_swap(): void {}\n";
                 generation: 0,
                 retired: false,
                 active: true,
+                ref_count: 1,
                 path: root.join("assets/second.ttf"),
                 size: 24,
             });
@@ -7685,6 +7701,8 @@ function on_code_swap(): void {}\n";
         assert_eq!(stale_run, 1);
         assert_eq!(retained_run, 2);
         embedded_release_font(1);
+        assert!(embedded_measure_text_cached(stale_run) > 0.0);
+        embedded_release_font(1);
         assert_eq!(embedded_measure_text_cached(stale_run), 0.0);
         assert!(embedded_measure_text_cached(retained_run) > 0.0);
         {
@@ -7692,6 +7710,7 @@ function on_code_swap(): void {}\n";
             let font = &mut slot.as_mut().unwrap().fonts[0];
             font.handle = (font.generation << FONT_HANDLE_INDEX_BITS | 1) as i32;
             font.active = true;
+            font.ref_count = 1;
             font.path = root.join("assets/replacement.ttf");
             font.size = 20;
         }
@@ -7723,6 +7742,7 @@ function on_code_swap(): void {}\n";
                 generation: 0,
                 retired: false,
                 active: true,
+                ref_count: 1,
                 path: root.join("assets/first.ttf"),
                 size: 18,
             });
@@ -7731,6 +7751,7 @@ function on_code_swap(): void {}\n";
                 generation: 0,
                 retired: false,
                 active: true,
+                ref_count: 1,
                 path: root.join("assets/second.ttf"),
                 size: 30,
             });

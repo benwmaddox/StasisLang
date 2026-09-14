@@ -190,6 +190,10 @@ test("web released font handles stay invalid and the allocator never aliases the
       env.stasis_jit_gfx_release_font(first);
       assert.equal(env.stasis_jit_gfx_cache_text(first, 2), 0);
       assert.equal(env.stasis_jit_measure_text(first, 2), 0);
+      for (let index = 0; index < 4100; index += 1) {
+        game.strings["2"] = `released-${index}`;
+        assert.equal(env.stasis_jit_gfx_cache_text(first, 2), 0);
+      }
       game.strings["1"] = "assets/replacement.ttf";
       second = env.load_font(1, 20);
       assert.ok(second > first);

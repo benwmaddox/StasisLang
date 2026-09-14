@@ -532,6 +532,7 @@ typedef struct {
     uint32_t renderer_generation;
     uint32_t generation;
     int retired;         /* generation wrapped; never reuse this slot */
+    int ref_count;       /* callers sharing this exact font acquisition */
     char source_path[1024];
     uint64_t source_size;
 } StasisFont;
@@ -6523,6 +6524,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
        stale handle from the prior renderer session cannot alias a new font. */
     for (int i = 0; i < MAX_FONTS; i++) {
         if (g_fonts[i].active) {
+            g_fonts[i].ref_count = 1;
             stasis_gfx_release_font(stasis_font_handle_for_slot(i));
         }
     }
@@ -6879,7 +6881,12 @@ static int stasis_build_font_atlas(StasisFont* font) {
     const int replaces_existing = font->raster_size > 0 && font->atlas_size > 0;
 
     const float pixel_scale = stasis_display_font_raster_scale(g_pixel_scale);
-    const int raster_size = stasis_display_scaled_extent(font->font_size, pixel_scale);
+    const int raster_size = stasis_display_font_scaled_extent_for_backing(
+        font->font_size,
+        g_display_metrics.logical_w,
+        g_display_metrics.logical_h,
+        g_display_metrics.drawable_w,
+        g_display_metrics.drawable_h);
     int atlas_size = stasis_display_font_atlas_extent(pixel_scale);
     size_t atlas_pixels = 0;
     unsigned char* atlas_bitmap = NULL;
@@ -7455,6 +7462,11 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
             if (g_fonts[i].source_size == (uint64_t)size && g_fonts[i].ttf_buffer &&
                 memcmp(g_fonts[i].ttf_buffer, ttf_buffer, size) == 0) {
                 free(ttf_buffer);
+                if (g_fonts[i].ref_count == INT_MAX) {
+                    stasis_report_runtime_errorf("Font reference count overflow: %s", path);
+                    return 0;
+                }
+                g_fonts[i].ref_count++;
                 return stasis_font_handle_for_slot(i);
             }
         }
@@ -7496,6 +7508,7 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
     font->source_size = (uint64_t)size;
     stbtt_GetFontVMetrics(&font->font_info, &font->ascent, &font->descent, &font->line_gap);
     font->active = true;
+    font->ref_count = 1;
     if (!stasis_build_font_atlas(font)) {
         stasis_report_runtime_errorf("Font atlas creation failed: %s", path);
         font->active = false;
@@ -7514,6 +7527,10 @@ STASIS_EXPORT int stasis_load_font(const char* path, int font_size) {
 STASIS_EXPORT void stasis_gfx_release_font(int handle) {
     StasisFont* font = stasis_font_get(handle);
     if (!font) return;
+    if (font->ref_count > 1) {
+        font->ref_count--;
+        return;
+    }
 
     const int slot = (int)(((uint32_t)handle & FONT_HANDLE_INDEX_MASK) - 1u);
     const uint32_t next_generation =
