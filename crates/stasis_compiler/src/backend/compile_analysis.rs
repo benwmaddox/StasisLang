@@ -179,7 +179,7 @@ pub(crate) fn collect_supported_extern_call_signatures(
             signature.trusted_graphics_source =
                 crate::frontend::module_graph::is_recognized_graphics_implementation_source(
                     &file.path,
-                    &file.content,
+                    &file.original_content,
                 ) || crate::frontend::module_graph::is_explicit_graphics_test_seam_path(&file.path);
             signature.source_start = declaration.name_range.start;
             signature.source_end = declaration.name_range.end;

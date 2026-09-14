@@ -1,0 +1,13 @@
+import "../src/snake_turn.stasis";
+
+test `a reverse turn is consumed without reversing movement`(): bool {
+    reset_snake();
+    let x_before: i32 = snake.head_x;
+    if (!queue_turn(-1, 0)) {
+        return false;
+    }
+
+    tick();
+
+    return snake.head_x == x_before + 1 && snake.direction_x == 1 && !snake.has_queued_turn;
+}

@@ -1,5 +1,6 @@
 import "live_edit_helper.stasis";
-import "/.stasis_cache/toolchain/src/stdlib/rig2d.stasis";
+import "/vendor/stasis/stdlib/rig2d.stasis";
+import "/vendor/stasis/stdlib/graphics.stasis";
 
 // Fixed storage is explicit. A generic collection owns exactly one declared
 // array and never allocates, resizes, or copies its backing storage.
@@ -197,6 +198,12 @@ function near(actual: f32, expected: f32): bool {
 }
 
 function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    clear(0.0, 0.0, 0.0, 1.0);
+    end_frame();
     return 0;
 }
 

@@ -201,7 +201,6 @@ impl ProposalTools {
         source_catalog::inspect(&self.sources, args, MAX_SOURCE_CONTEXT_BYTES)
     }
 
-    #[cfg(test)]
     fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
         self.inspect_source(args)
     }
@@ -218,9 +217,8 @@ impl ToolExecutor for ProposalTools {
                 let repair = call.tool == "repair_semantic_edit";
                 let result: Result<Value, String> = (|| {
                     match call.tool.as_str() {
-                        "inspect_source" | "read_source_symbol" => {
-                            return self.inspect_source(&call.args)
-                        }
+                        "inspect_source" => return self.inspect_source(&call.args),
+                        "read_source_symbol" => return self.read_source_symbol(&call.args),
                         "propose_semantic_edit" | "repair_semantic_edit" => {}
                         _ => return Err(format!("Unknown desktop editor tool: {}", call.tool)),
                     }

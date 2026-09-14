@@ -4,5 +4,26 @@
   "entry": "src/main.stasis",
   "tests": "tests",
   "output": "build",
-  "stdlib": "toolchain"
+  "vendor": {
+    "stasis": {
+      "release_id": "local-generics-542",
+      "sha256": "995af6abafb640fc7289b867bd6297c5bd09a7b7b2a2862751f503f47e406b22"
+    }
+  },
+  "ai": {
+    "provider": null,
+    "openrouter": {
+      "approved_models": [
+        "openai/gpt-oss-120b"
+      ],
+      "min_throughput_tokens_per_second": 400,
+      "max_p50_latency_seconds": 2.0
+    },
+    "editor": {
+      "auto_persist_html_transcripts": false
+    }
+  },
+  "web": {
+    "entry": "src/wasm_entry.stasis"
+  }
 }

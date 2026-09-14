@@ -45,6 +45,7 @@ jobs:
       - pr-ci-cargo-stasis-main
       - pr-ci-cargo-stasis-provenance
       - pr-ci-cargo-stasis-integration
+      - pr-ci-generics-cross-platform
     runs-on: ubuntu-latest
     steps:
       - name: Verify required PR CI lanes
@@ -56,8 +57,9 @@ jobs:
           STASIS_MAIN_RESULT: ${{ needs.pr-ci-cargo-stasis-main.result }}
           STASIS_PROVENANCE_RESULT: ${{ needs.pr-ci-cargo-stasis-provenance.result }}
           STASIS_INTEGRATION_RESULT: ${{ needs.pr-ci-cargo-stasis-integration.result }}
+          GENERICS_CROSS_PLATFORM_RESULT: ${{ needs.pr-ci-generics-cross-platform.result }}
         run: |
-          for result in "$PREFLIGHT_RESULT" "$WORKSPACE_RESULT" "$STASIS_LIBRARY_RESULT" "$STASIS_TEST_HARNESS_RESULT" "$STASIS_MAIN_RESULT" "$STASIS_PROVENANCE_RESULT" "$STASIS_INTEGRATION_RESULT"; do
+          for result in "$PREFLIGHT_RESULT" "$WORKSPACE_RESULT" "$STASIS_LIBRARY_RESULT" "$STASIS_TEST_HARNESS_RESULT" "$STASIS_MAIN_RESULT" "$STASIS_PROVENANCE_RESULT" "$STASIS_INTEGRATION_RESULT" "$GENERICS_CROSS_PLATFORM_RESULT"; do
             if [[ "$result" != "success" ]]; then
               echo "A required PR CI lane finished with result: $result"
               exit 1
@@ -293,6 +295,37 @@ jobs:
           done < <(find apps/stasis/tests -maxdepth 1 -type f -name '*.rs' | sort)
           test "${#test_args[@]}" -gt 0
           python tools/cargo_cache.py run -- cargo test -p stasis "${test_args[@]}" -- --test-threads=1
+
+  pr-ci-generics-cross-platform:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    name: Generics compiler (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Run generic JIT, Wasm, and diagnostic harness
+        timeout-minutes: 15
+        run: python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_jit_aot_wasm -- --test-threads=1
 
   bootstrap-smoke-windows:
     if: ${{ inputs.run_slow_seams }}
@@ -568,6 +601,33 @@ jobs:
           archive: true
           name: android-native-link-evidence
           path: target/android-native-link-evidence.json
+
+      - name: Package and link generic collections Android game
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+          STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
+          STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
+        run: |
+          python tools/cargo_cache.py run -- cargo run -p stasis -- --workspace samples/generics_collections package-mobile --target android-arm64 --out dist/generics-android --development-build
+          gradle -p samples/generics_collections/dist/generics-android/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain
+          test -f samples/generics_collections/dist/generics-android/android/app/build/outputs/apk/debug/app-debug.apk
+          native_library=$(find samples/generics_collections/dist/generics-android/android/app/build/intermediates/cxx/Debug -path '*/obj/arm64-v8a/libmain.so' -print -quit)
+          link_map=$(find samples/generics_collections/dist/generics-android/android/app/.cxx/Debug -name libmain.map -print -quit)
+          test -n "$native_library"
+          test -n "$link_map"
+          python tools/ci/verify_android_native_library.py \
+            --library "$native_library" \
+            --bundle-manifest samples/generics_collections/dist/generics-android/aot/mobile_aot_bundle_manifest.json \
+            --link-map "$link_map" \
+            --readelf "$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            --evidence target/generics-android-native-link-evidence.json
+
+      - name: Upload generic Android native-link evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: generics-android-native-link-evidence
+          path: target/generics-android-native-link-evidence.json
 
   ios-package-link:
     if: ${{ inputs.run_slow_seams }}
