@@ -184,11 +184,10 @@ higher-kinded parameters, runtime value arguments, non-`i32` value parameters,
 and arbitrary unsupported composite copies are deferred.
 
 The current reference coverage and backend boundary are recorded in
-[`docs/generics.md`](generics.md). The full bounded collection sample runs
-through JIT and native AOT. Web packaging selects its scalar generic entry
-fixture because the current Wasm backend does not support the full sample's
-receiver-owned `Entity[]` view; that unsupported shape remains an explicit
-compile-time boundary rather than a fallback.
+[`docs/generics.md`](generics.md). Bounded named-struct arrays use caller-backed
+views in JIT, native AOT, and internal Wasm calls, including receiver-owned
+`Entity[]` views. Wasm host imports, exports, and returns retain their explicit
+scalar-only ABI boundary; no aggregate is silently copied across it.
 
 ### 4.3 Numeric Conversion Semantics
 
@@ -607,8 +606,10 @@ state.enemies[i].damage(5);
 Receiver-owned fixed arrays of named structs support scalar field reads and
 writes, such as `self.bones[index].parent` and `self.bones[index].local_x`.
 The receiver retains its owner's storage identity through nested calls. Indexed
-access retains the fixed-array bounds contract in section 4.2.1; selecting a whole
-struct element as a scalar value is rejected.
+access retains the fixed-array bounds contract in section 4.2.1. Selecting a
+whole struct element forms a caller-backed scalar view for typed internal calls
+and explicit field-wise indexed copies; it does not materialize a standalone
+struct value or cross a host import, export, or return boundary.
 
 Entry files should normally group application-owned mutable state beneath one
 root global. Fixed host ABI globals are an explicit exception.
