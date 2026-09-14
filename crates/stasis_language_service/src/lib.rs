@@ -9,15 +9,16 @@ use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
 use stasis_compiler::frontend::parser::{completion_expected_type, parse_top_level_functions};
 use stasis_compiler::frontend::workshop::{
-    find_workshop_references, organize_workshop_imports, plan_workshop_rename,
-    prepare_workshop_rename, workshop_base_type_name, workshop_call_hierarchy,
-    workshop_completion_items, workshop_folding_ranges, workshop_inlay_hints,
-    workshop_inlay_hints_from_local_types, workshop_linked_edit_ranges, workshop_reachable_files,
-    workshop_selection_ranges, workshop_semantic_tokens, workshop_source_items, workshop_symbols,
-    workshop_type_hierarchy, WorkshopCallHierarchyEdge, WorkshopCompletionItem,
-    WorkshopCompletionScope, WorkshopHierarchyItem, WorkshopInlayHint, WorkshopInlayHintKind,
-    WorkshopSourceFile, WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol,
-    WorkshopSymbolKind, WorkshopTypeHierarchyEdge,
+    find_workshop_generic_parameter_references_at, find_workshop_references,
+    organize_workshop_imports, plan_workshop_rename, prepare_workshop_rename,
+    workshop_base_type_name, workshop_call_hierarchy, workshop_completion_items,
+    workshop_folding_ranges, workshop_inlay_hints, workshop_inlay_hints_from_local_types,
+    workshop_linked_edit_ranges, workshop_reachable_files, workshop_selection_ranges,
+    workshop_semantic_tokens, workshop_source_items, workshop_symbols, workshop_type_hierarchy,
+    WorkshopCallHierarchyEdge, WorkshopCompletionItem, WorkshopCompletionScope,
+    WorkshopHierarchyItem, WorkshopInlayHint, WorkshopInlayHintKind, WorkshopSourceFile,
+    WorkshopSourceItem, WorkshopSourceItemKind, WorkshopSymbol, WorkshopSymbolKind,
+    WorkshopTypeHierarchyEdge,
 };
 pub use stasis_compiler::frontend::workshop::{
     workshop_source_hash, WorkshopReference, WorkshopReferenceKind,
@@ -1757,9 +1758,30 @@ impl LanguageService {
             .ok_or_else(|| format!("navigation document is not indexed: '{path}'"))?;
         let symbol = reference_symbol_at(&document.text, byte_offset)
             .ok_or_else(|| "no Stasis symbol at navigation position".to_string())?;
+        let relative = canonical_source_path(Some(&self.project_root), path)?;
         let project_root = self.project_root.clone();
         let index = self.language_index()?;
         let mut references = Vec::new();
+        if let Some(scoped) = find_workshop_generic_parameter_references_at(
+            &index.files,
+            &relative,
+            byte_offset,
+            256,
+        )? {
+            return Ok(scoped
+                .into_iter()
+                .map(|reference| {
+                    (
+                        reference.kind,
+                        LanguageLocation {
+                            path: absolute_source_path(&project_root, &reference.file),
+                            range: reference.source_span.start as usize
+                                ..reference.source_span.end as usize,
+                        },
+                    )
+                })
+                .collect());
+        }
         for candidate in receiver_function_reference_symbols(&index.workshop_items, &symbol) {
             for reference in find_workshop_references(&index.files, &candidate, 256)? {
                 let location = LanguageLocation {
@@ -3934,6 +3956,68 @@ function main(): i32 {
             .expect("workspace symbols");
         assert_eq!(workspace.len(), 1);
         assert_eq!(workspace[0].name, "spawn_enemy");
+    }
+
+    #[test]
+    fn generic_references_are_scoped_by_the_requested_position() {
+        let root = std::env::temp_dir().join("stasis-language-service-generic-references");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = concat!(
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n",
+            "function first(value: Buffer<T, N>): i32 { return N; }\n",
+            "function second(value: Buffer<T, N>): i32 { return N; }",
+        );
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+
+        for function in ["first", "second"] {
+            let declaration = source
+                .find(&format!("function {function}(value: Buffer<T, N>"))
+                .expect("generic function")
+                + format!("function {function}(value: Buffer<T, ").len();
+            let references = service
+                .references(&path_text, declaration, true)
+                .expect("scoped generic references");
+            assert_eq!(references.len(), 2);
+            let function_start = source
+                .find(&format!("function {function}"))
+                .expect("function start");
+            let function_end = source[function_start..]
+                .find('}')
+                .map(|offset| function_start + offset + 1)
+                .expect("function end");
+            assert!(references.iter().all(|reference| {
+                function_start <= reference.range.start && reference.range.end <= function_end
+            }));
+        }
+    }
+
+    #[test]
+    fn generic_reference_probe_preserves_non_generic_member_references() {
+        let root = std::env::temp_dir().join("stasis-language-service-member-references");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = concat!(
+            "struct Enemy { hp: i32; }\n",
+            "global foe: Enemy;\n",
+            "function main(): i32 { foe . hp = 3; return foe . hp; }",
+        );
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let member = source.rfind("foe . hp").expect("member reference") + "foe . ".len();
+
+        let references = service
+            .references(&path_text, member, true)
+            .expect("non-generic member references");
+        assert!(references.len() >= 3);
+        assert!(references.iter().all(|reference| {
+            let text = source[reference.range.clone()]
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            matches!(text.as_str(), "hp" | "foe.hp")
+        }));
     }
 
     #[test]

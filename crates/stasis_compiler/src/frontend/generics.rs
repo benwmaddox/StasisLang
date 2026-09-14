@@ -2789,7 +2789,7 @@ fn generic_function_identity(path: &str, signature: &ParsedFunctionSignature) ->
     identity
 }
 
-fn module_alias_for_path(path: &str) -> String {
+pub(super) fn module_alias_for_path(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
     let raw = name.strip_suffix(".stasis").unwrap_or(name);
     let mut alias = raw

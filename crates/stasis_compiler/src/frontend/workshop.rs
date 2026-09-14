@@ -43,6 +43,58 @@ pub struct WorkshopGenericParameter {
     pub kind: WorkshopGenericParameterKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkshopGenericStructDefinition {
+    module_alias: String,
+    name: String,
+    parameters: Vec<ParsedGenericParameter>,
+}
+
+fn workshop_generic_struct_definitions(
+    files: &[WorkshopSourceFile],
+) -> Result<Vec<WorkshopGenericStructDefinition>, String> {
+    let mut definitions = Vec::new();
+    for file in files {
+        let module_alias = super::generics::module_alias_for_path(&file.path);
+        for definition in parse_top_level_type_layout(&file.source)?.structs {
+            definitions.push(WorkshopGenericStructDefinition {
+                module_alias: module_alias.clone(),
+                name: definition.name,
+                parameters: definition.generic_parameters,
+            });
+        }
+    }
+    Ok(definitions)
+}
+
+fn resolve_workshop_generic_struct<'a>(
+    definitions: &'a [WorkshopGenericStructDefinition],
+    name: &str,
+    current_module_alias: &str,
+) -> Option<&'a WorkshopGenericStructDefinition> {
+    let short = name.rsplit('.').next().unwrap_or(name);
+    let qualified_alias = name.rsplit_once('.').map(|(alias, _)| alias);
+    let preferred_alias = qualified_alias.unwrap_or(current_module_alias);
+    let preferred = definitions
+        .iter()
+        .filter(|definition| definition.name == short && definition.module_alias == preferred_alias)
+        .collect::<Vec<_>>();
+    match preferred.as_slice() {
+        [definition] => Some(*definition),
+        [] if qualified_alias.is_none() => {
+            let candidates = definitions
+                .iter()
+                .filter(|definition| definition.name == short)
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [definition] => Some(*definition),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn workshop_generic_parameters(
     parameters: &[ParsedGenericParameter],
 ) -> Vec<WorkshopGenericParameter> {
@@ -60,7 +112,8 @@ fn workshop_generic_parameters(
 
 fn derive_workshop_function_generic_parameters(
     function: &crate::frontend::parser::ParsedFunctionSignature,
-    struct_generics: &BTreeMap<String, Vec<ParsedGenericParameter>>,
+    current_module_alias: &str,
+    generic_structs: &[WorkshopGenericStructDefinition],
     known_type_names: &BTreeSet<String>,
     constants: &BTreeSet<String>,
 ) -> Vec<WorkshopGenericParameter> {
@@ -71,19 +124,18 @@ fn derive_workshop_function_generic_parameters(
     else {
         return Vec::new();
     };
-    let struct_name = struct_path.rsplit('.').next().unwrap_or(struct_path);
-    let Some(parameters) = struct_generics
-        .get(struct_path)
-        .or_else(|| struct_generics.get(struct_name))
+    let Some(definition) =
+        resolve_workshop_generic_struct(generic_structs, struct_path, current_module_alias)
     else {
         return Vec::new();
     };
     let mut derived = Vec::new();
-    for (argument, parameter) in arguments.into_iter().zip(parameters) {
+    for (argument, parameter) in arguments.into_iter().zip(&definition.parameters) {
         collect_workshop_generic_parameters(
             argument,
             parameter.kind,
-            struct_generics,
+            current_module_alias,
+            generic_structs,
             known_type_names,
             constants,
             &mut derived,
@@ -95,7 +147,8 @@ fn derive_workshop_function_generic_parameters(
 fn collect_workshop_generic_parameters(
     argument: &str,
     kind: ParsedGenericParameterKind,
-    struct_generics: &BTreeMap<String, Vec<ParsedGenericParameter>>,
+    current_module_alias: &str,
+    generic_structs: &[WorkshopGenericStructDefinition],
     known_type_names: &BTreeSet<String>,
     constants: &BTreeSet<String>,
     out: &mut Vec<WorkshopGenericParameter>,
@@ -107,7 +160,8 @@ fn collect_workshop_generic_parameters(
                 collect_workshop_generic_parameters(
                     element,
                     ParsedGenericParameterKind::Type,
-                    struct_generics,
+                    current_module_alias,
+                    generic_structs,
                     known_type_names,
                     constants,
                     out,
@@ -115,7 +169,8 @@ fn collect_workshop_generic_parameters(
                 collect_workshop_generic_parameters(
                     extent,
                     ParsedGenericParameterKind::I32,
-                    struct_generics,
+                    current_module_alias,
+                    generic_structs,
                     known_type_names,
                     constants,
                     out,
@@ -123,16 +178,17 @@ fn collect_workshop_generic_parameters(
                 return;
             }
             if let Some((struct_path, arguments)) = parse_workshop_type_application(argument) {
-                let struct_name = struct_path.rsplit('.').next().unwrap_or(struct_path);
-                if let Some(parameters) = struct_generics
-                    .get(struct_path)
-                    .or_else(|| struct_generics.get(struct_name))
-                {
-                    for (nested, parameter) in arguments.into_iter().zip(parameters) {
+                if let Some(definition) = resolve_workshop_generic_struct(
+                    generic_structs,
+                    struct_path,
+                    current_module_alias,
+                ) {
+                    for (nested, parameter) in arguments.into_iter().zip(&definition.parameters) {
                         collect_workshop_generic_parameters(
                             nested,
                             parameter.kind,
-                            struct_generics,
+                            current_module_alias,
+                            generic_structs,
                             known_type_names,
                             constants,
                             out,
@@ -176,6 +232,8 @@ fn workshop_builtin_type_names() -> BTreeSet<String> {
         "u8".to_string(),
         "u16".to_string(),
         "u32".to_string(),
+        "ascii".to_string(),
+        "utf8".to_string(),
         "string".to_string(),
     ])
 }
@@ -634,7 +692,7 @@ pub fn build_workshop_symbol_tree(
         })?;
     }
     let mut struct_names = BTreeSet::new();
-    let mut struct_generics = BTreeMap::new();
+    let generic_structs = workshop_generic_struct_definitions(files)?;
     let mut known_type_names = workshop_builtin_type_names();
     let mut constants = BTreeSet::new();
     let mut structs_by_file: BTreeMap<&str, Vec<String>> = BTreeMap::new();
@@ -643,9 +701,6 @@ pub fn build_workshop_symbol_tree(
         for parsed in &layout.structs {
             struct_names.insert(parsed.name.clone());
             known_type_names.insert(parsed.name.clone());
-            struct_generics
-                .entry(parsed.name.clone())
-                .or_insert_with(|| parsed.generic_parameters.clone());
             structs_by_file
                 .entry(file.path.as_str())
                 .or_default()
@@ -664,7 +719,7 @@ pub fn build_workshop_symbol_tree(
         pending.extend(index_file_symbols(
             file,
             &struct_names,
-            &struct_generics,
+            &generic_structs,
             &known_type_names,
             &constants,
             structs_by_file
@@ -715,7 +770,7 @@ pub fn build_workshop_symbol_tree(
 fn index_file_symbols(
     file: &WorkshopSourceFile,
     struct_names: &BTreeSet<String>,
-    struct_generics: &BTreeMap<String, Vec<ParsedGenericParameter>>,
+    generic_structs: &[WorkshopGenericStructDefinition],
     known_type_names: &BTreeSet<String>,
     constants: &BTreeSet<String>,
     file_structs: &[String],
@@ -762,7 +817,8 @@ fn index_file_symbols(
         let source = source_for_range(&file.source, full_range.clone())?;
         let generic_parameters = derive_workshop_function_generic_parameters(
             &function,
-            struct_generics,
+            &super::generics::module_alias_for_path(&file.path),
+            generic_structs,
             known_type_names,
             constants,
         );
@@ -2079,7 +2135,10 @@ pub fn find_workshop_references(
         .iter()
         .filter(|item| item.kind == "generic_parameter" && item.text == symbol)
         .collect::<Vec<_>>();
-    if !generic_items.is_empty() {
+    let has_non_generic_item = catalog
+        .iter()
+        .any(|item| item.text == symbol && item.kind != "generic_parameter");
+    if generic_items.len() == 1 && !has_non_generic_item {
         return generic_parameter_workshop_references(
             files,
             &items,
@@ -2088,6 +2147,11 @@ pub fn find_workshop_references(
             symbol,
             limit,
         );
+    }
+    if generic_items.len() > 1 && !has_non_generic_item {
+        return Err(format!(
+            "generic parameter '{symbol}' is ambiguous without a source position"
+        ));
     }
     let definition = match field_definition_reference(files, &segments, &items)? {
         Some(reference) => Some(reference),
@@ -2104,6 +2168,17 @@ pub fn find_workshop_references(
             };
             let start = tokens[start_index].start;
             let end = tokens[end_index].end;
+            if generic_items.iter().any(|generic_item| {
+                generic_parameter_item_contains_token(
+                    &catalog,
+                    generic_item,
+                    &file.path,
+                    start,
+                    end,
+                )
+            }) {
+                continue;
+            }
             let Some(item) = items
                 .iter()
                 .filter(|item| {
@@ -2152,6 +2227,85 @@ pub fn find_workshop_references(
         }
     }
     Ok(references)
+}
+
+pub fn find_workshop_generic_parameter_references_at(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    byte_offset: usize,
+    limit: usize,
+) -> Result<Option<Vec<WorkshopReference>>, String> {
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("reference file is not indexed: {request_file}"))?;
+    if byte_offset > file.source.len() || !file.source.is_char_boundary(byte_offset) {
+        return Err(format!("reference offset {byte_offset} is invalid"));
+    }
+    let Some(token) = lex(&file.source)?.into_iter().find(|token| {
+        token.kind == TokenKind::Identifier
+            && token.start <= byte_offset
+            && byte_offset <= token.end
+    }) else {
+        return Ok(None);
+    };
+    let symbol = token_text(&file.source, token);
+    let catalog = workshop_completion_items(files)?;
+    let generic_items = catalog
+        .iter()
+        .filter(|item| {
+            item.kind == "generic_parameter"
+                && item.text == symbol
+                && generic_parameter_item_contains_token(
+                    &catalog,
+                    item,
+                    &file.path,
+                    token.start,
+                    token.end,
+                )
+        })
+        .collect::<Vec<_>>();
+    let generic_item = match generic_items.as_slice() {
+        [] => return Ok(None),
+        [generic_item] => *generic_item,
+        _ => {
+            return Err(format!(
+                "multiple generic parameters named '{symbol}' are visible at the reference position"
+            ))
+        }
+    };
+    if generic_item.scope.is_none() {
+        return Ok(None);
+    }
+    let items = workshop_source_items(files)?;
+    generic_parameter_workshop_references(
+        files,
+        &items,
+        &catalog,
+        vec![generic_item],
+        symbol,
+        limit.clamp(1, 256),
+    )
+    .map(Some)
+}
+
+fn generic_parameter_item_contains_token(
+    catalog: &[WorkshopCompletionItem],
+    generic_item: &WorkshopCompletionItem,
+    file: &str,
+    start: usize,
+    end: usize,
+) -> bool {
+    let Some(scope) = generic_item.scope.as_ref() else {
+        return false;
+    };
+    scope.file == file
+        && scope.visible_from <= start
+        && end <= scope.visible_to
+        && !generic_parameter_shadow_ranges(catalog, generic_item)
+            .iter()
+            .any(|range| range.start <= start && end <= range.end)
 }
 
 fn generic_parameter_workshop_references(
@@ -3230,16 +3384,13 @@ pub fn workshop_completion_items(
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let mut struct_generics = BTreeMap::<String, Vec<ParsedGenericParameter>>::new();
+    let generic_structs = workshop_generic_struct_definitions(files)?;
     let mut known_type_names = workshop_builtin_type_names();
     let mut constants = BTreeSet::new();
     let mut struct_scopes = BTreeMap::<(String, String), WorkshopCompletionScope>::new();
     for (file, layout, _, _, _, ranges) in &parsed_files {
         for definition in &layout.structs {
             known_type_names.insert(definition.name.clone());
-            struct_generics
-                .entry(definition.name.clone())
-                .or_insert_with(|| definition.generic_parameters.clone());
         }
         for definition in &layout.enums {
             known_type_names.insert(definition.name.clone());
@@ -3486,7 +3637,8 @@ pub fn workshop_completion_items(
             );
             let generic_parameters = derive_workshop_function_generic_parameters(
                 &function,
-                &struct_generics,
+                &super::generics::module_alias_for_path(&file.path),
+                &generic_structs,
                 &known_type_names,
                 &constants,
             );
@@ -6381,7 +6533,14 @@ mod workshop_contract_tests {
             .find("function clear(buffer: Buffer<T")
             .expect("receiver T")
             + "function clear(buffer: Buffer<".len();
-        let generic_references = find_workshop_references(&files, "T", 16).expect("generic refs");
+        let generic_references = find_workshop_generic_parameter_references_at(
+            &files,
+            "src/main.stasis",
+            receiver_t,
+            16,
+        )
+        .expect("generic refs")
+        .expect("generic target");
         assert!(generic_references.iter().any(|reference| {
             reference.kind == WorkshopReferenceKind::Definition
                 && reference.source_span.start as usize == receiver_t
@@ -6400,6 +6559,234 @@ mod workshop_contract_tests {
         assert!(after[0]
             .source
             .contains("clear(buffer: Buffer<Value, N>, value: Value)"));
+    }
+
+    #[test]
+    fn generic_receiver_metadata_preserves_module_identity() {
+        let left = WorkshopSourceFile {
+            path: "src/left.stasis".to_string(),
+            source: concat!(
+                "struct Policy<T: type> { value: T; }\n",
+                "function apply_left_local(value: Policy<T>, item: T): void { return; }",
+            )
+            .to_string(),
+        };
+        let right = WorkshopSourceFile {
+            path: "src/right.stasis".to_string(),
+            source: concat!(
+                "struct Policy<N: i32> { values: i32[N]; }\n",
+                "function apply_right_local(value: Policy<N>): i32 { return N; }",
+            )
+            .to_string(),
+        };
+        let main = WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: concat!(
+                "import \"left.stasis\"; import \"right.stasis\";\n",
+                "struct Wrapper<X: type> { value: X; }\n",
+                "function apply_left(value: left.Policy<T>, item: T): void { return; }\n",
+                "function apply_right(value: right.Policy<N>, count: i32): i32 { return N; }\n",
+                "function apply_nested(value: Wrapper<right.Policy<M>>): i32 { return M; }",
+            )
+            .to_string(),
+        };
+
+        for files in [
+            vec![left.clone(), right.clone(), main.clone()],
+            vec![right.clone(), left.clone(), main.clone()],
+        ] {
+            let symbols = workshop_symbols(&files).expect("module-aware generic symbols");
+            let left_function = symbols
+                .iter()
+                .find(|symbol| symbol.name == "apply_left")
+                .expect("left receiver function");
+            assert_eq!(
+                left_function.generic_parameters,
+                vec![WorkshopGenericParameter {
+                    name: "T".to_string(),
+                    kind: WorkshopGenericParameterKind::Type,
+                }]
+            );
+            let right_function = symbols
+                .iter()
+                .find(|symbol| symbol.name == "apply_right")
+                .expect("right receiver function");
+            assert_eq!(
+                right_function.generic_parameters,
+                vec![WorkshopGenericParameter {
+                    name: "N".to_string(),
+                    kind: WorkshopGenericParameterKind::I32,
+                }]
+            );
+            let nested_function = symbols
+                .iter()
+                .find(|symbol| symbol.name == "apply_nested")
+                .expect("nested receiver function");
+            assert_eq!(
+                nested_function.generic_parameters,
+                vec![WorkshopGenericParameter {
+                    name: "M".to_string(),
+                    kind: WorkshopGenericParameterKind::I32,
+                }]
+            );
+            for (function, parameter, kind) in [
+                ("apply_left_local", "T", WorkshopGenericParameterKind::Type),
+                ("apply_right_local", "N", WorkshopGenericParameterKind::I32),
+            ] {
+                let local_function = symbols
+                    .iter()
+                    .find(|symbol| symbol.name == function)
+                    .expect("file-local receiver function");
+                assert_eq!(
+                    local_function.generic_parameters,
+                    vec![WorkshopGenericParameter {
+                        name: parameter.to_string(),
+                        kind,
+                    }]
+                );
+            }
+
+            let completions = workshop_completion_items(&files).expect("module-aware completions");
+            assert!(completions.iter().any(|item| {
+                item.text == "T"
+                    && item.kind == "generic_parameter"
+                    && item.owner.as_deref() == Some("apply_left")
+                    && item.type_name.as_deref() == Some("type")
+            }));
+            assert!(completions.iter().any(|item| {
+                item.text == "N"
+                    && item.kind == "generic_parameter"
+                    && item.owner.as_deref() == Some("apply_right")
+                    && item.type_name.as_deref() == Some("i32")
+            }));
+
+            let right_n = right
+                .source
+                .find("function apply_right_local(value: Policy<N>")
+                .expect("right local receiver")
+                + "function apply_right_local(value: Policy<".len();
+            let semantic_tokens = workshop_semantic_tokens(&files, &right.path)
+                .expect("module-aware semantic tokens");
+            assert!(semantic_tokens.iter().any(|token| {
+                token.kind == "generic_parameter"
+                    && token.source_span.start as usize == right_n
+                    && token.source_span.end as usize == right_n + 1
+            }));
+        }
+    }
+
+    #[test]
+    fn concrete_text_types_are_not_derived_as_function_generics() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: concat!(
+                "struct Buffer<T: type, N: i32> { values: T[N]; }\n",
+                "function clear_ascii(value: Buffer<ascii, N>): i32 { return N; }\n",
+                "function clear_utf8(value: Buffer<utf8, M>): i32 { return M; }",
+            )
+            .to_string(),
+        }];
+
+        let symbols = workshop_symbols(&files).expect("text receiver symbols");
+        for (function, parameter) in [("clear_ascii", "N"), ("clear_utf8", "M")] {
+            let symbol = symbols
+                .iter()
+                .find(|symbol| symbol.name == function)
+                .expect("text receiver function");
+            assert_eq!(
+                symbol.generic_parameters,
+                vec![WorkshopGenericParameter {
+                    name: parameter.to_string(),
+                    kind: WorkshopGenericParameterKind::I32,
+                }]
+            );
+        }
+        let completions = workshop_completion_items(&files).expect("text receiver completions");
+        assert!(completions.iter().all(|item| {
+            item.kind != "generic_parameter" || !matches!(item.text.as_str(), "ascii" | "utf8")
+        }));
+        let semantic_tokens =
+            workshop_semantic_tokens(&files, "src/main.stasis").expect("text semantic tokens");
+        assert!(semantic_tokens.iter().all(|token| {
+            token.kind != "generic_parameter" || !matches!(token.text.as_str(), "ascii" | "utf8")
+        }));
+    }
+
+    #[test]
+    fn positioned_generic_references_select_one_declaration_scope() {
+        let source = concat!(
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n",
+            "global N: i32;\n",
+            "function first(value: Buffer<T, N>): i32 { return N; }\n",
+            "function second(value: Buffer<T, N>): i32 { return N; }\n",
+            "function main(): i32 { return N; }",
+        );
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: source.to_string(),
+        }];
+
+        for function in ["first", "second"] {
+            let declaration = source
+                .find(&format!("function {function}(value: Buffer<T, N>"))
+                .expect("generic function")
+                + format!("function {function}(value: Buffer<T, ").len();
+            let references = find_workshop_generic_parameter_references_at(
+                &files,
+                "src/main.stasis",
+                declaration,
+                16,
+            )
+            .expect("positioned generic references")
+            .expect("generic target");
+            assert_eq!(references.len(), 2);
+            assert!(references
+                .iter()
+                .all(|reference| reference.containing_name == function));
+            assert!(references.iter().any(|reference| {
+                reference.kind == WorkshopReferenceKind::Definition
+                    && reference.source_span.start as usize == declaration
+            }));
+        }
+
+        let global_references = find_workshop_references(&files, "N", 16)
+            .expect("nongeneric references with same name");
+        assert!(global_references
+            .iter()
+            .any(|reference| reference.containing_name == "main"));
+        assert!(global_references.iter().all(|reference| {
+            !matches!(reference.containing_name.as_str(), "first" | "second")
+        }));
+
+        let first_declaration = source
+            .find("function first(value: Buffer<T, N>")
+            .expect("first generic function")
+            + "function first(value: Buffer<T, ".len();
+        let (renamed, plan) =
+            plan_workshop_rename(&files, "src/main.stasis", first_declaration, "Count")
+                .expect("scoped generic rename");
+        assert_eq!(plan.kind, "generic_parameter");
+        assert!(renamed[0]
+            .source
+            .contains("function first(value: Buffer<T, Count>): i32 { return Count; }"));
+        assert!(renamed[0]
+            .source
+            .contains("function second(value: Buffer<T, N>): i32 { return N; }"));
+        assert!(renamed[0].source.contains("global N: i32;"));
+
+        let ambiguous_source = source
+            .replace("global N: i32;\n", "")
+            .replace("function main(): i32 { return N; }", "");
+        let error = find_workshop_references(
+            &[WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: ambiguous_source,
+            }],
+            "N",
+            16,
+        )
+        .expect_err("text-only generic query must be ambiguous");
+        assert!(error.contains("ambiguous without a source position"));
     }
 
     #[test]
