@@ -170,3 +170,37 @@ test("web stale immutable font readiness cannot overwrite a replacement receiver
   assert.equal(view.getInt32(4, true), replacementHandle);
   assert.equal(view.getFloat32(8, true), 222);
 });
+
+test("web released font handles stay invalid and the allocator never aliases them", async () => {
+  const game = {
+    memory: {},
+    globals: {},
+    views: {},
+    strings: { "1": "assets/font.ttf", "2": "released" },
+  };
+  const releases = new Map();
+  let first = 0;
+  let second = 0;
+  const result = await loadRuntime(game, {
+    fontLoad: font => new Promise(resolve => releases.set(font.source, () => resolve(font))),
+    main: env => {
+      first = env.load_font(1, 20);
+      assert.ok(first > 0);
+      assert.ok(env.stasis_jit_gfx_cache_text(first, 2) > 0);
+      env.stasis_jit_gfx_release_font(first);
+      assert.equal(env.stasis_jit_gfx_cache_text(first, 2), 0);
+      assert.equal(env.stasis_jit_measure_text(first, 2), 0);
+      game.strings["1"] = "assets/replacement.ttf";
+      second = env.load_font(1, 20);
+      assert.ok(second > first);
+      assert.ok(env.stasis_jit_gfx_cache_text(second, 2) > 0);
+    },
+  });
+  assert.equal(releases.size, 2);
+  releases.get("url(assets/replacement.ttf)")();
+  await result.runtimePromise;
+  assert.equal(result.addedFonts.length, 1);
+  releases.get("url(assets/font.ttf)")();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(result.addedFonts.length, 1);
+});

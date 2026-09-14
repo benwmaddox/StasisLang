@@ -261,6 +261,13 @@ static void test_extreme_density_and_extent_are_bounded(void) {
 }
 
 static void test_font_atlas_growth_is_bounded_and_deterministic(void) {
+    CHECK(close_enough(stasis_display_font_raster_scale(0.5f), 2.0f));
+    CHECK(close_enough(stasis_display_font_raster_scale(1.0f), 2.0f));
+    CHECK(close_enough(stasis_display_font_raster_scale(1.5f), 2.0f));
+    CHECK(close_enough(stasis_display_font_raster_scale(3.0f), 3.0f));
+    CHECK(close_enough(stasis_display_font_raster_scale(20.0f), 8.0f));
+    CHECK(stasis_display_scaled_extent(13, stasis_display_font_raster_scale(1.0f)) == 26);
+    CHECK(stasis_display_font_atlas_extent(stasis_display_font_raster_scale(1.0f)) == 1024);
     CHECK(stasis_display_font_atlas_next_extent(512) == 1024);
     CHECK(stasis_display_font_atlas_next_extent(1024) == 2048);
     CHECK(stasis_display_font_atlas_next_extent(2048) == 4096);

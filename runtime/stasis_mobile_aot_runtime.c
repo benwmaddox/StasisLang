@@ -51,6 +51,7 @@ int stasis_asset_task_poll(int task);
 int stasis_asset_task_take_handle(int task);
 void stasis_asset_task_cancel(int task);
 void stasis_gfx_release_sprite(int handle);
+void stasis_gfx_release_font(int handle);
 int stasis_gfx_dump_bmp(const char *path);
 int stasis_gfx_dump_png(const char *path);
 int stasis_gfx_cache_text(int font, const char *text);
@@ -793,6 +794,7 @@ int stasis_jit_asset_task_take_handle(int32_t task) {
 }
 void stasis_jit_asset_task_cancel(int32_t task) { stasis_asset_task_cancel(task); }
 void stasis_jit_gfx_release_sprite(int32_t handle) { stasis_gfx_release_sprite(handle); }
+void stasis_jit_gfx_release_font(int32_t handle) { stasis_gfx_release_font(handle); }
 int stasis_jit_gfx_dump_bmp(int32_t path) {
     char *value = resolve_text(path);
     int result = value == NULL ? 0 : stasis_gfx_dump_bmp(value);

@@ -286,6 +286,12 @@ Recommendation:
 - expose numeric font handles and cached text handles similarly to native
 - do not attempt to fully replicate native font internals inside wasm first
 
+Implemented lifecycle note: the Web host exposes `release_font` as part of
+graphics runtime ABI 4. Release removes the `FontFace`, pending calibration,
+font-owned cached runs, prepared canvases, and GPU atlas resources. Completion
+of a font load after its handle was released cannot republish that face, and a
+released nonzero font handle never falls back to a different browser font.
+
 ## 5. Replace native input/time/window plumbing with browser equivalents
 
 ### Input

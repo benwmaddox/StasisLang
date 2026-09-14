@@ -274,6 +274,17 @@ static int stasis_display_should_apply_windowed_extent(
 
 #define STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT 512
 #define STASIS_DISPLAY_FONT_ATLAS_MAX_EXTENT 4096
+#define STASIS_DISPLAY_FONT_RASTER_SCALE_MIN 2.0f
+
+static float stasis_display_font_raster_scale(float pixel_scale) {
+    if (!isfinite(pixel_scale) || pixel_scale < STASIS_DISPLAY_FONT_RASTER_SCALE_MIN) {
+        return STASIS_DISPLAY_FONT_RASTER_SCALE_MIN;
+    }
+    if (pixel_scale > (float)STASIS_DISPLAY_RASTER_SCALE_MAX) {
+        return (float)STASIS_DISPLAY_RASTER_SCALE_MAX;
+    }
+    return pixel_scale;
+}
 
 static int stasis_display_font_atlas_extent(float pixel_scale) {
     if (pixel_scale <= 1.0f) return STASIS_DISPLAY_FONT_ATLAS_MIN_EXTENT;

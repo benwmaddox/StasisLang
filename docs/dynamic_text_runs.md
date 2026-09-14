@@ -41,6 +41,15 @@ does not alter the running state. Renderer or density restoration rebuilds prepa
 retained text and the existing font identity. A full runtime/session reset clears host catalogs;
 callers must initialize or replace their runs again after such a reset.
 
+Releasing a font deterministically invalidates only cached runs that reference
+that font. Their stale handles continue to measure as zero and draw nothing even
+after a slot is reused; native run handles carry a generation, Android run
+handles are monotonic for the session, and Web handles are monotonic. Runs owned
+by other live fonts remain valid. Native storage is compacted and rebuilt after
+release, Android removes the released-font entries without reusing their handle
+values, and Web evicts matching prepared canvases and GPU atlas entries. An
+in-flight Web `FontFace` completion is ignored after release.
+
 Pointer Pong demonstrates the intended pattern: two caller-owned UTF-8 buffers and two replaceable
 runs are updated only when a score changes, preserve the original two-digit `00` through `99`
 display, and let `render` emit cached-handle draw commands only.

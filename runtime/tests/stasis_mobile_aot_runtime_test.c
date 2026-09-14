@@ -203,6 +203,7 @@ void stasis_gfx_release_sprite(int handle) {
     released_sprite_handle = handle;
     released_sprite_count += 1;
 }
+void stasis_gfx_release_font(int handle) { (void)handle; }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
 int stasis_gfx_dump_png(const char *path) { return path != NULL; }
 int stasis_gfx_cache_text(int font, const char *text) {

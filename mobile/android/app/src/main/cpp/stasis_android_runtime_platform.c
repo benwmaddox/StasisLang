@@ -33,6 +33,7 @@ int stasis_gfx_load_sprite(const char *path, int max_w, int max_h) {
 }
 
 void stasis_gfx_release_sprite(int handle) { (void)handle; }
+void stasis_gfx_release_font(int handle) { (void)handle; }
 int stasis_gfx_dump_bmp(const char *path) { (void)path; return 0; }
 int stasis_gfx_cache_text(int font, const char *text) { (void)font; (void)text; return 0; }
 int stasis_gfx_replace_text(int handle, int font, const char *text) { (void)handle; (void)font; (void)text; return 0; }

@@ -967,6 +967,8 @@ pub fn run_android_workshop_tick(
 }
 
 const MAX_EMBEDDED_FONTS: usize = 64;
+const FONT_HANDLE_INDEX_BITS: u32 = 7;
+const FONT_HANDLE_GENERATION_MASK: u32 = 0x00ff_ffff;
 const MAX_EMBEDDED_TEXT_RUNS: usize = 4096;
 const MAX_EMBEDDED_TEXT_BYTES: usize = 262_144;
 const MAX_EMBEDDED_DYNAMIC_TEXT_BYTES: usize = 4096;
@@ -976,6 +978,9 @@ const MAX_PENDING_SPRITE_RELEASES: usize = 256;
 #[derive(Clone)]
 struct EmbeddedFont {
     handle: i32,
+    generation: u32,
+    retired: bool,
+    active: bool,
     path: PathBuf,
     size: i32,
 }
@@ -1001,6 +1006,7 @@ struct EmbeddedResourceCatalog {
     assets: ResolvedAssetManifest,
     fonts: Vec<EmbeddedFont>,
     text_runs: Vec<EmbeddedTextRun>,
+    next_text_run_handle: i32,
     sprite_refs: Vec<EmbeddedSpriteRef>,
     pending_sprite_releases: Vec<i32>,
     pending_sprite_release_cancellations: Vec<i32>,
@@ -1027,6 +1033,7 @@ fn install_embedded_resource_host(project_root: &Path) -> Result<(), String> {
         load_sprite: embedded_load_sprite,
         release_sprite: embedded_release_sprite,
         load_font: embedded_load_font,
+        release_font: embedded_release_font,
         measure_text: embedded_measure_text,
         cache_text: embedded_cache_text,
         replace_text: embedded_replace_text,
@@ -1057,6 +1064,7 @@ fn prepare_embedded_resource_catalog(
     let (
         fonts,
         text_runs,
+        next_text_run_handle,
         sprite_refs,
         pending_sprite_releases,
         pending_sprite_release_cancellations,
@@ -1070,6 +1078,7 @@ fn prepare_embedded_resource_catalog(
                 (
                     catalog.fonts.clone(),
                     catalog.text_runs.clone(),
+                    catalog.next_text_run_handle,
                     catalog.sprite_refs.clone(),
                     catalog.pending_sprite_releases.clone(),
                     catalog.pending_sprite_release_cancellations.clone(),
@@ -1079,6 +1088,7 @@ fn prepare_embedded_resource_catalog(
                 (
                     Vec::with_capacity(MAX_EMBEDDED_FONTS),
                     Vec::with_capacity(MAX_EMBEDDED_TEXT_RUNS),
+                    1,
                     Vec::with_capacity(MAX_EMBEDDED_SPRITES),
                     Vec::with_capacity(MAX_PENDING_SPRITE_RELEASES),
                     Vec::with_capacity(MAX_EMBEDDED_SPRITES),
@@ -1088,6 +1098,7 @@ fn prepare_embedded_resource_catalog(
         (
             Vec::with_capacity(MAX_EMBEDDED_FONTS),
             Vec::with_capacity(MAX_EMBEDDED_TEXT_RUNS),
+            1,
             Vec::with_capacity(MAX_EMBEDDED_SPRITES),
             Vec::with_capacity(MAX_PENDING_SPRITE_RELEASES),
             Vec::with_capacity(MAX_EMBEDDED_SPRITES),
@@ -1098,6 +1109,7 @@ fn prepare_embedded_resource_catalog(
         assets,
         fonts,
         text_runs,
+        next_text_run_handle,
         sprite_refs,
         pending_sprite_releases,
         pending_sprite_release_cancellations,
@@ -1376,21 +1388,65 @@ fn embedded_load_font(path: &[u8], size: i32) -> i32 {
     if let Some(font) = catalog
         .fonts
         .iter()
-        .find(|font| font.path == absolute && font.size == size)
+        .find(|font| font.active && font.path == absolute && font.size == size)
     {
         return font.handle;
+    }
+    if let Some(index) = catalog
+        .fonts
+        .iter()
+        .position(|font| !font.active && !font.retired)
+    {
+        let font = &mut catalog.fonts[index];
+        let handle = ((font.generation << FONT_HANDLE_INDEX_BITS) | (index as u32 + 1)) as i32;
+        font.handle = handle;
+        font.active = true;
+        font.path = absolute;
+        font.size = size;
+        return handle;
     }
     if catalog.fonts.len() >= MAX_EMBEDDED_FONTS {
         set_embedded_resource_error(catalog, "font registry is full".to_string());
         return 0;
     }
-    let handle = catalog.fonts.len() as i32 + 1;
+    let index = catalog.fonts.len();
+    let handle = (index as u32 + 1) as i32;
     catalog.fonts.push(EmbeddedFont {
         handle,
+        generation: 0,
+        retired: false,
+        active: true,
         path: absolute,
         size,
     });
     handle
+}
+
+fn embedded_release_font(handle: i32) {
+    if handle <= 0 {
+        return;
+    }
+    let Ok(mut slot) = embedded_resource_catalog().lock() else {
+        return;
+    };
+    let Some(catalog) = slot.as_mut() else {
+        return;
+    };
+    let Some(index) = catalog
+        .fonts
+        .iter()
+        .position(|font| font.active && font.handle == handle)
+    else {
+        return;
+    };
+    let next_generation = (catalog.fonts[index].generation + 1) & FONT_HANDLE_GENERATION_MASK;
+    catalog.fonts[index].active = false;
+    catalog.fonts[index].handle = 0;
+    catalog.fonts[index].generation = next_generation;
+    catalog.fonts[index].retired = next_generation == 0;
+    catalog.fonts[index].path = PathBuf::new();
+    catalog.fonts[index].size = 0;
+    catalog.text_runs.retain(|run| run.font != handle);
 }
 
 fn embedded_measure_text(font: i32, text: &[u8]) -> f32 {
@@ -1400,10 +1456,24 @@ fn embedded_measure_text(font: i32, text: &[u8]) -> f32 {
     let Some(catalog) = slot.as_ref() else {
         return 0.0;
     };
-    let Some(font) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
+    let Some(font) = catalog
+        .fonts
+        .iter()
+        .find(|entry| entry.active && entry.handle == font)
+    else {
         return 0.0;
     };
     text.len() as f32 * font.size as f32 * 0.6
+}
+
+fn embedded_take_text_run_handle(catalog: &mut EmbeddedResourceCatalog) -> i32 {
+    let handle = catalog.next_text_run_handle;
+    let Some(next) = handle.checked_add(1) else {
+        set_embedded_resource_error(catalog, "cached text handle space is exhausted".to_string());
+        return 0;
+    };
+    catalog.next_text_run_handle = next;
+    handle
 }
 
 fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
@@ -1417,10 +1487,15 @@ fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
         set_embedded_resource_error(catalog, "cached text is not valid UTF-8".to_string());
         return 0;
     };
-    let Some(font_entry) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
+    let Some(font_entry) = catalog
+        .fonts
+        .iter()
+        .find(|entry| entry.active && entry.handle == font)
+    else {
         set_embedded_resource_error(catalog, format!("font handle {font} was not loaded"));
         return 0;
     };
+    let font_size = font_entry.size;
     if let Some(run) = catalog
         .text_runs
         .iter()
@@ -1443,14 +1518,17 @@ fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
         set_embedded_resource_error(catalog, "cached text registry is full".to_string());
         return 0;
     }
-    let handle = catalog.text_runs.len() as i32 + 1;
-    let measured_width = text.len() as f32 * font_entry.size as f32 * 0.6;
+    let handle = embedded_take_text_run_handle(catalog);
+    if handle == 0 {
+        return 0;
+    }
+    let measured_width = text.len() as f32 * font_size as f32 * 0.6;
     catalog.text_runs.push(EmbeddedTextRun {
         handle,
         font,
         text: text.to_string(),
         measured_width,
-        measured_height: font_entry.size as f32,
+        measured_height: font_size as f32,
         replaceable: false,
     });
     handle
@@ -1472,9 +1550,14 @@ fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
     if text.len() > MAX_EMBEDDED_DYNAMIC_TEXT_BYTES {
         return 0;
     }
-    let Some(font_entry) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
+    let Some(font_entry) = catalog
+        .fonts
+        .iter()
+        .find(|entry| entry.active && entry.handle == font)
+    else {
         return 0;
     };
+    let font_size = font_entry.size;
     let existing = catalog
         .text_runs
         .iter()
@@ -1492,8 +1575,8 @@ fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
     if retained - prior_len + text.len() > MAX_EMBEDDED_TEXT_BYTES {
         return 0;
     }
-    let measured_width = text.len() as f32 * font_entry.size as f32 * 0.6;
-    let measured_height = font_entry.size as f32;
+    let measured_width = text.len() as f32 * font_size as f32 * 0.6;
+    let measured_height = font_size as f32;
     if let Some(index) = replace_index {
         let replacement = text.to_string();
         let run = &mut catalog.text_runs[index];
@@ -1503,7 +1586,10 @@ fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
         run.measured_height = measured_height;
         return run.handle;
     }
-    let handle = catalog.text_runs.len() as i32 + 1;
+    let handle = embedded_take_text_run_handle(catalog);
+    if handle == 0 {
+        return 0;
+    }
     catalog.text_runs.push(EmbeddedTextRun {
         handle,
         font,
@@ -3557,6 +3643,7 @@ mod tests {
             },
             fonts: Vec::new(),
             text_runs: Vec::new(),
+            next_text_run_handle: 1,
             sprite_refs: vec![EmbeddedSpriteRef {
                 handle: 17,
                 refs: 2,
@@ -3598,6 +3685,7 @@ mod tests {
             },
             fonts: Vec::new(),
             text_runs: Vec::new(),
+            next_text_run_handle: 1,
             sprite_refs: vec![EmbeddedSpriteRef {
                 handle: 31,
                 refs: usize::MAX,
@@ -3625,6 +3713,7 @@ mod tests {
             },
             fonts: Vec::new(),
             text_runs: Vec::new(),
+            next_text_run_handle: 1,
             sprite_refs: (1..=300)
                 .map(|handle| EmbeddedSpriteRef { handle, refs: 1 })
                 .collect(),
@@ -3657,6 +3746,7 @@ mod tests {
             },
             fonts: Vec::new(),
             text_runs: Vec::new(),
+            next_text_run_handle: 1,
             sprite_refs: Vec::new(),
             pending_sprite_releases: Vec::new(),
             pending_sprite_release_cancellations: Vec::new(),
@@ -7533,6 +7623,9 @@ function on_code_swap(): void {}\n";
             let catalog = slot.as_mut().expect("installed resource catalog");
             catalog.fonts.push(EmbeddedFont {
                 handle: 1,
+                generation: 0,
+                retired: false,
+                active: true,
                 path: root.join("assets/font.ttf"),
                 size: 18,
             });
@@ -7544,6 +7637,7 @@ function on_code_swap(): void {}\n";
                 measured_height: 18.0,
                 replaceable: false,
             });
+            catalog.next_text_run_handle = 2;
         }
 
         assert_eq!(embedded_measure_text_cached(1), 75.6);
@@ -7561,6 +7655,62 @@ function on_code_swap(): void {}\n";
     }
 
     #[test]
+    fn embedded_font_release_never_aliases_text_handles() {
+        let _guard = bridge_runtime_test_guard();
+        let root = temp_project("embedded_font_release_handles");
+        install_embedded_resource_host(&root).expect("install embedded resource host");
+        {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            let catalog = slot.as_mut().unwrap();
+            catalog.fonts.push(EmbeddedFont {
+                handle: 1,
+                generation: 0,
+                retired: false,
+                active: true,
+                path: root.join("assets/first.ttf"),
+                size: 18,
+            });
+            catalog.fonts.push(EmbeddedFont {
+                handle: 2,
+                generation: 0,
+                retired: false,
+                active: true,
+                path: root.join("assets/second.ttf"),
+                size: 24,
+            });
+        }
+
+        let stale_run = embedded_cache_text(1, b"released");
+        let retained_run = embedded_cache_text(2, b"retained");
+        assert_eq!(stale_run, 1);
+        assert_eq!(retained_run, 2);
+        embedded_release_font(1);
+        assert_eq!(embedded_measure_text_cached(stale_run), 0.0);
+        assert!(embedded_measure_text_cached(retained_run) > 0.0);
+        {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            let font = &mut slot.as_mut().unwrap().fonts[0];
+            font.handle = (font.generation << FONT_HANDLE_INDEX_BITS | 1) as i32;
+            font.active = true;
+            font.path = root.join("assets/replacement.ttf");
+            font.size = 20;
+        }
+        let replacement_font = {
+            let slot = embedded_resource_catalog().lock().unwrap();
+            slot.as_ref().unwrap().fonts[0].handle
+        };
+        let replacement_run = embedded_cache_text(replacement_font, b"replacement");
+        assert_eq!(replacement_run, 3);
+        assert_ne!(replacement_run, stale_run);
+        assert_ne!(replacement_run, retained_run);
+        assert_eq!(embedded_measure_text_cached(stale_run), 0.0);
+        assert!(embedded_measure_text_cached(retained_run) > 0.0);
+        *embedded_resource_catalog().lock().unwrap() = None;
+        stasis_dynload::set_embedded_graphics_host(None);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn embedded_dynamic_text_churn_is_bounded_and_transactional() {
         let _guard = bridge_runtime_test_guard();
         let root = temp_project("embedded_dynamic_text_churn");
@@ -7570,11 +7720,17 @@ function on_code_swap(): void {}\n";
             let catalog = slot.as_mut().unwrap();
             catalog.fonts.push(EmbeddedFont {
                 handle: 1,
+                generation: 0,
+                retired: false,
+                active: true,
                 path: root.join("assets/first.ttf"),
                 size: 18,
             });
             catalog.fonts.push(EmbeddedFont {
                 handle: 2,
+                generation: 0,
+                retired: false,
+                active: true,
                 path: root.join("assets/second.ttf"),
                 size: 30,
             });

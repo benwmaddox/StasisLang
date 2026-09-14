@@ -16,6 +16,13 @@ Returning without `end_frame()` discards the working construction. A nonzero ren
 
 `SpriteRunWriter` remains the bounded streaming option. Reserve, write typed `SpriteRef` instances, and finalize or cancel it in the same frame. Its token is not a public command-buffer offset.
 
+`load_font(path, size)` returns an opaque, generation-safe font handle. Call
+`release_font(handle)` when that logical size is superseded. Releasing zero or an
+already-released handle is harmless. A released handle never aliases a later
+font, and a failed replacement load leaves the previous handle usable until the
+caller explicitly releases it. Graphics runtime ABI 4 makes the release symbol
+mandatory across JIT, AOT, desktop, Android, and Web hosts.
+
 The command arrays, `GFX_*` layout constants, and `gfx_cmd_*` helpers belong to `stdlib/internal/gfx_cmd.stasis`. The compiler rejects their import, use, or redeclaration outside the canonical graphics implementation and explicit `tests/stasis` ABI seams. It also rejects aliases of privileged graphics extern symbols, so spelling a different Stasis function name cannot bypass the module boundary. Renderer fallback entry points such as the C `stasis_draw_lines_f32` symbol remain runtime implementation details.
 
 The compiler recognizes graphics implementation modules only when both their normalized module identity and their complete source content match the compiler-owned `graphics.stasis`, `asset_tasks.stasis`, or `internal/gfx_cmd.stasis` module. A project file that merely adopts a canonical `src/stdlib`, toolchain `.stasis_cache/toolchain/src/stdlib`, or `vendor/stasis[/src]/stdlib` path is not trusted when its content differs. Vendor manifest hashes additionally protect checked-in snapshot integrity. Raw `tests/stasis` ABI seams are enabled only for compiler unit builds or when the configured project root resolves to the Stasis repository itself; an ordinary project cannot claim the exception by copying its path spelling.
