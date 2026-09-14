@@ -531,18 +531,25 @@ impl Compiler {
             return Err(CompileError::Frontend(error));
         }
         self.refresh_module_graph()?;
-        crate::frontend::generics::expand_sources(&mut self.files).map_err(|message| {
-            self.last_source_diagnostic = self.files.first().map(|file| {
-                crate::SourceDiagnostic::new(
-                    file.path.clone(),
-                    0,
-                    file.content.len(),
-                    String::new(),
-                    message.clone(),
-                )
-            });
-            CompileError::Frontend(message)
-        })?;
+        crate::frontend::generics::expand_sources(&mut self.files, &self.module_graph).map_err(
+            |error| {
+                let diagnostic_file = error
+                    .path
+                    .as_deref()
+                    .and_then(|path| self.files.iter().find(|file| file.path == path))
+                    .or_else(|| self.files.first());
+                self.last_source_diagnostic = diagnostic_file.map(|file| {
+                    crate::SourceDiagnostic::new(
+                        file.path.clone(),
+                        0,
+                        file.content.len(),
+                        String::new(),
+                        error.message.clone(),
+                    )
+                });
+                CompileError::Frontend(error.message)
+            },
+        )?;
         let changed_paths: Vec<String> = self
             .files
             .iter()

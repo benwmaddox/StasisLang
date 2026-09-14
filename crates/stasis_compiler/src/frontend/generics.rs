@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::compiler::SourceFile;
 use crate::frontend::indexer::hash_text;
 use crate::frontend::lexer::{lex, TokenKind};
+use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::parser::{
     parse_top_level_extern_functions, parse_top_level_functions,
     parse_top_level_struct_definitions, parse_top_level_type_layout, ParsedFunctionSignature,
@@ -41,6 +42,7 @@ struct GenericStructDefinition {
 #[derive(Debug, Clone)]
 struct GenericFunctionDefinition {
     file_index: usize,
+    path: String,
     module_alias: String,
     name: String,
     parameters: Vec<ParsedGenericParameter>,
@@ -79,9 +81,25 @@ struct RawFile {
 
 #[derive(Debug, Clone)]
 struct ConstantDefinition {
+    path: String,
     name: String,
     type_name: String,
     value_text: String,
+}
+
+#[derive(Debug, Clone)]
+struct ConcretePathDefinition {
+    file_index: usize,
+    path: String,
+    type_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct OrdinaryStructDefinition {
+    file_index: usize,
+    path: String,
+    name: String,
+    fields: Vec<crate::frontend::parser::ParsedField>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -89,6 +107,7 @@ struct GenericEnvironment {
     values: BTreeMap<String, i32>,
     types: BTreeMap<String, String>,
     module_alias: Option<String>,
+    source_path: Option<String>,
 }
 
 impl GenericEnvironment {
@@ -134,24 +153,56 @@ impl GenericEnvironment {
 
 struct Expansion {
     files: Vec<RawFile>,
+    module_graph: ModuleGraph,
     generic_structs: BTreeMap<String, GenericStructDefinition>,
     generic_structs_by_name: BTreeMap<String, Vec<String>>,
     generic_functions: Vec<GenericFunctionDefinition>,
     generic_functions_by_name: BTreeMap<String, Vec<usize>>,
     ordinary_function_names: BTreeMap<String, Vec<(usize, String, Vec<String>)>>,
-    visible_module_aliases: BTreeMap<usize, std::collections::BTreeSet<String>>,
-    constants: BTreeMap<String, i32>,
+    constant_definitions: Vec<ConstantDefinition>,
+    constant_values: BTreeMap<String, i32>,
     struct_specializations: BTreeMap<StructSpecializationKey, StructSpecialization>,
     struct_work: VecDeque<(StructSpecializationKey, usize)>,
     function_specializations: BTreeMap<FunctionSpecializationKey, FunctionSpecialization>,
     function_work: VecDeque<(FunctionSpecializationKey, usize)>,
-    struct_fields: BTreeMap<String, Vec<crate::frontend::parser::ParsedField>>,
-    known_type_names: BTreeSet<String>,
-    concrete_paths: BTreeMap<String, String>,
+    ordinary_structs_by_name: BTreeMap<String, Vec<OrdinaryStructDefinition>>,
+    known_type_files_by_name: BTreeMap<String, BTreeSet<usize>>,
+    concrete_path_definitions: Vec<ConcretePathDefinition>,
+    concrete_paths_by_file: BTreeMap<usize, BTreeMap<String, String>>,
     active_depth: Option<usize>,
 }
 
-pub(crate) fn expand_sources(files: &mut [SourceFile]) -> Result<(), String> {
+pub(crate) struct ExpansionError {
+    pub(crate) path: Option<String>,
+    pub(crate) message: String,
+}
+
+impl ExpansionError {
+    fn without_path(message: String) -> Self {
+        Self {
+            path: None,
+            message,
+        }
+    }
+
+    fn for_file(path: String, message: String) -> Self {
+        Self {
+            path: Some(path),
+            message,
+        }
+    }
+}
+
+impl From<String> for ExpansionError {
+    fn from(message: String) -> Self {
+        Self::without_path(message)
+    }
+}
+
+pub(crate) fn expand_sources(
+    files: &mut [SourceFile],
+    module_graph: &ModuleGraph,
+) -> Result<(), ExpansionError> {
     let raw_files = files
         .iter()
         .map(|file| RawFile {
@@ -159,7 +210,7 @@ pub(crate) fn expand_sources(files: &mut [SourceFile]) -> Result<(), String> {
             source: file.original_content.clone(),
         })
         .collect::<Vec<_>>();
-    let mut expansion = Expansion::new(raw_files)?;
+    let mut expansion = Expansion::new(raw_files, module_graph.clone())?;
     expansion.reject_explicit_generic_calls()?;
     if expansion.generic_structs.is_empty() && expansion.generic_functions.is_empty() {
         for file in files {
@@ -175,18 +226,293 @@ pub(crate) fn expand_sources(files: &mut [SourceFile]) -> Result<(), String> {
 }
 
 impl Expansion {
-    fn reject_explicit_generic_calls(&self) -> Result<(), String> {
+    fn environment_for_file(&self, file_index: usize) -> GenericEnvironment {
+        let path = self.files[file_index].path.clone();
+        GenericEnvironment {
+            module_alias: self
+                .module_graph
+                .module(&path)
+                .map(|module| module.alias.clone())
+                .or_else(|| Some(module_alias_for_path(&path))),
+            source_path: Some(path),
+            ..GenericEnvironment::default()
+        }
+    }
+
+    fn imported_alias_target(&self, file_index: usize, alias: &str) -> Option<&str> {
+        self.module_graph
+            .imported_alias_target(&self.files[file_index].path, alias)
+    }
+
+    fn visible_paths(&self, file_index: usize) -> BTreeSet<String> {
+        self.module_graph
+            .dependency_closure(&self.files[file_index].path)
+    }
+
+    fn visible_constant_definition(
+        &self,
+        name: &str,
+        source_path: &str,
+    ) -> Result<Option<&ConstantDefinition>, String> {
+        let local = self
+            .constant_definitions
+            .iter()
+            .filter(|definition| {
+                definition.path == source_path
+                    && definition.name == name
+                    && definition.type_name.trim() == "i32"
+            })
+            .collect::<Vec<_>>();
+        let matches = if local.is_empty() {
+            let visible = self.module_graph.dependency_closure(source_path);
+            self.constant_definitions
+                .iter()
+                .filter(|definition| {
+                    visible.contains(&definition.path)
+                        && definition.name == name
+                        && definition.type_name.trim() == "i32"
+                })
+                .collect::<Vec<_>>()
+        } else {
+            local
+        };
+        match matches.as_slice() {
+            [] => Ok(None),
+            [definition] => Ok(Some(*definition)),
+            _ => Err(format!(
+                "ambiguous compile-time constant '{}' from '{}': {}",
+                name,
+                source_path,
+                sorted_paths(matches.iter().map(|definition| definition.path.as_str()))
+            )),
+        }
+    }
+
+    fn visible_constant_value(
+        &self,
+        name: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<Option<i32>, String> {
+        let Some(source_path) = environment.source_path.as_deref() else {
+            return Ok(None);
+        };
+        let Some(definition) = self.visible_constant_definition(name, source_path)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .constant_values
+            .get(&constant_definition_identity(definition))
+            .copied())
+    }
+
+    fn evaluate_i32_expression(
+        &self,
+        source: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<i32, String> {
+        let mut constants = BTreeMap::new();
+        for token in tokenize_constant_expression(source)? {
+            let ConstantToken::Identifier(identifier) = token else {
+                continue;
+            };
+            if environment.values.contains_key(&identifier) {
+                continue;
+            }
+            if let Some(value) = self.visible_constant_value(&identifier, environment)? {
+                constants.insert(identifier, value);
+            }
+        }
+        evaluate_i32_expression(source, environment, &constants)
+    }
+
+    fn local_constant_values(&self, file_index: usize) -> BTreeMap<String, i32> {
+        let path = &self.files[file_index].path;
+        self.constant_definitions
+            .iter()
+            .filter(|definition| &definition.path == path)
+            .filter_map(|definition| {
+                self.constant_values
+                    .get(&constant_definition_identity(definition))
+                    .copied()
+                    .map(|value| (definition.name.clone(), value))
+            })
+            .collect()
+    }
+
+    fn constant_rewrites_for_source(
+        &self,
+        file_index: usize,
+        source: &str,
+    ) -> Result<BTreeMap<String, (String, i32)>, String> {
+        let duplicate_names = self
+            .constant_definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .filter(|name| {
+                self.constant_definitions
+                    .iter()
+                    .filter(|definition| definition.name == **name)
+                    .map(|definition| definition.path.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    > 1
+            })
+            .collect::<BTreeSet<_>>();
+        let names = constant_identifier_ranges(source, &duplicate_names)?
+            .into_iter()
+            .map(|(start, end)| &source[start..end])
+            .collect::<BTreeSet<_>>();
+        let mut rewrites = BTreeMap::new();
+        for name in names {
+            let Some(definition) =
+                self.visible_constant_definition(name, &self.files[file_index].path)?
+            else {
+                continue;
+            };
+            let identity = constant_definition_identity(definition);
+            let Some(value) = self.constant_values.get(&identity).copied() else {
+                continue;
+            };
+            let generated_name = format!("__stasis_const_{:016x}", hash_text(&identity));
+            rewrites.insert(name.to_string(), (generated_name, value));
+        }
+        Ok(rewrites)
+    }
+
+    fn lookup_ordinary_struct_for_environment(
+        &self,
+        name: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<Option<&OrdinaryStructDefinition>, String> {
+        let short = name.rsplit('.').next().unwrap_or(name);
+        let Some(candidates) = self.ordinary_structs_by_name.get(short) else {
+            return Ok(None);
+        };
+        let Some(caller_path) = environment.source_path.as_deref() else {
+            return Ok(None);
+        };
+        let matches = if let Some((alias, _)) = name.rsplit_once('.') {
+            let Some(target) = self.module_graph.imported_alias_target(caller_path, alias) else {
+                return Ok(None);
+            };
+            candidates
+                .iter()
+                .filter(|definition| definition.path == target)
+                .collect::<Vec<_>>()
+        } else {
+            let local = candidates
+                .iter()
+                .filter(|definition| definition.path == caller_path)
+                .collect::<Vec<_>>();
+            if !local.is_empty() {
+                local
+            } else {
+                let visible = self.module_graph.dependency_closure(caller_path);
+                candidates
+                    .iter()
+                    .filter(|definition| visible.contains(&definition.path))
+                    .collect::<Vec<_>>()
+            }
+        };
+        match matches.as_slice() {
+            [] => Ok(None),
+            [definition] => Ok(Some(*definition)),
+            _ => Err(format!(
+                "ambiguous struct type '{}' from '{}': {}",
+                name,
+                caller_path,
+                sorted_paths(matches.iter().map(|definition| definition.path.as_str()))
+            )),
+        }
+    }
+
+    fn is_known_concrete_type(&self, name: &str, file_index: usize) -> Result<bool, String> {
+        if matches!(
+            name,
+            "void"
+                | "i32"
+                | "f32"
+                | "bool"
+                | "f64"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "ascii"
+                | "utf8"
+                | "string"
+        ) {
+            return Ok(true);
+        }
+        let environment = self.environment_for_file(file_index);
+        if self
+            .lookup_ordinary_struct_for_environment(name, &environment)?
+            .is_some()
+            || self
+                .lookup_generic_struct_for_environment(name, &environment)?
+                .is_some()
+        {
+            return Ok(true);
+        }
+        let short = name.rsplit('.').next().unwrap_or(name);
+        let Some(candidate_files) = self.known_type_files_by_name.get(short) else {
+            return Ok(false);
+        };
+        let caller_path = &self.files[file_index].path;
+        let matches = if let Some((alias, _)) = name.rsplit_once('.') {
+            let Some(target) = self.module_graph.imported_alias_target(caller_path, alias) else {
+                return Ok(false);
+            };
+            candidate_files
+                .iter()
+                .filter(|candidate| self.files[**candidate].path == target)
+                .count()
+        } else if candidate_files.contains(&file_index) {
+            1
+        } else {
+            let visible = self.visible_paths(file_index);
+            candidate_files
+                .iter()
+                .filter(|candidate| visible.contains(&self.files[**candidate].path))
+                .count()
+        };
+        if matches > 1 {
+            return Err(format!("ambiguous type '{}' from '{}'", name, caller_path));
+        }
+        Ok(matches == 1)
+    }
+
+    fn ordinary_type_replacements_for_source(
+        &self,
+        file_index: usize,
+        source: &str,
+    ) -> Result<Vec<(usize, usize, String)>, String> {
+        let environment = self.environment_for_file(file_index);
+        let mut replacements = Vec::new();
+        for (start, end) in type_identifier_ranges(source)? {
+            let name = &source[start..end];
+            let Some(definition) =
+                self.lookup_ordinary_struct_for_environment(name, &environment)?
+            else {
+                continue;
+            };
+            replacements.push((start, end, ordinary_struct_generated_name(definition)));
+        }
+        Ok(replacements)
+    }
+
+    fn reject_explicit_generic_calls(&self) -> Result<(), ExpansionError> {
         for (file_index, file) in self.files.iter().enumerate() {
             reject_explicit_generic_calls(&file.source, |name, qualifier| {
                 !self
                     .generic_function_candidates(name, qualifier, file_index)
                     .is_empty()
-            })?;
+            })
+            .map_err(|message| ExpansionError::for_file(file.path.clone(), message))?;
         }
         Ok(())
     }
 
-    fn new(files: Vec<RawFile>) -> Result<Self, String> {
+    fn new(files: Vec<RawFile>, module_graph: ModuleGraph) -> Result<Self, ExpansionError> {
         let mut generic_structs: BTreeMap<String, GenericStructDefinition> = BTreeMap::new();
         let mut generic_structs_by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let generic_functions = Vec::new();
@@ -194,26 +520,13 @@ impl Expansion {
         let ordinary_function_names: BTreeMap<String, Vec<(usize, String, Vec<String>)>> =
             BTreeMap::new();
         let mut constant_definitions = Vec::new();
-        let mut struct_fields = BTreeMap::new();
-        let mut known_type_names = BTreeSet::new();
-        let mut concrete_paths = BTreeMap::new();
-        let mut visible_module_aliases = BTreeMap::new();
+        let mut ordinary_structs_by_name: BTreeMap<String, Vec<OrdinaryStructDefinition>> =
+            BTreeMap::new();
+        let mut known_type_files_by_name: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+        let mut concrete_path_definitions = Vec::new();
         let mut parsed_functions = Vec::new();
 
         for (file_index, file) in files.iter().enumerate() {
-            let mut visible = BTreeSet::new();
-            visible.insert(module_alias_for_path(&file.path));
-            if let Ok(imports) =
-                crate::frontend::module_graph::parse_imports(&file.path, &file.source)
-            {
-                visible.extend(
-                    imports
-                        .into_iter()
-                        .map(|import| module_alias_for_path(&import.target)),
-                );
-            }
-            visible_module_aliases.insert(file_index, visible);
-
             // This discovery pass must not take ownership of malformed-source
             // diagnostics. The canonical parser/indexer below has the source
             // span and function context needed to report those errors.
@@ -221,34 +534,42 @@ impl Expansion {
                 continue;
             };
             for global in &layout.globals {
-                concrete_paths.insert(global.name.clone(), global.type_name.clone());
+                concrete_path_definitions.push(ConcretePathDefinition {
+                    file_index,
+                    path: global.name.clone(),
+                    type_name: global.type_name.clone(),
+                });
             }
             for block in &layout.global_blocks {
                 for field in &block.fields {
-                    concrete_paths.insert(
-                        format!("{}.{}", block.name, field.name),
-                        field.type_name.clone(),
-                    );
+                    concrete_path_definitions.push(ConcretePathDefinition {
+                        file_index,
+                        path: format!("{}.{}", block.name, field.name),
+                        type_name: field.type_name.clone(),
+                    });
                 }
             }
             for structure in &layout.structs {
-                known_type_names.insert(structure.name.clone());
+                known_type_files_by_name
+                    .entry(structure.name.clone())
+                    .or_default()
+                    .insert(file_index);
                 if !structure.generic_parameters.is_empty() {
                     continue;
                 }
-                if let Some(existing) = struct_fields.get(&structure.name) {
-                    if existing != &structure.fields {
-                        return Err(format!(
-                            "conflicting struct definition for '{}'",
-                            structure.name
-                        ));
-                    }
-                } else {
-                    struct_fields.insert(structure.name.clone(), structure.fields.clone());
-                }
+                ordinary_structs_by_name
+                    .entry(structure.name.clone())
+                    .or_default()
+                    .push(OrdinaryStructDefinition {
+                        file_index,
+                        path: file.path.clone(),
+                        name: structure.name.clone(),
+                        fields: structure.fields.clone(),
+                    });
             }
             for constant in layout.constants {
                 constant_definitions.push(ConstantDefinition {
+                    path: file.path.clone(),
                     name: constant.name,
                     type_name: constant.type_name,
                     value_text: constant.value_text,
@@ -262,16 +583,17 @@ impl Expansion {
                     &file.source,
                     &structure.name,
                     &structure.generic_parameters,
-                )?;
+                )
+                .map_err(|message| ExpansionError::for_file(file.path.clone(), message))?;
                 if generic_structs_by_name
                     .get(&structure.name)
                     .into_iter()
                     .flatten()
                     .any(|identity| generic_structs[identity].file_index == file_index)
                 {
-                    return Err(format!(
-                        "duplicate generic struct declaration '{}'",
-                        structure.name
+                    return Err(ExpansionError::for_file(
+                        file.path.clone(),
+                        format!("duplicate generic struct declaration '{}'", structure.name),
                     ));
                 }
                 let identity = generic_definition_identity(&file.path, &structure.name);
@@ -281,7 +603,10 @@ impl Expansion {
                         identity: identity.clone(),
                         file_index,
                         path: file.path.clone(),
-                        module_alias: module_alias_for_path(&file.path),
+                        module_alias: module_graph
+                            .module(&file.path)
+                            .map(|module| module.alias.clone())
+                            .unwrap_or_else(|| module_alias_for_path(&file.path)),
                         name: structure.name.clone(),
                         parameters: structure.generic_parameters,
                         fields: structure.fields,
@@ -298,9 +623,12 @@ impl Expansion {
                     .iter()
                     .find(|declaration| !declaration.generic_parameters.is_empty())
                 {
-                    return Err(format!(
-                        "generic extern function '{}' cannot be a host declaration; use a concrete wrapper",
-                        extern_decl.name
+                    return Err(ExpansionError::for_file(
+                        file.path.clone(),
+                        format!(
+                            "generic extern function '{}' cannot be a host declaration; use a concrete wrapper",
+                            extern_decl.name
+                        ),
                     ));
                 }
             }
@@ -309,57 +637,80 @@ impl Expansion {
             };
             for function in functions {
                 if !function.generic_parameters.is_empty() {
-                    return Err(format!(
-                        "generic function declaration '{}<...>' is no longer supported; remove the function generic parameter list and bind parameters through the first parameter's generic struct",
-                        function.name,
+                    return Err(ExpansionError::for_file(
+                        file.path.clone(),
+                        format!(
+                            "generic function declaration '{}<...>' is no longer supported; remove the function generic parameter list and bind parameters through the first parameter's generic struct",
+                            function.name,
+                        ),
                     ));
                 }
-                parsed_functions.push((file_index, module_alias_for_path(&file.path), function));
+                parsed_functions.push((
+                    file_index,
+                    module_graph
+                        .module(&file.path)
+                        .map(|module| module.alias.clone())
+                        .unwrap_or_else(|| module_alias_for_path(&file.path)),
+                    function,
+                ));
             }
             for enumeration in &layout.enums {
-                known_type_names.insert(enumeration.name.clone());
+                known_type_files_by_name
+                    .entry(enumeration.name.clone())
+                    .or_default()
+                    .insert(file_index);
             }
         }
 
-        let mut constants = BTreeMap::new();
+        let mut constant_values = BTreeMap::new();
         for definition in &constant_definitions {
             if definition.type_name.trim() == "i32" {
-                let value = evaluate_constant_name(
-                    &definition.name,
+                evaluate_constant_definition(
+                    definition,
                     &constant_definitions,
-                    &mut constants,
+                    &module_graph,
+                    &mut constant_values,
                     &mut Vec::new(),
                     &mut 0,
-                )?;
-                constants.insert(definition.name.clone(), value);
+                )
+                .map_err(|message| ExpansionError::for_file(definition.path.clone(), message))?;
             }
         }
 
         let mut expansion = Self {
             files,
+            module_graph,
             generic_structs,
             generic_structs_by_name,
             generic_functions,
             generic_functions_by_name,
             ordinary_function_names,
-            visible_module_aliases,
-            constants,
+            constant_definitions,
+            constant_values,
             struct_specializations: BTreeMap::new(),
             struct_work: VecDeque::new(),
             function_specializations: BTreeMap::new(),
             function_work: VecDeque::new(),
-            struct_fields,
-            known_type_names,
-            concrete_paths,
+            ordinary_structs_by_name,
+            known_type_files_by_name,
+            concrete_path_definitions,
+            concrete_paths_by_file: BTreeMap::new(),
             active_depth: None,
         };
         for (file_index, module_alias, function) in parsed_functions {
-            let parameters = expansion.receiver_generic_parameters(file_index, &function)?;
+            let parameters = expansion
+                .receiver_generic_parameters(file_index, &function)
+                .map_err(|message| {
+                    ExpansionError::for_file(expansion.files[file_index].path.clone(), message)
+                })?;
             if let Some(parameters) = parameters {
                 if is_concrete_only_function_name(&function.name) {
-                    return Err(format!(
-                        "generic function '{}' cannot be a lifecycle or host entry; use a concrete wrapper",
-                        function.name
+                    return Err(ExpansionError::for_file(
+                        expansion.files[file_index].path.clone(),
+                        format!(
+                            "generic function '{}' cannot be a lifecycle or host entry; use a concrete wrapper",
+                            function.name
+                        ),
                     ));
                 }
                 let definition = expansion.generic_functions.len();
@@ -370,13 +721,18 @@ impl Expansion {
                     .push(definition);
                 expansion.generic_functions.push(GenericFunctionDefinition {
                     file_index,
+                    path: expansion.files[file_index].path.clone(),
                     module_alias,
                     name: function.name.clone(),
                     parameters,
                     signature: function,
                 });
             } else {
-                expansion.validate_unbound_function_signature(&function, file_index)?;
+                expansion
+                    .validate_unbound_function_signature(&function, file_index)
+                    .map_err(|message| {
+                        ExpansionError::for_file(expansion.files[file_index].path.clone(), message)
+                    })?;
                 expansion
                     .ordinary_function_names
                     .entry(function.name.clone())
@@ -406,8 +762,7 @@ impl Expansion {
         let Some((base, arguments)) = parse_type_application(&first.type_name)? else {
             return Ok(None);
         };
-        let mut lookup_environment = GenericEnvironment::default();
-        lookup_environment.module_alias = Some(module_alias_for_path(&self.files[file_index].path));
+        let lookup_environment = self.environment_for_file(file_index);
         let Some(definition) =
             self.lookup_generic_struct_for_environment(base, &lookup_environment)?
         else {
@@ -460,9 +815,7 @@ impl Expansion {
         match kind {
             ParsedGenericParameterKind::Type => {
                 if let Some((base, arguments)) = parse_type_application(argument)? {
-                    let mut lookup_environment = GenericEnvironment::default();
-                    lookup_environment.module_alias =
-                        Some(module_alias_for_path(&self.files[file_index].path));
+                    let lookup_environment = self.environment_for_file(file_index);
                     let Some(definition) =
                         self.lookup_generic_struct_for_environment(base, &lookup_environment)?
                     else {
@@ -503,7 +856,9 @@ impl Expansion {
                     }
                     return Ok(());
                 }
-                if is_identifier_text(argument) && !self.is_known_concrete_type(argument) {
+                if is_identifier_text(argument)
+                    && !self.is_known_concrete_type(argument, file_index)?
+                {
                     add_receiver_parameter(parameters, argument, ParsedGenericParameterKind::Type)?;
                 } else if !is_type_argument_text(argument) {
                     return Err(format!(
@@ -513,14 +868,16 @@ impl Expansion {
                 }
             }
             ParsedGenericParameterKind::I32 => {
-                if is_identifier_text(argument) && !self.constants.contains_key(argument) {
+                let environment = self.environment_for_file(file_index);
+                if is_identifier_text(argument)
+                    && self
+                        .visible_constant_value(argument, &environment)?
+                        .is_none()
+                {
                     add_receiver_parameter(parameters, argument, ParsedGenericParameterKind::I32)?;
-                } else if evaluate_i32_expression(
-                    argument,
-                    &GenericEnvironment::default(),
-                    &self.constants,
-                )
-                .is_err()
+                } else if self
+                    .evaluate_i32_expression(argument, &environment)
+                    .is_err()
                 {
                     return Err(format!(
                         "receiver generic i32 argument '{}' must be a checked constant or identifier",
@@ -530,31 +887,6 @@ impl Expansion {
             }
         }
         Ok(())
-    }
-
-    fn is_known_concrete_type(&self, name: &str) -> bool {
-        let short_name = name.rsplit('.').next().unwrap_or(name);
-        matches!(
-            name,
-            "void"
-                | "i32"
-                | "f32"
-                | "bool"
-                | "f64"
-                | "u8"
-                | "u16"
-                | "u32"
-                | "ascii"
-                | "utf8"
-                | "string"
-        ) || self.known_type_names.contains(name)
-            || self.known_type_names.contains(short_name)
-            || self.struct_fields.contains_key(name)
-            || self.lookup_generic_struct(name).is_some()
-            || self
-                .struct_fields
-                .keys()
-                .any(|candidate| candidate.rsplit('.').next() == Some(name))
     }
 
     fn is_generic_placeholder_name(&self, name: &str) -> bool {
@@ -655,13 +987,17 @@ impl Expansion {
         if let Some((element, extent)) = split_array_suffix(type_name) {
             self.validate_receiver_type_expression(element, parameters, function_name, file_index)?;
             if !extent.trim().is_empty() {
-                self.validate_receiver_i32_expression(extent, parameters, function_name)?;
+                self.validate_receiver_i32_expression(
+                    extent,
+                    parameters,
+                    function_name,
+                    file_index,
+                )?;
             }
             return Ok(());
         }
         if let Some((base, arguments)) = parse_type_application(type_name)? {
-            let mut environment = GenericEnvironment::default();
-            environment.module_alias = Some(module_alias_for_path(&self.files[file_index].path));
+            let environment = self.environment_for_file(file_index);
             let Some(definition) =
                 self.lookup_generic_struct_for_environment(base, &environment)?
             else {
@@ -703,7 +1039,7 @@ impl Expansion {
                 }
                 return Ok(());
             }
-            if !self.is_known_concrete_type(type_name)
+            if !self.is_known_concrete_type(type_name, file_index)?
                 && self.is_generic_placeholder_name(type_name)
             {
                 return Err(format!(
@@ -730,9 +1066,12 @@ impl Expansion {
                 function_name,
                 file_index,
             ),
-            ParsedGenericParameterKind::I32 => {
-                self.validate_receiver_i32_expression(argument, parameters, function_name)
-            }
+            ParsedGenericParameterKind::I32 => self.validate_receiver_i32_expression(
+                argument,
+                parameters,
+                function_name,
+                file_index,
+            ),
         }
     }
 
@@ -741,6 +1080,7 @@ impl Expansion {
         expression: &str,
         parameters: &[ParsedGenericParameter],
         function_name: &str,
+        file_index: usize,
     ) -> Result<(), String> {
         let Ok(tokens) = tokenize_constant_expression(expression) else {
             return Err(format!(
@@ -752,7 +1092,9 @@ impl Expansion {
             let ConstantToken::Identifier(identifier) = token else {
                 continue;
             };
-            if self.constants.contains_key(&identifier)
+            if self
+                .visible_constant_value(&identifier, &self.environment_for_file(file_index))?
+                .is_some()
                 || parameters.iter().any(|parameter| {
                     parameter.name == identifier
                         && parameter.kind == ParsedGenericParameterKind::I32
@@ -768,33 +1110,63 @@ impl Expansion {
         Ok(())
     }
 
-    fn populate_concrete_paths(&mut self) -> Result<(), String> {
-        let roots = self
-            .concrete_paths
-            .iter()
-            .filter(|(path, _)| !path.contains('.'))
-            .map(|(path, type_name)| (path.clone(), type_name.clone()))
-            .collect::<Vec<_>>();
-        let block_fields = self
-            .concrete_paths
-            .iter()
-            .filter(|(path, _)| path.contains('.'))
-            .map(|(path, type_name)| (path.clone(), type_name.clone()))
-            .collect::<Vec<_>>();
-        for (path, type_name) in roots.into_iter().chain(block_fields) {
-            self.populate_concrete_type(
-                &path,
-                &type_name,
-                &GenericEnvironment::default(),
-                &mut Vec::new(),
-                0,
-            )?;
+    fn populate_concrete_paths(&mut self) -> Result<(), ExpansionError> {
+        for file_index in 0..self.files.len() {
+            let path = self.files[file_index].path.clone();
+            let result = (|| -> Result<(), String> {
+                let visible = self.visible_paths(file_index);
+                let names = self
+                    .concrete_path_definitions
+                    .iter()
+                    .filter(|definition| visible.contains(&self.files[definition.file_index].path))
+                    .map(|definition| definition.path.clone())
+                    .collect::<BTreeSet<_>>();
+                let mut paths = BTreeMap::new();
+                for name in names {
+                    let local = self
+                        .concrete_path_definitions
+                        .iter()
+                        .filter(|definition| {
+                            definition.file_index == file_index && definition.path == name
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let matches = if local.is_empty() {
+                        self.concrete_path_definitions
+                            .iter()
+                            .filter(|definition| {
+                                visible.contains(&self.files[definition.file_index].path)
+                                    && definition.path == name
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    } else {
+                        local
+                    };
+                    let [definition] = matches.as_slice() else {
+                        continue;
+                    };
+                    let environment = self.environment_for_file(definition.file_index);
+                    self.populate_concrete_type(
+                        &mut paths,
+                        &definition.path,
+                        &definition.type_name,
+                        &environment,
+                        &mut Vec::new(),
+                        0,
+                    )?;
+                }
+                self.concrete_paths_by_file.insert(file_index, paths);
+                Ok(())
+            })();
+            result.map_err(|message| ExpansionError::for_file(path, message))?;
         }
         Ok(())
     }
 
     fn populate_concrete_type(
         &mut self,
+        paths: &mut BTreeMap<String, String>,
         path: &str,
         type_name: &str,
         environment: &GenericEnvironment,
@@ -802,12 +1174,11 @@ impl Expansion {
         generic_depth: usize,
     ) -> Result<(), String> {
         let resolved_type = rewrite_generic_identifiers(type_name, environment);
-        self.materialize_type(&resolved_type, environment)?;
-        self.concrete_paths
-            .insert(path.to_string(), resolved_type.clone());
+        let materialized_type = self.materialize_type(&resolved_type, environment)?;
+        paths.insert(path.to_string(), materialized_type.clone());
 
-        let subject = split_array_suffix(&resolved_type)
-            .map_or(resolved_type.as_str(), |(element, _)| element);
+        let subject = split_array_suffix(&materialized_type)
+            .map_or(materialized_type.as_str(), |(element, _)| element);
         let Some((fields, nested_environment, visit_key)) =
             self.struct_fields_for_type(subject, environment)?
         else {
@@ -826,6 +1197,7 @@ impl Expansion {
         visiting.push(visit_key);
         for field in fields {
             self.populate_concrete_type(
+                paths,
                 &format!("{path}.{}", field.name),
                 &field.type_name,
                 &nested_environment,
@@ -844,7 +1216,11 @@ impl Expansion {
         source: &str,
         environment: &GenericEnvironment,
     ) -> Result<BTreeMap<String, String>, String> {
-        let mut paths = self.concrete_paths.clone();
+        let mut paths = self
+            .concrete_paths_by_file
+            .get(&file_index)
+            .cloned()
+            .unwrap_or_default();
         for parameter in &function.params {
             let type_name = rewrite_generic_identifiers(&parameter.type_name, environment);
             self.populate_local_type_paths(
@@ -886,10 +1262,10 @@ impl Expansion {
         generic_depth: usize,
     ) -> Result<(), String> {
         let resolved_type = rewrite_generic_identifiers(type_name, environment);
-        paths.insert(path.to_string(), resolved_type.clone());
-        let _ = self.materialize_type(&resolved_type, environment)?;
-        let subject = split_array_suffix(&resolved_type)
-            .map_or(resolved_type.as_str(), |(element, _)| element);
+        let materialized_type = self.materialize_type(&resolved_type, environment)?;
+        paths.insert(path.to_string(), materialized_type.clone());
+        let subject = split_array_suffix(&materialized_type)
+            .map_or(materialized_type.as_str(), |(element, _)| element);
         if let Some((fields, nested_environment, visit_key)) =
             self.struct_fields_for_type(subject, environment)?
         {
@@ -919,30 +1295,35 @@ impl Expansion {
         Ok(())
     }
 
-    fn seed_direct_uses(&mut self) -> Result<(), String> {
+    fn seed_direct_uses(&mut self) -> Result<(), ExpansionError> {
         for file_index in 0..self.files.len() {
-            let source = self.files[file_index].source.clone();
-            let source_without_templates = self.source_without_templates(file_index, &source)?;
-            let mut source_environment = GenericEnvironment::default();
-            source_environment.module_alias =
-                Some(module_alias_for_path(&self.files[file_index].path));
-            self.collect_type_applications(&source_without_templates, &source_environment)?;
-            let Ok(functions) = parse_top_level_functions(&source_without_templates) else {
-                continue;
-            };
-            for function in functions {
-                let Some(body) = source_without_templates.get(function.body_range.clone()) else {
-                    continue;
+            let path = self.files[file_index].path.clone();
+            let result = (|| -> Result<(), String> {
+                let source = self.files[file_index].source.clone();
+                let source_without_templates =
+                    self.source_without_templates(file_index, &source)?;
+                let source_environment = self.environment_for_file(file_index);
+                self.collect_type_applications(&source_without_templates, &source_environment)?;
+                let Ok(functions) = parse_top_level_functions(&source_without_templates) else {
+                    return Ok(());
                 };
-                let local_paths = self.local_paths_for_function(
-                    file_index,
-                    &function,
-                    &source_without_templates,
-                    &source_environment,
-                )?;
-                self.seed_inferred_receiver_calls(body, file_index, &local_paths)?;
-                self.seed_inferred_argument_calls(body, file_index, &local_paths)?;
-            }
+                for function in functions {
+                    let Some(body) = source_without_templates.get(function.body_range.clone())
+                    else {
+                        continue;
+                    };
+                    let local_paths = self.local_paths_for_function(
+                        file_index,
+                        &function,
+                        &source_without_templates,
+                        &source_environment,
+                    )?;
+                    self.seed_inferred_receiver_calls(body, file_index, &local_paths)?;
+                    self.seed_inferred_argument_calls(body, file_index, &local_paths)?;
+                }
+                Ok(())
+            })();
+            result.map_err(|message| ExpansionError::for_file(path, message))?;
         }
         Ok(())
     }
@@ -954,16 +1335,17 @@ impl Expansion {
         local_paths: &BTreeMap<String, String>,
     ) -> Result<(), String> {
         for call in collect_inferred_receiver_calls(source)? {
-            let is_module_call = !self.concrete_paths.contains_key(&call.receiver)
+            let is_module_call = !local_paths.contains_key(&call.receiver)
                 && self
-                    .visible_module_aliases
-                    .get(&file_index)
-                    .is_some_and(|aliases| aliases.contains(&call.receiver));
+                    .imported_alias_target(file_index, &call.receiver)
+                    .is_some();
             if is_module_call {
                 let Some(actual_types) = call
                     .arguments
                     .iter()
-                    .map(|argument| self.infer_expression_type_text(argument, local_paths))
+                    .map(|argument| {
+                        self.infer_expression_type_text(argument, local_paths, file_index)
+                    })
                     .collect::<Option<Vec<_>>>()
                 else {
                     continue;
@@ -998,31 +1380,21 @@ impl Expansion {
                 }
                 continue;
             }
-            let Some(actual_type) = local_paths
-                .get(&call.receiver)
-                .or_else(|| self.concrete_paths.get(&call.receiver))
-                .cloned()
-            else {
+            let Some(actual_type) = local_paths.get(&call.receiver).cloned() else {
                 continue;
             };
             let mut actual_types = vec![actual_type];
             let Some(argument_types) = call
                 .arguments
                 .iter()
-                .map(|argument| self.infer_expression_type_text(argument, local_paths))
+                .map(|argument| self.infer_expression_type_text(argument, local_paths, file_index))
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
             };
             actual_types.extend(argument_types);
-            let definitions =
-                self.generic_function_candidates(&call.name, Some(&call.receiver), file_index);
-            if self.has_ordinary_function_candidate(
-                &call.name,
-                Some(&call.receiver),
-                file_index,
-                &actual_types,
-            ) {
+            let definitions = self.generic_function_candidates(&call.name, None, file_index);
+            if self.has_ordinary_function_candidate(&call.name, None, file_index, &actual_types) {
                 continue;
             }
             let had_viable_definition = !definitions.is_empty();
@@ -1061,7 +1433,7 @@ impl Expansion {
             let Some(inferred_types) = call
                 .arguments
                 .iter()
-                .map(|argument| self.infer_expression_type_text(argument, local_paths))
+                .map(|argument| self.infer_expression_type_text(argument, local_paths, file_index))
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
@@ -1103,6 +1475,7 @@ impl Expansion {
         }
         let mut environment = GenericEnvironment::default();
         environment.module_alias = Some(generic.module_alias.clone());
+        environment.source_path = Some(generic.path.clone());
         // Generic names are definitionally owned by the first parameter.  It
         // is the only parameter allowed to introduce bindings; all remaining
         // parameters merely validate the already-substituted signature.
@@ -1143,6 +1516,7 @@ impl Expansion {
         &self,
         expression: &str,
         local_paths: &BTreeMap<String, String>,
+        file_index: usize,
     ) -> Option<String> {
         let mut expression = expression.trim();
         while has_outer_parentheses(expression) {
@@ -1151,7 +1525,12 @@ impl Expansion {
         if let Some(type_name) = local_paths.get(expression) {
             return Some(type_name.clone());
         }
-        if self.constants.contains_key(expression) {
+        if self
+            .visible_constant_value(expression, &self.environment_for_file(file_index))
+            .ok()
+            .flatten()
+            .is_some()
+        {
             return Some("i32".to_string());
         }
         if expression == "true" || expression == "false" {
@@ -1171,8 +1550,8 @@ impl Expansion {
             return Some("f32".to_string());
         }
         if let Some((lhs, operator, rhs)) = split_binary_expression(expression) {
-            let lhs = self.infer_expression_type_text(lhs, local_paths)?;
-            let rhs = self.infer_expression_type_text(rhs, local_paths)?;
+            let lhs = self.infer_expression_type_text(lhs, local_paths, file_index)?;
+            let rhs = self.infer_expression_type_text(rhs, local_paths, file_index)?;
             if operator == '<' || operator == '>' || operator == '=' {
                 return Some("bool".to_string());
             }
@@ -1185,7 +1564,8 @@ impl Expansion {
             return Some(lhs);
         }
         if let Some((collection, suffix)) = split_indexed_expression(expression) {
-            let collection_type = self.infer_expression_type_text(collection, local_paths)?;
+            let collection_type =
+                self.infer_expression_type_text(collection, local_paths, file_index)?;
             let element_type = split_array_suffix(&collection_type)?.0.to_string();
             if suffix.is_empty() {
                 return Some(element_type);
@@ -1193,20 +1573,28 @@ impl Expansion {
             return local_paths
                 .get(&format!("{collection}[0]{suffix}"))
                 .cloned()
-                .or_else(|| self.field_type_from_text(&element_type, suffix));
+                .or_else(|| self.field_type_from_text(&element_type, suffix, file_index));
         }
         None
     }
 
-    fn field_type_from_text(&self, type_name: &str, suffix: &str) -> Option<String> {
+    fn field_type_from_text(
+        &self,
+        type_name: &str,
+        suffix: &str,
+        file_index: usize,
+    ) -> Option<String> {
         let mut current = type_name.trim().to_string();
+        let mut current_environment = self.environment_for_file(file_index);
         for field_name in suffix.trim_start_matches('.').split('.') {
             let fields = if let Some((base, arguments)) = parse_type_application(&current).ok()? {
-                let mut lookup_environment = GenericEnvironment::default();
                 let definition = self
-                    .lookup_generic_struct_for_environment(base, &lookup_environment)
-                    .ok()??;
+                    .lookup_generic_struct_for_environment(base, &current_environment)
+                    .ok()??
+                    .clone();
+                let mut lookup_environment = current_environment.clone();
                 lookup_environment.module_alias = Some(definition.module_alias.clone());
+                lookup_environment.source_path = Some(definition.path.clone());
                 let resolved_arguments = definition
                     .parameters
                     .iter()
@@ -1217,7 +1605,7 @@ impl Expansion {
                                 .ok()?,
                         )),
                         ParsedGenericParameterKind::I32 => Some(ConcreteArgument::I32(
-                            evaluate_i32_expression(argument, &lookup_environment, &self.constants)
+                            self.evaluate_i32_expression(argument, &lookup_environment)
                                 .ok()?,
                         )),
                     })
@@ -1228,6 +1616,8 @@ impl Expansion {
                 )
                 .ok()?;
                 environment.module_alias = Some(definition.module_alias.clone());
+                environment.source_path = Some(definition.path.clone());
+                current_environment = environment.clone();
                 definition
                     .fields
                     .iter()
@@ -1244,6 +1634,8 @@ impl Expansion {
                 let mut environment =
                     GenericEnvironment::from_parameters(&definition.parameters, &arguments).ok()?;
                 environment.module_alias = Some(definition.module_alias.clone());
+                environment.source_path = Some(definition.path.clone());
+                current_environment = environment.clone();
                 definition
                     .fields
                     .iter()
@@ -1255,9 +1647,14 @@ impl Expansion {
                             .unwrap_or(substituted)
                     })
             } else {
-                self.struct_fields
-                    .get(&current)
-                    .and_then(|fields| fields.iter().find(|field| field.name == field_name))
+                let definition = self
+                    .lookup_ordinary_struct_for_environment(&current, &current_environment)
+                    .ok()??;
+                current_environment = self.environment_for_file(definition.file_index);
+                definition
+                    .fields
+                    .iter()
+                    .find(|field| field.name == field_name)
                     .map(|field| field.type_name.clone())
             }?;
             current = fields;
@@ -1314,35 +1711,28 @@ impl Expansion {
                 parameter.kind == ParsedGenericParameterKind::I32
                     && parameter.name == pattern_extent
             }) {
-                let value = evaluate_i32_expression(
-                    actual_extent,
-                    &GenericEnvironment::default(),
-                    &self.constants,
-                )?;
+                let value = self.evaluate_i32_expression(actual_extent, environment)?;
                 return bind_inferred_value(environment, &parameter.name, value);
             }
-            let expected =
-                match evaluate_i32_expression(pattern_extent, environment, &self.constants) {
-                    Ok(value) => value,
-                    Err(_)
-                        if expression_mentions_unbound_value(
-                            pattern_extent,
-                            parameters,
-                            environment,
-                        ) =>
-                    {
-                        // Do not solve N+1=capacity.  Another exact occurrence
-                        // may bind N later, after which the expression is checked.
-                        return Ok(true);
-                    }
-                    Err(_) => return Ok(false),
-                };
-            let Some(observed) = evaluate_i32_expression(
-                actual_extent,
-                &GenericEnvironment::default(),
-                &self.constants,
-            )
-            .ok() else {
+            let expected = match self.evaluate_i32_expression(pattern_extent, environment) {
+                Ok(value) => value,
+                Err(_)
+                    if expression_mentions_unbound_value(
+                        pattern_extent,
+                        parameters,
+                        environment,
+                    ) =>
+                {
+                    // Do not solve N+1=capacity.  Another exact occurrence
+                    // may bind N later, after which the expression is checked.
+                    return Ok(true);
+                }
+                Err(_) => return Ok(false),
+            };
+            let Some(observed) = self
+                .evaluate_i32_expression(actual_extent, environment)
+                .ok()
+            else {
                 return Ok(false);
             };
             return Ok(expected == observed);
@@ -1404,18 +1794,12 @@ impl Expansion {
                             .iter()
                             .find(|candidate| candidate.name == pattern_argument.trim())
                         else {
-                            let expected = evaluate_i32_expression(
-                                pattern_argument,
-                                environment,
-                                &self.constants,
-                            )
-                            .ok();
-                            let observed = evaluate_i32_expression(
-                                actual_argument,
-                                &GenericEnvironment::default(),
-                                &self.constants,
-                            )
-                            .ok();
+                            let expected = self
+                                .evaluate_i32_expression(pattern_argument, environment)
+                                .ok();
+                            let observed = self
+                                .evaluate_i32_expression(actual_argument, environment)
+                                .ok();
                             match (expected, observed) {
                                 (Some(expected), Some(observed)) => {
                                     if expected != observed {
@@ -1438,11 +1822,7 @@ impl Expansion {
                         if nested.kind != ParsedGenericParameterKind::I32 {
                             return Ok(false);
                         }
-                        let value = evaluate_i32_expression(
-                            actual_argument,
-                            &GenericEnvironment::default(),
-                            &self.constants,
-                        )?;
+                        let value = self.evaluate_i32_expression(actual_argument, environment)?;
                         if !bind_inferred_value(environment, &nested.name, value)? {
                             return Ok(false);
                         }
@@ -1480,19 +1860,32 @@ impl Expansion {
         Ok(output)
     }
 
-    fn process_worklist(&mut self) -> Result<(), String> {
+    fn process_worklist(&mut self) -> Result<(), ExpansionError> {
         while !self.struct_work.is_empty() || !self.function_work.is_empty() {
             if let Some((key, depth)) = self.struct_work.pop_front() {
+                let path = self
+                    .lookup_generic_struct(&key.definition)
+                    .map(|definition| definition.path.clone());
                 let previous_depth = self.active_depth.replace(depth);
                 let result = self.materialize_struct(&key);
                 self.active_depth = previous_depth;
-                result?;
+                result.map_err(|message| match path {
+                    Some(path) => ExpansionError::for_file(path, message),
+                    None => ExpansionError::without_path(message),
+                })?;
             }
             if let Some((key, depth)) = self.function_work.pop_front() {
+                let path = self
+                    .generic_functions
+                    .get(key.definition)
+                    .map(|definition| definition.path.clone());
                 let previous_depth = self.active_depth.replace(depth);
                 let result = self.materialize_function(&key);
                 self.active_depth = previous_depth;
-                result?;
+                result.map_err(|message| match path {
+                    Some(path) => ExpansionError::for_file(path, message),
+                    None => ExpansionError::without_path(message),
+                })?;
             }
         }
         Ok(())
@@ -1555,7 +1948,7 @@ impl Expansion {
             if extent.is_empty() {
                 return Ok(format!("{element}[]"));
             }
-            let value = evaluate_i32_expression(extent, environment, &self.constants)?;
+            let value = self.evaluate_i32_expression(extent, environment)?;
             if value < 0 {
                 return Err(format!(
                     "negative array extent {} is invalid after generic substitution",
@@ -1586,6 +1979,11 @@ impl Expansion {
                 trimmed
             ));
         }
+        if let Some(definition) =
+            self.lookup_ordinary_struct_for_environment(trimmed, environment)?
+        {
+            return Ok(ordinary_struct_generated_name(definition));
+        }
         Ok(trimmed.to_string())
     }
 
@@ -1600,7 +1998,7 @@ impl Expansion {
             if extent.is_empty() {
                 return Ok(format!("{element}[]"));
             }
-            let value = evaluate_i32_expression(extent, environment, &self.constants)?;
+            let value = self.evaluate_i32_expression(extent, environment)?;
             if value < 0 {
                 return Err(format!("negative array extent {} is invalid", value));
             }
@@ -1628,24 +2026,16 @@ impl Expansion {
         if let Some(value) = environment.types.get(trimmed) {
             return Ok(value.clone());
         }
+        if let Some(definition) =
+            self.lookup_ordinary_struct_for_environment(trimmed, environment)?
+        {
+            return Ok(ordinary_struct_generated_name(definition));
+        }
         Ok(trimmed.to_string())
     }
 
     fn lookup_generic_struct(&self, name: &str) -> Option<&GenericStructDefinition> {
-        if let Some(definition) = self.generic_structs.get(name) {
-            return Some(definition);
-        }
-        let short = name.rsplit('.').next().unwrap_or(name);
-        let candidates = self.generic_structs_by_name.get(short)?;
-        if let Some(module_alias) = name.rsplit_once('.').map(|(alias, _)| alias) {
-            return candidates
-                .iter()
-                .filter_map(|identity| self.generic_structs.get(identity))
-                .find(|definition| definition.module_alias == module_alias);
-        }
-        (candidates.len() == 1)
-            .then(|| self.generic_structs.get(&candidates[0]))
-            .flatten()
+        self.generic_structs.get(name)
     }
 
     fn lookup_generic_struct_for_environment(
@@ -1660,35 +2050,40 @@ impl Expansion {
         let Some(candidates) = self.generic_structs_by_name.get(short) else {
             return Ok(None);
         };
-        let qualified_alias = name.rsplit_once('.').map(|(alias, _)| alias);
-        let preferred_alias = qualified_alias.or(environment.module_alias.as_deref());
-        let matches = candidates
+        let Some(caller_path) = environment.source_path.as_deref() else {
+            return Ok(None);
+        };
+        let candidate_definitions = candidates
             .iter()
-            .filter_map(|identity| self.generic_structs.get(identity))
-            .filter(|definition| {
-                preferred_alias.is_none_or(|alias| definition.module_alias == alias)
-            })
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [] if preferred_alias.is_some() && qualified_alias.is_none() => {
-                let fallback = candidates
-                    .iter()
-                    .filter_map(|identity| self.generic_structs.get(identity))
-                    .collect::<Vec<_>>();
-                match fallback.as_slice() {
-                    [definition] => Ok(Some(*definition)),
-                    [] => Ok(None),
-                    _ => Err(format!(
-                        "ambiguous generic type '{}'; qualify the declaration with its module",
-                        name
-                    )),
-                }
+            .filter_map(|identity| self.generic_structs.get(identity));
+        let matches = if let Some((alias, _)) = name.rsplit_once('.') {
+            let Some(target_path) = self.module_graph.imported_alias_target(caller_path, alias)
+            else {
+                return Ok(None);
+            };
+            candidate_definitions
+                .filter(|definition| definition.path == target_path)
+                .collect::<Vec<_>>()
+        } else {
+            let local = candidate_definitions
+                .clone()
+                .filter(|definition| definition.path == caller_path)
+                .collect::<Vec<_>>();
+            if !local.is_empty() {
+                local
+            } else {
+                let visible = self.module_graph.dependency_closure(caller_path);
+                candidate_definitions
+                    .filter(|definition| visible.contains(&definition.path))
+                    .collect::<Vec<_>>()
             }
+        };
+        match matches.as_slice() {
             [] => Ok(None),
             [definition] => Ok(Some(*definition)),
             _ => Err(format!(
-                "ambiguous generic type '{}'; qualify the declaration with its module",
-                name
+                "ambiguous generic type '{}' from '{}'; qualify the declaration with a directly imported module",
+                name, caller_path
             )),
         }
     }
@@ -1756,6 +2151,7 @@ impl Expansion {
             let mut nested_environment =
                 GenericEnvironment::from_parameters(&definition.parameters, &resolved_arguments)?;
             nested_environment.module_alias = Some(definition.module_alias.clone());
+            nested_environment.source_path = Some(definition.path.clone());
             return Ok(Some((
                 definition.fields,
                 nested_environment,
@@ -1766,17 +2162,24 @@ impl Expansion {
             let mut nested_environment =
                 GenericEnvironment::from_parameters(&definition.parameters, &arguments)?;
             nested_environment.module_alias = Some(definition.module_alias.clone());
+            nested_environment.source_path = Some(definition.path.clone());
             return Ok(Some((
                 definition.fields,
                 nested_environment,
                 format!("generic:{}<{arguments:?}>", definition.identity),
             )));
         }
-        Ok(self
-            .struct_fields
-            .get(type_name.trim())
+        let Some(definition) = self
+            .lookup_ordinary_struct_for_environment(type_name.trim(), environment)?
             .cloned()
-            .map(|fields| (fields, environment.clone(), type_name.trim().to_string())))
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            definition.fields,
+            self.environment_for_file(definition.file_index),
+            format!("struct:{}::{}", definition.path, definition.name),
+        )))
     }
 
     fn resolve_argument_list(
@@ -1796,7 +2199,7 @@ impl Expansion {
         for (parameter, argument) in parameters.iter().zip(arguments) {
             match parameter.kind {
                 ParsedGenericParameterKind::I32 => {
-                    let value = evaluate_i32_expression(argument, environment, &self.constants)?;
+                    let value = self.evaluate_i32_expression(argument, environment)?;
                     resolved.push(ConcreteArgument::I32(value));
                 }
                 ParsedGenericParameterKind::Type => {
@@ -1838,7 +2241,7 @@ impl Expansion {
             .zip(parameters)
             .map(|(argument, parameter)| match parameter.kind {
                 ParsedGenericParameterKind::I32 => Ok(ConcreteArgument::I32(
-                    evaluate_i32_expression(argument, environment, &self.constants)?,
+                    self.evaluate_i32_expression(argument, environment)?,
                 )),
                 ParsedGenericParameterKind::Type => {
                     let value = if is_type_argument_text(argument) {
@@ -1941,6 +2344,7 @@ impl Expansion {
         let mut environment =
             GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
         environment.module_alias = Some(definition.module_alias.clone());
+        environment.source_path = Some(definition.path.clone());
         let generated_name = self
             .struct_specializations
             .get(key)
@@ -1979,6 +2383,7 @@ impl Expansion {
         let mut environment =
             GenericEnvironment::from_parameters(&generic.parameters, &key.arguments)?;
         environment.module_alias = Some(generic.module_alias.clone());
+        environment.source_path = Some(generic.path.clone());
         let source = self.files[generic.file_index].source.clone();
         let start = generic.signature.signature_range.start;
         let end = generic.signature.body_range.end;
@@ -1996,6 +2401,15 @@ impl Expansion {
 
         let substituted = rewrite_generic_identifiers(&stripped, &environment);
         let substituted = self.rewrite_type_applications(&substituted, &environment)?;
+        let substituted = rewrite_i32_constants(
+            &substituted,
+            &BTreeMap::new(),
+            &self.constant_rewrites_for_source(generic.file_index, &substituted)?,
+        )?;
+        let substituted = apply_replacements(
+            &substituted,
+            &self.ordinary_type_replacements_for_source(generic.file_index, &substituted)?,
+        )?;
 
         let parsed_substituted = parse_top_level_functions(&substituted)?;
         let specialized_signature = parsed_substituted
@@ -2012,14 +2426,15 @@ impl Expansion {
         for call in collect_inferred_receiver_calls(&substituted)? {
             let is_module_call = !local_paths.contains_key(&call.receiver)
                 && self
-                    .visible_module_aliases
-                    .get(&generic.file_index)
-                    .is_some_and(|aliases| aliases.contains(&call.receiver));
+                    .imported_alias_target(generic.file_index, &call.receiver)
+                    .is_some();
             if is_module_call {
                 let Some(actual_types) = call
                     .arguments
                     .iter()
-                    .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                    .map(|argument| {
+                        self.infer_expression_type_text(argument, &local_paths, generic.file_index)
+                    })
                     .collect::<Option<Vec<_>>>()
                 else {
                     continue;
@@ -2061,21 +2476,20 @@ impl Expansion {
             let Some(argument_types) = call
                 .arguments
                 .iter()
-                .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                .map(|argument| {
+                    self.infer_expression_type_text(argument, &local_paths, generic.file_index)
+                })
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
             };
             let mut actual_types = vec![actual_type];
             actual_types.extend(argument_types);
-            let definitions = self.generic_function_candidates(
-                &call.name,
-                Some(&call.receiver),
-                generic.file_index,
-            );
+            let definitions =
+                self.generic_function_candidates(&call.name, None, generic.file_index);
             if self.has_ordinary_function_candidate(
                 &call.name,
-                Some(&call.receiver),
+                None,
                 generic.file_index,
                 &actual_types,
             ) {
@@ -2105,7 +2519,9 @@ impl Expansion {
             let Some(actual_types) = call
                 .arguments
                 .iter()
-                .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                .map(|argument| {
+                    self.infer_expression_type_text(argument, &local_paths, generic.file_index)
+                })
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
@@ -2201,92 +2617,107 @@ impl Expansion {
         Ok(output)
     }
 
-    fn write_sources(&mut self, files: &mut [SourceFile]) -> Result<(), String> {
-        let function_names = self.function_names()?;
-        for (file_index, file) in files.iter_mut().enumerate() {
-            let raw = &self.files[file_index].source;
-            let mut removals = Vec::new();
-            for definition in self.generic_structs.values() {
-                if definition.file_index == file_index {
-                    removals.push(definition.definition_range.clone());
+    fn write_sources(&mut self, files: &mut [SourceFile]) -> Result<(), ExpansionError> {
+        let function_names = self
+            .function_names()
+            .map_err(ExpansionError::without_path)?;
+        for file_index in 0..files.len() {
+            let path = self.files[file_index].path.clone();
+            let result = (|| -> Result<String, String> {
+                let raw = self.files[file_index].source.clone();
+                let mut removals = Vec::new();
+                for definition in self.generic_structs.values() {
+                    if definition.file_index == file_index {
+                        removals.push(definition.definition_range.clone());
+                    }
                 }
-            }
-            for definition in &self.generic_functions {
-                if definition.file_index == file_index {
-                    removals.push(
-                        definition.signature.signature_range.start
-                            ..definition.signature.body_range.end,
-                    );
+                for definition in &self.generic_functions {
+                    if definition.file_index == file_index {
+                        removals.push(
+                            definition.signature.signature_range.start
+                                ..definition.signature.body_range.end,
+                        );
+                    }
                 }
-            }
-            removals.sort_by_key(|range| (range.start, range.end));
-            let mut generated = rewrite_kept_source(self, file_index, raw, &removals)?;
-            generated = self.rewrite_inferred_generic_calls(
-                file_index,
-                &generated,
-                &GenericEnvironment {
-                    module_alias: Some(module_alias_for_path(&self.files[file_index].path)),
-                    ..GenericEnvironment::default()
-                },
-                &function_names,
-            )?;
-
-            for (key, specialization) in &self.struct_specializations {
-                let Some(definition) = self.lookup_generic_struct(&key.definition) else {
-                    continue;
-                };
-                if definition.file_index != file_index {
-                    continue;
-                }
-                let mut environment =
-                    GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
-                environment.module_alias = Some(definition.module_alias.clone());
-                let mut fields = String::new();
-                for field in &definition.fields {
-                    let field_type =
-                        self.materialize_type_readonly(&field.type_name, &environment)?;
-                    fields.push_str("    ");
-                    fields.push_str(&field.name);
-                    fields.push_str(": ");
-                    fields.push_str(&field_type);
-                    fields.push_str(";\n");
-                }
-                generated.push_str(&format!(
-                    "\nstruct {} {{\n{fields}}}\n",
-                    specialization.generated_name
-                ));
-            }
-
-            let function_specializations = self
-                .function_specializations
-                .iter()
-                .map(|(key, specialization)| (key.clone(), specialization.clone()))
-                .collect::<Vec<_>>();
-            for (key, specialization) in function_specializations {
-                let definition = self.generic_functions[specialization.definition].clone();
-                if definition.file_index != file_index || specialization.source.is_empty() {
-                    continue;
-                }
-                let mut environment =
-                    GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
-                environment.module_alias = Some(definition.module_alias.clone());
-                let source = self.rewrite_inferred_generic_calls(
+                removals.sort_by_key(|range| (range.start, range.end));
+                let mut generated = rewrite_kept_source(self, file_index, &raw, &removals)?;
+                generated = self.rewrite_inferred_generic_calls(
                     file_index,
-                    &specialization.source,
-                    &environment,
+                    &generated,
+                    &GenericEnvironment {
+                        module_alias: Some(module_alias_for_path(&self.files[file_index].path)),
+                        source_path: Some(self.files[file_index].path.clone()),
+                        ..GenericEnvironment::default()
+                    },
                     &function_names,
                 )?;
-                let source = rename_function_declaration(
-                    &source,
-                    &definition.name,
-                    function_names.get(&key).ok_or_else(|| {
-                        "missing generic function specialization name".to_string()
-                    })?,
-                )?;
-                generated.push('\n');
-                generated.push_str(&source);
-                generated.push('\n');
-            }
+
+                for (key, specialization) in &self.struct_specializations {
+                    let Some(definition) = self.lookup_generic_struct(&key.definition) else {
+                        continue;
+                    };
+                    if definition.file_index != file_index {
+                        continue;
+                    }
+                    let mut environment = GenericEnvironment::from_parameters(
+                        &definition.parameters,
+                        &key.arguments,
+                    )?;
+                    environment.module_alias = Some(definition.module_alias.clone());
+                    environment.source_path = Some(definition.path.clone());
+                    let mut fields = String::new();
+                    for field in &definition.fields {
+                        let field_type =
+                            self.materialize_type_readonly(&field.type_name, &environment)?;
+                        fields.push_str("    ");
+                        fields.push_str(&field.name);
+                        fields.push_str(": ");
+                        fields.push_str(&field_type);
+                        fields.push_str(";\n");
+                    }
+                    generated.push_str(&format!(
+                        "\nstruct {} {{\n{fields}}}\n",
+                        specialization.generated_name
+                    ));
+                }
+
+                let function_specializations = self
+                    .function_specializations
+                    .iter()
+                    .map(|(key, specialization)| (key.clone(), specialization.clone()))
+                    .collect::<Vec<_>>();
+                for (key, specialization) in function_specializations {
+                    let definition = self.generic_functions[specialization.definition].clone();
+                    if definition.file_index != file_index || specialization.source.is_empty() {
+                        continue;
+                    }
+                    let mut environment = GenericEnvironment::from_parameters(
+                        &definition.parameters,
+                        &key.arguments,
+                    )?;
+                    environment.module_alias = Some(definition.module_alias.clone());
+                    environment.source_path = Some(definition.path.clone());
+                    let source = self.rewrite_inferred_generic_calls(
+                        file_index,
+                        &specialization.source,
+                        &environment,
+                        &function_names,
+                    )?;
+                    let source = rename_function_declaration(
+                        &source,
+                        &definition.name,
+                        function_names.get(&key).ok_or_else(|| {
+                            "missing generic function specialization name".to_string()
+                        })?,
+                    )?;
+                    generated.push('\n');
+                    generated.push_str(&source);
+                    generated.push('\n');
+                }
+                Ok(generated)
+            })();
+            let generated = result.map_err(|message| ExpansionError::for_file(path, message))?;
+            let file = &mut files[file_index];
             file.content = generated;
             file.hash = hash_text(&file.content);
         }
@@ -2316,9 +2747,8 @@ impl Expansion {
             for call in collect_inferred_receiver_calls(body)? {
                 let is_module_call = !local_paths.contains_key(&call.receiver)
                     && self
-                        .visible_module_aliases
-                        .get(&file_index)
-                        .is_some_and(|aliases| aliases.contains(&call.receiver));
+                        .imported_alias_target(file_index, &call.receiver)
+                        .is_some();
                 let mut actual_types = Vec::new();
                 if !is_module_call {
                     let Some(receiver_type) = local_paths.get(&call.receiver).cloned() else {
@@ -2329,18 +2759,21 @@ impl Expansion {
                 let Some(argument_types) = call
                     .arguments
                     .iter()
-                    .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                    .map(|argument| {
+                        self.infer_expression_type_text(argument, &local_paths, file_index)
+                    })
                     .collect::<Option<Vec<_>>>()
                 else {
                     continue;
                 };
                 actual_types.extend(argument_types);
+                let qualifier = is_module_call.then_some(call.receiver.as_str());
                 let definitions =
-                    self.generic_function_candidates(&call.name, Some(&call.receiver), file_index);
+                    self.generic_function_candidates(&call.name, qualifier, file_index);
                 if definitions.is_empty()
                     || self.has_ordinary_function_candidate(
                         &call.name,
-                        Some(&call.receiver),
+                        qualifier,
                         file_index,
                         &actual_types,
                     )
@@ -2349,7 +2782,7 @@ impl Expansion {
                 }
                 let targets = self.inferred_generic_target_names(
                     &call.name,
-                    Some(&call.receiver),
+                    qualifier,
                     &actual_types,
                     &definitions,
                     function_names,
@@ -2379,7 +2812,9 @@ impl Expansion {
                 let Some(actual_types) = call
                     .arguments
                     .iter()
-                    .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                    .map(|argument| {
+                        self.infer_expression_type_text(argument, &local_paths, file_index)
+                    })
                     .collect::<Option<Vec<_>>>()
                 else {
                     continue;
@@ -2524,18 +2959,13 @@ impl Expansion {
             return Vec::new();
         };
         if let Some(qualifier) = qualifier {
-            let is_receiver_path = self.concrete_paths.contains_key(qualifier)
-                || self
-                    .visible_module_aliases
-                    .get(&file_index)
-                    .is_none_or(|aliases| !aliases.contains(qualifier));
-            if is_receiver_path {
-                return all.clone();
-            }
+            let Some(target_path) = self.imported_alias_target(file_index, qualifier) else {
+                return Vec::new();
+            };
             return all
                 .iter()
                 .copied()
-                .filter(|index| self.generic_functions[*index].module_alias == qualifier)
+                .filter(|index| self.generic_functions[*index].path == target_path)
                 .collect();
         }
 
@@ -2547,23 +2977,13 @@ impl Expansion {
         if !local.is_empty() {
             return local;
         }
-        let visible = self
-            .visible_module_aliases
-            .get(&file_index)
-            .cloned()
-            .unwrap_or_default();
+        let visible = self.visible_paths(file_index);
         let imported = all
             .iter()
             .copied()
-            .filter(|index| visible.contains(&self.generic_functions[*index].module_alias))
+            .filter(|index| visible.contains(&self.generic_functions[*index].path))
             .collect::<Vec<_>>();
-        if !imported.is_empty() {
-            return imported;
-        }
-        if all.len() == 1 {
-            return all.clone();
-        }
-        Vec::new()
+        imported
     }
 
     fn has_ordinary_function_candidate(
@@ -2576,17 +2996,25 @@ impl Expansion {
         let Some(all) = self.ordinary_function_names.get(name) else {
             return false;
         };
+        let qualified_target =
+            qualifier.and_then(|alias| self.imported_alias_target(file_index, alias));
+        if qualifier.is_some() && qualified_target.is_none() {
+            return false;
+        }
+        let has_local = qualifier.is_none()
+            && all
+                .iter()
+                .any(|(candidate_file, _, _)| *candidate_file == file_index);
+        let visible = self.visible_paths(file_index);
         all.iter()
-            .filter(|(_, module_alias, _)| {
-                qualifier.is_none_or(|qualifier| *module_alias == qualifier)
-            })
-            .filter(|(candidate_file, module_alias, _)| {
-                qualifier.is_some()
-                    || *candidate_file == file_index
-                    || self
-                        .visible_module_aliases
-                        .get(&file_index)
-                        .is_some_and(|aliases| aliases.contains(module_alias))
+            .filter(|(candidate_file, _, _)| {
+                if let Some(target) = qualified_target {
+                    self.files[*candidate_file].path == target
+                } else if has_local {
+                    *candidate_file == file_index
+                } else {
+                    visible.contains(&self.files[*candidate_file].path)
+                }
             })
             .any(|(_, _, parameter_types)| {
                 parameter_types.len() == actual_types.len()
@@ -2630,10 +3058,19 @@ fn ordinary_source_piece(
     file_index: usize,
     source: &str,
 ) -> Result<String, String> {
-    let source = rewrite_i32_constants(source, &expansion.constants)?;
+    let source = apply_replacements(
+        source,
+        &expansion.ordinary_type_replacements_for_source(file_index, source)?,
+    )?;
     let mut environment = GenericEnvironment::default();
     environment.module_alias = Some(module_alias_for_path(&expansion.files[file_index].path));
-    expansion.rewrite_type_applications_readonly(&source, &environment)
+    environment.source_path = Some(expansion.files[file_index].path.clone());
+    let source = expansion.rewrite_type_applications_readonly(&source, &environment)?;
+    rewrite_i32_constants(
+        &source,
+        &expansion.local_constant_values(file_index),
+        &expansion.constant_rewrites_for_source(file_index, &source)?,
+    )
 }
 
 impl Expansion {
@@ -3669,48 +4106,293 @@ fn matching_angle(source: &str, open: usize) -> Result<usize, String> {
     Err("missing closing '>' in generic argument list".to_string())
 }
 
-fn evaluate_constant_name(
+fn constant_definition_identity(definition: &ConstantDefinition) -> String {
+    format!("{}::{}", definition.path, definition.name)
+}
+
+fn ordinary_struct_generated_name(definition: &OrdinaryStructDefinition) -> String {
+    format!(
+        "__module_type_{:016x}",
+        hash_text(&format!("{}::{}", definition.path, definition.name))
+    )
+}
+
+fn type_identifier_ranges(source: &str) -> Result<Vec<(usize, usize)>, String> {
+    let tokens = lex(source)?;
+    let mut ranges = Vec::new();
+    let mut in_type = false;
+    let mut angle_depth = 0usize;
+    let mut square_depth = 0usize;
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let token = tokens[index];
+        let text = &source[token.start..token.end];
+        if token.kind == TokenKind::Identifier && text == "struct" {
+            if let Some(name) = tokens
+                .get(index + 1)
+                .filter(|candidate| candidate.kind == TokenKind::Identifier)
+            {
+                ranges.push((name.start, name.end));
+            }
+        }
+        if token.kind == TokenKind::Colon {
+            in_type = true;
+            angle_depth = 0;
+            square_depth = 0;
+            index += 1;
+            continue;
+        }
+        if !in_type {
+            index += 1;
+            continue;
+        }
+        if token.kind == TokenKind::Other {
+            match text {
+                "<" => angle_depth += 1,
+                ">" => angle_depth = angle_depth.saturating_sub(1),
+                "[" => square_depth += 1,
+                "]" => square_depth = square_depth.saturating_sub(1),
+                "=" if angle_depth == 0 && square_depth == 0 => in_type = false,
+                _ => {}
+            }
+        }
+        if angle_depth == 0
+            && square_depth == 0
+            && matches!(
+                token.kind,
+                TokenKind::Comma | TokenKind::RParen | TokenKind::Semicolon | TokenKind::LBrace
+            )
+        {
+            in_type = false;
+            index += 1;
+            continue;
+        }
+        if token.kind == TokenKind::Identifier && angle_depth == 0 && square_depth == 0 {
+            if tokens.get(index + 1).is_some_and(|candidate| {
+                candidate.kind == TokenKind::Other && &source[candidate.start..candidate.end] == "."
+            }) && tokens
+                .get(index + 2)
+                .is_some_and(|candidate| candidate.kind == TokenKind::Identifier)
+            {
+                let end = tokens[index + 2].end;
+                ranges.push((token.start, end));
+                index += 3;
+                continue;
+            }
+            ranges.push((token.start, token.end));
+        }
+        index += 1;
+    }
+    ranges.sort_unstable();
+    ranges.dedup();
+    Ok(ranges)
+}
+
+fn constant_identifier_ranges(
+    source: &str,
+    candidate_names: &BTreeSet<&str>,
+) -> Result<Vec<(usize, usize)>, String> {
+    if candidate_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tokens = lex(source)?;
+    let locals = crate::frontend::parser::parse_local_declarations(source).unwrap_or_default();
+    let functions = parse_top_level_functions(source).unwrap_or_default();
+    let mut enum_ranges = Vec::new();
+    for (index, token) in tokens.iter().copied().enumerate() {
+        if token.kind != TokenKind::Identifier || &source[token.start..token.end] != "enum" {
+            continue;
+        }
+        let Some(open_index) = (index + 1..tokens.len())
+            .find(|candidate| tokens[*candidate].kind == TokenKind::LBrace)
+        else {
+            continue;
+        };
+        let mut depth = 0usize;
+        for candidate in &tokens[open_index..] {
+            match candidate.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        enum_ranges.push(token.start..candidate.end);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut ranges = Vec::new();
+    for (index, token) in tokens.iter().copied().enumerate() {
+        if token.kind != TokenKind::Identifier {
+            continue;
+        }
+        let name = &source[token.start..token.end];
+        if !candidate_names.contains(name) {
+            continue;
+        }
+        let previous = index.checked_sub(1).and_then(|value| tokens.get(value));
+        let next = tokens.get(index + 1);
+        let followed_by_assignment = next.is_some_and(|candidate| {
+            candidate.kind == TokenKind::Other
+                && &source[candidate.start..candidate.end] == "="
+                && !tokens.get(index + 2).is_some_and(|following| {
+                    following.kind == TokenKind::Other
+                        && &source[following.start..following.end] == "="
+                })
+        });
+        let is_constant_declaration = previous.is_some_and(|candidate| {
+            candidate.kind == TokenKind::Identifier
+                && &source[candidate.start..candidate.end] == "const"
+        });
+        if !is_constant_declaration {
+            if enum_ranges
+                .iter()
+                .any(|range| range.start <= token.start && token.end <= range.end)
+            {
+                continue;
+            }
+            if previous.is_some_and(|candidate| {
+                candidate.kind == TokenKind::Other && &source[candidate.start..candidate.end] == "."
+            }) || next.is_some_and(|candidate| {
+                matches!(
+                    candidate.kind,
+                    TokenKind::LParen | TokenKind::LBrace | TokenKind::Colon
+                ) || (candidate.kind == TokenKind::Other
+                    && &source[candidate.start..candidate.end] == ".")
+            }) || previous.is_some_and(|candidate| {
+                candidate.kind == TokenKind::Identifier
+                    && matches!(
+                        &source[candidate.start..candidate.end],
+                        "struct" | "enum" | "global" | "let"
+                    )
+            }) || followed_by_assignment
+            {
+                continue;
+            }
+            if locals.iter().any(|local| {
+                local.name == name
+                    && local.visibility_range.start <= token.start
+                    && token.end <= local.visibility_range.end
+            }) {
+                continue;
+            }
+            if functions.iter().any(|function| {
+                function.body_range.start <= token.start
+                    && token.end <= function.body_range.end
+                    && function
+                        .params
+                        .iter()
+                        .any(|parameter| parameter.name == name)
+            }) {
+                continue;
+            }
+        }
+        ranges.push((token.start, token.end));
+    }
+    Ok(ranges)
+}
+
+fn sorted_paths<'a>(paths: impl Iterator<Item = &'a str>) -> String {
+    let mut paths = paths.collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.dedup();
+    paths.join(", ")
+}
+
+fn visible_constant_definition_in<'a>(
     name: &str,
+    source_path: &str,
+    definitions: &'a [ConstantDefinition],
+    module_graph: &ModuleGraph,
+) -> Result<Option<&'a ConstantDefinition>, String> {
+    let local = definitions
+        .iter()
+        .filter(|definition| {
+            definition.path == source_path
+                && definition.name == name
+                && definition.type_name.trim() == "i32"
+        })
+        .collect::<Vec<_>>();
+    let matches = if local.is_empty() {
+        let visible = module_graph.dependency_closure(source_path);
+        definitions
+            .iter()
+            .filter(|definition| {
+                visible.contains(&definition.path)
+                    && definition.name == name
+                    && definition.type_name.trim() == "i32"
+            })
+            .collect::<Vec<_>>()
+    } else {
+        local
+    };
+    match matches.as_slice() {
+        [] => Ok(None),
+        [definition] => Ok(Some(*definition)),
+        _ => Err(format!(
+            "ambiguous compile-time constant '{}' from '{}': {}",
+            name,
+            source_path,
+            sorted_paths(matches.iter().map(|definition| definition.path.as_str()))
+        )),
+    }
+}
+
+fn evaluate_constant_definition(
+    definition: &ConstantDefinition,
     definitions: &[ConstantDefinition],
+    module_graph: &ModuleGraph,
     resolved: &mut BTreeMap<String, i32>,
     stack: &mut Vec<String>,
     steps: &mut usize,
 ) -> Result<i32, String> {
-    if let Some(value) = resolved.get(name) {
+    let identity = constant_definition_identity(definition);
+    if let Some(value) = resolved.get(&identity) {
         return Ok(*value);
     }
-    if stack.iter().any(|entry| entry == name) {
+    if stack.iter().any(|entry| entry == &identity) {
         let mut chain = stack.clone();
-        chain.push(name.to_string());
+        chain.push(identity.clone());
         return Err(format!("constant reference cycle: {}", chain.join(" -> ")));
     }
-    let definition = definitions
-        .iter()
-        .find(|definition| definition.name == name)
-        .ok_or_else(|| format!("unknown compile-time constant '{name}'"))?;
-    stack.push(name.to_string());
+    stack.push(identity.clone());
     let mut environment = GenericEnvironment::default();
+    environment.source_path = Some(definition.path.clone());
     let tokens = tokenize_constant_expression(&definition.value_text)?;
     for token in tokens {
         let ConstantToken::Identifier(identifier) = token else {
             continue;
         };
-        if identifier == name || environment.values.contains_key(&identifier) {
+        if identifier == definition.name || environment.values.contains_key(&identifier) {
             continue;
         }
-        if let Some(candidate) = definitions
-            .iter()
-            .find(|candidate| candidate.name == identifier && candidate.type_name.trim() == "i32")
-        {
-            let value =
-                evaluate_constant_name(&candidate.name, definitions, resolved, stack, steps)?;
+        if let Some(candidate) = visible_constant_definition_in(
+            &identifier,
+            &definition.path,
+            definitions,
+            module_graph,
+        )? {
+            let value = evaluate_constant_definition(
+                candidate,
+                definitions,
+                module_graph,
+                resolved,
+                stack,
+                steps,
+            )?;
             environment.values.insert(identifier, value);
         }
     }
-    let value =
-        evaluate_i32_expression_with_steps(&definition.value_text, &environment, resolved, steps)?;
+    let value = evaluate_i32_expression_with_steps(
+        &definition.value_text,
+        &environment,
+        &BTreeMap::new(),
+        steps,
+    )?;
     stack.pop();
-    resolved.insert(name.to_string(), value);
+    resolved.insert(identity, value);
     Ok(value)
 }
 
@@ -3927,9 +4609,11 @@ fn tokenize_constant_expression(source: &str) -> Result<Vec<ConstantToken>, Stri
 fn rewrite_i32_constants(
     source: &str,
     constants: &BTreeMap<String, i32>,
+    renames: &BTreeMap<String, (String, i32)>,
 ) -> Result<String, String> {
     let tokens = lex(source)?;
     let mut replacements = Vec::<(usize, usize, String)>::new();
+    let mut initializer_ranges = Vec::<std::ops::Range<usize>>::new();
     for (index, token) in tokens.iter().copied().enumerate() {
         if token.kind != TokenKind::Identifier || &source[token.start..token.end] != "const" {
             continue;
@@ -3967,12 +4651,28 @@ fn rewrite_i32_constants(
         let Some(value) = constants.get(constant_name) else {
             continue;
         };
+        initializer_ranges.push(tokens[equals_index].end..tokens[semicolon_index].start);
         replacements.push((
             tokens[equals_index].end,
             tokens[semicolon_index].start,
             format!(" {value} "),
         ));
     }
+    let rename_names = renames.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    for (start, end) in constant_identifier_ranges(source, &rename_names)? {
+        if initializer_ranges
+            .iter()
+            .any(|range| range.start <= start && end <= range.end)
+        {
+            continue;
+        }
+        let name = &source[start..end];
+        let Some((generated_name, _)) = renames.get(name) else {
+            continue;
+        };
+        replacements.push((start, end, generated_name.clone()));
+    }
+    replacements.sort_by_key(|(start, end, _)| (*start, *end));
     apply_replacements(source, &replacements)
 }
 
