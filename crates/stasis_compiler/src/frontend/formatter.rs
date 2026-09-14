@@ -1154,13 +1154,12 @@ mod tests {
     }
 
     #[test]
-    fn formats_nested_generic_angles_and_explicit_calls_without_touching_comparisons() {
-        let source = "struct Buffer<T:type,N:i32>{values:T[N];} function clear<T:type,N:i32>(value:Buffer<Buffer<T,N>>):void{return;} function main():void{clear::<f32,4>(buffer);if(1<2){return;}}";
+    fn formats_nested_generic_angles_and_inferred_calls_without_touching_comparisons() {
+        let source = "struct Buffer<T:type,N:i32>{values:T[N];} function clear(value:Buffer<Buffer<T,N>>):void{return;} function main():void{clear(buffer);if(1<2){return;}}";
         let formatted = format_source(source).expect("format generics");
         assert!(formatted.contains("struct Buffer<T: type, N: i32> {"));
-        assert!(formatted
-            .contains("function clear<T: type, N: i32>(value: Buffer<Buffer<T, N>>): void {"));
-        assert!(formatted.contains("clear::<f32, 4>(buffer);"));
+        assert!(formatted.contains("function clear(value: Buffer<Buffer<T, N>>): void {"));
+        assert!(formatted.contains("clear(buffer);"));
         assert!(formatted.contains("if (1 < 2) {"));
         assert_eq!(
             format_source(&formatted).expect("reformat generics"),

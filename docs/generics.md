@@ -10,8 +10,9 @@ The language contract is also summarized in [the specification](spec.md#422-gene
 
 ## Supported contract
 
-Generic structs and functions may declare type parameters (`T: type`) and
-compile-time signed 32-bit value parameters (`N: i32`):
+Only structs declare type parameters (`T: type`) and compile-time signed 32-bit
+value parameters (`N: i32`). A function receives those names from the concrete
+generic struct application in its first parameter:
 
 ```stasis
 struct Buffer<T: type, N: i32> {
@@ -19,7 +20,7 @@ struct Buffer<T: type, N: i32> {
     values: T[N];
 }
 
-function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 {
+function capacity(buffer: Buffer<T, N>): i32 {
     return N;
 }
 
@@ -34,18 +35,19 @@ array extents are diagnostics. A value parameter is not inherently a capacity:
 negative values are valid when used as offsets or modes, while a substituted
 array extent must still satisfy the ordinary fixed-array policy.
 
-Inferred calls are preferred:
+The first argument is the only source of function generic bindings. Free and
+receiver calls are equivalent and select the same specialization:
 
 ```stasis
-let result: i32 = samples.capacity();
+let free_result: i32 = capacity(samples);
+let method_result: i32 = samples.capacity();
 ```
 
-When inference is not possible, a complete explicit argument list uses the
-unambiguous `::<...>` marker:
-
-```stasis
-let result: i32 = capacity::<f32, 128>(samples);
-```
+Function-owned declarations such as `function capacity<T: type>(...)` and
+explicit calls such as `capacity<T>(...)` or `capacity::<T>(...)` are migration
+errors. A placeholder used only by a later parameter, return type, body, or raw
+view is also rejected. Introduce a nominal generic struct in parameter one when
+a reusable compile-time policy is required.
 
 Specializations have nominal identity based on the defining declaration and
 the canonical, ordered arguments. Equal constant expressions identify the same
@@ -57,8 +59,9 @@ The existing ownership and view rules remain authoritative:
 
 - `T[N]` owns its statically declared storage; it has no runtime length,
   allocation, resize, or implicit copy operation.
-- `T[]` is a view and can accept fixed arrays with different capacities, but it
-  cannot infer a capacity parameter.
+- `T[]` is a view and can accept fixed arrays with different capacities after
+  `T` has been bound by parameter one's nominal generic struct. A raw `T[]`
+  parameter cannot introduce a function generic.
 - A struct or element parameter is a view of caller-backed storage. Generic
   syntax never creates a hidden owning temporary or deep copy.
 - Operations on `T` are checked after substitution. Generic code cannot invent
@@ -81,7 +84,7 @@ as native packaging.
 
 | Surface | Executable coverage | Result required for a green run |
 | --- | --- | --- |
-| Syntax, inference, explicit calls, scalar storage, nesting, bounds | `generics_collections_jit_aot_wasm::generic_collection_sample_tests_pass_in_the_production_jit_shape`; the two sample tests | Both tests return true. |
+| Syntax, receiver binding, free/dot calls, scalar storage, nesting, bounds | `generics_collections_jit_aot_wasm::generic_collection_sample_tests_pass_in_the_production_jit_shape`; the two sample tests | Both tests return true. |
 | Generic expansion and graphics provenance | `generics_collections_jit_aot_wasm::generic_collection_aot_accepts_vendor_graphics_after_expansion` | Generic constant rewriting does not invalidate the compiler-owned vendor graphics module. |
 | Negative diagnostics | `generics_collections_jit_aot_wasm::negative_generic_collection_fixtures_keep_expected_diagnostics` | Runtime capacities, unresolved values, layout overflow, ambiguous receivers, and unsupported composite copies fail with stable diagnostics. |
 | JIT and Wasm execution | `generics_collections_jit_aot_wasm::generic_collection_scalar_fixture_executes_in_wasm` | The module has a valid Wasm header and Node observes `main() == 0`. |
@@ -93,11 +96,11 @@ as native packaging.
 
 ## Deliberate boundaries
 
-The following are not part of the current supported contract: generic enums,
-aliases, defaults, variadic or higher-kinded parameters, traits, runtime value
-arguments, non-`i32` value parameters, symbolic equation solving for inference,
-or arbitrary composite-element copying. Generic functions must be concrete at
-lifecycle and host boundaries; use a concrete wrapper when one is required.
+The following are not part of the current supported contract: function-owned
+generic declarations, explicit generic function calls, generic enums, aliases,
+defaults, variadic or higher-kinded parameters, traits, runtime value arguments,
+non-`i32` value parameters, symbolic equation solving, or arbitrary
+composite-element copying. Lifecycle and host entries remain concrete.
 
 Web packaging must use the sample's scalar `wasm_entry.stasis` until the
 receiver-owned struct-array view is supported by that backend. This is a
@@ -108,10 +111,10 @@ must remain compile-time errors.
 
 | Dimension | Concrete fixture or rule | Green evidence |
 | --- | --- | --- |
-| Type/value kind and arity | `Buffer<T, N>`, explicit `::<f32, 3>`, and the negative kind/arity fixtures | Parser and semantic diagnostics in the generic harness. |
+| Type/value kind and arity | `Buffer<T, N>`, first-parameter binding, and the negative kind/arity fixtures | Parser and semantic diagnostics in the generic harness. |
 | Constant evaluation | Equal expressions, negative offsets, overflow, zero division, and extent checks | `negative_generic_collection_fixtures_keep_expected_diagnostics`. |
 | Identity and layout | `Buffer<i32, 4>`, `Buffer<i32, 8>`, `Buffer<f32, 3>`, `Nested<i32, 2>`, and `Rig2D<24>/<64>` | Published AOT symbols/layout plus the JIT test workload. |
-| Inference and views | Receiver inference, explicit calls, `first_value<T>(T[])`, and capacity non-inference from views | Production JIT sample test and ambiguous/unresolved negatives. |
+| Binding and views | Free/dot receiver binding, nominal generic first parameters, and rejection of raw-view-only generics | Production JIT sample test and ambiguous/unresolved negatives. |
 | Bounds and occupancy | Full/empty append, ring wrap/drop, pool release, explicit counts, and fixed capacity | The two `.test.stasis` tests and native AOT/Wasm entry results. |
 | Effects and name lookup | Definition-site imports and existing receiver/view effect checking after substitution | Generic compilation uses the ordinary semantic checker; failures are not erased by specialization. |
 | Incremental/swap | Helper edit preserving live state; capacity/layout change migration and rejected-candidate retry | `live_edit_helper.stasis` sample test and `development_swap` unit test. |
@@ -122,3 +125,23 @@ and the repository's applicable ABI/CI policy checks are required before a
 generic release change is published.
 
 Visual evidence: not applicable to this compiler and packaging contract.
+
+## Migration from function-owned generics
+
+Move each function's generic list to its receiver struct and remove explicit
+call arguments:
+
+```stasis
+// Before
+function append<T: type, N: i32>(buffer: Buffer<T, N>, value: T): bool { ... }
+append::<i32, 8>(items, value);
+
+// Current
+function append(buffer: Buffer<T, N>, value: T): bool { ... }
+append(items, value);
+```
+
+If the old function had no nominal generic first parameter, introduce a small
+policy struct only when the compile-time distinction is part of the domain.
+Otherwise make the function concrete. The compatibility parser recognizes old
+declarations and calls only to report this migration; it never executes them.

@@ -4064,7 +4064,7 @@ function main(): i32 {
     fn generic_body_edits_rejit_specializations_and_callers_but_reuse_unrelated_code() {
         fn source(body: &str) -> String {
             format!(
-                "function value<N: i32>(): i32 {{ {body} }}\nfunction unrelated(): i32 {{ return 5; }}\nfunction main(): i32 {{ return value::<4>() + unrelated(); }}\n"
+                "struct Policy<N: i32> {{ marker: i32; }}\nglobal policy: Policy<4>;\nfunction value(policy: Policy<N>): i32 {{ {body} }}\nfunction unrelated(): i32 {{ return 5; }}\nfunction main(): i32 {{ return value(policy) + unrelated(); }}\n"
             )
         }
 
@@ -4123,7 +4123,7 @@ function main(): i32 {
     fn equivalent_generic_argument_spelling_reuses_specialization_and_callers() {
         fn source(argument: &str) -> String {
             format!(
-                "const CAPACITY: i32 = {argument};\nfunction value<N: i32>(): i32 {{ return N; }}\nfunction main(): i32 {{ return value::<CAPACITY>(); }}\n"
+                "const CAPACITY: i32 = {argument};\nstruct Policy<N: i32> {{ marker: i32; }}\nglobal policy: Policy<CAPACITY>;\nfunction value(policy: Policy<N>): i32 {{ return N; }}\nfunction main(): i32 {{ return value(policy); }}\n"
             )
         }
 
@@ -8813,11 +8813,11 @@ function main(): i32 { batch.update(0); return 0; }
         let mut active = JitProcess::new();
         active.upsert_file(
             "main.stasis",
-            "import \"lib/generic.stasis\";\nfunction main(): i32 { return generic.capacity::<4>(); }\n",
+            "import \"lib/generic.stasis\";\nglobal policy: generic.Policy<4>;\nfunction main(): i32 { return generic.capacity(policy); }\n",
         );
         active.upsert_file(
             "lib/generic.stasis",
-            "function capacity<N: i32>(): i32 { return N; }\n",
+            "struct Policy<N: i32> { marker: i32; }\nfunction capacity(policy: Policy<N>): i32 { return N; }\n",
         );
         active.compile().expect("generic baseline compiles");
         assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(4));
@@ -8825,7 +8825,7 @@ function main(): i32 { batch.update(0); return 0; }
         let mut candidate = active.staged_candidate();
         candidate.upsert_file(
             "main.stasis",
-            "import \"lib/generic.stasis\";\nfunction main(): i32 { return generic.capacity::<8>(); }\n",
+            "import \"lib/generic.stasis\";\nglobal policy: generic.Policy<8>;\nfunction main(): i32 { return generic.capacity(policy); }\n",
         );
         candidate
             .compile()
@@ -8845,7 +8845,7 @@ function main(): i32 { batch.update(0); return 0; }
         ));
         std::fs::create_dir_all(&root).expect("create watcher root");
         let helper_path = root.join("generic.stasis");
-        let initial_source = "function capacity<N: i32>(): i32 { return N; }\n";
+        let initial_source = "struct Policy<N: i32> { marker: i32; }\nfunction capacity(policy: Policy<N>): i32 { return N; }\n";
         std::fs::write(&helper_path, initial_source).expect("write initial generic source");
 
         let result = (|| {
@@ -8855,7 +8855,7 @@ function main(): i32 { batch.update(0); return 0; }
                 .expect("set watcher project root");
             process.upsert_file(
                 "main.stasis",
-                "import \"generic.stasis\";\nfunction main(): i32 { return generic.capacity::<4>(); }\n",
+                "import \"generic.stasis\";\nglobal policy: generic.Policy<4>;\nfunction main(): i32 { return generic.capacity(policy); }\n",
             );
             process.upsert_file("generic.stasis", initial_source);
             process
@@ -8868,7 +8868,7 @@ function main(): i32 { batch.update(0); return 0; }
             );
 
             let changed_source =
-                "function capacity<N: i32>(): i32 { return N + 1; }\n// source edit\n";
+                "struct Policy<N: i32> { marker: i32; }\nfunction capacity(policy: Policy<N>): i32 { return N + 1; }\n// source edit\n";
             std::fs::write(&helper_path, changed_source).expect("write changed generic source");
             assert!(process.refresh_imported_sources_from_disk("main.stasis"));
             process.compile().expect("changed generic source compiles");

@@ -8,7 +8,7 @@ struct WasmBuffer<T: type, N: i32> {
     values: T[N];
 }
 
-function wasm_buffer_append<T: type, N: i32>(self: WasmBuffer<T, N>, value: T): bool {
+function wasm_buffer_append(self: WasmBuffer<T, N>, value: T): bool {
     if (self.count < 0 || self.count >= N) {
         return false;
     }
@@ -17,7 +17,7 @@ function wasm_buffer_append<T: type, N: i32>(self: WasmBuffer<T, N>, value: T): 
     return true;
 }
 
-function wasm_buffer_first<T: type, N: i32>(self: WasmBuffer<T, N>): T {
+function wasm_buffer_first(self: WasmBuffer<T, N>): T {
     return self.values[0];
 }
 

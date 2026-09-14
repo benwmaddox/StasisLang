@@ -1,6 +1,6 @@
 global values: i32[];
 
-function extent<T: type, N: i32>(items: T[N]): i32 {
+function extent(items: T[N]): i32 {
     return N;
 }
 

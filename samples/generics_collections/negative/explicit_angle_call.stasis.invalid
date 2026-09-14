@@ -1,0 +1,13 @@
+struct Buffer<T: type, N: i32> {
+    values: T[N];
+}
+
+function capacity(buffer: Buffer<T, N>): i32 {
+    return N;
+}
+
+global values: Buffer<i32, 4>;
+
+function main(): i32 {
+    return capacity<i32, 4>(values);
+}

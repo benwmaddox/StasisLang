@@ -1822,9 +1822,11 @@ impl ExprParser<'_> {
         if !matches!(self.tokens.get(self.cursor), Some(ExprToken::ColonColon)) {
             return Ok(());
         }
-        let end = self.generic_arguments_end(self.cursor)?;
-        self.cursor = end;
-        Ok(())
+        let _ = self.generic_arguments_end(self.cursor)?;
+        Err(
+            "explicit generic function calls are not supported; remove the explicit arguments and infer from the first parameter's generic struct"
+                .to_string(),
+        )
     }
 
     fn generic_arguments_end(&self, start: usize) -> Result<usize, String> {

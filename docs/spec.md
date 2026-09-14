@@ -131,8 +131,9 @@ Rules:
 
 ### 4.2.2 Generic Types and Compile-Time Value Parameters
 
-Generic structs and functions may declare ordered type and compile-time value
-parameters:
+Generic structs declare ordered type and compile-time value parameters. A
+function may use those names only when its first parameter is an application of
+that generic struct:
 
 ```stasis
 struct Buffer<T: type, N: i32> {
@@ -140,7 +141,7 @@ struct Buffer<T: type, N: i32> {
     values: T[N];
 }
 
-function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 {
+function capacity(self: Buffer<T, N>): i32 {
     return N;
 }
 ```
@@ -153,20 +154,21 @@ generic values, parentheses, unary signs, and checked integer `+`, `-`, `*`,
 substituted fixed-array extent are diagnostics. Ordinary runtime parameters
 remain runtime values.
 
-Generic applications use angle brackets in type positions. In expression
-positions, an explicit call uses `::<...>` so comparisons and shifts retain
-their existing parsing:
+Generic applications use angle brackets only in type positions. Function calls
+never accept explicit generic arguments. Free and receiver spelling resolve to
+the same canonical function:
 
 ```stasis
 global samples: Buffer<f32, 128>;
-let size: i32 = samples.capacity();
-let explicit_size: i32 = capacity::<f32, 128>(samples);
+let free_size: i32 = capacity(samples);
+let receiver_size: i32 = samples.capacity();
 ```
 
-The complete explicit argument list is required in v1. Inferred arguments are
-bound by structural matching against ordinary argument types. A fixed array
-can infer its element type through a `T[]` view, but a view does not infer a
-capacity parameter. Conflicting or ambiguous bindings are compile-time errors.
+The concrete first argument binds the generic struct's declared parameters.
+Names used only by later parameters, the return type, body, or a raw `T[]` view
+are not implicit generics. Function-owned `<...>` declarations and both
+`f<T>(...)` and `f::<T>(...)` calls are migration diagnostics. Conflicting or
+ambiguous receiver bindings are compile-time errors.
 
 Each specialization has nominal identity based on its defining declaration and
 canonical ordered arguments. Equal evaluated value expressions share identity;
