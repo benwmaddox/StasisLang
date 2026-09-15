@@ -4636,9 +4636,8 @@ fn package_workspace(
                 source_snapshot_root.display()
             )
         })?;
-        let executable = staging_root.join(&executable_file_name);
         #[cfg(windows)]
-        nest_windows_desktop_payload(&staging_root, &executable)?;
+        nest_windows_desktop_payload(&staging_root, &staging_root.join(&executable_file_name))?;
         let payload_root = if cfg!(windows) {
             staging_root.join(WINDOWS_DESKTOP_PAYLOAD_DIR)
         } else {
