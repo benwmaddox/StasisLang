@@ -304,6 +304,13 @@ struct PackagedFunctionAlias {
     returns_i32: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PackagedRenderAlias {
+    target_symbol: String,
+    reset_symbol: String,
+    finish_symbol: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct PackagedRuntimeField {
     name: String,
@@ -3130,6 +3137,7 @@ fn build_engine_bundle_runtime_bridge_source(
     runtime_fields: &[PackagedRuntimeField],
     function_symbols: &[String],
     function_aliases: &[PackagedFunctionAlias],
+    render_alias: Option<&PackagedRenderAlias>,
     string_literals: &[EngineBundleManifestStringLiteralRow],
 ) -> Result<String, String> {
     let host_i32_hash = crate::hash_global_path("host_i32");
@@ -3256,6 +3264,14 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
             ));
         }
     }
+    if let Some(render) = render_alias {
+        source.push_str(&format!(
+            "STASIS_EXPORT int32_t render(void) {{ ((void (*)(void)){reset})(); int32_t result = ((int32_t (*)(void)){target})(); return ((int32_t (*)(int32_t)){finish})(result); }}\n",
+            reset = render.reset_symbol,
+            target = render.target_symbol,
+            finish = render.finish_symbol,
+        ));
+    }
     // Keep the Android ABI surface fixed while the host shell/input event mapping lands separately.
     if target.is_android() {
         source.push_str(
@@ -3313,6 +3329,7 @@ fn emit_engine_bundle_runtime_bridge_object(
     runtime_fields: &[PackagedRuntimeField],
     function_symbols: &[String],
     function_aliases: &[PackagedFunctionAlias],
+    render_alias: Option<&PackagedRenderAlias>,
     string_literals: &[EngineBundleManifestStringLiteralRow],
 ) -> Result<PathBuf, String> {
     let source_path = backend
@@ -3327,6 +3344,7 @@ fn emit_engine_bundle_runtime_bridge_object(
         runtime_fields,
         function_symbols,
         function_aliases,
+        render_alias,
         string_literals,
     )?;
     std::fs::write(&source_path, source).map_err(|error| {
@@ -3937,6 +3955,31 @@ fn package_engine_bundle_release(
         .iter()
         .find(|row| is_zero_argument_manifest_function(row, "render"))
         .map(|row| row.symbol.clone());
+    let render_alias = if let Some(target_symbol) = render_symbol.as_ref() {
+        let reset_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| is_zero_argument_manifest_function(row, "gfx_cmd_construction_reset"))
+            .map(|row| row.symbol.clone())
+            .ok_or_else(|| {
+                "engine bundle render callback is missing gfx_cmd_construction_reset".to_string()
+            })?;
+        let finish_symbol = manifest
+            .functions
+            .iter()
+            .find(|row| row.name == "gfx_cmd_construction_finish" && row.parameter_count == 1)
+            .map(|row| row.symbol.clone())
+            .ok_or_else(|| {
+                "engine bundle render callback is missing gfx_cmd_construction_finish".to_string()
+            })?;
+        Some(PackagedRenderAlias {
+            target_symbol: target_symbol.clone(),
+            reset_symbol,
+            finish_symbol,
+        })
+    } else {
+        None
+    };
     let on_code_swap_symbol = manifest
         .functions
         .iter()
@@ -3989,13 +4032,6 @@ fn package_engine_bundle_release(
     if let Some(symbol) = tick_symbol.as_ref() {
         function_aliases.push(PackagedFunctionAlias {
             alias: "tick",
-            target_symbol: symbol.clone(),
-            returns_i32: true,
-        });
-    }
-    if let Some(symbol) = render_symbol.as_ref() {
-        function_aliases.push(PackagedFunctionAlias {
-            alias: "render",
             target_symbol: symbol.clone(),
             returns_i32: true,
         });
@@ -4074,6 +4110,7 @@ fn package_engine_bundle_release(
         &runtime_fields,
         &function_symbols,
         &function_aliases,
+        render_alias.as_ref(),
         &string_literals,
     )?;
     let mut object_paths: Vec<PathBuf> = bundle.object_paths().cloned().collect();
@@ -4331,6 +4368,37 @@ mod tests {
             &manifest.functions[0],
             "render"
         ));
+    }
+
+    #[test]
+    fn packaged_render_alias_wraps_frame_construction() {
+        let render = PackagedRenderAlias {
+            target_symbol: "aot_render".to_string(),
+            reset_symbol: "aot_reset".to_string(),
+            finish_symbol: "aot_finish".to_string(),
+        };
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::Native,
+            &[],
+            &[
+                "aot_render".to_string(),
+                "aot_reset".to_string(),
+                "aot_finish".to_string(),
+            ],
+            &[],
+            Some(&render),
+            &[],
+        )
+        .expect("build render bridge source");
+        let wrapper = source
+            .lines()
+            .find(|line| line.starts_with("STASIS_EXPORT int32_t render(void)"))
+            .expect("render wrapper");
+        let reset = wrapper.find("aot_reset").expect("reset call");
+        let render = wrapper.find("aot_render").expect("render call");
+        let finish = wrapper.find("aot_finish").expect("finish call");
+        assert!(reset < render && render < finish);
+        assert!(wrapper.contains("int32_t result"));
     }
 
     #[test]
@@ -5061,6 +5129,7 @@ mod tests {
             &runtime_fields,
             &[],
             &[],
+            None,
             &[],
         )
         .expect("build runtime bridge");
@@ -5153,6 +5222,7 @@ mod tests {
             &support.runtime_fields,
             &[],
             &[],
+            None,
             &[],
         )
         .expect("build embedded data bridge");
@@ -5199,6 +5269,7 @@ mod tests {
                     returns_i32: true,
                 },
             ],
+            None,
             &[],
         )
         .expect("build android bridge source");
@@ -5230,12 +5301,22 @@ mod tests {
         let source = build_engine_bundle_runtime_bridge_source(
             &stasis_jit::AotTarget::Native,
             &runtime_fields,
-            &["aot_fn_1".to_string()],
+            &[
+                "aot_fn_1".to_string(),
+                "aot_render".to_string(),
+                "aot_reset".to_string(),
+                "aot_finish".to_string(),
+            ],
             &[PackagedFunctionAlias {
                 alias: "main",
                 target_symbol: "aot_fn_1".to_string(),
                 returns_i32: true,
             }],
+            Some(&PackagedRenderAlias {
+                target_symbol: "aot_render".to_string(),
+                reset_symbol: "aot_reset".to_string(),
+                finish_symbol: "aot_finish".to_string(),
+            }),
             &[],
         )
         .expect("build bridge source");
@@ -5636,6 +5717,7 @@ mod tests {
             &runtime_fields,
             &function_symbols,
             &function_aliases,
+            None,
             manifest.string_literals.as_deref().unwrap_or_default(),
         )
         .expect("compile Brickout runtime bridge");
@@ -6508,6 +6590,7 @@ mod tests {
             &runtime_fields,
             &function_symbols,
             &aliases,
+            None,
             &[],
         )
         .expect("compile direct storage bridge");
@@ -6613,6 +6696,7 @@ mod tests {
             &runtime_fields,
             &function_symbols,
             &aliases,
+            None,
             &[],
         )
         .expect("compile runtime bridge");
