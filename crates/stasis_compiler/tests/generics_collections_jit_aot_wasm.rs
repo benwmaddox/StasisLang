@@ -324,6 +324,121 @@ function main(): i32 {
 }
 "#;
 
+const ZERO_EXTENT_VIEW_IDENTITY: &str = r#"
+struct ZeroBuffer<T: type, N: i32> {
+    values: T[N];
+}
+
+global first: ZeroBuffer<i32, 0>;
+global second: ZeroBuffer<i32, 0>;
+global populated: ZeroBuffer<i32, 2>;
+global index_calls: i32;
+global value_calls: i32;
+
+extern function capture(values: i32[], slot: i32): i32;
+
+function capacity(self: ZeroBuffer<T, N>): i32 {
+    let visited: i32 = 0;
+    foreach (let value, index in self.values) {
+        visited += value + index + 1;
+    }
+    return self.values.max_length + visited;
+}
+
+function forwarded_capacity(values: i32[]): i32 {
+    return values.max_length;
+}
+
+function forward(self: ZeroBuffer<T, N>): i32 {
+    let values: T[] = self.values;
+    values = self.values;
+    return forwarded_capacity(values);
+}
+
+function expose(self: ZeroBuffer<T, N>): T[] {
+    return self.values;
+}
+
+function next_index(): i32 {
+    index_calls += 1;
+    return 0;
+}
+
+function next_value(): i32 {
+    value_calls += 1;
+    return 9;
+}
+
+function main(): i32 {
+    populated.values[0] = 4;
+    populated.values[1] = 5;
+    capture(first.values, 0);
+    capture(second.values, 1);
+    capture(populated.values, 2);
+    capture(expose(first), 3);
+    return capacity(first) * 100
+        + capacity(second) * 10
+        + capacity(populated)
+        + forward(first) * 100
+        + forward(second) * 10
+        + forward(populated);
+}
+
+function tick(): i32 {
+    return index_calls * 10 + value_calls;
+}
+
+function render(mode: i32): i32 {
+    if (mode < 0) {
+        return first.values[mode];
+    }
+    if (mode == 2) {
+        return first.values[0];
+    }
+    first.values[next_index()] = next_value();
+    return 0;
+}
+"#;
+
+const ZERO_EXTENT_BACKEND_PARITY: &str = r#"
+global empty_first: i32[0];
+global populated: i32[2];
+global empty_last: i32[0];
+
+function parity_capacity(values: i32[]): i32 {
+    return values.max_length;
+}
+
+function parity_expose(values: i32[]): i32[] {
+    return values;
+}
+
+function parity_forward(values: i32[]): i32 {
+    let forwarded: i32[] = values;
+    forwarded = parity_expose(values);
+    return forwarded.max_length;
+}
+
+function main(): i32 {
+    populated[0] = 4;
+    populated[1] = 5;
+    return parity_capacity(empty_first) * 100
+        + parity_capacity(empty_last) * 10
+        + parity_capacity(populated)
+        + parity_forward(empty_first) * 100
+        + parity_forward(empty_last) * 10
+        + parity_forward(populated);
+}
+
+function tick(): i32 {
+    return main();
+}
+
+function render(): i32 {
+    return 0;
+}
+"#;
+
 const INDEXED_VIEW_OVERLOADS: &str = r#"
 import "generics_parity_module.stasis";
 
@@ -534,6 +649,91 @@ fn receiver_compound_assignment_preserves_nested_view_indices_and_owners() {
         "receiver compound scratch guard",
     );
     assert_eq!(output, "321");
+}
+
+#[test]
+fn zero_extent_generic_views_have_distinct_tokens_and_trap_without_side_effect_replay() {
+    let wasm = compile_wasm_fixture(
+        "focused/zero_extent_view_identity.stasis",
+        ZERO_EXTENT_VIEW_IDENTITY,
+        &["main", "tick", "render"],
+        &[],
+    );
+    let output = run_wasm_node(
+        &wasm,
+        r#"const fs=require('node:fs');
+const module=new WebAssembly.Module(fs.readFileSync(process.argv[1]));
+const seen=[];
+const env={capture:(token,slot)=>{seen[slot]=token;return 0;}};
+WebAssembly.instantiate(module,{env}).then((instance)=>{
+  const e=instance.exports;
+  const trapped=(call)=>{try{call();return false;}catch(error){return error instanceof WebAssembly.RuntimeError;}};
+  const digest=e.main();
+  const writeTrapped=trapped(()=>e.render(0));
+  const counters=e.tick();
+  const minusOneTrapped=trapped(()=>e.render(-1));
+  const zeroTrapped=trapped(()=>e.render(2));
+  const unique=new Set(seen.slice(0,3)).size===3;
+  const returned=seen[3]===seen[0];
+  process.stdout.write([e.__stasis_collection_view_abi_version.value,digest,unique,returned,writeTrapped,counters,minusOneTrapped,zeroTrapped].join(','));
+}).catch((error)=>{console.error(error);process.exit(1);});"#,
+        "zero-extent generic view identity",
+    );
+    assert_eq!(output, "2,16,true,true,true,11,true,true");
+}
+
+#[test]
+fn zero_extent_generic_semantics_match_jit_aot_and_wasm() {
+    const EXPECTED_DIGEST: i32 = 4;
+    const ROOTS: &[&str] = &["main", "tick", "render"];
+
+    let mut jit = JitProcess::new();
+    jit.set_required_emit_roots(
+        &ROOTS
+            .iter()
+            .map(|root| (*root).to_string())
+            .collect::<Vec<_>>(),
+    );
+    jit.upsert_file(
+        "focused/zero_extent_backend_parity.stasis",
+        ZERO_EXTENT_BACKEND_PARITY,
+    );
+    jit.compile()
+        .expect("compile zero-extent parity oracle for JIT");
+    assert_eq!(
+        jit.execute_i32_noarg_by_name("main")
+            .expect("execute zero-extent parity oracle in JIT"),
+        EXPECTED_DIGEST
+    );
+
+    let mut aot = AotProcess::new();
+    aot.set_required_emit_roots(
+        &ROOTS
+            .iter()
+            .map(|root| (*root).to_string())
+            .collect::<Vec<_>>(),
+    );
+    aot.upsert_file(
+        "focused/zero_extent_backend_parity.stasis",
+        ZERO_EXTENT_BACKEND_PARITY,
+    );
+    aot.compile()
+        .expect("compile zero-extent parity oracle for AOT");
+    #[cfg(windows)]
+    run_linked_aot_oracle(&aot, EXPECTED_DIGEST);
+
+    let wasm = compile_wasm_fixture(
+        "focused/zero_extent_backend_parity.stasis",
+        ZERO_EXTENT_BACKEND_PARITY,
+        ROOTS,
+        &[],
+    );
+    let output = run_wasm_node(
+        &wasm,
+        "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+        "zero-extent backend parity",
+    );
+    assert_eq!(output, EXPECTED_DIGEST.to_string());
 }
 
 #[test]

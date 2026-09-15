@@ -26,7 +26,7 @@ use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::{JitExternProfile, JitProcess};
 use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
-use stasis_compiler::backend::wasm::WasmProcess;
+use stasis_compiler::backend::wasm::{WasmProcess, COLLECTION_VIEW_ABI_VERSION};
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::types::{TYPE_ID_F32, TYPE_ID_I32};
 use stasis_compiler::frontend::workshop::{
@@ -5219,6 +5219,7 @@ fn web_runtime_config(
                 path.clone(),
                 json!({
                     "hash": stasis_compiler::backend::wasm::wasm_global_hash(path),
+                    "handle": layout.handle,
                     "offset": layout.offset,
                     "type_id": layout.type_id,
                     "length": layout.length,
@@ -5259,6 +5260,7 @@ fn web_runtime_config(
         "views": views,
         "globals": globals,
         "assets": {},
+        "collectionViewAbiVersion": COLLECTION_VIEW_ABI_VERSION,
         "renderContractVersion": if render_construction_lifecycle_version == 1 { GFX_CMD_VERSION } else { GFX_CMD_LEGACY_VERSION },
         "renderConstructionLifecycleVersion": render_construction_lifecycle_version,
     });

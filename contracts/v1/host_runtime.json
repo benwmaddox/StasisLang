@@ -121,6 +121,11 @@
     "snapshot_fields": ["surface_generation", "renderer_generation", "restore_attempts", "restore_failures", "state", "state_before_pause", "reason"],
     "platform_extensions": {"java_reasons": ["renderer_created"], "javascript_snapshot": "unsupported"}
   },
+  "wasm_collection_view": {
+    "version": 2,
+    "package_field": "collectionViewAbiVersion",
+    "wasm_export": "__stasis_collection_view_abi_version"
+  },
   "guest_entrypoints": {
     "main": {"symbol": "main", "signature": "() -> i32", "required": true},
     "tick": {"symbol": "tick", "signature": "() -> i32", "required": true},

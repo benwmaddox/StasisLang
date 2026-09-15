@@ -33,6 +33,8 @@
   let pendingExternalActionGeneration = 0;
   const commands = [];
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
+  const COLLECTION_VIEW_ABI_VERSION = 2;
+  const collectionViewAbiVersion = game.collectionViewAbiVersion ?? 1;
   const sprites = new Map();
   const fonts = new Map();
   const fontLoads = new Map();
@@ -742,18 +744,19 @@
       networkClient,
     };
   }
-  const readAscii = (offset, length) => {
-    if (!instance?.exports.memory || offset < 0 || length < 0) return "";
-    const bytes = new Uint8Array(instance.exports.memory.buffer, offset, length);
+  const readAscii = (reference, length) => {
+    const memory = resolveU8Memory(reference);
+    if (!memory || length < 0 || length > memory.length) return "";
+    const bytes = Array.from({ length }, (_, index) => readU8(memory, index));
     return String.fromCharCode(...bytes);
   };
-  const writeAscii = (offset, capacity, value) => {
-    if (!instance?.exports.memory || offset < 0 || capacity <= 0) return -1;
+  const writeAscii = (reference, capacity, value) => {
+    const memory = resolveU8Memory(reference);
+    if (!memory || capacity <= 0 || capacity > memory.length) return -1;
     const bytes = Array.from(value, character => character.codePointAt(0));
     if (bytes.some(value => value < 32 || value > 126) || bytes.length >= capacity) return -1;
-    const target = new Uint8Array(instance.exports.memory.buffer, offset, capacity);
-    target.fill(0);
-    target.set(bytes);
+    for (let index = 0; index < capacity; index += 1) writeU8(memory, index, 0);
+    bytes.forEach((value, index) => writeU8(memory, index, value));
     return bytes.length;
   };
   const memoryLayouts = typeId => Object.values(game.memory || {})
@@ -761,6 +764,11 @@
       && Number.isSafeInteger(layout.hash));
   const memoryLayoutsByHash = typeId => new Map(
     memoryLayouts(typeId).map(layout => [layout.hash | 0, layout])
+  );
+  const memoryLayoutsByHandle = typeId => new Map(
+    memoryLayouts(typeId)
+      .filter(layout => Number.isSafeInteger(layout.handle) && layout.handle !== 0)
+      .map(layout => [layout.handle | 0, layout])
   );
   const memoryLayoutsByOffset = typeId => new Map(
     Object.values(game.memory || {})
@@ -780,15 +788,28 @@
         && Number.isSafeInteger(layout.offset))
       .map(([path, layout]) => [layout.offset | 0, { ...layout, path }])
   );
-  const hasU8MemoryReference = reference => u8MemoryLayouts.has(reference | 0)
-    || u8MemoryLayoutsByOffset.has(reference | 0);
-  const resolveU8Memory = hash => {
-    const layout = u8MemoryLayouts.get(hash | 0) || u8MemoryLayoutsByOffset.get(hash | 0);
+  const u8MemoryLayoutsByHandle = new Map(
+    Object.entries(game.memory || {})
+      .filter(([, layout]) => (layout?.byte_backed === true || layout?.type_id === 5)
+        && Number.isSafeInteger(layout.handle) && layout.handle !== 0)
+      .map(([path, layout]) => [layout.handle | 0, { ...layout, path }])
+  );
+  const legacyMemoryLayout = (byHash, byOffset, reference) =>
+    byHash.get(reference | 0) || byOffset.get(reference | 0);
+  const hasU8MemoryReference = reference => collectionViewAbiVersion === COLLECTION_VIEW_ABI_VERSION
+    ? u8MemoryLayoutsByHandle.has(reference | 0)
+    : Boolean(legacyMemoryLayout(u8MemoryLayouts, u8MemoryLayoutsByOffset, reference));
+  const resolveU8Memory = reference => {
+    const layout = collectionViewAbiVersion === COLLECTION_VIEW_ABI_VERSION
+      ? u8MemoryLayoutsByHandle.get(reference | 0)
+      : legacyMemoryLayout(u8MemoryLayouts, u8MemoryLayoutsByOffset, reference);
     const memory = instance?.exports?.memory;
-    if (!layout || !(memory instanceof WebAssembly.Memory)) return null;
+    if (!layout) return null;
     const { offset, stride, length } = layout;
     if (![offset, stride, length].every(Number.isSafeInteger)
       || offset < 0 || stride <= 0 || length < 0) return null;
+    if (length === 0) return { bytes: null, offset, stride, length, path: layout.path };
+    if (!(memory instanceof WebAssembly.Memory)) return null;
     const span = length === 0 ? 0 : (length - 1) * stride + 1;
     const end = offset + span;
     if (!Number.isSafeInteger(span) || !Number.isSafeInteger(end)
@@ -823,18 +844,21 @@
     }
   };
   const typedMemoryLayouts = new Map([
-    [1, { byHash: memoryLayoutsByHash(1), byOffset: memoryLayoutsByOffset(1), width: 4 }],
-    [2, { byHash: memoryLayoutsByHash(2), byOffset: memoryLayoutsByOffset(2), width: 4 }],
+    [1, { byHandle: memoryLayoutsByHandle(1), byHash: memoryLayoutsByHash(1), byOffset: memoryLayoutsByOffset(1), width: 4 }],
+    [2, { byHandle: memoryLayoutsByHandle(2), byHash: memoryLayoutsByHash(2), byOffset: memoryLayoutsByOffset(2), width: 4 }],
   ]);
   const resolveTypedMemory = (reference, typeId) => {
     const metadata = typedMemoryLayouts.get(typeId);
-    const layout = metadata?.byHash.get(reference | 0)
-      || metadata?.byOffset.get(reference | 0);
+    const layout = collectionViewAbiVersion === COLLECTION_VIEW_ABI_VERSION
+      ? metadata?.byHandle.get(reference | 0)
+      : legacyMemoryLayout(metadata?.byHash || new Map(), metadata?.byOffset || new Map(), reference);
     const memory = instance?.exports?.memory;
-    if (!layout || !(memory instanceof WebAssembly.Memory)) return null;
+    if (!layout) return null;
     const { offset, stride, length } = layout;
     if (![offset, stride, length].every(Number.isSafeInteger)
       || offset < 0 || stride <= 0 || length < 0) return null;
+    if (length === 0) return { view: null, offset, stride, length };
+    if (!(memory instanceof WebAssembly.Memory)) return null;
     const span = length === 0 ? 0 : (length - 1) * stride + metadata.width;
     const end = offset + span;
     if (!Number.isSafeInteger(span) || !Number.isSafeInteger(end)
@@ -2036,14 +2060,19 @@
     if (closingContext && closingContext.state !== "closed") void closingContext.close().catch(() => {});
     updateAudioState();
   };
-  const pushAudio = (byteOffset, frameCount) => {
-    if (!audioStreamAvailable() || !instance?.exports.memory || frameCount <= 0 || byteOffset % 4 !== 0) return 0;
+  const pushAudio = (reference, frameCount) => {
+    if (!audioStreamAvailable() || frameCount <= 0) return 0;
+    const sampleMemory = resolveTypedMemory(reference, 2);
+    if (!sampleMemory || !sampleMemory.view) return 0;
     const suspended = !audioContext || audioContext.state !== "running";
     const acceptedFrames = suspended
       ? Math.min(frameCount, Math.max(0, Math.min(audioStreamCapacity, pendingAudioFrameLimit()) - queuedAudioFrames()))
       : Math.min(frameCount, Math.max(0, audioStreamCapacity - queuedAudioFrames()));
     if (acceptedFrames <= 0 || (suspended && pendingAudio.length >= PENDING_AUDIO_ENTRY_LIMIT)) return 0;
     const sampleCount = acceptedFrames * audioChannels;
+    if (sampleCount > sampleMemory.length) return 0;
+    const byteOffset = sampleMemory.offset;
+    if (byteOffset % 4 !== 0) return 0;
     if (byteOffset < 0 || byteOffset + sampleCount * 4 > instance.exports.memory.buffer.byteLength) return 0;
     const samples = new Float32Array(instance.exports.memory.buffer, byteOffset, sampleCount).slice();
     const start = () => {
@@ -3698,6 +3727,13 @@
       if (!getGpuBatcher()) throw new Error("WebGL2 is required by the Stasis Web renderer");
       const result = await WebAssembly.instantiate(await wasmBytes(), imports);
       instance = result.instance;
+      const wasmCollectionViewAbi = instance.exports.__stasis_collection_view_abi_version;
+      const wasmCollectionViewAbiVersion = wasmCollectionViewAbi instanceof WebAssembly.Global
+        ? Number(wasmCollectionViewAbi.value) : 0;
+      if (collectionViewAbiVersion !== COLLECTION_VIEW_ABI_VERSION
+        || wasmCollectionViewAbiVersion !== COLLECTION_VIEW_ABI_VERSION) {
+        throw new Error(`collection view ABI mismatch: package=${collectionViewAbiVersion} wasm=${wasmCollectionViewAbiVersion} runtime=${COLLECTION_VIEW_ABI_VERSION}`);
+      }
       writeHostFrame(performance.now());
       const mainResult = instance.exports.main();
       finishHostFrame();

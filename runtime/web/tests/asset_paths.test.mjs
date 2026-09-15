@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -69,6 +70,12 @@ export async function loadRuntime(game, options = {}) {
       render: () => 0,
     }
   };
+  installCollectionViewAbi(game, instance.exports, {
+    packageVersion: options.collectionViewAbiVersion ?? game.collectionViewAbiVersion ?? 2,
+    wasmVersion: options.wasmCollectionViewAbiVersion ?? 2,
+    includeWasmExport: options.includeWasmCollectionViewAbi !== false,
+    omitPackageVersion: options.omitCollectionViewAbiVersion === true,
+  });
   const screen = { width: 640, height: 360 };
   const contextObject = {
     document,
@@ -314,4 +321,54 @@ test("web startup waits for every FontFace load before the fonts-ready signal", 
   const afterFontsResolve = await runtime;
   assert.equal(frameCount, 1);
   assert.equal(afterFontsResolve.addedFonts.length, 2);
+});
+
+test("web startup reaches main only when package and Wasm collection-view ABI v2 agree", async () => {
+  let mainCalls = 0;
+  const result = await loadRuntime({ memory: {}, strings: {} }, {
+    main: () => { mainCalls += 1; },
+  });
+  await result.runtimePromise;
+  assert.equal(mainCalls, 1);
+  assert.equal(result.document.body.dataset.ready, "true");
+});
+
+test("web startup rejects a missing package collection-view ABI before main", async () => {
+  let mainCalls = 0;
+  const result = await loadRuntime({ memory: {}, strings: {} }, {
+    main: () => { mainCalls += 1; },
+    omitCollectionViewAbiVersion: true,
+  });
+  await assert.rejects(result.runtimePromise, /collection view ABI mismatch: package=1 wasm=2 runtime=2/);
+  assert.equal(mainCalls, 0);
+});
+
+test("web startup rejects a mismatched package collection-view ABI before main", async () => {
+  let mainCalls = 0;
+  const result = await loadRuntime({ memory: {}, strings: {} }, {
+    main: () => { mainCalls += 1; },
+    collectionViewAbiVersion: 1,
+  });
+  await assert.rejects(result.runtimePromise, /collection view ABI mismatch: package=1 wasm=2 runtime=2/);
+  assert.equal(mainCalls, 0);
+});
+
+test("web startup rejects a missing Wasm collection-view ABI export before main", async () => {
+  let mainCalls = 0;
+  const result = await loadRuntime({ memory: {}, strings: {} }, {
+    main: () => { mainCalls += 1; },
+    includeWasmCollectionViewAbi: false,
+  });
+  await assert.rejects(result.runtimePromise, /collection view ABI mismatch: package=2 wasm=0 runtime=2/);
+  assert.equal(mainCalls, 0);
+});
+
+test("web startup rejects a mismatched Wasm collection-view ABI before main", async () => {
+  let mainCalls = 0;
+  const result = await loadRuntime({ memory: {}, strings: {} }, {
+    main: () => { mainCalls += 1; },
+    wasmCollectionViewAbiVersion: 1,
+  });
+  await assert.rejects(result.runtimePromise, /collection view ABI mismatch: package=2 wasm=1 runtime=2/);
+  assert.equal(mainCalls, 0);
 });

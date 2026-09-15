@@ -142,13 +142,10 @@ fn execute_web_main_with_byte_memcpy(package: &Path) -> Output {
 const root = process.argv[1];
 const source = fs.readFileSync(`${root}/game.js`, 'utf8');
 const game = JSON.parse(source.slice('window.STASIS_GAME = '.length, source.indexOf(';', 'window.STASIS_GAME = '.length)));
-const layoutsByHash = new Map(Object.values(game.memory || {})
-  .filter(layout => layout?.byte_backed === true && Number.isSafeInteger(layout.hash))
-  .map(layout => [layout.hash | 0, layout]));
-const layoutsByOffset = new Map(Object.values(game.memory || {})
-  .filter(layout => layout?.byte_backed === true && Number.isSafeInteger(layout.offset))
-  .map(layout => [layout.offset | 0, layout]));
-const layoutFor = reference => layoutsByHash.get(reference | 0) || layoutsByOffset.get(reference | 0);
+const layoutsByHandle = new Map(Object.values(game.memory || {})
+  .filter(layout => layout?.byte_backed === true && Number.isSafeInteger(layout.handle))
+  .map(layout => [layout.handle | 0, layout]));
+const layoutFor = reference => layoutsByHandle.get(reference | 0);
 let instance;
 function copy_u8(destinationHash, destinationIndex, sourceHash, sourceIndex, count) {
   const destination = layoutFor(destinationHash);
@@ -498,7 +495,7 @@ function render(): i32 {
     )
     .expect("write byte memcpy source");
 
-    let output = package(&workspace, Path::new("build/web-package"));
+    let output = package_development(&workspace, Path::new("build/web-package"));
     let runtime = fs::read_to_string(output.join("game.js")).expect("byte memcpy runtime");
     let game = runtime
         .strip_prefix("window.STASIS_GAME = ")
@@ -507,14 +504,40 @@ function render(): i32 {
             serde_json::from_str::<serde_json::Value>(json).expect("parse runtime metadata")
         })
         .expect("runtime metadata prefix");
+    assert_eq!(game["collectionViewAbiVersion"], serde_json::json!(2));
     for path in ["source", "destination"] {
         assert_eq!(
             game["memory"][path]["byte_backed"],
             serde_json::json!(true),
             "release metadata omitted byte-backed marker for {path}"
         );
+        assert!(
+            game["memory"][path]["handle"].as_i64().is_some(),
+            "release metadata omitted collection handle for {path}"
+        );
+        assert!(
+            game["memory"][path]["offset"].as_u64().is_some(),
+            "release metadata omitted physical memory offset for {path}"
+        );
     }
-    assert!(runtime.contains("sysMemcpyU8"));
+    assert_ne!(
+        game["memory"]["source"]["handle"],
+        game["memory"]["destination"]["handle"]
+    );
+    for expected in [
+        "const COLLECTION_VIEW_ABI_VERSION = 2;",
+        "const collectionViewAbiVersion = game.collectionViewAbiVersion ?? 1;",
+        "const memoryLayoutsByHandle = typeId => new Map(",
+        "const u8MemoryLayoutsByHandle = new Map(",
+        "collectionViewAbiVersion === COLLECTION_VIEW_ABI_VERSION",
+        "u8MemoryLayoutsByHandle.get(reference | 0)",
+        "sysMemcpyU8",
+    ] {
+        assert!(
+            runtime.contains(expected),
+            "development Web runtime omitted handle-based collection logic {expected}"
+        );
+    }
 
     let execution = execute_web_main_with_byte_memcpy(&output);
     assert!(

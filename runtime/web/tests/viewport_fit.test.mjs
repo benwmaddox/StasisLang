@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const html = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const fitter = html.match(/<script>\s*([\s\S]*?)\s*<\/script>/)?.[1];
@@ -327,6 +328,7 @@ function integratedRuntime({
     },
     render: () => 0
   } };
+  installCollectionViewAbi(game, instance.exports);
   const eventTarget = {
     addEventListener(type, listener) {
       const values = listeners.get(type) || [];
@@ -367,7 +369,7 @@ function integratedRuntime({
     screen: { width: desktop[0], height: desktop[1] },
     get devicePixelRatio() { return currentDpr; },
     performance: { now: () => 0 },
-    WebAssembly: { instantiate: async () => ({ instance }) },
+    WebAssembly: { Global: WebAssembly.Global, instantiate: async () => ({ instance }) },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
     requestAnimationFrame: callback => { raf.push(callback); return raf.length; },
     cancelAnimationFrame() {},

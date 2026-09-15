@@ -31,6 +31,8 @@ pub fn wasm_global_hash(path: &str) -> i32 {
     hash_global_path(path)
 }
 
+pub const COLLECTION_VIEW_ABI_VERSION: i32 = 2;
+
 #[derive(Debug, Clone, Default)]
 pub struct WasmProcess {
     compiler: Compiler,
@@ -150,8 +152,8 @@ impl WasmProcess {
         }
 
         self.string_literals = collect_string_literals(&lowered, &analysis.constant_values);
-        let (memory_bindings, _) =
-            build_memory_bindings(&analysis, &types).map_err(CompileError::Backend)?;
+        let (memory_bindings, _) = build_memory_bindings(&analysis, &types, &self.string_literals)
+            .map_err(CompileError::Backend)?;
         self.memory_layout = memory_bindings
             .into_iter()
             .map(|(path, binding)| {
@@ -160,6 +162,7 @@ impl WasmProcess {
                 (
                     path,
                     WasmMemoryLayout {
+                        handle: binding.handle,
                         offset: binding.offset,
                         type_id: binding.type_id,
                         length: binding.len,
@@ -386,6 +389,7 @@ fn is_host_export(function: &FunctionMeta) -> bool {
 
 #[derive(Debug, Clone)]
 struct MemoryBinding {
+    handle: i32,
     offset: u32,
     type_id: TypeId,
     len: i32,
@@ -450,6 +454,7 @@ fn build_struct_scalars(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmMemoryLayout {
+    pub handle: i32,
     pub offset: u32,
     pub type_id: TypeId,
     pub length: i32,
@@ -555,6 +560,7 @@ fn struct_memory_scalar_paths(
 fn build_memory_bindings(
     analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
     types: &TypeTable,
+    string_literals: &BTreeMap<i32, String>,
 ) -> Result<(BTreeMap<String, MemoryBinding>, u32), String> {
     let mut offset = 0u32;
     let mut bindings = BTreeMap::new();
@@ -567,6 +573,7 @@ fn build_memory_bindings(
             bindings.insert(
                 path.clone(),
                 MemoryBinding {
+                    handle: 0,
                     offset,
                     type_id,
                     len: collection.len,
@@ -596,6 +603,7 @@ fn build_memory_bindings(
             bindings.insert(
                 field_path,
                 MemoryBinding {
+                    handle: 0,
                     offset,
                     type_id: *type_id,
                     len: collection.len,
@@ -646,6 +654,7 @@ fn build_memory_bindings(
         bindings.insert(
             path.clone(),
             MemoryBinding {
+                handle: 0,
                 offset,
                 type_id,
                 len: 1,
@@ -657,6 +666,32 @@ fn build_memory_bindings(
         offset = offset
             .checked_add(width)
             .ok_or_else(|| "web memory layout overflow".to_string())?;
+    }
+    let mut reserved_handles = string_literals.keys().copied().collect::<BTreeSet<_>>();
+    reserved_handles.extend(
+        analysis
+            .global_path_types
+            .keys()
+            .map(|path| hash_global_path(path)),
+    );
+    reserved_handles.extend(
+        analysis
+            .collection_infos
+            .keys()
+            .map(|path| hash_global_path(path)),
+    );
+    let mut next_handle = i32::MIN;
+    for binding in bindings.values_mut().filter(|binding| !binding.scalar) {
+        while reserved_handles.contains(&next_handle) {
+            next_handle = next_handle
+                .checked_add(1)
+                .ok_or_else(|| "web collection handle space exhausted".to_string())?;
+        }
+        binding.handle = next_handle;
+        reserved_handles.insert(next_handle);
+        next_handle = next_handle
+            .checked_add(1)
+            .ok_or_else(|| "web collection handle space exhausted".to_string())?;
     }
     Ok((bindings, offset))
 }
@@ -864,7 +899,7 @@ fn encode_module(
         signatures.push(signature);
     }
 
-    let (memory_bindings, memory_bytes) = build_memory_bindings(analysis, types)?;
+    let (memory_bindings, memory_bytes) = build_memory_bindings(analysis, types, string_literals)?;
     let (string_literal_memory, total_memory_bytes) =
         build_string_literal_memory(string_literals, memory_bytes)?;
     let has_memory = memory_bytes > 0 || !string_literal_memory.is_empty();
@@ -1029,21 +1064,22 @@ fn encode_module(
         section(5, memory_section, &mut module);
     }
 
-    if !globals.is_empty() {
-        let mut global_section = Vec::new();
-        uleb(globals.len() as u32, &mut global_section);
-        for (_, type_id, initial_i32) in &globals {
-            global_section.extend([wasm_value_type(*type_id)?, 1]);
-            if let Some(value) = initial_i32 {
-                global_section.push(0x41);
-                sleb(*value, &mut global_section);
-            } else {
-                encode_zero(*type_id, &mut global_section)?;
-            }
-            global_section.push(0x0b);
+    let mut global_section = Vec::new();
+    uleb(globals.len() as u32 + 1, &mut global_section);
+    for (_, type_id, initial_i32) in &globals {
+        global_section.extend([wasm_value_type(*type_id)?, 1]);
+        if let Some(value) = initial_i32 {
+            global_section.push(0x41);
+            sleb(*value, &mut global_section);
+        } else {
+            encode_zero(*type_id, &mut global_section)?;
         }
-        section(6, global_section, &mut module);
+        global_section.push(0x0b);
     }
+    global_section.extend([I32, 0, 0x41]);
+    sleb(COLLECTION_VIEW_ABI_VERSION, &mut global_section);
+    global_section.push(0x0b);
+    section(6, global_section, &mut module);
 
     let mut export_section = Vec::new();
     uleb(
@@ -1057,6 +1093,7 @@ fn encode_module(
                 0
             }
             + u32::from(has_memory)
+            + 1
             + 4,
         &mut export_section,
     );
@@ -1080,6 +1117,9 @@ fn encode_module(
         export_section.push(2);
         uleb(0, &mut export_section);
     }
+    string("__stasis_collection_view_abi_version", &mut export_section);
+    export_section.push(3);
+    uleb(globals.len() as u32, &mut export_section);
     let accessor_base = (imports.len() + functions.len()) as u32;
     for (offset, name) in [
         "__stasis_global_get_i32",
@@ -2108,6 +2148,10 @@ fn encode_target_get(
                 out.push(0x41);
                 sleb(len, out);
                 Ok(TYPE_ID_I32)
+            } else if let Some(len) = receiver_array_meta_len(name, context)? {
+                out.push(0x41);
+                sleb(len, out);
+                Ok(TYPE_ID_I32)
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 encode_struct_field_load(binding, suffix, context, out)
             } else if let Some(binding) = context.locals.get(name) {
@@ -2137,6 +2181,10 @@ fn encode_target_get(
                 )?;
                 Ok(TYPE_ID_I32)
             } else if let Some(len) = receiver_struct_collection_meta_len(name, context)? {
+                out.push(0x41);
+                sleb(len, out);
+                Ok(TYPE_ID_I32)
+            } else if let Some(len) = receiver_array_meta_len(name, context)? {
                 out.push(0x41);
                 sleb(len, out);
                 Ok(TYPE_ID_I32)
@@ -2827,6 +2875,26 @@ fn encode_receiver_array_address(
     Ok(())
 }
 
+fn encode_receiver_array_handle(binding: &ReceiverArrayBinding<'_>, out: &mut Vec<u8>) {
+    fn select(receiver_base: u32, candidates: &[ReceiverArrayCandidate<'_>], out: &mut Vec<u8>) {
+        let Some((candidate, rest)) = candidates.split_first() else {
+            out.push(0x00);
+            return;
+        };
+        out.push(0x20);
+        uleb(receiver_base, out);
+        out.push(0x41);
+        sleb(candidate.base, out);
+        out.extend([0x46, 0x04, I32, 0x41]);
+        sleb(candidate.memory.handle, out);
+        out.push(0x05);
+        select(receiver_base, rest, out);
+        out.push(0x0b);
+    }
+
+    select(binding.receiver.index, &binding.candidates, out);
+}
+
 fn memory_binding<'a>(
     context: &'a EncodeContext<'_>,
     collection_path: &str,
@@ -2844,6 +2912,12 @@ fn memory_binding<'a>(
 }
 
 fn collection_len(context: &EncodeContext<'_>, collection_path: &str) -> Result<i32, String> {
+    if let Some(len) = receiver_struct_collection_len(collection_path, context)? {
+        return Ok(len);
+    }
+    if let Some(binding) = receiver_array_binding(context, collection_path, "")? {
+        return Ok(binding.candidates[0].memory.len);
+    }
     context
         .memory
         .get(collection_path)
@@ -2947,7 +3021,7 @@ fn encode_collection_meta_load(
     out.push(0x20);
     uleb(base_local, out);
     out.push(0x41);
-    sleb(memory.offset as i32, out);
+    sleb(memory.handle, out);
     out.extend([0x46, 0x04, I32]);
     if matches!(suffix, "length" | "char_length") {
         match *backing {
@@ -3017,7 +3091,7 @@ fn encode_collection_meta_store(
     out.push(0x20);
     uleb(base_local, out);
     out.push(0x41);
-    sleb(memory.offset as i32, out);
+    sleb(memory.handle, out);
     out.extend([0x46, 0x04, 0x40]);
     match *backing {
         Some(CollectionMetaBacking::Global(global)) => {
@@ -3150,6 +3224,17 @@ fn receiver_struct_collection_meta_len(
         return Ok(None);
     };
     receiver_struct_collection_len(collection_path, context)
+}
+
+fn receiver_array_meta_len(
+    value: &str,
+    context: &EncodeContext<'_>,
+) -> Result<Option<i32>, String> {
+    let Some(collection_path) = value.strip_suffix(".max_length") else {
+        return Ok(None);
+    };
+    Ok(receiver_array_binding(context, collection_path, "")?
+        .map(|binding| binding.candidates[0].memory.len))
 }
 
 fn receiver_struct_collection_field_type(
@@ -3861,6 +3946,7 @@ fn encode_struct_field_address(
         // Keep the unreachable collection arm valid without inventing storage.
         out.push(0x00);
         return Ok(MemoryBinding {
+            handle: 0,
             offset: 0,
             type_id: field_type,
             len: 0,
@@ -4207,7 +4293,7 @@ fn encode_registered_collection_store(
     out.push(0x20);
     uleb(handle_local, out);
     out.push(0x41);
-    sleb(memory.offset as i32, out);
+    sleb(memory.handle, out);
     out.extend([0x46, 0x04, 0x40]);
     if wasm_value_type(memory.type_id)? != wasm_value_type(element_type)? {
         return Err(format!(
@@ -4315,7 +4401,7 @@ fn encode_registered_collection_load(
     out.push(0x20);
     uleb(handle_local, out);
     out.push(0x41);
-    sleb(memory.offset as i32, out);
+    sleb(memory.handle, out);
     let element_lane = wasm_value_type(element_type)?;
     let memory_lane = wasm_value_type(memory.type_id)?;
     if memory_lane != element_lane {
@@ -4855,6 +4941,18 @@ fn encode_expr_as(
                 out.push(0x41);
                 sleb(len, out);
                 Ok(TYPE_ID_I32)
+            } else if let Some(len) = receiver_array_meta_len(name, context)? {
+                out.push(0x41);
+                sleb(len, out);
+                Ok(TYPE_ID_I32)
+            } else if expected
+                .is_some_and(|type_id| context.types.indexed_element_type_id(type_id).is_some())
+                && receiver_array_binding(context, name, "")?.is_some()
+            {
+                let binding = receiver_array_binding(context, name, "")?
+                    .expect("receiver array binding checked above");
+                encode_receiver_array_handle(&binding, out);
+                Ok(expected.expect("collection view expectation checked above"))
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 encode_struct_field_load(binding, suffix, context, out)
             } else if let Some(binding) = context.locals.get(name) {
@@ -4872,7 +4970,7 @@ fn encode_expr_as(
                     Ok(binding.type_id)
                 } else {
                     out.push(0x41);
-                    sleb(binding.offset as i32, out);
+                    sleb(binding.handle, out);
                     Ok(expected.unwrap_or(TYPE_ID_I32))
                 }
             } else if let Some(index) = context.globals.get(name) {
@@ -5563,7 +5661,7 @@ function render(): i32 { return 0; }
     }
 
     #[test]
-    fn passes_fixed_collection_offsets_to_array_view_host_imports() {
+    fn publishes_opaque_collection_handles_for_array_view_host_imports() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
         process.upsert_file(
@@ -5572,10 +5670,60 @@ function render(): i32 { return 0; }
         );
         process.compile().expect("compile web audio view module");
         assert_eq!(process.memory_layout()["samples"].offset, 0);
+        assert_ne!(
+            process.memory_layout()["samples"].handle,
+            process.memory_layout()["samples"].offset as i32
+        );
         assert!(process
             .module_bytes()
             .windows("audio_push_f32_interleaved".len())
             .any(|window| window == b"audio_push_f32_interleaved"));
+        assert!(process
+            .module_bytes()
+            .windows("__stasis_collection_view_abi_version".len())
+            .any(|window| window == b"__stasis_collection_view_abi_version"));
+    }
+
+    #[test]
+    fn zero_extent_collections_share_no_identity_or_storage_bytes() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into()]);
+        process.upsert_file(
+            "zero_views.stasis",
+            "global first: i32[0]; global second: i32[0]; global values: i32[2]; function inspect(view: i32[]): i32 { return view.max_length; } function main(): i32 { return inspect(first) + inspect(second) + inspect(values); }",
+        );
+        process.compile().expect("compile zero-extent web views");
+
+        let first = &process.memory_layout()["first"];
+        let second = &process.memory_layout()["second"];
+        let values = &process.memory_layout()["values"];
+        assert_eq!((first.offset, second.offset, values.offset), (0, 0, 0));
+        assert_eq!((first.length, second.length, values.length), (0, 0, 2));
+        assert_ne!(first.handle, 0);
+        assert_ne!(second.handle, 0);
+        assert_ne!(values.handle, 0);
+        assert_ne!(first.handle, second.handle);
+        assert_ne!(first.handle, values.handle);
+        assert_ne!(second.handle, values.handle);
+    }
+
+    #[test]
+    fn zero_extent_only_module_keeps_handles_without_exporting_memory() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into()]);
+        process.upsert_file(
+            "zero_only_views.stasis",
+            "global first: i32[0]; global second: i32[0]; extern function capture(view: i32[]): i32; function main(): i32 { return capture(first) + capture(second); }",
+        );
+        process
+            .compile()
+            .expect("compile memory-free zero-extent web views");
+
+        assert_eq!(section_entry_count(process.module_bytes(), 5), 0);
+        assert_ne!(
+            process.memory_layout()["first"].handle,
+            process.memory_layout()["second"].handle
+        );
     }
 
     #[test]
@@ -6127,8 +6275,8 @@ function render(): i32 { return 0; }
         }
         assert_eq!(
             section_entry_count(process.module_bytes(), 6),
-            1,
-            "only the true top-level scalar should remain a Wasm global"
+            2,
+            "only the true top-level scalar and collection-view ABI marker should be Wasm globals"
         );
         assert_eq!(
             section_entry_count(process.module_bytes(), 11),

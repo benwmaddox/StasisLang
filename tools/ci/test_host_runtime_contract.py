@@ -59,6 +59,23 @@ class HostRuntimeContractTests(unittest.TestCase):
             )
         )
 
+    def test_collection_view_abi_version_drift_names_compiler_and_web_runtime(self):
+        registry = copy.deepcopy(self.registry)
+        registry["wasm_collection_view"]["version"] = 3
+        failures, _ = contract.check(registry=registry)
+        sources = {
+            failure.source
+            for failure in failures
+            if failure.field == "wasm_collection_view.version"
+        }
+        self.assertEqual(
+            {
+                "crates/stasis_compiler/src/backend/wasm.rs",
+                "runtime/web/game.js",
+            },
+            sources,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
