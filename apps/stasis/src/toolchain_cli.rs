@@ -4538,13 +4538,7 @@ fn package_workspace(
         ));
     }
     let mut provenance = resolve_package_provenance(development_build)?;
-    provenance["desktop_package"] = json!({
-        "project": package_project_provenance(
-            workspace,
-            workspace.manifest.entry.as_str(),
-            &manifest_bytes,
-        )?,
-    });
+    provenance["desktop_package"] = desktop_package_project_provenance(workspace, &manifest_bytes)?;
     let network_enabled = workspace
         .manifest
         .capabilities
@@ -4636,14 +4630,12 @@ fn package_workspace(
                 manifest_path.display()
             ));
         }
-        let current_project_provenance = package_project_provenance(
-            workspace,
-            workspace.manifest.entry.as_str(),
-            &current_manifest_bytes,
-        )?;
-        if current_project_provenance != provenance["desktop_package"]["project"] {
+        let current_project_provenance =
+            desktop_package_project_provenance(workspace, &current_manifest_bytes)?;
+        if current_project_provenance != provenance["desktop_package"] {
             return Err(
-                "desktop package source or vendored runtime changed during packaging".to_string(),
+                "desktop package host source, network guest source, or vendored runtime changed during packaging"
+                    .to_string(),
             );
         }
         let staged_manifest = fs::read(payload_root.join(MANIFEST_NAME)).map_err(|error| {
@@ -4847,6 +4839,42 @@ fn package_project_provenance(
         },
         "reachable_sources": reachable_sources,
         "vendor": vendor,
+    }))
+}
+
+fn desktop_package_project_provenance(
+    workspace: &Workspace,
+    manifest_bytes: &[u8],
+) -> Result<Value, String> {
+    let project =
+        package_project_provenance(workspace, workspace.manifest.entry.as_str(), manifest_bytes)?;
+    let network_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network);
+    let network_guest = if network_enabled {
+        let web_entry = workspace
+            .manifest
+            .web
+            .as_ref()
+            .map(|web| web.entry.as_str())
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                "network-enabled desktop projects must declare web.entry for the guest bundle"
+                    .to_string()
+            })?;
+        Some(package_project_provenance(
+            workspace,
+            web_entry,
+            manifest_bytes,
+        )?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "project": project,
+        "network_guest": network_guest,
     }))
 }
 
@@ -9455,6 +9483,57 @@ mod tests {
         assert_ne!(
             before, after,
             "source mutation must change package provenance"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_package_project_provenance_detects_network_guest_mutation() {
+        let root = temp_dir("desktop_package_network_guest_provenance");
+        create_project(
+            root.clone(),
+            "desktop_package_network_guest_provenance".to_string(),
+        )
+        .expect("create project");
+        fs::write(
+            root.join("src/guest.stasis"),
+            "function main(): i32 { return 42; }\n",
+        )
+        .expect("write guest entry");
+        let mut manifest: ProjectManifest = serde_json::from_slice(
+            &fs::read(root.join(MANIFEST_NAME)).expect("read generated manifest"),
+        )
+        .expect("parse generated manifest");
+        manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/guest.stasis".to_string(),
+            loading_font: None,
+            viewport: None,
+        });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
+        let workspace = load_workspace(Some(&root)).expect("load network workspace");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
+        let before = desktop_package_project_provenance(&workspace, &manifest_bytes)
+            .expect("capture desktop provenance");
+
+        fs::write(
+            root.join("src/guest.stasis"),
+            "function main(): i32 { return 43; }\n",
+        )
+        .expect("mutate guest entry");
+        let after = desktop_package_project_provenance(&workspace, &manifest_bytes)
+            .expect("recapture desktop provenance");
+
+        assert_eq!(
+            before["project"], after["project"],
+            "host source graph must be unchanged"
+        );
+        assert_ne!(
+            before["network_guest"], after["network_guest"],
+            "guest source mutation must change desktop package provenance"
         );
         remove_temp(&root);
     }
