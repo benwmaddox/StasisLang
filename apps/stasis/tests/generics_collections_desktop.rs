@@ -390,9 +390,12 @@ fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
         );
         None
     } else {
-        let expected = "RUNNER_DIAG: render_construction_lifecycle_version=1";
+        let expected = "render_construction_lifecycle_version=1";
         assert!(
-            runner_diagnostics.contains(expected),
+            runner_diagnostics.lines().any(|line| {
+                line.starts_with("RUNNER_DIAG:")
+                    && line.split_ascii_whitespace().any(|field| field == expected)
+            }),
             "packaged runner did not report lifecycle-v1 ownership; diagnostics={runner_diagnostics}"
         );
         Some(expected)
