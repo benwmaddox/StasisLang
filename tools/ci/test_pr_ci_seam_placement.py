@@ -175,6 +175,14 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.generics)
         self.assertNotIn("STASIS_REQUIRE_SIGNED_EXECUTION", self.generics)
+        self.assertEqual(self.generics.count("-DSTASIS_BUILD_RUNNER=ON"), 2)
+        self.assertEqual(
+            self.generics.count(
+                "--target stasis_graphics stasis_runner"
+            ),
+            2,
+        )
+        self.assertEqual(self.generics.count("STASIS_RUNTIME_RUNNER_PATH="), 2)
         self.assertIn("if-no-files-found: error", self.generics)
         self.assertIn(
             "name: generics-collections-${{ matrix.evidence }}-evidence",

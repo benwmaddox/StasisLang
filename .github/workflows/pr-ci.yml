@@ -373,12 +373,13 @@ jobs:
         run: |
           $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
           if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
-          cmake -S runtime -B target/generics-web-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
+          cmake -S runtime -B target/generics-web-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build target/generics-web-runtime --config Release --target stasis_graphics
+          cmake --build target/generics-web-runtime --config Release --target stasis_graphics stasis_runner
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "STASIS_RUNTIME_DLL_PATH=$((Resolve-Path 'target/generics-web-runtime/bin/Release/stasis_graphics.dll').Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "STASIS_RUNTIME_LIBRARY_PATH=$((Resolve-Path 'target/generics-web-runtime/bin/Release/stasis_graphics.dll').Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_RUNTIME_RUNNER_PATH=$((Resolve-Path 'target/generics-web-runtime/bin/Release/stasis_runner.exe').Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build matching packaged desktop runtime on Unix
         if: matrix.os != 'windows-latest'
@@ -389,14 +390,21 @@ jobs:
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
-            -DSTASIS_BUILD_RUNNER=OFF \
+            -DSTASIS_BUILD_RUNNER=ON \
             -DSTASIS_BUILD_SYS=OFF \
             -DSTASIS_RELEASE_ID="$STASIS_RELEASE_ID" \
             -DSTASIS_BUILD_FINGERPRINT="$STASIS_BUILD_FINGERPRINT"
-          cmake --build target/generics-desktop-runtime --config Release --target stasis_graphics
+          cmake --build target/generics-desktop-runtime --config Release --target stasis_graphics stasis_runner
           runtime="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/${{ matrix.runtime_library }}"
           test -f "$runtime"
           echo "STASIS_RUNTIME_LIBRARY_PATH=$runtime" >> "$GITHUB_ENV"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            runner="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/Release/stasis_runner.app/Contents/MacOS/stasis_runner"
+          else
+            runner="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/Release/stasis_runner"
+          fi
+          test -x "$runner"
+          echo "STASIS_RUNTIME_RUNNER_PATH=$runner" >> "$GITHUB_ENV"
 
       - name: Run packaged generics desktop acceptance on Unix
         if: runner.os != 'Windows'
