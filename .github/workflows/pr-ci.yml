@@ -408,7 +408,7 @@ jobs:
 
       - name: Run packaged generics desktop acceptance on Unix
         if: runner.os != 'Windows'
-        timeout-minutes: 20
+        timeout-minutes: 15
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
@@ -419,7 +419,7 @@ jobs:
 
       - name: Run packaged generics desktop acceptance on Windows
         if: runner.os == 'Windows'
-        timeout-minutes: 20
+        timeout-minutes: 15
         shell: pwsh
         run: |
           python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --ignored --exact full_generics_desktop_package_launches_with_provenance_and_digest_frame --test-threads=1 --nocapture

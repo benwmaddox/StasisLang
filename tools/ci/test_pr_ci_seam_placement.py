@@ -193,6 +193,11 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         )[1].split("\n      - name:", 1)[0]
         self.assertIn("if: runner.os == 'Windows'", windows_acceptance)
         self.assertIn("shell: pwsh", windows_acceptance)
+        self.assertIn("timeout-minutes: 15", windows_acceptance)
+        unix_acceptance = self.generics.split(
+            "- name: Run packaged generics desktop acceptance on Unix", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 15", unix_acceptance)
 
     def test_runner_uses_cached_cargo_and_names_grouped_failures(self):
         cargo_tokens = (
