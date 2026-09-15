@@ -4508,6 +4508,7 @@ fn package_workspace(
         );
     }
     validate_desktop_network_guest_contract(&workspace.manifest)?;
+    validate_desktop_package_output_location(workspace, &package_root)?;
     let staging_name = format!(
         ".{}.staging",
         package_root
@@ -4820,6 +4821,121 @@ fn package_input_directory_provenance(
     }))
 }
 
+fn desktop_entry_support_path(entry: &str) -> Result<PathBuf, String> {
+    let entry_path = Path::new(entry);
+    validate_relative_path("desktop package entry", entry_path)?;
+    let entry_stem = entry_path.file_stem().ok_or_else(|| {
+        format!(
+            "desktop package entry has no file name: {}",
+            entry_path.display()
+        )
+    })?;
+    Ok(entry_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(entry_stem))
+}
+
+fn resolve_destination_path(candidate: &Path) -> Result<PathBuf, String> {
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!("failed to resolve path {}", candidate.display()));
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let mut ancestor = normalized.as_path();
+    let mut missing = Vec::new();
+    while !ancestor.exists() {
+        let name = ancestor
+            .file_name()
+            .ok_or_else(|| format!("failed to resolve path {}", candidate.display()))?;
+        missing.push(name.to_os_string());
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| format!("failed to resolve path {}", candidate.display()))?;
+    }
+    let mut resolved = ancestor
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve path {}: {error}", candidate.display()))?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn destination_starts_with(candidate: &Path, base: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let mut candidate = candidate.components();
+        for expected in base.components() {
+            let Some(actual) = candidate.next() else {
+                return false;
+            };
+            if !actual
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
+            {
+                return false;
+            }
+        }
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        candidate.starts_with(base)
+    }
+}
+
+fn validate_desktop_package_output_location(
+    workspace: &Workspace,
+    package_root: &Path,
+) -> Result<(), String> {
+    let resolved_output = resolve_destination_path(package_root)?;
+    let mut captured_inputs = vec![
+        PathBuf::from("vendor"),
+        PathBuf::from("assets"),
+        PathBuf::from("data"),
+    ];
+    captured_inputs.push(desktop_entry_support_path(&workspace.manifest.entry)?);
+    if workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network)
+    {
+        if let Some(web_entry) = workspace
+            .manifest
+            .web
+            .as_ref()
+            .map(|web| web.entry.as_str())
+            .filter(|entry| !entry.is_empty())
+        {
+            captured_inputs.push(desktop_entry_support_path(web_entry)?);
+        }
+    }
+    captured_inputs.sort();
+    captured_inputs.dedup();
+
+    for relative in captured_inputs {
+        let input = workspace.root.join(&relative);
+        let resolved_input = resolve_destination_path(&input)?;
+        if destination_starts_with(&resolved_output, &resolved_input) {
+            return Err(format!(
+                "desktop package output must not be inside captured input directory {}",
+                input.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn package_project_provenance(
     workspace: &Workspace,
     entry: &str,
@@ -4864,18 +4980,7 @@ fn package_project_provenance(
             })
         })
         .transpose()?;
-    let entry_path = Path::new(entry);
-    validate_relative_path("desktop package entry", entry_path)?;
-    let entry_stem = entry_path.file_stem().ok_or_else(|| {
-        format!(
-            "desktop package entry has no file name: {}",
-            entry_path.display()
-        )
-    })?;
-    let entry_support = entry_path
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join(entry_stem);
+    let entry_support = desktop_entry_support_path(entry)?;
     Ok(json!({
         "manifest": {
             "path": MANIFEST_NAME,
@@ -9692,6 +9797,49 @@ mod tests {
             before, after,
             "source mutation must change package provenance"
         );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_package_output_rejects_captured_input_descendants() {
+        let root = temp_dir("desktop_package_output_location");
+        create_project(root.clone(), "desktop_package_output_location".to_string())
+            .expect("create project");
+        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+
+        validate_desktop_package_output_location(&workspace, &root.join("dist/game"))
+            .expect("ordinary distribution output");
+        validate_desktop_package_output_location(&workspace, &root.join("data/../dist/game"))
+            .expect("normalized distribution output");
+        for output in [
+            root.join("assets/package"),
+            root.join("data/package"),
+            root.join("vendor/package"),
+            root.join("src/main/package"),
+        ] {
+            let error = validate_desktop_package_output_location(&workspace, &output)
+                .expect_err("captured input descendant must be rejected");
+            assert!(
+                error.contains("must not be inside captured input directory"),
+                "unexpected error for {}: {error}",
+                output.display()
+            );
+        }
+        #[cfg(windows)]
+        assert!(
+            validate_desktop_package_output_location(&workspace, &root.join("ASSETS/package"))
+                .is_err(),
+            "Windows captured-input matching must be case-insensitive"
+        );
+        let error = package_workspace(
+            &workspace,
+            PackageTarget::Desktop,
+            Some(Path::new("data/package")),
+            true,
+        )
+        .expect_err("desktop package command must reject a captured-input output");
+        assert!(error.contains("must not be inside captured input directory"));
+        assert!(!root.join("data/.package.staging").exists());
         remove_temp(&root);
     }
 
