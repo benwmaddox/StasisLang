@@ -9435,6 +9435,7 @@ mod tests {
             loading_font: None,
             viewport: None,
         });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write project manifest");
         let workspace = Workspace {
             root: root.clone(),
             manifest,
