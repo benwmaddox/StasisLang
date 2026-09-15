@@ -22,6 +22,13 @@ use crate::frontend::parser::{
 const MAX_SPECIALIZATIONS: usize = 4096;
 const MAX_INSTANTIATION_DEPTH: usize = 128;
 const MAX_CONSTANT_EVALUATION_STEPS: usize = 10_000;
+const MAX_CONSTANT_DEPENDENCY_DEPTH: usize = 128;
+const MAX_GENERIC_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EXPANDED_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ELABORATION_WORK_UNITS: usize = 32 * 1024 * 1024;
+const SPECIALIZATION_WORK_UNITS: usize = 1024;
+const GENERATED_COMPILER_PREFIXES: [&str; 3] =
+    ["__stasis_type_", "__stasis_function_", "__stasis_const_"];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ConcreteArgument {
@@ -71,6 +78,7 @@ struct StructSpecialization {
 #[derive(Debug, Clone)]
 struct FunctionSpecialization {
     definition: usize,
+    generated_name: String,
     source: String,
     param_type_names: Vec<String>,
 }
@@ -156,6 +164,7 @@ impl GenericEnvironment {
 
 struct Expansion {
     files: Vec<RawFile>,
+    input_bytes: usize,
     module_graph: ModuleGraph,
     generic_structs: BTreeMap<String, GenericStructDefinition>,
     generic_structs_by_name: BTreeMap<String, Vec<String>>,
@@ -168,6 +177,8 @@ struct Expansion {
     struct_work: VecDeque<(StructSpecializationKey, usize)>,
     function_specializations: BTreeMap<FunctionSpecializationKey, FunctionSpecialization>,
     function_work: VecDeque<(FunctionSpecializationKey, usize)>,
+    materialized_function_bytes: usize,
+    generated_specialization_identities: BTreeMap<String, String>,
     ordinary_structs_by_name: BTreeMap<String, Vec<OrdinaryStructDefinition>>,
     known_type_files_by_name: BTreeMap<String, BTreeSet<usize>>,
     concrete_path_definitions: Vec<ConcretePathDefinition>,
@@ -235,6 +246,14 @@ pub(crate) fn expand_sources(
     files: &mut [SourceFile],
     module_graph: &ModuleGraph,
 ) -> Result<(), ExpansionError> {
+    let input_bytes = files.iter().try_fold(0usize, |total, file| {
+        total
+            .checked_add(file.original_content.len())
+            .ok_or_else(|| {
+                ExpansionError::without_path("generic source byte count overflowed".to_string())
+            })
+    })?;
+    ensure_generic_source_bytes(input_bytes).map_err(ExpansionError::without_path)?;
     let raw_files = files
         .iter()
         .map(|file| RawFile {
@@ -254,7 +273,7 @@ pub(crate) fn expand_sources(
         }
         return Ok(());
     }
-    let mut expansion = Expansion::new(raw_files, module_graph.clone())?;
+    let mut expansion = Expansion::new(raw_files, input_bytes, module_graph.clone())?;
     expansion.reject_explicit_generic_calls()?;
     if expansion.generic_structs.is_empty() && expansion.generic_functions.is_empty() {
         for file in files {
@@ -570,7 +589,11 @@ impl Expansion {
         Ok(())
     }
 
-    fn new(files: Vec<RawFile>, module_graph: ModuleGraph) -> Result<Self, ExpansionError> {
+    fn new(
+        files: Vec<RawFile>,
+        input_bytes: usize,
+        module_graph: ModuleGraph,
+    ) -> Result<Self, ExpansionError> {
         let mut generic_structs: BTreeMap<String, GenericStructDefinition> = BTreeMap::new();
         let mut generic_structs_by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let generic_functions = Vec::new();
@@ -594,6 +617,32 @@ impl Expansion {
             let Ok(struct_ranges) = parse_top_level_struct_definitions(&file.source) else {
                 continue;
             };
+            for (kind, name) in layout
+                .structs
+                .iter()
+                .map(|item| ("struct", item.name.as_str()))
+                .chain(layout.enums.iter().map(|item| ("enum", item.name.as_str())))
+                .chain(
+                    layout
+                        .globals
+                        .iter()
+                        .map(|item| ("global", item.name.as_str())),
+                )
+                .chain(
+                    layout
+                        .global_blocks
+                        .iter()
+                        .map(|item| ("global block", item.name.as_str())),
+                )
+                .chain(
+                    layout
+                        .constants
+                        .iter()
+                        .map(|item| ("constant", item.name.as_str())),
+                )
+            {
+                reject_reserved_declaration_name(&file.path, kind, name)?;
+            }
             for global in &layout.globals {
                 concrete_path_definitions.push(ConcretePathDefinition {
                     file_index,
@@ -688,6 +737,9 @@ impl Expansion {
             let Ok(externs) = parse_top_level_extern_functions(&file.source) else {
                 continue;
             };
+            for declaration in &externs {
+                reject_reserved_declaration_name(&file.path, "extern function", &declaration.name)?;
+            }
             if let Some(extern_decl) = externs
                 .iter()
                 .find(|declaration| !declaration.generic_parameters.is_empty())
@@ -704,6 +756,7 @@ impl Expansion {
                 continue;
             };
             for function in functions {
+                reject_reserved_declaration_name(&file.path, "function", &function.name)?;
                 if !function.generic_parameters.is_empty() {
                     return Err(ExpansionError::for_file(
                         file.path.clone(),
@@ -731,6 +784,7 @@ impl Expansion {
         }
 
         let mut constant_values = BTreeMap::new();
+        let mut constant_evaluation_steps = 0;
         for definition in &constant_definitions {
             if definition.type_name.trim() == "i32" {
                 evaluate_constant_definition(
@@ -739,7 +793,7 @@ impl Expansion {
                     &module_graph,
                     &mut constant_values,
                     &mut Vec::new(),
-                    &mut 0,
+                    &mut constant_evaluation_steps,
                 )
                 .map_err(|message| ExpansionError::for_file(definition.path.clone(), message))?;
             }
@@ -747,6 +801,7 @@ impl Expansion {
 
         let mut expansion = Self {
             files,
+            input_bytes,
             module_graph,
             generic_structs,
             generic_structs_by_name,
@@ -759,6 +814,8 @@ impl Expansion {
             struct_work: VecDeque::new(),
             function_specializations: BTreeMap::new(),
             function_work: VecDeque::new(),
+            materialized_function_bytes: 0,
+            generated_specialization_identities: BTreeMap::new(),
             ordinary_structs_by_name,
             known_type_files_by_name,
             concrete_path_definitions,
@@ -1395,11 +1452,8 @@ impl Expansion {
             return Ok(());
         }
         let is_generic = visit_key.starts_with("generic:");
-        if is_generic && generic_depth > MAX_INSTANTIATION_DEPTH {
-            return Err(format!(
-                "generic instantiation depth exceeded (maximum {})",
-                MAX_INSTANTIATION_DEPTH
-            ));
+        if is_generic {
+            ensure_instantiation_depth(generic_depth)?;
         }
         visiting.push(visit_key);
         for field in fields {
@@ -1480,11 +1534,8 @@ impl Expansion {
                 return Ok(());
             }
             let is_generic = visit_key.starts_with("generic:");
-            if is_generic && generic_depth > MAX_INSTANTIATION_DEPTH {
-                return Err(format!(
-                    "generic instantiation depth exceeded (maximum {})",
-                    MAX_INSTANTIATION_DEPTH
-                ));
+            if is_generic {
+                ensure_instantiation_depth(generic_depth)?;
             }
             visiting.push(visit_key);
             for field in fields {
@@ -2554,8 +2605,14 @@ impl Expansion {
             return Ok(existing.generated_name.clone());
         }
         self.check_specialization_limit()?;
-        let generated_name =
-            mangle_specialization("type", &definition.path, &definition.name, &key.arguments);
+        let identity =
+            specialization_identity("type", &definition.path, &definition.name, &key.arguments);
+        let generated_name = mangle_specialization_identity(&identity);
+        register_specialization_name(
+            &mut self.generated_specialization_identities,
+            &generated_name,
+            &identity,
+        )?;
         self.struct_specializations.insert(
             key.clone(),
             StructSpecialization {
@@ -2589,10 +2646,21 @@ impl Expansion {
             return Ok(());
         }
         self.check_specialization_limit()?;
+        let identity_path =
+            generic_function_identity(&self.files[generic.file_index].path, &generic.signature);
+        let identity =
+            specialization_identity("function", &identity_path, &generic.name, &key.arguments);
+        let generated_name = mangle_specialization_identity(&identity);
+        register_specialization_name(
+            &mut self.generated_specialization_identities,
+            &generated_name,
+            &identity,
+        )?;
         self.function_specializations.insert(
             key.clone(),
             FunctionSpecialization {
                 definition,
+                generated_name,
                 source: String::new(),
                 param_type_names: Vec::new(),
             },
@@ -2608,13 +2676,7 @@ impl Expansion {
 
     fn enqueue_depth(&self) -> Result<(), String> {
         let depth = self.next_depth();
-        if depth > MAX_INSTANTIATION_DEPTH {
-            return Err(format!(
-                "generic instantiation depth exceeded (maximum {})",
-                MAX_INSTANTIATION_DEPTH
-            ));
-        }
-        Ok(())
+        ensure_instantiation_depth(depth)
     }
 
     fn materialize_struct(&mut self, key: &StructSpecializationKey) -> Result<(), String> {
@@ -2659,32 +2721,44 @@ impl Expansion {
             GenericEnvironment::from_parameters(&generic.parameters, &key.arguments)?;
         environment.module_alias = Some(generic.module_alias.clone());
         environment.source_path = Some(generic.path.clone());
-        let source = self.files[generic.file_index].source.clone();
         let start = generic.signature.signature_range.start;
         let end = generic.signature.body_range.end;
-        let original = source.get(start..end).ok_or_else(|| {
-            format!(
-                "generic function '{}' has invalid source range",
-                generic.name
-            )
-        })?;
-        let body = source
-            .get(generic.signature.body_range.clone())
-            .ok_or_else(|| format!("generic function '{}' has invalid body range", generic.name))?;
-        reject_value_parameter_writes(body, &generic.parameters)?;
-        let stripped = strip_generic_declaration(original, "function")?;
+        let stripped = {
+            let source = &self.files[generic.file_index].source;
+            let original = source.get(start..end).ok_or_else(|| {
+                format!(
+                    "generic function '{}' has invalid source range",
+                    generic.name
+                )
+            })?;
+            let body = source
+                .get(generic.signature.body_range.clone())
+                .ok_or_else(|| {
+                    format!("generic function '{}' has invalid body range", generic.name)
+                })?;
+            reject_value_parameter_writes(body, &generic.parameters)?;
+            strip_generic_declaration(original, "function")?
+        };
+        self.next_materialized_function_bytes(stripped.len())?;
 
-        let substituted = rewrite_generic_identifiers(&stripped, &environment);
+        let substituted = rewrite_generic_identifiers_checked(&stripped, &environment, |length| {
+            self.next_materialized_function_bytes(length).map(|_| ())
+        })?;
         let substituted = self.rewrite_type_applications(&substituted, &environment)?;
-        let substituted = rewrite_i32_constants(
+        let constant_rewrites =
+            self.constant_rewrites_for_source(generic.file_index, &substituted)?;
+        let substituted = rewrite_i32_constants_checked(
             &substituted,
             &BTreeMap::new(),
-            &self.constant_rewrites_for_source(generic.file_index, &substituted)?,
+            &constant_rewrites,
+            |length| self.next_materialized_function_bytes(length).map(|_| ()),
         )?;
-        let substituted = apply_replacements(
-            &substituted,
-            &self.ordinary_type_replacements_for_source(generic.file_index, &substituted)?,
-        )?;
+        let ordinary_replacements =
+            self.ordinary_type_replacements_for_source(generic.file_index, &substituted)?;
+        let substituted =
+            apply_replacements_checked(&substituted, &ordinary_replacements, |length| {
+                self.next_materialized_function_bytes(length).map(|_| ())
+            })?;
 
         let parsed_substituted = parse_top_level_functions(&substituted)?;
         let specialized_signature = parsed_substituted
@@ -2827,6 +2901,8 @@ impl Expansion {
             }
         }
 
+        let next_materialized_function_bytes =
+            self.next_materialized_function_bytes(substituted.len())?;
         let record = self
             .function_specializations
             .get_mut(key)
@@ -2838,7 +2914,43 @@ impl Expansion {
             .map(|parameter| parameter.type_name.clone())
             .collect();
         record.source = substituted;
+        self.materialized_function_bytes = next_materialized_function_bytes;
         Ok(())
+    }
+
+    fn next_materialized_function_bytes(&self, additional: usize) -> Result<usize, String> {
+        let next = self
+            .materialized_function_bytes
+            .checked_add(additional)
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        ensure_expanded_source_bytes(next)?;
+        ensure_elaboration_work(
+            self.input_bytes,
+            self.struct_specializations.len() + self.function_specializations.len(),
+            next,
+        )?;
+        Ok(next)
+    }
+
+    fn ensure_generated_output_candidate(
+        &self,
+        prior_expanded_bytes: usize,
+        current_file_bytes: usize,
+        specialization_count: usize,
+    ) -> Result<(), String> {
+        let expanded_bytes = prior_expanded_bytes
+            .checked_add(current_file_bytes)
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        ensure_expanded_source_bytes(expanded_bytes)?;
+        let retained_and_expanded = self
+            .materialized_function_bytes
+            .checked_add(expanded_bytes)
+            .ok_or_else(|| "generic elaboration work count overflowed".to_string())?;
+        ensure_elaboration_work(
+            self.input_bytes,
+            specialization_count,
+            retained_and_expanded,
+        )
     }
 
     fn rewrite_type_applications(
@@ -2852,17 +2964,32 @@ impl Expansion {
         while cursor < bytes.len() {
             if bytes[cursor] == b'"' {
                 let end = skip_string(source, cursor)?;
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
             if starts_comment(source, cursor) {
                 let end = skip_comment(source, cursor)?;
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
             if !is_identifier_start(bytes[cursor]) {
+                let next = output
+                    .len()
+                    .checked_add(1)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push(bytes[cursor] as char);
                 cursor += 1;
                 continue;
@@ -2882,9 +3009,19 @@ impl Expansion {
             {
                 let close = matching_angle(source, after)?;
                 let replacement = self.materialize_type(&source[start..=close], environment)?;
+                let next = output
+                    .len()
+                    .checked_add(replacement.len())
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push_str(&replacement);
                 cursor = close + 1;
             } else {
+                let next = output
+                    .len()
+                    .checked_add(qualified_end - start)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push_str(&source[start..qualified_end]);
                 cursor = qualified_end;
             }
@@ -2896,6 +3033,10 @@ impl Expansion {
         let function_names = self
             .function_names()
             .map_err(ExpansionError::without_path)?;
+        let specialization_count =
+            self.struct_specializations.len() + self.function_specializations.len();
+        let mut expanded_files = Vec::with_capacity(files.len());
+        let mut expanded_bytes = 0usize;
         for file_index in 0..files.len() {
             let path = self.files[file_index].path.clone();
             let result = (|| -> Result<String, String> {
@@ -2915,7 +3056,14 @@ impl Expansion {
                     }
                 }
                 removals.sort_by_key(|range| (range.start, range.end));
-                let mut generated = rewrite_kept_source(self, file_index, &raw, &removals)?;
+                let mut generated =
+                    rewrite_kept_source(self, file_index, &raw, &removals, |length| {
+                        self.ensure_generated_output_candidate(
+                            expanded_bytes,
+                            length,
+                            specialization_count,
+                        )
+                    })?;
                 generated = self.rewrite_inferred_generic_calls(
                     file_index,
                     &generated,
@@ -2925,6 +3073,14 @@ impl Expansion {
                         ..GenericEnvironment::default()
                     },
                     &function_names,
+                    expanded_bytes,
+                    0,
+                    specialization_count,
+                )?;
+                self.ensure_generated_output_candidate(
+                    expanded_bytes,
+                    generated.len(),
+                    specialization_count,
                 )?;
 
                 for (key, specialization) in &self.struct_specializations {
@@ -2940,20 +3096,40 @@ impl Expansion {
                     )?;
                     environment.module_alias = Some(definition.module_alias.clone());
                     environment.source_path = Some(definition.path.clone());
-                    let mut fields = String::new();
+                    let mut declaration = String::new();
+                    let mut push_declaration = |piece: &str| -> Result<(), String> {
+                        let declaration_len =
+                            declaration.len().checked_add(piece.len()).ok_or_else(|| {
+                                "generic expansion output byte count overflowed".to_string()
+                            })?;
+                        let current_file_bytes = generated
+                            .len()
+                            .checked_add(declaration_len)
+                            .ok_or_else(|| {
+                                "generic expansion output byte count overflowed".to_string()
+                            })?;
+                        self.ensure_generated_output_candidate(
+                            expanded_bytes,
+                            current_file_bytes,
+                            specialization_count,
+                        )?;
+                        declaration.push_str(piece);
+                        Ok(())
+                    };
+                    push_declaration("\nstruct ")?;
+                    push_declaration(&specialization.generated_name)?;
+                    push_declaration(" {\n")?;
                     for field in &definition.fields {
                         let field_type =
                             self.materialize_type_readonly(&field.type_name, &environment)?;
-                        fields.push_str("    ");
-                        fields.push_str(&field.name);
-                        fields.push_str(": ");
-                        fields.push_str(&field_type);
-                        fields.push_str(";\n");
+                        push_declaration("    ")?;
+                        push_declaration(&field.name)?;
+                        push_declaration(": ")?;
+                        push_declaration(&field_type)?;
+                        push_declaration(";\n")?;
                     }
-                    generated.push_str(&format!(
-                        "\nstruct {} {{\n{fields}}}\n",
-                        specialization.generated_name
-                    ));
+                    push_declaration("}\n")?;
+                    generated.push_str(&declaration);
                 }
 
                 let function_specializations = self
@@ -2977,13 +3153,44 @@ impl Expansion {
                         &specialization.source,
                         &environment,
                         &function_names,
+                        expanded_bytes,
+                        generated.len().checked_add(2).ok_or_else(|| {
+                            "generic expansion output byte count overflowed".to_string()
+                        })?,
+                        specialization_count,
                     )?;
-                    let source = rename_function_declaration(
+                    let append_base = generated.len().checked_add(2).ok_or_else(|| {
+                        "generic expansion output byte count overflowed".to_string()
+                    })?;
+                    let source = rename_function_declaration_checked(
                         &source,
                         &definition.name,
                         function_names.get(&key).ok_or_else(|| {
                             "missing generic function specialization name".to_string()
                         })?,
+                        |length| {
+                            let current_file_bytes =
+                                append_base.checked_add(length).ok_or_else(|| {
+                                    "generic expansion output byte count overflowed".to_string()
+                                })?;
+                            self.ensure_generated_output_candidate(
+                                expanded_bytes,
+                                current_file_bytes,
+                                specialization_count,
+                            )
+                        },
+                    )?;
+                    let next_len = generated
+                        .len()
+                        .checked_add(source.len())
+                        .and_then(|bytes| bytes.checked_add(2))
+                        .ok_or_else(|| {
+                            "generic expansion output byte count overflowed".to_string()
+                        })?;
+                    self.ensure_generated_output_candidate(
+                        expanded_bytes,
+                        next_len,
+                        specialization_count,
                     )?;
                     generated.push('\n');
                     generated.push_str(&source);
@@ -2992,7 +3199,27 @@ impl Expansion {
                 Ok(generated)
             })();
             let generated = result.map_err(|message| ExpansionError::for_file(path, message))?;
-            let file = &mut files[file_index];
+            expanded_bytes = expanded_bytes.checked_add(generated.len()).ok_or_else(|| {
+                ExpansionError::without_path(
+                    "generic expansion output byte count overflowed".to_string(),
+                )
+            })?;
+            ensure_expanded_source_bytes(expanded_bytes)
+                .and_then(|()| {
+                    let retained_and_expanded = self
+                        .materialized_function_bytes
+                        .checked_add(expanded_bytes)
+                        .ok_or_else(|| "generic elaboration work count overflowed".to_string())?;
+                    ensure_elaboration_work(
+                        self.input_bytes,
+                        specialization_count,
+                        retained_and_expanded,
+                    )
+                })
+                .map_err(ExpansionError::without_path)?;
+            expanded_files.push(generated);
+        }
+        for (file, generated) in files.iter_mut().zip(expanded_files) {
             file.content = generated;
             file.hash = hash_text(&file.content);
         }
@@ -3005,6 +3232,9 @@ impl Expansion {
         source: &str,
         environment: &GenericEnvironment,
         function_names: &BTreeMap<FunctionSpecializationKey, String>,
+        prior_expanded_bytes: usize,
+        append_base: usize,
+        specialization_count: usize,
     ) -> Result<String, String> {
         let functions = parse_top_level_functions(source)?;
         let mut replacements = Vec::new();
@@ -3123,7 +3353,16 @@ impl Expansion {
             }
         }
         replacements.sort_by_key(|(start, _, _)| *start);
-        apply_replacements(source, &replacements)
+        apply_replacements_checked(source, &replacements, |length| {
+            let current_file_bytes = append_base
+                .checked_add(length)
+                .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+            self.ensure_generated_output_candidate(
+                prior_expanded_bytes,
+                current_file_bytes,
+                specialization_count,
+            )
+        })
     }
 
     fn inferred_generic_target_names(
@@ -3194,16 +3433,7 @@ impl Expansion {
                         "internal error: missing generic function definition".to_string()
                     })?;
                 let name = if needs_mangled_names {
-                    let identity_path = generic_function_identity(
-                        &self.files[definition.file_index].path,
-                        &definition.signature,
-                    );
-                    mangle_specialization(
-                        "function",
-                        &identity_path,
-                        &definition.name,
-                        &key.arguments,
-                    )
+                    specialization.generated_name.clone()
                 } else {
                     definition.name.clone()
                 };
@@ -3214,13 +3444,14 @@ impl Expansion {
     }
 
     fn check_specialization_limit(&self) -> Result<(), String> {
-        let total = self.struct_specializations.len() + self.function_specializations.len();
-        if total >= MAX_SPECIALIZATIONS {
-            return Err(format!(
-                "generic specialization limit exceeded (maximum {})",
-                MAX_SPECIALIZATIONS
-            ));
-        }
+        let next = self
+            .struct_specializations
+            .len()
+            .checked_add(self.function_specializations.len())
+            .and_then(|total| total.checked_add(1))
+            .ok_or_else(|| "generic specialization count overflowed".to_string())?;
+        ensure_specialization_count(next)?;
+        ensure_elaboration_work(self.input_bytes, next, self.materialized_function_bytes)?;
         Ok(())
     }
 
@@ -3306,6 +3537,7 @@ fn rewrite_kept_source(
     file_index: usize,
     source: &str,
     removals: &[std::ops::Range<usize>],
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0usize;
@@ -3313,18 +3545,29 @@ fn rewrite_kept_source(
         if range.start < cursor || range.end > source.len() {
             return Err("generic declaration range is invalid".to_string());
         }
-        output.push_str(&ordinary_source_piece(
+        let base = output.len();
+        let piece = ordinary_source_piece(
             expansion,
             file_index,
             &source[cursor..range.start],
-        )?);
+            |length| {
+                let total = base
+                    .checked_add(length)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(total)
+            },
+        )?;
+        output.push_str(&piece);
         cursor = range.end;
     }
-    output.push_str(&ordinary_source_piece(
-        expansion,
-        file_index,
-        &source[cursor..],
-    )?);
+    let base = output.len();
+    let piece = ordinary_source_piece(expansion, file_index, &source[cursor..], |length| {
+        let total = base
+            .checked_add(length)
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        ensure_output(total)
+    })?;
+    output.push_str(&piece);
     Ok(output)
 }
 
@@ -3332,27 +3575,34 @@ fn ordinary_source_piece(
     expansion: &Expansion,
     file_index: usize,
     source: &str,
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
-    let source = apply_replacements(
+    let source = apply_replacements_checked(
         source,
         &expansion.ordinary_type_replacements_for_source(file_index, source)?,
+        |length| ensure_output(length),
     )?;
     let mut environment = GenericEnvironment::default();
     environment.module_alias = Some(module_alias_for_path(&expansion.files[file_index].path));
     environment.source_path = Some(expansion.files[file_index].path.clone());
-    let source = expansion.rewrite_type_applications_readonly(&source, &environment)?;
-    rewrite_i32_constants(
+    let source =
+        expansion.rewrite_type_applications_readonly_checked(&source, &environment, |length| {
+            ensure_output(length)
+        })?;
+    rewrite_i32_constants_checked(
         &source,
         &expansion.local_constant_values(file_index),
         &expansion.constant_rewrites_for_source(file_index, &source)?,
+        ensure_output,
     )
 }
 
 impl Expansion {
-    fn rewrite_type_applications_readonly(
+    fn rewrite_type_applications_readonly_checked(
         &self,
         source: &str,
         environment: &GenericEnvironment,
+        mut ensure_output: impl FnMut(usize) -> Result<(), String>,
     ) -> Result<String, String> {
         let bytes = source.as_bytes();
         let mut output = String::with_capacity(source.len());
@@ -3360,17 +3610,32 @@ impl Expansion {
         while cursor < bytes.len() {
             if bytes[cursor] == b'"' {
                 let end = skip_string(source, cursor)?;
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
             if starts_comment(source, cursor) {
                 let end = skip_comment(source, cursor)?;
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
             if !is_identifier_start(bytes[cursor]) {
+                let next = output
+                    .len()
+                    .checked_add(1)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push(bytes[cursor] as char);
                 cursor += 1;
                 continue;
@@ -3391,9 +3656,19 @@ impl Expansion {
                 let close = matching_angle(source, after)?;
                 let replacement =
                     self.materialize_type_readonly(&source[start..=close], environment)?;
+                let next = output
+                    .len()
+                    .checked_add(replacement.len())
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&replacement);
                 cursor = close + 1;
             } else {
+                let next = output
+                    .len()
+                    .checked_add(qualified_end - start)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[start..qualified_end]);
                 cursor = qualified_end;
             }
@@ -3402,8 +3677,115 @@ impl Expansion {
     }
 }
 
+fn reject_reserved_declaration_name(
+    path: &str,
+    kind: &str,
+    name: &str,
+) -> Result<(), ExpansionError> {
+    if let Some(prefix) = GENERATED_COMPILER_PREFIXES
+        .iter()
+        .find(|prefix| name.starts_with(**prefix))
+    {
+        return Err(ExpansionError::for_file(
+            path.to_string(),
+            format!("{kind} name '{name}' uses reserved compiler prefix '{prefix}'"),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_specialization_count(count: usize) -> Result<(), String> {
+    if count > MAX_SPECIALIZATIONS {
+        return Err(format!(
+            "generic specialization limit exceeded (maximum {})",
+            MAX_SPECIALIZATIONS
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_generic_source_bytes(bytes: usize) -> Result<(), String> {
+    if bytes > MAX_GENERIC_SOURCE_BYTES {
+        return Err(format!(
+            "generic source exceeds {} byte limit",
+            MAX_GENERIC_SOURCE_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_instantiation_depth(depth: usize) -> Result<(), String> {
+    if depth > MAX_INSTANTIATION_DEPTH {
+        return Err(format!(
+            "generic instantiation depth exceeded (maximum {})",
+            MAX_INSTANTIATION_DEPTH
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_constant_evaluation_steps(steps: usize) -> Result<(), String> {
+    if steps > MAX_CONSTANT_EVALUATION_STEPS {
+        return Err(format!(
+            "compile-time expression evaluation exceeded {} steps",
+            MAX_CONSTANT_EVALUATION_STEPS
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_constant_dependency_depth(depth: usize) -> Result<(), String> {
+    if depth >= MAX_CONSTANT_DEPENDENCY_DEPTH {
+        return Err(format!(
+            "constant dependency depth exceeded (maximum {})",
+            MAX_CONSTANT_DEPENDENCY_DEPTH
+        ));
+    }
+    Ok(())
+}
+
+fn elaboration_work_units(
+    input_bytes: usize,
+    specialization_count: usize,
+    expanded_bytes: usize,
+) -> Option<usize> {
+    input_bytes
+        .checked_add(specialization_count.checked_mul(SPECIALIZATION_WORK_UNITS)?)?
+        .checked_add(expanded_bytes)
+}
+
+fn ensure_elaboration_work(
+    input_bytes: usize,
+    specialization_count: usize,
+    expanded_bytes: usize,
+) -> Result<(), String> {
+    let work = elaboration_work_units(input_bytes, specialization_count, expanded_bytes)
+        .ok_or_else(|| "generic elaboration work count overflowed".to_string())?;
+    if work > MAX_ELABORATION_WORK_UNITS {
+        return Err(format!(
+            "generic elaboration exceeded {} work units",
+            MAX_ELABORATION_WORK_UNITS
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_expanded_source_bytes(bytes: usize) -> Result<(), String> {
+    if bytes > MAX_EXPANDED_SOURCE_BYTES {
+        return Err(format!(
+            "generic expansion exceeds {} output byte limit",
+            MAX_EXPANDED_SOURCE_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_identity_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 fn generic_definition_identity(path: &str, name: &str) -> String {
-    format!("{path}::{name}")
+    format!("{}::{name}", canonical_identity_path(path))
 }
 
 fn add_receiver_parameter(
@@ -3506,20 +3888,48 @@ fn reject_explicit_generic_calls(
 fn generic_function_identity(path: &str, signature: &ParsedFunctionSignature) -> String {
     // Keep source offsets out of the identity: edits to constants or comments
     // before a declaration must not orphan an otherwise reusable specialization.
-    let mut identity = format!("{path}::{}|", signature.name);
+    let mut identity = String::new();
+    push_identity_component(&mut identity, "path", &canonical_identity_path(path));
+    push_identity_component(&mut identity, "name", &signature.name);
     for parameter in &signature.generic_parameters {
-        identity.push_str(match parameter.kind {
-            ParsedGenericParameterKind::Type => "type",
-            ParsedGenericParameterKind::I32 => "i32",
-        });
-        identity.push('|');
+        push_identity_component(
+            &mut identity,
+            "generic",
+            match parameter.kind {
+                ParsedGenericParameterKind::Type => "type",
+                ParsedGenericParameterKind::I32 => "i32",
+            },
+        );
     }
     for parameter in &signature.params {
-        identity.push_str(&parameter.type_name);
-        identity.push('|');
+        push_identity_component(
+            &mut identity,
+            "parameter",
+            &canonical_type_identity_text(&parameter.type_name),
+        );
     }
-    identity.push_str(&signature.return_type_name);
+    push_identity_component(
+        &mut identity,
+        "return",
+        &canonical_type_identity_text(&signature.return_type_name),
+    );
     identity
+}
+
+fn canonical_type_identity_text(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect()
+}
+
+fn push_identity_component(identity: &mut String, tag: &str, value: &str) {
+    identity.push_str(tag);
+    identity.push(':');
+    identity.push_str(&value.len().to_string());
+    identity.push(':');
+    identity.push_str(value);
+    identity.push('|');
 }
 
 pub(super) fn module_alias_for_path(path: &str) -> String {
@@ -3618,12 +4028,26 @@ fn strip_generic_declaration(source: &str, keyword: &str) -> Result<String, Stri
 }
 
 fn rewrite_generic_identifiers(source: &str, environment: &GenericEnvironment) -> String {
+    rewrite_generic_identifiers_checked(source, environment, |_| Ok(()))
+        .expect("unbounded generic identifier rewrite cannot fail")
+}
+
+fn rewrite_generic_identifiers_checked(
+    source: &str,
+    environment: &GenericEnvironment,
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
+) -> Result<String, String> {
     let bytes = source.as_bytes();
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0usize;
     while cursor < bytes.len() {
         if bytes[cursor] == b'"' {
             if let Ok(end) = skip_string(source, cursor) {
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
@@ -3631,12 +4055,22 @@ fn rewrite_generic_identifiers(source: &str, environment: &GenericEnvironment) -
         }
         if starts_comment(source, cursor) {
             if let Ok(end) = skip_comment(source, cursor) {
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
         }
         if !is_identifier_start(bytes[cursor]) {
+            let next = output
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+            ensure_output(next)?;
             output.push(bytes[cursor] as char);
             cursor += 1;
             continue;
@@ -3651,25 +4085,34 @@ fn rewrite_generic_identifiers(source: &str, environment: &GenericEnvironment) -
             .chars()
             .rev()
             .find(|character| !character.is_ascii_whitespace());
-        if previous == Some('.') {
-            output.push_str(identifier);
-        } else if let Some(value) = environment.values.get(identifier) {
-            output.push_str(&value.to_string());
+        let value_text = environment.values.get(identifier).map(i32::to_string);
+        let replacement = if previous == Some('.') {
+            identifier
+        } else if let Some(value) = value_text.as_deref() {
+            value
         } else if let Some(value) = environment.types.get(identifier) {
-            output.push_str(value);
+            value.as_str()
         } else {
-            output.push_str(identifier);
-        }
+            identifier
+        };
+        let next = output
+            .len()
+            .checked_add(replacement.len())
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        ensure_output(next)?;
+        output.push_str(&replacement);
     }
-    output
+    Ok(output)
 }
 
-fn rename_function_declaration(
+fn rename_function_declaration_checked(
     source: &str,
     old_name: &str,
     new_name: &str,
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
     if old_name == new_name {
+        ensure_output(source.len())?;
         return Ok(source.to_string());
     }
     let Some(keyword_start) = source.find("function") else {
@@ -3710,7 +4153,11 @@ fn rename_function_declaration(
             &source[start..cursor]
         ));
     }
-    apply_replacements(source, &[(start, cursor, new_name.to_string())])
+    apply_replacements_checked(
+        source,
+        &[(start, cursor, new_name.to_string())],
+        ensure_output,
+    )
 }
 
 fn reject_value_parameter_writes(
@@ -4259,27 +4706,57 @@ fn split_top_level_arguments(source: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-fn mangle_specialization(
+fn specialization_identity(
     kind: &str,
     path: &str,
     name: &str,
     arguments: &[ConcreteArgument],
 ) -> String {
-    let mut identity = format!("{kind}|{path}|{name}|");
+    let mut identity = format!("{kind}|");
+    push_identity_component(&mut identity, "path", &canonical_identity_path(path));
+    push_identity_component(&mut identity, "name", name);
     for argument in arguments {
         match argument {
             ConcreteArgument::Type(value) => {
-                identity.push_str("T:");
-                identity.push_str(value);
+                push_identity_component(
+                    &mut identity,
+                    "type",
+                    &canonical_type_identity_text(value),
+                );
             }
             ConcreteArgument::I32(value) => {
-                identity.push_str("I:");
-                identity.push_str(&value.to_string());
+                push_identity_component(&mut identity, "i32", &value.to_string());
             }
         }
-        identity.push('|');
     }
+    identity
+}
+
+fn mangle_specialization_identity(identity: &str) -> String {
+    let kind = identity.split('|').next().unwrap_or("specialization");
     format!("__stasis_{kind}_{}", fnv1a(identity.as_bytes()))
+}
+
+fn register_specialization_name(
+    identities: &mut BTreeMap<String, String>,
+    generated_name: &str,
+    identity: &str,
+) -> Result<(), String> {
+    if let Some(existing) = identities.get(generated_name) {
+        if existing != identity {
+            let (left, right) = if existing.as_str() <= identity {
+                (existing.as_str(), identity)
+            } else {
+                (identity, existing.as_str())
+            };
+            return Err(format!(
+                "generic specialization symbol collision for '{generated_name}': '{left}' conflicts with '{right}'"
+            ));
+        }
+        return Ok(());
+    }
+    identities.insert(generated_name.to_string(), identity.to_string());
+    Ok(())
 }
 
 fn fnv1a(bytes: &[u8]) -> String {
@@ -4760,6 +5237,7 @@ fn evaluate_constant_definition(
         chain.push(identity.clone());
         return Err(format!("constant reference cycle: {}", chain.join(" -> ")));
     }
+    ensure_constant_dependency_depth(stack.len())?;
     stack.push(identity.clone());
     let mut environment = GenericEnvironment::default();
     environment.source_path = Some(definition.path.clone());
@@ -4768,7 +5246,7 @@ fn evaluate_constant_definition(
         let ConstantToken::Identifier(identifier) = token else {
             continue;
         };
-        if identifier == definition.name || environment.values.contains_key(&identifier) {
+        if environment.values.contains_key(&identifier) {
             continue;
         }
         if let Some(candidate) = visible_constant_definition_in(
@@ -4885,12 +5363,7 @@ impl<'a> ConstantParser<'a> {
 
     fn parse_prefix(&mut self) -> Result<i32, String> {
         *self.steps = self.steps.saturating_add(1);
-        if *self.steps > MAX_CONSTANT_EVALUATION_STEPS {
-            return Err(format!(
-                "compile-time expression evaluation exceeded {} steps",
-                MAX_CONSTANT_EVALUATION_STEPS
-            ));
-        }
+        ensure_constant_evaluation_steps(*self.steps)?;
         let token = self
             .tokens
             .get(self.cursor)
@@ -5009,10 +5482,11 @@ fn tokenize_constant_expression(source: &str) -> Result<Vec<ConstantToken>, Stri
     Ok(tokens)
 }
 
-fn rewrite_i32_constants(
+fn rewrite_i32_constants_checked(
     source: &str,
     constants: &BTreeMap<String, i32>,
     renames: &BTreeMap<String, (String, i32)>,
+    ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
     let tokens = lex(source)?;
     let mut replacements = Vec::<(usize, usize, String)>::new();
@@ -5076,19 +5550,31 @@ fn rewrite_i32_constants(
         replacements.push((start, end, generated_name.clone()));
     }
     replacements.sort_by_key(|(start, end, _)| (*start, *end));
-    apply_replacements(source, &replacements)
+    apply_replacements_checked(source, &replacements, ensure_output)
 }
 
-fn apply_replacements(
+fn apply_replacements_checked(
     source: &str,
     replacements: &[(usize, usize, String)],
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
-    let mut output = String::with_capacity(source.len());
+    let mut final_len = source.len();
     let mut cursor = 0usize;
     for (start, end, replacement) in replacements {
-        if *start < cursor || *end > source.len() {
+        if *start < cursor || *end < *start || *end > source.len() {
             return Err("overlapping source replacement".to_string());
         }
+        final_len = final_len
+            .checked_sub(end - start)
+            .and_then(|length| length.checked_add(replacement.len()))
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        cursor = *end;
+    }
+    ensure_output(final_len)?;
+
+    let mut output = String::with_capacity(final_len);
+    cursor = 0;
+    for (start, end, replacement) in replacements {
         output.push_str(&source[cursor..*start]);
         output.push_str(replacement);
         cursor = *end;
@@ -5196,6 +5682,529 @@ fn qualified_identifier_end(source: &str, _start: usize, mut cursor: usize) -> u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_resource_limits_accept_exact_maxima_and_reject_next_values() {
+        for accepted in [MAX_SPECIALIZATIONS - 1, MAX_SPECIALIZATIONS] {
+            ensure_specialization_count(accepted).expect("specialization neighbor is accepted");
+        }
+        assert!(ensure_specialization_count(MAX_SPECIALIZATIONS + 1).is_err());
+
+        for accepted in [MAX_INSTANTIATION_DEPTH - 1, MAX_INSTANTIATION_DEPTH] {
+            ensure_instantiation_depth(accepted).expect("depth neighbor is accepted");
+        }
+        assert!(ensure_instantiation_depth(MAX_INSTANTIATION_DEPTH + 1).is_err());
+
+        for accepted in [
+            MAX_CONSTANT_EVALUATION_STEPS - 1,
+            MAX_CONSTANT_EVALUATION_STEPS,
+        ] {
+            ensure_constant_evaluation_steps(accepted)
+                .expect("constant-evaluation neighbor is accepted");
+        }
+        assert!(ensure_constant_evaluation_steps(MAX_CONSTANT_EVALUATION_STEPS + 1).is_err());
+
+        for accepted in [MAX_GENERIC_SOURCE_BYTES - 1, MAX_GENERIC_SOURCE_BYTES] {
+            ensure_generic_source_bytes(accepted).expect("source byte neighbor is accepted");
+        }
+        assert!(ensure_generic_source_bytes(MAX_GENERIC_SOURCE_BYTES + 1).is_err());
+
+        for accepted in [MAX_EXPANDED_SOURCE_BYTES - 1, MAX_EXPANDED_SOURCE_BYTES] {
+            ensure_expanded_source_bytes(accepted).expect("output byte neighbor is accepted");
+        }
+        assert!(ensure_expanded_source_bytes(MAX_EXPANDED_SOURCE_BYTES + 1).is_err());
+
+        for accepted in [MAX_ELABORATION_WORK_UNITS - 1, MAX_ELABORATION_WORK_UNITS] {
+            ensure_elaboration_work(accepted, 0, 0).expect("work-unit neighbor is accepted");
+        }
+        assert!(ensure_elaboration_work(MAX_ELABORATION_WORK_UNITS + 1, 0, 0).is_err());
+    }
+
+    #[test]
+    fn generated_specialization_identity_is_canonical_and_collision_checked() {
+        let arguments = [
+            ConcreteArgument::Type("i32".to_string()),
+            ConcreteArgument::I32(4),
+        ];
+        let slash = specialization_identity("type", "library/types.stasis", "Buffer", &arguments);
+        let backslash =
+            specialization_identity("type", "library\\types.stasis", "Buffer", &arguments);
+        assert_eq!(slash, backslash);
+        assert_ne!(
+            slash,
+            specialization_identity(
+                "type",
+                "library/types.stasis",
+                "Buffer",
+                &[
+                    ConcreteArgument::Type("i32".to_string()),
+                    ConcreteArgument::I32(8),
+                ]
+            )
+        );
+
+        let mut identities = BTreeMap::new();
+        let injected_digest_name = "__stasis_type_injected_collision";
+        register_specialization_name(&mut identities, injected_digest_name, &slash)
+            .expect("first injected digest is accepted");
+        let error = register_specialization_name(
+            &mut identities,
+            injected_digest_name,
+            "type|other.stasis|Buffer|T:i32|I:4|",
+        )
+        .expect_err("a reused digest for a different full key must fail");
+        assert!(error.contains("specialization symbol collision"));
+        assert!(error.contains(&slash));
+
+        let mut reverse = BTreeMap::new();
+        register_specialization_name(
+            &mut reverse,
+            injected_digest_name,
+            "type|other.stasis|Buffer|T:i32|I:4|",
+        )
+        .expect("reversed first injected digest is accepted");
+        let reverse_error =
+            register_specialization_name(&mut reverse, injected_digest_name, &slash)
+                .expect_err("a reversed collision must fail identically");
+        assert_eq!(error, reverse_error);
+    }
+
+    #[test]
+    fn source_declarations_cannot_spoof_the_generated_namespace() {
+        for source in [
+            "struct __stasis_type_deadbeef { value: i32; } function main(): i32 { return 0; }",
+            "enum __stasis_type_deadbeef { First, Second } function main(): i32 { return 0; }",
+            "function __stasis_function_deadbeef(): i32 { return 0; } function main(): i32 { return 0; }",
+            "global __stasis_type_deadbeef: i32; function main(): i32 { return 0; }",
+            "global __stasis_type_deadbeef { value: i32; } function main(): i32 { return 0; }",
+            "const __stasis_const_deadbeef: i32 = 1; function main(): i32 { return 0; }",
+            "function @extern(\"host_symbol\") __stasis_function_deadbeef(value: i32): i32; function main(): i32 { return 0; }",
+        ] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file("spoof.stasis", source);
+            let error = compiler
+                .check()
+                .expect_err("the compiler-generated namespace is reserved");
+            let diagnostic = format!("{error:?}");
+            assert!(diagnostic.contains("reserved compiler prefix"), "{diagnostic}");
+        }
+    }
+
+    #[test]
+    fn test_wrapper_namespace_remains_available_to_authored_sources() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "test_wrapper.stasis",
+            "function __stasis_test_wrapper(): i32 { return 7; } function main(): i32 { return __stasis_test_wrapper(); }",
+        );
+        compiler
+            .check()
+            .expect("the test harness namespace must not be reserved by generic expansion");
+    }
+
+    fn repeated_constant_terms(term_count: usize) -> String {
+        std::iter::repeat("0")
+            .take(term_count)
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    #[test]
+    fn constant_evaluation_enforces_9999_10000_10001_step_neighbors() {
+        let environment = GenericEnvironment::default();
+        let constants = BTreeMap::new();
+        for accepted in [9_999, 10_000] {
+            assert_eq!(
+                evaluate_i32_expression(
+                    &repeated_constant_terms(accepted),
+                    &environment,
+                    &constants
+                )
+                .expect("the documented constant-evaluation boundary is accepted"),
+                0
+            );
+        }
+        let error =
+            evaluate_i32_expression(&repeated_constant_terms(10_001), &environment, &constants)
+                .expect_err("one step beyond the documented boundary must fail");
+        assert!(
+            error.contains("compile-time expression evaluation exceeded 10000 steps"),
+            "{error}"
+        );
+    }
+
+    fn shared_constant_step_source(first_steps: usize, second_steps: usize) -> String {
+        format!(
+            "const FIRST: i32 = {};\nconst SECOND: i32 = {};\nstruct Box<N: i32> {{ value: i32; }}\nglobal root: Box<SECOND>;\nfunction main(): i32 {{ return FIRST; }}\n",
+            repeated_constant_terms(first_steps),
+            repeated_constant_terms(second_steps),
+        )
+    }
+
+    #[test]
+    fn compiler_constant_evaluation_shares_9999_10000_10001_step_budget() {
+        for (first, second) in [(5_000, 4_999), (5_000, 5_000)] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file(
+                "shared_constant_steps.stasis",
+                shared_constant_step_source(first, second),
+            );
+            compiler.check().unwrap_or_else(|error| {
+                panic!("shared {first}+{second} step budget failed: {error:?}")
+            });
+        }
+
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "shared_constant_steps.stasis",
+            shared_constant_step_source(5_000, 5_001),
+        );
+        let error = compiler
+            .check()
+            .expect_err("the shared compilation budget must reject step 10001");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("compile-time expression evaluation exceeded 10000 steps"),
+            "{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn constant_cycles_are_rejected_deterministically() {
+        for (name, constants) in [
+            ("self", "const A: i32 = A;\n"),
+            ("mutual", "const A: i32 = B;\nconst B: i32 = A;\n"),
+        ] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file(
+                format!("{name}_constant_cycle.stasis"),
+                format!(
+                    "{constants}struct Box<N: i32> {{ value: i32; }}\nglobal root: Box<A>;\nfunction main(): i32 {{ return 0; }}\n"
+                ),
+            );
+            let error = compiler
+                .check()
+                .expect_err("constant reference cycles must fail expansion");
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains("constant reference cycle"),
+                "{name}: {diagnostic}"
+            );
+        }
+    }
+
+    fn constant_dependency_chain_source(definitions: usize) -> String {
+        let mut source = String::new();
+        for index in (0..definitions).rev() {
+            if index == 0 {
+                source.push_str("const C0: i32 = 0;\n");
+            } else {
+                source.push_str(&format!("const C{index}: i32 = C{};\n", index - 1));
+            }
+        }
+        source.push_str("struct Box<N: i32> { value: i32; }\n");
+        source.push_str(&format!(
+            "global root: Box<C{}>;\nfunction main(): i32 {{ return 0; }}\n",
+            definitions - 1
+        ));
+        source
+    }
+
+    #[test]
+    fn constant_dependency_depth_is_bounded_before_stack_exhaustion() {
+        let mut accepted = crate::compiler::Compiler::new();
+        accepted.upsert_file(
+            "constant_depth_128.stasis",
+            constant_dependency_chain_source(128),
+        );
+        accepted
+            .check()
+            .expect("128 active constant definitions are accepted");
+
+        let mut rejected = crate::compiler::Compiler::new();
+        rejected.upsert_file(
+            "constant_depth_129.stasis",
+            constant_dependency_chain_source(129),
+        );
+        let error = rejected
+            .check()
+            .expect_err("the dependency guard must reject definition 129");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("constant dependency depth exceeded (maximum 128)"),
+            "{diagnostic}"
+        );
+    }
+
+    fn specialization_boundary_source(count: usize) -> String {
+        let mut source = String::from("struct Box<N: i32> { value: i32; }\n");
+        for index in 0..count {
+            source.push_str(&format!("global value_{index}: Box<{index}>;\n"));
+        }
+        source.push_str("function main(): i32 { return 0; }\n");
+        source
+    }
+
+    #[test]
+    fn specialization_count_enforces_4095_4096_4097_neighbors() {
+        for accepted in [4_095, 4_096] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file(
+                "specialization_boundary.stasis",
+                specialization_boundary_source(accepted),
+            );
+            compiler
+                .check()
+                .unwrap_or_else(|error| panic!("{accepted} specializations failed: {error:?}"));
+        }
+
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "specialization_boundary.stasis",
+            specialization_boundary_source(4_097),
+        );
+        let error = compiler
+            .check()
+            .expect_err("4097 specializations must exceed the documented boundary");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("generic specialization limit exceeded (maximum 4096)"),
+            "{diagnostic}"
+        );
+    }
+
+    fn nested_box_source(maximum_depth: usize) -> String {
+        let mut nested = "i32".to_string();
+        for _ in 0..=maximum_depth {
+            nested = format!("Box<{nested}>");
+        }
+        format!(
+            "struct Box<T: type> {{ value: T; }}\nglobal root: {nested};\nfunction main(): i32 {{ return 0; }}\n"
+        )
+    }
+
+    #[test]
+    fn instantiation_depth_enforces_127_128_129_neighbors() {
+        for accepted in [127, 128] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file("depth_boundary.stasis", nested_box_source(accepted));
+            compiler.check().unwrap_or_else(|error| {
+                panic!("maximum specialization depth {accepted} failed: {error:?}")
+            });
+        }
+
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file("depth_boundary.stasis", nested_box_source(129));
+        let error = compiler
+            .check()
+            .expect_err("depth 129 must exceed the documented boundary");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("generic instantiation depth exceeded (maximum 128)"),
+            "{diagnostic}"
+        );
+    }
+
+    fn large_receiver_body_multiplication_source() -> String {
+        const INSTANCES: usize = 128;
+        const BODY_PADDING_BYTES: usize = 132_000;
+
+        let mut source = String::from("struct Box<N: i32> { value: i32; }\n");
+        source.push_str("function inspect(self: Box<N>): i32 {");
+        source.push_str(&" ".repeat(BODY_PADDING_BYTES));
+        source.push_str("return self.value; }\n");
+        source.push_str("global output: i32;\n");
+        for index in 0..INSTANCES {
+            source.push_str(&format!("global value_{index}: Box<{index}>;\n"));
+        }
+        source.push_str("function main(): i32 {\n");
+        for index in 0..INSTANCES {
+            source.push_str(&format!("output = value_{index}.inspect();\n"));
+        }
+        source.push_str("return output; }\n");
+        source
+    }
+
+    #[test]
+    fn large_receiver_body_multiplication_fails_before_partial_source_publication() {
+        let source = large_receiver_body_multiplication_source();
+        assert!(source.len() < MAX_GENERIC_SOURCE_BYTES);
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file("large_body.stasis", source.clone());
+
+        let error = compiler
+            .check()
+            .expect_err("specialized bodies exceeding the byte ceiling must fail");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("generic expansion exceeds 16777216 output byte limit"),
+            "{diagnostic}"
+        );
+        assert_eq!(compiler.files().len(), 1);
+        assert_eq!(compiler.files()[0].content, source);
+        assert_eq!(
+            compiler.files()[0].hash,
+            hash_text(&compiler.files()[0].original_content)
+        );
+    }
+
+    fn combined_elaboration_work_source() -> String {
+        const BODY_PADDING_BYTES: usize = 11_200_000;
+
+        let mut source = String::from("struct Box<N: i32> { value: i32; }\n");
+        source.push_str("function inspect(self: Box<N>): i32 {");
+        source.push_str(&" ".repeat(BODY_PADDING_BYTES));
+        source.push_str("return self.value; }\n");
+        source.push_str("global value: Box<1>;\n");
+        source.push_str("function main(): i32 { return value.inspect(); }\n");
+        source
+    }
+
+    #[test]
+    fn combined_elaboration_work_ceiling_is_enforced_by_real_expansion() {
+        let source = combined_elaboration_work_source();
+        assert!(source.len() < MAX_GENERIC_SOURCE_BYTES);
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file("combined_work.stasis", source.clone());
+
+        let error = compiler
+            .check()
+            .expect_err("combined retained and expanded work must exceed 32 MiB");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("generic elaboration exceeded 33554432 work units"),
+            "{diagnostic}"
+        );
+        assert_eq!(compiler.files()[0].content, source);
+    }
+
+    fn accepted_generic_program(capacity: i32) -> String {
+        format!(
+            "struct Buffer<N: i32> {{ value: i32; values: i32[N]; }}\n\
+             global buffer: Buffer<{capacity}>;\n\
+             function capacity(self: Buffer<N>): i32 {{ return N; }}\n\
+             function main(): i32 {{ return buffer.capacity(); }}\n"
+        )
+    }
+
+    const EXPANDING_GENERIC_FAILURE: &str = "struct Node<N: i32> { next: Node<N + 1>; }\n\
+         global root: Node<0>;\n\
+         function main(): i32 { return 0; }\n";
+
+    #[test]
+    fn generic_expansion_failure_preserves_published_outputs_across_check_jit_aot_and_wasm() {
+        use crate::backend::aot::AotProcess;
+        use crate::backend::jit::JitProcess;
+        use crate::backend::wasm::WasmProcess;
+
+        let baseline = accepted_generic_program(4);
+        let recovered = accepted_generic_program(8);
+
+        let mut checker = crate::compiler::Compiler::new();
+        checker.upsert_file("parity.stasis", &baseline);
+        checker.check().expect("baseline check");
+        let checked_functions = checker.functions().to_vec();
+
+        let mut jit = JitProcess::new();
+        jit.upsert_file("parity.stasis", &baseline);
+        jit.compile().expect("baseline JIT compile");
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("baseline JIT execution"),
+            4
+        );
+        let jit_artifacts = jit.artifacts().to_vec();
+        let jit_snapshot = format!("{:?}", jit.program_snapshot());
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("parity.stasis", &baseline);
+        aot.compile().expect("baseline AOT compile");
+        let aot_artifacts = aot.artifacts().to_vec();
+        let aot_snapshot = format!("{:?}", aot.program_snapshot());
+
+        let mut wasm = WasmProcess::new();
+        wasm.set_required_emit_roots(&["main".to_string()]);
+        wasm.upsert_file("parity.stasis", &baseline);
+        wasm.compile().expect("baseline Wasm compile");
+        let wasm_module = wasm.module_bytes().to_vec();
+        let wasm_literals = wasm.string_literals().clone();
+        let wasm_memory = wasm.memory_layout().clone();
+        let wasm_views = wasm.struct_views().clone();
+        let wasm_globals = wasm.global_types().clone();
+        let wasm_imports = wasm.imported_symbols().clone();
+        let wasm_snapshot = format!("{:?}", wasm.program_snapshot());
+
+        checker.upsert_file("parity.stasis", EXPANDING_GENERIC_FAILURE);
+        jit.upsert_file("parity.stasis", EXPANDING_GENERIC_FAILURE);
+        aot.upsert_file("parity.stasis", EXPANDING_GENERIC_FAILURE);
+        wasm.upsert_file("parity.stasis", EXPANDING_GENERIC_FAILURE);
+        let diagnostics = [
+            checker.check().expect_err("check rejects expansion"),
+            jit.compile().expect_err("JIT rejects expansion"),
+            aot.compile().expect_err("AOT rejects expansion"),
+            wasm.compile().expect_err("Wasm rejects expansion"),
+        ]
+        .map(|error| format!("{error:?}"));
+        for diagnostic in &diagnostics {
+            assert_eq!(diagnostic, &diagnostics[0]);
+            assert!(
+                diagnostic.contains("generic instantiation depth exceeded (maximum 128)"),
+                "{diagnostic}"
+            );
+        }
+        for diagnostic in [
+            checker.last_source_diagnostic(),
+            jit.last_source_diagnostic(),
+            aot.last_source_diagnostic(),
+            wasm.last_source_diagnostic(),
+        ] {
+            let diagnostic = diagnostic.expect("generic failure has source diagnostic");
+            assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Generic);
+            assert_eq!(
+                diagnostic.message,
+                "generic instantiation depth exceeded (maximum 128)"
+            );
+        }
+
+        assert_eq!(checker.functions(), checked_functions);
+        assert_eq!(checker.files()[0].content, EXPANDING_GENERIC_FAILURE);
+        assert_eq!(
+            checker.files()[0].hash,
+            hash_text(&checker.files()[0].original_content)
+        );
+
+        assert_eq!(jit.artifacts(), jit_artifacts);
+        assert_eq!(format!("{:?}", jit.program_snapshot()), jit_snapshot);
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("rejected JIT candidate leaves baseline executable"),
+            4
+        );
+        assert_eq!(aot.artifacts(), aot_artifacts);
+        assert_eq!(format!("{:?}", aot.program_snapshot()), aot_snapshot);
+        assert_eq!(wasm.module_bytes(), wasm_module);
+        assert_eq!(wasm.string_literals(), &wasm_literals);
+        assert_eq!(wasm.memory_layout(), &wasm_memory);
+        assert_eq!(wasm.struct_views(), &wasm_views);
+        assert_eq!(wasm.global_types(), &wasm_globals);
+        assert_eq!(wasm.imported_symbols(), &wasm_imports);
+        assert_eq!(format!("{:?}", wasm.program_snapshot()), wasm_snapshot);
+
+        checker.upsert_file("parity.stasis", &recovered);
+        checker.check().expect("check recovers after rejection");
+        jit.upsert_file("parity.stasis", &recovered);
+        jit.compile().expect("JIT recovers after rejection");
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("recovered JIT execution"),
+            8
+        );
+        aot.upsert_file("parity.stasis", &recovered);
+        aot.compile().expect("AOT recovers after rejection");
+        wasm.upsert_file("parity.stasis", &recovered);
+        wasm.compile().expect("Wasm recovers after rejection");
+        assert_ne!(wasm.module_bytes(), wasm_module);
+    }
 
     #[test]
     fn lowers_value_generic_structs_and_functions_before_indexing() {
@@ -5774,6 +6783,23 @@ mod tests {
             .check()
             .expect_err("recursive generic structs cannot be stored by value");
         assert!(format!("{error:?}").contains("recursive generic struct field"));
+    }
+
+    #[test]
+    fn rejects_mutually_recursive_generic_struct_storage_without_overflowing() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "mutually_recursive.stasis",
+            "struct Left<N: i32> { right: Right<N>; }\n\
+             struct Right<N: i32> { left: Left<N>; }\n\
+             global root: Left<0>;\n\
+             function main(): i32 { return 0; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("mutually recursive generic structs cannot be stored by value");
+        let diagnostic = format!("{error:?}");
+        assert!(diagnostic.contains("recursive"), "{diagnostic}");
     }
 
     #[test]
