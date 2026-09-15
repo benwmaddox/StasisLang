@@ -199,6 +199,8 @@ global negative_three: CompileValue<-3>;
 global mode_zero: CompileValue<0>;
 global mode_one: CompileValue<1>;
 global mode_two: CompileValue<2>;
+global web_bounds_probe_index: i32;
+global generics_collections_digest_value: i32;
 
 function near(actual: f32, expected: f32): bool {
     let difference: f32 = actual - expected;
@@ -206,19 +208,29 @@ function near(actual: f32, expected: f32): bool {
 }
 
 function tick(): i32 {
-    return 0;
+    let probed_id: i32 = entity_pool.entities[web_bounds_probe_index].id;
+    return probed_id - probed_id;
 }
 
 function render(): i32 {
-    clear(0.0, 0.0, 0.0, 1.0);
+    clear(0.04, 0.08, 0.16, 1.0);
+    fill_rect(48.0, 48.0, 160.0, 96.0, 0.16, 0.72, 0.52, 1.0);
     end_frame();
     return 0;
+}
+
+function generics_collections_state_digest(): i32 {
+    return integer_buffer_sum(integer_buffer) + integer_buffer_sum(wide_buffer) + integer_buffer_sum(nested_buffer.inner) + ring_peek(ring) + entity_pool_id(
+        entity_pool,
+        0
+    ) + entity_pool_id(entity_pool, 1) + integer_buffer.count + wide_buffer.count + float_buffer.count + nested_buffer.inner.count + sample_window.count + ring.count + entity_pool.count + live_edit_state + courier_rig.count + boss_rig.count;
 }
 
 function main(): i32 {
     buffer_clear(integer_buffer);
     buffer_clear(wide_buffer);
     buffer_clear(float_buffer);
+    buffer_clear(nested_buffer.inner);
     window_clear(sample_window);
     ring_clear(ring);
     entity_pool_clear(entity_pool);
@@ -349,5 +361,7 @@ function main(): i32 {
     if (live_edit_tick() != 8 || live_edit_tick() != 9) {
         return 19;
     }
+    web_bounds_probe_index = 0;
+    generics_collections_digest_value = generics_collections_state_digest();
     return 0;
 }

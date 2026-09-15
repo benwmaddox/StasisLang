@@ -1,4 +1,5 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,11 +22,35 @@ fn sample_root() -> PathBuf {
 }
 
 fn copy_web_fixture(project: &Path) {
-    fs::create_dir_all(project.join("src")).expect("create generic package source directory");
-    for relative in ["stasis.json", "src/wasm_entry.stasis"] {
-        let source = sample_root().join(relative);
-        let destination = project.join(relative);
-        fs::copy(source, destination).expect("copy generic package fixture");
+    fn copy_tree(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).expect("create generic package fixture directory");
+        let mut entries = fs::read_dir(source)
+            .expect("read generic package fixture directory")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("enumerate generic package fixture directory");
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let file_type = entry
+                .file_type()
+                .expect("generic package fixture file type");
+            assert!(!file_type.is_symlink(), "fixture symlinks are unsupported");
+            let destination = destination.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_tree(&entry.path(), &destination);
+            } else if file_type.is_file() {
+                fs::copy(entry.path(), destination).expect("copy generic package fixture file");
+            }
+        }
+    }
+
+    fs::create_dir_all(project).expect("create generic package fixture root");
+    fs::copy(
+        sample_root().join("stasis.json"),
+        project.join("stasis.json"),
+    )
+    .expect("copy generic package manifest");
+    for relative in ["assets", "src", "vendor"] {
+        copy_tree(&sample_root().join(relative), &project.join(relative));
     }
 }
 
@@ -155,6 +180,7 @@ fn generic_collections_web_package_executes_declared_entry() {
             "--development-build",
             "--out",
             "dist",
+            "--json",
         ])
         .current_dir(&project)
         .output()
@@ -167,6 +193,20 @@ fn generic_collections_web_package_executes_declared_entry() {
     );
 
     let package = project.join("dist");
+    let receipt: Value = serde_json::from_slice(&output.stdout).expect("parse package receipt");
+    assert_eq!(receipt["result"]["web_entry"], "src/main.stasis");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(project.join("stasis.json")).expect("read copied generic manifest"),
+    )
+    .expect("parse copied generic manifest");
+    assert!(
+        manifest.pointer("/web/entry").is_none(),
+        "alternate Web entry must stay retired"
+    );
+    assert!(
+        !project.join("src/wasm_entry.stasis").exists(),
+        "reduced Web entry must stay retired"
+    );
     assert!(package.join("game.js").is_file());
     let wasm = package.join("game.wasm");
     assert!(wasm.is_file());
@@ -176,13 +216,107 @@ fn generic_collections_web_package_executes_declared_entry() {
     .expect("parse generic Web provenance");
     assert_eq!(provenance["schema"], "stasis.release_provenance.v1");
     assert_eq!(provenance["development_build"], true);
+    for hash in [
+        &manifest["vendor"]["stasis"]["sha256"],
+        &provenance["compiler"]["sha256"],
+    ] {
+        let hash = hash.as_str().expect("provenance SHA-256 string");
+        assert_eq!(hash.len(), 64);
+        assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+    let source_hash = format!(
+        "{:x}",
+        Sha256::digest(fs::read(project.join("src/main.stasis")).expect("read canonical entry"))
+    );
+    let manifest_hash = format!(
+        "{:x}",
+        Sha256::digest(fs::read(project.join("stasis.json")).expect("read package manifest"))
+    );
+    let graphics_hash = format!(
+        "{:x}",
+        Sha256::digest(
+            fs::read(project.join("vendor/stasis/stdlib/graphics.stasis"))
+                .expect("read vendored graphics source")
+        )
+    );
+    let wasm_hash = format!(
+        "{:x}",
+        Sha256::digest(fs::read(&wasm).expect("read packaged Wasm"))
+    );
+    assert_ne!(
+        source_hash, wasm_hash,
+        "source and Wasm identities must be distinct"
+    );
+    let project_provenance = &provenance["web_package"]["project"];
+    assert_eq!(project_provenance["manifest"]["path"], "stasis.json");
+    assert_eq!(project_provenance["manifest"]["sha256"], manifest_hash);
+    assert_eq!(project_provenance["entry"]["path"], "src/main.stasis");
+    assert_eq!(project_provenance["entry"]["sha256"], source_hash);
+    assert_eq!(
+        project_provenance["reachable_sources"]["src/main.stasis"],
+        source_hash
+    );
+    assert_eq!(
+        project_provenance["reachable_sources"]["vendor/stasis/stdlib/graphics.stasis"],
+        graphics_hash
+    );
+    assert_eq!(
+        project_provenance["vendor"]["release_id"],
+        manifest["vendor"]["stasis"]["release_id"]
+    );
+    assert_eq!(
+        project_provenance["vendor"]["recorded_sha256"],
+        manifest["vendor"]["stasis"]["sha256"]
+    );
+    assert_eq!(
+        project_provenance["vendor"]["actual_sha256"],
+        manifest["vendor"]["stasis"]["sha256"]
+    );
 
     let node = Command::new("node")
-        .args([
-            "-e",
-            "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => { if (instance.exports.main() !== 0) process.exit(1); }).catch((error) => { console.error(error); process.exit(1); });",
-        ])
-        .arg(&wasm)
+        .arg("-e")
+        .arg(
+            r#"const fs = require('node:fs');
+const root = process.argv[1];
+const runtime = fs.readFileSync(`${root}/game.js`, 'utf8');
+const marker = 'window.STASIS_GAME = ';
+const game = JSON.parse(runtime.slice(marker.length, runtime.indexOf(';\n', marker.length)));
+const bytes = fs.readFileSync(`${root}/game.wasm`);
+const module = new WebAssembly.Module(bytes);
+const imports = WebAssembly.Module.imports(module).map(({ module, name, kind }) => ({ module, name, kind }));
+if (imports.length !== 0) throw new Error(`unexpected Wasm imports: ${JSON.stringify(imports)}`);
+const exportNames = WebAssembly.Module.exports(module).map(({ name }) => name);
+for (const name of ['main', 'tick', 'render', 'memory', '__stasis_global_get_i32', '__stasis_global_set_i32', '__stasis_collection_view_abi_version', 'gfx_cmd_construction_reset', 'gfx_cmd_construction_finish']) {
+  if (!exportNames.includes(name)) throw new Error(`missing export ${name}`);
+}
+WebAssembly.instantiate(module, {}).then(instance => {
+  const e = instance.exports;
+  const mainResult = e.main();
+  const tickResult = e.tick();
+  const digestHash = game.globals.generics_collections_digest_value.hash;
+  const stateDigest = e.__stasis_global_get_i32(digestHash);
+  const probeHash = game.globals.web_bounds_probe_index.hash;
+  const trapped = index => {
+    e.__stasis_global_set_i32(probeHash, index);
+    try { e.tick(); return false; } catch (error) { return error instanceof WebAssembly.RuntimeError; }
+  };
+  const lowTrap = trapped(-1);
+  const highTrap = trapped(2);
+  e.__stasis_global_set_i32(probeHash, 0);
+  e.gfx_cmd_construction_reset();
+  const renderResult = e.render();
+  const finishResult = e.gfx_cmd_construction_finish(renderResult);
+  const commandLayout = game.memory.gfx_cmd_i32;
+  const commandView = new DataView(e.memory.buffer, commandLayout.offset, commandLayout.length * commandLayout.stride);
+  process.stdout.write(JSON.stringify({
+    imports, mainResult, tickResult, stateDigest, lowTrap, highTrap, renderResult, finishResult,
+    commandMagic: commandView.getInt32(0, true),
+    commandFlags: commandView.getInt32(2 * 4, true),
+    rectangleCount: commandView.getInt32(24 * 4, true)
+  }));
+}).catch(error => { console.error(error); process.exit(1); });"#,
+        )
+        .arg(&package)
         .output()
         .expect("run packaged generic Web Wasm");
     assert!(
@@ -191,6 +325,19 @@ fn generic_collections_web_package_executes_declared_entry() {
         String::from_utf8_lossy(&node.stdout),
         String::from_utf8_lossy(&node.stderr)
     );
+
+    let execution: Value = serde_json::from_slice(&node.stdout).expect("parse Wasm execution");
+    assert_eq!(execution["imports"], serde_json::json!([]));
+    assert_eq!(execution["mainResult"], 0);
+    assert_eq!(execution["tickResult"], 0);
+    assert_eq!(execution["stateDigest"], 507);
+    assert_eq!(execution["lowTrap"], true);
+    assert_eq!(execution["highTrap"], true);
+    assert_eq!(execution["renderResult"], 0);
+    assert_eq!(execution["finishResult"], 0);
+    assert_eq!(execution["commandMagic"], 1_196_967_473_i64);
+    assert_eq!(execution["commandFlags"], 3);
+    assert_eq!(execution["rectangleCount"], 1);
 
     fs::remove_dir_all(project).expect("remove generic Web package fixture");
 }

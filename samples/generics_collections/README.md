@@ -14,15 +14,16 @@ stasis --workspace samples/generics_collections package --target web --developme
 stasis --workspace samples/generics_collections package-mobile --target android-arm64 --out build/android-arm64 --development-build
 ```
 
-The production compiler seam also checks the entry point through JIT and AOT
-object generation. The manifest's Web entry is the standalone
-`src/wasm_entry.stasis` scalar fixture, so the packaged `game.wasm` executes a
-generic collection without claiming the current Wasm backend's unsupported
-receiver-owned struct-array view. The full entry keeps that struct-array
-coverage in the JIT/AOT path and the boundary remains explicit. The Android
-package uses the same full entry and valid frame lifecycle as native runs.
+The production compiler seam checks the canonical `src/main.stasis` entry
+through JIT, linked AOT, raw Wasm, and the packaged Web runtime. All targets
+execute the same generic collection workload and expose the same deterministic
+post-run state digest through `generics_collections_state_digest()`, while
+`tick()` retains its zero-success lifecycle contract. Packaged Web reads the
+captured digest through the supported global accessor. The Web acceptance also verifies the
+real browser's WebGL2 frame and the fixed-array bounds trap. Android uses this
+same full entry and valid frame lifecycle.
 `vendor/stasis` is the recorded, hash-checked graphics/runtime snapshot used
-by native and mobile packaging.
+by every packaged target.
 
 ```text
 python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_jit_aot_wasm -- --nocapture
