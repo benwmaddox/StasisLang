@@ -275,6 +275,15 @@ fn isolated_jit_command(root: &str) -> Command {
     command
 }
 
+#[cfg(unix)]
+fn expected_bounds_trap_signal() -> i32 {
+    if cfg!(target_arch = "aarch64") {
+        5 // SIGTRAP: Cranelift lowers traps to AArch64 BRK.
+    } else {
+        4 // SIGILL: Cranelift uses an illegal instruction on supported desktop x64 hosts.
+    }
+}
+
 fn is_native_bounds_trap(output: &Output) -> bool {
     #[cfg(windows)]
     {
@@ -283,7 +292,7 @@ fn is_native_bounds_trap(output: &Output) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        output.status.signal() == Some(4)
+        output.status.signal() == Some(expected_bounds_trap_signal())
     }
 }
 
@@ -295,7 +304,7 @@ fn is_jit_bounds_trap(output: &Output) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        output.status.signal() == Some(4)
+        output.status.signal() == Some(expected_bounds_trap_signal())
     }
 }
 
