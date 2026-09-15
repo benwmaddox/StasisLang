@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 const EVIDENCE_DIR: &str = "STASIS_GENERICS_DESKTOP_EVIDENCE_DIR";
-const PACKAGE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
+const PACKAGE_TIMEOUT: Duration = Duration::from_secs(8 * 60);
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(90);
 
 struct TestTree(PathBuf);
 

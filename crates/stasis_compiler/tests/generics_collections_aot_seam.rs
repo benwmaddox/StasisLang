@@ -26,8 +26,6 @@ const EVIDENCE_DIR: &str = "STASIS_GENERICS_DESKTOP_EVIDENCE_DIR";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(windows)]
 const WINDOWS_ILLEGAL_INSTRUCTION: i32 = 0xC000001D_u32 as i32;
-#[cfg(windows)]
-const WINDOWS_ACCESS_VIOLATION: i32 = 0xC0000005_u32 as i32;
 
 const NATIVE_WRAPPERS: &str = r#"
 global generics_native_bounds_index: i32;
@@ -292,17 +290,12 @@ fn is_native_bounds_trap(output: &Output) -> bool {
 fn is_jit_bounds_trap(output: &Output) -> bool {
     #[cfg(windows)]
     {
-        output.status.code().is_some_and(|code| {
-            code == WINDOWS_ILLEGAL_INSTRUCTION || code == WINDOWS_ACCESS_VIOLATION
-        })
+        output.status.code() == Some(WINDOWS_ILLEGAL_INSTRUCTION)
     }
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        output
-            .status
-            .signal()
-            .is_some_and(|signal| signal == 4 || signal == 11)
+        output.status.signal() == Some(4)
     }
 }
 
@@ -341,9 +334,16 @@ fn write_evidence(
     )
     .expect("copy native AOT provenance");
     let status = |output: &Output| {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(unix)]
+        let signal = output.status.signal();
+        #[cfg(not(unix))]
+        let signal: Option<i32> = None;
         json!({
             "success": output.status.success(),
             "code": output.status.code(),
+            "signal": signal,
             "stdout": String::from_utf8_lossy(&output.stdout),
             "stderr": String::from_utf8_lossy(&output.stderr),
         })
@@ -385,9 +385,14 @@ fn write_evidence(
 fn shared_generics_oracle_matches_jit_and_linked_native_aot_with_isolated_bounds_traps() {
     if let Some(root) = std::env::var_os(TRAP_CHILD_ROOT) {
         let root = root.to_string_lossy().into_owned();
-        let jit = configured_jit(&[root.clone()]);
+        let jit = configured_jit(&["render".to_string()]);
+        let index = match root.as_str() {
+            LOW_TRAP_ROOT => -1,
+            HIGH_TRAP_ROOT => 3,
+            other => panic!("unknown isolated JIT trap root {other}"),
+        };
         let _ = jit
-            .execute_i32_noarg_by_name(&root)
+            .execute_i32_onearg_by_name("render", index)
             .expect("out-of-range generics JIT access must trap before returning");
         return;
     }
@@ -403,7 +408,7 @@ fn shared_generics_oracle_matches_jit_and_linked_native_aot_with_isolated_bounds
     let bounds_clif = jit
         .clif_for_function_name("oracle_read_bound")
         .expect("oracle_read_bound CLIF");
-    for instruction in ["icmp_imm sge", "icmp ult", "trapz"] {
+    for instruction in ["iconst.i32 2", "icmp_imm sge", "icmp ult", "trapz"] {
         assert!(
             bounds_clif.contains(instruction),
             "array-view bounds lowering omitted {instruction}:\n{bounds_clif}"

@@ -111,7 +111,8 @@ function oracle_unsigned_lanes(items: OracleItem[]): bool {
 }
 
 function oracle_read_bound(items: OracleItem[], index: i32): i32 {
-    return items[index].score;
+    let item: OracleItem = items[index];
+    return item.score;
 }
 
 function generics_oracle_state_digest(): i32 {

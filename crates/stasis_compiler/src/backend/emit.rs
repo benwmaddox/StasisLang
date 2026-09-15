@@ -4181,7 +4181,7 @@ pub(crate) fn try_emit_struct_view_value(
             } else {
                 let kind_value = builder
                     .ins()
-                    .iconst(types::I32, i64::from(CollectionMetaKind::Length as i32));
+                    .iconst(types::I32, i64::from(CollectionMetaKind::MaxLength as i32));
                 let call = builder.ins().call(
                     runtime_call_refs.collection_i32_load,
                     &[collection_handle, kind_value],
