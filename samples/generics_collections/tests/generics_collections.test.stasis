@@ -4,6 +4,10 @@ test `generic collection workload returns the green result`(): bool {
     return main() == 0;
 }
 
+test `generic collection workload has the stable state digest`(): bool {
+    return main() == 0 && tick() == 507;
+}
+
 test `live edit helper preserves the explicit state counter`(): bool {
     reset_live_edit_state();
     return live_edit_tick() == 8 && live_edit_tick() == 9;

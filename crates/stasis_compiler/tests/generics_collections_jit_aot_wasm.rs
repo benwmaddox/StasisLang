@@ -105,7 +105,7 @@ fn dynload_artifacts() -> (PathBuf, PathBuf) {
 }
 
 #[cfg(windows)]
-fn run_linked_aot_oracle(aot: &AotProcess, expected_digest: i32) {
+fn run_linked_aot_oracle(aot: &AotProcess, function: &str, expected_result: i32) {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
@@ -120,9 +120,9 @@ fn run_linked_aot_oracle(aot: &AotProcess, expected_digest: i32) {
     fs::create_dir_all(&tree.0).expect("create linked-AOT oracle directory");
     let (import, runtime) = dynload_artifacts();
     fs::copy(runtime, tree.0.join("stasis_dynload.dll")).expect("copy linked-AOT runtime");
-    let executable = tree.0.join("generics_parity_oracle.exe");
+    let executable = tree.0.join(format!("generics_{function}.exe"));
     aot.link_executable_for_i32_noarg_function(
-        "main",
+        function,
         &executable,
         &AotLinkConfig {
             linker_path: Some(linker_path()),
@@ -144,7 +144,10 @@ fn run_linked_aot_oracle(aot: &AotProcess, expected_digest: i32) {
             "skipping linked AOT execution parity: Windows Application Control returned 4551 and signed execution is not required"
         );
     } else {
-        assert_eq!(aot_code, expected_digest, "JIT/AOT result parity");
+        assert_eq!(
+            aot_code, expected_result,
+            "JIT/AOT result parity for {function}"
+        );
     }
 }
 
@@ -508,7 +511,7 @@ fn generic_collection_shared_fixture_executes_in_wasm() {
     let output = Command::new("node")
         .args([
             "-e",
-            "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write([instance.exports.main(), instance.exports.tick()].join(','))).catch((error) => { console.error(error); process.exit(1); });",
         ])
         .arg(&wasm_path)
         .output()
@@ -519,7 +522,7 @@ fn generic_collection_shared_fixture_executes_in_wasm() {
         "Node failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "0");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0,507");
 }
 
 #[test]
@@ -561,7 +564,7 @@ fn backend_neutral_generics_oracle_matches_jit_aot_and_wasm() {
     aot.compile()
         .expect("compile shared generics oracle to a native AOT object");
     #[cfg(windows)]
-    run_linked_aot_oracle(&aot, EXPECTED_DIGEST);
+    run_linked_aot_oracle(&aot, "main", EXPECTED_DIGEST);
 
     let mut wasm = WasmProcess::new();
     wasm.set_required_emit_roots(
@@ -720,7 +723,7 @@ fn zero_extent_generic_semantics_match_jit_aot_and_wasm() {
     aot.compile()
         .expect("compile zero-extent parity oracle for AOT");
     #[cfg(windows)]
-    run_linked_aot_oracle(&aot, EXPECTED_DIGEST);
+    run_linked_aot_oracle(&aot, "main", EXPECTED_DIGEST);
 
     let wasm = compile_wasm_fixture(
         "focused/zero_extent_backend_parity.stasis",
@@ -778,7 +781,7 @@ fn rejects_named_struct_array_returns_at_the_shared_frontend_boundary() {
 fn generic_collection_sample_tests_pass_in_the_production_jit_shape() {
     let (rewritten, tests) =
         rewrite_top_level_test_declarations(TESTS).expect("discover generic sample tests");
-    assert_eq!(tests.len(), 2);
+    assert_eq!(tests.len(), 3);
     let mut process = JitProcess::new();
     process
         .set_project_root(repository_root().to_string_lossy())
@@ -792,6 +795,18 @@ fn generic_collection_sample_tests_pass_in_the_production_jit_shape() {
     process.upsert_file(ENTRY_PATH, repository_entry());
     process.upsert_file(TEST_PATH, rewritten);
     process.compile().expect("compile generic sample tests");
+    assert_eq!(
+        process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute canonical generic sample entry in JIT"),
+        0
+    );
+    assert_eq!(
+        process
+            .execute_i32_noarg_by_name("tick")
+            .expect("execute canonical generic sample digest in JIT"),
+        507
+    );
     for test in tests {
         assert!(
             process
@@ -808,10 +823,22 @@ fn generic_collection_aot_accepts_vendor_graphics_after_expansion() {
     let sample_root = repository_root().join("samples/generics_collections");
     let mut aot = AotProcess::new();
     aot.set_import_base_dir(&sample_root);
-    aot.set_required_emit_roots(&["main".to_string(), "render".to_string()]);
-    aot.upsert_file("src/main.stasis", ENTRY);
+    aot.set_required_emit_roots(&[
+        "main".to_string(),
+        "tick".to_string(),
+        "render".to_string(),
+        "generics_collections_run_and_digest".to_string(),
+    ]);
+    aot.upsert_file(
+        "src/main.stasis",
+        format!(
+            "{ENTRY}\nfunction generics_collections_run_and_digest(): i32 {{\n    if (main() != 0) {{ return -1; }}\n    return tick();\n}}\n"
+        ),
+    );
     aot.compile()
         .expect("generic collection AOT must preserve vendor graphics provenance");
+    #[cfg(windows)]
+    run_linked_aot_oracle(&aot, "generics_collections_run_and_digest", 507);
 }
 
 #[test]

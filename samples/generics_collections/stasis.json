@@ -6,8 +6,8 @@
   "output": "build",
   "vendor": {
     "stasis": {
-      "release_id": "local-generics-547",
-      "sha256": "3b5d69fedeb5dd76eeb5f01f1b1676f8bfb411a1183bd504fb627f28a0189f0a"
+      "release_id": "local-generics-585",
+      "sha256": "4a096f7816d8070e57097e0b438f8848d7bfb01fa0f91010af01f67a5f71db33"
     }
   },
   "ai": {
@@ -22,8 +22,5 @@
     "editor": {
       "auto_persist_html_transcripts": false
     }
-  },
-  "web": {
-    "entry": "src/wasm_entry.stasis"
   }
 }

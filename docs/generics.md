@@ -126,10 +126,8 @@ backend paths. JIT, native AOT, and Wasm support bounded named-struct-array
 views for internal calls, including fixed-to-view conversion, receiver-owned
 fields, forwarded views, indexed element calls, field mutation, `foreach`, and
 `max_length`. The sample uses the hash-checked `vendor/stasis` snapshot for
-native and mobile packaging. Its `stasis.json` still selects
-`src/wasm_entry.stasis` for Web packaging until the separate package migration
-slice changes that entry. Android uses the same full entry and renderer
-lifecycle as native packaging.
+every packaged target. Web, Android, and native packaging all compile the
+canonical `src/main.stasis` entry and use the same renderer lifecycle.
 
 | Surface | Executable coverage | Result required for a green run |
 | --- | --- | --- |
@@ -139,7 +137,7 @@ lifecycle as native packaging.
 | JIT, AOT, and Wasm parity | `generics_collections_jit_aot_wasm::backend_neutral_generics_oracle_matches_jit_aot_and_wasm` | JIT and Node/Wasm observe the independent digest; Windows also links and executes the AOT object and checks the same digest. |
 | Receiver and forwarded named-struct views | `generics_collections_jit_aot_wasm::indexed_named_struct_elements_resolve_local_receiver_and_qualified_calls`; Wasm backend receiver-view tests | Internal indexed calls, whole-element field-wise copies, owner isolation, `foreach`, and `max_length` execute against caller-backed storage. |
 | Incremental state and swap | `development_swap::tests::generic_collection_capacity_swap_migrates_state_and_allows_retry_after_rejection` | Compatible state migrates and a rejected candidate leaves the active state retryable. |
-| Packaged Web | `apps/stasis/tests/generics_collections_package.rs` | `package --target web --development-build` emits `game.wasm`, and Node executes its scalar entry with result 0. |
+| Packaged Web | `apps/stasis/tests/generics_collections_package.rs`; `tools/run_generics_collections_browser_acceptance.mjs` | The package selects `src/main.stasis`; Node observes the full workload result/digest and bounds traps; a real browser presents the authored frame without runtime errors. |
 | Android AOT link | The `android-package-link` slow CI lane and the generated `android` Gradle project | The generic arm64 package links `libmain.so`; its bundle and link map agree. The x86_64 development APK is the emulator lane and must present valid frames. |
 | Host coverage | `generics-cross-platform` CI matrix on Ubuntu, Windows, and macOS; Windows bootstrap additionally runs the native AOT seam | The shared JIT/Wasm/diagnostic contract passes on all three hosts. |
 
@@ -153,10 +151,9 @@ composite-element copying. Lifecycle and host entries remain concrete.
 
 Named-struct returns and stored views are rejected by the shared frontend, so
 JIT, native AOT, Wasm, lifecycle declarations, host externs, and generated
-wrappers observe one contract and one diagnostic category. The sample's scalar
-`wasm_entry.stasis` remains a packaging choice until the separate Web-package
-migration changes it; it is no longer required by the internal Wasm
-named-struct-array view representation.
+wrappers observe one contract and one diagnostic category. Web packaging has
+no alternate entry: the internal Wasm named-struct-array view representation
+executes the full sample directly.
 
 ## Acceptance matrix
 

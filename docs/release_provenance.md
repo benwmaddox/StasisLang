@@ -30,13 +30,16 @@ current command-buffer schema; generated artifacts must be rebuilt with the matc
 The desktop graphics runtime logs the bounded
 sidecar manifest from the resolved runtime payload directory during initialization.
 
-Web package provenance additionally contains `web_package.asset_metadata_audit`
-and `web_package.size_metrics`. The audit table is the complete metadata derived
-from the prepared `assets/manifest.json`; release runtime JavaScript receives only
-the browser-required projection. Size metrics define `raw_bytes` as exact UTF-8
-length and `gzip_bytes` as RFC 1952 gzip at level 9 with mtime zero, and record
-before/after values for both linked JavaScript and asset metadata. These values
-are deterministic package evidence, not estimates from a deployment server.
+Web package provenance additionally contains `web_package.asset_metadata_audit`,
+`web_package.size_metrics`, and `web_package.project`. The project record names
+and hashes the manifest, selected entry, every reachable source, and the
+recorded plus recomputed vendor identity. The audit table is the complete
+metadata derived from the prepared `assets/manifest.json`; release runtime
+JavaScript receives only the browser-required projection. Size metrics define
+`raw_bytes` as exact UTF-8 length and `gzip_bytes` as RFC 1952 gzip at level 9
+with mtime zero, and record before/after values for both linked JavaScript and
+asset metadata. These values are deterministic package evidence, not estimates
+from a deployment server.
 `stasis_mobile_package.json` points to the
 embedded manifest and exposes the release/development classification to build
 audit tools.

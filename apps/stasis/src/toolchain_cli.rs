@@ -4731,6 +4731,21 @@ fn package_web_workspace(
     package_root: &Path,
     development_build: bool,
 ) -> Result<CommandResult, String> {
+    let manifest_path = workspace.root.join(MANIFEST_NAME);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "failed to read Web package manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest_snapshot: ProjectManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
+    if manifest_snapshot != workspace.manifest {
+        return Err(format!(
+            "Web package manifest changed after workspace load: {}",
+            manifest_path.display()
+        ));
+    }
     let staging_name = format!(
         ".{}.staging",
         package_root
@@ -4759,6 +4774,43 @@ fn package_web_workspace(
             .unwrap_or(workspace.manifest.entry.as_str());
         let files = load_workshop_edit_workspace(&workspace.root, Path::new(web_entry))?;
         let files = workshop_reachable_files(&files, Path::new(web_entry))?;
+        let source_provenance = files
+            .iter()
+            .map(|file| {
+                let source_path = Path::new(&file.path);
+                let relative = source_path
+                    .strip_prefix(&workspace.root)
+                    .unwrap_or(source_path);
+                (
+                    relative.to_string_lossy().replace('\\', "/"),
+                    format!("{:x}", Sha256::digest(file.source.as_bytes())),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let normalized_web_entry = web_entry.replace('\\', "/");
+        let entry_sha256 = source_provenance
+            .get(&normalized_web_entry)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "compiled Web entry is missing from reachable source provenance: {normalized_web_entry}"
+                )
+            })?;
+        let vendor_provenance = workspace
+            .manifest
+            .vendor
+            .as_ref()
+            .map(|vendor| {
+                let actual_sha256 = directory_sha256(&workspace.root.join("vendor/stasis"));
+                actual_sha256.map(|actual_sha256| {
+                    json!({
+                        "release_id": vendor.stasis.release_id,
+                        "recorded_sha256": vendor.stasis.sha256,
+                        "actual_sha256": actual_sha256,
+                    })
+                })
+            })
+            .transpose()?;
         let mut process = WasmProcess::new();
         process.set_debug_symbols(development_build);
         process.set_project_root(display_path(&workspace.root))?;
@@ -4860,6 +4912,18 @@ fn package_web_workspace(
         provenance["web_package"] = json!({
             "asset_metadata_audit": audit_asset_metadata,
             "size_metrics": size_metrics.clone(),
+            "project": {
+                "manifest": {
+                    "path": MANIFEST_NAME,
+                    "sha256": format!("{:x}", Sha256::digest(&manifest_bytes)),
+                },
+                "entry": {
+                    "path": normalized_web_entry,
+                    "sha256": entry_sha256,
+                },
+                "reachable_sources": source_provenance,
+                "vendor": vendor_provenance,
+            },
         });
         let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, &wasm.bytes)
@@ -4952,6 +5016,23 @@ fn package_web_workspace(
             return Err(error);
         }
     };
+    let current_manifest_bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(format!(
+                "failed to re-read Web package manifest {}: {error}",
+                manifest_path.display()
+            ));
+        }
+    };
+    if current_manifest_bytes != manifest_bytes {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(format!(
+            "Web package manifest changed while packaging: {}",
+            manifest_path.display()
+        ));
+    }
     publish_package_output(&staging_root, package_root)?;
     let optimization = if wasm_optimized {
         "wasm-opt -Oz"
@@ -9311,6 +9392,7 @@ mod tests {
                 height: 900,
             }),
         });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write project manifest");
         let workspace = Workspace {
             root: root.clone(),
             manifest,
