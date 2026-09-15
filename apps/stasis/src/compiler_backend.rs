@@ -6645,9 +6645,22 @@ function render(): i32 {
                 .join("engine_bundle_runtime_bridge.c"),
         )
         .expect("read emitted AOT lifecycle bridge source");
-        assert!(bridge_source.contains("STASIS_EXPORT int32_t render(void)"));
-        assert!(bridge_source.contains("gfx_cmd_construction_reset"));
-        assert!(bridge_source.contains("gfx_cmd_construction_finish"));
+        let render_wrapper = bridge_source
+            .lines()
+            .find(|line| line.starts_with("STASIS_EXPORT int32_t render(void)"))
+            .expect("render lifecycle wrapper");
+        assert!(render_wrapper.contains(
+            render_alias
+                .reset_symbol
+                .as_deref()
+                .expect("render lifecycle reset symbol")
+        ));
+        assert!(render_wrapper.contains(
+            render_alias
+                .finish_symbol
+                .as_deref()
+                .expect("render lifecycle finish symbol")
+        ));
 
         let mut objects = bundle.object_paths().cloned().collect::<Vec<_>>();
         objects.push(bridge_object);
