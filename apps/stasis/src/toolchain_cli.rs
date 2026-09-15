@@ -4538,7 +4538,6 @@ fn package_workspace(
         ));
     }
     let mut provenance = resolve_package_provenance(development_build)?;
-    provenance["desktop_package"] = desktop_package_project_provenance(workspace, &manifest_bytes)?;
     let network_enabled = workspace
         .manifest
         .capabilities
@@ -4553,20 +4552,36 @@ fn package_workspace(
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let executable_file_name = executable_name(&workspace.manifest.name);
     let assembled = (|| -> Result<(), String> {
+        let source_snapshot_root = staging_root.join(".source-snapshot");
+        let snapshot_workspace =
+            capture_desktop_package_workspace(workspace, &manifest_bytes, &source_snapshot_root)?;
+        provenance["desktop_package"] =
+            desktop_package_project_provenance(&snapshot_workspace, &manifest_bytes)?;
+        let package_assembly_root = source_snapshot_root.join(".package-output");
+        fs::create_dir_all(&package_assembly_root).map_err(|error| {
+            format!(
+                "failed to create desktop package assembly {}: {error}",
+                package_assembly_root.display()
+            )
+        })?;
         let network_build = if network_enabled || network_client_enabled {
             if network_enabled {
-                stage_desktop_network_guest(workspace, &staging_root, development_build)?;
+                stage_desktop_network_guest(
+                    &snapshot_workspace,
+                    &package_assembly_root,
+                    development_build,
+                )?;
             }
             Some(build_desktop_network_library(
-                &staging_root,
+                &package_assembly_root,
                 development_build,
             )?)
         } else {
             None
         };
-        let executable = staging_root.join(&executable_file_name);
+        let executable = package_assembly_root.join(&executable_file_name);
         build_workspace_with_desktop_network(
-            workspace,
+            &snapshot_workspace,
             BuildMode::Release,
             Some(&executable),
             network_build
@@ -4581,7 +4596,7 @@ fn package_workspace(
                     },
                 }),
         )?;
-        let network_target = staging_root.join(".network-rust-target");
+        let network_target = package_assembly_root.join(".network-rust-target");
         if network_target.exists() {
             fs::remove_dir_all(&network_target).map_err(|error| {
                 format!("failed to remove temporary desktop network build: {error}")
@@ -4599,6 +4614,29 @@ fn package_workspace(
                 )
             })?;
         }
+        let current_manifest_bytes =
+            fs::read(source_snapshot_root.join(MANIFEST_NAME)).map_err(|error| {
+                format!("failed to verify captured desktop package manifest: {error}")
+            })?;
+        if current_manifest_bytes != manifest_bytes {
+            return Err("captured desktop package manifest changed during packaging".to_string());
+        }
+        let current_project_provenance =
+            desktop_package_project_provenance(&snapshot_workspace, &current_manifest_bytes)?;
+        if current_project_provenance != provenance["desktop_package"] {
+            return Err(
+                "captured desktop package host source, network guest source, or vendored runtime changed during packaging"
+                    .to_string(),
+            );
+        }
+        move_dir_contents(&package_assembly_root, &staging_root)?;
+        fs::remove_dir_all(&source_snapshot_root).map_err(|error| {
+            format!(
+                "failed to remove captured desktop package workspace {}: {error}",
+                source_snapshot_root.display()
+            )
+        })?;
+        let executable = staging_root.join(&executable_file_name);
         #[cfg(windows)]
         nest_windows_desktop_payload(&staging_root, &executable)?;
         let payload_root = if cfg!(windows) {
@@ -4606,10 +4644,8 @@ fn package_workspace(
         } else {
             staging_root.clone()
         };
-        copy_file(
-            &workspace.root.join(MANIFEST_NAME),
-            &payload_root.join(MANIFEST_NAME),
-        )?;
+        fs::write(payload_root.join(MANIFEST_NAME), &manifest_bytes)
+            .map_err(|error| format!("failed to stage desktop package manifest: {error}"))?;
         if !cfg!(windows) && !network_enabled && !network_client_enabled {
             if let Some(runtime) = installed_runtime_library() {
                 copy_file(
@@ -4617,26 +4653,6 @@ fn package_workspace(
                     &payload_root.join(runtime.file_name().unwrap_or_default()),
                 )?;
             }
-        }
-        let current_manifest_bytes = fs::read(&manifest_path).map_err(|error| {
-            format!(
-                "failed to re-read desktop package manifest {}: {error}",
-                manifest_path.display()
-            )
-        })?;
-        if current_manifest_bytes != manifest_bytes {
-            return Err(format!(
-                "desktop package manifest changed during packaging: {}",
-                manifest_path.display()
-            ));
-        }
-        let current_project_provenance =
-            desktop_package_project_provenance(workspace, &current_manifest_bytes)?;
-        if current_project_provenance != provenance["desktop_package"] {
-            return Err(
-                "desktop package host source, network guest source, or vendored runtime changed during packaging"
-                    .to_string(),
-            );
         }
         let staged_manifest = fs::read(payload_root.join(MANIFEST_NAME)).map_err(|error| {
             format!("failed to verify staged desktop package manifest: {error}")
@@ -4840,6 +4856,125 @@ fn package_project_provenance(
         "reachable_sources": reachable_sources,
         "vendor": vendor,
     }))
+}
+
+fn capture_desktop_package_workspace(
+    workspace: &Workspace,
+    manifest_bytes: &[u8],
+    snapshot_root: &Path,
+) -> Result<Workspace, String> {
+    if snapshot_root.exists() {
+        return Err(format!(
+            "desktop package source snapshot already exists: {}",
+            snapshot_root.display()
+        ));
+    }
+
+    let mut entries = vec![workspace.manifest.entry.as_str()];
+    if workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network)
+    {
+        let web_entry = workspace
+            .manifest
+            .web
+            .as_ref()
+            .map(|web| web.entry.as_str())
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                "network-enabled desktop projects must declare web.entry for the guest bundle"
+                    .to_string()
+            })?;
+        entries.push(web_entry);
+    }
+
+    let mut sources = BTreeMap::<PathBuf, String>::new();
+    for entry in &entries {
+        let files = load_workshop_edit_workspace(&workspace.root, Path::new(entry))?;
+        for file in workshop_reachable_files(&files, Path::new(entry))? {
+            let source_path = Path::new(&file.path);
+            let relative = if source_path.is_absolute() {
+                source_path.strip_prefix(&workspace.root).map_err(|_| {
+                    format!(
+                        "desktop package source resolves outside the workspace: {}",
+                        source_path.display()
+                    )
+                })?
+            } else {
+                source_path
+            };
+            validate_relative_path("desktop package source", relative)?;
+            if let Some(previous) = sources.insert(relative.to_path_buf(), file.source.clone()) {
+                if previous != file.source {
+                    return Err(format!(
+                        "desktop package source changed while capturing it: {}",
+                        relative.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    fs::create_dir_all(snapshot_root).map_err(|error| {
+        format!(
+            "failed to create desktop package source snapshot {}: {error}",
+            snapshot_root.display()
+        )
+    })?;
+    fs::write(snapshot_root.join(MANIFEST_NAME), manifest_bytes).map_err(|error| {
+        format!(
+            "failed to capture desktop package manifest in {}: {error}",
+            snapshot_root.display()
+        )
+    })?;
+    for directory in ["vendor", "assets", "data"] {
+        copy_dir_if_exists(
+            &workspace.root.join(directory),
+            &snapshot_root.join(directory),
+        )?;
+    }
+    for entry in entries {
+        let entry = Path::new(entry);
+        validate_relative_path("desktop package entry", entry)?;
+        let package_dir_name = entry.file_stem().ok_or_else(|| {
+            format!(
+                "desktop package entry has no file name: {}",
+                entry.display()
+            )
+        })?;
+        let support_relative = entry
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(package_dir_name);
+        copy_dir_if_exists(
+            &workspace.root.join(&support_relative),
+            &snapshot_root.join(&support_relative),
+        )?;
+    }
+    for (relative, source) in sources {
+        let destination = snapshot_root.join(&relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create captured source directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::write(&destination, source).map_err(|error| {
+            format!(
+                "failed to capture desktop package source {}: {error}",
+                destination.display()
+            )
+        })?;
+    }
+
+    Ok(Workspace {
+        root: canonical_workspace_root(snapshot_root)?,
+        manifest: workspace.manifest.clone(),
+    })
 }
 
 fn desktop_package_project_provenance(
@@ -9296,6 +9431,31 @@ fn copy_dir_if_exists(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn move_dir_contents(source: &Path, destination: &Path) -> Result<(), String> {
+    let mut entries: Vec<_> = fs::read_dir(source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to enumerate {}: {error}", source.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let target = destination.join(entry.file_name());
+        if target.exists() {
+            return Err(format!(
+                "desktop package assembly conflicts with {}",
+                target.display()
+            ));
+        }
+        fs::rename(entry.path(), &target).map_err(|error| {
+            format!(
+                "failed to move desktop package assembly {} to {}: {error}",
+                entry.path().display(),
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
     fs::copy(source, destination).map(|_| ()).map_err(|error| {
         format!(
@@ -9534,6 +9694,91 @@ mod tests {
         assert_ne!(
             before["network_guest"], after["network_guest"],
             "guest source mutation must change desktop package provenance"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_package_workspace_snapshot_isolated_from_original_source_mutation() {
+        let root = temp_dir("desktop_package_workspace_snapshot");
+        create_project(
+            root.clone(),
+            "desktop_package_workspace_snapshot".to_string(),
+        )
+        .expect("create project");
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 { return 40; }\n",
+        )
+        .expect("write host entry");
+        fs::write(
+            root.join("src/guest.stasis"),
+            "function main(): i32 { return 42; }\n",
+        )
+        .expect("write guest entry");
+        fs::create_dir_all(root.join("src/main")).expect("create entry support directory");
+        fs::write(root.join("src/main/config.json"), "{\"value\":40}\n")
+            .expect("write entry support data");
+        fs::create_dir_all(root.join("data")).expect("create project data");
+        fs::write(root.join("data/package.txt"), "captured\n").expect("write project data");
+        let mut manifest: ProjectManifest = serde_json::from_slice(
+            &fs::read(root.join(MANIFEST_NAME)).expect("read generated manifest"),
+        )
+        .expect("parse generated manifest");
+        manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/guest.stasis".to_string(),
+            loading_font: None,
+            viewport: None,
+        });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
+        let workspace = load_workspace(Some(&root)).expect("load network workspace");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
+        let snapshot_root = root.join(".desktop-source-snapshot");
+        let snapshot =
+            capture_desktop_package_workspace(&workspace, &manifest_bytes, &snapshot_root)
+                .expect("capture desktop package workspace");
+        let captured_provenance = desktop_package_project_provenance(&snapshot, &manifest_bytes)
+            .expect("capture snapshot provenance");
+
+        fs::write(
+            root.join(&workspace.manifest.entry),
+            "function main(): i32 { return 41; }\n",
+        )
+        .expect("mutate original host entry");
+        fs::write(
+            root.join("src/guest.stasis"),
+            "function main(): i32 { return 43; }\n",
+        )
+        .expect("mutate original guest entry");
+        fs::write(root.join("data/package.txt"), "mutated\n").expect("mutate original data");
+        fs::write(root.join("src/main/config.json"), "{\"value\":41}\n")
+            .expect("mutate original entry support data");
+
+        assert_eq!(
+            desktop_package_project_provenance(&snapshot, &manifest_bytes)
+                .expect("re-read snapshot provenance"),
+            captured_provenance,
+            "original source mutations must not alter captured package inputs"
+        );
+        assert_eq!(
+            fs::read_to_string(snapshot.root.join("data/package.txt")).expect("read captured data"),
+            "captured\n"
+        );
+        assert_eq!(
+            fs::read_to_string(snapshot.root.join("src/main/config.json"))
+                .expect("read captured entry support data"),
+            "{\"value\":40}\n"
+        );
+        let jit = compile_workspace_jit(&snapshot).expect("compile captured workspace");
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("execute captured host entry"),
+            40,
+            "the captured workspace, not the mutated original, must be compiled"
         );
         remove_temp(&root);
     }

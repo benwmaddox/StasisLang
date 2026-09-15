@@ -158,6 +158,29 @@ fn is_zero_argument_manifest_function(row: &EngineBundleManifestFunctionRow, nam
     row.name == name && row.parameter_count == 0
 }
 
+fn packaged_render_alias(
+    manifest: &EngineBundleManifest,
+    target_symbol: &str,
+) -> Option<PackagedRenderAlias> {
+    let reset_symbol = manifest
+        .functions
+        .iter()
+        .find(|row| is_zero_argument_manifest_function(row, "gfx_cmd_construction_reset"))?
+        .symbol
+        .clone();
+    let finish_symbol = manifest
+        .functions
+        .iter()
+        .find(|row| row.name == "gfx_cmd_construction_finish" && row.parameter_count == 1)?
+        .symbol
+        .clone();
+    Some(PackagedRenderAlias {
+        target_symbol: target_symbol.to_string(),
+        reset_symbol,
+        finish_symbol,
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifest {
     #[serde(default)]
@@ -3955,31 +3978,9 @@ fn package_engine_bundle_release(
         .iter()
         .find(|row| is_zero_argument_manifest_function(row, "render"))
         .map(|row| row.symbol.clone());
-    let render_alias = if let Some(target_symbol) = render_symbol.as_ref() {
-        let reset_symbol = manifest
-            .functions
-            .iter()
-            .find(|row| is_zero_argument_manifest_function(row, "gfx_cmd_construction_reset"))
-            .map(|row| row.symbol.clone())
-            .ok_or_else(|| {
-                "engine bundle render callback is missing gfx_cmd_construction_reset".to_string()
-            })?;
-        let finish_symbol = manifest
-            .functions
-            .iter()
-            .find(|row| row.name == "gfx_cmd_construction_finish" && row.parameter_count == 1)
-            .map(|row| row.symbol.clone())
-            .ok_or_else(|| {
-                "engine bundle render callback is missing gfx_cmd_construction_finish".to_string()
-            })?;
-        Some(PackagedRenderAlias {
-            target_symbol: target_symbol.clone(),
-            reset_symbol,
-            finish_symbol,
-        })
-    } else {
-        None
-    };
+    let render_alias = render_symbol
+        .as_ref()
+        .and_then(|target_symbol| packaged_render_alias(&manifest, target_symbol));
     let on_code_swap_symbol = manifest
         .functions
         .iter()
@@ -4035,6 +4036,15 @@ fn package_engine_bundle_release(
             target_symbol: symbol.clone(),
             returns_i32: true,
         });
+    }
+    if render_alias.is_none() {
+        if let Some(symbol) = render_symbol.as_ref() {
+            function_aliases.push(PackagedFunctionAlias {
+                alias: "render",
+                target_symbol: symbol.clone(),
+                returns_i32: true,
+            });
+        }
     }
     if let Some(symbol) = on_code_swap_symbol.as_ref() {
         function_aliases.push(PackagedFunctionAlias {
@@ -4364,6 +4374,7 @@ mod tests {
             .find(|row| is_zero_argument_manifest_function(row, "render"))
             .expect("zero-argument render callback");
         assert_eq!(render.symbol, "render_frame");
+        assert!(packaged_render_alias(&manifest, &render.symbol).is_none());
         assert!(!is_zero_argument_manifest_function(
             &manifest.functions[0],
             "render"
