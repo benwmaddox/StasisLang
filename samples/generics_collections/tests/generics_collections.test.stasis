@@ -5,7 +5,7 @@ test `generic collection workload returns the green result`(): bool {
 }
 
 test `generic collection workload has the stable state digest`(): bool {
-    return main() == 0 && tick() == 507;
+    return main() == 0 && tick() == 0 && generics_collections_state_digest() == 507;
 }
 
 test `live edit helper preserves the explicit state counter`(): bool {

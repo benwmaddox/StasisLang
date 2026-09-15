@@ -126,7 +126,11 @@ try {
   assert.deepEqual(await evaluate("genericsProof.failures"), []);
   assert.deepEqual(await evaluate("genericsProof.imports"), []);
   assert.deepEqual(protocolFailures, []);
-  assert.equal(await evaluate("genericsProof.guest.tick()"), 507);
+  assert.equal(await evaluate("genericsProof.guest.tick()"), 0);
+  assert.equal(await evaluate(`(() => {
+    const hash = STASIS_GAME.globals.generics_collections_digest_value.hash;
+    return genericsProof.guest.__stasis_global_get_i32(hash);
+  })()`), 507);
   const bounds = await evaluate(`(() => {
     const e = genericsProof.guest;
     const hash = STASIS_GAME.globals.web_bounds_probe_index.hash;

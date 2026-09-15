@@ -4726,6 +4726,20 @@ fn prepare_web_wasm(
     })
 }
 
+fn normalize_web_package_source_path(path: &str) -> String {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.to_string_lossy().replace('\\', "/")
+}
+
 fn package_web_workspace(
     workspace: &Workspace,
     package_root: &Path,
@@ -4782,12 +4796,12 @@ fn package_web_workspace(
                     .strip_prefix(&workspace.root)
                     .unwrap_or(source_path);
                 (
-                    relative.to_string_lossy().replace('\\', "/"),
+                    normalize_web_package_source_path(&relative.to_string_lossy()),
                     format!("{:x}", Sha256::digest(file.source.as_bytes())),
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let normalized_web_entry = web_entry.replace('\\', "/");
+        let normalized_web_entry = normalize_web_package_source_path(web_entry);
         let entry_sha256 = source_provenance
             .get(&normalized_web_entry)
             .cloned()
@@ -9493,6 +9507,18 @@ mod tests {
                 "accepted invalid web loading font path {path}"
             );
         }
+    }
+
+    #[test]
+    fn web_package_source_paths_match_workshop_normalization() {
+        assert_eq!(
+            normalize_web_package_source_path("./src/./main.stasis"),
+            "src/main.stasis"
+        );
+        assert_eq!(
+            normalize_web_package_source_path("src\\main.stasis"),
+            "src/main.stasis"
+        );
     }
 
     #[test]

@@ -286,13 +286,15 @@ const module = new WebAssembly.Module(bytes);
 const imports = WebAssembly.Module.imports(module).map(({ module, name, kind }) => ({ module, name, kind }));
 if (imports.length !== 0) throw new Error(`unexpected Wasm imports: ${JSON.stringify(imports)}`);
 const exportNames = WebAssembly.Module.exports(module).map(({ name }) => name);
-for (const name of ['main', 'tick', 'render', 'memory', '__stasis_global_set_i32', '__stasis_collection_view_abi_version', 'gfx_cmd_construction_reset', 'gfx_cmd_construction_finish']) {
+for (const name of ['main', 'tick', 'render', 'memory', '__stasis_global_get_i32', '__stasis_global_set_i32', '__stasis_collection_view_abi_version', 'gfx_cmd_construction_reset', 'gfx_cmd_construction_finish']) {
   if (!exportNames.includes(name)) throw new Error(`missing export ${name}`);
 }
 WebAssembly.instantiate(module, {}).then(instance => {
   const e = instance.exports;
   const mainResult = e.main();
-  const stateDigest = e.tick();
+  const tickResult = e.tick();
+  const digestHash = game.globals.generics_collections_digest_value.hash;
+  const stateDigest = e.__stasis_global_get_i32(digestHash);
   const probeHash = game.globals.web_bounds_probe_index.hash;
   const trapped = index => {
     e.__stasis_global_set_i32(probeHash, index);
@@ -307,7 +309,7 @@ WebAssembly.instantiate(module, {}).then(instance => {
   const commandLayout = game.memory.gfx_cmd_i32;
   const commandView = new DataView(e.memory.buffer, commandLayout.offset, commandLayout.length * commandLayout.stride);
   process.stdout.write(JSON.stringify({
-    imports, mainResult, stateDigest, lowTrap, highTrap, renderResult, finishResult,
+    imports, mainResult, tickResult, stateDigest, lowTrap, highTrap, renderResult, finishResult,
     commandMagic: commandView.getInt32(0, true),
     commandFlags: commandView.getInt32(2 * 4, true),
     rectangleCount: commandView.getInt32(24 * 4, true)
@@ -327,6 +329,7 @@ WebAssembly.instantiate(module, {}).then(instance => {
     let execution: Value = serde_json::from_slice(&node.stdout).expect("parse Wasm execution");
     assert_eq!(execution["imports"], serde_json::json!([]));
     assert_eq!(execution["mainResult"], 0);
+    assert_eq!(execution["tickResult"], 0);
     assert_eq!(execution["stateDigest"], 507);
     assert_eq!(execution["lowTrap"], true);
     assert_eq!(execution["highTrap"], true);

@@ -200,6 +200,7 @@ global mode_zero: CompileValue<0>;
 global mode_one: CompileValue<1>;
 global mode_two: CompileValue<2>;
 global web_bounds_probe_index: i32;
+global generics_collections_digest_value: i32;
 
 function near(actual: f32, expected: f32): bool {
     let difference: f32 = actual - expected;
@@ -208,7 +209,7 @@ function near(actual: f32, expected: f32): bool {
 
 function tick(): i32 {
     let probed_id: i32 = entity_pool.entities[web_bounds_probe_index].id;
-    return generics_collections_state_digest() + probed_id - probed_id;
+    return probed_id - probed_id;
 }
 
 function render(): i32 {
@@ -361,5 +362,6 @@ function main(): i32 {
         return 19;
     }
     web_bounds_probe_index = 0;
+    generics_collections_digest_value = generics_collections_state_digest();
     return 0;
 }

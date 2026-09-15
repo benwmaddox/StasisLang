@@ -17,7 +17,9 @@ stasis --workspace samples/generics_collections package-mobile --target android-
 The production compiler seam checks the canonical `src/main.stasis` entry
 through JIT, linked AOT, raw Wasm, and the packaged Web runtime. All targets
 execute the same generic collection workload and expose the same deterministic
-post-run state digest through `tick()`. The Web acceptance also verifies the
+post-run state digest through `generics_collections_state_digest()`, while
+`tick()` retains its zero-success lifecycle contract. Packaged Web reads the
+captured digest through the supported global accessor. The Web acceptance also verifies the
 real browser's WebGL2 frame and the fixed-array bounds trap. Android uses this
 same full entry and valid frame lifecycle.
 `vendor/stasis` is the recorded, hash-checked graphics/runtime snapshot used

@@ -490,7 +490,7 @@ fn generic_collection_shared_fixture_executes_in_wasm() {
     let mut wasm = WasmProcess::new();
     wasm.set_project_root(repository_root().to_string_lossy())
         .expect("set sample Wasm project root");
-    wasm.set_required_emit_roots(&[WASM_ROOT.to_string()]);
+    wasm.set_required_emit_roots(&[WASM_ROOT.to_string(), "tick".to_string()]);
     wasm.upsert_file(ENTRY_PATH, repository_entry());
     wasm.compile()
         .expect("compile generic collection Wasm sample");
@@ -522,7 +522,7 @@ fn generic_collection_shared_fixture_executes_in_wasm() {
         "Node failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "0,507");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0,0");
 }
 
 #[test]
@@ -804,6 +804,12 @@ fn generic_collection_sample_tests_pass_in_the_production_jit_shape() {
     assert_eq!(
         process
             .execute_i32_noarg_by_name("tick")
+            .expect("execute canonical generic sample lifecycle tick in JIT"),
+        0
+    );
+    assert_eq!(
+        process
+            .execute_i32_noarg_by_name("generics_collections_state_digest")
             .expect("execute canonical generic sample digest in JIT"),
         507
     );
@@ -832,7 +838,7 @@ fn generic_collection_aot_accepts_vendor_graphics_after_expansion() {
     aot.upsert_file(
         "src/main.stasis",
         format!(
-            "{ENTRY}\nfunction generics_collections_run_and_digest(): i32 {{\n    if (main() != 0) {{ return -1; }}\n    return tick();\n}}\n"
+            "{ENTRY}\nfunction generics_collections_run_and_digest(): i32 {{\n    if (main() != 0) {{ return -1; }}\n    if (tick() != 0) {{ return -2; }}\n    return generics_collections_state_digest();\n}}\n"
         ),
     );
     aot.compile()
