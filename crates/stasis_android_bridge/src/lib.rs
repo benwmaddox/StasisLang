@@ -3013,33 +3013,24 @@ fn format_native_diagnostic_with_locations(
             serde_json::Value::String(resource.to_string()),
         );
     }
-    let mut envelope = serde_json::Map::new();
-    envelope.insert(
-        "schema".to_string(),
-        serde_json::Value::String("stasis.native_diagnostic.v1".to_string()),
-    );
-    envelope.insert("version".to_string(), serde_json::json!(1));
-    envelope.insert(
-        "stage".to_string(),
-        serde_json::Value::String(stage.to_string()),
-    );
-    envelope.insert(
-        "code".to_string(),
-        serde_json::Value::String(code.to_string()),
-    );
-    envelope.insert("context".to_string(), serde_json::Value::Object(context));
-    envelope.insert(
-        "detail".to_string(),
-        serde_json::Value::String(detail.to_string()),
-    );
-    envelope.insert("causes".to_string(), serde_json::json!(&cause_values));
-    if let Some(primary) = primary {
-        envelope.insert("primary".to_string(), primary);
+    let mut envelope = serde_json::json!({
+        "schema": "stasis.native_diagnostic.v1",
+        "version": 1,
+        "stage": stage,
+        "code": code,
+        "context": context,
+        "detail": detail,
+        "causes": &cause_values,
+    });
+    if let Some(object) = envelope.as_object_mut() {
+        if let Some(primary) = primary {
+            object.insert("primary".to_string(), primary);
+        }
+        if !related.is_empty() {
+            object.insert("related".to_string(), serde_json::json!(related));
+        }
     }
-    if !related.is_empty() {
-        envelope.insert("related".to_string(), serde_json::json!(related));
-    }
-    let envelope = serde_json::Value::Object(envelope).to_string();
+    let envelope = envelope.to_string();
     format!(
         "|diagnostic_schema=stasis.native_diagnostic.v1|diagnostic_version=1|diagnostic_stage={}|diagnostic_code={}|diagnostic_detail={}|diagnostic_causes={}|diagnostic_envelope={}",
         percent_encode(stage),
