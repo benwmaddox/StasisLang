@@ -161,6 +161,8 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "--test generics_collections_jit_aot_wasm",
             "--test generics_collections_aot_seam",
             "--test generics_collections_desktop",
+            "Run packaged generics desktop acceptance on Unix",
+            "Run packaged generics desktop acceptance on Windows",
             "Build matching packaged Web runtime",
             "Build matching packaged desktop runtime on Unix",
             "xvfb-run -a",
@@ -178,6 +180,11 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "name: generics-collections-${{ matrix.evidence }}-evidence",
             self.generics,
         )
+        windows_acceptance = self.generics.split(
+            "- name: Run packaged generics desktop acceptance on Windows", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: runner.os == 'Windows'", windows_acceptance)
+        self.assertIn("shell: pwsh", windows_acceptance)
 
     def test_runner_uses_cached_cargo_and_names_grouped_failures(self):
         cargo_tokens = (
