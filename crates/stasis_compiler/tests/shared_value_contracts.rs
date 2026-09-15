@@ -54,7 +54,7 @@ function main(): i32 {
 const FIXED_STORED_ARRAYS: Case = Case {
     name: "fixed stored arrays",
     source: r#"
-struct Scores { values: i32[2]; }
+struct Scores { values: i32[2]; label: string[24]; }
 global scores: Scores;
 
 function main(): i32 {

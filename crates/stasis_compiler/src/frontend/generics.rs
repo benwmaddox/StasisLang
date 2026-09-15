@@ -4094,7 +4094,13 @@ fn contains_view_type(type_name: &str) -> bool {
         return true;
     }
     if let Some((element, extent)) = split_array_suffix(trimmed) {
-        return extent.trim().is_empty() || contains_view_type(element);
+        if extent.trim().is_empty() {
+            return true;
+        }
+        if element.trim() == "string" {
+            return false;
+        }
+        return contains_view_type(element);
     }
     parse_type_application(trimmed)
         .ok()
