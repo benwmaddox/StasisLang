@@ -507,7 +507,13 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 workflow_name,
             )
 
-            self.assertIn('python3 - "${smoke_executable}" <<\'PY\'', unix_block, workflow_name)
+            self.assertIn('smoke_driver=(python3)', unix_block, workflow_name)
+            self.assertIn('smoke_driver=(xvfb-run -a python3)', unix_block, workflow_name)
+            self.assertIn(
+                '"${smoke_driver[@]}" - "${smoke_executable}" <<\'PY\'',
+                unix_block,
+                workflow_name,
+            )
             self.assertIn("process = subprocess.Popen([sys.argv[1]])", unix_block, workflow_name)
             self.assertIn("process.wait(timeout=5)", unix_block, workflow_name)
             self.assertIn("if return_code != 0:", unix_block, workflow_name)
@@ -519,6 +525,39 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 r"(?m)^\s+\./cli-smoke/build/ci_smoke\s*$",
                 workflow_name,
             )
+
+    def test_linux_release_smokes_install_virtual_display(self):
+        for workflow_name in (
+            ".github/workflows/nightly-release.yml",
+            ".github/workflows/bootstrap-artifacts.yml",
+        ):
+            workflow = (ROOT / workflow_name).read_text(encoding="utf-8")
+            install_start = workflow.index(
+                "      - name: Install SDL development packages (linux)"
+            )
+            next_step = workflow.index("\n      - name:", install_start + 1)
+            install_block = workflow[install_start:next_step]
+            self.assertRegex(install_block, r"\bxvfb\b", workflow_name)
+
+    def test_bootstrap_packaged_runner_uses_platform_path_and_bounded_smoke(self):
+        workflow = (ROOT / ".github/workflows/bootstrap-artifacts.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'package_executable="./cli-smoke/dist/ci_smoke-desktop/ci_smoke"',
+            workflow,
+        )
+        self.assertIn(
+            'package_executable="./cli-smoke/dist/ci_smoke-desktop/'
+            'ci_smoke.app/Contents/MacOS/ci_smoke"',
+            workflow,
+        )
+        self.assertIn(
+            'desktop_diagnostics="$("${smoke_driver[@]}" - "${package_executable}"',
+            workflow,
+        )
+        self.assertIn("process.communicate(timeout=5)", workflow)
+        self.assertIn("except subprocess.TimeoutExpired:", workflow)
 
     def test_windows_graphics_smoke_requires_monolithic_package_payload(self):
         for workflow_name in (

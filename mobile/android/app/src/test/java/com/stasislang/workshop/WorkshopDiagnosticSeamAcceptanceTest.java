@@ -6,6 +6,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import org.json.JSONObject;
 import org.junit.Test;
 
 public class WorkshopDiagnosticSeamAcceptanceTest {
@@ -53,5 +54,19 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
         assertThrows(IllegalStateException.class, () ->
                 WorkshopDiagnosticSeamAcceptance.renderConstructionSource(
                         "function later(): i32 { return 1; }\n"));
+    }
+
+    @Test public void logEvidenceKeepsStructuredProofWithoutUnboundedDisplayText()
+            throws Exception {
+        JSONObject evidence = new JSONObject()
+                .put("native", new JSONObject().put("detail", "specific detail"))
+                .put("ui", new JSONObject().put("detail", "specific detail"))
+                .put("displayed_text", "x".repeat(8000));
+        JSONObject bounded = WorkshopDiagnosticSeamAcceptance.boundedLogEvidence(
+                evidence, "specific detail");
+        assertFalse(bounded.has("displayed_text"));
+        assertEquals("specific detail", bounded.getString("displayed_detail"));
+        assertTrue(bounded.getBoolean("displayed_text_contains_detail"));
+        assertTrue(evidence.has("displayed_text"));
     }
 }
