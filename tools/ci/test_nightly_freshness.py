@@ -16,6 +16,7 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
     def test_independent_schedule_detects_stale_changed_main(self):
+        self.assertIn("name: Nightly Publication Freshness", self.freshness)
         self.assertIn('cron: "15 15 * * *"', self.freshness)
         self.assertIn("workflow_dispatch:", self.freshness)
         self.assertIn("git tag --merged HEAD --list 'nightly-*'", self.freshness)
@@ -23,6 +24,14 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         self.assertIn("stasis-nightly-win-x64.zip", self.freshness)
         self.assertIn("stasis-editor-release-win32-x64.zip", self.freshness)
         self.assertIn('git rev-list "${last_tag}..HEAD" --count', self.freshness)
+        self.assertIn(
+            "git log --format='%ct' \"${last_tag}..HEAD\" | tail -n1",
+            self.freshness,
+        )
+        self.assertNotIn(
+            "git log --reverse --format='%ct' \"${last_tag}..HEAD\" | head -n1",
+            self.freshness,
+        )
         self.assertIn("36 * 60 * 60", self.freshness)
         self.assertIn("::error::main has remained ahead", self.freshness)
 
