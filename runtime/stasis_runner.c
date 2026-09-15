@@ -2037,7 +2037,12 @@ int main(int argc, char **argv)
         {
             const char *start_fs = getenv("STASIS_START_FULLSCREEN");
             int want_fullscreen = (start_fs && strcmp(start_fs, "1") == 0) ? 1 : 0;
-            (void)init_window(640, 360, "Stasis");
+            if (!init_window(640, 360, "Stasis"))
+            {
+                fprintf(stderr, "error: packaged graphics runtime failed to initialize a window\n");
+                FreeLibrary(lib);
+                return 1;
+            }
             if (want_fullscreen && set_fullscreen)
             {
                 (void)set_fullscreen(1);
@@ -2819,7 +2824,12 @@ int main(int argc, char **argv)
         {
             const char *start_fs = getenv("STASIS_START_FULLSCREEN");
             int want_fullscreen = (start_fs && strcmp(start_fs, "1") == 0) ? 1 : 0;
-            (void)init_window(640, 360, "Stasis");
+            if (!init_window(640, 360, "Stasis"))
+            {
+                fprintf(stderr, "error: packaged graphics runtime failed to initialize a window\n");
+                dlclose(gfx_lib);
+                return 1;
+            }
             if (want_fullscreen && set_fullscreen)
             {
                 (void)set_fullscreen(1);

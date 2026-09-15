@@ -154,6 +154,10 @@ struct EngineBundleManifestHotRenderImageRow {
     backend_constraints: Option<String>,
 }
 
+fn is_zero_argument_manifest_function(row: &EngineBundleManifestFunctionRow, name: &str) -> bool {
+    row.name == name && row.parameter_count == 0
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifest {
     #[serde(default)]
@@ -3926,12 +3930,12 @@ fn package_engine_bundle_release(
     let tick_symbol = manifest
         .functions
         .iter()
-        .find(|row| row.name == "tick" && row.parameter_count == 0)
+        .find(|row| is_zero_argument_manifest_function(row, "tick"))
         .map(|row| row.symbol.clone());
     let render_symbol = manifest
         .functions
         .iter()
-        .find(|row| row.name == "render")
+        .find(|row| is_zero_argument_manifest_function(row, "render"))
         .map(|row| row.symbol.clone());
     let on_code_swap_symbol = manifest
         .functions
@@ -4309,6 +4313,24 @@ mod tests {
         assert_eq!(image.max_renders_per_render, Some(3));
         assert!(image.atlas_eligible);
         assert_eq!(image.backend_constraints.as_deref(), Some("desktop-gl"));
+    }
+
+    #[test]
+    fn packaged_frame_callbacks_require_zero_arguments() {
+        let manifest: EngineBundleManifest = serde_json::from_str(
+            r#"{"functions":[{"function_id":1,"symbol_id":"render-indexed","name":"render","symbol":"render_indexed","parameter_count":1},{"function_id":2,"symbol_id":"render-frame","name":"render","symbol":"render_frame","parameter_count":0}]}"#,
+        )
+        .expect("parse callback manifest");
+        let render = manifest
+            .functions
+            .iter()
+            .find(|row| is_zero_argument_manifest_function(row, "render"))
+            .expect("zero-argument render callback");
+        assert_eq!(render.symbol, "render_frame");
+        assert!(!is_zero_argument_manifest_function(
+            &manifest.functions[0],
+            "render"
+        ));
     }
 
     #[test]

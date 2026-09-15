@@ -20,6 +20,10 @@ STASIS_TEST_EXPORT int stasis_init_window(int width, int height, const char *tit
     (void)width;
     (void)height;
     (void)title;
+    const char *fail = getenv("STASIS_TEST_WINDOW_INIT_FAILURE");
+    if (fail && fail[0] == '1') {
+        return 0;
+    }
     return setenv("STASIS_TEST_WINDOW_READY", "1", 1) == 0;
 }
 

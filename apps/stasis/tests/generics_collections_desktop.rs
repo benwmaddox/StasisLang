@@ -95,7 +95,18 @@ fn finish_child(mut child: Child, description: &str, timeout: Duration) -> Compl
             #[cfg(not(windows))]
             child.kill().ok();
             child.wait().ok();
-            panic!("{description} exceeded {} seconds", timeout.as_secs());
+            let stdout = stdout_reader
+                .join()
+                .expect("join timed-out child stdout reader");
+            let stderr = stderr_reader
+                .join()
+                .expect("join timed-out child stderr reader");
+            panic!(
+                "{description} exceeded {} seconds: stdout={} stderr={}",
+                timeout.as_secs(),
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
         }
         thread::sleep(Duration::from_millis(25));
     };
@@ -314,7 +325,14 @@ fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
         .current_dir(&package)
         .env("STASIS_SCREENSHOT_ONCE", &screenshot)
         .env("STASIS_SCREENSHOT_FRAME", "2")
-        .env("STASIS_EXIT_AFTER_SCREENSHOT", "1");
+        .env("STASIS_EXIT_AFTER_SCREENSHOT", "1")
+        .env("STASIS_RECORDING_PRESENTATION", "1")
+        .env("STASIS_RECORDING_WIDTH", "640")
+        .env("STASIS_RECORDING_HEIGHT", "360")
+        .env("STASIS_RECORDING_FPS", "60")
+        .env("SDL_RENDER_DRIVER", "software")
+        .env("SDL_AUDIODRIVER", "dummy")
+        .env("STASIS_RUNNER_DIAG", "1");
     let launched = launch(
         launch_command,
         "packaged generics desktop runtime",

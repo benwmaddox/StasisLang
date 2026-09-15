@@ -22,3 +22,17 @@ execute_process(
 if(NOT RESULT EQUAL 0 OR NOT STDOUT MATCHES "PACKAGED_RUNNER_OK")
     message(FATAL_ERROR "packaged runner failed (${RESULT})\nstdout=${STDOUT}\nstderr=${STDERR}")
 endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env STASIS_TEST_WINDOW_INIT_FAILURE=1 "../package/game"
+    WORKING_DIRECTORY "${TEST_ROOT}/caller"
+    RESULT_VARIABLE INIT_FAILURE_RESULT
+    OUTPUT_VARIABLE INIT_FAILURE_STDOUT
+    ERROR_VARIABLE INIT_FAILURE_STDERR
+)
+if(INIT_FAILURE_RESULT EQUAL 0 OR
+   NOT INIT_FAILURE_STDERR MATCHES "packaged graphics runtime failed to initialize a window")
+    message(FATAL_ERROR
+        "packaged runner did not reject failed graphics initialization (${INIT_FAILURE_RESULT})\n"
+        "stdout=${INIT_FAILURE_STDOUT}\nstderr=${INIT_FAILURE_STDERR}")
+endif()
