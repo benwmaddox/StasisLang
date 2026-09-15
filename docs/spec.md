@@ -175,7 +175,11 @@ ambiguous receiver bindings are compile-time errors.
 
 Each specialization has nominal identity based on its defining declaration and
 canonical ordered arguments. Equal evaluated value expressions share identity;
-different arguments do not. Generic structs use the existing concrete layout,
+different arguments do not. Generic parameter names are alpha-renamed by their
+ordered declaration slots, so renaming a parameter and its receiver-bound uses
+does not change concrete specialization identity. Equivalent qualified generic-
+or ordinary-struct type spellings resolve to the same defining declaration
+before identity is computed. Generic structs use the existing concrete layout,
 alignment, fixed-array header, SoA field-path, backing, and state-inspection
 rules. Generic syntax never adds allocation, resizing, runtime array length, or
 implicit deep copies. Struct and element parameters remain caller-backed views.

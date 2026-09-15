@@ -1,14 +1,20 @@
 global live_edit_state: i32;
 
+struct LiveEditPolicy<N: i32> {
+    marker: i32;
+}
+
+global live_edit_policy: LiveEditPolicy<7>;
+
 function reset_live_edit_state(): void {
     live_edit_state = 0;
 }
 
-function live_edit_helper(value: i32): i32 {
-    return value + 7;
+function live_edit_helper(self: LiveEditPolicy<N>, value: i32): i32 {
+    return value + N;
 }
 
 function live_edit_tick(): i32 {
     live_edit_state = live_edit_state + 1;
-    return live_edit_helper(live_edit_state);
+    return live_edit_policy.live_edit_helper(live_edit_state);
 }

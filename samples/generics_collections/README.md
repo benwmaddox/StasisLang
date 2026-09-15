@@ -69,10 +69,12 @@ receiver-style call paths; function calls never carry explicit generic
 arguments.
 
 `live_edit_helper.stasis` is intentionally tiny: `live_edit_tick` increments
-`live_edit_state` before calling the helper. During a live session, change only
-the helper return expression and re-run the live-edit command; the next result
-changes while the incremented `live_edit_state` remains. The generic collection
-layouts are not changed by that helper edit.
+`live_edit_state` before calling the receiver-bound specialization for
+`LiveEditPolicy<7>`. During a live session, change only the generic helper
+return expression and re-run the live-edit command; every affected concrete
+specialization and caller is rebuilt, the next result changes, and the
+incremented `live_edit_state` remains. The generic collection layouts are not
+changed by that helper edit, so unrelated artifacts and state remain reusable.
 
 The intentionally failing sources are under `negative/`, outside the normal
 project `tests/` directory. They are compiled by the focused Rust harness and
