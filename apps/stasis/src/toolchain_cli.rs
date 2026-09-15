@@ -14,8 +14,10 @@ use stasis::{
     resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
     run_play_in_process_with_replay, run_play_in_process_with_window_title,
     run_project_tests_bounded_with_receipt, run_self_host_aot_cli_with_desktop_network,
-    run_self_host_aot_cli_with_options, sign_artifacts, signing_status, verify_artifacts,
-    DesktopNetworkMode, LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
+    run_self_host_aot_cli_with_desktop_network_and_artifact_root,
+    run_self_host_aot_cli_with_options, run_self_host_aot_cli_with_options_and_artifact_root,
+    sign_artifacts, signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig,
+    PlayReplayConfig, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
@@ -4147,7 +4149,7 @@ fn build_workspace(
     mode: BuildMode,
     output: Option<&Path>,
 ) -> Result<CommandResult, String> {
-    build_workspace_with_desktop_network(workspace, mode, output, None)
+    build_workspace_with_desktop_network(workspace, mode, output, None, None)
 }
 
 struct DesktopNetworkBuild<'a> {
@@ -4161,6 +4163,7 @@ fn build_workspace_with_desktop_network(
     mode: BuildMode,
     output: Option<&Path>,
     desktop_network: Option<DesktopNetworkBuild<'_>>,
+    aot_artifact_root: Option<&Path>,
 ) -> Result<CommandResult, String> {
     match mode {
         BuildMode::Dev => {
@@ -4229,16 +4232,38 @@ fn build_workspace_with_desktop_network(
             }
             let entry = Path::new(&workspace.manifest.entry);
             let summary = if let Some(network) = desktop_network.as_ref() {
-                run_self_host_aot_cli_with_desktop_network(
-                    &workspace.root,
-                    &output,
-                    entry,
-                    network.library,
-                    network.include_dir,
-                    network.mode,
-                )?
+                if let Some(artifact_root) = aot_artifact_root {
+                    run_self_host_aot_cli_with_desktop_network_and_artifact_root(
+                        &workspace.root,
+                        &output,
+                        entry,
+                        network.library,
+                        network.include_dir,
+                        network.mode,
+                        artifact_root,
+                    )?
+                } else {
+                    run_self_host_aot_cli_with_desktop_network(
+                        &workspace.root,
+                        &output,
+                        entry,
+                        network.library,
+                        network.include_dir,
+                        network.mode,
+                    )?
+                }
             } else {
-                run_self_host_aot_cli_with_options(&workspace.root, &output, None, Some(entry))?
+                if let Some(artifact_root) = aot_artifact_root {
+                    run_self_host_aot_cli_with_options_and_artifact_root(
+                        &workspace.root,
+                        &output,
+                        None,
+                        Some(entry),
+                        artifact_root,
+                    )?
+                } else {
+                    run_self_host_aot_cli_with_options(&workspace.root, &output, None, Some(entry))?
+                }
             };
             let build_snapshot = summary.program_snapshot.as_ref().ok_or_else(|| {
                 "release build did not publish its authoritative ProgramSnapshot".to_string()
@@ -4486,6 +4511,61 @@ fn validate_network_client_target(
     ))
 }
 
+const DESKTOP_PACKAGE_AOT_ARTIFACT_PREFIX: &str = "stasis-pkg-aot";
+
+struct DesktopPackageAotArtifactRoot {
+    path: Option<PathBuf>,
+}
+
+impl DesktopPackageAotArtifactRoot {
+    fn new() -> Result<Self, String> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let path = env::temp_dir().join(format!(
+            "{DESKTOP_PACKAGE_AOT_ARTIFACT_PREFIX}-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).map_err(|error| {
+            format!(
+                "failed to create temporary desktop package AOT artifact root {}: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Self { path: Some(path) })
+    }
+
+    fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("desktop package AOT artifact root already cleaned")
+    }
+
+    fn cleanup(&mut self) -> Result<(), String> {
+        let Some(path) = self.path.take() else {
+            return Ok(());
+        };
+        match fs::remove_dir_all(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                self.path = Some(path.clone());
+                Err(format!(
+                    "failed to remove temporary desktop package AOT artifact root {}: {error}",
+                    path.display()
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for DesktopPackageAotArtifactRoot {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
 fn package_workspace(
     workspace: &Workspace,
     target: PackageTarget,
@@ -4566,6 +4646,7 @@ fn package_workspace(
         .capabilities
         .as_ref()
         .is_some_and(|capabilities| capabilities.network_client);
+    let mut aot_artifact_root = DesktopPackageAotArtifactRoot::new()?;
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let executable_file_name = executable_name(&workspace.manifest.name);
@@ -4613,6 +4694,7 @@ fn package_workspace(
                         DesktopNetworkMode::Client
                     },
                 }),
+            Some(aot_artifact_root.path()),
         )?;
         let network_target = package_assembly_root.join(".network-rust-target");
         if network_target.exists() {
@@ -4682,7 +4764,12 @@ fn package_workspace(
         write_json_file(&payload_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
         Ok(())
     })();
+    let cleanup = aot_artifact_root.cleanup();
     if let Err(error) = assembled {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(error);
+    }
+    if let Err(error) = cleanup {
         let _ = fs::remove_dir_all(&staging_root);
         return Err(error);
     }
@@ -14491,6 +14578,50 @@ mod tests {
                     "message": "generic template declared here",
                 }],
             })
+        );
+    }
+
+    #[test]
+    fn desktop_package_aot_artifact_root_is_temp_scoped_and_cleans_up() {
+        let artifact_path = {
+            let mut artifact_root = DesktopPackageAotArtifactRoot::new()
+                .expect("create desktop package AOT artifact root");
+            let artifact_path = artifact_root.path().to_path_buf();
+            let temp_root = env::temp_dir();
+            assert_eq!(
+                artifact_path.parent(),
+                Some(temp_root.as_path()),
+                "package AOT artifacts must live directly below the OS temp directory"
+            );
+            assert!(
+                artifact_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(DESKTOP_PACKAGE_AOT_ARTIFACT_PREFIX)),
+                "package AOT artifact root must have a recognizable transaction-scoped name"
+            );
+            fs::write(artifact_path.join("marker"), "temporary").expect("write marker");
+            artifact_root
+                .cleanup()
+                .expect("clean package AOT artifacts");
+            assert!(!artifact_path.exists());
+            artifact_path
+        };
+        assert!(
+            !artifact_path.exists(),
+            "the package AOT artifact root must stay removed after its guard is dropped"
+        );
+
+        let dropped_path = {
+            let artifact_root = DesktopPackageAotArtifactRoot::new()
+                .expect("create second desktop package AOT artifact root");
+            let dropped_path = artifact_root.path().to_path_buf();
+            fs::write(dropped_path.join("marker"), "temporary").expect("write drop marker");
+            dropped_path
+        };
+        assert!(
+            !dropped_path.exists(),
+            "failed package paths must be cleaned when the guard unwinds"
         );
     }
 

@@ -281,7 +281,7 @@ jobs:
           if (-not (Test-Path "cli-smoke/dist/ios/ios/StasisMobile.xcodeproj/project.pbxproj")) { throw "iOS mobile shell missing" }
           Pop-Location
           if ("${{ github.event_name }}" -ne "workflow_dispatch") {
-            python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop/app"
+            python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop/app" --expect-desktop-package
             python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/android" --expect-runtime-sources
             python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ios" --expect-runtime-sources
           }
@@ -361,7 +361,7 @@ jobs:
           ./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios "${package_flag[@]}"
           popd
           if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-            python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop"
+            python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop" --expect-desktop-package
             python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/android" --expect-runtime-sources
             python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ios" --expect-runtime-sources
           fi

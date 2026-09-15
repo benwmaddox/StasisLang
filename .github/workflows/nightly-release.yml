@@ -500,7 +500,7 @@ jobs:
             }
             Pop-Location
           }
-          python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ci_smoke-desktop/app"
+          python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ci_smoke-desktop/app" --expect-desktop-package
           python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/android" --expect-runtime-sources
           python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ios" --expect-runtime-sources
           python tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-android" --expect-runtime-sources
@@ -595,7 +595,7 @@ jobs:
           ./bin/stasis --workspace cli-smoke package --target desktop --out dist/network-desktop
           test -f cli-smoke/dist/network-desktop/network_guest.bundle
           test -f cli-smoke/dist/network-desktop/network_guest.bundle.json
-          python3 "${repo_root}/tools/verify_package_provenance.py" --release-root . --package-root cli-smoke/dist/network-desktop
+          python3 "${repo_root}/tools/verify_package_provenance.py" --release-root . --package-root cli-smoke/dist/network-desktop --expect-desktop-package
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             python3 "${repo_root}/tools/ci/test_linux_desktop_network_package.py" --executable cli-smoke/dist/network-desktop/ci_smoke --result cli-smoke/network-desktop-result.json
           fi
@@ -619,7 +619,7 @@ jobs:
           trap - EXIT
           rmdir "${network_source_backup}"
           popd
-          python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ci_smoke-desktop"
+          python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ci_smoke-desktop" --expect-desktop-package
           python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/android" --expect-runtime-sources
           python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/ios" --expect-runtime-sources
           python3 tools/verify_package_provenance.py --release-root "dist/${{ matrix.archive }}" --package-root "dist/${{ matrix.archive }}/cli-smoke/dist/network-android" --expect-runtime-sources

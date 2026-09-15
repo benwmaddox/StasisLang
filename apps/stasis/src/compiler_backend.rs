@@ -433,6 +433,7 @@ pub struct SelfHostedAotCliOptions {
     summary_file_path: Option<PathBuf>,
     entry_file: Option<PathBuf>,
     desktop_network: Option<DesktopNetworkLink>,
+    artifact_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -463,7 +464,13 @@ impl SelfHostedAotCliOptions {
             summary_file_path,
             entry_file,
             desktop_network: None,
+            artifact_root: None,
         }
+    }
+
+    fn with_artifact_root(mut self, artifact_root: PathBuf) -> Self {
+        self.artifact_root = Some(artifact_root);
+        self
     }
 
     fn with_desktop_network(
@@ -4352,6 +4359,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn self_host_aot_artifact_root_override_is_package_scoped() {
+        let project_dir = Path::new(r"C:\captured\.source-snapshot");
+        let output_exe = project_dir.join(".package-output/game.exe");
+        let normal = resolve_self_host_aot_artifact_root(project_dir, &output_exe, None);
+        assert_eq!(
+            normal,
+            project_dir.join(".stasis_cache/aot_cli/game"),
+            "ordinary AOT builds retain their project cache location"
+        );
+
+        let temporary = PathBuf::from(r"C:\Temp\stasis-pkg-aot-123-456");
+        let overridden =
+            resolve_self_host_aot_artifact_root(project_dir, &output_exe, Some(&temporary));
+        assert_eq!(
+            overridden, temporary,
+            "package AOT builds must use the explicit short-lived artifact root"
+        );
+        assert!(
+            !overridden.starts_with(project_dir),
+            "the package override must not be nested below the captured source snapshot"
+        );
+    }
+
+    #[test]
     fn desktop_monolith_network_configuration_is_explicit_and_optional() {
         let base = monolith_configure_arguments(
             Path::new("runtime"),
@@ -7997,20 +8028,38 @@ pub fn run_self_host_aot_cli_with_options(
     )
 }
 
-fn run_self_host_aot_cli_with_cli_options(
-    project_dir: &Path,
-    output_exe: &Path,
-    options: SelfHostedAotCliOptions,
-) -> Result<SelfHostedAotCliSummary, String> {
+fn default_self_host_aot_artifact_root(project_dir: &Path, output_exe: &Path) -> PathBuf {
     let output_key = output_exe
         .file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
         .unwrap_or("aot_output");
-    let artifact_root = project_dir
+    project_dir
         .join(".stasis_cache")
         .join("aot_cli")
-        .join(output_key);
+        .join(output_key)
+}
+
+fn resolve_self_host_aot_artifact_root(
+    project_dir: &Path,
+    output_exe: &Path,
+    override_root: Option<&Path>,
+) -> PathBuf {
+    override_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_self_host_aot_artifact_root(project_dir, output_exe))
+}
+
+fn run_self_host_aot_cli_with_cli_options(
+    project_dir: &Path,
+    output_exe: &Path,
+    options: SelfHostedAotCliOptions,
+) -> Result<SelfHostedAotCliSummary, String> {
+    let artifact_root = resolve_self_host_aot_artifact_root(
+        project_dir,
+        output_exe,
+        options.artifact_root.as_deref(),
+    );
     let mut backend = IncrementalCompilerBackend::new_self_host_aot_cli(artifact_root);
     let mut summary = run_self_host_aot_cli_with_backend_and_options(
         &mut backend,
@@ -8020,6 +8069,24 @@ fn run_self_host_aot_cli_with_cli_options(
     )?;
     summary.program_snapshot = backend.last_program_snapshot.clone();
     Ok(summary)
+}
+
+pub fn run_self_host_aot_cli_with_options_and_artifact_root(
+    project_dir: &Path,
+    output_exe: &Path,
+    summary_file_path: Option<&Path>,
+    entry_file: Option<&Path>,
+    artifact_root: &Path,
+) -> Result<SelfHostedAotCliSummary, String> {
+    run_self_host_aot_cli_with_cli_options(
+        project_dir,
+        output_exe,
+        SelfHostedAotCliOptions::new(
+            summary_file_path.map(PathBuf::from),
+            entry_file.map(PathBuf::from),
+        )
+        .with_artifact_root(artifact_root.to_path_buf()),
+    )
 }
 
 pub fn run_self_host_aot_cli_with_desktop_network(
@@ -8032,6 +8099,21 @@ pub fn run_self_host_aot_cli_with_desktop_network(
 ) -> Result<SelfHostedAotCliSummary, String> {
     let options = SelfHostedAotCliOptions::new(None, Some(entry_file.to_path_buf()))
         .with_desktop_network(library.to_path_buf(), include_dir.to_path_buf(), mode);
+    run_self_host_aot_cli_with_cli_options(project_dir, output_exe, options)
+}
+
+pub fn run_self_host_aot_cli_with_desktop_network_and_artifact_root(
+    project_dir: &Path,
+    output_exe: &Path,
+    entry_file: &Path,
+    library: &Path,
+    include_dir: &Path,
+    mode: DesktopNetworkMode,
+    artifact_root: &Path,
+) -> Result<SelfHostedAotCliSummary, String> {
+    let options = SelfHostedAotCliOptions::new(None, Some(entry_file.to_path_buf()))
+        .with_desktop_network(library.to_path_buf(), include_dir.to_path_buf(), mode)
+        .with_artifact_root(artifact_root.to_path_buf());
     run_self_host_aot_cli_with_cli_options(project_dir, output_exe, options)
 }
 
