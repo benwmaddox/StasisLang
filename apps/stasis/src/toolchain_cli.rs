@@ -4799,6 +4799,27 @@ fn normalize_web_package_source_path(path: &str) -> String {
     normalized.to_string_lossy().replace('\\', "/")
 }
 
+fn package_input_directory_provenance(
+    workspace: &Workspace,
+    relative: &Path,
+) -> Result<Value, String> {
+    validate_relative_path("desktop package input", relative)?;
+    let directory = workspace.root.join(relative);
+    if !directory.exists() {
+        return Ok(Value::Null);
+    }
+    if !directory.is_dir() {
+        return Err(format!(
+            "desktop package input is not a directory: {}",
+            directory.display()
+        ));
+    }
+    Ok(json!({
+        "path": normalize_web_package_source_path(&relative.to_string_lossy()),
+        "sha256": directory_sha256(&directory)?,
+    }))
+}
+
 fn package_project_provenance(
     workspace: &Workspace,
     entry: &str,
@@ -4843,6 +4864,18 @@ fn package_project_provenance(
             })
         })
         .transpose()?;
+    let entry_path = Path::new(entry);
+    validate_relative_path("desktop package entry", entry_path)?;
+    let entry_stem = entry_path.file_stem().ok_or_else(|| {
+        format!(
+            "desktop package entry has no file name: {}",
+            entry_path.display()
+        )
+    })?;
+    let entry_support = entry_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(entry_stem);
     Ok(json!({
         "manifest": {
             "path": MANIFEST_NAME,
@@ -4854,6 +4887,11 @@ fn package_project_provenance(
         },
         "reachable_sources": reachable_sources,
         "vendor": vendor,
+        "captured_inputs": {
+            "assets": package_input_directory_provenance(workspace, Path::new("assets"))?,
+            "data": package_input_directory_provenance(workspace, Path::new("data"))?,
+            "entry_support": package_input_directory_provenance(workspace, &entry_support)?,
+        },
     }))
 }
 
@@ -4934,12 +4972,19 @@ fn capture_desktop_package_workspace(
             &snapshot_root.join(directory),
         )?;
     }
+    stasis::rewrite_packaged_json_asset_paths(&snapshot_root.join("data"), "data")?;
     for entry in entries {
         let entry = Path::new(entry);
         validate_relative_path("desktop package entry", entry)?;
         let package_dir_name = entry.file_stem().ok_or_else(|| {
             format!(
                 "desktop package entry has no file name: {}",
+                entry.display()
+            )
+        })?;
+        let package_dir_name = package_dir_name.to_str().ok_or_else(|| {
+            format!(
+                "desktop package entry has a non-UTF-8 file name: {}",
                 entry.display()
             )
         })?;
@@ -4950,6 +4995,10 @@ fn capture_desktop_package_workspace(
         copy_dir_if_exists(
             &workspace.root.join(&support_relative),
             &snapshot_root.join(&support_relative),
+        )?;
+        stasis::rewrite_packaged_json_asset_paths(
+            &snapshot_root.join(&support_relative),
+            package_dir_name,
         )?;
     }
     for (relative, source) in sources {
@@ -9698,6 +9747,67 @@ mod tests {
     }
 
     #[test]
+    fn desktop_package_project_provenance_hashes_non_source_inputs() {
+        let root = temp_dir("desktop_package_non_source_provenance");
+        create_project(
+            root.clone(),
+            "desktop_package_non_source_provenance".to_string(),
+        )
+        .expect("create project");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        fs::create_dir_all(root.join("data")).expect("create data");
+        fs::create_dir_all(root.join("src/main")).expect("create entry support");
+        fs::write(root.join("assets/marker.png"), b"asset-a").expect("write asset");
+        fs::write(root.join("data/config.json"), b"data-a").expect("write data");
+        fs::write(root.join("src/main/config.json"), b"support-a").expect("write entry support");
+        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
+        let before = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("capture non-source provenance");
+
+        fs::write(root.join("assets/marker.png"), b"asset-b").expect("mutate asset");
+        let after_asset = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("recapture asset provenance");
+        assert_ne!(
+            before["captured_inputs"]["assets"],
+            after_asset["captured_inputs"]["assets"]
+        );
+
+        fs::write(root.join("data/config.json"), b"data-b").expect("mutate data");
+        let after_data = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("recapture data provenance");
+        assert_ne!(
+            after_asset["captured_inputs"]["data"],
+            after_data["captured_inputs"]["data"]
+        );
+
+        fs::write(root.join("src/main/config.json"), b"support-b").expect("mutate entry support");
+        let after_support = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("recapture entry-support provenance");
+        assert_ne!(
+            after_data["captured_inputs"]["entry_support"],
+            after_support["captured_inputs"]["entry_support"]
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
     fn desktop_package_workspace_snapshot_isolated_from_original_source_mutation() {
         let root = temp_dir("desktop_package_workspace_snapshot");
         create_project(
@@ -9715,9 +9825,19 @@ mod tests {
             "function main(): i32 { return 42; }\n",
         )
         .expect("write guest entry");
+        fs::create_dir_all(root.join("external")).expect("create external asset directory");
+        let external_asset = root.join("external/source.png");
+        fs::write(&external_asset, b"captured-asset").expect("write external asset");
         fs::create_dir_all(root.join("src/main")).expect("create entry support directory");
-        fs::write(root.join("src/main/config.json"), "{\"value\":40}\n")
-            .expect("write entry support data");
+        fs::write(
+            root.join("src/main/config.json"),
+            serde_json::to_vec(&json!({
+                "value": 40,
+                "asset": display_path(&external_asset),
+            }))
+            .expect("serialize entry support data"),
+        )
+        .expect("write entry support data");
         fs::create_dir_all(root.join("data")).expect("create project data");
         fs::write(root.join("data/package.txt"), "captured\n").expect("write project data");
         let mut manifest: ProjectManifest = serde_json::from_slice(
@@ -9756,6 +9876,7 @@ mod tests {
         fs::write(root.join("data/package.txt"), "mutated\n").expect("mutate original data");
         fs::write(root.join("src/main/config.json"), "{\"value\":41}\n")
             .expect("mutate original entry support data");
+        fs::write(&external_asset, b"mutated-asset").expect("mutate original external asset");
 
         assert_eq!(
             desktop_package_project_provenance(&snapshot, &manifest_bytes)
@@ -9767,10 +9888,21 @@ mod tests {
             fs::read_to_string(snapshot.root.join("data/package.txt")).expect("read captured data"),
             "captured\n"
         );
-        assert_eq!(
-            fs::read_to_string(snapshot.root.join("src/main/config.json"))
+        let captured_support: Value = serde_json::from_slice(
+            &fs::read(snapshot.root.join("src/main/config.json"))
                 .expect("read captured entry support data"),
-            "{\"value\":40}\n"
+        )
+        .expect("parse captured entry support data");
+        assert_eq!(captured_support["value"], 40);
+        let captured_asset = captured_support["asset"]
+            .as_str()
+            .expect("captured package-relative asset path");
+        assert!(captured_asset.starts_with("main/assets/external/"));
+        assert!(captured_asset.ends_with("-source.png"));
+        assert_eq!(
+            fs::read(snapshot.root.join("src").join(captured_asset))
+                .expect("read captured absolute asset"),
+            b"captured-asset"
         );
         let jit = compile_workspace_jit(&snapshot).expect("compile captured workspace");
         assert_eq!(

@@ -118,6 +118,7 @@ struct EngineBundleManifestFunctionRow {
     symbol: String,
     #[serde(default)]
     parameter_count: usize,
+    return_type: i32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -160,22 +161,56 @@ fn is_zero_argument_manifest_function(row: &EngineBundleManifestFunctionRow, nam
 
 fn packaged_render_alias(
     manifest: &EngineBundleManifest,
-    target_symbol: &str,
-) -> Option<PackagedRenderAlias> {
-    let reset_symbol = manifest
-        .functions
-        .iter()
-        .find(|row| is_zero_argument_manifest_function(row, "gfx_cmd_construction_reset"))?
-        .symbol
-        .clone();
-    let finish_symbol = manifest
-        .functions
-        .iter()
-        .find(|row| row.name == "gfx_cmd_construction_finish" && row.parameter_count == 1)?
-        .symbol
-        .clone();
-    Some(PackagedRenderAlias {
-        target_symbol: target_symbol.to_string(),
+    render: &EngineBundleManifestFunctionRow,
+) -> Result<PackagedRenderAlias, String> {
+    if !matches!(render.return_type, 0 | 1) {
+        return Err(format!(
+            "engine bundle render callback must return void or i32, found type id {}",
+            render.return_type
+        ));
+    }
+    let (reset_symbol, finish_symbol) = match manifest.render_construction_lifecycle_version {
+        0 => (None, None),
+        1 => {
+            let reset = manifest
+                .functions
+                .iter()
+                .find(|row| row.name == "gfx_cmd_construction_reset")
+                .ok_or_else(|| {
+                    "engine bundle render lifecycle is missing gfx_cmd_construction_reset"
+                        .to_string()
+                })?;
+            if reset.parameter_count != 0 || reset.return_type != 0 {
+                return Err(
+                    "engine bundle gfx_cmd_construction_reset must have signature void()"
+                        .to_string(),
+                );
+            }
+            let finish = manifest
+                .functions
+                .iter()
+                .find(|row| row.name == "gfx_cmd_construction_finish")
+                .ok_or_else(|| {
+                    "engine bundle render lifecycle is missing gfx_cmd_construction_finish"
+                        .to_string()
+                })?;
+            if finish.parameter_count != 1 || finish.return_type != 1 {
+                return Err(
+                    "engine bundle gfx_cmd_construction_finish must have signature i32(i32)"
+                        .to_string(),
+                );
+            }
+            (Some(reset.symbol.clone()), Some(finish.symbol.clone()))
+        }
+        version => {
+            return Err(format!(
+                "unsupported engine bundle render construction lifecycle version {version}"
+            ))
+        }
+    };
+    Ok(PackagedRenderAlias {
+        target_symbol: render.symbol.clone(),
+        returns_i32: render.return_type == 1,
         reset_symbol,
         finish_symbol,
     })
@@ -185,6 +220,8 @@ fn packaged_render_alias(
 struct EngineBundleManifest {
     #[serde(default)]
     optimization_profile: Option<String>,
+    #[serde(default)]
+    render_construction_lifecycle_version: u32,
     functions: Vec<EngineBundleManifestFunctionRow>,
     #[serde(default)]
     string_literals: Option<Vec<EngineBundleManifestStringLiteralRow>>,
@@ -330,8 +367,9 @@ struct PackagedFunctionAlias {
 #[derive(Debug, Clone)]
 struct PackagedRenderAlias {
     target_symbol: String,
-    reset_symbol: String,
-    finish_symbol: String,
+    returns_i32: bool,
+    reset_symbol: Option<String>,
+    finish_symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2441,17 +2479,23 @@ fn copy_json_referenced_absolute_assets(
         }
         serde_json::Value::String(text) => {
             let source = PathBuf::from(text.as_str());
-            if !source.is_absolute() || !source.exists() || !is_bundleable_asset_extension(&source)
-            {
+            if !source.is_absolute() || !is_bundleable_asset_extension(&source) {
                 return Ok(false);
             }
+            if !source.is_file() {
+                return Err(format!(
+                    "referenced absolute package asset is unavailable: {}",
+                    source.display()
+                ));
+            }
+            let source = source.canonicalize().unwrap_or(source);
 
             if let Some(existing) = copied_assets.get(&source) {
                 *text = existing.clone();
                 return Ok(true);
             }
 
-            let asset_dir = staged_entry_dir.join("assets");
+            let asset_dir = staged_entry_dir.join("assets").join("external");
             std::fs::create_dir_all(&asset_dir).map_err(|error| {
                 format!(
                     "failed to create asset directory {}: {error}",
@@ -2463,34 +2507,20 @@ fn copy_json_referenced_absolute_assets(
                 .file_name()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| format!("invalid asset file name {}", source.display()))?;
-            let mut destination = asset_dir.join(file_name);
-            if destination.exists() {
-                let stem = source
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("asset");
-                let ext = source
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("");
-                let mut counter: usize = 1;
-                while destination.exists() {
-                    let candidate = if ext.is_empty() {
-                        format!("{stem}_{counter}")
-                    } else {
-                        format!("{stem}_{counter}.{ext}")
-                    };
-                    destination = asset_dir.join(candidate);
-                    counter += 1;
-                }
+            let bytes = std::fs::read(&source)
+                .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+            let digest = format!("{:x}", Sha256::digest(&bytes));
+            let destination = asset_dir.join(format!("{digest}-{file_name}"));
+            if !destination.exists() {
+                std::fs::write(&destination, &bytes).map_err(|error| {
+                    format!("failed to write {}: {error}", destination.display())
+                })?;
             }
-
-            copy_file_creating_parent(&source, &destination)?;
             let rel_name = destination
                 .file_name()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| format!("invalid packaged asset path {}", destination.display()))?;
-            let rel_path = format!("{package_rel_root}/assets/{rel_name}");
+            let rel_path = format!("{package_rel_root}/assets/external/{rel_name}");
             copied_assets.insert(source, rel_path.clone());
             *text = rel_path;
             Ok(true)
@@ -2499,7 +2529,7 @@ fn copy_json_referenced_absolute_assets(
     }
 }
 
-fn rewrite_packaged_json_asset_paths(
+pub fn rewrite_packaged_json_asset_paths(
     staged_entry_dir: &Path,
     package_rel_root: &str,
 ) -> Result<(), String> {
@@ -2508,22 +2538,27 @@ fn rewrite_packaged_json_asset_paths(
         staged_entry_dir: &Path,
         package_rel_root: &str,
         copied_assets: &mut BTreeMap<PathBuf, String>,
-    ) -> Result<(), String> {
-        let entries = std::fs::read_dir(dir)
+    ) -> Result<bool, String> {
+        let mut entries = std::fs::read_dir(dir)
             .map_err(|error| format!("failed to read directory {}: {error}", dir.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|error| {
+        let mut entries = entries
+            .by_ref()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
                 format!(
                     "failed to read directory entry in {}: {error}",
                     dir.display()
                 )
             })?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut changed = false;
+        for entry in entries {
             let path = entry.path();
             let file_type = entry.file_type().map_err(|error| {
                 format!("failed to read file type for {}: {error}", path.display())
             })?;
             if file_type.is_dir() {
-                walk(&path, staged_entry_dir, package_rel_root, copied_assets)?;
+                changed |= walk(&path, staged_entry_dir, package_rel_root, copied_assets)?;
                 continue;
             }
             let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
@@ -2544,23 +2579,24 @@ fn rewrite_packaged_json_asset_paths(
                 package_rel_root,
                 copied_assets,
             )? {
+                changed = true;
                 let next = serde_json::to_string_pretty(&value)
                     .map_err(|error| format!("failed to serialize {}: {error}", path.display()))?;
                 std::fs::write(&path, next)
                     .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
             }
         }
-        Ok(())
+        Ok(changed)
     }
 
     let mut copied_assets = BTreeMap::new();
     if staged_entry_dir.exists() {
-        walk(
+        while walk(
             staged_entry_dir,
             staged_entry_dir,
             package_rel_root,
             &mut copied_assets,
-        )?;
+        )? {}
     }
     Ok(())
 }
@@ -3288,12 +3324,34 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
         }
     }
     if let Some(render) = render_alias {
-        source.push_str(&format!(
-            "STASIS_EXPORT int32_t render(void) {{ ((void (*)(void)){reset})(); int32_t result = ((int32_t (*)(void)){target})(); return ((int32_t (*)(int32_t)){finish})(result); }}\n",
-            reset = render.reset_symbol,
-            target = render.target_symbol,
-            finish = render.finish_symbol,
-        ));
+        match (
+            render.returns_i32,
+            render.reset_symbol.as_deref(),
+            render.finish_symbol.as_deref(),
+        ) {
+            (true, Some(reset), Some(finish)) => source.push_str(&format!(
+                "STASIS_EXPORT int32_t render(void) {{ ((void (*)(void)){reset})(); int32_t result = ((int32_t (*)(void)){target})(); return ((int32_t (*)(int32_t)){finish})(result); }}\n",
+                target = render.target_symbol,
+            )),
+            (false, Some(reset), Some(finish)) => source.push_str(&format!(
+                "STASIS_EXPORT int32_t render(void) {{ ((void (*)(void)){reset})(); ((void (*)(void)){target})(); return ((int32_t (*)(int32_t)){finish})(0); }}\n",
+                target = render.target_symbol,
+            )),
+            (true, None, None) => source.push_str(&format!(
+                "STASIS_EXPORT int32_t render(void) {{ return ((int32_t (*)(void)){target})(); }}\n",
+                target = render.target_symbol,
+            )),
+            (false, None, None) => source.push_str(&format!(
+                "STASIS_EXPORT int32_t render(void) {{ ((void (*)(void)){target})(); return 0; }}\n",
+                target = render.target_symbol,
+            )),
+            _ => {
+                return Err(
+                    "packaged render construction lifecycle requires both reset and finish helpers"
+                        .to_string(),
+                )
+            }
+        }
     }
     // Keep the Android ABI surface fixed while the host shell/input event mapping lands separately.
     if target.is_android() {
@@ -3973,14 +4031,13 @@ fn package_engine_bundle_release(
         .iter()
         .find(|row| is_zero_argument_manifest_function(row, "tick"))
         .map(|row| row.symbol.clone());
-    let render_symbol = manifest
+    let render_row = manifest
         .functions
         .iter()
-        .find(|row| is_zero_argument_manifest_function(row, "render"))
-        .map(|row| row.symbol.clone());
-    let render_alias = render_symbol
-        .as_ref()
-        .and_then(|target_symbol| packaged_render_alias(&manifest, target_symbol));
+        .find(|row| is_zero_argument_manifest_function(row, "render"));
+    let render_alias = render_row
+        .map(|render| packaged_render_alias(&manifest, render))
+        .transpose()?;
     let on_code_swap_symbol = manifest
         .functions
         .iter()
@@ -4037,15 +4094,6 @@ fn package_engine_bundle_release(
             returns_i32: true,
         });
     }
-    if render_alias.is_none() {
-        if let Some(symbol) = render_symbol.as_ref() {
-            function_aliases.push(PackagedFunctionAlias {
-                alias: "render",
-                target_symbol: symbol.clone(),
-                returns_i32: true,
-            });
-        }
-    }
     if let Some(symbol) = on_code_swap_symbol.as_ref() {
         function_aliases.push(PackagedFunctionAlias {
             alias: "on_code_swap",
@@ -4062,8 +4110,8 @@ fn package_engine_bundle_release(
         export_symbols.insert(symbol.clone());
         export_symbols.insert("tick".to_string());
     }
-    if let Some(symbol) = render_symbol.as_ref() {
-        export_symbols.insert(symbol.clone());
+    if let Some(render) = render_row {
+        export_symbols.insert(render.symbol.clone());
         export_symbols.insert("render".to_string());
     }
     if let Some(on_code_swap) = on_code_swap_symbol.as_ref() {
@@ -4191,7 +4239,7 @@ fn package_engine_bundle_release(
     if tick_symbol.is_some() {
         launch_lines.push("tick=tick".to_string());
     }
-    if render_symbol.is_some() {
+    if render_row.is_some() {
         launch_lines.push("render=render".to_string());
     }
     if let (Some(data_json), Some(data_meta)) = (
@@ -4365,7 +4413,7 @@ mod tests {
     #[test]
     fn packaged_frame_callbacks_require_zero_arguments() {
         let manifest: EngineBundleManifest = serde_json::from_str(
-            r#"{"functions":[{"function_id":1,"symbol_id":"render-indexed","name":"render","symbol":"render_indexed","parameter_count":1},{"function_id":2,"symbol_id":"render-frame","name":"render","symbol":"render_frame","parameter_count":0}]}"#,
+            r#"{"functions":[{"function_id":1,"symbol_id":"render-indexed","name":"render","symbol":"render_indexed","return_type":1,"parameter_count":1},{"function_id":2,"symbol_id":"render-frame","name":"render","symbol":"render_frame","return_type":1,"parameter_count":0}]}"#,
         )
         .expect("parse callback manifest");
         let render = manifest
@@ -4374,7 +4422,10 @@ mod tests {
             .find(|row| is_zero_argument_manifest_function(row, "render"))
             .expect("zero-argument render callback");
         assert_eq!(render.symbol, "render_frame");
-        assert!(packaged_render_alias(&manifest, &render.symbol).is_none());
+        let alias = packaged_render_alias(&manifest, render).expect("legacy render alias");
+        assert!(alias.reset_symbol.is_none());
+        assert!(alias.finish_symbol.is_none());
+        assert!(alias.returns_i32);
         assert!(!is_zero_argument_manifest_function(
             &manifest.functions[0],
             "render"
@@ -4382,11 +4433,51 @@ mod tests {
     }
 
     #[test]
+    fn packaged_render_alias_validates_manifest_return_and_lifecycle_contracts() {
+        let manifest: EngineBundleManifest = serde_json::from_str(
+            r#"{"render_construction_lifecycle_version":1,"functions":[{"function_id":1,"symbol_id":"render","name":"render","symbol":"aot_render","return_type":0,"parameter_count":0},{"function_id":2,"symbol_id":"reset","name":"gfx_cmd_construction_reset","symbol":"aot_reset","return_type":0,"parameter_count":0},{"function_id":3,"symbol_id":"finish","name":"gfx_cmd_construction_finish","symbol":"aot_finish","return_type":1,"parameter_count":1}]}"#,
+        )
+        .expect("parse lifecycle manifest");
+        let render = &manifest.functions[0];
+        let alias = packaged_render_alias(&manifest, render).expect("valid lifecycle alias");
+        assert!(!alias.returns_i32);
+        assert_eq!(alias.reset_symbol.as_deref(), Some("aot_reset"));
+        assert_eq!(alias.finish_symbol.as_deref(), Some("aot_finish"));
+
+        let malformed: EngineBundleManifest = serde_json::from_str(
+            r#"{"render_construction_lifecycle_version":1,"functions":[{"function_id":1,"symbol_id":"render","name":"render","symbol":"aot_render","return_type":1,"parameter_count":0},{"function_id":2,"symbol_id":"reset","name":"gfx_cmd_construction_reset","symbol":"aot_reset","return_type":1,"parameter_count":0},{"function_id":3,"symbol_id":"finish","name":"gfx_cmd_construction_finish","symbol":"aot_finish","return_type":1,"parameter_count":1}]}"#,
+        )
+        .expect("parse malformed lifecycle manifest");
+        assert!(packaged_render_alias(&malformed, &malformed.functions[0])
+            .expect_err("wrong reset signature must fail")
+            .contains("must have signature void()"));
+
+        let unsupported: EngineBundleManifest = serde_json::from_str(
+            r#"{"functions":[{"function_id":1,"symbol_id":"render","name":"render","symbol":"aot_render","return_type":2,"parameter_count":0}]}"#,
+        )
+        .expect("parse unsupported render manifest");
+        assert!(
+            packaged_render_alias(&unsupported, &unsupported.functions[0])
+                .expect_err("unsupported render result must fail")
+                .contains("must return void or i32")
+        );
+
+        let partial: EngineBundleManifest = serde_json::from_str(
+            r#"{"render_construction_lifecycle_version":1,"functions":[{"function_id":1,"symbol_id":"render","name":"render","symbol":"aot_render","return_type":1,"parameter_count":0},{"function_id":2,"symbol_id":"reset","name":"gfx_cmd_construction_reset","symbol":"aot_reset","return_type":0,"parameter_count":0}]}"#,
+        )
+        .expect("parse partial lifecycle manifest");
+        assert!(packaged_render_alias(&partial, &partial.functions[0])
+            .expect_err("partial lifecycle must fail")
+            .contains("missing gfx_cmd_construction_finish"));
+    }
+
+    #[test]
     fn packaged_render_alias_wraps_frame_construction() {
         let render = PackagedRenderAlias {
             target_symbol: "aot_render".to_string(),
-            reset_symbol: "aot_reset".to_string(),
-            finish_symbol: "aot_finish".to_string(),
+            returns_i32: true,
+            reset_symbol: Some("aot_reset".to_string()),
+            finish_symbol: Some("aot_finish".to_string()),
         };
         let source = build_engine_bundle_runtime_bridge_source(
             &stasis_jit::AotTarget::Native,
@@ -4410,6 +4501,58 @@ mod tests {
         let finish = wrapper.find("aot_finish").expect("finish call");
         assert!(reset < render && render < finish);
         assert!(wrapper.contains("int32_t result"));
+    }
+
+    #[test]
+    fn packaged_render_alias_preserves_void_return_contract() {
+        let render = PackagedRenderAlias {
+            target_symbol: "aot_render".to_string(),
+            returns_i32: false,
+            reset_symbol: Some("aot_reset".to_string()),
+            finish_symbol: Some("aot_finish".to_string()),
+        };
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::Native,
+            &[],
+            &[
+                "aot_render".to_string(),
+                "aot_reset".to_string(),
+                "aot_finish".to_string(),
+            ],
+            &[],
+            Some(&render),
+            &[],
+        )
+        .expect("build void render bridge source");
+        let wrapper = source
+            .lines()
+            .find(|line| line.starts_with("STASIS_EXPORT int32_t render(void)"))
+            .expect("render wrapper");
+        assert!(wrapper.contains("((void (*)(void))aot_render)();"));
+        assert!(wrapper.contains("aot_finish)(0)"));
+        assert!(!wrapper.contains("int32_t result"));
+
+        let legacy = PackagedRenderAlias {
+            target_symbol: "aot_render".to_string(),
+            returns_i32: false,
+            reset_symbol: None,
+            finish_symbol: None,
+        };
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::Native,
+            &[],
+            &["aot_render".to_string()],
+            &[],
+            Some(&legacy),
+            &[],
+        )
+        .expect("build legacy void render bridge source");
+        let wrapper = source
+            .lines()
+            .find(|line| line.starts_with("STASIS_EXPORT int32_t render(void)"))
+            .expect("legacy render wrapper");
+        assert!(wrapper.contains("((void (*)(void))aot_render)(); return 0;"));
+        assert!(!wrapper.contains("aot_finish"));
     }
 
     #[test]
@@ -5156,6 +5299,91 @@ mod tests {
     }
 
     #[test]
+    fn package_support_capture_closes_nested_absolute_asset_graph() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_absolute_support_{stamp}"));
+        let support = root.join("support");
+        let external = root.join("external");
+        fs::create_dir_all(&support).expect("create support directory");
+        fs::create_dir_all(external.join("one")).expect("create first external directory");
+        fs::create_dir_all(external.join("two")).expect("create second external directory");
+        let first = external.join("one/shared.png");
+        let second = external.join("two/shared.png");
+        let table = external.join("values.csv");
+        let metadata = external.join("metadata.json");
+        fs::write(&first, b"first-image").expect("write first image");
+        fs::write(&second, b"second-image").expect("write second image");
+        fs::write(&table, b"id,value\n1,42\n").expect("write table");
+        fs::write(
+            &metadata,
+            serde_json::to_vec(&serde_json::json!({"table": table})).expect("serialize metadata"),
+        )
+        .expect("write metadata");
+        fs::write(
+            support.join("config.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "images": [first, second],
+                "metadata": metadata,
+            }))
+            .expect("serialize support config"),
+        )
+        .expect("write support config");
+
+        rewrite_packaged_json_asset_paths(&support, "main")
+            .expect("capture absolute support graph");
+        let config = fs::read_to_string(support.join("config.json")).expect("read config");
+        assert!(!config.contains(&root.to_string_lossy().to_string()));
+        let captured = fs::read_dir(support.join("assets/external"))
+            .expect("read captured assets")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("enumerate captured assets");
+        assert_eq!(captured.len(), 4);
+        assert_eq!(
+            captured
+                .iter()
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with("-shared.png"))
+                .count(),
+            2,
+            "content-derived names must preserve distinct same-basename assets"
+        );
+
+        fs::remove_dir_all(&external).expect("remove original absolute assets");
+        rewrite_packaged_json_asset_paths(&support, "main")
+            .expect("rewritten support must not read original paths");
+        for entry in captured {
+            if entry.path().extension().and_then(|value| value.to_str()) == Some("json") {
+                let json = fs::read_to_string(entry.path()).expect("read captured nested JSON");
+                assert!(!json.contains(&root.to_string_lossy().to_string()));
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn package_support_capture_rejects_missing_absolute_asset() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_missing_support_{stamp}"));
+        fs::create_dir_all(&root).expect("create support directory");
+        let missing = root.join("missing.png");
+        fs::write(
+            root.join("config.json"),
+            serde_json::to_vec(&serde_json::json!({"image": missing}))
+                .expect("serialize missing asset path"),
+        )
+        .expect("write support config");
+        let error = rewrite_packaged_json_asset_paths(&root, "main")
+            .expect_err("missing absolute package asset must fail capture");
+        assert!(error.contains("referenced absolute package asset is unavailable"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn project_data_is_staged_and_embedded_in_aot_runtime_fields() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5325,8 +5553,9 @@ mod tests {
             }],
             Some(&PackagedRenderAlias {
                 target_symbol: "aot_render".to_string(),
-                reset_symbol: "aot_reset".to_string(),
-                finish_symbol: "aot_finish".to_string(),
+                returns_i32: true,
+                reset_symbol: Some("aot_reset".to_string()),
+                finish_symbol: Some("aot_finish".to_string()),
             }),
             &[],
         )
