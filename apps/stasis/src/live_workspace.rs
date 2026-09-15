@@ -2866,18 +2866,17 @@ fn plan_live_edit(
         }
         target.file = Some(matches[0].file.clone());
     }
-    let (after, plan) = plan_workshop_semantic_edits(
-        files,
-        &WorkshopSemanticEditBatch {
-            schema_version: 1,
-            edits: vec![WorkshopSemanticEdit {
-                operation,
-                target,
-                new_source: source,
-                expected_source_hash,
-            }],
-        },
-    )?;
+    let batch = WorkshopSemanticEditBatch {
+        schema_version: 1,
+        edits: vec![WorkshopSemanticEdit {
+            operation,
+            target,
+            new_source: source,
+            expected_source_hash,
+        }],
+    };
+    preflight_live_explicit_generic_updates(files, &batch)?;
+    let (after, plan) = plan_workshop_semantic_edits(files, &batch)?;
     reject_live_explicit_generic_edits(&after, &plan)?;
     Ok((after, plan))
 }
@@ -2891,6 +2890,61 @@ fn reject_live_explicit_generic_edits(
         .iter()
         .map(|change| normalize_file(&change.file))
         .collect::<BTreeSet<_>>();
+    reject_live_explicit_generic_paths(files, &changed_paths)
+}
+
+fn preflight_live_explicit_generic_updates(
+    files: &[WorkshopSourceFile],
+    batch: &WorkshopSemanticEditBatch,
+) -> Result<(), String> {
+    let mut candidate = files.to_vec();
+    let mut changed_paths = BTreeSet::new();
+    for edit in &batch.edits {
+        if edit.operation != WorkshopSemanticEditOperation::Update {
+            continue;
+        }
+        let Some(replacement) = edit.new_source.as_deref() else {
+            continue;
+        };
+        let matches = find_workshop_symbols(&candidate, &edit.target)?;
+        let [symbol] = matches.as_slice() else {
+            continue;
+        };
+        if edit
+            .expected_source_hash
+            .as_deref()
+            .is_some_and(|expected| workshop_source_hash(&symbol.source) != expected)
+        {
+            continue;
+        }
+        let symbol = symbol.clone();
+        let Some(file) = candidate.iter_mut().find(|file| file.path == symbol.file) else {
+            continue;
+        };
+        let Some(span) = symbol.source_spans.iter().find(|span| {
+            file.source
+                .get(span.start as usize..span.end as usize)
+                .is_some_and(|source| source == symbol.source)
+        }) else {
+            continue;
+        };
+        let range = span.start as usize..span.end as usize;
+        if range.end > file.source.len()
+            || !file.source.is_char_boundary(range.start)
+            || !file.source.is_char_boundary(range.end)
+        {
+            continue;
+        }
+        file.source.replace_range(range, replacement);
+        changed_paths.insert(normalize_file(&file.path));
+    }
+    reject_live_explicit_generic_paths(&candidate, &changed_paths)
+}
+
+fn reject_live_explicit_generic_paths(
+    files: &[WorkshopSourceFile],
+    changed_paths: &BTreeSet<String>,
+) -> Result<(), String> {
     for changed_path in changed_paths {
         let closure = workshop_reachable_files(files, Path::new(&changed_path))?;
         let mut compiler = stasis_compiler::compiler::Compiler::new();
@@ -2973,13 +3027,12 @@ fn plan_live_edit_batch(
             expected_source_hash: edit.expected_source_hash,
         });
     }
-    let (after, plan) = plan_workshop_semantic_edits(
-        files,
-        &WorkshopSemanticEditBatch {
-            schema_version: 1,
-            edits: semantic_edits,
-        },
-    )?;
+    let batch = WorkshopSemanticEditBatch {
+        schema_version: 1,
+        edits: semantic_edits,
+    };
+    preflight_live_explicit_generic_updates(files, &batch)?;
+    let (after, plan) = plan_workshop_semantic_edits(files, &batch)?;
     reject_live_explicit_generic_edits(&after, &plan)?;
     Ok((after, plan))
 }
@@ -7652,7 +7705,6 @@ mod tests {
             ),
         );
         assert!(!failed.ok, "explicit generic call must fail: {failed:?}");
-        eprintln!("failed explicit diagnostic: {failed:?}");
         let diagnostic =
             failed.data.as_ref().expect("structured live diagnostic")["diagnostic"].clone();
         assert_eq!(diagnostic["code"], "stasis.explicitGenericCall");

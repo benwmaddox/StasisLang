@@ -7725,6 +7725,7 @@ fn plan_symbol_batch(
     mut batch: WorkshopSemanticEditBatch,
 ) -> Result<WorkshopSemanticEditPlan, String> {
     normalize_cli_semantic_batch(editable_files, &mut batch)?;
+    preflight_explicit_generic_updates(workspace, query_files, &batch)?;
     let (after, plan) = plan_workshop_semantic_edits(editable_files, &batch)?;
     ensure_editable_semantic_plan(&plan)?;
     let validation_files = overlay_workshop_files(query_files, &after);
@@ -7743,6 +7744,64 @@ fn reject_explicit_generic_edits(
         .iter()
         .map(|change| normalize_symbol_file(&change.file))
         .collect::<BTreeSet<_>>();
+    reject_explicit_generic_paths(workspace, files, &changed_paths)
+}
+
+fn preflight_explicit_generic_updates(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+    batch: &WorkshopSemanticEditBatch,
+) -> Result<(), String> {
+    let mut candidate = files.to_vec();
+    let mut changed_paths = BTreeSet::new();
+    for edit in &batch.edits {
+        if edit.operation != WorkshopSemanticEditOperation::Update {
+            continue;
+        }
+        let Some(replacement) = edit.new_source.as_deref() else {
+            continue;
+        };
+        let matches = find_workshop_symbols(&candidate, &edit.target)?;
+        let [symbol] = matches.as_slice() else {
+            continue;
+        };
+        if edit
+            .expected_source_hash
+            .as_deref()
+            .is_some_and(|expected| workshop_source_hash(&symbol.source) != expected)
+        {
+            // Preserve the planner's stale-hash diagnostic precedence.
+            continue;
+        }
+        let symbol = symbol.clone();
+        let Some(file) = candidate.iter_mut().find(|file| file.path == symbol.file) else {
+            continue;
+        };
+        let Some(span) = symbol.source_spans.iter().find(|span| {
+            file.source
+                .get(span.start as usize..span.end as usize)
+                .is_some_and(|source| source == symbol.source)
+        }) else {
+            continue;
+        };
+        let range = span.start as usize..span.end as usize;
+        if range.end > file.source.len()
+            || !file.source.is_char_boundary(range.start)
+            || !file.source.is_char_boundary(range.end)
+        {
+            continue;
+        }
+        file.source.replace_range(range, replacement);
+        changed_paths.insert(normalize_symbol_file(&file.path));
+    }
+    reject_explicit_generic_paths(workspace, &candidate, &changed_paths)
+}
+
+fn reject_explicit_generic_paths(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+    changed_paths: &BTreeSet<String>,
+) -> Result<(), String> {
     for changed_path in changed_paths {
         let closure = workshop_reachable_files(files, Path::new(&changed_path))?;
         let mut compiler = stasis_compiler::compiler::Compiler::new();
