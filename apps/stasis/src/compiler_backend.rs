@@ -169,22 +169,38 @@ fn packaged_render_alias(
             render.return_type
         ));
     }
-    let has_reset = manifest
+    let reset_count = manifest
         .functions
         .iter()
-        .any(|row| row.name == "gfx_cmd_construction_reset");
-    let has_finish = manifest
+        .filter(|row| row.name == "gfx_cmd_construction_reset")
+        .count();
+    let finish_count = manifest
         .functions
         .iter()
-        .any(|row| row.name == "gfx_cmd_construction_finish");
-    if has_reset != has_finish {
+        .filter(|row| row.name == "gfx_cmd_construction_finish")
+        .count();
+    if reset_count != finish_count {
         return Err(
             "engine bundle render construction lifecycle requires both reset and finish helpers"
                 .to_string(),
         );
     }
+    if reset_count > 1 {
+        return Err(
+            "engine bundle render construction lifecycle requires exactly one reset and finish helper"
+                .to_string(),
+        );
+    }
     let (reset_symbol, finish_symbol) = match manifest.render_construction_lifecycle_version {
-        0 => (None, None),
+        0 => {
+            if reset_count != 0 {
+                return Err(
+                    "engine bundle render lifecycle version 0 must omit construction helpers"
+                        .to_string(),
+                );
+            }
+            (None, None)
+        }
         1 => {
             let reset = manifest
                 .functions
@@ -4256,6 +4272,10 @@ fn package_engine_bundle_release(
     }
     if render_row.is_some() {
         launch_lines.push("render=render".to_string());
+        launch_lines.push(format!(
+            "render_construction_lifecycle_version={}",
+            manifest.render_construction_lifecycle_version
+        ));
     }
     if let (Some(data_json), Some(data_meta)) = (
         support.data_bind_json_rel.as_ref(),
@@ -4484,6 +4504,35 @@ mod tests {
         assert!(packaged_render_alias(&partial, &partial.functions[0])
             .expect_err("version-zero partial lifecycle must fail")
             .contains("requires both reset and finish helpers"));
+
+        let duplicate: EngineBundleManifest = serde_json::from_str(
+            r#"{"render_construction_lifecycle_version":1,"functions":[{"function_id":1,"symbol_id":"render","name":"render","symbol":"aot_render","return_type":1,"parameter_count":0},{"function_id":2,"symbol_id":"reset-1","name":"gfx_cmd_construction_reset","symbol":"aot_reset_1","return_type":0,"parameter_count":0},{"function_id":3,"symbol_id":"reset-2","name":"gfx_cmd_construction_reset","symbol":"aot_reset_2","return_type":0,"parameter_count":0},{"function_id":4,"symbol_id":"finish-1","name":"gfx_cmd_construction_finish","symbol":"aot_finish_1","return_type":1,"parameter_count":1},{"function_id":5,"symbol_id":"finish-2","name":"gfx_cmd_construction_finish","symbol":"aot_finish_2","return_type":1,"parameter_count":1}]}"#,
+        )
+        .expect("parse duplicate lifecycle manifest");
+        assert!(packaged_render_alias(&duplicate, &duplicate.functions[0])
+            .expect_err("duplicate lifecycle helpers must fail")
+            .contains("requires exactly one reset and finish helper"));
+
+        let legacy_with_helpers: EngineBundleManifest = serde_json::from_str(
+            r#"{"render_construction_lifecycle_version":0,"functions":[{"function_id":1,"symbol_id":"render","name":"render","symbol":"aot_render","return_type":1,"parameter_count":0},{"function_id":2,"symbol_id":"reset","name":"gfx_cmd_construction_reset","symbol":"aot_reset","return_type":0,"parameter_count":0},{"function_id":3,"symbol_id":"finish","name":"gfx_cmd_construction_finish","symbol":"aot_finish","return_type":1,"parameter_count":1}]}"#,
+        )
+        .expect("parse legacy lifecycle manifest");
+        let legacy_alias =
+            packaged_render_alias(&legacy_with_helpers, &legacy_with_helpers.functions[0])
+                .expect_err("version-zero lifecycle must reject construction helpers");
+        assert!(legacy_alias.contains("version 0 must omit construction helpers"));
+
+        let legacy_without_helpers: EngineBundleManifest = serde_json::from_str(
+            r#"{"render_construction_lifecycle_version":0,"functions":[{"function_id":1,"symbol_id":"render","name":"render","symbol":"aot_render","return_type":1,"parameter_count":0}]}"#,
+        )
+        .expect("parse legacy direct manifest");
+        let legacy_alias = packaged_render_alias(
+            &legacy_without_helpers,
+            &legacy_without_helpers.functions[0],
+        )
+        .expect("version-zero lifecycle without helpers remains direct");
+        assert!(legacy_alias.reset_symbol.is_none());
+        assert!(legacy_alias.finish_symbol.is_none());
     }
 
     #[test]
@@ -5166,6 +5215,10 @@ mod tests {
     }
     #[cfg(windows)]
     use object::{Object, ObjectSection};
+    #[cfg(unix)]
+    use stasis_dynload::{
+        invoke_i32_i32_i32_to_i32, invoke_i32_to_i32, invoke_noarg_i32, Library as DynamicLibrary,
+    };
     #[cfg(windows)]
     use stasis_dynload::{invoke_noarg_u64, Library as DynamicLibrary};
     use stasis_runner::swap::contracts::{CompileRequest, CompileStatus, RequestId, TargetMode};
@@ -6465,6 +6518,204 @@ mod tests {
         assert!(result.aot_linked_image_size_bytes.is_some());
         assert!(result.aot_linked_image_sha256.is_some());
         assert!(backend.last_jit_engine_package().is_none());
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aot_packaged_render_bridge_executes_one_generation_and_aborts_nested_begin() {
+        let _global_guard = crate::jit_test_support::lock();
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("canonical repository root");
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = repository_root
+            .join(".stasis_cache")
+            .join(format!("aot_packaged_render_lifecycle_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create AOT lifecycle fixture directory");
+        let source = temp_root.join("render_lifecycle_probe.stasis");
+        fs::write(
+            &source,
+            r#"import "../../src/stdlib/graphics.stasis";
+global render_calls: i32;
+function main(): i32 { return 0; }
+function tick(): i32 { return 0; }
+function render(): i32 {
+    render_calls = render_calls + 1;
+    if (render_calls > 1) {
+        begin_frame();
+        fill_rect(2.0, 3.0, 4.0, 5.0, 0.4, 0.5, 0.6, 1.0);
+        end_frame();
+        return 0;
+    }
+    clear(0.1, 0.2, 0.3, 1.0);
+    fill_rect(2.0, 3.0, 4.0, 5.0, 0.4, 0.5, 0.6, 1.0);
+    end_frame();
+    return 0;
+}
+"#,
+        )
+        .expect("write AOT lifecycle fixture");
+
+        let artifact_root = temp_root.join("aot_artifacts");
+        let mut backend =
+            IncrementalCompilerBackend::with_aot_config(AotCompileConfig::default(), artifact_root);
+        let result = backend.compile(CompileRequest::new(
+            RequestId(9_605),
+            vec![source],
+            TargetMode::AotProd,
+        ));
+        assert_eq!(
+            result.status,
+            CompileStatus::Success,
+            "AOT lifecycle fixture diagnostics: {:?}",
+            result.diagnostics
+        );
+
+        let bundle = backend
+            .last_aot_engine_bundle()
+            .expect("AOT lifecycle engine bundle")
+            .clone();
+        let manifest = backend
+            .read_engine_bundle_manifest(&bundle.manifest_path)
+            .expect("read AOT lifecycle manifest");
+        assert_eq!(manifest.render_construction_lifecycle_version, 1);
+        let render_row = manifest
+            .functions
+            .iter()
+            .find(|row| is_zero_argument_manifest_function(row, "render"))
+            .expect("zero-argument render row");
+        let render_alias = packaged_render_alias(&manifest, render_row)
+            .expect("AOT lifecycle helper pair should be valid");
+        assert!(render_alias.reset_symbol.is_some());
+        assert!(render_alias.finish_symbol.is_some());
+        assert_eq!(render_alias.returns_i32, true);
+        for helper in ["gfx_cmd_construction_reset", "gfx_cmd_construction_finish"] {
+            assert_eq!(
+                manifest
+                    .functions
+                    .iter()
+                    .filter(|row| row.name == helper)
+                    .count(),
+                1,
+                "AOT lifecycle manifest should contain exactly one {helper} helper"
+            );
+        }
+
+        let snapshot = backend
+            .last_program_snapshot
+            .as_ref()
+            .expect("AOT lifecycle program snapshot");
+        let runtime_fields = merge_runtime_fields(snapshot.state_layout(), &[])
+            .expect("derive AOT lifecycle runtime fields");
+        assert!(runtime_fields
+            .iter()
+            .any(|field| field.name == "gfx_sprite_writer_frame_generation"));
+        let function_symbols = manifest
+            .functions
+            .iter()
+            .map(|row| row.symbol.clone())
+            .collect::<Vec<_>>();
+        let aliases = ["main", "tick"]
+            .into_iter()
+            .map(|name| PackagedFunctionAlias {
+                alias: name,
+                target_symbol: resolve_engine_bundle_symbol(&manifest, name)
+                    .expect("resolve AOT lifecycle entrypoint"),
+                returns_i32: true,
+            })
+            .collect::<Vec<_>>();
+        let bridge_object = emit_engine_bundle_runtime_bridge_object(
+            &backend,
+            &runtime_fields,
+            &function_symbols,
+            &aliases,
+            Some(&render_alias),
+            manifest.string_literals.as_deref().unwrap_or_default(),
+        )
+        .expect("compile production AOT lifecycle bridge");
+        assert!(bridge_object.exists());
+        let bridge_source = fs::read_to_string(
+            backend
+                .aot_artifact_root
+                .join("engine_bundle_runtime_bridge.c"),
+        )
+        .expect("read emitted AOT lifecycle bridge source");
+        assert!(bridge_source.contains("STASIS_EXPORT int32_t render(void)"));
+        assert!(bridge_source.contains("gfx_cmd_construction_reset"));
+        assert!(bridge_source.contains("gfx_cmd_construction_finish"));
+
+        let mut objects = bundle.object_paths().cloned().collect::<Vec<_>>();
+        objects.push(bridge_object);
+        let linked = temp_root.join("aot_packaged_render_lifecycle.so");
+        let dynload = ensure_stasis_dynload_link_library().expect("stasis dynload link library");
+        link_objects_to_dynamic_library(
+            &objects,
+            &linked,
+            &[
+                "render".to_string(),
+                "stasis_aot_bind_runtime_globals".to_string(),
+                "stasis_jit_global_i32_load".to_string(),
+                "stasis_jit_global_i32_array_load".to_string(),
+            ],
+            &AotLinkConfig {
+                linker_path: None,
+                runtime_lib_paths: vec![dynload],
+                target: stasis_jit::AotTarget::default(),
+            },
+        )
+        .expect("link production AOT lifecycle bridge");
+
+        let library = DynamicLibrary::load(&linked).expect("load production AOT lifecycle bridge");
+        let bind = library
+            .symbol_address("stasis_aot_bind_runtime_globals")
+            .expect("resolve AOT lifecycle global binding");
+        stasis_dynload::invoke_noarg_void(bind).expect("bind AOT lifecycle globals");
+        let render = library
+            .symbol_address("render")
+            .expect("resolve production render alias");
+        let load_i32 = library
+            .symbol_address("stasis_jit_global_i32_load")
+            .expect("resolve scalar global accessor");
+        let load_i32_array = library
+            .symbol_address("stasis_jit_global_i32_array_load")
+            .expect("resolve array global accessor");
+        let render_calls_hash = stasis_dynload::global_path_hash("render_calls");
+        let generation_hash =
+            stasis_dynload::global_path_hash("gfx_sprite_writer_frame_generation");
+        let gfx_cmd_i32_hash = stasis_dynload::global_path_hash("gfx_cmd_i32");
+        let read_scalar =
+            |path_hash| invoke_i32_to_i32(load_i32, path_hash).expect("read scalar runtime global");
+        let read_gfx = |index| {
+            invoke_i32_i32_i32_to_i32(load_i32_array, gfx_cmd_i32_hash, 0, index)
+                .expect("read command buffer global")
+        };
+
+        assert_eq!(invoke_noarg_i32(render), Ok(0));
+        assert_eq!(read_scalar(render_calls_hash), 1);
+        assert_eq!(
+            read_scalar(generation_hash),
+            1,
+            "one wrapper reset starts generation one"
+        );
+        assert_eq!(read_gfx(2), 3, "clear plus present publishes frame");
+        assert_eq!(read_gfx(24), 1, "published frame contains one rectangle");
+
+        assert_eq!(invoke_noarg_i32(render), Ok(0));
+        assert_eq!(read_scalar(render_calls_hash), 2);
+        assert_eq!(
+            read_scalar(generation_hash),
+            3,
+            "nested begin is rejected and finish performs one abort reset"
+        );
+        assert_eq!(read_gfx(2), 0, "aborted frame has no publication flags");
+        assert_eq!(read_gfx(24), 0, "aborted frame has no reachable rectangles");
+
+        drop(library);
         fs::remove_dir_all(&temp_root).ok();
     }
 

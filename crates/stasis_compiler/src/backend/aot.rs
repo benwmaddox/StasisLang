@@ -932,7 +932,7 @@ impl AotProcess {
             self.program_snapshot
                 .as_ref()
                 .map_or(&[], |snapshot| snapshot.hot_render_images()),
-        );
+        )?;
         fs::write(&manifest_path, manifest).map_err(|error| {
             format!(
                 "failed to write engine bundle manifest {}: {error}",
@@ -1548,20 +1548,43 @@ fn build_engine_bundle_manifest(
     string_literals: &BTreeMap<i32, String>,
     collection_max_lengths: &BTreeMap<String, i32>,
     hot_render_images: &[HotRenderImageMetadata],
-) -> String {
+) -> Result<String, String> {
     let mut out = String::new();
     out.push_str("{\n");
     out.push_str(&format!(
         "  \"optimization_profile\": \"{}\",\n",
         optimization_profile.as_str()
     ));
-    let has_reset = rows
+    let reset_rows = rows
         .iter()
-        .any(|(_, _, name, _, _, _, _)| name == "gfx_cmd_construction_reset");
-    let has_finish = rows
+        .filter(|(_, _, name, _, _, _, _)| name == "gfx_cmd_construction_reset")
+        .collect::<Vec<_>>();
+    let finish_rows = rows
         .iter()
-        .any(|(_, _, name, _, _, _, _)| name == "gfx_cmd_construction_finish");
-    let lifecycle_version = if has_reset && has_finish { 1 } else { 0 };
+        .filter(|(_, _, name, _, _, _, _)| name == "gfx_cmd_construction_finish")
+        .collect::<Vec<_>>();
+    if reset_rows.len() != finish_rows.len() {
+        return Err(
+            "AOT render construction lifecycle requires both reset and finish helpers".to_string(),
+        );
+    }
+    if reset_rows.len() > 1 {
+        return Err(
+            "AOT render construction lifecycle requires exactly one reset and finish helper"
+                .to_string(),
+        );
+    }
+    if let Some((_, _, _, _, _, return_type, parameter_count)) = reset_rows.first() {
+        if *return_type != 0 || *parameter_count != 0 {
+            return Err("AOT gfx_cmd_construction_reset must have signature void()".to_string());
+        }
+    }
+    if let Some((_, _, _, _, _, return_type, parameter_count)) = finish_rows.first() {
+        if *return_type != 1 || *parameter_count != 1 {
+            return Err("AOT gfx_cmd_construction_finish must have signature i32(i32)".to_string());
+        }
+    }
+    let lifecycle_version = if reset_rows.is_empty() { 0 } else { 1 };
     out.push_str(&format!(
         "  \"render_construction_lifecycle_version\": {lifecycle_version},\n"
     ));
@@ -1638,12 +1661,81 @@ fn build_engine_bundle_manifest(
     );
     out.push('\n');
     out.push_str("}\n");
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manifest_for_lifecycle_rows(
+        rows: &[(FunctionId, String, String, String, String, u16, usize)],
+    ) -> Result<String, String> {
+        build_engine_bundle_manifest(
+            AotOptimizationProfile::None,
+            &EngineEntrypoints::default(),
+            rows,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+        )
+    }
+
+    fn lifecycle_row(
+        id: FunctionId,
+        name: &str,
+        return_type: u16,
+        parameter_count: usize,
+    ) -> (FunctionId, String, String, String, String, u16, usize) {
+        (
+            id,
+            format!("symbol-id-{id}"),
+            name.to_string(),
+            format!("aot_{name}_{id}"),
+            format!("{name}_{id}.o"),
+            return_type,
+            parameter_count,
+        )
+    }
+
+    #[test]
+    fn aot_manifest_requires_one_well_typed_render_lifecycle_pair() {
+        let reset = lifecycle_row(1, "gfx_cmd_construction_reset", 0, 0);
+        let finish = lifecycle_row(2, "gfx_cmd_construction_finish", 1, 1);
+        let manifest = manifest_for_lifecycle_rows(&[reset.clone(), finish.clone()])
+            .expect("valid lifecycle manifest");
+        assert!(manifest.contains("\"render_construction_lifecycle_version\": 1"));
+
+        let missing_finish =
+            manifest_for_lifecycle_rows(&[reset.clone()]).expect_err("partial lifecycle must fail");
+        assert!(missing_finish.contains("requires both reset and finish helpers"));
+
+        let duplicate = manifest_for_lifecycle_rows(&[
+            reset.clone(),
+            lifecycle_row(3, "gfx_cmd_construction_reset", 0, 0),
+            finish.clone(),
+            lifecycle_row(4, "gfx_cmd_construction_finish", 1, 1),
+        ])
+        .expect_err("duplicate lifecycle helpers must fail");
+        assert!(duplicate.contains("requires exactly one reset and finish helper"));
+
+        let wrong_reset = manifest_for_lifecycle_rows(&[
+            lifecycle_row(1, "gfx_cmd_construction_reset", 1, 0),
+            finish.clone(),
+        ])
+        .expect_err("wrong reset result must fail");
+        assert!(wrong_reset.contains("must have signature void()"));
+
+        let wrong_finish = manifest_for_lifecycle_rows(&[
+            reset,
+            lifecycle_row(2, "gfx_cmd_construction_finish", 1, 0),
+        ])
+        .expect_err("wrong finish parameters must fail");
+        assert!(wrong_finish.contains("must have signature i32(i32)"));
+
+        let legacy = manifest_for_lifecycle_rows(&[]).expect("legacy lifecycle manifest");
+        assert!(legacy.contains("\"render_construction_lifecycle_version\": 0"));
+    }
 
     #[test]
     fn aot_rejects_invalid_unreachable_function_body() {
