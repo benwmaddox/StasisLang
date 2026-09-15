@@ -69,6 +69,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             )
         )
         cls.windows = job(cls.workflow, "bootstrap-smoke-windows")
+        cls.generics = job(cls.workflow, "pr-ci-generics-cross-platform")
 
     def test_linux_ordinary_rust_seams_run_once_in_bounded_shards(self):
         commands = (
@@ -148,6 +149,55 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         ):
             with self.subTest(job=boundary_job):
                 self.assertRegex(self.workflow, rf"(?m)^  {boundary_job}:$")
+
+    def test_generics_desktop_parity_runs_and_uploads_on_every_host(self):
+        for marker in (
+            "os: ubuntu-latest",
+            "os: windows-latest",
+            "os: macos-15",
+            "expected_arch: x86_64",
+            "expected_arch: aarch64",
+            "STASIS_EXPECTED_HOST_ARCH: ${{ matrix.expected_arch }}",
+            "--test generics_collections_jit_aot_wasm",
+            "--test generics_collections_aot_seam",
+            "--test generics_collections_desktop",
+            "Run packaged generics desktop acceptance on Unix",
+            "Run packaged generics desktop acceptance on Windows",
+            "Build matching packaged Web runtime",
+            "Build matching packaged desktop runtime on Unix",
+            "xvfb-run -a",
+            "pkg-config",
+            "libegl1",
+            "libgl1-mesa-dri",
+            "if: always()",
+            "target/generics-desktop-${{ matrix.evidence }}/**",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.generics)
+        self.assertNotIn("STASIS_REQUIRE_SIGNED_EXECUTION", self.generics)
+        self.assertEqual(self.generics.count("-DSTASIS_BUILD_RUNNER=ON"), 2)
+        self.assertEqual(
+            self.generics.count(
+                "--target stasis_graphics stasis_runner"
+            ),
+            2,
+        )
+        self.assertEqual(self.generics.count("STASIS_RUNTIME_RUNNER_PATH="), 2)
+        self.assertIn("if-no-files-found: error", self.generics)
+        self.assertIn(
+            "name: generics-collections-${{ matrix.evidence }}-evidence",
+            self.generics,
+        )
+        windows_acceptance = self.generics.split(
+            "- name: Run packaged generics desktop acceptance on Windows", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: runner.os == 'Windows'", windows_acceptance)
+        self.assertIn("shell: pwsh", windows_acceptance)
+        self.assertIn("timeout-minutes: 15", windows_acceptance)
+        unix_acceptance = self.generics.split(
+            "- name: Run packaged generics desktop acceptance on Unix", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 15", unix_acceptance)
 
     def test_runner_uses_cached_cargo_and_names_grouped_failures(self):
         cargo_tokens = (

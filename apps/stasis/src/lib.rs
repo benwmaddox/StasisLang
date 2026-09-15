@@ -18,6 +18,8 @@ mod window_config;
 pub mod windows_signing;
 
 pub use compiler_backend::build_aot_direct_storage_source;
+#[doc(hidden)]
+pub use compiler_backend::rewrite_packaged_json_asset_paths;
 pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_desktop_network;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
