@@ -176,6 +176,41 @@ generic release change is published.
 
 Visual evidence: not applicable to this compiler and packaging contract.
 
+## Tooling contract
+
+The CLI, live workspace, and Android Workshop bridge expose the same
+compiler-owned generic metadata. Source-item responses include the generic
+struct or first-parameter-bound function's `generic_parameters`, stable
+`symbol_id`, defining `file`, signature, source spans, and source hash.
+Reference responses retain the referenced symbol, containing item, defining
+file, and the exact `source_span`; Android adds no transport-side source
+reparsing. The live `:symbols` and `:references` commands use the same
+project-relative paths and byte offsets as the CLI and Workshop JSON APIs.
+
+Compiler failures carry a stable `code`, primary `path`/`start`/`end`/`symbol`,
+and any related template or call-site locations. The Android native v1
+diagnostic envelope projects those fields as additive `primary` and `related`
+objects while retaining the legacy file and line markers. Existing consumers
+may continue to read the legacy fields; new consumers should use the typed
+locations.
+
+The supported tooling surface is deliberately narrow: generic structs with
+`T: type` and/or `N: i32`, and functions whose first parameter binds those
+parameters through the nominal struct. Standalone function generic
+declarations, method-only generic declarations, and explicit generic calls
+are not supported. Both `capacity<T>(value)` and turbofish forms such as
+`capacity::<T>(value)` (including qualified calls) produce the exact
+`stasis.explicitGenericCall` diagnostic at the callee name and include the
+generic template declaration as a related location. Completion and hover are
+also intentionally suppressed inside an explicit generic call.
+
+Semantic updates require the source hash returned by source-item discovery
+when a caller supplies an expected hash. A stale hash is rejected before any
+file is written; if later validation or receipt creation fails, the bridge
+and live workspace restore the prior sources and runtime candidate. Correcting
+the source or hash allows the same request to be retried. These parity tests
+run on the host and do not require a connected Android device.
+
 ## Migration from function-owned generics
 
 Move each function's generic list to its receiver struct and remove explicit

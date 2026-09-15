@@ -2,6 +2,8 @@ package com.stasislang.workshop;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.List;
 
 final class WorkshopSourceDiagnostic {
     final String file;
@@ -11,9 +13,22 @@ final class WorkshopSourceDiagnostic {
     final int endColumn;
     final String symbol;
     final String message;
+    final String code;
+    final int start;
+    final int end;
+    final WorkshopNativeDiagnostic.Location primary;
+    final List<WorkshopNativeDiagnostic.Location> related;
 
     WorkshopSourceDiagnostic(String file, int line, int column, int endLine, int endColumn,
             String symbol, String message) {
+        this(file, line, column, endLine, endColumn, symbol, message, null, 0, 0, null,
+                Collections.<WorkshopNativeDiagnostic.Location>emptyList());
+    }
+
+    private WorkshopSourceDiagnostic(String file, int line, int column, int endLine, int endColumn,
+            String symbol, String message, String code, int start, int end,
+            WorkshopNativeDiagnostic.Location primary,
+            List<WorkshopNativeDiagnostic.Location> related) {
         this.file = normalizeProjectPath(file);
         this.line = Math.max(0, line);
         this.column = Math.max(0, column);
@@ -21,20 +36,45 @@ final class WorkshopSourceDiagnostic {
         this.endColumn = Math.max(0, endColumn);
         this.symbol = symbol == null ? "" : symbol;
         this.message = message == null ? "" : message;
+        this.code = code == null ? "" : code;
+        this.start = Math.max(0, start);
+        this.end = Math.max(this.start, end);
+        this.primary = primary;
+        this.related = Collections.unmodifiableList(related);
     }
 
     static WorkshopSourceDiagnostic fromCompileResult(String result) {
         if (result == null || !result.startsWith("CompileError")) return null;
         String file = field(result, "diagnostic_file");
+        WorkshopNativeDiagnostic nativeDiagnostic = WorkshopNativeDiagnostic.fromNative(result);
+        WorkshopNativeDiagnostic.Location primary = nativeDiagnostic == null
+                ? null : nativeDiagnostic.primary;
+        if (file.isEmpty() && primary != null && primary.file != null) file = primary.file;
+        if (file.isEmpty() && nativeDiagnostic != null && nativeDiagnostic.file != null) {
+            file = nativeDiagnostic.file;
+        }
         if (file.isEmpty()) return null;
         try {
-            return new WorkshopSourceDiagnostic(file,
-                    integerField(result, "diagnostic_line"),
-                    integerField(result, "diagnostic_column"),
-                    integerField(result, "diagnostic_end_line"),
-                    integerField(result, "diagnostic_end_column"),
-                    field(result, "diagnostic_symbol"),
-                    field(result, "diagnostic_message"));
+            int line = integerField(result, "diagnostic_line");
+            int column = integerField(result, "diagnostic_column");
+            int endLine = integerField(result, "diagnostic_end_line");
+            int endColumn = integerField(result, "diagnostic_end_column");
+            String symbol = field(result, "diagnostic_symbol");
+            String message = field(result, "diagnostic_message");
+            if (nativeDiagnostic != null) {
+                if (symbol.isEmpty() && nativeDiagnostic.symbol != null) {
+                    symbol = nativeDiagnostic.symbol;
+                }
+                if (message.isEmpty() && nativeDiagnostic.detail != null) {
+                    message = nativeDiagnostic.detail;
+                }
+            }
+            int start = primary == null ? 0 : primary.start;
+            int end = primary == null ? start : primary.end;
+            return new WorkshopSourceDiagnostic(file, line, column, endLine, endColumn, symbol,
+                    message, nativeDiagnostic == null ? null : nativeDiagnostic.code, start, end,
+                    primary, nativeDiagnostic == null ? Collections.<WorkshopNativeDiagnostic.Location>emptyList()
+                            : nativeDiagnostic.related);
         } catch (IllegalArgumentException error) {
             return null;
         }

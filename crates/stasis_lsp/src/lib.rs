@@ -29,23 +29,23 @@ use lsp_types::{
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     CallHierarchyServerCapability, CodeAction, CodeActionKind, CodeActionOptions,
     CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability, CompletionList,
-    CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentChanges, DocumentFormattingParams, DocumentOnTypeFormattingOptions,
-    DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, DocumentSymbol,
-    DocumentSymbolParams, DocumentSymbolResponse, Documentation, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions, InlayHintParams,
-    InlayHintServerCapabilities, LinkedEditingRangeParams, LinkedEditingRangeServerCapabilities,
-    LinkedEditingRanges, Location, MarkupContent, MarkupKind, NumberOrString, OneOf,
-    OptionalVersionedTextDocumentIdentifier, PositionEncodingKind, PrepareRenameResponse,
-    PublishDiagnosticsParams, ReferenceParams, RenameOptions, RenameParams, SaveOptions,
-    SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability, SemanticToken,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, ServerCapabilities, ServerInfo, SignatureHelpOptions,
-    SignatureHelpParams, SymbolInformation, TextDocumentContentChangeEvent, TextDocumentEdit,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    CompletionOptions, CompletionParams, CompletionResponse, DiagnosticRelatedInformation,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentChanges, DocumentFormattingParams,
+    DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams, DocumentRangeFormattingParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation, FoldingRange,
+    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions,
+    InlayHintParams, InlayHintServerCapabilities, LinkedEditingRangeParams,
+    LinkedEditingRangeServerCapabilities, LinkedEditingRanges, Location, MarkupContent, MarkupKind,
+    NumberOrString, OneOf, OptionalVersionedTextDocumentIdentifier, PositionEncodingKind,
+    PrepareRenameResponse, PublishDiagnosticsParams, ReferenceParams, RenameOptions, RenameParams,
+    SaveOptions, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
+    SemanticToken, SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, ServerCapabilities, ServerInfo,
+    SignatureHelpOptions, SignatureHelpParams, SymbolInformation, TextDocumentContentChangeEvent,
+    TextDocumentEdit, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
     TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, TypeHierarchyItem,
     TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
     WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
@@ -53,9 +53,9 @@ use lsp_types::{
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use stasis_language_service::{
-    CompletionResolveData, DiagnosticSeverity, Document, LanguageHierarchyItem,
-    LanguageInlayHintKind, LanguageLocation, LanguageService, LanguageSymbol, Position, TextChange,
-    WorkspaceRevision,
+    CompletionResolveData, DiagnosticSeverity, Document, LanguageDiagnosticRelated,
+    LanguageHierarchyItem, LanguageInlayHintKind, LanguageLocation, LanguageService,
+    LanguageSymbol, Position, TextChange, WorkspaceRevision, WorkspaceSnapshot,
 };
 use url::Url;
 
@@ -86,10 +86,19 @@ struct LiveRequestParams {
 pub fn run_stdio(project_root: &Path) -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
     let result = run_connection(connection, project_root);
-    io_threads
+    let io_result = io_threads
         .join()
-        .map_err(|error| format!("LSP I/O thread failed: {error}"))?;
-    result
+        .map_err(|error| format!("LSP I/O thread failed: {error}"));
+    match (result, io_result) {
+        // Keep the server-side error when both the dispatch loop and the
+        // reader observe the same shutdown.  Otherwise the reader's bounded
+        // channel reports a misleading "sending on a disconnected channel"
+        // after the dispatch loop has already dropped its receiver.
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) if is_disconnected_channel_error(&error) => Ok(()),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(), String> {
@@ -205,15 +214,30 @@ pub fn run_connection(connection: Connection, project_root: &Path) -> Result<(),
                 {
                     break;
                 }
-                server.handle_request(&connection, request)?;
+                if let Err(error) = server.handle_request(&connection, request) {
+                    if is_disconnected_channel_error(&error) {
+                        break;
+                    }
+                    return Err(error);
+                }
             }
             Message::Notification(notification) => {
-                server.handle_notification(&connection, notification)?;
+                if let Err(error) = server.handle_notification(&connection, notification) {
+                    if is_disconnected_channel_error(&error) {
+                        break;
+                    }
+                    return Err(error);
+                }
             }
             Message::Response(_) => {}
         }
     }
     Ok(())
+}
+
+fn is_disconnected_channel_error(error: &str) -> bool {
+    error.contains("sending on a disconnected channel")
+        || error.contains("receiving on a disconnected channel")
 }
 
 struct LanguageServer {
@@ -1532,17 +1556,35 @@ impl LanguageServer {
     fn publish_diagnostics(&mut self, connection: &Connection) -> Result<(), String> {
         let report = self.service.diagnostics();
         let snapshot = self.service.snapshot();
+        self.publish_diagnostic_report(connection, report, &snapshot)
+    }
+
+    fn publish_diagnostic_report(
+        &mut self,
+        connection: &Connection,
+        report: stasis_language_service::DiagnosticReport,
+        snapshot: &WorkspaceSnapshot,
+    ) -> Result<(), String> {
         let mut by_path = BTreeMap::<String, Vec<lsp_types::Diagnostic>>::new();
         for diagnostic in report.diagnostics {
             let Some(document) = snapshot.document(&diagnostic.path) else {
                 continue;
             };
-            let start = document
-                .position(diagnostic.range.start)
-                .map_err(|error| error.to_string())?;
-            let end = document
-                .position(diagnostic.range.end)
-                .map_err(|error| error.to_string())?;
+            // A malformed producer span must not terminate the language
+            // server. Compiler diagnostics normally carry original-source
+            // offsets; if that contract is ever violated, omit that one
+            // diagnostic and keep the transport alive for subsequent edits.
+            if diagnostic.range.start > diagnostic.range.end {
+                continue;
+            }
+            let (Ok(start), Ok(end)) = (
+                document.position(diagnostic.range.start),
+                document.position(diagnostic.range.end),
+            ) else {
+                continue;
+            };
+            let related_information =
+                lsp_related_information(&diagnostic.related, &snapshot, &self.uri_by_path);
             by_path
                 .entry(diagnostic.path)
                 .or_default()
@@ -1560,7 +1602,8 @@ impl LanguageServer {
                     code_description: None,
                     source: Some(diagnostic.source.to_string()),
                     message: diagnostic.message,
-                    related_information: None,
+                    related_information: (!related_information.is_empty())
+                        .then_some(related_information),
                     tags: None,
                     data: None,
                 });
@@ -1598,6 +1641,38 @@ impl LanguageServer {
         self.published_paths = current_paths;
         Ok(())
     }
+}
+
+/// Projects related compiler locations into LSP locations without making
+/// publication of the primary diagnostic depend on the related file still
+/// being available in the current workspace snapshot.
+fn lsp_related_information(
+    related: &[LanguageDiagnosticRelated],
+    snapshot: &WorkspaceSnapshot,
+    uri_by_path: &BTreeMap<String, Uri>,
+) -> Vec<DiagnosticRelatedInformation> {
+    related
+        .iter()
+        .filter_map(|related| {
+            if related.range.start > related.range.end {
+                return None;
+            }
+            let document = snapshot.document(&related.path)?;
+            let start = document.position(related.range.start).ok()?;
+            let end = document.position(related.range.end).ok()?;
+            let uri = uri_by_path
+                .get(&related.path)
+                .cloned()
+                .or_else(|| path_uri(Path::new(&related.path)).ok())?;
+            Some(DiagnosticRelatedInformation {
+                location: Location::new(
+                    uri,
+                    lsp_types::Range::new(lsp_position(start), lsp_position(end)),
+                ),
+                message: related.message.clone(),
+            })
+        })
+        .collect()
 }
 
 fn overlay_after_change(document: &Document, change: &TextChange) -> Result<Document, String> {
@@ -1755,6 +1830,282 @@ mod tests {
         let mut server = LanguageServer::new(&root, 64, Arc::new(|_, _| {}))
             .expect("LSP starts with diagnostics-capable invalid source");
         assert!(!server.service.diagnostics().diagnostics.is_empty());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn missing_related_snapshot_does_not_abort_diagnostic_projection() {
+        let path = std::env::temp_dir().join(format!(
+            "stasis-lsp-related-projection-{}",
+            std::process::id()
+        ));
+        let path = path_text(&path);
+        let mut documents = stasis_language_service::WorkspaceDocuments::default();
+        documents.open_document(&path, 1, "function main(): i32 { return 0; }\n");
+        let snapshot = documents.snapshot();
+        let uri = path_uri(Path::new(&path)).expect("primary URI");
+        let uri_by_path = BTreeMap::from([(path.clone(), uri.clone())]);
+        let related = vec![
+            LanguageDiagnosticRelated {
+                path: "missing/template.stasis".to_string(),
+                range: 0..8,
+                symbol: "missing".to_string(),
+                message: "missing related declaration".to_string(),
+            },
+            LanguageDiagnosticRelated {
+                path: path.clone(),
+                range: 0..8,
+                symbol: "main".to_string(),
+                message: "primary declaration".to_string(),
+            },
+        ];
+
+        let projected = lsp_related_information(&related, &snapshot, &uri_by_path);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].location.uri, uri);
+        assert_eq!(projected[0].message, "primary declaration");
+    }
+
+    #[test]
+    fn missing_related_snapshot_still_publishes_primary_diagnostic() {
+        let (mut server, uri, key) = test_server("missing-related-publish");
+        server
+            .service
+            .open_document(key.clone(), 1, "function main(): i32 { return 0; }\n");
+        server.uri_by_path.insert(key.clone(), uri.clone());
+        let snapshot = server.service.snapshot();
+        let report = stasis_language_service::DiagnosticReport {
+            revision: snapshot.revision(),
+            diagnostics: vec![stasis_language_service::Diagnostic {
+                path: key,
+                range: 0..8,
+                severity: DiagnosticSeverity::Error,
+                source: "stasis",
+                code: "stasis.test".to_string(),
+                message: "primary diagnostic".to_string(),
+                related: vec![LanguageDiagnosticRelated {
+                    path: "missing/template.stasis".to_string(),
+                    range: 0..8,
+                    symbol: "missing".to_string(),
+                    message: "missing related declaration".to_string(),
+                }],
+            }],
+        };
+        let (server_connection, client_connection) = Connection::memory();
+        server
+            .publish_diagnostic_report(&server_connection, report, &snapshot)
+            .expect("publish primary diagnostic");
+        let Message::Notification(notification) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("published primary diagnostic")
+        else {
+            panic!("expected diagnostic notification");
+        };
+        let published: PublishDiagnosticsParams =
+            serde_json::from_value(notification.params).expect("published diagnostics payload");
+        assert_eq!(published.uri, uri);
+        assert_eq!(published.diagnostics.len(), 1);
+        assert_eq!(published.diagnostics[0].message, "primary diagnostic");
+        assert!(published.diagnostics[0].related_information.is_none());
+    }
+
+    #[test]
+    fn invalid_primary_span_is_cleared_without_terminating_transport() {
+        let (mut server, uri, key) = test_server("invalid-primary-span");
+        server
+            .service
+            .open_document(key.clone(), 1, "function main(): i32 { return 0; }\n");
+        server.uri_by_path.insert(key.clone(), uri.clone());
+        server.published_paths.insert(key.clone());
+        let snapshot = server.service.snapshot();
+        let report = stasis_language_service::DiagnosticReport {
+            revision: snapshot.revision(),
+            diagnostics: vec![stasis_language_service::Diagnostic {
+                path: key,
+                range: 500..600,
+                severity: DiagnosticSeverity::Error,
+                source: "stasis",
+                code: "stasis.test".to_string(),
+                message: "invalid producer span".to_string(),
+                related: Vec::new(),
+            }],
+        };
+        let (server_connection, client_connection) = Connection::memory();
+
+        server
+            .publish_diagnostic_report(&server_connection, report, &snapshot)
+            .expect("invalid diagnostic span must not terminate publication");
+
+        let Message::Notification(notification) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cleared diagnostics notification")
+        else {
+            panic!("expected diagnostic notification");
+        };
+        let published: PublishDiagnosticsParams =
+            serde_json::from_value(notification.params).expect("published diagnostics payload");
+        assert_eq!(published.uri, uri);
+        assert!(published.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reversed_primary_span_is_cleared_without_terminating_transport() {
+        let (mut server, uri, key) = test_server("reversed-primary-span");
+        server
+            .service
+            .open_document(key.clone(), 1, "function main(): i32 { return 0; }\n");
+        server.uri_by_path.insert(key.clone(), uri.clone());
+        server.published_paths.insert(key.clone());
+        let snapshot = server.service.snapshot();
+        let report = stasis_language_service::DiagnosticReport {
+            revision: snapshot.revision(),
+            diagnostics: vec![stasis_language_service::Diagnostic {
+                path: key,
+                range: 24..8,
+                severity: DiagnosticSeverity::Error,
+                source: "stasis",
+                code: "stasis.test".to_string(),
+                message: "reversed producer span".to_string(),
+                related: Vec::new(),
+            }],
+        };
+        let (server_connection, client_connection) = Connection::memory();
+
+        server
+            .publish_diagnostic_report(&server_connection, report, &snapshot)
+            .expect("reversed diagnostic span must not terminate publication");
+
+        let Message::Notification(notification) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cleared diagnostics notification")
+        else {
+            panic!("expected diagnostic notification");
+        };
+        let published: PublishDiagnosticsParams =
+            serde_json::from_value(notification.params).expect("published diagnostics payload");
+        assert_eq!(published.uri, uri);
+        assert!(published.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reversed_related_span_is_skipped_without_aborting_projection() {
+        let path = std::env::temp_dir().join(format!(
+            "stasis-lsp-related-reversed-{}",
+            std::process::id()
+        ));
+        let path = path_text(&path);
+        let mut documents = stasis_language_service::WorkspaceDocuments::default();
+        documents.open_document(&path, 1, "function main(): i32 { return 0; }\n");
+        let snapshot = documents.snapshot();
+        let uri = path_uri(Path::new(&path)).expect("related URI");
+        let uri_by_path = BTreeMap::from([(path.clone(), uri.clone())]);
+        let related = vec![
+            LanguageDiagnosticRelated {
+                path: path.clone(),
+                range: 8..0,
+                symbol: "main".to_string(),
+                message: "reversed related declaration".to_string(),
+            },
+            LanguageDiagnosticRelated {
+                path,
+                range: 0..8,
+                symbol: "main".to_string(),
+                message: "valid related declaration".to_string(),
+            },
+        ];
+
+        let projected = lsp_related_information(&related, &snapshot, &uri_by_path);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].location.uri, uri);
+        assert_eq!(projected[0].message, "valid related declaration");
+    }
+
+    #[test]
+    fn in_memory_protocol_lifecycle_stays_connected_through_diagnostics() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis-lsp-protocol-lifecycle-{}",
+            std::process::id()
+        ));
+        let source_path = root.join("src/main.stasis");
+        fs::create_dir_all(source_path.parent().expect("source parent")).expect("source dir");
+        fs::write(&source_path, "function main(): i32 { return 0; }\n").expect("valid disk source");
+        let uri = path_uri(&source_path).expect("source URI");
+        let (server_connection, client_connection) = Connection::memory();
+        let server_root = root.clone();
+        let server_thread = thread::spawn(move || run_connection(server_connection, &server_root));
+
+        client_connection
+            .sender
+            .send(Message::Request(Request::new(
+                lsp_server::RequestId::from(1),
+                "initialize".to_string(),
+                serde_json::json!({"capabilities": {}}),
+            )))
+            .expect("initialize request");
+        let initialize = receive_response(&client_connection, 1);
+        assert!(
+            initialize.response_result.is_ok(),
+            "initialize failed: {initialize:?}"
+        );
+        client_connection
+            .sender
+            .send(Message::Notification(Notification::new(
+                "initialized".to_string(),
+                serde_json::json!({}),
+            )))
+            .expect("initialized notification");
+
+        client_connection
+            .sender
+            .send(Message::Notification(Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                serde_json::json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": "stasis",
+                        "version": 1,
+                        "text": "function unfinished(): i32 {"
+                    }
+                }),
+            )))
+            .expect("didOpen notification");
+        let Message::Notification(diagnostics) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("didOpen diagnostics")
+        else {
+            panic!("expected didOpen diagnostics notification");
+        };
+        assert_eq!(diagnostics.method, PublishDiagnostics::METHOD);
+        let diagnostics: PublishDiagnosticsParams =
+            serde_json::from_value(diagnostics.params).expect("diagnostics payload");
+        assert!(!diagnostics.diagnostics.is_empty());
+
+        client_connection
+            .sender
+            .send(Message::Request(Request::new(
+                lsp_server::RequestId::from(2),
+                "shutdown".to_string(),
+                Value::Null,
+            )))
+            .expect("shutdown request");
+        let shutdown = receive_response(&client_connection, 2);
+        assert!(
+            shutdown.response_result.is_ok(),
+            "shutdown failed: {shutdown:?}"
+        );
+        client_connection
+            .sender
+            .send(Message::Notification(Notification::new(
+                "exit".to_string(),
+                Value::Null,
+            )))
+            .expect("exit notification");
+
+        assert_eq!(server_thread.join().expect("LSP server thread"), Ok(()));
         fs::remove_dir_all(root).ok();
     }
 
@@ -2860,6 +3211,228 @@ mod tests {
             panic!("expected partial completion text edit");
         };
         assert_eq!(edit.new_text, "spawn_enemy(${1:count}, ${2:health})");
+    }
+
+    #[test]
+    fn generic_protocol_requests_project_signatures_and_suppress_explicit_calls() {
+        let (mut server, uri, key) = test_server("generic-protocol");
+        let (server_connection, client_connection) = Connection::memory();
+        let source = "struct Buffer<N: i32> { values: i32[N]; }\n/* 😀 */ function clear(buffer: Buffer<N>): bool { return true; }\nglobal samples: Buffer<4>;\nfunction main(): void { clear(samples); samples.clear(3); clear<4>(samples); samples.clear::<4>(3); }\n";
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidOpenTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "stasis",
+                            "version": 1,
+                            "text": source
+                        }
+                    }),
+                ),
+            )
+            .expect("generic didOpen");
+
+        let Message::Notification(notification) = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("generic diagnostics")
+        else {
+            panic!("expected generic diagnostics notification");
+        };
+        let published: PublishDiagnosticsParams =
+            serde_json::from_value(notification.params).expect("generic diagnostics payload");
+        assert_eq!(published.diagnostics.len(), 1);
+        assert_eq!(
+            published.diagnostics[0].code,
+            Some(NumberOrString::String(
+                "stasis.explicitGenericCall".to_string()
+            ))
+        );
+        let related = published.diagnostics[0]
+            .related_information
+            .as_ref()
+            .expect("generic template related information");
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].location.uri, uri);
+        assert_eq!(
+            related[0].location.range.start,
+            lsp_types::Position::new(1, 9)
+        );
+        assert_eq!(related[0].message, "generic template declared here");
+
+        let document = server
+            .service
+            .snapshot()
+            .document(&key)
+            .expect("unsaved generic document")
+            .clone();
+        let request_position = |offset: usize| {
+            lsp_position(document.position(offset).expect("generic request position"))
+        };
+        let request = |id: i32, method: &str, position: lsp_types::Position| {
+            Request::new(
+                RequestId::from(id),
+                method.to_string(),
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "position": position
+                }),
+            )
+        };
+
+        let generic_completion_offset =
+            source.find("Buffer<N>").expect("generic type") + "Buffer<".len();
+        server
+            .handle_request(
+                &server_connection,
+                request(
+                    201,
+                    Completion::METHOD,
+                    request_position(generic_completion_offset),
+                ),
+            )
+            .expect("generic completion request");
+        let completion: Option<CompletionResponse> = serde_json::from_value(
+            receive_response(&client_connection, 201)
+                .response_result
+                .expect("generic completion result"),
+        )
+        .expect("generic completion response");
+        let CompletionResponse::List(completion) = completion.expect("generic completion list")
+        else {
+            panic!("expected generic completion list");
+        };
+        let generic_item = completion
+            .items
+            .iter()
+            .find(|item| item.label == "N")
+            .expect("generic parameter completion");
+        assert_eq!(
+            generic_item.kind,
+            Some(lsp_types::CompletionItemKind::TYPE_PARAMETER)
+        );
+
+        let free_hover_offset = source.find("clear(samples").expect("free generic call") + 2;
+        for (id, offset) in [
+            (202, free_hover_offset),
+            (
+                203,
+                source.find("samples.clear(3)").expect("dot generic call") + "samples.".len() + 2,
+            ),
+        ] {
+            server
+                .handle_request(
+                    &server_connection,
+                    request(id, HoverRequest::METHOD, request_position(offset)),
+                )
+                .expect("generic hover request");
+            let hover: Option<Hover> = serde_json::from_value(
+                receive_response(&client_connection, id)
+                    .response_result
+                    .expect("generic hover result"),
+            )
+            .expect("generic hover response");
+            let HoverContents::Markup(contents) = hover.expect("generic hover").contents else {
+                panic!("expected generic markdown hover");
+            };
+            assert!(contents.value.contains("clear(buffer: Buffer<4>): bool"));
+        }
+
+        let free_signature_offset =
+            source.find("clear(samples").expect("free signature call") + "clear(".len();
+        let dot_signature_offset =
+            source.find("samples.clear(3)").expect("dot signature call") + "samples.clear(".len();
+        for (id, offset) in [(204, free_signature_offset), (205, dot_signature_offset)] {
+            server
+                .handle_request(
+                    &server_connection,
+                    request(id, SignatureHelpRequest::METHOD, request_position(offset)),
+                )
+                .expect("generic signature request");
+            let help: Option<lsp_types::SignatureHelp> = serde_json::from_value(
+                receive_response(&client_connection, id)
+                    .response_result
+                    .expect("generic signature result"),
+            )
+            .expect("generic signature response");
+            assert_eq!(
+                help.expect("generic signature help").signatures[0].label,
+                "clear(buffer: Buffer<4>): bool"
+            );
+        }
+
+        let explicit_calls = [
+            (
+                "clear<4>",
+                206,
+                source.find("clear<4>").expect("direct explicit call") + 2,
+            ),
+            (
+                "samples.clear::<4>",
+                209,
+                source
+                    .find("samples.clear::<4>")
+                    .expect("dot explicit call")
+                    + "samples.".len()
+                    + 2,
+            ),
+        ];
+        for (needle, id, offset) in explicit_calls {
+            server
+                .handle_request(
+                    &server_connection,
+                    request(id, HoverRequest::METHOD, request_position(offset)),
+                )
+                .expect("explicit hover request");
+            let hover: Option<Hover> = serde_json::from_value(
+                receive_response(&client_connection, id)
+                    .response_result
+                    .expect("explicit hover result"),
+            )
+            .expect("explicit hover response");
+            assert!(hover.is_none(), "hover leaked for {needle}");
+
+            server
+                .handle_request(
+                    &server_connection,
+                    request(
+                        id + 1,
+                        SignatureHelpRequest::METHOD,
+                        request_position(offset),
+                    ),
+                )
+                .expect("explicit signature request");
+            let help: Option<lsp_types::SignatureHelp> = serde_json::from_value(
+                receive_response(&client_connection, id + 1)
+                    .response_result
+                    .expect("explicit signature result"),
+            )
+            .expect("explicit signature response");
+            assert!(help.is_none(), "signature help leaked for {needle}");
+
+            server
+                .handle_request(
+                    &server_connection,
+                    request(id + 2, Completion::METHOD, request_position(offset)),
+                )
+                .expect("explicit completion request");
+            let completion: Option<CompletionResponse> = serde_json::from_value(
+                receive_response(&client_connection, id + 2)
+                    .response_result
+                    .expect("explicit completion result"),
+            )
+            .expect("explicit completion response");
+            let Some(CompletionResponse::List(completion)) = completion else {
+                panic!("expected empty explicit completion list for {needle}");
+            };
+            assert!(
+                completion.items.is_empty(),
+                "completion leaked for {needle}"
+            );
+        }
     }
 
     #[test]
