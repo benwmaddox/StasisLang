@@ -55,6 +55,17 @@ specialization; different capacities or element types do not. Generic structs
 use the existing concrete layout machinery, including fixed-array headers,
 alignment, SoA field paths, and state-inspection metadata.
 
+Generated symbols use the reserved `__stasis_type_`, `__stasis_function_`, and
+`__stasis_const_` namespaces. Source structs, enums, globals, global blocks,
+constants, externs, and functions may not use those prefixes. Other
+compiler-owned families, including test wrappers, remain distinct. The
+compiler retains the full canonical specialization key while elaborating and
+treats a generated-symbol reuse for a different key as a deterministic
+collision. Identity uses the canonical project-relative source path with `/`
+separators, the defining declaration, and canonical ordered type/value
+arguments; file insertion order, formatting, call spelling, and equivalent
+free/receiver qualification do not change it.
+
 The existing ownership and view rules remain authoritative:
 
 - `T[N]` owns its statically declared storage; it has no runtime length,
@@ -75,6 +86,38 @@ The existing ownership and view rules remain authoritative:
   not already support.
 - Generic declarations do not add array `.length`; explicit `count` fields
   remain the logical occupancy for bounded collections.
+
+## Resource ceilings and counting
+
+Generic elaboration constructs all rewritten sources before publishing any of
+them. A reusable raw `Compiler` retains the newly authored candidate text after
+a failed check but never publishes a partially expanded source set. JIT, native
+AOT, and Wasm retain their last accepted program snapshot and artifacts when
+elaboration fails; the development hot-swap backend also leaves its prepared
+candidate and commit queue unchanged. A corrected candidate can be retried on
+the same process.
+
+The supported ceilings are inclusive:
+
+| Resource | Ceiling | Counting convention |
+| --- | ---: | --- |
+| Project source | 16 MiB | Sum of original UTF-8 source bytes presented to the shared frontend. The guard is applied before specialization, so it is also the compiler's source-input ceiling for a project with no generic declarations. |
+| Specializations | 4,096 | Distinct concrete generic struct specializations plus distinct receiver-bound concrete function specializations. Reuses of the same canonical key count once. Standalone/function-owned generic roots are rejected and never consume this budget. |
+| Instantiation depth | 128 | A directly requested specialization is depth 0; each specialization first discovered while materializing it is parent depth plus 1. Depth 128 is accepted and 129 is rejected. |
+| Constant evaluation | 10,000 steps | Each parsed primary or unary prefix consumes one step. A top-level constant dependency graph shares one counter for the compilation; an independently evaluated generic argument starts its own counter. Checked binary arithmetic does not add a second step beyond its operands. |
+| Constant dependencies | 128 active definitions | The active dependency chain is bounded before recursion. Self and mutual cycles fail with a stable cycle diagnostic. |
+| Type IDs | 65,536 entries | IDs are unsigned 16-bit values `0..=65535`, including builtins. The next distinct type is rejected without mutating the table. |
+| Static layout | `u32` bytes | Header, payload multiplication, and final addition are checked independently. Zero-capacity fixed arrays are valid; any byte-size overflow is rejected. |
+| Expanded source | 16 MiB | Sum of UTF-8 bytes after concrete declarations and receiver-bound functions are emitted. Every substitution and replacement pass preflights or incrementally checks its output before allocation, and materialized function bodies are charged before they are retained. |
+| Elaboration work | 32 Mi work units | `input bytes + retained materialized function bytes + final expanded bytes + 1,024 * specialization count`, using checked arithmetic. This deterministic proxy bounds simultaneous source rewriting and specialization fan-out. |
+
+The exact neighbor fixtures exercise specialization counts 4,095/4,096/4,097,
+depths 127/128/129, and both standalone and shared-compilation evaluation
+counts 9,999/10,000/10,001. Separate fixtures cover TypeId exhaustion, the last
+fitting and first overflowing `u32` layout, zero capacity, constant cycles,
+finite/mutual/expanding recursion, generated-name spoofing, injected hash
+collisions, large-body multiplication, the combined 32 Mi work formula, and
+cross-backend plus prepared-hot-swap rollback/retry.
 
 ## Backend and packaging contract
 
@@ -122,6 +165,8 @@ named-struct-array view representation.
 | Type/value kind and arity | `Buffer<T, N>`, first-parameter binding, and the negative kind/arity fixtures | Parser and semantic diagnostics in the generic harness. |
 | Constant evaluation | Equal expressions, negative offsets, overflow, zero division, and extent checks | `negative_generic_collection_fixtures_keep_expected_diagnostics`. |
 | Identity and layout | `Buffer<i32, 4>`, `Buffer<i32, 8>`, `Buffer<f32, 3>`, `Nested<i32, 2>`, and `Rig2D<24>/<64>` | Published AOT symbols/layout plus the JIT test workload. |
+| Resource neighbors | 4,095/4,096/4,097 specializations, depth 127/128/129, 9,999/10,000/10,001 evaluation steps, TypeId and layout endpoints | Non-ignored `frontend::generics::tests` and `frontend::types::tests` fixtures enforce every boundary in normal compiler CI. |
+| Transactional failure | Expanding recursion, large receiver-body multiplication, and combined-work overflow | Expanding recursion has matching check/JIT/AOT/Wasm diagnostics and successful retry; large-body and combined-work fixtures prove all-or-nothing expanded-source publication; the prepared JIT path preserves its accepted snapshot/package and queues no commit. |
 | Binding and views | Free/dot receiver binding, nominal generic first parameters, and rejection of raw-view-only generics | Production JIT sample test and ambiguous/unresolved negatives. |
 | Bounds and occupancy | Full/empty append, ring wrap/drop, pool release, explicit counts, and fixed capacity | The two `.test.stasis` tests and native AOT/Wasm entry results. |
 | Effects and name lookup | Definition-site imports and existing receiver/view effect checking after substitution | Generic compilation uses the ordinary semantic checker; failures are not erased by specialization. |

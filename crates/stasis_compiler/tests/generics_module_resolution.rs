@@ -283,6 +283,55 @@ function score(self: Box<N>): i32 { return 99 + N + 900; }
 }
 
 #[test]
+fn formatting_and_equivalent_call_qualification_keep_specialization_identity() {
+    const BARE_MAIN: &str = r#"
+import "library.stasis";
+global item: library.Box<5>;
+function main(): i32 { return score(item); }
+"#;
+    const RECEIVER_MAIN: &str = r#"
+import "library.stasis";
+global item: library.Box<5>;
+function main(): i32 { return item.score(); }
+"#;
+    const COMPACT_LIBRARY: &str =
+        "struct Box<N:i32>{value:i32;}\nfunction score(self:Box<N>):i32{return N;}\n";
+    const FORMATTED_LIBRARY: &str = r#"
+struct Box<N: i32> {
+    value: i32;
+}
+
+function score(self: Box< N >): i32 {
+    return N;
+}
+"#;
+
+    let bare = compile_jit(&[
+        ("main.stasis", BARE_MAIN),
+        ("library.stasis", COMPACT_LIBRARY),
+    ]);
+    let receiver = compile_jit(&[
+        ("library.stasis", FORMATTED_LIBRARY),
+        ("main.stasis", RECEIVER_MAIN),
+    ]);
+    assert_eq!(
+        bare.execute_i32_noarg_by_name("main")
+            .expect("bare spelling executes"),
+        5
+    );
+    assert_eq!(
+        receiver
+            .execute_i32_noarg_by_name("main")
+            .expect("receiver spelling executes"),
+        5
+    );
+    assert_eq!(
+        generated_specialization_names(&bare),
+        generated_specialization_names(&receiver)
+    );
+}
+
+#[test]
 fn unrelated_duplicate_ordinary_type_does_not_change_specialization_identity() {
     const MAIN: &str = r#"
 import "library.stasis";

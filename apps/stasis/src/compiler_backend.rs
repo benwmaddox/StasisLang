@@ -4591,6 +4591,97 @@ mod tests {
     }
 
     #[test]
+    fn rejected_generic_expansion_preserves_prepared_jit_snapshot_package_and_queue() {
+        let _global_guard = crate::jit_test_support::lock();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!("stasis_generic_jit_rollback_{stamp}"));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let source = temp_root.join("engine.stasis");
+        fs::write(
+            &source,
+            "struct Buffer<N: i32> { value: i32; }\n\
+             global buffer: Buffer<4>;\n\
+             function capacity(self: Buffer<N>): i32 { return N; }\n\
+             function main(): i32 { return buffer.capacity(); }\n\
+             function tick(): i32 { return buffer.capacity(); }\n\
+             function render(): i32 { return 0; }\n\
+             function on_code_swap(): void { return; }\n",
+        )
+        .expect("write valid generic engine source");
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let mut backend = IncrementalCompilerBackend::new_with_prepared_jit_swaps(sender);
+        let baseline = backend.compile(CompileRequest::new(
+            RequestId(98_012),
+            vec![source.clone()],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(baseline.status, CompileStatus::Success, "{baseline:?}");
+        let prepared = receiver.recv().expect("prepared baseline candidate");
+        assert_eq!(prepared.candidate.execute_i32_noarg_by_name("main"), Ok(4));
+        let accepted_snapshot = snapshot_semantic_fingerprint(
+            backend
+                .last_program_snapshot
+                .as_ref()
+                .expect("accepted snapshot"),
+        );
+        let accepted_package = backend
+            .last_jit_engine_package
+            .as_ref()
+            .expect("accepted engine package")
+            .clone();
+        assert!(backend.pending_jit_candidate.is_none());
+
+        fs::write(
+            &source,
+            "struct Node<N: i32> { next: Node<N + 1>; }\n\
+             global root: Node<0>;\n\
+             function main(): i32 { return 0; }\n\
+             function tick(): i32 { return 0; }\n\
+             function render(): i32 { return 0; }\n\
+             function on_code_swap(): void { return; }\n",
+        )
+        .expect("write expanding generic candidate");
+        let rejected = backend.compile(CompileRequest::new(
+            RequestId(98_013),
+            vec![source.clone()],
+            TargetMode::JitDev,
+        ));
+        assert_eq!(rejected.status, CompileStatus::Failed, "{rejected:?}");
+        assert!(rejected.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("stasis.generic")
+                && diagnostic
+                    .message
+                    .contains("generic instantiation depth exceeded")
+        }));
+        assert_eq!(
+            snapshot_semantic_fingerprint(
+                backend
+                    .last_program_snapshot
+                    .as_ref()
+                    .expect("preserved snapshot"),
+            ),
+            accepted_snapshot
+        );
+        assert_eq!(
+            backend
+                .last_jit_engine_package
+                .as_ref()
+                .expect("preserved engine package"),
+            &accepted_package
+        );
+        assert!(backend.pending_jit_candidate.is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        fs::remove_dir_all(&temp_root).ok();
+    }
+
+    #[test]
     fn failed_prepared_jit_send_preserves_accepted_snapshot() {
         let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()

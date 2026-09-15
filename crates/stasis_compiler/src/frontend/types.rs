@@ -708,6 +708,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn type_id_capacity_accepts_last_u16_id_and_rejects_next_without_mutation() {
+        let mut table = TypeTable::new();
+        let mut last_id = None;
+        while table.types.len() <= usize::from(u16::MAX) {
+            let index = table.types.len();
+            last_id = Some(
+                table
+                    .intern_named(&format!("BoundaryType{index}"))
+                    .expect("every representable TypeId is accepted"),
+            );
+        }
+
+        assert_eq!(last_id, Some(u16::MAX));
+        assert_eq!(table.types.len(), usize::from(u16::MAX) + 1);
+        let before_types = table.types.len();
+        let before_keys = table.type_keys.len();
+        let before_index = table.by_key.len();
+        let error = table
+            .intern_named("TypeIdOverflow")
+            .expect_err("the first unrepresentable TypeId must fail");
+        assert!(
+            error.contains("type table exceeded u16 capacity"),
+            "{error}"
+        );
+        assert_eq!(table.types.len(), before_types);
+        assert_eq!(table.type_keys.len(), before_keys);
+        assert_eq!(table.by_key.len(), before_index);
+        assert_eq!(table.resolve("TypeIdOverflow"), None);
+    }
+
+    #[test]
+    fn fixed_array_layout_accepts_zero_and_last_u32_size_then_rejects_overflow() {
+        let mut table = TypeTable::new();
+        let zero = table.resolve_or_intern("i32[0]").expect("zero capacity");
+        let last = table
+            .resolve_or_intern("i32[1073741822]")
+            .expect("last i32 array layout fitting u32");
+
+        assert_eq!(
+            table.type_info(zero).expect("zero layout").layout,
+            TypeLayout {
+                header_i32_words: 1,
+                payload_size_bytes: Some(0),
+                static_size_bytes: Some(4),
+            }
+        );
+        assert_eq!(
+            table.type_info(last).expect("last layout").layout,
+            TypeLayout {
+                header_i32_words: 1,
+                payload_size_bytes: Some(4_294_967_288),
+                static_size_bytes: Some(4_294_967_292),
+            }
+        );
+
+        let before = table.types.len();
+        let error = table
+            .resolve_or_intern("i32[1073741823]")
+            .expect_err("header addition must reject u32 overflow");
+        assert!(error.contains("type layout size overflow"), "{error}");
+        assert_eq!(table.types.len(), before);
+        assert_eq!(table.resolve("i32[1073741823]"), None);
+    }
+
+    #[test]
     fn interns_array_view_and_fixed_types_deterministically() {
         let mut table = TypeTable::new();
         let view_1 = table.resolve_or_intern("i32[]").expect("i32[]");
