@@ -28,6 +28,8 @@ def validate(text: str) -> list[str]:
                     errors.append(f"{action} requires {required}")
         if action == "actions/upload-artifact" and "archive: true" not in block:
             errors.append("Artifact uploads must preserve named zip archives")
+        if action == "android-actions/setup-android" and "packages: platform-tools" not in block:
+            errors.append("Android setup must exclude the retired tools package")
     for bypass in ("ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION", "ACTIONS_RUNNER_FORCE_ACTIONS_NODE_VERSION", "NODE_NO_WARNINGS"):
         if bypass in text:
             errors.append(f"Runtime warning bypass: {bypass}")
