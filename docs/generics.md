@@ -64,6 +64,12 @@ The existing ownership and view rules remain authoritative:
   parameter cannot introduce a function generic.
 - A struct or element parameter is a view of caller-backed storage. Generic
   syntax never creates a hidden owning temporary or deep copy.
+- Struct fields may own fixed-capacity storage such as `T[N]`, but may not
+  store borrowed views such as `T[]` or `string`. This is checked on ordinary
+  declarations and again after generic substitution.
+- Functions and externs may not return named structs or arrays of named
+  structs. Pass the destination as a non-owning struct parameter and return a
+  scalar or `void`; the same rule applies after generic substitution.
 - Operations on `T` are checked after substitution. Generic code cannot invent
   arithmetic, conversions, memcpy, or field access that the concrete type does
   not already support.
@@ -102,11 +108,12 @@ defaults, variadic or higher-kinded parameters, traits, runtime value arguments,
 non-`i32` value parameters, symbolic equation solving, or arbitrary
 composite-element copying. Lifecycle and host entries remain concrete.
 
-Wasm host imports, exports, and aggregate returns remain scalar-only ABI
-boundaries. The sample's scalar `wasm_entry.stasis` remains a packaging choice
-until the separate Web-package migration changes it; it is no longer required
-by the internal Wasm named-struct-array view representation. Unsupported host
-aggregate shapes remain compile-time errors.
+Named-struct returns and stored views are rejected by the shared frontend, so
+JIT, native AOT, Wasm, lifecycle declarations, host externs, and generated
+wrappers observe one contract and one diagnostic category. The sample's scalar
+`wasm_entry.stasis` remains a packaging choice until the separate Web-package
+migration changes it; it is no longer required by the internal Wasm
+named-struct-array view representation.
 
 ## Acceptance matrix
 

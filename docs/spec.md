@@ -108,6 +108,9 @@ Header access:
 - The storage header still carries `max_length` so bounds metadata remains available at runtime.
 - Reads of `.max_length` through a statically named fixed collection are compile-time constants. Views
   retain runtime `.max_length` metadata because their capacity belongs to the referenced collection.
+- A struct field cannot store `Type[]` or another view type. Fields that own
+  collection storage must declare a fixed capacity such as `Type[N]`; borrowed
+  views remain parameters or locals.
 
 `ascii[N]` layout:
 - header `byte_length: i32`
@@ -185,9 +188,9 @@ and arbitrary unsupported composite copies are deferred.
 
 The current reference coverage and backend boundary are recorded in
 [`docs/generics.md`](generics.md). Bounded named-struct arrays use caller-backed
-views in JIT, native AOT, and internal Wasm calls, including receiver-owned
-`Entity[]` views. Wasm host imports, exports, and returns retain their explicit
-scalar-only ABI boundary; no aggregate is silently copied across it.
+views in JIT, native AOT, and internal Wasm calls. Stored views and named-struct
+returns are rejected by the shared frontend; no aggregate is silently copied
+or returned across an internal, lifecycle, host, or generated-wrapper boundary.
 
 ### 4.3 Numeric Conversion Semantics
 
@@ -629,11 +632,12 @@ Receiver-scoped declarations with different parameter 0 types may use their natu
 
 ### 7.5 Struct and Array Returns
 
-Struct and array returns are allowed.
-
-Stasis treats these as strongly typed references/views, not implicit by-value copies.
-- Struct/array returns must reference global-backed storage (for example a global struct field/element path).
-- Struct-typed temporaries are not materialized as standalone local value objects in Stasis.
+Named-struct returns, including fixed or view arrays whose element is a named
+struct, are not supported. This is a shared frontend rule for ordinary and
+generic functions, methods, lifecycle functions, extern declarations, and
+generated wrappers. Pass caller-backed struct storage as a parameter and return
+a scalar or `void`. Struct-typed temporaries are not materialized as standalone
+local value objects in Stasis.
 
 ### 7.6 Compiled Call Generations
 
