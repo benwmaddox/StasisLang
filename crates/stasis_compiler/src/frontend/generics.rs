@@ -6,6 +6,7 @@
 //! fixed-layout input.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Range;
 
 use crate::compiler::SourceFile;
 use crate::frontend::indexer::hash_text;
@@ -13,8 +14,9 @@ use crate::frontend::lexer::{lex, TokenKind};
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::parser::{
     parse_top_level_extern_functions, parse_top_level_functions,
-    parse_top_level_struct_definitions, parse_top_level_type_layout, ParsedFunctionSignature,
-    ParsedGenericParameter, ParsedGenericParameterKind,
+    parse_top_level_struct_definitions, parse_top_level_type_layout,
+    ParsedExternFunctionDeclaration, ParsedFunctionSignature, ParsedGenericParameter,
+    ParsedGenericParameterKind, ParsedStructDefinitionRange,
 };
 
 const MAX_SPECIALIZATIONS: usize = 4096;
@@ -100,6 +102,7 @@ struct OrdinaryStructDefinition {
     path: String,
     name: String,
     fields: Vec<crate::frontend::parser::ParsedField>,
+    definition_range: Range<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -174,21 +177,50 @@ struct Expansion {
 
 pub(crate) struct ExpansionError {
     pub(crate) path: Option<String>,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) symbol: String,
     pub(crate) message: String,
+    pub(crate) code: crate::SourceDiagnosticCode,
 }
 
 impl ExpansionError {
     fn without_path(message: String) -> Self {
         Self {
             path: None,
+            start: 0,
+            end: usize::MAX,
+            symbol: String::new(),
             message,
+            code: crate::SourceDiagnosticCode::Generic,
         }
     }
 
     fn for_file(path: String, message: String) -> Self {
         Self {
             path: Some(path),
+            start: 0,
+            end: usize::MAX,
+            symbol: String::new(),
             message,
+            code: crate::SourceDiagnosticCode::Generic,
+        }
+    }
+
+    fn contract(
+        path: String,
+        range: Range<usize>,
+        symbol: String,
+        message: String,
+        code: crate::SourceDiagnosticCode,
+    ) -> Self {
+        Self {
+            path: Some(path),
+            start: range.start,
+            end: range.end,
+            symbol,
+            message,
+            code,
         }
     }
 }
@@ -210,6 +242,18 @@ pub(crate) fn expand_sources(
             source: file.original_content.clone(),
         })
         .collect::<Vec<_>>();
+    if raw_files.iter().any(|file| {
+        parse_top_level_type_layout(&file.source).is_err()
+            || parse_top_level_struct_definitions(&file.source).is_err()
+            || parse_top_level_extern_functions(&file.source).is_err()
+            || parse_top_level_functions(&file.source).is_err()
+    }) {
+        for file in files {
+            file.content = file.original_content.clone();
+            file.hash = hash_text(&file.content);
+        }
+        return Ok(());
+    }
     let mut expansion = Expansion::new(raw_files, module_graph.clone())?;
     expansion.reject_explicit_generic_calls()?;
     if expansion.generic_structs.is_empty() && expansion.generic_functions.is_empty() {
@@ -547,6 +591,9 @@ impl Expansion {
             let Ok(layout) = parse_top_level_type_layout(&file.source) else {
                 continue;
             };
+            let Ok(struct_ranges) = parse_top_level_struct_definitions(&file.source) else {
+                continue;
+            };
             for global in &layout.globals {
                 concrete_path_definitions.push(ConcretePathDefinition {
                     file_index,
@@ -579,6 +626,12 @@ impl Expansion {
                         path: file.path.clone(),
                         name: structure.name.clone(),
                         fields: structure.fields.clone(),
+                        definition_range: find_struct_definition_range(
+                            &struct_ranges,
+                            &structure.name,
+                            &structure.generic_parameters,
+                        )
+                        .map_err(|message| ExpansionError::for_file(file.path.clone(), message))?,
                     });
             }
             for constant in layout.constants {
@@ -594,7 +647,7 @@ impl Expansion {
                     continue;
                 }
                 let definition_range = find_struct_definition_range(
-                    &file.source,
+                    &struct_ranges,
                     &structure.name,
                     &structure.generic_parameters,
                 )
@@ -632,19 +685,20 @@ impl Expansion {
                     .or_default()
                     .push(identity);
             }
-            if let Ok(externs) = parse_top_level_extern_functions(&file.source) {
-                if let Some(extern_decl) = externs
-                    .iter()
-                    .find(|declaration| !declaration.generic_parameters.is_empty())
-                {
-                    return Err(ExpansionError::for_file(
-                        file.path.clone(),
-                        format!(
-                            "generic extern function '{}' cannot be a host declaration; use a concrete wrapper",
-                            extern_decl.name
-                        ),
-                    ));
-                }
+            let Ok(externs) = parse_top_level_extern_functions(&file.source) else {
+                continue;
+            };
+            if let Some(extern_decl) = externs
+                .iter()
+                .find(|declaration| !declaration.generic_parameters.is_empty())
+            {
+                return Err(ExpansionError::for_file(
+                    file.path.clone(),
+                    format!(
+                        "generic extern function '{}' cannot be a host declaration; use a concrete wrapper",
+                        extern_decl.name
+                    ),
+                ));
             }
             let Ok(functions) = parse_top_level_functions(&file.source) else {
                 continue;
@@ -711,6 +765,7 @@ impl Expansion {
             concrete_paths_by_file: BTreeMap::new(),
             active_depth: None,
         };
+        expansion.validate_original_value_contracts(&parsed_functions)?;
         for (file_index, module_alias, function) in parsed_functions {
             let parameters = expansion
                 .receiver_generic_parameters(file_index, &function)
@@ -763,6 +818,144 @@ impl Expansion {
             }
         }
         Ok(expansion)
+    }
+
+    fn validate_original_value_contracts(
+        &self,
+        parsed_functions: &[(usize, String, ParsedFunctionSignature)],
+    ) -> Result<(), ExpansionError> {
+        for (file_index, _, function) in parsed_functions {
+            let environment = self.environment_for_file(*file_index);
+            if self
+                .is_named_struct_result(&function.return_type_name, &environment)
+                .map_err(|message| {
+                    ExpansionError::for_file(self.files[*file_index].path.clone(), message)
+                })?
+            {
+                return Err(self.unsupported_struct_return_error(
+                    *file_index,
+                    function,
+                    &function.return_type_name,
+                ));
+            }
+        }
+
+        for (file_index, file) in self.files.iter().enumerate() {
+            let Ok(externs) = parse_top_level_extern_functions(&file.source) else {
+                continue;
+            };
+            let environment = self.environment_for_file(file_index);
+            for declaration in externs {
+                if self
+                    .is_named_struct_result(&declaration.return_type_name, &environment)
+                    .map_err(|message| ExpansionError::for_file(file.path.clone(), message))?
+                {
+                    let range = extern_return_type_range(&file.source, &declaration)
+                        .unwrap_or_else(|| declaration.name_range.clone());
+                    return Err(ExpansionError::contract(
+                        file.path.clone(),
+                        range,
+                        declaration.name.clone(),
+                        unsupported_struct_return_message(&declaration.return_type_name),
+                        crate::SourceDiagnosticCode::UnsupportedStructReturn,
+                    ));
+                }
+            }
+        }
+
+        for definitions in self.ordinary_structs_by_name.values() {
+            for definition in definitions {
+                self.validate_stored_view_fields(
+                    definition.file_index,
+                    &definition.name,
+                    &definition.fields,
+                    definition.definition_range.clone(),
+                    &GenericEnvironment::default(),
+                )?;
+            }
+        }
+        for definition in self.generic_structs.values() {
+            self.validate_stored_view_fields(
+                definition.file_index,
+                &definition.name,
+                &definition.fields,
+                definition.definition_range.clone(),
+                &GenericEnvironment::default(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_stored_view_fields(
+        &self,
+        file_index: usize,
+        struct_name: &str,
+        fields: &[crate::frontend::parser::ParsedField],
+        definition_range: Range<usize>,
+        environment: &GenericEnvironment,
+    ) -> Result<(), ExpansionError> {
+        let file = &self.files[file_index];
+        for field in fields {
+            let materialized = environment
+                .types
+                .get(field.type_name.trim())
+                .map_or(field.type_name.as_str(), String::as_str);
+            if !contains_view_type(materialized) {
+                continue;
+            }
+            let range =
+                struct_field_type_range(&file.source, definition_range.clone(), &field.name)
+                    .unwrap_or_else(|| definition_range.clone());
+            return Err(ExpansionError::contract(
+                file.path.clone(),
+                range,
+                struct_name.to_string(),
+                stored_view_field_message(struct_name, &field.name, materialized),
+                crate::SourceDiagnosticCode::StoredViewField,
+            ));
+        }
+        Ok(())
+    }
+
+    fn is_named_struct_result(
+        &self,
+        type_name: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<bool, String> {
+        let trimmed = type_name.trim();
+        if let Some((element, _)) = split_array_suffix(trimmed) {
+            return self.is_named_struct_result(element, environment);
+        }
+        if let Some(value) = environment.types.get(trimmed) {
+            return self.is_named_struct_result(value, environment);
+        }
+        if let Some((base, _)) = parse_type_application(trimmed)? {
+            return Ok(self
+                .lookup_generic_struct_for_environment(base, environment)?
+                .is_some());
+        }
+        Ok(self
+            .lookup_ordinary_struct_for_environment(trimmed, environment)?
+            .is_some()
+            || self.generated_struct_application(trimmed).is_some())
+    }
+
+    fn unsupported_struct_return_error(
+        &self,
+        file_index: usize,
+        function: &ParsedFunctionSignature,
+        return_type: &str,
+    ) -> ExpansionError {
+        let file = &self.files[file_index];
+        let range = function_return_type_range(&file.source, function)
+            .unwrap_or_else(|| function.signature_range.clone());
+        ExpansionError::contract(
+            file.path.clone(),
+            range,
+            function.name.clone(),
+            unsupported_struct_return_message(return_type),
+            crate::SourceDiagnosticCode::UnsupportedStructReturn,
+        )
     }
 
     fn receiver_generic_parameters(
@@ -1881,12 +2074,17 @@ impl Expansion {
                     .lookup_generic_struct(&key.definition)
                     .map(|definition| definition.path.clone());
                 let previous_depth = self.active_depth.replace(depth);
-                let result = self.materialize_struct(&key);
+                let result = self
+                    .validate_materialized_struct_contract(&key)
+                    .and_then(|()| {
+                        self.materialize_struct(&key)
+                            .map_err(|message| match path.clone() {
+                                Some(path) => ExpansionError::for_file(path, message),
+                                None => ExpansionError::without_path(message),
+                            })
+                    });
                 self.active_depth = previous_depth;
-                result.map_err(|message| match path {
-                    Some(path) => ExpansionError::for_file(path, message),
-                    None => ExpansionError::without_path(message),
-                })?;
+                result?;
             }
             if let Some((key, depth)) = self.function_work.pop_front() {
                 let path = self
@@ -1894,15 +2092,84 @@ impl Expansion {
                     .get(key.definition)
                     .map(|definition| definition.path.clone());
                 let previous_depth = self.active_depth.replace(depth);
-                let result = self.materialize_function(&key);
+                let result = self
+                    .validate_materialized_function_contract(&key)
+                    .and_then(|()| {
+                        self.materialize_function(&key)
+                            .map_err(|message| match path.clone() {
+                                Some(path) => ExpansionError::for_file(path, message),
+                                None => ExpansionError::without_path(message),
+                            })
+                    });
                 self.active_depth = previous_depth;
-                result.map_err(|message| match path {
-                    Some(path) => ExpansionError::for_file(path, message),
-                    None => ExpansionError::without_path(message),
-                })?;
+                result?;
             }
         }
         Ok(())
+    }
+
+    fn validate_materialized_struct_contract(
+        &mut self,
+        key: &StructSpecializationKey,
+    ) -> Result<(), ExpansionError> {
+        let definition = self
+            .lookup_generic_struct(&key.definition)
+            .cloned()
+            .ok_or_else(|| {
+                ExpansionError::without_path(format!("unknown generic struct '{}'", key.definition))
+            })?;
+        let mut environment =
+            GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)
+                .map_err(ExpansionError::without_path)?;
+        environment.module_alias = Some(definition.module_alias.clone());
+        environment.source_path = Some(definition.path.clone());
+        for field in &definition.fields {
+            let materialized = self
+                .materialize_type(&field.type_name, &environment)
+                .map_err(|message| ExpansionError::for_file(definition.path.clone(), message))?;
+            if !contains_view_type(&materialized) {
+                continue;
+            }
+            let source = &self.files[definition.file_index].source;
+            let range =
+                struct_field_type_range(source, definition.definition_range.clone(), &field.name)
+                    .unwrap_or_else(|| definition.definition_range.clone());
+            return Err(ExpansionError::contract(
+                definition.path.clone(),
+                range,
+                definition.name.clone(),
+                stored_view_field_message(&definition.name, &field.name, &materialized),
+                crate::SourceDiagnosticCode::StoredViewField,
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_materialized_function_contract(
+        &self,
+        key: &FunctionSpecializationKey,
+    ) -> Result<(), ExpansionError> {
+        let generic = self.generic_functions.get(key.definition).ok_or_else(|| {
+            ExpansionError::without_path(
+                "internal error: missing generic function definition".to_string(),
+            )
+        })?;
+        let mut environment =
+            GenericEnvironment::from_parameters(&generic.parameters, &key.arguments)
+                .map_err(ExpansionError::without_path)?;
+        environment.module_alias = Some(generic.module_alias.clone());
+        environment.source_path = Some(generic.path.clone());
+        if !self
+            .is_named_struct_result(&generic.signature.return_type_name, &environment)
+            .map_err(|message| ExpansionError::for_file(generic.path.clone(), message))?
+        {
+            return Ok(());
+        }
+        Err(self.unsupported_struct_return_error(
+            generic.file_index,
+            &generic.signature,
+            &generic.signature.return_type_name,
+        ))
     }
 
     fn collect_type_applications(
@@ -2370,12 +2637,6 @@ impl Expansion {
                 return Err(format!(
                     "generic struct '{}<...>' field '{}' cannot contain void after substitution",
                     definition.name, field.name
-                ));
-            }
-            if contains_view_type(&materialized) {
-                return Err(format!(
-                    "generic struct '{}<...>' field '{}' cannot store view type '{}'",
-                    definition.name, field.name, materialized
                 ));
             }
             if contains_type_name(&materialized, &generated_name) {
@@ -3293,13 +3554,13 @@ fn is_concrete_only_function_name(name: &str) -> bool {
 }
 
 fn find_struct_definition_range(
-    source: &str,
+    definitions: &[ParsedStructDefinitionRange],
     name: &str,
     parameters: &[ParsedGenericParameter],
 ) -> Result<std::ops::Range<usize>, String> {
-    for structure in parse_top_level_struct_definitions(source)? {
+    for structure in definitions {
         if structure.name == name && structure.generic_parameters == parameters {
-            return Ok(structure.definition_range);
+            return Ok(structure.definition_range.clone());
         }
     }
     Err(format!(
@@ -3705,13 +3966,141 @@ fn ordinary_types_compatible(parameter: &str, actual: &str) -> bool {
                 && type_names_equivalent(parameter_extent, actual_extent)))
 }
 
+fn unsupported_struct_return_message(type_name: &str) -> String {
+    format!(
+        "named-struct result '{}' is unsupported by the non-owning view ABI; pass it as a parameter and return a scalar or void",
+        type_name.trim()
+    )
+}
+
+fn stored_view_field_message(struct_name: &str, field_name: &str, type_name: &str) -> String {
+    format!(
+        "struct '{}' field '{}' cannot store view type '{}'; use a fixed-capacity field or keep the view as a parameter/local",
+        struct_name,
+        field_name,
+        type_name.trim()
+    )
+}
+
+fn function_return_type_range(
+    source: &str,
+    function: &ParsedFunctionSignature,
+) -> Option<Range<usize>> {
+    let tokens = lex(source).ok()?;
+    let signature_tokens = tokens
+        .iter()
+        .filter(|token| {
+            token.start >= function.signature_range.start
+                && token.end <= function.signature_range.end
+        })
+        .collect::<Vec<_>>();
+    for (index, pair) in signature_tokens.windows(2).enumerate().rev() {
+        if pair[0].kind == TokenKind::RParen && pair[1].kind == TokenKind::Colon {
+            let start = signature_tokens.get(index + 2)?.start;
+            let end = signature_tokens.last()?.end;
+            return (start < end).then_some(start..end);
+        }
+    }
+    None
+}
+
+fn extern_return_type_range(
+    source: &str,
+    declaration: &ParsedExternFunctionDeclaration,
+) -> Option<Range<usize>> {
+    let tokens = lex(source).ok()?;
+    let name_index = tokens.iter().position(|token| {
+        token.start == declaration.name_range.start && token.end == declaration.name_range.end
+    })?;
+    let mut depth = 0usize;
+    let mut parameter_end = None;
+    for (index, token) in tokens.iter().enumerate().skip(name_index + 1) {
+        match token.kind {
+            TokenKind::LParen => depth += 1,
+            TokenKind::RParen => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    parameter_end = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let parameter_end = parameter_end?;
+    if tokens.get(parameter_end + 1)?.kind != TokenKind::Colon {
+        return None;
+    }
+    let type_start = parameter_end + 2;
+    let semicolon = tokens
+        .iter()
+        .enumerate()
+        .skip(type_start)
+        .find(|(_, token)| token.kind == TokenKind::Semicolon)
+        .map(|(index, _)| index)?;
+    let start = tokens.get(type_start)?.start;
+    let end = tokens.get(semicolon.checked_sub(1)?)?.end;
+    (start < end).then_some(start..end)
+}
+
+fn struct_field_type_range(
+    source: &str,
+    definition_range: Range<usize>,
+    field_name: &str,
+) -> Option<Range<usize>> {
+    let tokens = lex(source).ok()?;
+    let mut depth = 0usize;
+    let mut in_definition = false;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.start < definition_range.start || token.end > definition_range.end {
+            continue;
+        }
+        match token.kind {
+            TokenKind::LBrace => {
+                depth += 1;
+                in_definition = true;
+            }
+            TokenKind::RBrace => depth = depth.saturating_sub(1),
+            TokenKind::Identifier
+                if in_definition
+                    && depth == 1
+                    && &source[token.start..token.end] == field_name
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|next| next.kind == TokenKind::Colon) =>
+            {
+                let type_start = index + 2;
+                let semicolon = tokens
+                    .iter()
+                    .enumerate()
+                    .skip(index + 2)
+                    .find(|next| {
+                        next.1.start <= definition_range.end && next.1.kind == TokenKind::Semicolon
+                    })?
+                    .0;
+                let start = tokens.get(type_start)?.start;
+                let end = tokens.get(semicolon.checked_sub(1)?)?.end;
+                return (start < end).then_some(start..end);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn contains_view_type(type_name: &str) -> bool {
     let trimmed = type_name.trim();
     if trimmed == "string" {
         return true;
     }
     if let Some((element, extent)) = split_array_suffix(trimmed) {
-        return extent.trim().is_empty() || contains_view_type(element);
+        if extent.trim().is_empty() {
+            return true;
+        }
+        if element.trim() == "string" {
+            return false;
+        }
+        return contains_view_type(element);
     }
     parse_type_application(trimmed)
         .ok()
@@ -5085,6 +5474,50 @@ mod tests {
         assert_eq!(diagnostic.path, "broken.stasis");
         assert_eq!(diagnostic.symbol, "broken");
         assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Parse);
+    }
+
+    #[test]
+    fn malformed_function_diagnostic_precedes_stored_view_contract() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "broken_contract.stasis",
+            "struct Rig { bones: i32[]; }\nfunction broken(: i32): void {}\n",
+        );
+        compiler
+            .check()
+            .expect_err("canonical parser must own malformed source diagnostics");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("canonical parser diagnostic");
+        assert_eq!(diagnostic.path, "broken_contract.stasis");
+        assert_eq!(diagnostic.symbol, "broken");
+        assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Parse);
+    }
+
+    #[test]
+    fn malformed_import_diagnostic_precedes_specialized_stored_view_contract() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"library.stasis\";\nglobal invalid: library.Box<i32[]>;\nfunction main(): i32 { return 0; }\n",
+        );
+        compiler.upsert_file(
+            "library.stasis",
+            "struct Box<T: type> { value: T; }\nfunction broken(: i32): void {}\n",
+        );
+        compiler
+            .check()
+            .expect_err("imported canonical parser diagnostic must precede value contracts");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("imported canonical parser diagnostic");
+        assert_eq!(diagnostic.path, "library.stasis", "{diagnostic:?}");
+        assert_eq!(diagnostic.symbol, "broken", "{diagnostic:?}");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::Parse,
+            "{diagnostic:?}"
+        );
     }
 
     #[test]

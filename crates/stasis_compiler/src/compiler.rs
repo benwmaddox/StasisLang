@@ -541,11 +541,12 @@ impl Compiler {
                 self.last_source_diagnostic = diagnostic_file.map(|file| {
                     crate::SourceDiagnostic::new(
                         file.path.clone(),
-                        0,
-                        file.content.len(),
-                        String::new(),
+                        error.start.min(file.original_content.len()),
+                        error.end.min(file.original_content.len()),
+                        error.symbol.clone(),
                         error.message.clone(),
                     )
+                    .with_code(error.code.clone())
                 });
                 CompileError::Frontend(error.message)
             },
@@ -3084,7 +3085,7 @@ function unfinished(): void { continue; }
             r#"
 struct Enemy { hp: i32; }
 function main(): i32 { return 0; }
-function create_enemy(): Enemy { let enemy: Enemy; return enemy; }
+function prepare_enemy(): void { let enemy: Enemy; return; }
 "#,
         );
         compiler.check().expect("typed default should be valid");
@@ -3094,7 +3095,7 @@ function create_enemy(): Enemy { let enemy: Enemy; return enemy; }
             r#"
 struct Enemy { hp: i32; }
 function main(): i32 { return 0; }
-function create_enemy(): Enemy { let enemy: Enemy = 0.0; return enemy; }
+function prepare_enemy(): void { let enemy: Enemy = 0.0; return; }
 "#,
         );
         let error = compiler

@@ -3328,10 +3328,10 @@ function main(): i32 { return mem_zero_f32(memory_probe, 1, 0, 1); }\n";
         let source = r#"struct Enemy { hp: i32; }
 
 // Creates an enemy with explicit health.
-function spawn_enemy(count: i32, health: i32): Enemy {
+function spawn_enemy(count: i32, health: i32): i32 {
     let enemy: Enemy;
     enemy.hp = health;
-    return enemy;
+    return enemy.hp;
 }
 
 function main(): i32 {
@@ -3691,7 +3691,7 @@ function main(): i32 {
             .expect("function information");
         assert_eq!(
             function.signatures,
-            vec!["spawn_enemy(count: i32, health: i32): Enemy"]
+            vec!["spawn_enemy(count: i32, health: i32): i32"]
         );
         assert_eq!(
             function.documentation.as_deref(),
@@ -3915,7 +3915,7 @@ function main(): i32 {
         assert_eq!(help.active_signature, 0);
         assert_eq!(
             help.signatures[0].label,
-            "spawn_enemy(count: i32, health: i32): Enemy"
+            "spawn_enemy(count: i32, health: i32): i32"
         );
         assert_eq!(help.signatures[0].parameters[1].label, "health: i32");
         assert_eq!(

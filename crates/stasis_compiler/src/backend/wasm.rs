@@ -5997,7 +5997,7 @@ function main(): i32 {
             .compile()
             .expect_err("receiver struct-array views must stay unsupported");
         assert!(
-            format!("{error:?}").contains("has no supported layout"),
+            format!("{error:?}").contains("cannot store view type 'Bone[]'"),
             "unexpected receiver array layout diagnostic: {error:?}"
         );
     }

@@ -16,6 +16,8 @@ pub enum SourceDiagnosticCode {
     UnresolvedExtern,
     MissingModule,
     DuplicateImportAlias,
+    UnsupportedStructReturn,
+    StoredViewField,
 }
 
 impl SourceDiagnosticCode {
@@ -26,6 +28,8 @@ impl SourceDiagnosticCode {
             Self::UnresolvedExtern => "stasis.unresolvedExtern",
             Self::MissingModule => "stasis.missingModule",
             Self::DuplicateImportAlias => "stasis.duplicateImportAlias",
+            Self::UnsupportedStructReturn => "stasis.unsupportedStructReturn",
+            Self::StoredViewField => "stasis.storedViewField",
         }
     }
 }

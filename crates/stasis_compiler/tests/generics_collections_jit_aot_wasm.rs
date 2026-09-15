@@ -556,7 +556,7 @@ fn indexed_named_struct_elements_resolve_local_receiver_and_qualified_calls() {
 }
 
 #[test]
-fn rejects_named_struct_array_returns_at_the_wasm_abi_boundary() {
+fn rejects_named_struct_array_returns_at_the_shared_frontend_boundary() {
     let mut wasm = WasmProcess::new();
     wasm.set_project_root(repository_root().to_string_lossy())
         .expect("set named-array return fixture project root");
@@ -567,10 +567,9 @@ fn rejects_named_struct_array_returns_at_the_wasm_abi_boundary() {
     );
     let error = wasm
         .compile()
-        .expect_err("named-struct array return must remain outside the WebAssembly ABI");
+        .expect_err("named-struct array return must remain outside the shared value contract");
     assert!(
-        format!("{error:?}")
-            .contains("web named-struct array and struct-view returns are unsupported"),
+        format!("{error:?}").contains("named-struct result 'Item[]' is unsupported"),
         "unexpected named-array return diagnostic: {error:?}"
     );
 }
