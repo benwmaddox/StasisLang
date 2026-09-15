@@ -3,6 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -79,14 +80,16 @@ async function loadRuntime() {
     setItem(key, value) { storage.set(key, String(value)); },
   };
   const instance = { exports: { memory, main: () => 0, tick: () => 0, render: () => 0 } };
+  const game = {
+    strings: {},
+    memory: { payload: { hash: 7, handle: 7007, offset: 0, length: 8, stride: 1, byte_backed: true, type_id: 5 } },
+    assets: {},
+  };
+  installCollectionViewAbi(game, instance.exports);
   const context = {
     document,
     window: {
-      STASIS_GAME: {
-        strings: {},
-        memory: { payload: { hash: 7, offset: 0, length: 8, stride: 1, byte_backed: true, type_id: 5 } },
-        assets: {},
-      },
+      STASIS_GAME: game,
     },
     localStorage,
     location: {
@@ -130,11 +133,11 @@ test("browser network checkpoints and mailbox execute bounded behavior in a VM",
   assert.doesNotMatch(checkpoint[1], /0123456789abcdef/);
 
   new Uint8Array(memory.buffer).set([4, 5, 6], 0);
-  assert.equal(testing.networkSend(7, 3), 0, "open or connecting payload is accepted");
+  assert.equal(testing.networkSend(7007, 3), 0, "open or connecting payload is accepted");
   sockets[0].open();
   assert.deepEqual([...sockets[0].sent[0]], [4, 5, 6]);
   sockets[0].receive(new Uint8Array([8, 9]));
-  assert.equal(testing.networkPoll(7, 8), 2);
+  assert.equal(testing.networkPoll(7007, 8), 2);
   assert.deepEqual([...new Uint8Array(memory.buffer).slice(0, 2)], [8, 9]);
   assert.equal(imports.stasis_web_network_resume_seat(), 2);
   assert.equal(imports.stasis_web_network_last_sequence(), 17);
@@ -161,8 +164,8 @@ test("browser network outbound mailbox rejects work beyond its bounded queue", a
   new Uint8Array(memory.buffer)[0] = 1;
   assert.equal(testing.networkConnect(), 0);
   for (let index = 0; index < 256; index += 1) {
-    assert.equal(testing.networkSend(7, 1), 0, `queued payload ${index}`);
+    assert.equal(testing.networkSend(7007, 1), 0, `queued payload ${index}`);
   }
-  assert.equal(testing.networkSend(7, 1), -3);
+  assert.equal(testing.networkSend(7007, 1), -3);
   assert.equal(testing.networkClient.outbound.length, 256);
 });

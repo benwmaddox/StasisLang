@@ -27,11 +27,13 @@ DEVELOPMENT_SWAP = Path("crates/stasis_compiler/src/backend/development_swap.rs"
 DYNLOAD = Path("crates/stasis_dynload/src/lib.rs")
 MOBILE = Path("runtime/stasis_mobile_runtime.h")
 WEB = Path("runtime/web/game.js")
+WASM = Path("crates/stasis_compiler/src/backend/wasm.rs")
+TOOLCHAIN = Path("apps/stasis/src/toolchain_cli.rs")
 
 EXPECTED_TOP_LEVEL = {
     "schema", "version", "host_frame", "render_command", "renderer_lifecycle",
     "guest_entrypoints", "diagnostics", "compile_transaction", "development_swap",
-    "asset_package",
+    "asset_package", "wasm_collection_view",
 }
 
 
@@ -214,6 +216,35 @@ def check(
             if pattern not in _read(path, overlays):
                 failures.append(Failure(f"guest_entrypoints.{entrypoint}", path.as_posix(), pattern, "missing"))
 
+    collection_view = registry["wasm_collection_view"]
+    wasm_text = _read(WASM, overlays)
+    web_text = _read(WEB, overlays)
+    toolchain_text = _read(TOOLCHAIN, overlays)
+    compiler_version = re.search(
+        r"pub const COLLECTION_VIEW_ABI_VERSION: i32 = (\d+);", wasm_text
+    )
+    runtime_version = re.search(
+        r"const COLLECTION_VIEW_ABI_VERSION = (\d+);", web_text
+    )
+    for source, actual in (
+        (WASM, int(compiler_version.group(1)) if compiler_version else "missing"),
+        (WEB, int(runtime_version.group(1)) if runtime_version else "missing"),
+    ):
+        if collection_view["version"] != actual:
+            failures.append(
+                Failure("wasm_collection_view.version", source.as_posix(), collection_view["version"], actual)
+            )
+    for field, source, text in (
+        (collection_view["package_field"], TOOLCHAIN, toolchain_text),
+        (collection_view["package_field"], WEB, web_text),
+        (collection_view["wasm_export"], WASM, wasm_text),
+        (collection_view["wasm_export"], WEB, web_text),
+    ):
+        if field not in text:
+            failures.append(
+                Failure("wasm_collection_view.consumer", source.as_posix(), field, "missing")
+            )
+
     asset = registry["asset_package"]
     expected_asset = {"schema": "stasis.asset_package", "version": 1, "identity_path": "stasis_asset_package.json", "manifest_path": "assets/manifest.json", "hash_algorithm": "sha256"}
     if asset != expected_asset:
@@ -292,7 +323,7 @@ def check(
     abi_failures, abi_evidence = abi.check(overlays={path: text for path, text in overlays.items() if path in abi.REQUIRED})
     for failure in abi_failures:
         failures.append(Failure(f"existing_abi.{failure.field}", failure.consumer, failure.expected, failure.actual))
-    checks = len(host["constants"]) + len(render["constants"]) + len(lifecycle["states"]) + len(lifecycle["reasons"]) + len(source_codes) + len(asset_codes) + len(actual_receipt_fields) + len(actual_status_tags) + 1 + int(abi_evidence.get("checks", 0))
+    checks = len(host["constants"]) + len(render["constants"]) + len(lifecycle["states"]) + len(lifecycle["reasons"]) + len(source_codes) + len(asset_codes) + len(actual_receipt_fields) + len(actual_status_tags) + 7 + int(abi_evidence.get("checks", 0))
     return failures, {"schema": "stasis.host_contract.evidence.v1", "checks": checks, "status": "failed" if failures else "passed"}
 
 

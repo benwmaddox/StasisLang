@@ -40,6 +40,14 @@ metadata receive compiler-reported offsets alongside them. True top-level
 scalar globals may remain Wasm globals; function parameters and temporary
 values remain Wasm locals.
 
+Primitive collection views cross calls and host imports as one opaque `i32`
+handle. The handle is distinct from the physical byte offset and remains unique
+even when two zero-capacity collections occupy no bytes at the same offset. The
+generated memory-layout table publishes both `handle` and `offset`; browser host
+operations resolve the handle before touching linear memory. Package config and
+the immutable module export identify collection-view ABI version 2, and startup
+rejects mixed versions before invoking the guest.
+
 The exported `__stasis_global_get_*` and `__stasis_global_set_*` reflection
 helpers preserve path-hash access for both physical storage lanes. This keeps
 host inspection independent of whether a path is backed by linear memory or a

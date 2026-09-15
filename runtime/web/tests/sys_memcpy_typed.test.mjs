@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -47,6 +48,7 @@ async function loadRuntime(game, memory) {
       render: () => 0,
     }
   };
+  installCollectionViewAbi(game, instance.exports);
   let env;
   const webAssembly = {
     Global: WebAssembly.Global,
@@ -88,18 +90,18 @@ async function loadRuntime(game, memory) {
 function typedGame() {
   return {
     memory: {
-      i32Source: { hash: 101, offset: 0, type_id: 1, length: 5, stride: 8 },
-      i32Destination: { hash: 202, offset: 64, type_id: 1, length: 5, stride: 8 },
-      f32Source: { hash: 303, offset: 128, type_id: 2, length: 4, stride: 12 },
-      f32Destination: { hash: 404, offset: 192, type_id: 2, length: 4, stride: 12 },
-      invalid: { hash: 505, offset: 65535, type_id: 1, length: 4, stride: 8 },
+      i32Source: { hash: 101, handle: 1101, offset: 0, type_id: 1, length: 5, stride: 8 },
+      i32Destination: { hash: 202, handle: 1202, offset: 64, type_id: 1, length: 5, stride: 8 },
+      f32Source: { hash: 303, handle: 1303, offset: 128, type_id: 2, length: 4, stride: 12 },
+      f32Destination: { hash: 404, handle: 1404, offset: 192, type_id: 2, length: 4, stride: 12 },
+      invalid: { hash: 505, handle: 1505, offset: 65535, type_id: 1, length: 4, stride: 8 },
     },
     strings: {},
     assets: {},
   };
 }
 
-test("web typed memcpy imports copy strided i32/f32 values by hash", async () => {
+test("web typed memcpy imports copy strided i32/f32 values by opaque handle", async () => {
   const memory = new WebAssembly.Memory({ initial: 1 });
   const game = typedGame();
   const view = new DataView(memory.buffer);
@@ -107,19 +109,19 @@ test("web typed memcpy imports copy strided i32/f32 values by hash", async () =>
   for (let index = 0; index < 4; index += 1) view.setFloat32(128 + index * 12, index + 0.25, true);
   const env = await loadRuntime(game, memory);
 
-  env.sys_memcpy_i32(202, 1, 101, 0, 4);
+  env.sys_memcpy_i32(1202, 1, 1101, 0, 4);
   assert.deepEqual(
     Array.from({ length: 5 }, (_, index) => view.getInt32(64 + index * 8, true)),
     [0, -7, 4, 15, 26]
   );
-  env.sys_memcpy_f32(404, 0, 303, 0, 4);
+  env.sys_memcpy_f32(1404, 0, 1303, 0, 4);
   assert.deepEqual(
     Array.from({ length: 4 }, (_, index) => view.getFloat32(192 + index * 12, true)),
     [0.25, 1.25, 2.25, 3.25]
   );
 });
 
-test("web typed memcpy accepts linear-memory offsets and preserves overlap", async () => {
+test("web typed memcpy uses opaque handles and preserves overlap", async () => {
   const memory = new WebAssembly.Memory({ initial: 1 });
   const game = typedGame();
   const view = new DataView(memory.buffer);
@@ -127,12 +129,12 @@ test("web typed memcpy accepts linear-memory offsets and preserves overlap", asy
   for (let index = 0; index < 4; index += 1) view.setFloat32(128 + index * 12, index + 10.5, true);
   const env = await loadRuntime(game, memory);
 
-  env.sys_memcpy_i32(0, 1, 0, 0, 4);
+  env.sys_memcpy_i32(1101, 1, 1101, 0, 4);
   assert.deepEqual(
     Array.from({ length: 5 }, (_, index) => view.getInt32(index * 8, true)),
     [1, 1, 2, 3, 4]
   );
-  env.sys_memcpy_f32(192, 0, 128, 1, 3);
+  env.sys_memcpy_f32(1404, 0, 1303, 1, 3);
   assert.deepEqual(
     Array.from({ length: 4 }, (_, index) => view.getFloat32(192 + index * 12, true)),
     [11.5, 12.5, 13.5, 0]
@@ -148,14 +150,14 @@ test("web typed memcpy ignores invalid layouts and out-of-range elements", async
   view.setFloat32(128, 6.5, true);
   const env = await loadRuntime(game, memory);
 
-  env.sys_memcpy_i32(202, 4, 101, 4, 3);
+  env.sys_memcpy_i32(1202, 4, 1101, 4, 3);
   assert.equal(view.getInt32(64 + 4 * 8, true), 0);
-  env.sys_memcpy_i32(505, 0, 101, 0, 2);
+  env.sys_memcpy_i32(1505, 0, 1101, 0, 2);
   assert.equal(view.getInt32(64, true), 77);
-  env.sys_memcpy_i32(202, 0, 505, 0, 2);
+  env.sys_memcpy_i32(1202, 0, 1505, 0, 2);
   assert.equal(view.getInt32(64, true), 0);
-  env.sys_memcpy_f32(404, 0, 303, -1, 2);
+  env.sys_memcpy_f32(1404, 0, 1303, -1, 2);
   assert.equal(view.getFloat32(192, true), 0);
-  env.sys_memcpy_f32(404, 0, 303, 0, 0);
+  env.sys_memcpy_f32(1404, 0, 1303, 0, 0);
   assert.equal(view.getFloat32(192, true), 0);
 });

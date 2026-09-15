@@ -3,6 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -37,16 +38,18 @@ async function loadRuntime(initialStorage = new Map()) {
     addEventListener() {}, createElement: () => ({ getContext: () => ({}) }),
   };
   const instance = { exports: { memory, main: () => 0, tick: () => 0, render: () => 0 } };
+  const game = {
+    strings: { "1": "project-a", "2": "score", "3": "project-b", "4": "bad/key" },
+    memory: {
+      payload: { hash: 7, handle: 7007, offset: 0, length: 8, stride: 1, byte_backed: true, type_id: 5 },
+    },
+    assets: {},
+  };
+  installCollectionViewAbi(game, instance.exports);
   const context = {
     document,
     window: {
-      STASIS_GAME: {
-        strings: { "1": "project-a", "2": "score", "3": "project-b", "4": "bad/key" },
-        memory: {
-          payload: { hash: 7, offset: 0, length: 8, stride: 1, byte_backed: true, type_id: 5 },
-        },
-        assets: {},
-      },
+      STASIS_GAME: game,
     },
     localStorage,
     location: { origin: "https://example.test", protocol: "https:", host: "example.test", hash: "" },

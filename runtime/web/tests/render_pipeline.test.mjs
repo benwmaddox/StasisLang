@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 const MAGIC = 1196967473;
@@ -196,6 +197,16 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       });
     }
   }};
+  const game = {
+    memory: {
+      gfx_cmd_i32: { offset: 0, length: I32_COUNT },
+      gfx_cmd_f32: { offset: F32_OFFSET, length: F32_COUNT },
+      host_i32: { offset: 900000, length: 768 },
+      host_f32: { offset: 903072, length: 64 },
+    },
+    strings: {}, assets, asset_metadata: assetMetadata,
+  };
+  installCollectionViewAbi(game, instance.exports);
   const raf = [];
   const windowListeners = new Map();
   const location = { search: hudQuery, origin: "https://example.test", protocol: "https:", host: "example.test", hash: "" };
@@ -203,7 +214,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     document, screen: { width: 640, height: 360 }, devicePixelRatio: 1,
     location,
     URLSearchParams,
-    performance: { now: () => now }, WebAssembly: { instantiate: async (_bytes, imports) => { env = imports.env; return { instance }; } },
+    performance: { now: () => now }, WebAssembly: { Global: WebAssembly.Global, instantiate: async (_bytes, imports) => { env = imports.env; return { instance }; } },
     fetch: async source => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0), blob: async () => fetchBlob ? fetchBlob(source) : { source } }),
     requestAnimationFrame: callback => { raf.push(callback); return raf.length; }, cancelAnimationFrame() {},
     addEventListener(type, callback) { windowListeners.set(type, callback); }, console, Image: class { constructor() { stats.imageConstructed += 1; this.complete = imageReady; this.naturalWidth = imageReady ? imageExtent[0] : 0; this.naturalHeight = imageReady ? imageExtent[1] : 0; } decode() { stats.imageDecodeCalls += 1; return imageDecode ? imageDecode(this) : Promise.resolve(); } }, FontFace: class { load() { return Promise.resolve(this); } },
@@ -216,7 +227,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       return createImageBitmap(source, options, stats.bitmapCalls.length);
     };
   }
-  contextObject.window = { STASIS_GAME: { memory: { gfx_cmd_i32: { offset: 0, length: I32_COUNT }, gfx_cmd_f32: { offset: F32_OFFSET, length: F32_COUNT }, host_i32: { offset: 900000, length: 768 }, host_f32: { offset: 903072, length: 64 } }, strings: {}, assets, asset_metadata: assetMetadata }, screen: contextObject.screen };
+  contextObject.window = { STASIS_GAME: game, screen: contextObject.screen };
   vm.runInNewContext(source, contextObject, { filename: "runtime/web/game.js" });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));

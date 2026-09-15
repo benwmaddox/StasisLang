@@ -9,8 +9,13 @@ presentation do not belong here. Explicit `platform_extensions` record real
 differences without pretending that every host implements the same machinery.
 
 Contract version 1 preserves HostFrame v4, graphics runtime ABI 4, and mobile
-runtime ABI 1. The downstream render-command contract accepts only the current
-version 8; generated artifacts and hosts must be rebuilt together as described
+runtime ABI 1. Its WebAssembly collection-view sub-contract is version 2:
+collection values crossing the scalar Wasm ABI are opaque handles, with physical
+offsets retained only in package metadata for host memory access. Packaged hosts
+must match both `collectionViewAbiVersion` and the module's immutable
+`__stasis_collection_view_abi_version` export before guest startup. The downstream
+render-command contract accepts only the current version 8; generated artifacts
+and hosts must be rebuilt together as described
 in [`docs/runtime_compatibility.md`](../../docs/runtime_compatibility.md).
 Unknown registry versions are rejected. Runner diagnostics retain their stable
 compiler codes, and packaged asset trees publish the versioned identity

@@ -3,6 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -77,6 +78,7 @@ async function loadRuntime({ blocked = false, headless = false, recording = fals
       return blocked ? null : popup();
     },
   };
+  installCollectionViewAbi(window.STASIS_GAME, instance.exports);
   const context = {
     document, window, navigator: { userActivation: { isActive: true }, clipboard: {} },
     localStorage: { getItem() { return null; }, setItem() {} },

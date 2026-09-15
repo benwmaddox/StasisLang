@@ -26,7 +26,7 @@ use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::{JitExternProfile, JitProcess};
 use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
-use stasis_compiler::backend::wasm::WasmProcess;
+use stasis_compiler::backend::wasm::{WasmProcess, COLLECTION_VIEW_ABI_VERSION};
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::types::{TYPE_ID_F32, TYPE_ID_I32};
 use stasis_compiler::frontend::workshop::{
@@ -5219,6 +5219,7 @@ fn web_runtime_config(
                 path.clone(),
                 json!({
                     "hash": stasis_compiler::backend::wasm::wasm_global_hash(path),
+                    "handle": layout.handle,
                     "offset": layout.offset,
                     "type_id": layout.type_id,
                     "length": layout.length,
@@ -5259,6 +5260,7 @@ fn web_runtime_config(
         "views": views,
         "globals": globals,
         "assets": {},
+        "collectionViewAbiVersion": COLLECTION_VIEW_ABI_VERSION,
         "renderContractVersion": if render_construction_lifecycle_version == 1 { GFX_CMD_VERSION } else { GFX_CMD_LEGACY_VERSION },
         "renderConstructionLifecycleVersion": render_construction_lifecycle_version,
     });
@@ -5269,6 +5271,22 @@ fn web_runtime_config(
 }
 
 fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTreeSet<String>) {
+    let retain_byte_backed_memory = [
+        "sys_memcpy_u8",
+        "stasis_jit_storage_load_ascii",
+        "stasis_jit_storage_save_ascii",
+        "stasis_jit_clipboard_load_ascii",
+        "stasis_jit_clipboard_save_ascii",
+    ]
+    .iter()
+    .any(|symbol| imported_symbols.contains(*symbol));
+    let retain_f32_memory = [
+        "sys_memcpy_f32",
+        "audio_push_f32_interleaved",
+        "stasis_jit_audio_push_f32_interleaved",
+    ]
+    .iter()
+    .any(|symbol| imported_symbols.contains(*symbol));
     let views = config["views"].as_object_mut().expect("generated views");
     views.retain(|_, fields| {
         let fields = fields.as_object_mut().expect("generated view fields");
@@ -5306,12 +5324,10 @@ fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTree
             retained_paths.contains(path.as_str())
                 || WEB_RUNTIME_BUFFERS.contains(&path.as_str())
                 || dynamic_text_paths.contains(path)
-                || (imported_symbols.contains("sys_memcpy_u8")
-                    && layout["byte_backed"].as_bool() == Some(true))
+                || (retain_byte_backed_memory && layout["byte_backed"].as_bool() == Some(true))
                 || (imported_symbols.contains("sys_memcpy_i32")
                     && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_I32)))
-                || (imported_symbols.contains("sys_memcpy_f32")
-                    && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_F32)))
+                || (retain_f32_memory && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_F32)))
         });
     config["globals"]
         .as_object_mut()
@@ -9542,6 +9558,50 @@ mod tests {
         let runtime = link_web_runtime(&process, false, false).expect("link Web runtime");
         assert!(runtime.contains("const sysMemcpyU8 ="));
         assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
+    }
+
+    #[test]
+    fn release_web_runtime_retains_layouts_for_direct_collection_host_calls() {
+        let runtime_config = || {
+            json!({
+                "views": {},
+                "globals": {},
+                "memory": {
+                    "text": { "byte_backed": true, "type_id": TYPE_ID_U8 },
+                    "samples": { "byte_backed": false, "type_id": TYPE_ID_F32 },
+                    "unrelated": { "byte_backed": false, "type_id": TYPE_ID_I32 },
+                },
+            })
+        };
+
+        for symbol in [
+            "stasis_jit_storage_load_ascii",
+            "stasis_jit_storage_save_ascii",
+            "stasis_jit_clipboard_load_ascii",
+            "stasis_jit_clipboard_save_ascii",
+        ] {
+            let mut config = runtime_config();
+            prune_release_web_runtime_config(&mut config, &BTreeSet::from([symbol.to_string()]));
+            let memory = config["memory"].as_object().expect("release memory");
+            assert!(memory.contains_key("text"), "{symbol} omitted ASCII memory");
+            assert!(!memory.contains_key("samples"));
+            assert!(!memory.contains_key("unrelated"));
+        }
+
+        for symbol in [
+            "audio_push_f32_interleaved",
+            "stasis_jit_audio_push_f32_interleaved",
+        ] {
+            let mut config = runtime_config();
+            prune_release_web_runtime_config(&mut config, &BTreeSet::from([symbol.to_string()]));
+            let memory = config["memory"].as_object().expect("release memory");
+            assert!(
+                memory.contains_key("samples"),
+                "{symbol} omitted f32 sample memory"
+            );
+            assert!(!memory.contains_key("text"));
+            assert!(!memory.contains_key("unrelated"));
+        }
     }
 
     #[test]

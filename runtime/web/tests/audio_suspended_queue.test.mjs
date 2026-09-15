@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -94,8 +95,14 @@ async function createRuntime({ deviceFailure = false } = {}) {
     },
     addEventListener(type, listener) { addListener(documentEvents, type, listener); },
   };
-  const game = { memory: {}, strings: {}, assets: {} };
+  const game = {
+    memory: {
+      samples: { hash: 901, handle: 1901, offset: 0, length: 16384, stride: 4, type_id: 2 },
+    },
+    strings: {}, assets: {}
+  };
   const instance = { exports: { memory, main: () => 0, tick() {}, render() {} } };
+  installCollectionViewAbi(game, instance.exports);
   const contextObject = {
     document,
     screen: { width: 480, height: 720 },
@@ -190,14 +197,14 @@ test("public AudioStream imports share the legacy adapters and own stereo PCM", 
   const api = runtime.imports;
   assert.equal(api.stasis_jit_audio_init(48000, 2, 4800), 1);
   new Float32Array(runtime.memory.buffer, 0, 4).set([0.25, -0.5, 0.75, -1]);
-  assert.equal(api.stasis_jit_audio_push_f32_interleaved(0, 2), 2);
+  assert.equal(api.stasis_jit_audio_push_f32_interleaved(1901, 2), 2);
   new Float32Array(runtime.memory.buffer, 0, 4).fill(0);
   await runtime.resume();
   assert.deepEqual(Array.from(runtime.buffers[0].data[0]), [0.25, 0.75]);
   assert.deepEqual(Array.from(runtime.buffers[0].data[1]), [-0.5, -1]);
   api.stasis_jit_audio_shutdown();
   assert.equal(api.stasis_jit_audio_is_available(), 0);
-  assert.equal(api.stasis_jit_audio_push_f32_interleaved(0, 2), 0);
+  assert.equal(api.stasis_jit_audio_push_f32_interleaved(1901, 2), 0);
   assert.equal(api.stasis_jit_audio_init(44100, 1, 4410), 0);
   assert.equal(api.stasis_jit_audio_init(44100, 2, 4410), 1);
   assert.equal(api.stasis_jit_audio_get_sample_rate(), 44100);
@@ -209,7 +216,7 @@ test("AudioStream device failure never reports successful initialization or push
   const { imports } = await createRuntime({ deviceFailure: true });
   assert.equal(imports.stasis_jit_audio_init(48000, 2, 1024), 0);
   assert.equal(imports.stasis_jit_audio_is_available(), 0);
-  assert.equal(imports.stasis_jit_audio_push_f32_interleaved(0, 2), 0);
+  assert.equal(imports.stasis_jit_audio_push_f32_interleaved(1901, 2), 0);
 });
 
 test("scheduling failure drops owned PCM and marks the stream unavailable", async () => {
@@ -218,7 +225,7 @@ test("scheduling failure drops owned PCM and marks the stream unavailable", asyn
   api.stasis_jit_audio_init(48000, 2, 1024);
   await runtime.resume();
   runtime.failScheduling();
-  assert.equal(api.stasis_jit_audio_push_f32_interleaved(0, 4), 0);
+  assert.equal(api.stasis_jit_audio_push_f32_interleaved(1901, 4), 0);
   assert.equal(api.stasis_jit_audio_is_available(), 0);
   assert.equal(api.stasis_jit_audio_get_queued_frames(), 0);
 });
@@ -231,35 +238,35 @@ test("queue counts owned frames, drains with audio time, and suspends with visib
   assert.equal(api.stasis_jit_audio_push_f32_interleaved(1, 2), 0);
   assert.equal(api.stasis_jit_audio_push_f32_interleaved(-4, 2), 0);
   assert.equal(api.stasis_jit_audio_push_f32_interleaved(runtime.memory.buffer.byteLength, 2), 0);
-  assert.equal(api.stasis_jit_audio_push_f32_interleaved(0, 480), 480);
+  assert.equal(api.stasis_jit_audio_push_f32_interleaved(1901, 480), 480);
   assert.equal(api.stasis_jit_audio_get_queued_frames(), 480);
   const context = runtime.contexts.at(-1);
   context.currentTime = 0.010;
   assert.equal(api.stasis_jit_audio_get_queued_frames(), 240);
   await runtime.visibility(true);
   assert.equal(context.state, "suspended");
-  assert.equal(api.stasis_jit_audio_push_f32_interleaved(0, 8192), 4560);
+  assert.equal(api.stasis_jit_audio_push_f32_interleaved(1901, 8192), 4560);
   assert.equal(api.stasis_jit_audio_get_queued_frames(), 4800);
   await runtime.visibility(false);
   assert.equal(context.state, "running");
   context.currentTime = 1;
   assert.equal(api.stasis_jit_audio_get_queued_frames(), 0);
-  assert.equal(api.stasis_jit_audio_push_f32_interleaved(0, 4), 4);
+  assert.equal(api.stasis_jit_audio_push_f32_interleaved(1901, 4), 4);
   assert.equal(api.stasis_jit_audio_get_underruns(), 1);
 });
 
 test("page close drops pending PCM and running queues apply backpressure", async () => {
   const runtime = await createRuntime();
   runtime.imports.stasis_jit_audio_init(48000, 2, 1024);
-  runtime.imports.stasis_jit_audio_push_f32_interleaved(0, 2);
+  runtime.imports.stasis_jit_audio_push_f32_interleaved(1901, 2);
   runtime.pagehide();
   await runtime.resume();
   assert.equal(runtime.starts.length, 0);
   assert.equal(runtime.imports.stasis_jit_audio_is_available(), 0);
   runtime.imports.stasis_jit_audio_init(48000, 2, 1024);
   await runtime.resume();
-  assert.equal(runtime.imports.stasis_jit_audio_push_f32_interleaved(0, 8192), 8192);
-  assert.equal(runtime.imports.stasis_jit_audio_push_f32_interleaved(0, 1), 0);
+  assert.equal(runtime.imports.stasis_jit_audio_push_f32_interleaved(1901, 8192), 8192);
+  assert.equal(runtime.imports.stasis_jit_audio_push_f32_interleaved(1901, 1), 0);
 });
 
 test("suspended PCM queue is latency bounded, reported, and flushed in order", async () => {
@@ -267,13 +274,13 @@ test("suspended PCM queue is latency bounded, reported, and flushed in order", a
   runtime.imports.audio_init(48000, 2);
 
   writeStereo(runtime.memory, 2048, 0.1);
-  assert.equal(runtime.imports.audio_push_f32_interleaved(0, 2048), 2048);
+  assert.equal(runtime.imports.audio_push_f32_interleaved(1901, 2048), 2048);
   writeStereo(runtime.memory, 2048, 0.2);
-  assert.equal(runtime.imports.audio_push_f32_interleaved(0, 2048), 2048);
+  assert.equal(runtime.imports.audio_push_f32_interleaved(1901, 2048), 2048);
   writeStereo(runtime.memory, 2048, 0.3);
-  assert.equal(runtime.imports.audio_push_f32_interleaved(0, 2048), 704);
+  assert.equal(runtime.imports.audio_push_f32_interleaved(1901, 2048), 704);
   assert.equal(runtime.imports.audio_get_queued_frames(), 4800);
-  assert.equal(runtime.imports.audio_push_f32_interleaved(0, 2048), 0);
+  assert.equal(runtime.imports.audio_push_f32_interleaved(1901, 2048), 0);
   assert.equal(runtime.starts.length, 0);
 
   await runtime.resume();
@@ -293,9 +300,9 @@ test("suspended PCM closure count is bounded for tiny pushes", async () => {
   writeStereo(runtime.memory, 1, 0.25);
 
   for (let index = 0; index < 32; index += 1) {
-    assert.equal(runtime.imports.audio_push_f32_interleaved(0, 1), 1);
+    assert.equal(runtime.imports.audio_push_f32_interleaved(1901, 1), 1);
   }
-  assert.equal(runtime.imports.audio_push_f32_interleaved(0, 1), 0);
+  assert.equal(runtime.imports.audio_push_f32_interleaved(1901, 1), 0);
   assert.equal(runtime.imports.audio_get_queued_frames(), 32);
 
   await runtime.resume();
@@ -308,7 +315,7 @@ test("running PCM scheduling preserves full pushes and queue timing", async () =
   await runtime.resume();
   writeStereo(runtime.memory, 6000, 0.5);
 
-  assert.equal(runtime.imports.audio_push_f32_interleaved(0, 6000), 6000);
+  assert.equal(runtime.imports.audio_push_f32_interleaved(1901, 6000), 6000);
   assert.equal(runtime.starts.length, 1);
   assert.equal(runtime.buffers[0].frames, 6000);
   assert.equal(runtime.imports.audio_get_queued_frames(), 6000);

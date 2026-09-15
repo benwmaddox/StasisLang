@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -48,6 +49,7 @@ async function loadRuntime({ logical = [640, 360], css = logical, dpr = 1, inclu
     },
     render: () => 0,
   }};
+  installCollectionViewAbi(game, instance.exports);
   const document = {
     body, hidden: false, fullscreenElement: null,
     fonts: { ready: Promise.resolve(), add() {} }, hasFocus: () => true,
@@ -64,7 +66,7 @@ async function loadRuntime({ logical = [640, 360], css = logical, dpr = 1, inclu
     document, window: null, screen: { width: css[0], height: css[1] },
     get devicePixelRatio() { return currentDpr; },
     performance: { now: () => 0 },
-    WebAssembly: { instantiate: async () => ({ instance }) },
+    WebAssembly: { Global: WebAssembly.Global, instantiate: async () => ({ instance }) },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
     requestAnimationFrame: callback => { raf.push(callback); return raf.length; },
     cancelAnimationFrame() {}, addEventListener(type, listener) { events.set(`window:${type}`, listener); },
