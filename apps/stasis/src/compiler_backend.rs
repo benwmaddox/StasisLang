@@ -169,6 +169,20 @@ fn packaged_render_alias(
             render.return_type
         ));
     }
+    let has_reset = manifest
+        .functions
+        .iter()
+        .any(|row| row.name == "gfx_cmd_construction_reset");
+    let has_finish = manifest
+        .functions
+        .iter()
+        .any(|row| row.name == "gfx_cmd_construction_finish");
+    if has_reset != has_finish {
+        return Err(
+            "engine bundle render construction lifecycle requires both reset and finish helpers"
+                .to_string(),
+        );
+    }
     let (reset_symbol, finish_symbol) = match manifest.render_construction_lifecycle_version {
         0 => (None, None),
         1 => {
@@ -2564,7 +2578,8 @@ pub fn rewrite_packaged_json_asset_paths(
             let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if !name.ends_with(".json") || name.ends_with(".struct-meta.json") {
+            let lowercase_name = name.to_ascii_lowercase();
+            if !lowercase_name.ends_with(".json") || lowercase_name.ends_with(".struct-meta.json") {
                 continue;
             }
             let text = std::fs::read_to_string(&path)
@@ -4463,12 +4478,12 @@ mod tests {
         );
 
         let partial: EngineBundleManifest = serde_json::from_str(
-            r#"{"render_construction_lifecycle_version":1,"functions":[{"function_id":1,"symbol_id":"render","name":"render","symbol":"aot_render","return_type":1,"parameter_count":0},{"function_id":2,"symbol_id":"reset","name":"gfx_cmd_construction_reset","symbol":"aot_reset","return_type":0,"parameter_count":0}]}"#,
+            r#"{"functions":[{"function_id":1,"symbol_id":"render","name":"render","symbol":"aot_render","return_type":1,"parameter_count":0},{"function_id":2,"symbol_id":"reset","name":"gfx_cmd_construction_reset","symbol":"aot_reset","return_type":0,"parameter_count":0}]}"#,
         )
-        .expect("parse partial lifecycle manifest");
+        .expect("parse version-zero partial lifecycle manifest");
         assert!(packaged_render_alias(&partial, &partial.functions[0])
-            .expect_err("partial lifecycle must fail")
-            .contains("missing gfx_cmd_construction_finish"));
+            .expect_err("version-zero partial lifecycle must fail")
+            .contains("requires both reset and finish helpers"));
     }
 
     #[test]
@@ -5313,7 +5328,7 @@ mod tests {
         let first = external.join("one/shared.png");
         let second = external.join("two/shared.png");
         let table = external.join("values.csv");
-        let metadata = external.join("metadata.json");
+        let metadata = external.join("metadata.JSON");
         fs::write(&first, b"first-image").expect("write first image");
         fs::write(&second, b"second-image").expect("write second image");
         fs::write(&table, b"id,value\n1,42\n").expect("write table");
@@ -5354,7 +5369,12 @@ mod tests {
         rewrite_packaged_json_asset_paths(&support, "main")
             .expect("rewritten support must not read original paths");
         for entry in captured {
-            if entry.path().extension().and_then(|value| value.to_str()) == Some("json") {
+            if entry
+                .path()
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            {
                 let json = fs::read_to_string(entry.path()).expect("read captured nested JSON");
                 assert!(!json.contains(&root.to_string_lossy().to_string()));
             }
