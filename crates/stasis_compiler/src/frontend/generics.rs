@@ -384,6 +384,20 @@ impl Expansion {
         name: &str,
         environment: &GenericEnvironment,
     ) -> Result<Option<&OrdinaryStructDefinition>, String> {
+        let name = name.trim();
+        if name.starts_with("__module_type_") {
+            let generated_matches = self
+                .ordinary_structs_by_name
+                .values()
+                .flatten()
+                .filter(|definition| ordinary_struct_generated_name(definition) == name)
+                .collect::<Vec<_>>();
+            match generated_matches.as_slice() {
+                [definition] => return Ok(Some(*definition)),
+                [] => {}
+                _ => return Err(format!("ambiguous generated struct type '{name}'")),
+            }
+        }
         let short = name.rsplit('.').next().unwrap_or(name);
         let Some(candidates) = self.ordinary_structs_by_name.get(short) else {
             return Ok(None);
@@ -5257,6 +5271,33 @@ mod tests {
                 .execute_i32_noarg_by_name("main")
                 .expect("module-local generic receiver calls execute"),
             12
+        );
+    }
+
+    #[test]
+    fn rewrites_nested_receiver_calls_between_generic_methods() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "import \"library.stasis\";\n\
+             global value: library.Box<4>;\n\
+             function main(): i32 { return value.forward(); }\n",
+        );
+        process.upsert_file(
+            "library.stasis",
+            "struct Item { score: i32; }\n\
+             struct Box<N: i32> { values: Item[N]; }\n\
+             function read(self: Box<N>, score: i32): i32 { return N + score; }\n\
+             function forward(self: Box<N>): i32 { return self.read(self.values[0].score + 1); }\n",
+        );
+        process
+            .compile()
+            .expect("generic methods may call another method through their receiver");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("nested generic receiver call executes"),
+            5
         );
     }
 
