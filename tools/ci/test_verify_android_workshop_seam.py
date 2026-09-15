@@ -506,7 +506,8 @@ class WorkshopSeamTests(unittest.TestCase):
             if name == "render_construction":
                 diagnostic["context"]["symbol"] = "render"
             case = {"name": name, "native": diagnostic, "ui": diagnostic,
-                    "displayed_text": diagnostic["detail"], "equal": True}
+                    "displayed_detail": diagnostic["detail"],
+                    "displayed_text_contains_detail": True, "equal": True}
             if name == "parse":
                 case["location"] = {
                     "expected": {"line": 3, "column": 1, "end_line": 4, "end_column": 1},
@@ -517,6 +518,23 @@ class WorkshopSeamTests(unittest.TestCase):
                   "cases": cases, "cleanup_receipt": {"status": "Restored", "compile": "CompileReady: status=0", "frame": "passed", "source_fingerprint": "1111111111111111", "baseline_source_fingerprint": "1111111111111111", "generation": 4, "baseline_generation": 3, "ui": {"blocking_error_visible": False, "status_healthy": True, "compile_ready": True, "compile_attempted": True, "game_runtime_active": True, "displayed_status": "Game updated - hot swapped"}}}
         result = verify_log(_it031_log(marker), MANIFEST)
         self.assertEqual(result["it031"]["test_id"], "IT-031")
+
+    def test_rejects_it031_bounded_display_receipt_without_verified_detail(self):
+        compact = GOOD.replace(
+            '"displayed_text":"parse detail"',
+            '"displayed_detail":"parse detail","displayed_text_contains_detail":false',
+            1,
+        )
+        with self.assertRaisesRegex(SeamError, "lost detail"):
+            verify_log(compact, MANIFEST)
+
+        compact = GOOD.replace(
+            '"displayed_text":"parse detail"',
+            '"displayed_detail":"different","displayed_text_contains_detail":true',
+            1,
+        )
+        with self.assertRaisesRegex(SeamError, "lost detail"):
+            verify_log(compact, MANIFEST)
 
     def test_rejects_it031_changed_java_detail(self):
         cases = []
@@ -699,6 +717,11 @@ class WorkshopSeamTests(unittest.TestCase):
         start = bridge.index("fn format_native_diagnostic")
         end = bridge.index("fn format_runtime_diagnostic", start)
         self.assertNotIn("native preview frame failed", bridge[start:end])
+
+        acceptance = (Path(__file__).resolve().parents[2]
+                      / "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopDiagnosticSeamAcceptance.java").read_text()
+        self.assertIn('bounded.remove("displayed_text")', acceptance)
+        self.assertIn('put("displayed_text_contains_detail", true)', acceptance)
 
     def test_accepts_complete_single_frame_proof(self):
         result = verify_log(GOOD, MANIFEST)
@@ -1178,6 +1201,17 @@ class WorkshopSeamTests(unittest.TestCase):
         truncated = raw.split("|diagnostic_message=", 1)[0]
         with self.assertRaisesRegex(SeamError, "truncated|mismatched|out of order"):
             verify_log(GOOD.replace(raw, truncated, 1), MANIFEST)
+
+    def test_accepts_it028_raw_compile_error_with_extended_transport_suffix(self):
+        raw = next(line for line in GOOD.splitlines() if line.startswith("CompileError: "))
+        extended = raw + "|diagnostic_schema=stasis.native_diagnostic.v1|diagnostic_envelope=%7B"
+        result = verify_log(GOOD.replace(raw, extended, 1), MANIFEST)
+        self.assertEqual(result["it028"]["test_id"], "IT-028")
+
+    def test_rejects_it028_raw_compile_error_with_unknown_transport_suffix(self):
+        raw = next(line for line in GOOD.splitlines() if line.startswith("CompileError: "))
+        with self.assertRaisesRegex(SeamError, "truncated|mismatched|out of order"):
+            verify_log(GOOD.replace(raw, raw + "|unrelated=1", 1), MANIFEST)
 
     def test_rejects_embedded_or_prefixed_it028_raw_compile_error(self):
         raw = next(line for line in GOOD.splitlines() if line.startswith("CompileError: "))

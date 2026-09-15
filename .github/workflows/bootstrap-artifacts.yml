@@ -68,7 +68,7 @@ jobs:
         run: >-
           sudo apt-get update && sudo apt-get install --yes pkg-config
           libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev
-          libxi-dev libxss-dev libxtst-dev libxkbcommon-dev
+          libxi-dev libxss-dev libxtst-dev libxkbcommon-dev xvfb
 
       - name: Install SDL development packages (macos)
         if: runner.os == 'macOS'
@@ -300,7 +300,11 @@ jobs:
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"
           fi
-          python3 - "${smoke_executable}" <<'PY'
+          smoke_driver=(python3)
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            smoke_driver=(xvfb-run -a python3)
+          fi
+          "${smoke_driver[@]}" - "${smoke_executable}" <<'PY'
           import subprocess
           import sys
 
@@ -330,7 +334,28 @@ jobs:
             package_flag=()
           fi
           ./bin/stasis --workspace cli-smoke package --target desktop "${package_flag[@]}"
-          desktop_diagnostics="$(./cli-smoke/dist/ci_smoke-desktop/ci_smoke 2>&1)"
+          package_executable="./cli-smoke/dist/ci_smoke-desktop/ci_smoke"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            package_executable="./cli-smoke/dist/ci_smoke-desktop/ci_smoke.app/Contents/MacOS/ci_smoke"
+          fi
+          desktop_diagnostics="$("${smoke_driver[@]}" - "${package_executable}" <<'PY'
+          import subprocess
+          import sys
+
+          process = subprocess.Popen(
+              [sys.argv[1]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+          try:
+              output, _ = process.communicate(timeout=5)
+          except subprocess.TimeoutExpired:
+              process.kill()
+              output, _ = process.communicate()
+          else:
+              if process.returncode != 0:
+                  raise SystemExit(
+                      f"packaged ci_smoke exited early with code {process.returncode}:\n{output}")
+          print(output, end="")
+          PY
+          )"
           grep -q 'Stasis package provenance:' <<<"${desktop_diagnostics}"
           ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/android "${package_flag[@]}"
           ./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios "${package_flag[@]}"

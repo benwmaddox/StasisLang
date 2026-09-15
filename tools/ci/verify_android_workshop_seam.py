@@ -277,7 +277,10 @@ def verify_it028(log: str, after_position: int) -> dict:
     raw_line = raw_compile_error_lines[0]
     raw_match = RAW_COMPILE_ERROR_LINE.fullmatch(raw_line.group(0))
     raw_start = raw_line.start() + (raw_match.start("payload") if raw_match else 0)
-    if raw_match is None or raw_match.group("payload") != raw_expected \
+    raw_payload = raw_match.group("payload") if raw_match else ""
+    if raw_match is None or not (
+            raw_payload == raw_expected or raw_payload.startswith(
+                raw_expected + "|diagnostic_schema=stasis.native_diagnostic.v1")) \
             or raw_start <= cases[1][0].start() \
             or raw_start >= presents[2][0].start():
         raise SeamError("raw CompileError diagnostic was missing, truncated, or out of order")
@@ -495,7 +498,12 @@ def verify_it031(log: str, after_position: int) -> dict | None:
         ui = case.get("ui")
         if not isinstance(native, dict) or native != ui:
             raise SeamError(f"IT-031 case {name} changed between native and UI")
-        if not isinstance(case.get("displayed_text"), str) \
+        displayed_detail = case.get("displayed_detail")
+        if displayed_detail is not None:
+            if case.get("displayed_text_contains_detail") is not True \
+                    or displayed_detail != native.get("detail"):
+                raise SeamError(f"IT-031 case {name} lost detail in the displayed UI status")
+        elif not isinstance(case.get("displayed_text"), str) \
                 or native.get("detail", "") not in case["displayed_text"]:
             raise SeamError(f"IT-031 case {name} lost detail in the displayed UI status")
         if native.get("schema") != "stasis.native_diagnostic.v1" \
