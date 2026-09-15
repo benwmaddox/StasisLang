@@ -28,6 +28,9 @@ use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::wasm::{WasmProcess, COLLECTION_VIEW_ABI_VERSION};
 use stasis_compiler::frontend::formatter::format_source;
+use stasis_compiler::frontend::parser::{
+    map_rewritten_test_range_to_original, rewrite_top_level_test_declarations,
+};
 use stasis_compiler::frontend::types::{TYPE_ID_F32, TYPE_ID_I32};
 use stasis_compiler::frontend::workshop::{
     classify_workshop_reload, find_workshop_references, find_workshop_symbols,
@@ -37,6 +40,7 @@ use stasis_compiler::frontend::workshop::{
     WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
     WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+use stasis_compiler::SourceDiagnostic;
 use stasis_jit::AotTarget;
 pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
 use stasis_runner::live::{
@@ -70,6 +74,7 @@ const MAX_DESKTOP_FILE_WRITES: usize = 8;
 const MAX_DESKTOP_FILE_WRITE_BYTES: usize = 1024 * 1024;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
+const COMPILER_DIAGNOSTIC_PREFIX: &str = "__STASIS_COMPILER_DIAGNOSTIC__:";
 const GFX_CMD_NAME: &str = "gfx_cmd";
 const GFX_CMD_VERSION: i64 = 8;
 const GFX_CMD_LEGACY_VERSION: i64 = 7;
@@ -1152,13 +1157,26 @@ pub(super) fn try_run() -> Option<i32> {
             Some(result.code)
         }
         Err(message) => {
+            let compiler_diagnostic = message
+                .strip_prefix(COMPILER_DIAGNOSTIC_PREFIX)
+                .and_then(|payload| serde_json::from_str::<Value>(payload).ok());
+            let public_message = compiler_diagnostic
+                .as_ref()
+                .and_then(|payload| payload.get("display_message"))
+                .and_then(Value::as_str)
+                .unwrap_or(&message);
             if parsed.json {
                 let mut error = json!({
                     "ok": false,
                     "command": command_name,
                     "code": "command_failed",
-                    "message": &message,
+                    "message": public_message,
                 });
+                if let Some(payload) = compiler_diagnostic {
+                    if let Some(diagnostic) = payload.get("diagnostic") {
+                        error["diagnostic"] = diagnostic.clone();
+                    }
+                }
                 if let Some(payload) = message
                     .strip_prefix(crate::release_assets::ASSET_DIAGNOSTIC_PREFIX)
                     .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
@@ -1169,7 +1187,7 @@ pub(super) fn try_run() -> Option<i32> {
                 }
                 eprintln!("{error}");
             } else {
-                eprintln!("stasis {command_name}: {message}");
+                eprintln!("stasis {command_name}: {public_message}");
             }
             Some(1)
         }
@@ -2615,15 +2633,14 @@ fn compile_workspace_jit_with_options(
     }
     jit.compile().map_err(|error| {
         if let Some(diagnostic) = jit.last_source_diagnostic() {
-            let source = sources
-                .get(&diagnostic.path)
-                .map(String::as_str)
-                .unwrap_or("");
+            let source =
+                source_for_diagnostic(&sources, &workspace.root, &diagnostic.path).unwrap_or("");
             let (line, column) = line_column(source, diagnostic.start);
-            format!(
+            let display_message = format!(
                 "{}:{}:{}: {}",
                 diagnostic.path, line, column, diagnostic.message
-            )
+            );
+            encoded_source_diagnostic(diagnostic, display_message)
         } else {
             format!("{error:?}")
         }
@@ -5269,15 +5286,14 @@ fn package_web_workspace(
         }
         process.compile().map_err(|error| {
             if let Some(diagnostic) = process.last_source_diagnostic() {
-                let source = sources
-                    .get(&diagnostic.path)
-                    .map(String::as_str)
+                let source = source_for_diagnostic(&sources, &workspace.root, &diagnostic.path)
                     .unwrap_or("");
                 let (line, column) = line_column(source, diagnostic.start);
-                format!(
+                let display_message = format!(
                     "{}:{}:{}: {}",
                     diagnostic.path, line, column, diagnostic.message
-                )
+                );
+                encoded_source_diagnostic(diagnostic, display_message)
             } else {
                 format!("{error:?}")
             }
@@ -7533,10 +7549,13 @@ fn symbol_workspace(
                 .into_iter()
                 .map(|item| {
                     let mut value = json!({
+                        "symbol_id": item.symbol_id,
                         "kind": item.kind,
                         "name": item.name,
                         "file": item.file,
                         "signature": item.signature,
+                        "source_spans": item.source_spans,
+                        "generic_parameters": item.generic_parameters,
                     });
                     if let Some(owner) = item.owner {
                         value["owner"] = Value::String(owner);
@@ -7706,11 +7725,137 @@ fn plan_symbol_batch(
     mut batch: WorkshopSemanticEditBatch,
 ) -> Result<WorkshopSemanticEditPlan, String> {
     normalize_cli_semantic_batch(editable_files, &mut batch)?;
+    preflight_explicit_generic_updates(workspace, query_files, &batch)?;
     let (after, plan) = plan_workshop_semantic_edits(editable_files, &batch)?;
     ensure_editable_semantic_plan(&plan)?;
     let validation_files = overlay_workshop_files(query_files, &after);
+    reject_explicit_generic_edits(workspace, &validation_files, &plan)?;
     validate_semantic_files(workspace, &validation_files)?;
     Ok(plan)
+}
+
+fn reject_explicit_generic_edits(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+    plan: &WorkshopSemanticEditPlan,
+) -> Result<(), String> {
+    let changed_paths = plan
+        .changed_files
+        .iter()
+        .map(|change| normalize_symbol_file(&change.file))
+        .collect::<BTreeSet<_>>();
+    reject_explicit_generic_paths(workspace, files, &changed_paths)
+}
+
+fn preflight_explicit_generic_updates(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+    batch: &WorkshopSemanticEditBatch,
+) -> Result<(), String> {
+    let mut candidate = files.to_vec();
+    let mut changed_paths = BTreeSet::new();
+    for edit in &batch.edits {
+        if edit.operation != WorkshopSemanticEditOperation::Update {
+            continue;
+        }
+        let Some(replacement) = edit.new_source.as_deref() else {
+            continue;
+        };
+        let matches = find_workshop_symbols(&candidate, &edit.target)?;
+        let [symbol] = matches.as_slice() else {
+            continue;
+        };
+        if edit
+            .expected_source_hash
+            .as_deref()
+            .is_some_and(|expected| workshop_source_hash(&symbol.source) != expected)
+        {
+            // Preserve the planner's stale-hash diagnostic precedence.
+            continue;
+        }
+        let symbol = symbol.clone();
+        let Some(file) = candidate.iter_mut().find(|file| file.path == symbol.file) else {
+            continue;
+        };
+        let Some(span) = symbol.source_spans.iter().find(|span| {
+            file.source
+                .get(span.start as usize..span.end as usize)
+                .is_some_and(|source| source == symbol.source)
+        }) else {
+            continue;
+        };
+        let range = span.start as usize..span.end as usize;
+        if range.end > file.source.len()
+            || !file.source.is_char_boundary(range.start)
+            || !file.source.is_char_boundary(range.end)
+        {
+            continue;
+        }
+        file.source.replace_range(range, replacement);
+        changed_paths.insert(normalize_symbol_file(&file.path));
+    }
+    reject_explicit_generic_paths(workspace, &candidate, &changed_paths)
+}
+
+fn reject_explicit_generic_paths(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+    changed_paths: &BTreeSet<String>,
+) -> Result<(), String> {
+    for changed_path in changed_paths {
+        let closure = workshop_reachable_files(files, Path::new(&changed_path))?;
+        let mut compiler = stasis_compiler::compiler::Compiler::new();
+        let mut sources = BTreeMap::new();
+        let mut test_rewrites = BTreeMap::new();
+        for file in closure {
+            // Test declarations are rewritten only for this validation compiler;
+            // the semantic plan and disk sources retain their original spelling.
+            let original = file.source;
+            let (source, declarations) = rewrite_top_level_test_declarations(&original)
+                .unwrap_or_else(|_| (original.clone(), Vec::new()));
+            sources.insert(file.path.clone(), original.clone());
+            if !declarations.is_empty() {
+                test_rewrites.insert(file.path.clone(), (original, declarations));
+            }
+            compiler.upsert_file(file.path, source);
+        }
+        if compiler.check().is_err() {
+            if let Some(diagnostic) = compiler.last_source_diagnostic().filter(|diagnostic| {
+                diagnostic.code == stasis_compiler::SourceDiagnosticCode::ExplicitGenericCall
+            }) {
+                let mut diagnostic = diagnostic.clone();
+                if let Some((original, declarations)) = test_rewrites.get(&diagnostic.path) {
+                    let range = map_rewritten_test_range_to_original(
+                        original,
+                        declarations,
+                        diagnostic.start..diagnostic.end,
+                    );
+                    diagnostic.start = range.start;
+                    diagnostic.end = range.end;
+                }
+                for related in &mut diagnostic.related {
+                    if let Some((original, declarations)) = test_rewrites.get(&related.path) {
+                        let range = map_rewritten_test_range_to_original(
+                            original,
+                            declarations,
+                            related.start..related.end,
+                        );
+                        related.start = range.start;
+                        related.end = range.end;
+                    }
+                }
+                let source = source_for_diagnostic(&sources, &workspace.root, &diagnostic.path)
+                    .unwrap_or("");
+                let (line, column) = line_column(source, diagnostic.start);
+                let display_message = format!(
+                    "{}:{}:{}: {}",
+                    diagnostic.path, line, column, diagnostic.message
+                );
+                return Err(encoded_source_diagnostic(&diagnostic, display_message));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_symbol_plan(
@@ -8885,24 +9030,27 @@ fn validate_semantic_files(
         "render".to_string(),
         "on_code_swap".to_string(),
     ]);
+    let mut sources = BTreeMap::new();
     for file in &files {
-        let path = workspace.root.join(&file.path);
-        let compiler_path = path
-            .canonicalize()
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
+        // The compiler already owns `workspace.root`; keep source identities
+        // project-relative so import aliases and diagnostic paths use the same
+        // canonical spelling on Windows and Unix.
+        let compiler_path = file.path.replace('\\', "/");
+        sources.insert(compiler_path.clone(), file.source.clone());
         jit.upsert_file(compiler_path, file.source.clone());
     }
     jit.compile().map_err(|error| {
-        jit.last_source_diagnostic()
-            .map(|diagnostic| {
-                format!(
-                    "{}:{}-{}: {}",
-                    diagnostic.path, diagnostic.start, diagnostic.end, diagnostic.message
-                )
-            })
-            .unwrap_or_else(|| format!("{error:?}"))
+        let Some(diagnostic) = jit.last_source_diagnostic() else {
+            return format!("{error:?}");
+        };
+        let source =
+            source_for_diagnostic(&sources, &workspace.root, &diagnostic.path).unwrap_or("");
+        let (line, column) = line_column(source, diagnostic.start);
+        let display_message = format!(
+            "{}:{}:{}: {}",
+            diagnostic.path, line, column, diagnostic.message
+        );
+        encoded_source_diagnostic(diagnostic, display_message)
     })?;
     Ok(())
 }
@@ -9762,9 +9910,124 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
+fn source_for_diagnostic<'a>(
+    sources: &'a BTreeMap<String, String>,
+    workspace_root: &Path,
+    diagnostic_path: &str,
+) -> Option<&'a str> {
+    if let Some(source) = sources.get(diagnostic_path) {
+        return Some(source);
+    }
+
+    let path = Path::new(diagnostic_path);
+    let workspace_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    };
+    let canonical = workspace_path.canonicalize().unwrap_or(workspace_path);
+    let normalized = normalized_comparison_path(&canonical);
+
+    sources.iter().find_map(|(candidate, source)| {
+        let candidate_path = Path::new(candidate);
+        let candidate_workspace_path = if candidate_path.is_absolute() {
+            candidate_path.to_path_buf()
+        } else {
+            workspace_root.join(candidate_path)
+        };
+        let candidate_canonical = candidate_workspace_path
+            .canonicalize()
+            .unwrap_or(candidate_workspace_path);
+        (normalized_comparison_path(&candidate_canonical) == normalized).then_some(source.as_str())
+    })
+}
+
+fn normalized_comparison_path(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn encoded_source_diagnostic(diagnostic: &SourceDiagnostic, display_message: String) -> String {
+    format!(
+        "{COMPILER_DIAGNOSTIC_PREFIX}{}",
+        json!({
+            "display_message": display_message,
+            "diagnostic": source_diagnostic_json(diagnostic),
+        })
+    )
+}
+
+fn source_diagnostic_json(diagnostic: &SourceDiagnostic) -> Value {
+    json!({
+        "path": diagnostic.path,
+        "start": diagnostic.start,
+        "end": diagnostic.end,
+        "symbol": diagnostic.symbol,
+        "code": diagnostic.code.as_str(),
+        "message": diagnostic.message,
+        "related": diagnostic.related.iter().map(|related| json!({
+            "path": related.path,
+            "start": related.start,
+            "end": related.end,
+            "symbol": related.symbol,
+            "message": related.message,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_source_lookup_resolves_project_relative_path_against_absolute_map() {
+        let root = temp_dir("diagnostic_source_lookup");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        let source_path = root.join("src/main.stasis");
+        fs::write(
+            &source_path,
+            "// source\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("source file");
+        let absolute = source_path.canonicalize().expect("canonical source path");
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            display_path(&absolute),
+            "// source\nfunction main(): i32 { return 0; }\n".to_string(),
+        );
+
+        let source = source_for_diagnostic(&sources, &root, "src/main.stasis")
+            .expect("relative diagnostic path should resolve");
+        assert!(source.contains("function main"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn diagnostic_source_lookup_resolves_absolute_path_against_project_relative_map() {
+        let root = temp_dir("diagnostic_source_lookup_reverse");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        let source_path = root.join("src/main.stasis");
+        fs::write(
+            &source_path,
+            "// source\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("source file");
+        let absolute = source_path.canonicalize().expect("canonical source path");
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "src/main.stasis".to_string(),
+            "// source\nfunction main(): i32 { return 0; }\n".to_string(),
+        );
+
+        let source = source_for_diagnostic(&sources, &root, &display_path(&absolute))
+            .expect("absolute diagnostic path should resolve");
+        assert!(source.contains("function main"));
+        remove_temp(&root);
+    }
 
     #[test]
     fn desktop_package_project_provenance_detects_source_mutation() {
@@ -14191,6 +14454,44 @@ mod tests {
         )
         .is_ok());
         remove_temp(&root);
+    }
+
+    #[test]
+    fn compiler_diagnostic_json_preserves_primary_and_related_provenance() {
+        let diagnostic = SourceDiagnostic::new(
+            "src/main.stasis",
+            42,
+            50,
+            "capacity",
+            "explicit generic calls are unsupported",
+        )
+        .with_code(stasis_compiler::SourceDiagnosticCode::ExplicitGenericCall)
+        .with_related(stasis_compiler::SourceDiagnosticRelated {
+            path: "src/buffer.stasis".to_string(),
+            start: 7,
+            end: 61,
+            symbol: "capacity".to_string(),
+            message: "generic template declared here".to_string(),
+        });
+
+        assert_eq!(
+            source_diagnostic_json(&diagnostic),
+            json!({
+                "path": "src/main.stasis",
+                "start": 42,
+                "end": 50,
+                "symbol": "capacity",
+                "code": "stasis.explicitGenericCall",
+                "message": "explicit generic calls are unsupported",
+                "related": [{
+                    "path": "src/buffer.stasis",
+                    "start": 7,
+                    "end": 61,
+                    "symbol": "capacity",
+                    "message": "generic template declared here",
+                }],
+            })
+        );
     }
 
     #[test]

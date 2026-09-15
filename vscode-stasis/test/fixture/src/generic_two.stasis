@@ -1,0 +1,8 @@
+// A same-named template in another module keeps navigation module-specific.
+struct Box<N: i32> {
+    value: i32;
+}
+
+function score(self: Box<N>): i32 {
+    return self.value + N + 100;
+}

@@ -27,6 +27,7 @@ const MAX_GENERIC_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXPANDED_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ELABORATION_WORK_UNITS: usize = 32 * 1024 * 1024;
 const SPECIALIZATION_WORK_UNITS: usize = 1024;
+const MAX_DIAGNOSTIC_RELATED_LOCATIONS: usize = 8;
 const GENERATED_COMPILER_PREFIXES: [&str; 3] =
     ["__stasis_type_", "__stasis_function_", "__stasis_const_"];
 
@@ -81,6 +82,7 @@ struct FunctionSpecialization {
     generated_name: String,
     source: String,
     param_type_names: Vec<String>,
+    origins: Vec<crate::SourceDiagnosticRelated>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +195,7 @@ pub(crate) struct ExpansionError {
     pub(crate) symbol: String,
     pub(crate) message: String,
     pub(crate) code: crate::SourceDiagnosticCode,
+    pub(crate) related: Vec<crate::SourceDiagnosticRelated>,
 }
 
 impl ExpansionError {
@@ -204,6 +207,7 @@ impl ExpansionError {
             symbol: String::new(),
             message,
             code: crate::SourceDiagnosticCode::Generic,
+            related: Vec::new(),
         }
     }
 
@@ -215,6 +219,7 @@ impl ExpansionError {
             symbol: String::new(),
             message,
             code: crate::SourceDiagnosticCode::Generic,
+            related: Vec::new(),
         }
     }
 
@@ -232,7 +237,13 @@ impl ExpansionError {
             symbol,
             message,
             code,
+            related: Vec::new(),
         }
+    }
+
+    fn with_related(mut self, related: Vec<crate::SourceDiagnosticRelated>) -> Self {
+        self.related = related;
+        self
     }
 }
 
@@ -579,12 +590,46 @@ impl Expansion {
 
     fn reject_explicit_generic_calls(&self) -> Result<(), ExpansionError> {
         for (file_index, file) in self.files.iter().enumerate() {
-            reject_explicit_generic_calls(&file.source, |name, qualifier| {
+            let result = reject_explicit_generic_calls(&file.source, |name, qualifier| {
                 !self
                     .generic_function_candidates(name, qualifier, file_index)
                     .is_empty()
-            })
-            .map_err(|message| ExpansionError::for_file(file.path.clone(), message))?;
+            });
+            match result {
+                Ok(()) => {}
+                Err(ExplicitGenericCallScanError::Scan(message)) => {
+                    return Err(ExpansionError::for_file(file.path.clone(), message));
+                }
+                Err(ExplicitGenericCallScanError::Call {
+                    name,
+                    qualifier,
+                    range,
+                    message,
+                }) => {
+                    let related = self
+                        .generic_function_candidates(&name, qualifier.as_deref(), file_index)
+                        .into_iter()
+                        .map(|index| {
+                            let definition = &self.generic_functions[index];
+                            crate::SourceDiagnosticRelated {
+                                path: definition.path.clone(),
+                                start: definition.signature.signature_range.start,
+                                end: definition.signature.signature_range.end,
+                                symbol: definition.name.clone(),
+                                message: "generic template declared here".to_string(),
+                            }
+                        })
+                        .collect();
+                    return Err(ExpansionError::contract(
+                        file.path.clone(),
+                        range,
+                        name,
+                        message,
+                        crate::SourceDiagnosticCode::ExplicitGenericCall,
+                    )
+                    .with_related(related));
+                }
+            }
         }
         Ok(())
     }
@@ -1576,8 +1621,18 @@ impl Expansion {
                         &source_without_templates,
                         &source_environment,
                     )?;
-                    self.seed_inferred_receiver_calls(body, file_index, &local_paths)?;
-                    self.seed_inferred_argument_calls(body, file_index, &local_paths)?;
+                    self.seed_inferred_receiver_calls(
+                        body,
+                        function.body_range.start,
+                        file_index,
+                        &local_paths,
+                    )?;
+                    self.seed_inferred_argument_calls(
+                        body,
+                        function.body_range.start,
+                        file_index,
+                        &local_paths,
+                    )?;
                 }
                 Ok(())
             })();
@@ -1589,6 +1644,7 @@ impl Expansion {
     fn seed_inferred_receiver_calls(
         &mut self,
         source: &str,
+        source_offset: usize,
         file_index: usize,
         local_paths: &BTreeMap<String, String>,
     ) -> Result<(), String> {
@@ -1627,7 +1683,13 @@ impl Expansion {
                     else {
                         continue;
                     };
-                    self.schedule_function(definition, arguments)?;
+                    self.schedule_function_from_call(
+                        definition,
+                        arguments,
+                        file_index,
+                        source_offset + call.name_start..source_offset + call.name_end,
+                        &call.name,
+                    )?;
                     scheduled = true;
                 }
                 if had_viable_definition && !scheduled {
@@ -1663,7 +1725,13 @@ impl Expansion {
                 else {
                     continue;
                 };
-                self.schedule_function(definition, arguments)?;
+                self.schedule_function_from_call(
+                    definition,
+                    arguments,
+                    file_index,
+                    source_offset + call.name_start..source_offset + call.name_end,
+                    &call.name,
+                )?;
                 scheduled = true;
             }
             if had_viable_definition && !scheduled {
@@ -1679,6 +1747,7 @@ impl Expansion {
     fn seed_inferred_argument_calls(
         &mut self,
         source: &str,
+        source_offset: usize,
         file_index: usize,
         local_paths: &BTreeMap<String, String>,
     ) -> Result<(), String> {
@@ -1709,7 +1778,13 @@ impl Expansion {
                 if let Some(arguments) =
                     self.infer_generic_call_arguments(&generic, &actual_types)?
                 {
-                    self.schedule_function(definition, arguments)?;
+                    self.schedule_function_from_call(
+                        definition,
+                        arguments,
+                        file_index,
+                        source_offset + call.name_start..source_offset + call.name_end,
+                        &call.name,
+                    )?;
                     scheduled = true;
                 }
             }
@@ -2108,14 +2183,25 @@ impl Expansion {
             }
         }
         removals.sort_by_key(|range| (range.start, range.end));
-        let mut output = String::with_capacity(source.len());
-        let mut cursor = 0usize;
+        // Keep the source in the original byte coordinate space while hiding
+        // generic declarations from the ordinary-function parser.  The
+        // parser's ranges are later used to attach specialization provenance
+        // to the original source.  Concatenating the retained pieces here
+        // would shift every caller after an in-file template (and would be
+        // especially easy to get wrong for UTF-8 byte offsets).
+        let mut output = source.as_bytes().to_vec();
         for range in removals {
-            output.push_str(&source[cursor..range.start]);
-            cursor = range.end;
+            let Some(bytes) = output.get_mut(range.clone()) else {
+                return Err("generic declaration has invalid source range".to_string());
+            };
+            for byte in bytes {
+                if !matches!(*byte, b'\r' | b'\n') {
+                    *byte = b' ';
+                }
+            }
         }
-        output.push_str(&source[cursor..]);
-        Ok(output)
+        String::from_utf8(output)
+            .map_err(|_| "generic declaration masking produced invalid UTF-8".to_string())
     }
 
     fn process_worklist(&mut self) -> Result<(), ExpansionError> {
@@ -2216,11 +2302,18 @@ impl Expansion {
         {
             return Ok(());
         }
-        Err(self.unsupported_struct_return_error(
-            generic.file_index,
-            &generic.signature,
-            &generic.signature.return_type_name,
-        ))
+        let origins = self
+            .function_specializations
+            .get(key)
+            .map(|specialization| specialization.origins.clone())
+            .unwrap_or_default();
+        Err(self
+            .unsupported_struct_return_error(
+                generic.file_index,
+                &generic.signature,
+                &generic.signature.return_type_name,
+            )
+            .with_related(origins))
     }
 
     fn collect_type_applications(
@@ -2629,6 +2722,36 @@ impl Expansion {
         definition: usize,
         arguments: Vec<ConcreteArgument>,
     ) -> Result<(), String> {
+        self.schedule_function_with_origin(definition, arguments, None)
+    }
+
+    fn schedule_function_from_call(
+        &mut self,
+        definition: usize,
+        arguments: Vec<ConcreteArgument>,
+        file_index: usize,
+        range: Range<usize>,
+        symbol: &str,
+    ) -> Result<(), String> {
+        self.schedule_function_with_origin(
+            definition,
+            arguments,
+            Some(crate::SourceDiagnosticRelated {
+                path: self.files[file_index].path.clone(),
+                start: range.start,
+                end: range.end,
+                symbol: symbol.to_string(),
+                message: "generic specialization requested here".to_string(),
+            }),
+        )
+    }
+
+    fn schedule_function_with_origin(
+        &mut self,
+        definition: usize,
+        arguments: Vec<ConcreteArgument>,
+        origin: Option<crate::SourceDiagnosticRelated>,
+    ) -> Result<(), String> {
         let generic = &self.generic_functions[definition];
         if generic.parameters.len() != arguments.len() {
             return Err(format!(
@@ -2642,7 +2765,21 @@ impl Expansion {
             definition,
             arguments,
         };
-        if self.function_specializations.contains_key(&key) {
+        if let Some(existing) = self.function_specializations.get_mut(&key) {
+            if let Some(origin) = origin {
+                if !existing.origins.contains(&origin) {
+                    existing.origins.push(origin);
+                    existing.origins.sort_by(|left, right| {
+                        (&left.path, left.start, left.end, &left.symbol).cmp(&(
+                            &right.path,
+                            right.start,
+                            right.end,
+                            &right.symbol,
+                        ))
+                    });
+                    existing.origins.truncate(MAX_DIAGNOSTIC_RELATED_LOCATIONS);
+                }
+            }
             return Ok(());
         }
         self.check_specialization_limit()?;
@@ -2663,6 +2800,7 @@ impl Expansion {
                 generated_name,
                 source: String::new(),
                 param_type_names: Vec::new(),
+                origins: origin.into_iter().collect(),
             },
         );
         self.enqueue_depth()?;
@@ -3817,10 +3955,36 @@ fn is_identifier_text(source: &str) -> bool {
     is_identifier_start(first) && bytes.iter().copied().all(is_identifier_char)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExplicitGenericCallScanError {
+    Scan(String),
+    Call {
+        name: String,
+        qualifier: Option<String>,
+        range: Range<usize>,
+        message: String,
+    },
+}
+
+#[cfg(test)]
+impl ExplicitGenericCallScanError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Scan(message) | Self::Call { message, .. } => message,
+        }
+    }
+}
+
+impl From<String> for ExplicitGenericCallScanError {
+    fn from(message: String) -> Self {
+        Self::Scan(message)
+    }
+}
+
 fn reject_explicit_generic_calls(
     source: &str,
     mut is_generic: impl FnMut(&str, Option<&str>) -> bool,
-) -> Result<(), String> {
+) -> Result<(), ExplicitGenericCallScanError> {
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
     while cursor < bytes.len() {
@@ -3877,10 +4041,15 @@ fn reject_explicit_generic_calls(
             .map(|qualifier| format!("{}{}", qualifier, &source[start..cursor]))
             .unwrap_or_else(|| source[start..cursor].to_string());
         let spelling = if legacy { ":: <...>" } else { "<...>" };
-        return Err(format!(
-            "explicit generic function call '{}' using {} is not supported; remove the explicit arguments and infer from the first parameter's generic struct",
-            callee, spelling
-        ));
+        return Err(ExplicitGenericCallScanError::Call {
+            name,
+            qualifier,
+            range: start..cursor,
+            message: format!(
+                "explicit generic function call '{}' using {} is not supported; remove the explicit arguments and infer from the first parameter's generic struct",
+                callee, spelling
+            ),
+        });
     }
     Ok(())
 }
@@ -3933,7 +4102,14 @@ fn push_identity_component(identity: &mut String, tag: &str, value: &str) {
 }
 
 pub(super) fn module_alias_for_path(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
+    // Compiler callers may pass a workspace path before it has been
+    // canonicalized to project-relative slash-separated form.  Treat both
+    // Windows and POSIX separators as path boundaries so an absolute Windows
+    // path does not become part of the module alias.
+    let name = path
+        .rsplit(|character| character == '/' || character == '\\')
+        .next()
+        .unwrap_or(path);
     let raw = name.strip_suffix(".stasis").unwrap_or(name);
     let mut alias = raw
         .bytes()
@@ -6458,6 +6634,71 @@ mod tests {
     }
 
     #[test]
+    fn specialized_template_diagnostic_retains_originating_call_location() {
+        let mut compiler = crate::compiler::Compiler::new();
+        let main = "import \"box.stasis\";\nglobal value: box.Box<box.Item>;\nfunction main(): i32 { box.extract(value); box.extract(value); return 0; }\n";
+        let template = "struct Item { score: i32; }\nstruct Box<T: type> { value: T; }\nfunction extract(box: Box<T>): T { return box.value; }\n";
+        compiler.upsert_file("main.stasis", main);
+        compiler.upsert_file("box.stasis", template);
+
+        let error = compiler
+            .check()
+            .expect_err("named-struct specialization result must fail");
+        assert!(format!("{error:?}").contains("named-struct result"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured specialization diagnostic");
+        assert_eq!(diagnostic.path, "box.stasis");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::UnsupportedStructReturn
+        );
+        assert_eq!(diagnostic.symbol, "extract");
+        assert_eq!(&template[diagnostic.start..diagnostic.end], "T");
+        assert_eq!(diagnostic.related.len(), 2);
+        for origin in &diagnostic.related {
+            assert_eq!(origin.path, "main.stasis");
+            assert_eq!(origin.symbol, "extract");
+            assert_eq!(&main[origin.start..origin.end], "extract");
+        }
+        assert!(diagnostic.related[0].start < diagnostic.related[1].start);
+    }
+
+    #[test]
+    fn specialization_provenance_uses_original_offsets_after_utf8_in_file_template() {
+        let mut compiler = crate::compiler::Compiler::new();
+        let source = concat!(
+            "// café before the template\n",
+            "struct Item { score: i32; }\n",
+            "struct Box<T: type> { value: T; }\n",
+            "function extract(box: Box<T>): T { return box.value; }\n",
+            "global value: Box<Item>;\n",
+            "function main(): i32 { extract(value); return 0; }\n",
+        );
+        compiler.upsert_file("main.stasis", source);
+
+        let error = compiler
+            .check()
+            .expect_err("named-struct specialization result must fail");
+        assert!(format!("{error:?}").contains("named-struct result"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured specialization diagnostic");
+        assert_eq!(diagnostic.path, "main.stasis");
+        assert_eq!(diagnostic.symbol, "extract");
+        assert_eq!(diagnostic.related.len(), 1);
+        let origin = &diagnostic.related[0];
+        assert_eq!(origin.path, "main.stasis");
+        assert_eq!(origin.symbol, "extract");
+        let expected_start = source
+            .find("extract(value)")
+            .expect("generic call in original source");
+        assert_eq!(origin.start, expected_start);
+        assert_eq!(origin.end, expected_start + "extract".len());
+        assert_eq!(&source[origin.start..origin.end], "extract");
+    }
+
+    #[test]
     fn rejects_writes_to_specialized_value_parameters() {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
@@ -6870,6 +7111,163 @@ mod tests {
             .check()
             .expect_err("generic receiver types remain nominal across modules");
         assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(diagnostic.path, "main.stasis");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.symbol, "capacity");
+        let main = compiler
+            .files()
+            .iter()
+            .find(|file| file.path == "main.stasis")
+            .expect("main source");
+        assert_eq!(
+            &main.original_content[diagnostic.start..diagnostic.end],
+            "capacity"
+        );
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "right/right_box.stasis");
+        assert_eq!(diagnostic.related[0].symbol, "capacity");
+    }
+
+    #[test]
+    fn rejects_module_qualified_turbofish_generic_calls_with_template_related_info() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n",
+        );
+        compiler.upsert_file(
+            "types.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("module-qualified turbofish calls must be rejected");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.path, "main.stasis");
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "types.stasis");
+        assert_eq!(diagnostic.related[0].symbol, "capacity");
+    }
+
+    #[test]
+    fn rejects_project_relative_module_qualified_turbofish_generic_calls() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "src/main.stasis",
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n",
+        );
+        compiler.upsert_file(
+            "src/types.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("project-relative turbofish calls must be rejected");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.path, "src/main.stasis");
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "src/types.stasis");
+    }
+
+    #[test]
+    fn rejects_absolute_module_qualified_turbofish_generic_calls() {
+        let root = std::env::current_dir().expect("compiler checkout path");
+        let main_path = root.join("src/main.stasis");
+        let types_path = root.join("src/types.stasis");
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler
+            .set_project_root(root.to_string_lossy())
+            .expect("absolute project root");
+        compiler.upsert_file(
+            main_path.to_string_lossy(),
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n",
+        );
+        compiler.upsert_file(
+            types_path.to_string_lossy(),
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("absolute-path turbofish calls must be rejected");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.path, "src/main.stasis");
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "src/types.stasis");
+    }
+
+    #[test]
+    fn rejects_module_qualified_turbofish_in_a_replaced_entry_function() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "src/main.stasis",
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n\
+             function tick(): i32 { return 0; }\n\
+             function render(): i32 { return 0; }\n\
+             function on_code_swap(): void { return; }\n",
+        );
+        compiler.upsert_file(
+            "src/types.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("replaced entry functions must still reject turbofish calls");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
     }
 
     #[test]
@@ -6895,6 +7293,37 @@ mod tests {
                 .expect("qualified inferred generic call executes"),
             4
         );
+    }
+
+    #[test]
+    fn jit_rejects_module_qualified_turbofish_generic_calls_with_template_related_info() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "src/main.stasis",
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n",
+        );
+        process.upsert_file(
+            "src/types.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("JIT must reject module-qualified turbofish calls");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = process
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "src/types.stasis");
     }
 
     #[test]
@@ -6930,14 +7359,14 @@ mod tests {
             name == "capacity" && qualifier.is_none()
         })
         .expect_err("direct generic call must be rejected");
-        assert!(direct.contains("using <...>"));
+        assert!(direct.message().contains("using <...>"));
 
         let turbofish =
             reject_explicit_generic_calls("module.capacity :: <i32>(value);", |name, qualifier| {
                 name == "capacity" && qualifier == Some("module")
             })
             .expect_err("turbofish generic call must be rejected");
-        assert!(turbofish.contains("using :: <...>"));
+        assert!(turbofish.message().contains("using :: <...>"));
 
         reject_explicit_generic_calls("a < b > (c);", |_, _| true)
             .expect("comparison expression must remain ordinary syntax");
@@ -6950,6 +7379,18 @@ mod tests {
                 name == "capacity" && qualifier.is_none()
             })
             .expect_err("generic call after UTF-8 source must still be diagnosed");
-        assert!(error.contains("explicit generic function call"));
+        assert!(error.message().contains("explicit generic function call"));
+    }
+
+    #[test]
+    fn module_alias_for_path_handles_windows_absolute_paths() {
+        assert_eq!(
+            module_alias_for_path(r"C:\workspace\src\types.stasis"),
+            "types"
+        );
+        assert_eq!(
+            module_alias_for_path("C:/workspace/src/types.stasis"),
+            "types"
+        );
     }
 }

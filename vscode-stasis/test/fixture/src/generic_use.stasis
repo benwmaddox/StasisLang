@@ -1,0 +1,12 @@
+import "generic_one.stasis";
+
+global one_box: generic_one.Box<4>;
+global bare_box: Box<4>;
+
+function generic_free_probe(): i32 {
+    return score(one_box);
+}
+
+function generic_dot_probe(): i32 {
+    return one_box.score();
+}

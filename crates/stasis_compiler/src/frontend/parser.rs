@@ -579,6 +579,61 @@ pub fn rewrite_top_level_test_declarations(
     Ok((rewritten, declarations))
 }
 
+/// Map a byte range reported against [`rewrite_top_level_test_declarations`]
+/// output back to the user's original test source.
+pub fn map_rewritten_test_range_to_original(
+    source: &str,
+    declarations: &[ParsedTestDeclaration],
+    range: Range<usize>,
+) -> Range<usize> {
+    fn map_offset(
+        source_len: usize,
+        declarations: &[ParsedTestDeclaration],
+        offset: usize,
+    ) -> usize {
+        let mut original_cursor = 0usize;
+        let mut rewritten_cursor = 0usize;
+        for declaration in declarations {
+            let unchanged_len = declaration
+                .declaration_range
+                .start
+                .saturating_sub(original_cursor);
+            if offset <= rewritten_cursor.saturating_add(unchanged_len) {
+                return original_cursor
+                    .saturating_add(offset.saturating_sub(rewritten_cursor).min(unchanged_len));
+            }
+            rewritten_cursor = rewritten_cursor.saturating_add(unchanged_len);
+
+            let generated_header_len =
+                format!("function {}(): bool ", declaration.generated_function_name).len();
+            if offset < rewritten_cursor.saturating_add(generated_header_len) {
+                return declaration.declaration_range.start;
+            }
+            rewritten_cursor = rewritten_cursor.saturating_add(generated_header_len);
+
+            let body_len = declaration
+                .body_range
+                .end
+                .saturating_sub(declaration.body_range.start);
+            if offset <= rewritten_cursor.saturating_add(body_len) {
+                return declaration
+                    .body_range
+                    .start
+                    .saturating_add(offset.saturating_sub(rewritten_cursor).min(body_len));
+            }
+            rewritten_cursor = rewritten_cursor.saturating_add(body_len);
+            original_cursor = declaration.declaration_range.end;
+        }
+        original_cursor
+            .saturating_add(offset.saturating_sub(rewritten_cursor))
+            .min(source_len)
+    }
+
+    let start = map_offset(source.len(), declarations, range.start);
+    let end = map_offset(source.len(), declarations, range.end).max(start);
+    start..end
+}
+
 pub fn parse_top_level_functions(source: &str) -> Result<Vec<ParsedFunctionSignature>, String> {
     parse_top_level_functions_with_diagnostic(source).map_err(|error| error.message)
 }
@@ -2650,6 +2705,18 @@ function tick(): i32 {
         assert_eq!(parsed.len(), 1);
         assert!(rewritten.contains("function __stasis_test_0(): bool { return true; }"));
         assert!(!rewritten.contains("test `alpha`(): bool"));
+    }
+
+    #[test]
+    fn maps_rewritten_test_body_ranges_back_to_original_source() {
+        let source = "global x: i32;\ntest `alpha`(): bool { capacity<4>(x); return true; }\n";
+        let (rewritten, parsed) = rewrite_top_level_test_declarations(source).expect("rewrite");
+        let start = rewritten.find("capacity<4>").expect("rewritten call");
+        let rewritten_range = start..start + "capacity<4>".len();
+
+        let original = map_rewritten_test_range_to_original(source, &parsed, rewritten_range);
+
+        assert_eq!(&source[original], "capacity<4>");
     }
 
     #[test]

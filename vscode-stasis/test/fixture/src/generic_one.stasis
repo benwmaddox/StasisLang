@@ -1,0 +1,9 @@
+// The first module owns the generic metadata used by the editor fixture.
+struct Box<N: i32> {
+    value: i32;
+}
+
+// Scores a box using its compile-time capacity.
+function score(self: Box<N>): i32 {
+    return self.value + N;
+}

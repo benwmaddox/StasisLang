@@ -573,8 +573,10 @@ pub fn android_workshop_references(
         .into_iter()
         .map(|reference| {
             serde_json::json!({
+                "symbol": reference.symbol,
                 "kind": reference.kind,
                 "file": reference.file,
+                "source_span": reference.source_span,
                 "containing_kind": reference.containing_kind,
                 "containing_name": reference.containing_name,
                 "containing_signature": reference.containing_signature,
@@ -2846,17 +2848,35 @@ fn format_compiler_source_diagnostic(
         percent_encode(&symbol),
         percent_encode(&diagnostic.message),
     );
-    if matches!(
-        diagnostic.code,
-        stasis_compiler::SourceDiagnosticCode::Generic
-    ) {
-        return legacy;
-    }
     let stage = diagnostic_stage(&diagnostic.code);
     let causes = [format!("{stage} phase"), diagnostic.message.clone()];
+    let primary = diagnostic_location_json(
+        project_root,
+        &canonical_root,
+        &diagnostic.path,
+        diagnostic.start,
+        diagnostic.end,
+        &diagnostic.symbol,
+        &diagnostic.message,
+    );
+    let related = diagnostic
+        .related
+        .iter()
+        .map(|related| {
+            diagnostic_location_json(
+                project_root,
+                &canonical_root,
+                &related.path,
+                related.start,
+                related.end,
+                &related.symbol,
+                &related.message,
+            )
+        })
+        .collect::<Vec<_>>();
     format!(
         "{legacy}{}",
-        format_native_diagnostic(
+        format_native_diagnostic_with_locations(
             stage,
             diagnostic.code.as_str(),
             &diagnostic.message,
@@ -2868,8 +2888,50 @@ fn format_compiler_source_diagnostic(
             },
             None,
             &causes,
+            Some(primary),
+            &related,
         )
     )
+}
+
+fn diagnostic_location_json(
+    project_root: &Path,
+    canonical_root: &Path,
+    path: &str,
+    start: usize,
+    end: usize,
+    symbol: &str,
+    message: &str,
+) -> serde_json::Value {
+    let path = Path::new(path);
+    let disk_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    };
+    let source = fs::read_to_string(&disk_path).unwrap_or_default();
+    let bounded_start = start.min(source.len());
+    let bounded_end = end.max(bounded_start).min(source.len());
+    let (line, column) = source_line_column(&source, bounded_start);
+    let (end_line, end_column) = source_line_column(&source, bounded_end);
+    let file = disk_path
+        .strip_prefix(project_root)
+        .or_else(|_| disk_path.strip_prefix(canonical_root))
+        .unwrap_or(&disk_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    serde_json::json!({
+        "file": file.clone(),
+        "path": file,
+        "start": start,
+        "end": end,
+        "line": line,
+        "column": column,
+        "end_line": end_line,
+        "end_column": end_column,
+        "symbol": symbol,
+        "message": message,
+    })
 }
 
 fn sanitize_legacy_prefix(value: &str) -> String {
@@ -2903,6 +2965,30 @@ fn format_native_diagnostic(
     resource: Option<&str>,
     causes: &[String],
 ) -> String {
+    format_native_diagnostic_with_locations(
+        stage,
+        code,
+        detail,
+        file,
+        symbol,
+        resource,
+        causes,
+        None,
+        &[],
+    )
+}
+
+fn format_native_diagnostic_with_locations(
+    stage: &str,
+    code: &str,
+    detail: &str,
+    file: Option<&str>,
+    symbol: Option<&str>,
+    resource: Option<&str>,
+    causes: &[String],
+    primary: Option<serde_json::Value>,
+    related: &[serde_json::Value],
+) -> String {
     let cause_values = if causes.is_empty() {
         vec![detail.to_string()]
     } else {
@@ -2927,7 +3013,7 @@ fn format_native_diagnostic(
             serde_json::Value::String(resource.to_string()),
         );
     }
-    let envelope = serde_json::json!({
+    let mut envelope = serde_json::json!({
         "schema": "stasis.native_diagnostic.v1",
         "version": 1,
         "stage": stage,
@@ -2935,8 +3021,16 @@ fn format_native_diagnostic(
         "context": context,
         "detail": detail,
         "causes": &cause_values,
-    })
-    .to_string();
+    });
+    if let Some(object) = envelope.as_object_mut() {
+        if let Some(primary) = primary {
+            object.insert("primary".to_string(), primary);
+        }
+        if !related.is_empty() {
+            object.insert("related".to_string(), serde_json::json!(related));
+        }
+    }
+    let envelope = envelope.to_string();
     format!(
         "|diagnostic_schema=stasis.native_diagnostic.v1|diagnostic_version=1|diagnostic_stage={}|diagnostic_code={}|diagnostic_detail={}|diagnostic_causes={}|diagnostic_envelope={}",
         percent_encode(stage),
@@ -3625,6 +3719,54 @@ mod tests {
         assert!(message.contains("src/bad%7Cdiagnostic_envelope=%00.stasis"));
         assert!(message.contains("detail%7Cdiagnostic_envelope=%00tail"));
         CString::new(message).expect("encoded compiler diagnostic crosses C boundary");
+    }
+
+    #[test]
+    fn compiler_source_diagnostic_envelope_preserves_primary_and_related_locations() {
+        let root = temp_project("source_diagnostic_locations");
+        let primary_source =
+            "import \"types.stasis\";\nfunction main(): i32 { return capacity(); }\n";
+        let related_source = "function capacity(): i32 { return 4; }\n";
+        fs::write(root.join("src/main.stasis"), primary_source).expect("write primary source");
+        fs::write(root.join("src/types.stasis"), related_source).expect("write related source");
+        let start = primary_source.find("capacity").expect("primary symbol");
+        let end = start + "capacity".len();
+        let diagnostic = stasis_compiler::SourceDiagnostic::new(
+            "src/main.stasis",
+            start,
+            end,
+            "capacity",
+            "explicit generic calls are unsupported",
+        )
+        .with_code(stasis_compiler::SourceDiagnosticCode::ExplicitGenericCall)
+        .with_related(stasis_compiler::SourceDiagnosticRelated {
+            path: "src/types.stasis".to_string(),
+            start: 9,
+            end: 37,
+            symbol: "capacity".to_string(),
+            message: "generic template declared here".to_string(),
+        });
+        let message = format_compiler_source_diagnostic(&root, &diagnostic);
+        let envelope = message
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("source diagnostic envelope");
+        assert_eq!(envelope["code"], "stasis.explicitGenericCall");
+        assert_eq!(envelope["primary"]["path"], "src/main.stasis");
+        assert_eq!(envelope["primary"]["start"], start);
+        assert_eq!(envelope["primary"]["end"], end);
+        assert_eq!(envelope["primary"]["symbol"], "capacity");
+        assert_eq!(envelope["related"][0]["path"], "src/types.stasis");
+        assert_eq!(envelope["related"][0]["start"], 9);
+        assert_eq!(envelope["related"][0]["end"], 37);
+        assert_eq!(envelope["related"][0]["symbol"], "capacity");
+        assert_eq!(
+            envelope["related"][0]["message"],
+            "generic template declared here"
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     fn percent_decode_for_test(value: &str) -> String {
@@ -7942,6 +8084,131 @@ function on_code_swap(): void {}\n";
             .all(|reference| reference.get("source_hash").is_none()
                 && reference.get("source").is_none()));
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn c_generic_bridge_preserves_items_references_diagnostics_and_stale_guards() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("generic_tooling_ffi");
+        let entry = Path::new("src/main.stasis");
+        let valid_main = "import \"types.stasis\";\nglobal samples: types.Buffer<i32, 4>;\nfunction main(): i32 { return types.capacity(samples); }\nfunction tick(): void {}\nfunction render(): void {}\nfunction on_code_swap(): void {}\n";
+        let invalid_main = valid_main.replace(
+            "types.capacity(samples)",
+            "types.capacity::<i32, 4>(samples)",
+        );
+        let types = "struct Buffer<T: type, N: i32> { values: T[N]; }\nfunction capacity(self: Buffer<T, N>): i32 { return N; }\n";
+        fs::write(root.join(entry), valid_main).expect("write generic entry");
+        fs::write(root.join("src/types.stasis"), types).expect("write generic module");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new(entry.to_string_lossy().as_bytes()).expect("entry cstr");
+
+        let items = ffi_json(stasis_android_bridge_source_items(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+        ));
+        let items = items["items"].as_array().expect("generic source items");
+        let buffer = items
+            .iter()
+            .find(|item| item["name"] == "Buffer")
+            .expect("generic Buffer item");
+        assert_eq!(buffer["file"], "src/types.stasis");
+        assert_eq!(buffer["generic_parameters"][0]["name"], "T");
+        assert_eq!(buffer["generic_parameters"][1]["name"], "N");
+        let capacity = items
+            .iter()
+            .find(|item| item["name"] == "capacity")
+            .expect("generic capacity item");
+        assert_eq!(capacity["file"], "src/types.stasis");
+        assert_eq!(capacity["generic_parameters"][0]["name"], "T");
+        assert_eq!(capacity["generic_parameters"][1]["name"], "N");
+
+        let symbol_c = CString::new("capacity").expect("symbol cstr");
+        let references = ffi_json(stasis_android_bridge_find_references(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            symbol_c.as_ptr(),
+            16,
+        ));
+        let references = references["references"]
+            .as_array()
+            .expect("generic references");
+        assert!(references.iter().any(|reference| {
+            reference["file"] == "src/types.stasis"
+                && reference["source_span"]["start"].as_u64().is_some()
+        }));
+        assert!(references.iter().any(|reference| {
+            reference["file"] == "src/main.stasis"
+                && reference["symbol"] == "capacity"
+                && reference["source_span"]["end"].as_u64().is_some()
+        }));
+
+        fs::write(root.join(entry), &invalid_main).expect("write explicit generic call");
+        let error = compile_android_workshop_project(&root, entry)
+            .expect_err("explicit generic call must fail");
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("explicit-call diagnostic envelope");
+        assert_eq!(envelope["code"], "stasis.explicitGenericCall");
+        assert_eq!(envelope["primary"]["path"], "src/main.stasis");
+        assert_eq!(envelope["primary"]["symbol"], "capacity");
+        assert_eq!(envelope["related"][0]["path"], "src/types.stasis");
+        assert_eq!(envelope["related"][0]["symbol"], "capacity");
+        fs::write(root.join(entry), valid_main).expect("restore valid generic call");
+        compile_android_workshop_project(&root, entry).expect("generic call recovers");
+
+        let capacity_source_hash = capacity["source_hash"]
+            .as_str()
+            .expect("capacity source hash")
+            .to_string();
+        let stale_batch = WorkshopSemanticEditBatch {
+            schema_version: 1,
+            edits: vec![WorkshopSemanticEdit {
+                operation: WorkshopSemanticEditOperation::Update,
+                target: WorkshopSymbolSelector {
+                    symbol_id: capacity["symbol_id"].as_str().map(str::to_string),
+                    name: "capacity".to_string(),
+                    kind: Some(WorkshopSourceItemKind::Function),
+                    file: Some("src/types.stasis".to_string()),
+                    owner: None,
+                    signature: capacity["signature"].as_str().map(str::to_string),
+                },
+                new_source: Some(
+                    "function capacity(self: Buffer<T, N>): i32 { return N + 1; }".to_string(),
+                ),
+                expected_source_hash: Some("0".repeat(64)),
+            }],
+        };
+        let before = fs::read_to_string(root.join("src/types.stasis")).expect("before stale edit");
+        let stale =
+            execute_android_workshop_semantic_edit(&root, entry, &stale_batch, false, true, false)
+                .expect_err("stale generic edit must be rejected");
+        assert!(stale.contains("stale semantic edit target"), "{stale}");
+        assert_eq!(
+            fs::read_to_string(root.join("src/types.stasis")).expect("after stale edit"),
+            before
+        );
+
+        let mut applied_batch = stale_batch;
+        applied_batch.edits[0].expected_source_hash = Some(capacity_source_hash);
+        let applied = execute_android_workshop_semantic_edit(
+            &root,
+            entry,
+            &applied_batch,
+            false,
+            true,
+            false,
+        )
+        .expect("valid generic semantic edit");
+        assert_eq!(applied["status"], "applied");
+        assert!(fs::read_to_string(root.join("src/types.stasis"))
+            .expect("updated generic module")
+            .contains("return N + 1"));
+        clear_runtime_session_for_test();
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

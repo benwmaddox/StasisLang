@@ -12,6 +12,7 @@ pub mod performance;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceDiagnosticCode {
     Generic,
+    ExplicitGenericCall,
     Parse,
     UnresolvedExtern,
     MissingModule,
@@ -24,6 +25,7 @@ impl SourceDiagnosticCode {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Generic => "stasis.generic",
+            Self::ExplicitGenericCall => "stasis.explicitGenericCall",
             Self::Parse => "stasis.parse",
             Self::UnresolvedExtern => "stasis.unresolvedExtern",
             Self::MissingModule => "stasis.missingModule",
@@ -49,6 +51,15 @@ pub struct SourceDiagnosticFix {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceDiagnosticRelated {
+    pub path: String,
+    pub start: usize,
+    pub end: usize,
+    pub symbol: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDiagnostic {
     pub path: String,
     pub start: usize,
@@ -57,6 +68,7 @@ pub struct SourceDiagnostic {
     pub message: String,
     pub code: SourceDiagnosticCode,
     pub fixes: Vec<SourceDiagnosticFix>,
+    pub related: Vec<SourceDiagnosticRelated>,
 }
 
 impl SourceDiagnostic {
@@ -75,6 +87,7 @@ impl SourceDiagnostic {
             message: message.into(),
             code: SourceDiagnosticCode::Generic,
             fixes: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -85,6 +98,11 @@ impl SourceDiagnostic {
 
     pub fn with_fix(mut self, fix: SourceDiagnosticFix) -> Self {
         self.fixes.push(fix);
+        self
+    }
+
+    pub fn with_related(mut self, related: SourceDiagnosticRelated) -> Self {
+        self.related.push(related);
         self
     }
 }

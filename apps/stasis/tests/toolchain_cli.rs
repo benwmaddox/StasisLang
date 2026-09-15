@@ -1564,7 +1564,13 @@ fn usage_compile_test_and_guest_exit_codes_are_stable() {
     )
     .expect("write runnable source");
     let run = stasis(&["--json", "run", "--headless"], &project);
-    assert_eq!(run.status.code(), Some(7));
+    assert_eq!(
+        run.status.code(),
+        Some(7),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
     let run_json = json_stdout(&run);
     assert_eq!(run_json["result"]["exit_code"], 7);
 
@@ -3828,6 +3834,415 @@ fn state_inspection_sample_browses_state_and_watches_live_runtime() {
         "{stdout}"
     );
     assert!(stdout.contains("session closed"), "{stdout}");
+}
+
+#[test]
+fn generic_cli_projects_cross_file_metadata_diagnostics_and_recovery() {
+    let parent = temp_dir("generic_tooling");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    let created = stasis(&["new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(created.status.code(), Some(0));
+
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "import \"types.stasis\";\n",
+            "global samples: types.Buffer<i32, 4>;\n",
+            "function main(): i32 { return types.capacity(samples); }\n",
+            "function tick(): i32 { return 0; }\n",
+            "function render(): i32 { return 0; }\n",
+            "function on_code_swap(): void { return; }\n",
+        ),
+    )
+    .expect("write generic entry");
+    fs::write(
+        project.join("src/types.stasis"),
+        "struct Buffer<T: type, N: i32> { values: T[N]; }\nfunction capacity(self: Buffer<T, N>): i32 { return N; }\n",
+    )
+    .expect("write generic module");
+
+    let listed = stasis(&["--json", "symbol", "list"], &project);
+    assert_eq!(listed.status.code(), Some(0));
+    let listed_json = json_stdout(&listed);
+    let listed = listed_json["result"]["items"]
+        .as_array()
+        .expect("symbol list items");
+    let buffer = listed
+        .iter()
+        .find(|item| item["name"] == "Buffer")
+        .expect("generic Buffer item");
+    assert_eq!(buffer["file"], "src/types.stasis");
+    assert_eq!(buffer["generic_parameters"][0]["name"], "T");
+    assert_eq!(buffer["generic_parameters"][1]["name"], "N");
+    let capacity = listed
+        .iter()
+        .find(|item| item["name"] == "capacity")
+        .expect("generic capacity item");
+    assert_eq!(capacity["generic_parameters"][0]["name"], "T");
+    assert_eq!(capacity["generic_parameters"][1]["name"], "N");
+
+    let references = stasis(&["--json", "symbol", "references", "capacity"], &project);
+    assert_eq!(references.status.code(), Some(0));
+    let references_json = json_stdout(&references);
+    let references = references_json["result"]["references"]
+        .as_array()
+        .expect("generic references");
+    assert!(references.iter().any(|reference| {
+        reference["file"] == "src/types.stasis"
+            && reference["source_span"]["start"].as_u64().is_some()
+    }));
+    assert!(references.iter().any(|reference| {
+        reference["file"] == "src/main.stasis"
+            && reference["symbol"] == "capacity"
+            && reference["source_span"]["end"].as_u64().is_some()
+    }));
+
+    let invalid = fs::read_to_string(project.join("src/main.stasis"))
+        .expect("read generic entry")
+        .replace(
+            "types.capacity(samples)",
+            "types.capacity::<i32, 4>(samples)",
+        );
+    fs::write(project.join("src/main.stasis"), invalid).expect("write explicit generic call");
+    let checked = stasis(&["--json", "check"], &project);
+    assert_eq!(checked.status.code(), Some(1));
+    let error = json_stderr(&checked);
+    assert_eq!(error["code"], "command_failed");
+    let diagnostic = &error["diagnostic"];
+    assert!(diagnostic["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("src/main.stasis")));
+    assert_eq!(diagnostic["symbol"], "capacity", "{error}");
+    assert_eq!(diagnostic["code"], "stasis.explicitGenericCall");
+    assert_eq!(diagnostic["related"][0]["symbol"], "capacity");
+    assert!(diagnostic["related"][0]["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("src/types.stasis")));
+
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "import \"types.stasis\";\n",
+            "global samples: types.Buffer<i32, 4>;\n",
+            "function main(): i32 { return types.capacity(samples); }\n",
+            "function tick(): i32 { return 0; }\n",
+            "function render(): i32 { return 0; }\n",
+            "function on_code_swap(): void { return; }\n",
+        ),
+    )
+    .expect("restore generic entry");
+    let recovered = stasis(&["--json", "check"], &project);
+    assert_eq!(recovered.status.code(), Some(0));
+
+    let read = stasis(
+        &[
+            "--json",
+            "symbol",
+            "read",
+            "capacity",
+            "--kind",
+            "function",
+            "--file",
+            "src/types.stasis",
+        ],
+        &project,
+    );
+    assert_eq!(read.status.code(), Some(0));
+    let source_hash = json_stdout(&read)["result"]["item"]["source_hash"]
+        .as_str()
+        .expect("capacity source hash")
+        .to_string();
+    let stale_hash = "0".repeat(64);
+    let before = fs::read_to_string(project.join("src/types.stasis")).expect("types before stale");
+    let stale = stasis(
+        &[
+            "--json",
+            "symbol",
+            "update",
+            "capacity",
+            "--kind",
+            "function",
+            "--file",
+            "src/types.stasis",
+            "--source",
+            "function capacity(self: Buffer<T, N>): i32 { return N + 1; }",
+            "--expected-source-hash",
+            &stale_hash,
+        ],
+        &project,
+    );
+    assert_eq!(stale.status.code(), Some(1));
+    assert!(json_stderr(&stale)["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("stale semantic edit target"));
+    assert_eq!(
+        fs::read_to_string(project.join("src/types.stasis")).expect("types after stale"),
+        before
+    );
+
+    let applied = stasis(
+        &[
+            "--json",
+            "symbol",
+            "update",
+            "capacity",
+            "--kind",
+            "function",
+            "--file",
+            "src/types.stasis",
+            "--source",
+            "function capacity(self: Buffer<T, N>): i32 { return N + 1; }",
+            "--expected-source-hash",
+            &source_hash,
+        ],
+        &project,
+    );
+    assert_eq!(
+        applied.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(fs::read_to_string(project.join("src/types.stasis"))
+        .expect("types after apply")
+        .contains("return N + 1"));
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
+fn semantic_validation_failure_keeps_structured_compiler_diagnostic_provenance() {
+    let parent = temp_dir("semantic_diagnostic_provenance");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    let created = stasis(&["new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(created.status.code(), Some(0));
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "import \"types.stasis\";\n",
+            "global samples: types.Buffer<i32, 4>;\n",
+            "function main(): i32 { return types.capacity(samples); }\n",
+            "function tick(): i32 { return 0; }\n",
+            "function render(): i32 { return 0; }\n",
+            "function on_code_swap(): void { return; }\n",
+        ),
+    )
+    .expect("write semantic entry");
+    fs::write(
+        project.join("src/types.stasis"),
+        "struct Buffer<T: type, N: i32> { values: T[N]; }\nfunction capacity(self: Buffer<T, N>): i32 { return N; }\n",
+    )
+    .expect("write semantic module");
+
+    let read = stasis(
+        &[
+            "--json",
+            "symbol",
+            "read",
+            "main",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+        ],
+        &project,
+    );
+    assert_eq!(read.status.code(), Some(0));
+    let source_hash = json_stdout(&read)["result"]["item"]["source_hash"]
+        .as_str()
+        .expect("main source hash")
+        .to_string();
+    let invalid_source =
+        concat!("function main(): i32 { return types.capacity::<i32, 4>(samples); }");
+    let failed = stasis(
+        &[
+            "--json",
+            "symbol",
+            "update",
+            "main",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+            "--source",
+            invalid_source,
+            "--expected-source-hash",
+            &source_hash,
+            "--no-tests",
+        ],
+        &project,
+    );
+    assert_eq!(failed.status.code(), Some(1));
+    let error = json_stderr(&failed);
+    assert_eq!(error["code"], "command_failed");
+    let diagnostic = &error["diagnostic"];
+    assert!(
+        diagnostic["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("src/main.stasis")),
+        "{error}"
+    );
+    assert_eq!(diagnostic["symbol"], "capacity", "{error}");
+    assert_eq!(diagnostic["code"], "stasis.explicitGenericCall", "{error}");
+    assert!(diagnostic["start"].as_u64().is_some());
+    assert!(diagnostic["end"].as_u64().is_some());
+    assert_eq!(diagnostic["related"][0]["symbol"], "capacity");
+    assert!(diagnostic["related"][0]["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("src/types.stasis")));
+    assert_eq!(
+        fs::read_to_string(project.join("src/main.stasis")).expect("read unchanged entry"),
+        concat!(
+            "import \"types.stasis\";\n",
+            "global samples: types.Buffer<i32, 4>;\n",
+            "function main(): i32 { return types.capacity(samples); }\n",
+            "function tick(): i32 { return 0; }\n",
+            "function render(): i32 { return 0; }\n",
+            "function on_code_swap(): void { return; }\n",
+        )
+    );
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
+fn semantic_test_update_rejects_explicit_generic_call_without_mutating_file() {
+    let parent = temp_dir("semantic_test_diagnostic_provenance");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    let created = stasis(&["new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(created.status.code(), Some(0));
+    let original = concat!(
+        "test `before template`(): bool { return true; }\n",
+        "struct Buffer<N: i32> { values: i32[N]; }\n",
+        "function capacity(self: Buffer<N>): i32 { return N; }\n",
+        "global samples: Buffer<4>;\n",
+        "test `generic editor`(): bool { capacity(samples); return true; }\n",
+    );
+    fs::write(project.join("tests/generic.test.stasis"), original).expect("write generic test");
+
+    let read = stasis(
+        &[
+            "--json",
+            "symbol",
+            "read",
+            "generic editor",
+            "--kind",
+            "test",
+            "--file",
+            "tests/generic.test.stasis",
+        ],
+        &project,
+    );
+    assert_eq!(
+        read.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let source_hash = json_stdout(&read)["result"]["item"]["source_hash"]
+        .as_str()
+        .expect("test source hash")
+        .to_string();
+    let valid_test = "test `generic editor`(): bool { capacity(samples); return true; }";
+    let replacement = "test `generic editor`(): bool { capacity<4>(samples); return true; }";
+    let staged = original.replace(valid_test, replacement);
+    let failed = stasis(
+        &[
+            "--json",
+            "symbol",
+            "update",
+            "generic editor",
+            "--kind",
+            "test",
+            "--file",
+            "tests/generic.test.stasis",
+            "--source",
+            replacement,
+            "--expected-source-hash",
+            &source_hash,
+            "--no-tests",
+        ],
+        &project,
+    );
+    assert_eq!(failed.status.code(), Some(1));
+    let error = json_stderr(&failed);
+    assert_eq!(error["diagnostic"]["code"], "stasis.explicitGenericCall");
+    assert!(error["diagnostic"]["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("tests/generic.test.stasis")));
+    let start = error["diagnostic"]["start"].as_u64().expect("start") as usize;
+    let end = error["diagnostic"]["end"].as_u64().expect("end") as usize;
+    assert_eq!(&staged[start..end], "capacity");
+    let related = &error["diagnostic"]["related"][0];
+    let related_start = related["start"].as_u64().expect("related start") as usize;
+    let related_end = related["end"].as_u64().expect("related end") as usize;
+    assert_eq!(
+        &staged[related_start..related_end],
+        "function capacity(self: Buffer<N>): i32 "
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("tests/generic.test.stasis"))
+            .expect("unchanged generic test"),
+        original
+    );
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
+fn web_package_failure_keeps_structured_compiler_diagnostic_provenance() {
+    let parent = temp_dir("web_diagnostic_provenance");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    let created = stasis(&["new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(created.status.code(), Some(0));
+    fs::write(
+        project.join("src/main.stasis"),
+        concat!(
+            "import \"types.stasis\";\n",
+            "global samples: types.Buffer<i32, 4>;\n",
+            "function main(): i32 { return types.capacity::<i32, 4>(samples); }\n",
+            "function tick(): i32 { return 0; }\n",
+            "function render(): i32 { return 0; }\n",
+        ),
+    )
+    .expect("write web entry");
+    fs::write(
+        project.join("src/types.stasis"),
+        "struct Buffer<T: type, N: i32> { values: T[N]; }\nfunction capacity(self: Buffer<T, N>): i32 { return N; }\n",
+    )
+    .expect("write web module");
+
+    let failed = stasis(
+        &[
+            "--json",
+            "package",
+            "--target",
+            "web",
+            "--development-build",
+        ],
+        &project,
+    );
+    assert_eq!(failed.status.code(), Some(1));
+    let error = json_stderr(&failed);
+    assert_eq!(error["code"], "command_failed");
+    let diagnostic = &error["diagnostic"];
+    assert!(
+        diagnostic["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("src/main.stasis")),
+        "{error}"
+    );
+    assert_eq!(diagnostic["symbol"], "capacity", "{error}");
+    assert_eq!(diagnostic["code"], "stasis.explicitGenericCall");
+    assert!(diagnostic["start"].as_u64().is_some());
+    assert!(diagnostic["end"].as_u64().is_some());
+    assert_eq!(diagnostic["related"][0]["symbol"], "capacity");
+    assert!(diagnostic["related"][0]["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("src/types.stasis")));
+    fs::remove_dir_all(parent).ok();
 }
 
 fn walk_files(root: &Path) -> Vec<PathBuf> {

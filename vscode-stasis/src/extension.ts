@@ -11,6 +11,7 @@ import {
 import { LiveSession, LiveSessionState } from "./liveSession";
 import { LiveResponse, LiveValue } from "./protocol";
 import { LiveValueItem, LiveValuesProvider } from "./liveValuesProvider";
+import { hasDuplicateTestLabel, matchPassedTest, validTestSourceOffsets } from "./testExplorer";
 import { resolveEditorToolchain } from "./toolchain";
 
 const LANGUAGE_SELECTOR: vscode.DocumentSelector = [
@@ -23,8 +24,31 @@ interface CommandOutput {
   stderr: string;
 }
 
+export interface StasisTestItemInfo {
+  id: string;
+  label: string;
+  uri: string;
+  range?: {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+  };
+  children: readonly StasisTestItemInfo[];
+}
+
 function configuration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("stasis");
+}
+
+function hasAmbiguousTestIdentity(item: vscode.TestItem): boolean {
+  if (!item.parent) {
+    return false;
+  }
+  // `test` may execute a complete file even for one selected child, while the
+  // CLI reports only `path :: label`; duplicate sibling labels are therefore
+  // impossible to map back to a specific declaration.
+  const siblingLabels: string[] = [];
+  item.parent.children.forEach((sibling) => siblingLabels.push(sibling.label));
+  return hasDuplicateTestLabel(siblingLabels, item.label);
 }
 
 let activeToolchainExecutable: string | undefined;
@@ -127,6 +151,9 @@ class StasisTests implements vscode.Disposable {
   private readonly controller = vscode.tests.createTestController("stasisTests", "Stasis Tests");
   private readonly watcher = vscode.workspace.createFileSystemWatcher("**/*.test.stasis");
   private readonly runProfile: vscode.TestRunProfile;
+  private readonly preparedProjects = new Set<string>();
+  private symbolsReady = false;
+  private refreshQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly output: vscode.OutputChannel) {
     this.controller.resolveHandler = async () => this.refresh();
@@ -141,7 +168,17 @@ class StasisTests implements vscode.Disposable {
     this.watcher.onDidDelete(() => void this.refresh());
   }
 
-  async refresh(): Promise<void> {
+  refresh(): Promise<void> {
+    const includeSymbols = this.symbolsReady;
+    this.refreshQueue = this.refreshQueue
+      .catch((error: unknown) => {
+        this.output.appendLine(`Test discovery refresh failed: ${String(error)}`);
+      })
+      .then(() => this.refreshNow(includeSymbols));
+    return this.refreshQueue;
+  }
+
+  private async refreshNow(includeSymbols: boolean): Promise<void> {
     const items: vscode.TestItem[] = [];
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       const manifestUris = await vscode.workspace.findFiles(
@@ -152,17 +189,69 @@ class StasisTests implements vscode.Disposable {
         const projectRoot = path.dirname(manifestUri.fsPath);
         const manifest = asRecord(JSON.parse(fs.readFileSync(manifestUri.fsPath, "utf8")) as unknown);
         const testsDirectory = typeof manifest?.tests === "string" ? manifest.tests : "tests";
+        if (includeSymbols && !this.preparedProjects.has(projectRoot)) {
+          await runStasis(
+            ["--json", "--workspace", projectRoot, "prepare"],
+            projectRoot,
+            undefined,
+          );
+          this.preparedProjects.add(projectRoot);
+        }
         const files = await vscode.workspace.findFiles(
           new vscode.RelativePattern(projectRoot, `${testsDirectory.replaceAll("\\", "/")}/**/*.test.stasis`),
           "**/{.git,.stasis-cache,node_modules,target,build,dist}/**",
         );
         for (const uri of files.sort((left, right) => left.fsPath.localeCompare(right.fsPath))) {
           const label = path.relative(folder.uri.fsPath, uri.fsPath).replaceAll("\\", "/");
-          items.push(this.controller.createTestItem(uri.toString(), label, uri));
+          const item = this.controller.createTestItem(uri.toString(), label, uri);
+          if (includeSymbols) {
+            const document = await vscode.workspace.openTextDocument(uri);
+            const relative = path.relative(projectRoot, uri.fsPath).replaceAll("\\", "/");
+            const output = await runStasis(
+              ["--json", "--workspace", projectRoot, "symbol", "list", "--file", relative],
+              projectRoot,
+              undefined,
+            );
+            const envelope = asRecord(JSON.parse(output.stdout) as unknown);
+            const result = asRecord(envelope?.result);
+            const tests = Array.isArray(result?.items)
+              ? result.items
+                  .map(asRecord)
+                  .filter(
+                    (symbol): symbol is Record<string, unknown> =>
+                      symbol !== undefined && symbol.kind === "test" && typeof symbol.name === "string",
+                  )
+              : [];
+            item.canResolveChildren = tests.length > 0;
+            for (const [index, symbol] of tests.entries()) {
+              const span = Array.isArray(symbol.source_spans)
+                ? symbol.source_spans.find((candidate) => validTestSourceOffsets(document.getText(), candidate))
+                : undefined;
+              const offsets = validTestSourceOffsets(document.getText(), span);
+              const child = this.controller.createTestItem(
+                `${uri.toString()}#test:${index}:${symbol.name}:${offsets?.start ?? "unknown"}`,
+                symbol.name as string,
+                uri,
+              );
+              if (offsets) {
+                child.range = new vscode.Range(
+                  document.positionAt(offsets.start),
+                  document.positionAt(offsets.end),
+                );
+              }
+              item.children.add(child);
+            }
+          }
+          items.push(item);
         }
       }
     }
     this.controller.items.replace(items);
+  }
+
+  async refreshSymbols(): Promise<void> {
+    this.symbolsReady = true;
+    await this.refresh();
   }
 
   fileUris(): string[] {
@@ -173,6 +262,35 @@ class StasisTests implements vscode.Disposable {
       }
     });
     return uris.sort();
+  }
+
+  itemInfos(): readonly StasisTestItemInfo[] {
+    const describe = (item: vscode.TestItem): StasisTestItemInfo => {
+      const range = item.range
+        ? {
+            start: {
+              line: item.range.start.line,
+              character: item.range.start.character,
+            },
+            end: {
+              line: item.range.end.line,
+              character: item.range.end.character,
+            },
+          }
+        : undefined;
+      const children: StasisTestItemInfo[] = [];
+      item.children.forEach((child) => children.push(describe(child)));
+      return {
+        id: item.id,
+        label: item.label,
+        uri: item.uri?.toString() ?? "",
+        ...(range ? { range } : {}),
+        children,
+      };
+    };
+    const items: StasisTestItemInfo[] = [];
+    this.controller.items.forEach((item) => items.push(describe(item)));
+    return items;
   }
 
   async runFile(uri: vscode.Uri, token?: vscode.CancellationToken): Promise<CommandOutput> {
@@ -204,14 +322,47 @@ class StasisTests implements vscode.Disposable {
         run.skipped(item);
         continue;
       }
+      const isSelectedSymbol = item.id.includes("#test:");
+      const reportedItems: vscode.TestItem[] = isSelectedSymbol ? [item] : [];
+      if (!isSelectedSymbol) {
+        item.children.forEach((child) => reportedItems.push(child));
+      }
       run.started(item);
+      for (const reported of reportedItems) {
+        if (reported !== item) {
+          run.started(reported);
+        }
+      }
       try {
         const result = await this.runFile(item.uri, token);
         run.appendOutput(result.stdout.replaceAll("\n", "\r\n"), undefined, item);
-        run.passed(item);
+        const envelope = asRecord(JSON.parse(result.stdout) as unknown);
+        const resultData = asRecord(envelope?.result);
+        const passedTests = Array.isArray(resultData?.passed_tests) ? resultData.passed_tests : [];
+        for (const reported of reportedItems) {
+          const match = hasAmbiguousTestIdentity(reported)
+            ? "ambiguous"
+            : matchPassedTest(passedTests, reported.uri?.fsPath ?? item.uri.fsPath, reported.label);
+          if (match === "passed") {
+            run.passed(reported);
+            continue;
+          }
+          const message = match === "ambiguous"
+            ? `Stasis could not uniquely associate ${reported.label} in ${reported.uri?.fsPath ?? item.uri.fsPath}; duplicate test names share the CLI result identity.`
+            : `Stasis did not report ${reported.label} for ${reported.uri?.fsPath ?? item.uri.fsPath} as passed.`;
+          run.failed(reported, new vscode.TestMessage(message));
+        }
+        if (!isSelectedSymbol) {
+          run.passed(item);
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.output.appendLine(`Test failed: ${item.label}: ${message}`);
+        for (const reported of reportedItems) {
+          if (reported !== item) {
+            run.failed(reported, new vscode.TestMessage(message));
+          }
+        }
         run.failed(item, new vscode.TestMessage(message));
       }
     }
@@ -743,9 +894,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     command("stasis.showOutput", async () => output.show(true)),
   );
   void controller.setValuesViewVisible(liveValuesView.visible);
-  void tests.refresh();
-
   await languageClients.start();
+  await tests.refreshSymbols();
 
   return {
     state: () => controller.state,
@@ -754,6 +904,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Stasis
     stop: () => controller.stop(),
     request: (type, fields = {}) => controller.requireSession().request(type, fields),
     testFiles: () => tests.fileUris(),
+    testItems: () => tests.itemInfos(),
     runTestFile: (uri) => tests.runFile(vscode.Uri.parse(uri)),
   } satisfies StasisExtensionApi;
 }
@@ -765,6 +916,7 @@ export interface StasisExtensionApi {
   stop(): Promise<void>;
   request(type: string, fields?: Record<string, unknown>): Promise<LiveResponse>;
   testFiles(): readonly string[];
+  testItems(): readonly StasisTestItemInfo[];
   runTestFile(uri: string): Promise<CommandOutput>;
 }
 

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use stasis_compiler::compiler::Compiler;
 use stasis_compiler::frontend::formatter::format_source;
-use stasis_compiler::frontend::lexer::{lex, Token, TokenKind};
+use stasis_compiler::frontend::lexer::{lex, lex_with_diagnostic, Token, TokenKind};
 use stasis_compiler::frontend::parser::{completion_expected_type, parse_top_level_functions};
 use stasis_compiler::frontend::workshop::{
     find_workshop_generic_parameter_references_at, find_workshop_references,
@@ -51,6 +51,15 @@ pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub source: &'static str,
     pub code: String,
+    pub message: String,
+    pub related: Vec<LanguageDiagnosticRelated>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageDiagnosticRelated {
+    pub path: String,
+    pub range: Range<usize>,
+    pub symbol: String,
     pub message: String,
 }
 
@@ -383,8 +392,9 @@ struct LanguageIndex {
 #[derive(Default)]
 struct WarmDefinitionIndex {
     simple: BTreeMap<String, Vec<WorkshopReference>>,
-    root_types: BTreeMap<String, String>,
-    root_dependencies: BTreeMap<String, WarmDefinitionDependency>,
+    qualified: BTreeMap<String, Vec<WorkshopReference>>,
+    root_types: BTreeMap<(String, String), String>,
+    root_dependencies: BTreeMap<(String, String), WarmDefinitionDependency>,
     fields: BTreeMap<(String, String), (String, WorkshopReference)>,
     field_dependencies: BTreeMap<(String, String), WarmDefinitionDependency>,
     struct_names: BTreeSet<String>,
@@ -408,23 +418,33 @@ impl WarmDefinitionIndex {
         completion_items: &[WorkshopCompletionItem],
     ) -> Result<Self, String> {
         let mut index = Self::default();
-        let mut field_types = BTreeMap::<(String, String), String>::new();
+        let mut field_types = BTreeMap::<(String, String, String), String>::new();
+        let mut field_candidates =
+            BTreeMap::<(String, String), Vec<(String, WorkshopReference)>>::new();
+        let mut method_definitions =
+            BTreeMap::<(String, String, String), Vec<WorkshopReference>>::new();
         for item in completion_items {
             match item.kind.as_str() {
                 "global" | "constant" => {
                     if let Some(type_name) = item.type_name.as_ref() {
                         index
                             .root_types
-                            .entry(item.text.clone())
+                            .entry((item.file.clone(), item.text.clone()))
                             .or_insert_with(|| type_name.clone());
                     }
                 }
-                "field" if !item.text.contains('.') => {
+                "field" => {
                     if let (Some(owner), Some(type_name)) =
                         (item.owner.as_ref(), item.type_name.as_ref())
                     {
+                        let owner = workshop_base_type_name(owner)
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(owner)
+                            .to_string();
+                        let field = item.text.rsplit('.').next().unwrap_or(&item.text);
                         field_types
-                            .entry((owner.clone(), item.text.clone()))
+                            .entry((item.file.clone(), owner, field.to_string()))
                             .or_insert_with(|| type_name.clone());
                     }
                 }
@@ -436,7 +456,7 @@ impl WarmDefinitionIndex {
         }
 
         for file in files {
-            let tokens = lex(&file.source)?;
+            let tokens = lex_for_language_service(&file.source)?;
             for (token_index, token) in tokens.iter().copied().enumerate() {
                 if token.kind != TokenKind::Identifier {
                     continue;
@@ -470,15 +490,38 @@ impl WarmDefinitionIndex {
                 };
                 if let Some(kind) = simple_kind {
                     if let Some(container) = containing.filter(|item| item.kind == kind) {
+                        let reference = definition_reference(file, token, container, name)?;
                         index
                             .simple
                             .entry(name.to_string())
                             .or_default()
-                            .push(definition_reference(file, token, container, name)?);
+                            .push(reference.clone());
+                        if matches!(
+                            kind,
+                            WorkshopSourceItemKind::Function | WorkshopSourceItemKind::Struct
+                        ) {
+                            index
+                                .qualified
+                                .entry(format!(
+                                    "{}.{}",
+                                    module_alias_for_language_path(&file.path),
+                                    name
+                                ))
+                                .or_default()
+                                .push(reference.clone());
+                        }
+                        if kind == WorkshopSourceItemKind::Function {
+                            if let Some(owner) = container.owner.as_ref() {
+                                method_definitions
+                                    .entry((file.path.clone(), owner.clone(), name.to_string()))
+                                    .or_default()
+                                    .push(reference.clone());
+                            }
+                        }
                         if kind == WorkshopSourceItemKind::Globals {
                             index
                                 .root_dependencies
-                                .entry(name.to_string())
+                                .entry((file.path.clone(), name.to_string()))
                                 .or_insert_with(|| WarmDefinitionDependency {
                                     file: file.path.clone(),
                                     source_spans: container.source_spans.clone(),
@@ -494,34 +537,109 @@ impl WarmDefinitionIndex {
                     if let Some(container) =
                         containing.filter(|item| item.kind == WorkshopSourceItemKind::Struct)
                     {
-                        let key = (container.name.clone(), name.to_string());
-                        if let Some(type_name) = field_types.get(&key) {
-                            if !index.fields.contains_key(&key) {
-                                index.fields.insert(
-                                    key.clone(),
-                                    (
-                                        type_name.clone(),
-                                        definition_reference(file, token, container, name)?,
-                                    ),
-                                );
-                                index.field_dependencies.insert(
-                                    key,
-                                    WarmDefinitionDependency {
-                                        file: file.path.clone(),
-                                        source_spans: container.source_spans.clone(),
-                                    },
-                                );
+                        let owner = container.name.clone();
+                        let reference = definition_reference(file, token, container, name)?;
+                        if let Some(type_name) =
+                            field_types.get(&(file.path.clone(), owner.clone(), name.to_string()))
+                        {
+                            let alias_owner =
+                                format!("{}.{}", module_alias_for_language_path(&file.path), owner);
+                            for key in [
+                                (owner.clone(), name.to_string()),
+                                (alias_owner, name.to_string()),
+                            ] {
+                                field_candidates
+                                    .entry(key)
+                                    .or_default()
+                                    .push((type_name.clone(), reference.clone()));
                             }
                         }
                     }
                 }
             }
         }
+        for (key, candidates) in field_candidates {
+            let [(type_name, reference)] = candidates.as_slice() else {
+                continue;
+            };
+            index
+                .fields
+                .insert(key.clone(), (type_name.clone(), reference.clone()));
+            index.field_dependencies.insert(
+                key,
+                WarmDefinitionDependency {
+                    file: reference.file.clone(),
+                    source_spans: source_items
+                        .iter()
+                        .find(|item| {
+                            item.file == reference.file
+                                && item.name == reference.containing_name
+                                && item.kind == reference.containing_kind
+                                && item.signature == reference.containing_signature
+                        })
+                        .map(|item| item.source_spans.clone())
+                        .unwrap_or_default(),
+                },
+            );
+        }
+        for item in completion_items.iter().filter(|item| {
+            item.text.contains('.') && matches!(item.kind.as_str(), "field" | "method")
+        }) {
+            let name = item.text.rsplit('.').next().unwrap_or(&item.text);
+            let reference = if item.kind == "field" {
+                let owner = item.owner.as_ref().map(|owner| {
+                    workshop_base_type_name(owner)
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(owner)
+                        .to_string()
+                });
+                owner.and_then(|owner| {
+                    let alias_owner =
+                        format!("{}.{}", module_alias_for_language_path(&item.file), owner);
+                    index
+                        .fields
+                        .get(&(alias_owner, name.to_string()))
+                        .or_else(|| index.fields.get(&(owner, name.to_string())))
+                        .map(|(_, reference)| reference.clone())
+                })
+            } else {
+                item.owner.as_ref().and_then(|owner| {
+                    let owner = workshop_base_type_name(owner)
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(owner);
+                    method_definitions
+                        .get(&(item.file.clone(), owner.to_string(), name.to_string()))
+                        .and_then(|references| {
+                            (references.len() == 1).then(|| references[0].clone())
+                        })
+                })
+            };
+            if let Some(reference) = reference {
+                index
+                    .qualified
+                    .entry(item.text.clone())
+                    .or_default()
+                    .push(reference);
+            }
+        }
         Ok(index)
     }
 
-    fn definition(&self, symbol: &str) -> Option<WarmDefinitionResolution> {
+    fn definition(&self, symbol: &str, request_file: &str) -> Option<WarmDefinitionResolution> {
         let segments = symbol.split('.').collect::<Vec<_>>();
+        if let Some(references) = self.qualified.get(symbol) {
+            let dependencies = segments.first().and_then(|root| {
+                self.root_dependencies
+                    .get(&(request_file.to_string(), (*root).to_string()))
+                    .cloned()
+            });
+            return Some(WarmDefinitionResolution {
+                references: references.clone(),
+                dependencies: dependencies.into_iter().collect(),
+            });
+        }
         if let [name] = segments.as_slice() {
             return Some(WarmDefinitionResolution {
                 references: self.simple.get(*name)?.clone(),
@@ -530,11 +648,28 @@ impl WarmDefinitionIndex {
         }
         let root = *segments.first()?;
         let mut dependencies = Vec::new();
-        let mut type_name = if let Some(type_name) = self.root_types.get(root) {
-            if let Some(dependency) = self.root_dependencies.get(root) {
+        let root_binding = self
+            .root_types
+            .get(&(request_file.to_string(), root.to_string()))
+            .map(|type_name| {
+                (
+                    (request_file.to_string(), root.to_string()),
+                    type_name.clone(),
+                )
+            })
+            .or_else(|| {
+                let mut candidates = self.root_types.iter().filter(|((_, name), _)| name == root);
+                let candidate = candidates.next()?;
+                candidates
+                    .next()
+                    .is_none()
+                    .then(|| (candidate.0.clone(), candidate.1.clone()))
+            });
+        let mut type_name = if let Some((root_key, type_name)) = root_binding {
+            if let Some(dependency) = self.root_dependencies.get(&root_key) {
                 dependencies.push(dependency.clone());
             }
-            type_name.clone()
+            type_name
         } else if self.struct_names.contains(root) {
             root.to_string()
         } else {
@@ -545,7 +680,12 @@ impl WarmDefinitionIndex {
             let owner = workshop_base_type_name(&type_name).to_string();
             let (field_type, reference) = self
                 .fields
-                .get(&(owner.clone(), (*field_name).to_string()))?;
+                .get(&(owner.clone(), (*field_name).to_string()))
+                .or_else(|| {
+                    let short_owner = owner.rsplit('.').next()?;
+                    self.fields
+                        .get(&(short_owner.to_string(), (*field_name).to_string()))
+                })?;
             type_name = field_type.clone();
             if let Some(dependency) = self
                 .field_dependencies
@@ -582,6 +722,25 @@ fn definition_reference(
         containing_signature: container.signature.clone(),
         containing_source_hash: container.source_hash.clone(),
     })
+}
+
+fn module_alias_for_language_path(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let raw = name.strip_suffix(".stasis").unwrap_or(name);
+    let mut alias = raw
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
+                char::from(byte)
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if alias.is_empty() || alias.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        alias.insert(0, '_');
+    }
+    alias
 }
 
 struct LanguageHierarchyIndex {
@@ -803,6 +962,20 @@ impl LanguageService {
                     message: diagnostic
                         .map(|diagnostic| diagnostic.message.clone())
                         .unwrap_or_else(|| format!("{error:?}")),
+                    related: diagnostic
+                        .map(|diagnostic| {
+                            diagnostic
+                                .related
+                                .iter()
+                                .map(|related| LanguageDiagnosticRelated {
+                                    path: self.snapshot_path(&paths, &related.path),
+                                    range: related.start..related.end,
+                                    symbol: related.symbol.clone(),
+                                    message: related.message.clone(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 }]
             }
         };
@@ -826,6 +999,15 @@ impl LanguageService {
             return Err(format!(
                 "completion offset {byte_offset} is invalid for '{path}'"
             ));
+        }
+        let call = call_context(&document.text, byte_offset)?;
+        if call.as_ref().is_some_and(|call| call.explicit_generic) {
+            return Ok(LanguageCompletion {
+                replacement_start: byte_offset,
+                replacement_end: byte_offset,
+                truncated: false,
+                items: Vec::new(),
+            });
         }
         let relative = canonical_source_path(Some(&self.project_root), path)?;
         let context = self.query_context(&relative, byte_offset, &document.text)?;
@@ -865,13 +1047,15 @@ impl LanguageService {
                         resolve_data: None,
                     });
                 };
+                let catalog =
+                    project_completion_item(catalog, call.as_ref(), &source, index, &context);
                 let (insert_text, snippet) =
-                    completion_insert_text(catalog, &source, query.replacement_end);
+                    completion_insert_text(&catalog, &source, query.replacement_end);
                 Some(LanguageCompletionItem {
                     text: ranked.text.clone(),
-                    kind: ranked.kind.clone(),
-                    detail: ranked.detail.clone(),
-                    type_name: ranked.type_name.clone(),
+                    kind: catalog.kind.clone(),
+                    detail: catalog.detail.clone(),
+                    type_name: catalog.type_name.clone(),
                     signature: catalog.signature.clone(),
                     documentation: None,
                     insert_text,
@@ -908,10 +1092,14 @@ impl LanguageService {
         };
         let documentation = documentation_for_completion(index, item);
         let additional_text_edits = if current_revision == index.revision {
-            let reachable = workshop_reachable_files(&index.files, Path::new(&relative))?
-                .into_iter()
-                .map(|file| file.path)
-                .collect::<BTreeSet<_>>();
+            let reachable = workshop_reachable_files(&index.files, Path::new(&relative))
+                .map(|files| {
+                    files
+                        .into_iter()
+                        .map(|file| file.path)
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
             completion_import_edit(path, &relative, &reachable, item)
                 .into_iter()
                 .collect()
@@ -932,6 +1120,10 @@ impl LanguageService {
         let Some(range) = identifier_path_range(&document.text, byte_offset) else {
             return Ok(None);
         };
+        let call = call_context(&document.text, byte_offset)?;
+        if call.as_ref().is_some_and(|call| call.explicit_generic) {
+            return Ok(None);
+        }
         let symbol = document.text[range.clone()].to_string();
         let relative = canonical_source_path(Some(&self.project_root), path)?;
         let context = self.query_context(&relative, byte_offset, &document.text)?;
@@ -945,10 +1137,16 @@ impl LanguageService {
         let Some(primary) = matches.first().map(|item| (*item).clone()) else {
             return Ok(None);
         };
-        let mut signatures = matches
-            .iter()
-            .filter_map(|item| hover_signature(item))
-            .collect::<Vec<_>>();
+        let mut signatures = if let Some(call) = call.as_ref() {
+            matches
+                .iter()
+                .filter_map(|item| {
+                    hover_signature(item, Some(call), &document.text, index, &context)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            item_signature(&primary).into_iter().collect()
+        };
         signatures.sort();
         signatures.dedup();
         let documentation = documentation_for_completion(index, &primary);
@@ -993,6 +1191,9 @@ impl LanguageService {
         let Some(call) = call_context(&document.text, byte_offset)? else {
             return Ok(None);
         };
+        if call.explicit_generic {
+            return Ok(None);
+        }
         let relative = canonical_source_path(Some(&self.project_root), path)?;
         let context = self.query_context(&relative, byte_offset, &document.text)?;
         let index = self.language_index()?;
@@ -1001,7 +1202,7 @@ impl LanguageService {
             .iter()
             .filter(|item| item.text == call.target && workshop_completion_visible(item, &context))
             .filter_map(|item| {
-                let signature = item_signature(item)?;
+                let signature = signature_for_call(item, &call, &document.text, index, &context)?;
                 Some(SignatureInformation {
                     parameters: signature_parameters(&signature),
                     documentation: documentation_for_completion(index, item),
@@ -1054,12 +1255,82 @@ impl LanguageService {
         });
         if !has_scoped_candidate {
             if let Some(locations) = self.language_index.as_ref().and_then(|index| {
-                receiver_function_reference_symbols(&index.workshop_items, &symbol)
+                definition_reference_symbols(&index.workshop_items, &symbol)
+                    .into_iter()
+                    .find_map(|candidate| {
+                        let resolution = index.definitions.definition(&candidate, &relative)?;
+                        (resolution.references.len() == 1)
+                            .then(|| {
+                                remap_definition_locations(
+                                    &project_root,
+                                    &snapshot,
+                                    index,
+                                    &resolution,
+                                )
+                            })
+                            .flatten()
+                    })
+            }) {
+                return Ok(locations);
+            }
+        }
+        let context = self.query_context(&relative, byte_offset, &document.text)?;
+        let call = call_context(&document.text, byte_offset)?;
+        let index = self.language_index()?;
+        if let Some(call) = call.as_ref().filter(|call| !call.explicit_generic) {
+            let reachable = workshop_reachable_files(&index.files, Path::new(&relative))?
+                .into_iter()
+                .map(|file| file.path)
+                .collect::<BTreeSet<_>>();
+            let mut candidates = index
+                .workshop_items
+                .iter()
+                .filter(|item| item.text == call.target)
+                .filter(|item| item.file == relative || reachable.contains(&item.file))
+                .filter(|item| workshop_completion_visible(item, &context))
+                .filter(|item| {
+                    signature_for_call(item, call, &document.text, index, &context).is_some()
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|item| workshop_completion_specificity(item, &context));
+            if let [primary] = candidates.as_slice() {
+                let short_name = call.target.rsplit('.').next().unwrap_or(&call.target);
+                let references = index
+                    .definitions
+                    .simple
+                    .get(short_name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|reference| reference.file == primary.file)
+                    .filter(|reference| {
+                        primary
+                            .signature
+                            .as_deref()
+                            .is_none_or(|signature| reference.containing_signature == signature)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !references.is_empty() {
+                    let resolution = WarmDefinitionResolution {
+                        references,
+                        dependencies: Vec::new(),
+                    };
+                    if let Some(locations) =
+                        remap_definition_locations(&project_root, &snapshot, index, &resolution)
+                    {
+                        return Ok(locations);
+                    }
+                }
+            }
+        }
+        if !has_scoped_candidate {
+            if let Some(locations) = {
+                definition_reference_symbols(&index.workshop_items, &symbol)
                     .into_iter()
                     .find_map(|candidate| {
                         index
                             .definitions
-                            .definition(&candidate)
+                            .definition(&candidate, &relative)
                             .and_then(|resolution| {
                                 remap_definition_locations(
                                     &project_root,
@@ -1069,12 +1340,10 @@ impl LanguageService {
                                 )
                             })
                     })
-            }) {
+            } {
                 return Ok(locations);
             }
         }
-        let context = self.query_context(&relative, byte_offset, &document.text)?;
-        let index = self.language_index()?;
         if let Some(location) = scoped_binding_definition(
             &project_root,
             index,
@@ -1086,8 +1355,8 @@ impl LanguageService {
         )? {
             return Ok(vec![location]);
         }
-        for candidate in receiver_function_reference_symbols(&index.workshop_items, &symbol) {
-            if let Some(resolution) = index.definitions.definition(&candidate) {
+        for candidate in definition_reference_symbols(&index.workshop_items, &symbol) {
+            if let Some(resolution) = index.definitions.definition(&candidate, &relative) {
                 if let Some(locations) =
                     remap_definition_locations(&project_root, &snapshot, index, &resolution)
                 {
@@ -1096,7 +1365,7 @@ impl LanguageService {
             }
         }
         let mut locations = Vec::new();
-        for candidate in receiver_function_reference_symbols(&index.workshop_items, &symbol) {
+        for candidate in definition_reference_symbols(&index.workshop_items, &symbol) {
             for reference in find_workshop_references(&index.files, &candidate, 256)? {
                 if reference.kind != WorkshopReferenceKind::Definition {
                     continue;
@@ -2517,7 +2786,7 @@ fn scoped_binding_declaration_range(
     else {
         return Ok(None);
     };
-    let tokens = lex(source)?;
+    let tokens = lex_for_language_service(source)?;
     Ok(tokens
         .iter()
         .copied()
@@ -2540,6 +2809,294 @@ fn item_signature(item: &WorkshopCompletionItem) -> Option<String> {
     item.signature
         .clone()
         .filter(|signature| signature.contains('('))
+}
+
+fn signature_for_call(
+    item: &WorkshopCompletionItem,
+    call: &CallContext,
+    source: &str,
+    index: &LanguageIndex,
+    context: &CompletionContext,
+) -> Option<String> {
+    let signature = item_signature(item)?;
+    if item.generic_parameters.is_empty() {
+        return Some(signature);
+    }
+    let argument_range = call
+        .receiver_range
+        .as_ref()
+        .or(call.first_argument_range.as_ref())?;
+    let expression = source.get(argument_range.clone())?.trim();
+    let expression = strip_outer_parentheses(expression);
+    let actual_type = expression_type(index, expression, context)?;
+    let template_type = signature_first_parameter_type(&signature)?;
+    let generic_names = item
+        .generic_parameters
+        .iter()
+        .map(|parameter| parameter.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut bindings = BTreeMap::new();
+    collect_generic_bindings(template_type, &actual_type, &generic_names, &mut bindings);
+    Some(substitute_signature_types(&signature, &bindings))
+}
+
+fn project_completion_item(
+    item: &WorkshopCompletionItem,
+    call: Option<&CallContext>,
+    source: &str,
+    index: &LanguageIndex,
+    context: &CompletionContext,
+) -> WorkshopCompletionItem {
+    let Some(call) = call else {
+        return item.clone();
+    };
+    let Some(signature) = signature_for_call(item, call, source, index, context) else {
+        return item.clone();
+    };
+    let mut projected = item.clone();
+    projected.detail =
+        replace_signature_in_detail(&item.detail, item.signature.as_deref(), &signature);
+    projected.signature = Some(signature);
+    projected
+}
+
+fn replace_signature_in_detail(detail: &str, original: Option<&str>, projected: &str) -> String {
+    let Some(original) = original else {
+        return detail.to_string();
+    };
+    detail.strip_prefix(original).map_or_else(
+        || detail.to_string(),
+        |suffix| format!("{projected}{suffix}"),
+    )
+}
+
+fn expression_type(
+    index: &LanguageIndex,
+    expression: &str,
+    context: &CompletionContext,
+) -> Option<String> {
+    let mut candidates = index
+        .workshop_items
+        .iter()
+        .filter(|item| item.text == expression && item.type_name.is_some())
+        .filter(|item| !matches!(item.kind.as_str(), "function" | "method" | "test"))
+        .filter(|item| workshop_completion_visible(item, context))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|item| workshop_completion_specificity(item, context));
+    candidates.first().and_then(|item| item.type_name.clone())
+}
+
+fn strip_outer_parentheses(mut expression: &str) -> &str {
+    loop {
+        let trimmed = expression.trim();
+        if trimmed.len() < 2 || !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+            return trimmed;
+        }
+        let mut depth = 0usize;
+        let mut closes_at_end = false;
+        for (index, character) in trimmed.char_indices() {
+            match character {
+                '(' => depth = depth.saturating_add(1),
+                ')' => {
+                    depth = depth.checked_sub(1).unwrap_or_default();
+                    if depth == 0 {
+                        closes_at_end = index + character.len_utf8() == trimmed.len();
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !closes_at_end {
+            return trimmed;
+        }
+        expression = &trimmed[1..trimmed.len() - 1];
+    }
+}
+
+fn signature_first_parameter_type(signature: &str) -> Option<&str> {
+    let open = signature.find('(')?;
+    let close = signature[open + 1..]
+        .find(')')
+        .map(|index| open + 1 + index)?;
+    let first = split_top_level_commas(&signature[open + 1..close])
+        .into_iter()
+        .next()?;
+    let (_, type_name) = first.split_once(':')?;
+    Some(type_name.trim())
+}
+
+fn collect_generic_bindings(
+    template: &str,
+    actual: &str,
+    generic_names: &BTreeSet<&str>,
+    bindings: &mut BTreeMap<String, String>,
+) {
+    let template = template.trim();
+    let actual = actual.trim();
+    if generic_names.contains(template) {
+        bindings
+            .entry(template.to_string())
+            .or_insert_with(|| actual.to_string());
+        return;
+    }
+    if let (Some((template_base, template_args)), Some((actual_base, actual_args))) = (
+        split_type_application(template),
+        split_type_application(actual),
+    ) {
+        if type_base_name(&template_base) == type_base_name(&actual_base)
+            && template_args.len() == actual_args.len()
+        {
+            for (template_arg, actual_arg) in template_args.iter().zip(actual_args.iter()) {
+                collect_generic_bindings(template_arg, actual_arg, generic_names, bindings);
+            }
+        }
+        return;
+    }
+    if let (Some((template_element, template_extent)), Some((actual_element, actual_extent))) =
+        (split_array_suffix(template), split_array_suffix(actual))
+    {
+        collect_generic_bindings(template_element, actual_element, generic_names, bindings);
+        collect_generic_bindings(template_extent, actual_extent, generic_names, bindings);
+    }
+}
+
+fn split_type_application(type_name: &str) -> Option<(String, Vec<String>)> {
+    let type_name = type_name.trim();
+    let open = type_name.find('<')?;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (index, character) in type_name
+        .char_indices()
+        .skip_while(|(index, _)| *index < open)
+    {
+        match character {
+            '<' => depth = depth.saturating_add(1),
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    if !type_name[close + 1..].trim().is_empty() {
+        return None;
+    }
+    let base = type_name[..open].trim();
+    (!base.is_empty()).then(|| {
+        (
+            base.to_string(),
+            split_top_level_commas(&type_name[open + 1..close])
+                .into_iter()
+                .map(str::trim)
+                .filter(|argument| !argument.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
+    })
+}
+
+fn split_array_suffix(type_name: &str) -> Option<(&str, &str)> {
+    let type_name = type_name.trim();
+    let close = type_name.strip_suffix(']')?.len();
+    let open = type_name[..close].rfind('[')?;
+    let element = type_name[..open].trim();
+    let extent = type_name[open + 1..close].trim();
+    (!element.is_empty() && !extent.is_empty()).then_some((element, extent))
+}
+
+fn type_base_name(type_name: &str) -> &str {
+    type_name.rsplit('.').next().unwrap_or(type_name).trim()
+}
+
+fn split_top_level_commas(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut angle_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut paren_depth = 0usize;
+    for (index, character) in text.char_indices() {
+        match character {
+            '<' => angle_depth = angle_depth.saturating_add(1),
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '[' => bracket_depth = bracket_depth.saturating_add(1),
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '(' => paren_depth = paren_depth.saturating_add(1),
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            ',' if angle_depth == 0 && bracket_depth == 0 && paren_depth == 0 => {
+                parts.push(&text[start..index]);
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+fn substitute_signature_types(signature: &str, bindings: &BTreeMap<String, String>) -> String {
+    if bindings.is_empty() {
+        return signature.to_string();
+    }
+    let Some(open) = signature.find('(') else {
+        return signature.to_string();
+    };
+    let Some(close) = signature[open + 1..]
+        .find(')')
+        .map(|index| open + 1 + index)
+    else {
+        return signature.to_string();
+    };
+    let parameters = split_top_level_commas(&signature[open + 1..close])
+        .into_iter()
+        .map(str::trim)
+        .map(|parameter| {
+            parameter.split_once(':').map_or_else(
+                || parameter.to_string(),
+                |(name, type_name)| {
+                    format!("{}: {}", name.trim(), substitute_type(type_name, bindings))
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{}({}){}",
+        &signature[..open],
+        parameters,
+        substitute_type(&signature[close + 1..], bindings),
+    )
+}
+
+fn substitute_type(type_name: &str, bindings: &BTreeMap<String, String>) -> String {
+    let Ok(tokens) = lex(type_name) else {
+        return type_name.trim().to_string();
+    };
+    let mut result = String::new();
+    let mut cursor = 0usize;
+    for token in tokens {
+        if token.kind == TokenKind::Eof {
+            break;
+        }
+        result.push_str(&type_name[cursor..token.start]);
+        if token.kind == TokenKind::Identifier {
+            result.push_str(
+                bindings
+                    .get(token_text(type_name, token))
+                    .map(String::as_str)
+                    .unwrap_or_else(|| token_text(type_name, token)),
+            );
+        } else {
+            result.push_str(token_text(type_name, token));
+        }
+        cursor = token.end;
+    }
+    result.push_str(&type_name[cursor..]);
+    result.trim().to_string()
 }
 
 fn receiver_function_reference_symbols(
@@ -2569,6 +3126,15 @@ fn receiver_function_reference_symbols(
             .map(|item| item.text.clone()),
     );
     symbols.into_iter().collect()
+}
+
+fn definition_reference_symbols(items: &[WorkshopCompletionItem], symbol: &str) -> Vec<String> {
+    let mut candidates = receiver_function_reference_symbols(items, symbol);
+    if let Some(position) = candidates.iter().position(|candidate| candidate == symbol) {
+        let exact = candidates.remove(position);
+        candidates.insert(0, exact);
+    }
+    candidates
 }
 
 fn apply_workshop_rename_edits(
@@ -2613,8 +3179,17 @@ fn apply_workshop_rename_edits(
     Ok(after)
 }
 
-fn hover_signature(item: &WorkshopCompletionItem) -> Option<String> {
-    item_signature(item)
+fn hover_signature(
+    item: &WorkshopCompletionItem,
+    call: Option<&CallContext>,
+    source: &str,
+    index: &LanguageIndex,
+    context: &CompletionContext,
+) -> Option<String> {
+    call.map_or_else(
+        || item_signature(item),
+        |call| signature_for_call(item, call, source, index, context),
+    )
 }
 
 fn documentation_for_completion(
@@ -2684,11 +3259,27 @@ fn indexed_completion_receiver(source: &str, cursor: usize) -> Option<(&str, &st
         .then_some((collection_path, receiver))
 }
 
+/// Keep read-only language features usable when an edit introduces a lexer
+/// error after the requested position.  The compiler's lexer already reports
+/// the first invalid byte, so the language service can reuse every token that
+/// precedes that byte without maintaining a second lexer.
+fn lex_for_language_service(source: &str) -> Result<Vec<Token>, String> {
+    match lex_with_diagnostic(source) {
+        Ok(tokens) => Ok(tokens),
+        Err(diagnostic) => {
+            let prefix = source
+                .get(..diagnostic.offset.min(source.len()))
+                .ok_or_else(|| diagnostic.message.clone())?;
+            lex(prefix).map_err(|_| diagnostic.message)
+        }
+    }
+}
+
 fn identifier_path_range(source: &str, byte_offset: usize) -> Option<Range<usize>> {
     if byte_offset > source.len() || !source.is_char_boundary(byte_offset) {
         return None;
     }
-    let tokens = lex(source).ok()?;
+    let tokens = lex_for_language_service(source).ok()?;
     let mut index = tokens.iter().position(|token| {
         token.kind == TokenKind::Identifier
             && (token.start <= byte_offset && byte_offset <= token.end)
@@ -2719,7 +3310,7 @@ fn reference_symbol_at(source: &str, byte_offset: usize) -> Option<String> {
     if byte_offset > source.len() || !source.is_char_boundary(byte_offset) {
         return None;
     }
-    let tokens = lex(source).ok()?;
+    let tokens = lex_for_language_service(source).ok()?;
     let token = tokens.iter().find(|token| {
         token.kind == TokenKind::Identifier
             && token.start <= byte_offset
@@ -2893,89 +3484,249 @@ fn language_symbol(project_root: &str, symbol: &WorkshopSymbol) -> LanguageSymbo
 struct CallContext {
     target: String,
     active_parameter: usize,
+    open_start: usize,
+    first_argument_range: Option<Range<usize>>,
+    receiver_range: Option<Range<usize>>,
+    explicit_generic: bool,
 }
 
 fn call_context(source: &str, byte_offset: usize) -> Result<Option<CallContext>, String> {
     if byte_offset > source.len() || !source.is_char_boundary(byte_offset) {
         return Err(format!("signature offset {byte_offset} is invalid"));
     }
-    let prefix = &source[..byte_offset];
-    let tokens = lex(prefix)?;
-    let mut open_calls = Vec::<usize>::new();
-    for (index, token) in tokens.iter().enumerate() {
-        match token.kind {
-            TokenKind::LParen => open_calls.push(index),
-            TokenKind::RParen => {
-                open_calls.pop();
-            }
-            _ => {}
+    let tokens = lex_for_language_service(source)?;
+    let mut candidates = Vec::new();
+    for (open_index, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::LParen {
+            continue;
         }
-    }
-    let Some(open_index) = open_calls.last().copied() else {
-        return Ok(None);
-    };
-    let Some(mut target_end_index) = open_index.checked_sub(1) else {
-        return Ok(None);
-    };
-    if token_text(prefix, tokens[target_end_index]) == ">" {
-        let mut depth = 0usize;
-        let mut index = target_end_index;
-        loop {
-            let text = token_text(prefix, tokens[index]);
-            if text == ">" {
-                depth += 1;
-            } else if text == "<" {
-                depth = depth.checked_sub(1).ok_or_else(|| {
-                    "signature call has an unmatched generic closing delimiter".to_string()
-                })?;
-                if depth == 0 {
-                    if index < 3
-                        || token_text(prefix, tokens[index - 1]) != ":"
-                        || token_text(prefix, tokens[index - 2]) != ":"
-                    {
-                        return Ok(None);
-                    }
-                    // Keep recognizing the legacy `name::<args>(...)` shape so
-                    // signature help can still point at the ordinary canonical
-                    // function signature while the compiler reports the
-                    // migration diagnostic.  The arguments are deliberately
-                    // not retained or substituted into the label.
-                    target_end_index = index - 3;
-                    break;
-                }
-            }
-            index = index.checked_sub(1).ok_or_else(|| {
-                "signature call has an unmatched generic opening delimiter".to_string()
-            })?;
+        let Some(target) = call_target(source, &tokens, open_index) else {
+            continue;
+        };
+        let close_index = matching_call_close(&tokens, open_index);
+        let close_end = close_index.and_then(|index| tokens.get(index)).map_or_else(
+            || tokens.last().map_or(0, |token| token.end),
+            |token| token.end,
+        );
+        let in_target =
+            target.syntax_range.start <= byte_offset && byte_offset <= target.syntax_range.end;
+        let in_arguments = token.start <= byte_offset && byte_offset <= close_end;
+        if !in_target && !in_arguments {
+            continue;
         }
+        let active_parameter = call_active_parameter(
+            source,
+            &tokens,
+            open_index,
+            close_index.unwrap_or(tokens.len()),
+            byte_offset,
+        );
+        let first_argument_range = call_first_argument_range(
+            source,
+            &tokens,
+            open_index,
+            close_index.unwrap_or(tokens.len()),
+        );
+        candidates.push(CallContext {
+            target: source[target.target_range.clone()].to_string(),
+            active_parameter,
+            open_start: token.start,
+            first_argument_range,
+            receiver_range: target.receiver_range,
+            explicit_generic: target.explicit_generic,
+        });
     }
-    if tokens[target_end_index].kind != TokenKind::Identifier {
-        return Ok(None);
+    Ok(candidates.into_iter().max_by_key(|call| call.open_start))
+}
+
+struct CallTarget {
+    target_range: Range<usize>,
+    syntax_range: Range<usize>,
+    receiver_range: Option<Range<usize>>,
+    explicit_generic: bool,
+}
+
+fn call_target(source: &str, tokens: &[Token], open_index: usize) -> Option<CallTarget> {
+    let mut target_end_index = open_index.checked_sub(1)?;
+    let syntax_end = tokens[target_end_index].end;
+    let mut explicit_generic = false;
+    if token_text(source, *tokens.get(target_end_index)?) == ">" {
+        let generic_start = matching_generic_open(source, tokens, target_end_index)?;
+        let legacy_prefix = generic_start >= 2
+            && token_text(source, tokens[generic_start - 1]) == ":"
+            && token_text(source, tokens[generic_start - 2]) == ":";
+        if legacy_prefix {
+            if source.get(tokens[generic_start - 2].end..tokens[generic_start - 1].start)? != "" {
+                return None;
+            }
+        } else {
+            let previous = tokens.get(generic_start.checked_sub(1)?)?;
+            if source.get(previous.end..tokens[generic_start].start)? != "" {
+                return None;
+            }
+        }
+        explicit_generic = true;
+        target_end_index = if legacy_prefix {
+            generic_start.checked_sub(3)?
+        } else {
+            generic_start.checked_sub(1)?
+        };
+    }
+    if tokens.get(target_end_index)?.kind != TokenKind::Identifier {
+        return None;
     }
     let mut target_start_index = target_end_index;
     while target_start_index >= 2
         && tokens[target_start_index - 1].kind == TokenKind::Other
-        && token_text(prefix, tokens[target_start_index - 1]) == "."
+        && token_text(source, tokens[target_start_index - 1]) == "."
         && tokens[target_start_index - 2].kind == TokenKind::Identifier
     {
         target_start_index -= 2;
     }
-    let mut nested_parentheses = 0usize;
-    let mut active_parameter = 0usize;
-    for token in &tokens[open_index + 1..] {
-        match token.kind {
-            TokenKind::LParen => nested_parentheses = nested_parentheses.saturating_add(1),
-            TokenKind::RParen => nested_parentheses = nested_parentheses.saturating_sub(1),
-            TokenKind::Comma if nested_parentheses == 0 => {
-                active_parameter = active_parameter.saturating_add(1);
+    if is_function_declaration_target(tokens, target_start_index) {
+        return None;
+    }
+    let target_range = tokens[target_start_index].start..tokens[target_end_index].end;
+    let syntax_range = tokens[target_start_index].start..syntax_end;
+    let receiver_range = if target_start_index < target_end_index {
+        let dot_index = (target_start_index..target_end_index).rev().find(|index| {
+            tokens[*index].kind == TokenKind::Other && token_text(source, tokens[*index]) == "."
+        })?;
+        Some(tokens[target_start_index].start..tokens[dot_index - 1].end)
+    } else {
+        None
+    };
+    Some(CallTarget {
+        target_range,
+        syntax_range,
+        receiver_range,
+        explicit_generic,
+    })
+}
+
+fn is_function_declaration_target(tokens: &[Token], target_start_index: usize) -> bool {
+    let mut index = target_start_index;
+    while let Some(previous) = index.checked_sub(1) {
+        index = previous;
+        match tokens[index].kind {
+            TokenKind::FunctionKw => return true,
+            TokenKind::LBrace | TokenKind::RBrace | TokenKind::Semicolon => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn matching_generic_open(source: &str, tokens: &[Token], close_index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in (0..=close_index).rev() {
+        match token_text(source, tokens[index]) {
+            ">" => depth = depth.saturating_add(1),
+            "<" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
             }
             _ => {}
         }
     }
-    Ok(Some(CallContext {
-        target: prefix[tokens[target_start_index].start..tokens[target_end_index].end].to_string(),
-        active_parameter,
-    }))
+    None
+}
+
+fn matching_call_close(tokens: &[Token], open_index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in open_index..tokens.len() {
+        match tokens[index].kind {
+            TokenKind::LParen => depth = depth.saturating_add(1),
+            TokenKind::RParen => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn call_active_parameter(
+    source: &str,
+    tokens: &[Token],
+    open_index: usize,
+    end_index: usize,
+    byte_offset: usize,
+) -> usize {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut active_parameter = 0usize;
+    for token in tokens
+        .iter()
+        .copied()
+        .skip(open_index + 1)
+        .take(end_index.saturating_sub(open_index + 1))
+    {
+        if token.start >= byte_offset {
+            break;
+        }
+        match token.kind {
+            TokenKind::LParen => paren_depth = paren_depth.saturating_add(1),
+            TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+            TokenKind::Other => match token_text(source, token) {
+                "[" => bracket_depth = bracket_depth.saturating_add(1),
+                "]" => bracket_depth = bracket_depth.saturating_sub(1),
+                "{" => brace_depth = brace_depth.saturating_add(1),
+                "}" => brace_depth = brace_depth.saturating_sub(1),
+                _ => {}
+            },
+            TokenKind::Comma if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                active_parameter = active_parameter.saturating_add(1)
+            }
+            _ => {}
+        }
+    }
+    active_parameter
+}
+
+fn call_first_argument_range(
+    source: &str,
+    tokens: &[Token],
+    open_index: usize,
+    end_index: usize,
+) -> Option<Range<usize>> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut first_start = None;
+    let mut first_end = None;
+    for token in tokens
+        .iter()
+        .copied()
+        .skip(open_index + 1)
+        .take(end_index.saturating_sub(open_index + 1))
+    {
+        match token.kind {
+            TokenKind::LParen => paren_depth = paren_depth.saturating_add(1),
+            TokenKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+            TokenKind::Other => match token_text(source, token) {
+                "[" => bracket_depth = bracket_depth.saturating_add(1),
+                "]" => bracket_depth = bracket_depth.saturating_sub(1),
+                "{" => brace_depth = brace_depth.saturating_add(1),
+                "}" => brace_depth = brace_depth.saturating_sub(1),
+                _ => {}
+            },
+            TokenKind::Comma if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                break;
+            }
+            _ => {
+                first_start.get_or_insert(token.start);
+                first_end = Some(token.end);
+            }
+        }
+    }
+    Some(first_start?..first_end?)
 }
 
 fn signature_parameters(signature: &str) -> Vec<SignatureParameter> {
@@ -3278,6 +4029,19 @@ mod tests {
                 .any(|diagnostic| diagnostic.message.contains("while")),
             "dirty fixture diagnostics: {:?}",
             dirty.diagnostics
+        );
+        let compiler_diagnostic = dirty
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.message.contains("while"))
+            .expect("fixture compiler diagnostic");
+        assert_eq!(
+            &service
+                .snapshot()
+                .document(&path_text)
+                .expect("dirty fixture document")
+                .text[compiler_diagnostic.range.clone()],
+            "{ while (true) { return 1; } }"
         );
 
         service.open_document(
@@ -3700,6 +4464,32 @@ function main(): i32 {
     }
 
     #[test]
+    fn non_call_hover_does_not_borrow_same_named_imported_function_signature() {
+        let root = std::env::temp_dir().join("stasis-language-service-hover-identity");
+        let main_path = root.join("src/main.stasis");
+        let main_text = main_path.to_string_lossy().replace('\\', "/");
+        let main_source = "import \"generic.stasis\";\nglobal score: i32;\nfunction main(): i32 { score += 1; return score; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("service");
+        service.set_disk_document(main_text.clone(), main_source);
+        service.set_disk_document(
+            root.join("src/generic.stasis")
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "struct Box<N: i32> { value: i32; }\nfunction score(self: Box<N>): i32 { return self.value + N; }\n",
+        );
+
+        let use_offset = main_source.find("score +=").expect("global score use");
+        let hover = service
+            .hover(&main_text, use_offset + 2)
+            .expect("hover")
+            .expect("global hover");
+
+        assert_eq!(hover.kind, "global");
+        assert_eq!(hover.type_name.as_deref(), Some("i32"));
+        assert!(hover.signatures.is_empty());
+    }
+
+    #[test]
     fn receiver_bound_generic_hover_signature_help_and_rename_use_canonical_metadata() {
         let root = std::env::temp_dir().join("stasis-language-service-generics");
         let path = root.join("src/main.stasis");
@@ -3717,7 +4507,7 @@ function main(): i32 {
             .expect("generic hover info");
         assert_eq!(
             free_hover.signatures,
-            vec!["clear(buffer: Buffer<N>): void"]
+            vec!["clear(buffer: Buffer<4>): void"]
         );
 
         let dot_call = source
@@ -3765,7 +4555,7 @@ function main(): i32 {
                 .signature_help(&path_text, call + cursor_offset)
                 .expect("generic signature help")
                 .expect("generic call signature");
-            assert_eq!(help.signatures[0].label, "clear(buffer: Buffer<N>): void");
+            assert_eq!(help.signatures[0].label, "clear(buffer: Buffer<4>): void");
         }
 
         let parameter = source.find("Buffer<N>").expect("generic use") + "Buffer<".len();
@@ -3790,6 +4580,154 @@ function main(): i32 {
             .expect("legacy call");
         assert_eq!(call.target, "clear");
         assert_eq!(call.active_parameter, 0);
+        assert!(call.explicit_generic);
+    }
+
+    #[test]
+    fn call_context_selects_the_innermost_nested_call_and_ignores_comparisons() {
+        let nested = "outer(inner(1))";
+        let nested_cursor = nested.find('1').expect("nested argument") + 1;
+        assert_eq!(
+            call_context(nested, nested_cursor)
+                .expect("nested call context")
+                .expect("nested call")
+                .target,
+            "inner"
+        );
+
+        let comparison = "a < b > (c)";
+        let comparison_cursor = comparison.find('c').expect("comparison argument") + 1;
+        assert!(call_context(comparison, comparison_cursor)
+            .expect("comparison context")
+            .is_none());
+    }
+
+    #[test]
+    fn declaration_hover_is_not_treated_as_a_call() {
+        let root = std::env::temp_dir().join("stasis-language-service-declaration-hover");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = concat!(
+            "struct Buffer<N: i32> { values: i32[N]; }\n",
+            "function clear(buffer: Buffer<N>): void { return; }\n",
+            "global samples: Buffer<4>;\n",
+            "function main(): void { clear(samples); }\n",
+        );
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let declaration = source.find("function clear").expect("declaration") + "function ".len();
+        let hover = service
+            .hover(&path_text, declaration + 2)
+            .expect("declaration hover")
+            .expect("declaration hover information");
+        assert_eq!(hover.signatures, vec!["clear(buffer: Buffer<N>): void"]);
+    }
+
+    #[test]
+    fn providers_reuse_last_good_tokens_before_a_later_unterminated_string() {
+        let root = std::env::temp_dir().join("stasis-language-service-later-lexer-error");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source =
+            "function add(value: i32): i32 { return value; }\nfunction main(): i32 { return add(1); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+        let call = source.find("add(1)").expect("call");
+        service
+            .hover(&path_text, call + 2)
+            .expect("warm hover")
+            .expect("warm hover info");
+
+        let broken = format!("{source}\n\"unterminated");
+        service.open_document(path_text.clone(), 1, broken);
+        let hover = service
+            .hover(&path_text, call + 2)
+            .expect("hover before later lexer error")
+            .expect("hover before later lexer error info");
+        assert_eq!(hover.symbol, "add");
+        let completion = service
+            .completion(&path_text, call + 3, 64)
+            .expect("completion before later lexer error");
+        assert!(completion.items.iter().any(|item| item.text == "add"));
+    }
+
+    #[test]
+    fn explicit_generic_calls_keep_diagnostics_but_suppress_all_providers() {
+        let root = std::env::temp_dir().join("stasis-language-service-explicit-generics");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "struct Buffer<N: i32> { values: i32[N]; }\nfunction clear(buffer: Buffer<N>): void { return; }\nglobal samples: Buffer<4>;\nfunction main(): void { clear<4>(samples); samples.clear::<4>(); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics.diagnostics[0].code,
+            "stasis.explicitGenericCall"
+        );
+        assert_eq!(diagnostics.diagnostics[0].related.len(), 1);
+        assert_eq!(diagnostics.diagnostics[0].related[0].symbol, "clear");
+
+        for (needle, offset) in [
+            ("clear<4>", 2usize),
+            ("samples.clear::<4>", "samples.".len() + 2),
+        ] {
+            let start = source.find(needle).expect("explicit call") + offset;
+            assert!(service
+                .hover(&path_text, start)
+                .expect("explicit hover")
+                .is_none());
+            assert!(service
+                .signature_help(&path_text, start)
+                .expect("explicit signature")
+                .is_none());
+            assert!(service
+                .completion(&path_text, start, 64)
+                .expect("explicit completion")
+                .items
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn generic_type_and_extent_signatures_project_identically_for_free_and_dot_calls() {
+        let root = std::env::temp_dir().join("stasis-language-service-concrete-generics");
+        let path = root.join("src/main.stasis");
+        let path_text = path.to_string_lossy().replace('\\', "/");
+        let source = "struct Buffer<T: type, N: i32> { values: T[N]; }\nfunction append(buffer: Buffer<T, N>, value: T): bool { return true; }\nglobal samples: Buffer<i32, 4>;\nfunction main(): void { append(samples, 2); samples.append(3); }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(path_text.clone(), source);
+
+        let free_call = source.find("append(samples").expect("free call");
+        let dot_call = source.find("samples.append(").expect("dot call");
+        let free_hover = service
+            .hover(&path_text, free_call + 2)
+            .expect("free hover")
+            .expect("free hover info");
+        let dot_hover = service
+            .hover(&path_text, dot_call + "samples.".len() + 2)
+            .expect("dot hover")
+            .expect("dot hover info");
+        assert_eq!(
+            free_hover.signatures,
+            vec!["append(buffer: Buffer<i32, 4>, value: i32): bool"]
+        );
+        assert_eq!(dot_hover.signatures, free_hover.signatures);
+
+        let free_help = service
+            .signature_help(&path_text, free_call + "append(samples, ".len())
+            .expect("free signature")
+            .expect("free signature help");
+        let dot_help = service
+            .signature_help(&path_text, dot_call + "samples.append(".len())
+            .expect("dot signature")
+            .expect("dot signature help");
+        assert_eq!(free_help.signatures[0].label, dot_help.signatures[0].label);
+        assert_eq!(
+            free_help.signatures[0].label,
+            "append(buffer: Buffer<i32, 4>, value: i32): bool"
+        );
     }
 
     #[test]
@@ -4263,6 +5201,43 @@ function main(): i32 {
                 .revision,
             service.snapshot().revision(),
         );
+    }
+
+    #[test]
+    fn warm_navigation_disambiguates_same_named_imported_modules() {
+        let root = std::env::temp_dir().join("stasis-language-service-module-navigation");
+        let main_path = root.join("src/main.stasis");
+        let one_path = root.join("src/one.stasis");
+        let two_path = root.join("src/two.stasis");
+        let main_path_text = main_path.to_string_lossy().replace('\\', "/");
+        let one_path_text = one_path.to_string_lossy().replace('\\', "/");
+        let two_path_text = two_path.to_string_lossy().replace('\\', "/");
+        let main_source = concat!(
+            "import \"one.stasis\"; import \"two.stasis\";\n",
+            "global first: one.Box<4>;\n",
+            "global second: two.Box<7>;\n",
+            "function main(): i32 { return first.value + second.value + first.score() + second.score(); }\n",
+        );
+        let module_source =
+            "struct Box<N: i32> { value: i32; }\nfunction score(value: Box<N>): i32 { return N + value.value; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(main_path_text.clone(), main_source);
+        service.set_disk_document(one_path_text.clone(), module_source);
+        service.set_disk_document(two_path_text.clone(), module_source);
+
+        for (needle, expected_path, receiver_prefix) in [
+            ("first.value", one_path_text.as_str(), "first."),
+            ("second.value", two_path_text.as_str(), "second."),
+            ("first.score", one_path_text.as_str(), "first."),
+            ("second.score", two_path_text.as_str(), "second."),
+        ] {
+            let offset = main_source.find(needle).expect("module member") + receiver_prefix.len();
+            let locations = service
+                .definition(&main_path_text, offset)
+                .expect("module-aware warm definition");
+            assert_eq!(locations.len(), 1, "{needle} definition count");
+            assert_eq!(locations[0].path, expected_path, "{needle} module identity");
+        }
     }
 
     #[test]

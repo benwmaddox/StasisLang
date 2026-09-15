@@ -1,0 +1,9 @@
+import "../src/generic_use.stasis";
+
+test `generic free and dot calls agree`(): bool {
+    return generic_free_probe() == 4 && generic_dot_probe() == 4;
+}
+
+test `generic fixture keeps its module boundary`(): bool {
+    return generic_free_probe() == generic_dot_probe();
+}

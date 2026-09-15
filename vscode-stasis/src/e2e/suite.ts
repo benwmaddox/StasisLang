@@ -7,6 +7,17 @@ import * as vscode from "vscode";
 import type { LiveResponse, LiveValue } from "../protocol";
 import type { LiveSessionState } from "../liveSession";
 
+interface StasisTestItemInfo {
+  id: string;
+  label: string;
+  uri: string;
+  range?: {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+  };
+  children: readonly StasisTestItemInfo[];
+}
+
 interface StasisExtensionApi {
   state(): LiveSessionState;
   values(): readonly LiveValue[];
@@ -14,6 +25,7 @@ interface StasisExtensionApi {
   stop(): Promise<void>;
   request(type: string, fields?: Record<string, unknown>): Promise<LiveResponse>;
   testFiles(): readonly string[];
+  testItems(): readonly StasisTestItemInfo[];
   runTestFile(uri: string): Promise<{ stdout: string; stderr: string }>;
 }
 
@@ -28,6 +40,45 @@ function pixelAt(png: PNG, x: number, y: number): Rgba {
 
 function isNear(actual: Rgba, expected: Rgba, tolerance: number): boolean {
   return actual.every((channel, index) => Math.abs(channel - expected[index]!) <= tolerance);
+}
+
+function completionLabel(item: vscode.CompletionItem): string {
+  return typeof item.label === "string" ? item.label : item.label.label;
+}
+
+function hoverTextContent(hovers: readonly vscode.Hover[] | undefined): string {
+  return (
+    hovers
+      ?.flatMap((hover) => hover.contents)
+      .map((content) => (typeof content === "string" ? content : content.value))
+      .join("\n") ?? ""
+  );
+}
+
+async function waitForAsync<T>(
+  description: string,
+  operation: () => PromiseLike<T | undefined>,
+  predicate: (value: T | undefined) => boolean,
+  timeoutMs = 30_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  let lastValue: T | undefined;
+  while (Date.now() < deadline) {
+    try {
+      const value = await operation();
+      lastValue = value;
+      if (predicate(value)) {
+        return value as T;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}; last error: ${String(lastError)}`,
+  );
 }
 
 function assertRenderedFrame(framePath: string): void {
@@ -381,6 +432,37 @@ export async function run(): Promise<void> {
     "formatter output applies canonical block newlines and indentation",
   );
 
+  const genericFormatUri = vscode.Uri.file(
+    path.join(projectRoot, `generic-format-input-${process.pid}.stasis`),
+  );
+  fs.writeFileSync(
+    genericFormatUri.fsPath,
+    "struct Buffer<T:type,N:i32>{values:T[N];}\nstruct Nested<T:type,N:i32>{inner:Buffer<T,N>;}\nglobal nested:Nested<Buffer<i32,3>,2>;\nfunction nested_probe():i32{return nested.inner.values[0];}\n",
+  );
+  const genericFormatDocument = await vscode.workspace.openTextDocument(genericFormatUri);
+  const genericFormatEdits = await vscode.commands.executeCommand<vscode.TextEdit[]>(
+    "vscode.executeFormatDocumentProvider",
+    genericFormatUri,
+    { tabSize: 4, insertSpaces: true },
+  );
+  assert.ok(genericFormatEdits && genericFormatEdits.length > 0, "formatter handles nested generic types");
+  const genericFormatted = applyTextEdits(genericFormatDocument, genericFormatEdits);
+  assert.match(
+    genericFormatted,
+    /struct Buffer<T: type, N: i32> \{\r?\n    values: T\[N\];\r?\n\}/,
+    "formatter preserves generic parameter bounds and array fields",
+  );
+  assert.match(
+    genericFormatted,
+    /struct Nested<T: type, N: i32> \{\r?\n    inner: Buffer<T, N>;\r?\n\}/,
+    "formatter preserves nested generic field applications",
+  );
+  assert.match(
+    genericFormatted,
+    /global nested: Nested<Buffer<i32, 3>, 2>;/,
+    "formatter preserves nested generic type arguments",
+  );
+
   const validLength = document.getText().length;
   const invalidSuffix = "\nfunction lsp_diagnostic_probe(): i32 { while (true) { return 1; } }\n";
   const introduceDiagnostic = new vscode.WorkspaceEdit();
@@ -510,7 +592,11 @@ export async function run(): Promise<void> {
     ?.flatMap((hover) => hover.contents)
     .map((content) => (typeof content === "string" ? content : content.value))
     .join("\n");
-  assert.match(hoverText ?? "", /score: i32/, "standard LSP hover reports the global type");
+  assert.match(
+    hoverText ?? "",
+    /score: i32/,
+    `standard LSP hover reports the global type; observed ${JSON.stringify(hoverText)}`,
+  );
 
   const signatureCall = "add_score(1, 2)";
   const signatureOffset = document.getText().indexOf(signatureCall);
@@ -551,6 +637,268 @@ export async function run(): Promise<void> {
       (hint) => hint.kind === vscode.InlayHintKind.Parameter && hint.label === "amount:",
     ),
     "standard LSP inlay hints expose compiler-resolved parameter names",
+  );
+
+  const genericUseUri = vscode.Uri.file(path.join(projectRoot, "src", "generic_use.stasis"));
+  const genericUseDocument = await vscode.workspace.openTextDocument(genericUseUri);
+  const genericUseSource = genericUseDocument.getText();
+  const freeGenericCall = "score(one_box)";
+  const freeGenericOffset = genericUseSource.indexOf(freeGenericCall);
+  assert.notEqual(freeGenericOffset, -1, "the multi-file fixture contains a free generic call");
+  const dotGenericCall = "one_box.score()";
+  const dotGenericOffset = genericUseSource.indexOf(dotGenericCall);
+  assert.notEqual(dotGenericOffset, -1, "the multi-file fixture contains a dot generic call");
+  const bareGenericType = "bare_box: Box<4>";
+  const bareGenericTypeOffset = genericUseSource.indexOf(bareGenericType);
+  assert.notEqual(bareGenericTypeOffset, -1, "the multi-file fixture contains a bare generic type use");
+
+  const genericTypeCompletions = await waitForAsync(
+    "generic struct completion",
+    () =>
+      vscode.commands.executeCommand<vscode.CompletionList>(
+        "vscode.executeCompletionItemProvider",
+        genericUseUri,
+        genericUseDocument.positionAt(bareGenericTypeOffset + "bare_box: ".length + "Box".length),
+      ),
+    (value) =>
+      value?.items.some(
+        (item) => completionLabel(item) === "Box" && item.kind === vscode.CompletionItemKind.Struct,
+      ) === true,
+  );
+  const genericTypeCompletion = genericTypeCompletions.items.find(
+    (item) => completionLabel(item) === "Box",
+  );
+  assert.equal(
+    genericTypeCompletion?.kind,
+    vscode.CompletionItemKind.Struct,
+    "generic type completion preserves the Struct kind",
+  );
+
+  const genericCompletions = await waitForAsync(
+    "generic function completion",
+    () =>
+      vscode.commands.executeCommand<vscode.CompletionList>(
+        "vscode.executeCompletionItemProvider",
+        genericUseUri,
+        genericUseDocument.positionAt(freeGenericOffset + "sco".length),
+      ),
+    (value) =>
+      value?.items.some(
+        (item) => completionLabel(item) === "score" && item.kind === vscode.CompletionItemKind.Function,
+      ) === true,
+  );
+  const genericScoreCompletion = genericCompletions.items.find(
+    (item) =>
+      completionLabel(item) === "score" && item.kind === vscode.CompletionItemKind.Function,
+  );
+  assert.equal(
+    genericScoreCompletion?.kind,
+    vscode.CompletionItemKind.Function,
+    "generic function completion preserves the Function kind",
+  );
+  assert.match(
+    genericScoreCompletion?.detail ?? "",
+    /Box<4>/,
+    `generic function completion exposes its inferred receiver-bound signature; observed ${JSON.stringify(
+      genericScoreCompletion?.detail,
+    )}`,
+  );
+
+  const genericMethodCompletions = await waitForAsync(
+    "generic method completion",
+    () =>
+      vscode.commands.executeCommand<vscode.CompletionList>(
+        "vscode.executeCompletionItemProvider",
+        genericUseUri,
+        genericUseDocument.positionAt(dotGenericOffset + "one_box.sco".length),
+      ),
+    (value) =>
+      value?.items.some(
+        (item) =>
+          completionLabel(item) === "one_box.score" && item.kind === vscode.CompletionItemKind.Method,
+      ) === true,
+  );
+  const genericMethodCompletion = genericMethodCompletions.items.find(
+    (item) => completionLabel(item) === "one_box.score",
+  );
+  assert.equal(
+    genericMethodCompletion?.kind,
+    vscode.CompletionItemKind.Method,
+    "generic receiver completion preserves the Method kind",
+  );
+
+  const freeGenericHovers = await waitForAsync(
+    "free generic hover",
+    () =>
+      vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        genericUseUri,
+        genericUseDocument.positionAt(freeGenericOffset + 2),
+      ),
+    (value) => /score\(self: Box<4>\): i32/.test(hoverTextContent(value)),
+  );
+  const freeGenericHoverText = hoverTextContent(freeGenericHovers);
+  const dotGenericHovers = await waitForAsync(
+    "dot generic hover",
+    () =>
+      vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        genericUseUri,
+        genericUseDocument.positionAt(dotGenericOffset + "one_box.".length + 2),
+      ),
+    (value) => /score\(self: Box<4>\): i32/.test(hoverTextContent(value)),
+  );
+  const dotGenericHoverText = hoverTextContent(dotGenericHovers);
+  assert.match(freeGenericHoverText, /score\(self: Box<4>\): i32/);
+  assert.match(dotGenericHoverText, /score\(self: Box<4>\): i32/);
+  assert.equal(
+    dotGenericHoverText.match(/score\(self: Box<4>\): i32/g)?.[0],
+    freeGenericHoverText.match(/score\(self: Box<4>\): i32/g)?.[0],
+    "free and dot generic hovers use the same concrete signature",
+  );
+
+  const freeGenericSignature = await waitForAsync(
+    "free generic signature help",
+    () =>
+      vscode.commands.executeCommand<vscode.SignatureHelp>(
+        "vscode.executeSignatureHelpProvider",
+        genericUseUri,
+        genericUseDocument.positionAt(freeGenericOffset + "score(".length),
+        ",",
+      ),
+    (value) => value?.signatures[0]?.label === "score(self: Box<4>): i32",
+  );
+  const dotGenericSignature = await waitForAsync(
+    "dot generic signature help",
+    () =>
+      vscode.commands.executeCommand<vscode.SignatureHelp>(
+        "vscode.executeSignatureHelpProvider",
+        genericUseUri,
+        genericUseDocument.positionAt(dotGenericOffset + "one_box.score(".length),
+        ",",
+      ),
+    (value) => value?.signatures[0]?.label === "score(self: Box<4>): i32",
+  );
+  assert.equal(
+    dotGenericSignature.signatures[0]?.label,
+    freeGenericSignature.signatures[0]?.label,
+    "free and dot generic signature help use the same concrete signature",
+  );
+
+  const genericOneDocument = await vscode.workspace.openTextDocument(
+    vscode.Uri.file(path.join(projectRoot, "src", "generic_one.stasis")),
+  );
+  const genericOneScoreLine = genericOneDocument
+    .getText()
+    .split(/\r?\n/)
+    .findIndex((line) => line.includes("function score"));
+  assert.notEqual(genericOneScoreLine, -1, "the first generic module contains the score definition");
+  const freeGenericDefinitions = await waitForAsync(
+    "free generic definition",
+    () =>
+      vscode.commands.executeCommand<vscode.Location[]>(
+        "vscode.executeDefinitionProvider",
+        genericUseUri,
+        genericUseDocument.positionAt(freeGenericOffset + 2),
+      ),
+    (value) =>
+      value?.length === 1 &&
+      value[0]?.uri.fsPath.replaceAll("\\", "/").endsWith("/src/generic_one.stasis") === true,
+  );
+  const dotGenericDefinitions = await waitForAsync(
+    "dot generic definition",
+    () =>
+      vscode.commands.executeCommand<vscode.Location[]>(
+        "vscode.executeDefinitionProvider",
+        genericUseUri,
+        genericUseDocument.positionAt(dotGenericOffset + "one_box.".length + 2),
+      ),
+    (value) =>
+      value?.length === 1 &&
+      value[0]?.uri.fsPath.replaceAll("\\", "/").endsWith("/src/generic_one.stasis") === true,
+  );
+  assert.equal(freeGenericDefinitions.length, 1, "free generic navigation returns exactly one definition");
+  assert.equal(dotGenericDefinitions.length, 1, "dot generic navigation returns exactly one definition");
+  assert.equal(
+    freeGenericDefinitions[0]?.uri.fsPath,
+    dotGenericDefinitions[0]?.uri.fsPath,
+    "same-named templates in another module do not change the selected definition",
+  );
+  assert.equal(freeGenericDefinitions[0]?.range.start.line, genericOneScoreLine);
+  assert.equal(dotGenericDefinitions[0]?.range.start.line, genericOneScoreLine);
+
+  const genericTwoUseUri = vscode.Uri.file(path.join(projectRoot, "src", "generic_two_use.stasis"));
+  const genericTwoUseDocument = await vscode.workspace.openTextDocument(genericTwoUseUri);
+  const genericTwoUseSource = genericTwoUseDocument.getText();
+  const secondDotCall = "two_box.score()";
+  const secondDotOffset = genericTwoUseSource.indexOf(secondDotCall);
+  assert.notEqual(secondDotOffset, -1, "the second module fixture contains a dot generic call");
+  const genericTwoDefinitions = await waitForAsync(
+    "second same-named generic definition",
+    () =>
+      vscode.commands.executeCommand<vscode.Location[]>(
+        "vscode.executeDefinitionProvider",
+        genericTwoUseUri,
+        genericTwoUseDocument.positionAt(secondDotOffset + "two_box.".length + 2),
+      ),
+    (value) =>
+      value?.length === 1 &&
+      value[0]?.uri.fsPath.replaceAll("\\", "/").endsWith("/src/generic_two.stasis") === true,
+  );
+  assert.equal(genericTwoDefinitions.length, 1);
+  assert.notEqual(
+    genericTwoDefinitions[0]?.uri.fsPath,
+    freeGenericDefinitions[0]?.uri.fsPath,
+    "same-named templates in separate modules retain distinct navigation identities",
+  );
+
+  const genericValidLength = genericUseDocument.getText().length;
+  const invalidExplicitCall =
+    "\nfunction explicit_generic_probe(): i32 { return score<4>(one_box); }\n";
+  const invalidGenericEdit = new vscode.WorkspaceEdit();
+  invalidGenericEdit.insert(genericUseUri, genericUseDocument.positionAt(genericValidLength), invalidExplicitCall);
+  assert.equal(
+    await vscode.workspace.applyEdit(invalidGenericEdit),
+    true,
+    "VS Code applies an unsaved explicit generic-call probe",
+  );
+  try {
+    await waitFor("explicit generic-call diagnostic", () =>
+      vscode.languages
+        .getDiagnostics(genericUseUri)
+        .some(
+          (diagnostic) =>
+            diagnostic.source === "stasis" && diagnostic.message.includes("explicit generic function call"),
+        ),
+    );
+    const invalidSource = genericUseDocument.getText();
+    const invalidCallOffset = invalidSource.lastIndexOf("score<4>(one_box)");
+    assert.notEqual(invalidCallOffset, -1, "the unsaved document contains the explicit generic call");
+    const explicitSignature = await vscode.commands.executeCommand<vscode.SignatureHelp>(
+      "vscode.executeSignatureHelpProvider",
+      genericUseUri,
+      genericUseDocument.positionAt(invalidCallOffset + "score<4>(".length),
+      ",",
+    );
+    assert.equal(explicitSignature, undefined, "unsupported explicit generic calls have no signature help");
+  } finally {
+    const removeInvalidGenericEdit = new vscode.WorkspaceEdit();
+    removeInvalidGenericEdit.delete(
+      genericUseUri,
+      new vscode.Range(
+        genericUseDocument.positionAt(genericValidLength),
+        genericUseDocument.positionAt(genericUseDocument.getText().length),
+      ),
+    );
+    assert.equal(
+      await vscode.workspace.applyEdit(removeInvalidGenericEdit),
+      true,
+      "VS Code removes the unsaved explicit generic-call probe",
+    );
+  }
+  await waitFor(
+    "explicit generic-call diagnostic recovery",
+    () => vscode.languages.getDiagnostics(genericUseUri).length === 0,
   );
 
   const mainLineNumber = document
@@ -695,6 +1043,52 @@ export async function run(): Promise<void> {
   assert.equal(testEnvelope.ok, true, "Test Explorer executes the test through the Stasis CLI");
   assert.equal(testEnvelope.result?.tests_passed, 1, "the discovered fixture test passes");
 
+  const genericTestItems = await waitForAsync(
+    "Test Explorer generic symbol children",
+    async () => api.testItems(),
+    (items) => {
+      const candidate = items?.find((item) => item.label.endsWith("generic_editor.test.stasis"));
+      return (
+        candidate?.children.length === 2 &&
+        candidate.children.every(
+          (child) =>
+            child.uri.endsWith("/tests/generic_editor.test.stasis") &&
+            child.range !== undefined &&
+            child.range.start.line <= child.range.end.line,
+        )
+      );
+    },
+  );
+  const genericTestItem = genericTestItems.find((item) =>
+    item.label.endsWith("generic_editor.test.stasis"),
+  );
+  if (!genericTestItem) {
+    throw new Error("Test Explorer did not retain the generic test file item.");
+  }
+  assert.equal(genericTestItem.children.length, 2, "Test Explorer exposes each generic test as a child item");
+  const genericTestDocument = await vscode.workspace.openTextDocument(vscode.Uri.parse(genericTestItem.uri));
+  for (const child of genericTestItem.children) {
+    assert.ok(child.range, `Test Explorer gives ${child.label} a source range`);
+    const declarationLine = genericTestDocument.lineAt(child.range!.start.line).text;
+    assert.equal(
+      declarationLine.includes(`test \`${child.label}\``),
+      true,
+      `Test Explorer child ${child.label} navigates to its declaration`,
+    );
+    assert.equal(
+      child.uri,
+      genericTestItem.uri,
+      `Test Explorer child ${child.label} keeps the test-file navigation URI`,
+    );
+  }
+  const genericTestResult = await api.runTestFile(genericTestItem.uri);
+  const genericTestEnvelope = JSON.parse(genericTestResult.stdout) as {
+    ok?: boolean;
+    result?: { tests_passed?: number };
+  };
+  assert.equal(genericTestEnvelope.ok, true, "the generic Test Explorer fixture runs through the installed CLI");
+  assert.equal(genericTestEnvelope.result?.tests_passed, 2, "all discovered generic child tests pass");
+
   const debugLine = document
     .getText()
     .split(/\r?\n/)
@@ -793,6 +1187,40 @@ export async function run(): Promise<void> {
     const liveStatus = await api.request("status");
     const startedGeneration = liveStatus.runtime_identity?.generation;
     assert.equal(typeof startedGeneration, "number", "the running game publishes a runtime generation");
+    assert.equal(
+      typeof liveStatus.runtime_identity?.source_hashes?.["src/main.stasis"],
+      "string",
+      "the running game publishes its current file hash",
+    );
+    const tickSymbol = await api.request("read", {
+      name: "tick",
+      kind: "function",
+      file: "src/main.stasis",
+    });
+    const tickSymbolData = tickSymbol.data as { source_hash?: unknown } | undefined;
+    const initialTickHash = tickSymbolData?.source_hash;
+    assert.equal(
+      typeof initialTickHash,
+      "string",
+      "live symbol read publishes the target hash used by semantic edits",
+    );
+    await assert.rejects(
+      () =>
+        api.request("edit", {
+          operation: "update",
+          target: {
+            name: "tick",
+            kind: "function",
+            file: "src/main.stasis",
+          },
+          source: "function tick(): i32 { score += 2; return 0; }",
+          expected_source_hash: "stale-vsix-source-hash",
+          preview: true,
+          run_tests: false,
+        }),
+      /stale semantic edit target|expected source hash/i,
+      "a semantic edit with a stale source hash is rejected before staging",
+    );
     assert.ok(
       liveStatus.runtime_identity?.indexed_collections?.some(
         (collection) => collection.path === "state.enemies" && "speed" in collection.fields,
@@ -857,6 +1285,7 @@ export async function run(): Promise<void> {
         file: "src/main.stasis",
       },
       source: "function tick(): i32 { score += 2; return 0; }",
+      expected_source_hash: initialTickHash,
       preview: true,
       run_tests: false,
     });

@@ -539,14 +539,16 @@ impl Compiler {
                     .and_then(|path| self.files.iter().find(|file| file.path == path))
                     .or_else(|| self.files.first());
                 self.last_source_diagnostic = diagnostic_file.map(|file| {
-                    crate::SourceDiagnostic::new(
+                    let mut diagnostic = crate::SourceDiagnostic::new(
                         file.path.clone(),
                         error.start.min(file.original_content.len()),
                         error.end.min(file.original_content.len()),
                         error.symbol.clone(),
                         error.message.clone(),
                     )
-                    .with_code(error.code.clone())
+                    .with_code(error.code.clone());
+                    diagnostic.related = error.related.clone();
+                    diagnostic
                 });
                 CompileError::Frontend(error.message)
             },
@@ -562,29 +564,32 @@ impl Compiler {
             .flat_map(|path| self.module_graph.invalidation_closure(path))
             .filter(|path| !changed_paths.contains(path))
             .collect();
-        let has_tick_budget_annotation = self
-            .files
+        // The generic pass may remove declarations and append materialized
+        // functions, so its `content` offsets are not source coordinates. The
+        // budget annotation belongs to the user's declaration; validate it
+        // against an original-source view as well.
+        let original_files = original_source_files(&self.files);
+        let has_tick_budget_annotation = original_files
             .iter()
             .any(|file| file.content.contains("@tick_budget_us"));
         let tick_budget_result = if has_tick_budget_annotation {
-            crate::performance::tick_budget_us(&self.files)
+            crate::performance::tick_budget_us(&original_files)
         } else {
             Ok(None)
         };
         if let Err(message) = tick_budget_result {
-            let file = self
-                .files
+            let file = original_files
                 .iter()
                 .find(|file| {
                     crate::performance::tick_budget_us(std::slice::from_ref(file)).is_err()
                 })
                 .or_else(|| {
-                    self.files
+                    original_files
                         .iter()
                         .filter(|file| file.content.contains("@tick_budget_us"))
                         .nth(1)
                 })
-                .or_else(|| self.files.first());
+                .or_else(|| original_files.first());
             if let Some(file) = file {
                 let is_tick_budget_error = message.contains("tick_budget_us");
                 let start = is_tick_budget_error
@@ -600,7 +605,7 @@ impl Compiler {
                 };
                 let symbol = is_tick_budget_error
                     .then(|| {
-                        crate::frontend::parser::parse_top_level_functions(&file.content)
+                        crate::frontend::parser::parse_top_level_functions(&file.original_content)
                             .ok()
                             .and_then(|functions| {
                                 functions.into_iter().find(|function| {
@@ -639,6 +644,11 @@ impl Compiler {
                     Ok(indexed) => indexed,
                     Err(diagnostic) => {
                         let file = &self.files[file_id];
+                        let diagnostic = originalize_index_diagnostic(
+                            &file.original_content,
+                            &file.content,
+                            diagnostic,
+                        );
                         self.last_source_diagnostic = Some(
                             crate::SourceDiagnostic::new(
                                 file.path.clone(),
@@ -738,14 +748,33 @@ impl Compiler {
                 ) {
                     Ok(resolution) => resolution,
                     Err(error) => {
-                        let relative_span = dependency.name_span.clone();
-                        let base = self.functions[caller_index].source_range.start as usize;
+                        let caller = self.functions[caller_index].clone();
+                        let file = &self.files[caller.file_id as usize];
                         let message =
                             module_call_resolution_message(error, &dependency.name, caller_path);
+                        let span = original_call_span(
+                            &file.original_content,
+                            &file.content,
+                            &caller,
+                            &dependency,
+                        )
+                        .unwrap_or_else(|| {
+                            // Keep the fallback in the canonical source too.
+                            // A generated declaration has no exact one-to-one
+                            // byte range, but leaking its relative offset into
+                            // the original file is worse than selecting the
+                            // containing original body.
+                            original_function_body_range(
+                                &file.original_content,
+                                &file.content,
+                                &caller,
+                            )
+                            .unwrap_or(0..0)
+                        });
                         self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
                             caller_path.clone(),
-                            base + relative_span.start as usize,
-                            base + relative_span.end as usize,
+                            span.start,
+                            span.end,
                             dependency.name.clone(),
                             message.clone(),
                         ));
@@ -869,16 +898,11 @@ impl Compiler {
                 let artifacts = match parse_simple_statements_with_debug(body, &mut self.types) {
                     Ok(artifacts) => artifacts,
                     Err(message) => {
-                        self.last_source_diagnostic = Some(
-                            crate::SourceDiagnostic::new(
-                                file.path.clone(),
-                                function.source_range.start as usize,
-                                function.source_range.end as usize,
-                                function.name.clone(),
-                                message.clone(),
-                            )
-                            .with_code(crate::SourceDiagnosticCode::Parse),
-                        );
+                        let function = function.clone();
+                        self.record_function_diagnostic(&function, &message);
+                        if let Some(diagnostic) = self.last_source_diagnostic.as_mut() {
+                            diagnostic.code = crate::SourceDiagnosticCode::Parse;
+                        }
                         return Err(CompileError::Backend(message));
                     }
                 };
@@ -940,13 +964,54 @@ impl Compiler {
         if let Err(violation) =
             validate_effect_contracts(&self.files, &self.functions, &self.data_flow_summaries)
         {
-            self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
-                violation.file,
-                violation.source_start as usize,
-                violation.source_end as usize,
-                violation.function,
-                violation.message.clone(),
-            ));
+            let path = violation.file.clone();
+            let diagnostic = self
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .and_then(|file| {
+                    original_function_signature_for_span(
+                        &file.original_content,
+                        &file.content,
+                        &violation.function,
+                        violation.source_start as usize..violation.source_end as usize,
+                    )
+                    .map(|range| {
+                        crate::SourceDiagnostic::new(
+                            path.clone(),
+                            range.start,
+                            range.end,
+                            violation.function.clone(),
+                            violation.message.clone(),
+                        )
+                    })
+                })
+                .unwrap_or_else(|| {
+                    // A contract violation is always associated with a source
+                    // file. Keep a conservative range in that original file
+                    // even if a future generated declaration cannot be matched
+                    // to its template.
+                    let file = self
+                        .files
+                        .iter()
+                        .find(|file| file.path == path)
+                        .or_else(|| self.files.first());
+                    let range = file
+                        .and_then(|file| {
+                            function_signature_ranges(&file.original_content, &violation.function)
+                                .into_iter()
+                                .next()
+                        })
+                        .unwrap_or(0..0);
+                    crate::SourceDiagnostic::new(
+                        path,
+                        range.start,
+                        range.end,
+                        violation.function.clone(),
+                        violation.message.clone(),
+                    )
+                });
+            self.last_source_diagnostic = Some(diagnostic);
             return Err(CompileError::Frontend(violation.message));
         }
         if let Err((storage_index, message)) = validate_program_semantics(
@@ -1145,10 +1210,17 @@ impl Compiler {
         let Some(file) = self.files.get(function.file_id as usize) else {
             return;
         };
+        let range = original_function_body_range(&file.original_content, &file.content, function)
+            .unwrap_or_else(|| {
+                function_body_ranges(&file.original_content, &function.name)
+                    .into_iter()
+                    .next()
+                    .unwrap_or(0..0)
+            });
         self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
             file.path.clone(),
-            function.source_range.start as usize,
-            function.source_range.end as usize,
+            range.start,
+            range.end,
             function.name.clone(),
             message,
         ));
@@ -1302,6 +1374,520 @@ impl Compiler {
             .get(&id)
             .copied()
             .ok_or_else(|| CompileError::Invariant(format!("unknown stable function id {id:08x}")))
+    }
+}
+
+fn function_body_ranges(source: &str, name: &str) -> Vec<Range<usize>> {
+    crate::frontend::parser::parse_top_level_functions(source)
+        .map(|functions| {
+            functions
+                .into_iter()
+                .filter(|function| function.name == name)
+                .map(|function| function.body_range)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn function_signature_ranges(source: &str, name: &str) -> Vec<Range<usize>> {
+    crate::frontend::parser::parse_top_level_functions(source)
+        .map(|functions| {
+            functions
+                .into_iter()
+                .filter(|function| function.name == name)
+                .map(|function| function.signature_range)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn original_source_files(files: &[SourceFile]) -> Vec<SourceFile> {
+    files
+        .iter()
+        .map(|file| SourceFile {
+            path: file.path.clone(),
+            content: file.original_content.clone(),
+            original_content: file.original_content.clone(),
+            hash: hash_text(&file.original_content),
+            functions: file.functions.clone(),
+        })
+        .collect()
+}
+
+fn original_function_body_range(
+    original_source: &str,
+    expanded_source: &str,
+    function: &FunctionMeta,
+) -> Option<Range<usize>> {
+    original_function_for_meta(original_source, expanded_source, function)
+        .or_else(|| original_generic_template_for_meta(original_source, expanded_source, function))
+        .map(|function| function.body_range)
+}
+
+fn is_generic_function_template(
+    source: &str,
+    function: &crate::frontend::parser::ParsedFunctionSignature,
+) -> bool {
+    let Some(first_parameter) = function.params.first() else {
+        return false;
+    };
+    if !first_parameter.type_name.contains('<') {
+        return false;
+    }
+    let Ok(tokens) = crate::frontend::lexer::lex(&first_parameter.type_name) else {
+        return false;
+    };
+    let layout = crate::frontend::parser::parse_top_level_type_layout(source).ok();
+    let generic_names = layout
+        .as_ref()
+        .into_iter()
+        .flat_map(|layout| layout.structs.iter())
+        .flat_map(|structure| structure.generic_parameters.iter())
+        .map(|parameter| parameter.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let known_type_names = layout
+        .as_ref()
+        .into_iter()
+        .flat_map(|layout| {
+            layout
+                .structs
+                .iter()
+                .map(|structure| structure.name.as_str())
+        })
+        .chain(layout.as_ref().into_iter().flat_map(|layout| {
+            layout
+                .enums
+                .iter()
+                .map(|enumeration| enumeration.name.as_str())
+        }))
+        .chain(
+            [
+                "void", "i32", "f32", "bool", "f64", "u8", "u16", "u32", "ascii", "utf8", "string",
+            ]
+            .into_iter(),
+        )
+        .collect::<BTreeSet<_>>();
+    tokens.iter().any(|token| {
+        if token.kind != crate::frontend::lexer::TokenKind::Identifier {
+            return false;
+        }
+        let Some(name) = first_parameter.type_name.get(token.start..token.end) else {
+            return false;
+        };
+        generic_names.contains(name)
+            || (!known_type_names.contains(name)
+                && name.len() == 1
+                && name.as_bytes().first().is_some_and(u8::is_ascii_uppercase))
+    })
+}
+
+fn original_function_for_meta(
+    original_source: &str,
+    expanded_source: &str,
+    function: &FunctionMeta,
+) -> Option<crate::frontend::parser::ParsedFunctionSignature> {
+    let functions = crate::frontend::parser::parse_top_level_functions(original_source).ok()?;
+    let candidates = functions
+        .iter()
+        .filter(|candidate| candidate.name == function.name)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() || function.name.starts_with("__stasis_function_") {
+        return None;
+    }
+
+    // Stable function identity already contains the overload discriminator.
+    // This disambiguates same-name functions even when annotations or generic
+    // declarations changed the generated source offsets.
+    let discriminator = function.symbol_id.canonical().rsplit('|').next();
+    if let Some(candidate) = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.generic_parameters.is_empty())
+        .find(|candidate| {
+            discriminator
+                == Some(
+                    overload_discriminator(
+                        &candidate
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.type_name.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .as_str(),
+                )
+        })
+    {
+        return Some(candidate.clone());
+    }
+
+    let ordinary = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.generic_parameters.is_empty())
+        .collect::<Vec<_>>();
+    if ordinary.len() == 1 {
+        return Some(ordinary[0].clone());
+    }
+    let ordinal = expanded_function_ordinal(
+        expanded_source,
+        &function.name,
+        function.source_range.clone(),
+    )?;
+    ordinary.get(ordinal).cloned().cloned()
+}
+
+fn original_generic_template_for_meta(
+    original_source: &str,
+    expanded_source: &str,
+    function: &FunctionMeta,
+) -> Option<crate::frontend::parser::ParsedFunctionSignature> {
+    if !function.name.starts_with("__stasis_function_") {
+        return None;
+    }
+    let original = crate::frontend::parser::parse_top_level_functions(original_source).ok()?;
+    let expanded = crate::frontend::parser::parse_top_level_functions(expanded_source).ok()?;
+    let expanded_function = expanded.iter().find(|candidate| {
+        candidate.name == function.name
+            && candidate.body_range.start as u32 == function.source_range.start
+            && candidate.body_range.end as u32 == function.source_range.end
+    })?;
+    let expanded_shape = source_token_shape(expanded_source, expanded_function.body_range.clone())?;
+    let expanded_annotations = expanded_function
+        .annotations
+        .iter()
+        .map(|annotation| annotation.name.as_str())
+        .collect::<Vec<_>>();
+    let candidates = original
+        .into_iter()
+        .filter(|candidate| is_generic_function_template(original_source, candidate))
+        .filter(|candidate| candidate.params.len() == expanded_function.params.len())
+        .filter(|candidate| {
+            candidate
+                .annotations
+                .iter()
+                .map(|annotation| annotation.name.as_str())
+                .eq(expanded_annotations.iter().copied())
+        })
+        .collect::<Vec<_>>();
+    let shape_matches = candidates
+        .iter()
+        .filter(|candidate| {
+            source_token_shape(original_source, candidate.body_range.clone())
+                .is_some_and(|shape| shape == expanded_shape)
+        })
+        .collect::<Vec<_>>();
+    if shape_matches.len() == 1 {
+        return Some(shape_matches[0].clone());
+    }
+    // Substitution and inferred-call rewriting can change more than individual
+    // atom tokens. When the file contains only one compatible generic template,
+    // it is still a deterministic and strictly better provenance target than a
+    // generated-source offset or 0..0.
+    (candidates.len() == 1)
+        .then(|| candidates.into_iter().next())
+        .flatten()
+}
+
+fn original_function_signature_for_span(
+    original_source: &str,
+    expanded_source: &str,
+    name: &str,
+    expanded_range: Range<usize>,
+) -> Option<Range<usize>> {
+    let original = crate::frontend::parser::parse_top_level_functions(original_source).ok()?;
+    let expanded = crate::frontend::parser::parse_top_level_functions(expanded_source).ok()?;
+    let expanded_function = expanded.iter().find(|candidate| {
+        candidate.name == name
+            && candidate.signature_range.start == expanded_range.start
+            && candidate.signature_range.end == expanded_range.end
+    })?;
+    if name.starts_with("__stasis_function_") {
+        let expanded_shape =
+            source_token_shape(expanded_source, expanded_function.body_range.clone())?;
+        let candidates = original
+            .into_iter()
+            .filter(|candidate| is_generic_function_template(original_source, candidate))
+            .filter(|candidate| candidate.params.len() == expanded_function.params.len())
+            .filter(|candidate| {
+                source_token_shape(original_source, candidate.body_range.clone())
+                    .is_some_and(|shape| shape == expanded_shape)
+            })
+            .collect::<Vec<_>>();
+        return (candidates.len() == 1)
+            .then(|| {
+                candidates
+                    .into_iter()
+                    .next()
+                    .map(|candidate| candidate.signature_range)
+            })
+            .flatten();
+    }
+    let ordinal = expanded
+        .iter()
+        .filter(|candidate| candidate.name == name)
+        .position(|candidate| candidate.signature_range == expanded_function.signature_range)?;
+    original
+        .into_iter()
+        .filter(|candidate| candidate.name == name && candidate.generic_parameters.is_empty())
+        .nth(ordinal)
+        .map(|candidate| candidate.signature_range)
+}
+
+fn expanded_function_ordinal(source: &str, name: &str, body_range: Range<u32>) -> Option<usize> {
+    crate::frontend::parser::parse_top_level_functions(source)
+        .ok()?
+        .into_iter()
+        .filter(|candidate| candidate.name == name)
+        .position(|candidate| {
+            candidate.body_range.start as u32 == body_range.start
+                && candidate.body_range.end as u32 == body_range.end
+        })
+}
+
+fn original_call_span(
+    original_source: &str,
+    expanded_source: &str,
+    function: &FunctionMeta,
+    dependency: &IndexedCallDependency,
+) -> Option<Range<usize>> {
+    let original_function = original_function_for_meta(original_source, expanded_source, function)
+        .or_else(|| {
+            original_generic_template_for_meta(original_source, expanded_source, function)
+        })?;
+    let expanded_body = function.source_range.start as usize..function.source_range.end as usize;
+    let expanded_call_start = expanded_body
+        .start
+        .checked_add(dependency.name_span.start as usize)?;
+    let expanded_calls = call_name_ranges(
+        expanded_source,
+        expanded_body,
+        &dependency.name,
+        dependency.qualifier.as_deref(),
+    );
+    let ordinal = expanded_calls
+        .iter()
+        .position(|range| range.start == expanded_call_start)?;
+    let original_calls = call_name_ranges(
+        original_source,
+        original_function.body_range,
+        &dependency.name,
+        dependency.qualifier.as_deref(),
+    );
+    original_calls.get(ordinal).cloned()
+}
+
+fn call_name_ranges(
+    source: &str,
+    body_range: Range<usize>,
+    name: &str,
+    qualifier: Option<&str>,
+) -> Vec<Range<usize>> {
+    let Some(body) = source.get(body_range.clone()) else {
+        return Vec::new();
+    };
+    let Ok(tokens) = crate::frontend::lexer::lex(body) else {
+        return Vec::new();
+    };
+    tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| {
+            if token.kind != crate::frontend::lexer::TokenKind::Identifier
+                || body.get(token.start..token.end) != Some(name)
+                || !tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.kind == crate::frontend::lexer::TokenKind::LParen)
+            {
+                return None;
+            }
+            let dot = tokens.get(index.wrapping_sub(1)).filter(|previous| {
+                previous.kind == crate::frontend::lexer::TokenKind::Other
+                    && body.get(previous.start..previous.end) == Some(".")
+            });
+            let found_qualifier = dot
+                .and_then(|_| tokens.get(index.wrapping_sub(2)))
+                .and_then(|candidate| {
+                    (candidate.kind == crate::frontend::lexer::TokenKind::Identifier)
+                        .then(|| body.get(candidate.start..candidate.end))
+                        .flatten()
+                });
+            if qualifier.is_some() != found_qualifier.is_some()
+                || qualifier.is_some_and(|expected| Some(expected) != found_qualifier)
+            {
+                return None;
+            }
+            Some(body_range.start + token.start..body_range.start + token.end)
+        })
+        .collect()
+}
+
+fn source_token_shape(
+    source: &str,
+    range: Range<usize>,
+) -> Option<Vec<(crate::frontend::lexer::TokenKind, String)>> {
+    let text = source.get(range)?;
+    let tokens = crate::frontend::lexer::lex(text).ok()?;
+    Some(
+        tokens
+            .into_iter()
+            .filter(|token| token.kind != crate::frontend::lexer::TokenKind::Eof)
+            .map(|token| {
+                // Generic substitutions can change an identifier into an
+                // integer/string literal without changing the surrounding
+                // syntax. Keep atoms in one shape class so the generated
+                // body can still be matched to its original template.
+                let kind = match token.kind {
+                    crate::frontend::lexer::TokenKind::Identifier
+                    | crate::frontend::lexer::TokenKind::Integer
+                    | crate::frontend::lexer::TokenKind::StringLiteral
+                    | crate::frontend::lexer::TokenKind::BacktickLiteral => {
+                        crate::frontend::lexer::TokenKind::Identifier
+                    }
+                    kind => kind,
+                };
+                let text = if token.kind == crate::frontend::lexer::TokenKind::Other {
+                    text.get(token.start..token.end)
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    String::new()
+                };
+                (kind, text)
+            })
+            .collect(),
+    )
+}
+
+fn originalize_index_diagnostic(
+    original_source: &str,
+    expanded_source: &str,
+    diagnostic: crate::frontend::parser::ParserDiagnostic,
+) -> crate::frontend::parser::ParserDiagnostic {
+    if let Err(original) =
+        crate::frontend::parser::parse_top_level_functions_with_diagnostic(original_source)
+    {
+        // Expansion starts from this source and only succeeds after it has
+        // parsed, so a parser diagnostic in the expanded view is always best
+        // represented by the canonical parser result when the original view
+        // itself cannot be parsed. In particular, never return expanded
+        // offsets merely because the symbols differ.
+        return original;
+    }
+    let Some(original_functions) =
+        crate::frontend::parser::parse_top_level_functions(original_source).ok()
+    else {
+        return diagnostic;
+    };
+    let expanded_functions =
+        crate::frontend::parser::parse_top_level_functions(expanded_source).ok();
+    let original_candidates = original_functions
+        .iter()
+        .filter(|function| function.name == diagnostic.symbol)
+        .filter(|function| function.generic_parameters.is_empty())
+        .collect::<Vec<_>>();
+    let expanded_function = expanded_functions.as_ref().and_then(|functions| {
+        functions
+            .iter()
+            .filter(|function| function.name == diagnostic.symbol)
+            .find(|function| {
+                diagnostic.start >= function.signature_range.start
+                    && diagnostic.start <= function.body_range.end
+            })
+            .or_else(|| {
+                functions
+                    .iter()
+                    .filter(|function| function.name == diagnostic.symbol)
+                    .find(|function| function.signature_range.start >= diagnostic.start)
+            })
+    });
+    if diagnostic.symbol.starts_with("__stasis_function_") {
+        if let Some(expanded_function) = expanded_function {
+            let expanded_annotations = expanded_function
+                .annotations
+                .iter()
+                .map(|annotation| annotation.name.as_str())
+                .collect::<Vec<_>>();
+            let compatible = original_functions
+                .iter()
+                .filter(|candidate| is_generic_function_template(original_source, candidate))
+                .filter(|candidate| candidate.params.len() == expanded_function.params.len())
+                .filter(|candidate| {
+                    candidate
+                        .annotations
+                        .iter()
+                        .map(|annotation| annotation.name.as_str())
+                        .eq(expanded_annotations.iter().copied())
+                })
+                .collect::<Vec<_>>();
+            let expanded_shape =
+                source_token_shape(expanded_source, expanded_function.body_range.clone());
+            let shape_matches = compatible
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    expanded_shape.as_ref().is_some_and(|expanded_shape| {
+                        source_token_shape(original_source, candidate.body_range.clone())
+                            .is_some_and(|shape| &shape == expanded_shape)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let template = if shape_matches.len() == 1 {
+                shape_matches.first().copied()
+            } else if compatible.len() == 1 {
+                compatible.first().copied()
+            } else {
+                None
+            };
+            if let Some(template) = template {
+                let range = if diagnostic.start >= expanded_function.body_range.start {
+                    template.body_range.clone()
+                } else {
+                    template.signature_range.clone()
+                };
+                return crate::frontend::parser::ParserDiagnostic {
+                    message: diagnostic.message,
+                    start: range.start,
+                    end: range.end.max(range.start + 1).min(original_source.len()),
+                    symbol: template.name.clone(),
+                };
+            }
+        }
+    }
+    let candidate = if let (Some(expanded_functions), Some(expanded_function)) =
+        (expanded_functions.as_ref(), expanded_function)
+    {
+        let ordinal = expanded_functions
+            .iter()
+            .filter(|function| function.name == diagnostic.symbol)
+            .position(|function| function.signature_range == expanded_function.signature_range);
+        ordinal.and_then(|ordinal| original_candidates.get(ordinal).copied())
+    } else if original_candidates.len() == 1 {
+        original_candidates.first().copied()
+    } else {
+        None
+    };
+    if let Some(function) = candidate {
+        let range = expanded_function
+            .filter(|expanded| diagnostic.start >= expanded.body_range.start)
+            .map_or_else(
+                || function.signature_range.clone(),
+                |_| function.body_range.clone(),
+            );
+        return crate::frontend::parser::ParserDiagnostic {
+            message: diagnostic.message,
+            start: range.start,
+            end: range.end.max(range.start + 1).min(original_source.len()),
+            symbol: function.name.clone(),
+        };
+    }
+    // No generated declaration has a one-to-one range in the original source.
+    // Preserve the diagnostic text but expose a bounded original-source point
+    // rather than leaking an expanded offset to the host.
+    crate::frontend::parser::ParserDiagnostic {
+        message: diagnostic.message,
+        start: 0,
+        end: 0,
+        symbol: diagnostic.symbol,
     }
 }
 
@@ -3011,6 +3597,139 @@ function unreachable(): i32 { while (true) { return 1; } }
         assert_eq!(diagnostic.path, "dead.stasis");
         assert_eq!(diagnostic.symbol, "unreachable");
         assert!(diagnostic.message.contains("while"));
+    }
+
+    #[test]
+    fn function_diagnostics_map_expanded_offsets_back_to_original_source() {
+        let source = r#"
+struct Box<N: i32> { value: i32; }
+function score(self: Box<N>): i32 { return self.value + N; }
+global box: Box<4>;
+function main(): i32 { return score(box); }
+function broken(): i32 { while (true) { return 1; } }
+"#;
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("main.stasis", source);
+
+        compiler
+            .check()
+            .expect_err("the invalid ordinary function must fail after expansion");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured function diagnostic");
+
+        assert_eq!(diagnostic.symbol, "broken");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "{ while (true) { return 1; } }"
+        );
+    }
+
+    #[test]
+    fn function_diagnostics_map_annotated_body_after_generic_declaration() {
+        let source = r#"
+struct Box<N: i32> { value: i32; }
+global box: Box<4>;
+function @internal broken(): i32 { while (true) { return 1; } }
+function main(): i32 { return 0; }
+"#;
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("annotated.stasis", source);
+
+        compiler
+            .check()
+            .expect_err("the annotated function must fail after expansion");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured annotated-function diagnostic");
+
+        assert_eq!(diagnostic.symbol, "broken");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "{ while (true) { return 1; } }"
+        );
+    }
+
+    #[test]
+    fn function_diagnostics_map_the_matching_annotated_overload() {
+        let source = r#"
+struct Box<N: i32> { value: i32; }
+global box: Box<4>;
+function @internal overload(value: i32): i32 { return value; }
+function @internal overload(value: f32): f32 { return true; }
+function main(): i32 { return 0; }
+"#;
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("overloaded.stasis", source);
+
+        compiler
+            .check()
+            .expect_err("the f32 overload must fail type checking");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured overload diagnostic");
+
+        assert_eq!(diagnostic.symbol, "overload");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "{ return true; }"
+        );
+    }
+
+    #[test]
+    fn specialization_diagnostics_map_value_substitution_back_to_template_body() {
+        let source = r#"
+struct Box<N: i32> { value: i32; }
+global box: Box<4>;
+function invalid(box: Box<N>): bool {
+    let wrong: bool = N;
+    return wrong;
+}
+function main(): i32 { invalid(box); return 0; }
+"#;
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("specialized.stasis", source);
+
+        compiler
+            .check()
+            .expect_err("the materialized value substitution must fail type checking");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("specialization body diagnostic");
+
+        assert!(diagnostic.end > diagnostic.start);
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "{\n    let wrong: bool = N;\n    return wrong;\n}"
+        );
+    }
+
+    #[test]
+    fn effect_diagnostics_map_the_matching_annotated_overload() {
+        let source = r#"
+struct Box<N: i32> { value: i32; }
+global box: Box<4>;
+global allowed: i32;
+global forbidden: i32;
+function @effects(allowed) overload(value: i32): void { allowed += value; }
+function @effects(allowed) overload(value: f32): void { forbidden += 1; }
+function main(): i32 { return 0; }
+"#;
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("effects_overloaded.stasis", source);
+
+        compiler
+            .check()
+            .expect_err("the f32 overload must violate its effect contract");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured effect diagnostic");
+
+        assert_eq!(diagnostic.symbol, "overload");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "function @effects(allowed) overload(value: f32): void "
+        );
     }
 
     #[test]
