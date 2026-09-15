@@ -4522,7 +4522,29 @@ fn package_workspace(
             staging_root.display()
         ));
     }
-    let provenance = resolve_package_provenance(development_build)?;
+    let manifest_path = workspace.root.join(MANIFEST_NAME);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "failed to read desktop package manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest_snapshot: ProjectManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
+    if manifest_snapshot != workspace.manifest {
+        return Err(format!(
+            "desktop package manifest changed after workspace load: {}",
+            manifest_path.display()
+        ));
+    }
+    let mut provenance = resolve_package_provenance(development_build)?;
+    provenance["desktop_package"] = json!({
+        "project": package_project_provenance(
+            workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )?,
+    });
     let network_enabled = workspace
         .manifest
         .capabilities
@@ -4601,6 +4623,36 @@ fn package_workspace(
                     &payload_root.join(runtime.file_name().unwrap_or_default()),
                 )?;
             }
+        }
+        let current_manifest_bytes = fs::read(&manifest_path).map_err(|error| {
+            format!(
+                "failed to re-read desktop package manifest {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+        if current_manifest_bytes != manifest_bytes {
+            return Err(format!(
+                "desktop package manifest changed during packaging: {}",
+                manifest_path.display()
+            ));
+        }
+        let current_project_provenance = package_project_provenance(
+            workspace,
+            workspace.manifest.entry.as_str(),
+            &current_manifest_bytes,
+        )?;
+        if current_project_provenance != provenance["desktop_package"]["project"] {
+            return Err(
+                "desktop package source or vendored runtime changed during packaging".to_string(),
+            );
+        }
+        let staged_manifest = fs::read(payload_root.join(MANIFEST_NAME)).map_err(|error| {
+            format!("failed to verify staged desktop package manifest: {error}")
+        })?;
+        if staged_manifest != manifest_bytes {
+            return Err(
+                "staged desktop package manifest does not match the compiled project".to_string(),
+            );
         }
         write_json_file(&payload_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
         Ok(())
@@ -4738,6 +4790,64 @@ fn normalize_web_package_source_path(path: &str) -> String {
         }
     }
     normalized.to_string_lossy().replace('\\', "/")
+}
+
+fn package_project_provenance(
+    workspace: &Workspace,
+    entry: &str,
+    manifest_bytes: &[u8],
+) -> Result<Value, String> {
+    let files = load_workshop_edit_workspace(&workspace.root, Path::new(entry))?;
+    let files = workshop_reachable_files(&files, Path::new(entry))?;
+    let reachable_sources = files
+        .iter()
+        .map(|file| {
+            let source_path = Path::new(&file.path);
+            let relative = source_path
+                .strip_prefix(&workspace.root)
+                .unwrap_or(source_path);
+            (
+                normalize_web_package_source_path(&relative.to_string_lossy()),
+                format!("{:x}", Sha256::digest(file.source.as_bytes())),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let normalized_entry = normalize_web_package_source_path(entry);
+    let entry_sha256 = reachable_sources
+        .get(&normalized_entry)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "compiled package entry is missing from reachable source provenance: {normalized_entry}"
+            )
+        })?;
+    let vendor = workspace
+        .manifest
+        .vendor
+        .as_ref()
+        .map(|vendor| {
+            let actual_sha256 = directory_sha256(&workspace.root.join("vendor/stasis"));
+            actual_sha256.map(|actual_sha256| {
+                json!({
+                    "release_id": vendor.stasis.release_id,
+                    "recorded_sha256": vendor.stasis.sha256,
+                    "actual_sha256": actual_sha256,
+                })
+            })
+        })
+        .transpose()?;
+    Ok(json!({
+        "manifest": {
+            "path": MANIFEST_NAME,
+            "sha256": format!("{:x}", Sha256::digest(manifest_bytes)),
+        },
+        "entry": {
+            "path": normalized_entry,
+            "sha256": entry_sha256,
+        },
+        "reachable_sources": reachable_sources,
+        "vendor": vendor,
+    }))
 }
 
 fn package_web_workspace(
@@ -9314,6 +9424,40 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_package_project_provenance_detects_source_mutation() {
+        let root = temp_dir("desktop_package_project_provenance");
+        create_project(
+            root.clone(),
+            "desktop_package_project_provenance".to_string(),
+        )
+        .expect("create project");
+        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
+        let before = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("capture project provenance");
+        fs::write(
+            root.join(&workspace.manifest.entry),
+            "function main(): i32 { return 41; }\n",
+        )
+        .expect("mutate package entry");
+        let after = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("recapture project provenance");
+        assert_ne!(
+            before, after,
+            "source mutation must change package provenance"
+        );
+        remove_temp(&root);
+    }
 
     #[test]
     fn generated_graphical_project_has_effect_boundaries_and_checks() {

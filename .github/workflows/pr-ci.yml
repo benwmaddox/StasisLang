@@ -305,11 +305,26 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-latest
+            evidence: linux-x64
+            runtime_library: libstasis_graphics.so
+            expected_arch: x86_64
           - name: Windows
             os: windows-latest
+            evidence: windows-x64
+            runtime_library: stasis_graphics.dll
+            expected_arch: x86_64
           - name: macOS
             os: macos-15
+            evidence: macos-arm64
+            runtime_library: libstasis_graphics.dylib
+            expected_arch: aarch64
     runs-on: ${{ matrix.os }}
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      STASIS_RELEASE_ID: ci-generics-desktop-${{ github.run_id }}
+      STASIS_SOURCE_COMMIT: ${{ github.sha }}
+      STASIS_GENERICS_DESKTOP_EVIDENCE_DIR: ${{ github.workspace }}/target/generics-desktop-${{ matrix.evidence }}
+      STASIS_EXPECTED_HOST_ARCH: ${{ matrix.expected_arch }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -323,23 +338,33 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
+      - name: Setup MSVC dev environment for native generics acceptance
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Install Linux graphics and display dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y xvfb pkg-config libx11-dev
+          libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
+          libxss-dev libxtst-dev libxkbcommon-dev libegl1 libgl1-mesa-dri
+
+      - name: Install macOS graphics dependencies
+        if: runner.os == 'macOS'
+        run: brew install pkg-config
+
       - name: Run generic JIT, Wasm, and diagnostic harness
         timeout-minutes: 15
         run: python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_jit_aot_wasm -- --test-threads=1
 
-      - name: Setup MSVC dev environment for packaged Web acceptance
-        if: matrix.os == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - name: Run linked native generics execution and trap acceptance
+        timeout-minutes: 15
+        run: python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_aot_seam -- --test-threads=1 --nocapture
 
-      - name: Compute packaged Web toolchain identity
-        if: matrix.os == 'windows-latest'
+      - name: Compute packaged generics toolchain identity
         shell: pwsh
         run: |
-          $releaseId = "ci-generics-web-${{ github.run_id }}"
-          $sourceCommit = "${{ github.sha }}"
-          $fingerprint = (python tools/compute_toolchain_fingerprint.py --source-commit $sourceCommit --release-id $releaseId).Trim()
-          "STASIS_RELEASE_ID=$releaseId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_SOURCE_COMMIT=$sourceCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $fingerprint = (python tools/compute_toolchain_fingerprint.py --source-commit $env:STASIS_SOURCE_COMMIT --release-id $env:STASIS_RELEASE_ID).Trim()
           "STASIS_BUILD_FINGERPRINT=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build matching packaged Web runtime
@@ -353,6 +378,35 @@ jobs:
           cmake --build target/generics-web-runtime --config Release --target stasis_graphics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "STASIS_RUNTIME_DLL_PATH=$((Resolve-Path 'target/generics-web-runtime/bin/Release/stasis_graphics.dll').Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_RUNTIME_LIBRARY_PATH=$((Resolve-Path 'target/generics-web-runtime/bin/Release/stasis_graphics.dll').Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build matching packaged desktop runtime on Unix
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          cmake -S runtime -B target/generics-desktop-runtime \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
+            -DSTASIS_BUILD_RUNNER=OFF \
+            -DSTASIS_BUILD_SYS=OFF \
+            -DSTASIS_RELEASE_ID="$STASIS_RELEASE_ID" \
+            -DSTASIS_BUILD_FINGERPRINT="$STASIS_BUILD_FINGERPRINT"
+          cmake --build target/generics-desktop-runtime --config Release --target stasis_graphics
+          runtime="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/${{ matrix.runtime_library }}"
+          test -f "$runtime"
+          echo "STASIS_RUNTIME_LIBRARY_PATH=$runtime" >> "$GITHUB_ENV"
+
+      - name: Run packaged generics desktop acceptance
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            xvfb-run -a python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --test-threads=1 --nocapture
+          else
+            python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --test-threads=1 --nocapture
+          fi
 
       - name: Run packaged generics Web acceptance
         if: matrix.os == 'windows-latest'
@@ -365,16 +419,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/run_generics_collections_browser_acceptance.mjs samples/generics_collections/build/web target/generics-collections-browser
 
-      - name: Upload packaged generics Web evidence
-        if: matrix.os == 'windows-latest' && always()
+      - name: Upload packaged generics desktop and Web evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           archive: true
-          name: generics-collections-browser-evidence
+          name: generics-collections-${{ matrix.evidence }}-evidence
           if-no-files-found: error
           path: |
-            target/generics-collections-browser/browser.png
-            target/generics-collections-browser/receipt.json
+            target/generics-desktop-${{ matrix.evidence }}/**
+            target/generics-collections-browser/**
             samples/generics_collections/build/web/stasis_provenance.json
 
   bootstrap-smoke-windows:

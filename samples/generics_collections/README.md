@@ -22,11 +22,19 @@ post-run state digest through `generics_collections_state_digest()`, while
 captured digest through the supported global accessor. The Web acceptance also verifies the
 real browser's WebGL2 frame and the fixed-array bounds trap. Android uses this
 same full entry and valid frame lifecycle.
+The desktop acceptance runs the shared semantic oracle through production JIT
+and a freshly linked native AOT executable on each desktop host, including
+isolated bounds-trap children. It then packages and launches this canonical
+sample through the production desktop runtime. The authored frame is teal only
+when the captured sample digest is exactly `507`, giving the package launch an
+independent visible digest oracle; a mismatch renders red.
 `vendor/stasis` is the recorded, hash-checked graphics/runtime snapshot used
 by every packaged target.
 
 ```text
 python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_jit_aot_wasm -- --nocapture
+python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_aot_seam -- --nocapture
+python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --nocapture
 ```
 
 ## Storage contract

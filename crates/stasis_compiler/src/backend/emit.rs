@@ -2080,13 +2080,13 @@ pub(crate) fn emit_simple_statements(
                         ));
                     }
                     let mut view_bounds_proven = struct_view.bounds_proven;
-                    // A fixed global struct-array view with an arbitrary index must still fail
-                    // fatally, but the check belongs to creation of the alias rather than every
-                    // field access through that alias. Once validated, all loads and stores from
-                    // the same {base,index,len} view may reuse the fact.
-                    if !view_bounds_proven
-                        && struct_view.storage_kind == StructViewStorageKind::Soa
-                        && struct_view.known_collection_hash.is_some()
+                    // A struct-array view with an arbitrary index must still fail fatally. The
+                    // check belongs to creation of the alias rather than every field access
+                    // through that alias. This applies to both fixed globals and array-view
+                    // parameters; the latter carry their runtime length alongside the handle.
+                    // Once validated, all loads and stores from the same {base,index,len} view
+                    // may reuse the fact.
+                    if !view_bounds_proven && struct_view.storage_kind == StructViewStorageKind::Soa
                     {
                         emit_array_bounds_trap(builder, struct_view.index, struct_view.len);
                         view_bounds_proven = true;
@@ -2871,6 +2871,7 @@ pub(crate) fn emit_simple_statements(
                                             index_binding,
                                             *op,
                                             rhs,
+                                            true,
                                         )?;
                                         continue;
                                     }
@@ -4509,6 +4510,7 @@ pub(crate) fn emit_simple_expression(
                                 collection_hash,
                                 suffix,
                                 index_binding,
+                                true,
                             );
                         }
                     }
@@ -6097,6 +6099,13 @@ pub(crate) fn emit_local_indexed_collection_load(
     index_binding: ValueBinding,
 ) -> Result<ValueBinding, String> {
     let collection_handle = builder.use_var(collection_binding.var);
+    let index_binding = normalize_index_binding(index_binding, type_table)?;
+    if let Some(view) = collection_binding.struct_view {
+        if !view.bounds_proven {
+            let len = builder.use_var(view.len_var);
+            emit_array_bounds_trap(builder, index_binding.value, len);
+        }
+    }
     emit_local_indexed_collection_load_for_handle(
         builder,
         runtime_call_refs,
@@ -6107,7 +6116,25 @@ pub(crate) fn emit_local_indexed_collection_load(
         collection_handle,
         suffix,
         index_binding,
+        collection_binding.struct_view.is_some(),
     )
+}
+
+fn emit_collection_handle_bounds_trap(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    collection_handle: Value,
+    index: Value,
+) {
+    let max_length_kind = builder
+        .ins()
+        .iconst(types::I32, i64::from(CollectionMetaKind::MaxLength as i32));
+    let call = builder.ins().call(
+        runtime_call_refs.collection_i32_load,
+        &[collection_handle, max_length_kind],
+    );
+    let len = builder.inst_results(call)[0];
+    emit_array_bounds_trap(builder, index, len);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6121,6 +6148,7 @@ fn emit_local_indexed_collection_load_for_handle(
     collection_handle: Value,
     suffix: &str,
     index_binding: ValueBinding,
+    bounds_proven: bool,
 ) -> Result<ValueBinding, String> {
     let resolved = resolve_local_collection_value_type(
         collection_type,
@@ -6129,6 +6157,14 @@ fn emit_local_indexed_collection_load_for_handle(
         named_struct_field_types,
     )?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
+    if !bounds_proven {
+        emit_collection_handle_bounds_trap(
+            builder,
+            runtime_call_refs,
+            collection_handle,
+            index_binding.value,
+        );
+    }
     let field_hash = builder
         .ins()
         .iconst(types::I32, i64::from(hash_foreach_field_suffix(suffix)));
@@ -6181,6 +6217,13 @@ pub(crate) fn emit_local_indexed_collection_assignment(
     rhs: ValueBinding,
 ) -> Result<(), String> {
     let collection_handle = builder.use_var(collection_binding.var);
+    let index_binding = normalize_index_binding(index_binding, type_table)?;
+    if let Some(view) = collection_binding.struct_view {
+        if !view.bounds_proven {
+            let len = builder.use_var(view.len_var);
+            emit_array_bounds_trap(builder, index_binding.value, len);
+        }
+    }
     emit_local_indexed_collection_assignment_for_handle(
         builder,
         runtime_call_refs,
@@ -6193,6 +6236,7 @@ pub(crate) fn emit_local_indexed_collection_assignment(
         index_binding,
         op,
         rhs,
+        collection_binding.struct_view.is_some(),
     )
 }
 
@@ -6209,6 +6253,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
     index_binding: ValueBinding,
     op: AssignOp,
     rhs: ValueBinding,
+    bounds_proven: bool,
 ) -> Result<(), String> {
     let path_type = resolve_local_collection_value_type(
         collection_type,
@@ -6217,6 +6262,14 @@ fn emit_local_indexed_collection_assignment_for_handle(
         named_struct_field_types,
     )?;
     let index_binding = normalize_index_binding(index_binding, type_table)?;
+    if !bounds_proven {
+        emit_collection_handle_bounds_trap(
+            builder,
+            runtime_call_refs,
+            collection_handle,
+            index_binding.value,
+        );
+    }
     if !are_assignment_types_compatible(path_type, rhs.type_id, type_table) {
         return Err(format!(
             "local indexed assignment type mismatch for '{}[...].{}': target type {}, expression type {}",
@@ -6242,6 +6295,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
                     collection_handle,
                     suffix,
                     index_binding,
+                    true,
                 )?
                 .value,
             )
@@ -6286,6 +6340,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
                     collection_handle,
                     suffix,
                     index_binding,
+                    true,
                 )?
                 .value;
                 builder.ins().fadd(lhs, rhs.value)
@@ -6301,6 +6356,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
                     collection_handle,
                     suffix,
                     index_binding,
+                    true,
                 )?
                 .value;
                 builder.ins().fsub(lhs, rhs.value)
@@ -6316,6 +6372,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
                     collection_handle,
                     suffix,
                     index_binding,
+                    true,
                 )?
                 .value;
                 builder.ins().fmul(lhs, rhs.value)
@@ -6331,6 +6388,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
                     collection_handle,
                     suffix,
                     index_binding,
+                    true,
                 )?
                 .value;
                 builder.ins().fdiv(lhs, rhs.value)
@@ -6362,6 +6420,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
                     collection_handle,
                     suffix,
                     index_binding,
+                    true,
                 )?
                 .value;
                 builder.ins().fadd(lhs, rhs.value)
@@ -6377,6 +6436,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
                     collection_handle,
                     suffix,
                     index_binding,
+                    true,
                 )?
                 .value;
                 builder.ins().fsub(lhs, rhs.value)
@@ -6392,6 +6452,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
                     collection_handle,
                     suffix,
                     index_binding,
+                    true,
                 )?
                 .value;
                 builder.ins().fmul(lhs, rhs.value)
@@ -6407,6 +6468,7 @@ fn emit_local_indexed_collection_assignment_for_handle(
                     collection_handle,
                     suffix,
                     index_binding,
+                    true,
                 )?
                 .value;
                 builder.ins().fdiv(lhs, rhs.value)
