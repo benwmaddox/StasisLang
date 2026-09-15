@@ -2783,8 +2783,7 @@ impl Expansion {
             return Ok(());
         }
         self.check_specialization_limit()?;
-        let identity_path =
-            generic_function_identity(&self.files[generic.file_index].path, &generic.signature);
+        let identity_path = self.generic_function_identity(generic)?;
         let identity =
             specialization_identity("function", &identity_path, &generic.name, &key.arguments);
         let generated_name = mangle_specialization_identity(&identity);
@@ -3581,6 +3580,121 @@ impl Expansion {
         Ok(names)
     }
 
+    fn generic_function_identity(
+        &self,
+        generic: &GenericFunctionDefinition,
+    ) -> Result<String, String> {
+        // Receiver-bound generic names are source aliases, not part of a
+        // function's semantic identity.  Resolve the nominal applications to
+        // their defining declarations and name the bindings by their ordered
+        // receiver slots before constructing the stable identity.
+        let mut identity = String::new();
+        push_identity_component(
+            &mut identity,
+            "path",
+            &canonical_identity_path(&generic.path),
+        );
+        push_identity_component(&mut identity, "name", &generic.signature.name);
+        for parameter in &generic.parameters {
+            push_identity_component(
+                &mut identity,
+                "generic",
+                match parameter.kind {
+                    ParsedGenericParameterKind::Type => "type",
+                    ParsedGenericParameterKind::I32 => "i32",
+                },
+            );
+        }
+        for parameter in &generic.signature.params {
+            let type_name = self.canonical_generic_function_type(
+                &parameter.type_name,
+                generic.file_index,
+                &generic.parameters,
+            )?;
+            push_identity_component(&mut identity, "parameter", &type_name);
+        }
+        let return_type = self.canonical_generic_function_type(
+            &generic.signature.return_type_name,
+            generic.file_index,
+            &generic.parameters,
+        )?;
+        push_identity_component(&mut identity, "return", &return_type);
+        Ok(identity)
+    }
+
+    fn canonical_generic_function_type(
+        &self,
+        type_name: &str,
+        file_index: usize,
+        parameters: &[ParsedGenericParameter],
+    ) -> Result<String, String> {
+        let trimmed = type_name.trim();
+        if let Some((element, extent)) = split_array_suffix(trimmed) {
+            let element = self.canonical_generic_function_type(element, file_index, parameters)?;
+            let extent = if extent.trim().is_empty() {
+                String::new()
+            } else {
+                canonical_generic_function_expression(extent, parameters)
+            };
+            return Ok(format!("{element}[{extent}]"));
+        }
+        if let Some((base, arguments)) = parse_type_application(trimmed)? {
+            let environment = self.environment_for_file(file_index);
+            let definition = self
+                .lookup_generic_struct_for_environment(base, &environment)?
+                .ok_or_else(|| format!("unknown generic type '{base}'"))?;
+            if definition.parameters.len() != arguments.len() {
+                return Err(format!(
+                    "generic type '{}' has {} arguments; expected {}",
+                    base,
+                    arguments.len(),
+                    definition.parameters.len()
+                ));
+            }
+            let canonical_arguments = arguments
+                .iter()
+                .zip(&definition.parameters)
+                .map(|(argument, parameter)| match parameter.kind {
+                    ParsedGenericParameterKind::Type => {
+                        self.canonical_generic_function_type(argument, file_index, parameters)
+                    }
+                    ParsedGenericParameterKind::I32 => {
+                        Ok(canonical_generic_function_expression(argument, parameters))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(format!(
+                "generic:{}<{}>",
+                definition.identity,
+                canonical_arguments.join(",")
+            ));
+        }
+        if let Some(parameter) = parameters
+            .iter()
+            .find(|parameter| parameter.name == trimmed)
+        {
+            let index = parameters
+                .iter()
+                .position(|candidate| candidate.name == parameter.name)
+                .expect("generic parameter exists in its ordered parameter list");
+            return Ok(match parameter.kind {
+                ParsedGenericParameterKind::Type => format!("$type{index}"),
+                ParsedGenericParameterKind::I32 => format!("$i32{index}"),
+            });
+        }
+        let environment = self.environment_for_file(file_index);
+        if let Some(definition) =
+            self.lookup_ordinary_struct_for_environment(trimmed, &environment)?
+        {
+            return Ok(format!(
+                "struct:{}::{}",
+                canonical_identity_path(&definition.path),
+                definition.name
+            ));
+        }
+        Ok(canonical_type_identity_text(trimmed))
+    }
+
     fn check_specialization_limit(&self) -> Result<(), String> {
         let next = self
             .struct_specializations
@@ -4054,35 +4168,23 @@ fn reject_explicit_generic_calls(
     Ok(())
 }
 
-fn generic_function_identity(path: &str, signature: &ParsedFunctionSignature) -> String {
-    // Keep source offsets out of the identity: edits to constants or comments
-    // before a declaration must not orphan an otherwise reusable specialization.
-    let mut identity = String::new();
-    push_identity_component(&mut identity, "path", &canonical_identity_path(path));
-    push_identity_component(&mut identity, "name", &signature.name);
-    for parameter in &signature.generic_parameters {
-        push_identity_component(
-            &mut identity,
-            "generic",
-            match parameter.kind {
-                ParsedGenericParameterKind::Type => "type",
-                ParsedGenericParameterKind::I32 => "i32",
-            },
-        );
+fn canonical_generic_function_expression(
+    source: &str,
+    parameters: &[ParsedGenericParameter],
+) -> String {
+    let mut environment = GenericEnvironment::default();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let marker = match parameter.kind {
+            ParsedGenericParameterKind::Type => format!("$type{index}"),
+            ParsedGenericParameterKind::I32 => format!("$i32{index}"),
+        };
+        // The identity-only markers are intentionally stored in the type map:
+        // value bindings carry i32s and cannot represent an alpha-renamed
+        // slot.  The identifier rewriter still respects strings, comments,
+        // and qualified segments while replacing the unqualified binding.
+        environment.types.insert(parameter.name.clone(), marker);
     }
-    for parameter in &signature.params {
-        push_identity_component(
-            &mut identity,
-            "parameter",
-            &canonical_type_identity_text(&parameter.type_name),
-        );
-    }
-    push_identity_component(
-        &mut identity,
-        "return",
-        &canonical_type_identity_text(&signature.return_type_name),
-    );
-    identity
+    canonical_type_identity_text(&rewrite_generic_identifiers(source, &environment))
 }
 
 fn canonical_type_identity_text(source: &str) -> String {
@@ -5857,6 +5959,8 @@ fn qualified_identifier_end(source: &str, _start: usize, mut cursor: usize) -> u
 
 #[cfg(test)]
 mod tests {
+    use crate::compiler::Compiler;
+
     use super::*;
 
     #[test]
@@ -5943,6 +6047,39 @@ mod tests {
             register_specialization_name(&mut reverse, injected_digest_name, &slash)
                 .expect_err("a reversed collision must fail identically");
         assert_eq!(error, reverse_error);
+    }
+
+    #[test]
+    fn receiver_generic_function_identity_is_alpha_and_nominally_canonical() {
+        fn generated_function_names(binding: &str, qualified: bool) -> Vec<String> {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file("policy.stasis", "struct Policy<N: i32> { marker: i32; }");
+            let receiver = if qualified { "policy.Policy" } else { "Policy" };
+            compiler.upsert_file(
+                "use.stasis",
+                &format!(
+                    "import \"policy.stasis\";\n\
+                     global instance: {receiver}<4>;\n\
+                     function value(self: {receiver}<{binding}>): i32 {{ return {binding}; }}\n\
+                     function main(): i32 {{ return instance.value(); }}"
+                ),
+            );
+            compiler.check().expect("generic program should compile");
+            let mut names = compiler
+                .functions()
+                .iter()
+                .filter(|function| function.name.starts_with("__stasis_function_"))
+                .map(|function| function.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+
+        let canonical = generated_function_names("T", false);
+        assert!(!canonical.is_empty());
+        assert_eq!(canonical, generated_function_names("U", false));
+        assert_eq!(canonical, generated_function_names("T", true));
+        assert_eq!(canonical, generated_function_names("U", true));
     }
 
     #[test]

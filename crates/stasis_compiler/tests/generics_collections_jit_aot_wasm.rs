@@ -541,6 +541,87 @@ fn backend_neutral_generics_oracle_matches_jit_aot_and_wasm() {
     jit.upsert_file(PARITY_ORACLE_MODULE_PATH, PARITY_ORACLE_MODULE);
     jit.compile()
         .expect("compile shared generics oracle for JIT");
+    let jit_snapshot = jit
+        .program_snapshot()
+        .expect("shared generics oracle JIT snapshot");
+    let semantic_function_identities = jit_snapshot
+        .functions()
+        .iter()
+        .map(|function| {
+            (
+                function.symbol_id.to_string(),
+                function.name.clone(),
+                function.signature_hash,
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_collections = [
+        ("oracle_left.items", 3),
+        ("oracle_nested.pool.items", 2),
+        ("oracle_right.items", 3),
+    ];
+    for (path, capacity) in expected_collections {
+        let collection = jit_snapshot
+            .state_layout()
+            .collections
+            .iter()
+            .find(|collection| collection.path == path)
+            .unwrap_or_else(|| panic!("shared oracle collection layout for {path}"));
+        assert_eq!(collection.capacity, capacity, "{path} capacity");
+        assert!(collection.fully_migratable, "{path} migration policy");
+        assert_eq!(
+            collection
+                .fields
+                .iter()
+                .map(|field| (field.field.as_str(), field.storage_type_name()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("active", "bool"),
+                ("byte_lane", "u8"),
+                ("precise", "f64"),
+                ("score", "i32"),
+                ("short_lane", "u16"),
+                ("weight", "f32"),
+                ("wide_lane", "u32"),
+            ],
+            "{path} SoA field planes"
+        );
+        let snapshot_collection = jit_snapshot
+            .collections()
+            .iter()
+            .find(|collection| collection.path == path)
+            .unwrap_or_else(|| panic!("shared oracle snapshot collection for {path}"));
+        assert_eq!(snapshot_collection.capacity, capacity);
+        assert_eq!(snapshot_collection.field_type_ids.len(), 7);
+    }
+    let memory = jit
+        .state_memory_report(&Default::default(), u64::MAX)
+        .expect("shared generics oracle memory report");
+    for (field, alignment, element_bytes) in [
+        ("active", 4, 4),
+        ("byte_lane", 1, 1),
+        ("precise", 8, 8),
+        ("score", 4, 4),
+        ("short_lane", 2, 2),
+        ("weight", 4, 4),
+        ("wide_lane", 4, 4),
+    ] {
+        for (path, capacity) in expected_collections {
+            let plane = memory
+                .entries
+                .iter()
+                .find(|entry| entry.path == path && entry.field == field)
+                .unwrap_or_else(|| panic!("shared oracle memory plane {path}.{field}"));
+            assert_eq!(plane.alignment_bytes, alignment, "{path}.{field} alignment");
+            assert_eq!(plane.element_bytes, element_bytes, "{path}.{field} width");
+            assert_eq!(plane.capacity, capacity as u64, "{path}.{field} capacity");
+            assert_eq!(
+                plane.capacity_bytes,
+                capacity as u64 * element_bytes,
+                "{path}.{field} plane bytes"
+            );
+        }
+    }
     assert_eq!(
         jit.execute_i32_noarg_by_name("main")
             .expect("execute shared generics oracle in JIT"),
@@ -563,6 +644,25 @@ fn backend_neutral_generics_oracle_matches_jit_aot_and_wasm() {
     aot.upsert_file(PARITY_ORACLE_MODULE_PATH, PARITY_ORACLE_MODULE);
     aot.compile()
         .expect("compile shared generics oracle to a native AOT object");
+    let aot_snapshot = aot
+        .program_snapshot()
+        .expect("shared generics oracle AOT snapshot");
+    assert_eq!(aot_snapshot.state_layout(), jit_snapshot.state_layout());
+    assert_eq!(
+        aot_snapshot
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.symbol_id.to_string(),
+                    function.name.clone(),
+                    function.signature_hash,
+                )
+            })
+            .collect::<Vec<_>>(),
+        semantic_function_identities,
+        "AOT must consume the same concrete specialization identities as JIT"
+    );
     #[cfg(windows)]
     run_linked_aot_oracle(&aot, "main", EXPECTED_DIGEST);
 
@@ -577,6 +677,25 @@ fn backend_neutral_generics_oracle_matches_jit_aot_and_wasm() {
     wasm.upsert_file(PARITY_ORACLE_MODULE_PATH, PARITY_ORACLE_MODULE);
     wasm.compile()
         .expect("compile shared generics oracle for Wasm");
+    let wasm_snapshot = wasm
+        .program_snapshot()
+        .expect("shared generics oracle Wasm snapshot");
+    assert_eq!(wasm_snapshot.state_layout(), jit_snapshot.state_layout());
+    assert_eq!(
+        wasm_snapshot
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.symbol_id.to_string(),
+                    function.name.clone(),
+                    function.signature_hash,
+                )
+            })
+            .collect::<Vec<_>>(),
+        semantic_function_identities,
+        "Wasm must consume the same concrete specialization identities as JIT"
+    );
     let wasm_path = std::env::temp_dir().join(format!(
         "stasis_generics_parity_oracle_{}_{}.wasm",
         std::process::id(),

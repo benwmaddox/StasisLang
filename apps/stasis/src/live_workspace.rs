@@ -6023,6 +6023,304 @@ mod tests {
     }
 
     #[test]
+    fn imported_generic_dirty_buffer_preview_apply_and_rejection_are_transactional() {
+        let _global_guard = crate::jit_test_support::lock();
+        let (root, config) = project();
+        let entry = root.join("src/main.stasis");
+        let types_path = root.join("src/types.stasis");
+        let main_source = concat!(
+            "import \"types.stasis\";\n",
+            "extern function reject_code_swap(): void;\n",
+            "global world: types.Nested<i32, 2>;\n",
+            "global scalar: i32;\n",
+            "function main(): i32 { world.inner.values[0] = 7; world.inner.values[1] = 11; scalar = 99; return types.capacity(world.inner); }\n",
+            "function tick(): i32 { return types.capacity(world.inner); }\n",
+            "function render(): i32 { return world.inner.values[1]; }\n",
+            "function on_code_swap(): void { return; }\n",
+        );
+        let types_v1 = concat!(
+            "global generic_side: i32;\n",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n",
+            "struct Nested<T: type, N: i32> { inner: Buffer<T, N>; }\n",
+            "function @effects() capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+        let capacity_v2 = "function @effects() capacity(self: Buffer<T, N>): i32 { return N + 1; }";
+        let capacity_v3 = "function @effects() capacity(self: Buffer<T, N>): i32 { return N + 2; }";
+        let types_v2 = types_v1.replace(
+            "function @effects() capacity(self: Buffer<T, N>): i32 { return N; }",
+            capacity_v2,
+        );
+        let types_v3 = types_v1.replace(
+            "function @effects() capacity(self: Buffer<T, N>): i32 { return N; }",
+            capacity_v3,
+        );
+        fs::write(&entry, main_source).expect("write dirty-buffer entry");
+        fs::write(&types_path, types_v1).expect("write dirty-buffer generic module");
+
+        let (mut jit, package) = compile(&config);
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(2));
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let capacity_item = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "capacity")
+            .expect("generic capacity source item")
+            .clone();
+        let capacity_target = || LiveSymbolTarget {
+            name: "capacity".into(),
+            kind: Some("function".into()),
+            file: Some("src/types.stasis".into()),
+            owner: None,
+            signature: Some(capacity_item.signature.clone()),
+        };
+        let state = |jit: &JitProcess| {
+            (
+                jit.read_global_collection_scalar("world.inner.values", "", 0),
+                jit.read_global_collection_scalar("world.inner.values", "", 1),
+                jit.read_global_scalar("scalar"),
+                jit.read_global_scalar("generic_side"),
+            )
+        };
+        let initial_state = state(&jit);
+        assert_eq!(initial_state.0, Ok(JitScalarValue::I32(7)));
+        assert_eq!(initial_state.1, Ok(JitScalarValue::I32(11)));
+        assert_eq!(initial_state.2, Ok(JitScalarValue::I32(99)));
+        assert_eq!(initial_state.3, Ok(JitScalarValue::I32(0)));
+
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                5901,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: capacity_target(),
+                    source: Some(capacity_v2.into()),
+                    expected_source_hash: None,
+                    preview: true,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "generic preview: {:?}", preview.error);
+        assert_eq!(preview.kind, "edit_preview");
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("preview source"),
+            types_v1
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(2));
+        assert_eq!(state(&jit), initial_state);
+
+        let applied = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(5902, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(applied.ok, "generic apply: {:?}", applied.error);
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("applied source"),
+            types_v2
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(3));
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(render_ptr as usize),
+            Ok(11)
+        );
+        assert_eq!(state(&jit), initial_state);
+        let accepted_tick_ptr = tick_ptr;
+        let accepted_render_ptr = render_ptr;
+        let accepted_snapshot = jit.program_snapshot().expect("accepted snapshot");
+        let accepted_snapshot_evidence = (
+            accepted_snapshot.source_revision(),
+            accepted_snapshot.layout_digest(),
+            accepted_snapshot.functions().to_vec(),
+            accepted_snapshot.state_layout().clone(),
+        );
+        let accepted_artifacts = jit.artifacts().to_vec();
+        let accepted_code_ptrs = jit.function_code_ptrs();
+
+        for (request_id, invalid_source, label) in [
+            (
+                5903,
+                "function @effects() capacity(self: Buffer<T, N>): i32 { return missing; }",
+                "compile",
+            ),
+            (
+                5904,
+                "function @effects() capacity(self: Buffer<T, N>): i32 { return true; }",
+                "type",
+            ),
+            (
+                5905,
+                "function @effects() capacity(self: Buffer<T, N>): i32 { generic_side += 1; return N; }",
+                "effect",
+            ),
+        ] {
+            let rejected = run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(
+                    request_id,
+                    LiveCommand::Edit {
+                        operation: LiveEditOperation::Update,
+                        target: capacity_target(),
+                        source: Some(invalid_source.into()),
+                        expected_source_hash: None,
+                        preview: false,
+                        run_tests: false,
+                    },
+                ),
+            );
+            assert!(!rejected.ok, "invalid generic {label} edit unexpectedly succeeded");
+            assert_eq!(
+                fs::read_to_string(&types_path).expect("rejected source"),
+                types_v2
+            );
+            assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(3));
+            assert_eq!(state(&jit), initial_state);
+            assert_eq!(tick_ptr, accepted_tick_ptr, "{label} tick pointer");
+            assert_eq!(render_ptr, accepted_render_ptr, "{label} render pointer");
+            let rejected_snapshot = jit.program_snapshot().expect("rejected snapshot");
+            assert_eq!(
+                (
+                    rejected_snapshot.source_revision(),
+                    rejected_snapshot.layout_digest(),
+                    rejected_snapshot.functions().to_vec(),
+                    rejected_snapshot.state_layout().clone(),
+                ),
+                accepted_snapshot_evidence,
+                "{label} active snapshot"
+            );
+            assert_eq!(jit.artifacts(), accepted_artifacts, "{label} artifacts");
+            assert_eq!(jit.function_code_ptrs(), accepted_code_ptrs, "{label} code");
+        }
+
+        let hook_item = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "on_code_swap")
+            .expect("hook source item")
+            .clone();
+        let hook_preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                5906,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "on_code_swap".into(),
+                        kind: Some("function".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: Some(hook_item.signature),
+                    },
+                    source: Some(
+                        "function on_code_swap(): void { world.inner.values[0] = 123; scalar = 456; reject_code_swap(); return; }".into(),
+                    ),
+                    expected_source_hash: None,
+                    preview: true,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(hook_preview.ok, "hook preview: {:?}", hook_preview.error);
+        assert_eq!(
+            fs::read_to_string(&entry).expect("hook preview entry source"),
+            main_source
+        );
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("hook preview source"),
+            types_v2
+        );
+        assert_eq!(state(&jit), initial_state);
+
+        let hook_rejected = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(5907, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(!hook_rejected.ok, "hook rejection unexpectedly succeeded");
+        assert!(hook_rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("hook requested rejection")));
+        assert_eq!(
+            fs::read_to_string(&entry).expect("hook rollback entry source"),
+            main_source
+        );
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("hook rollback source"),
+            types_v2
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(3));
+        assert_eq!(state(&jit), initial_state);
+        assert_eq!(tick_ptr, accepted_tick_ptr);
+        assert_eq!(render_ptr, accepted_render_ptr);
+        let hook_rollback_snapshot = jit.program_snapshot().expect("hook rollback snapshot");
+        assert_eq!(
+            (
+                hook_rollback_snapshot.source_revision(),
+                hook_rollback_snapshot.layout_digest(),
+                hook_rollback_snapshot.functions().to_vec(),
+                hook_rollback_snapshot.state_layout().clone(),
+            ),
+            accepted_snapshot_evidence
+        );
+        assert_eq!(jit.artifacts(), accepted_artifacts);
+        assert_eq!(jit.function_code_ptrs(), accepted_code_ptrs);
+
+        let retry = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                5908,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: capacity_target(),
+                    source: Some(capacity_v3.into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(retry.ok, "valid generic retry: {:?}", retry.error);
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("retry source"),
+            types_v3
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(4));
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(render_ptr as usize),
+            Ok(11)
+        );
+        assert_eq!(state(&jit), initial_state);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn live_batch_can_add_and_call_a_helper_after_hot_swap() {
         let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();

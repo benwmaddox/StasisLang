@@ -3637,6 +3637,57 @@ fn compile_function_into_jit_module(
 mod tests {
     use super::*;
 
+    fn artifact_keys(process: &JitProcess) -> BTreeSet<FunctionKey> {
+        process
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.function_key.clone())
+            .collect()
+    }
+
+    fn artifact_keys_named(process: &JitProcess, name: &str) -> BTreeSet<FunctionKey> {
+        process
+            .artifacts()
+            .iter()
+            .filter(|artifact| artifact.function_key.name == name)
+            .map(|artifact| artifact.function_key.clone())
+            .collect()
+    }
+
+    fn generated_artifact_keys(process: &JitProcess) -> BTreeSet<FunctionKey> {
+        process
+            .artifacts()
+            .iter()
+            .filter(|artifact| artifact.function_key.name.starts_with("__stasis_function_"))
+            .map(|artifact| artifact.function_key.clone())
+            .collect()
+    }
+
+    fn metadata_artifact_keys(process: &JitProcess, ids: &[FunctionId]) -> BTreeSet<FunctionKey> {
+        ids.iter()
+            .filter_map(|id| {
+                process
+                    .artifacts()
+                    .iter()
+                    .find(|artifact| artifact.function_id == *id)
+                    .map(|artifact| artifact.function_key.clone())
+            })
+            .collect()
+    }
+
+    fn artifact_fingerprint(process: &JitProcess) -> BTreeMap<FunctionKey, (u64, u64, String)> {
+        process
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.function_key.clone(),
+                    (artifact.body_hash, artifact.code_ptr, artifact.clif.clone()),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn jit_rejects_invalid_unreachable_function_body() {
         let mut process = JitProcess::new();
@@ -4120,6 +4171,218 @@ function main(): i32 {
     }
 
     #[test]
+    fn generic_constant_and_helper_edits_invalidate_exact_dependency_closure() {
+        fn source(offset: i32, helper_bias: i32) -> String {
+            format!(
+                "const OFFSET: i32 = {offset};\nstruct Policy<N: i32> {{ marker: i32; }}\nglobal first: Policy<4>;\nglobal second: Policy<7>;\nfunction adjust(value: i32): i32 {{ return value + {helper_bias}; }}\nfunction value(self: Policy<N>): i32 {{ return adjust(N + OFFSET); }}\nfunction unrelated(): i32 {{ return 100; }}\nfunction main(): i32 {{ return first.value() + second.value() + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic_dependencies.stasis", source(1, 10));
+        process
+            .compile()
+            .expect("generic dependency baseline compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(133));
+        let specialization_keys = generated_artifact_keys(&process);
+        assert_eq!(specialization_keys.len(), 2);
+        let main_keys = artifact_keys_named(&process, "main");
+        let adjust_keys = artifact_keys_named(&process, "adjust");
+        let unrelated_keys = artifact_keys_named(&process, "unrelated");
+        let baseline = artifact_fingerprint(&process);
+
+        process.upsert_file("generic_dependencies.stasis", source(2, 10));
+        process
+            .compile()
+            .expect("referenced constant edit compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(135));
+        let metadata = process.generation_metadata().expect("constant metadata");
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.emitted_function_ids),
+            specialization_keys.union(&main_keys).cloned().collect(),
+            "a referenced constant edit rebuilds both specializations and their caller"
+        );
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.reused_function_ids),
+            adjust_keys.union(&unrelated_keys).cloned().collect(),
+            "constant-independent helper and unrelated code are reused"
+        );
+        assert_eq!(generated_artifact_keys(&process), specialization_keys);
+        let after_constant = artifact_fingerprint(&process);
+        for key in &specialization_keys {
+            assert_ne!(
+                after_constant[key], baseline[key],
+                "{key:?} emitted artifact fingerprint"
+            );
+        }
+        assert_eq!(
+            after_constant[&unrelated_keys.iter().next().unwrap()].1,
+            baseline[&unrelated_keys.iter().next().unwrap()].1
+        );
+
+        process.upsert_file("generic_dependencies.stasis", source(2, 20));
+        process.compile().expect("referenced helper edit compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(155));
+        let metadata = process.generation_metadata().expect("helper metadata");
+        let expected_emitted = specialization_keys
+            .union(&main_keys)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .union(&adjust_keys)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.emitted_function_ids),
+            expected_emitted,
+            "a helper edit rebuilds the helper, both specializations, and their caller"
+        );
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.reused_function_ids),
+            unrelated_keys,
+            "only unrelated reachable code is reused"
+        );
+    }
+
+    #[test]
+    fn generic_signature_and_overload_edits_have_exact_identity_effects() {
+        fn source(with_argument: bool, with_overload: bool) -> String {
+            let value = if with_argument {
+                "function value(self: Policy<N>, bonus: i32): i32 { return N + bonus; }"
+            } else {
+                "function value(self: Policy<N>): i32 { return N; }"
+            };
+            let call = if with_argument {
+                "policy.value(3)"
+            } else {
+                "policy.value()"
+            };
+            let overload = if with_overload {
+                "function value(self: Other): i32 { return 99; }\n"
+            } else {
+                ""
+            };
+            format!(
+                "struct Policy<N: i32> {{ marker: i32; }}\nstruct Other {{ marker: i32; }}\nglobal policy: Policy<4>;\n{overload}{value}\nfunction unrelated(): i32 {{ return 10; }}\nfunction main(): i32 {{ return {call} + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic_signature.stasis", source(false, false));
+        process
+            .compile()
+            .expect("generic signature baseline compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(14));
+        let old_specialization = generated_artifact_keys(&process);
+        assert_eq!(old_specialization.len(), 1);
+        let unrelated = artifact_keys_named(&process, "unrelated");
+        let unrelated_fingerprint = artifact_fingerprint(&process);
+
+        process.upsert_file("generic_signature.stasis", source(false, true));
+        let report = process
+            .compile()
+            .expect("unrelated overload addition compiles");
+        assert_eq!(report.emit.emitted_functions, 0);
+        assert_eq!(generated_artifact_keys(&process), old_specialization);
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(14));
+
+        process.upsert_file("generic_signature.stasis", source(false, false));
+        let report = process
+            .compile()
+            .expect("unrelated overload removal compiles");
+        assert_eq!(report.emit.emitted_functions, 0);
+        assert_eq!(generated_artifact_keys(&process), old_specialization);
+
+        process.upsert_file("generic_signature.stasis", source(true, false));
+        process.compile().expect("generic signature edit compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(17));
+        let new_specialization = generated_artifact_keys(&process);
+        assert_eq!(new_specialization.len(), 1);
+        assert!(old_specialization.is_disjoint(&new_specialization));
+        let current_keys = artifact_keys(&process);
+        assert!(old_specialization.is_disjoint(&current_keys));
+        let metadata = process.generation_metadata().expect("signature metadata");
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.emitted_function_ids),
+            new_specialization
+                .union(&artifact_keys_named(&process, "main"))
+                .cloned()
+                .collect(),
+            "signature edit emits the replacement specialization and caller"
+        );
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.reused_function_ids),
+            unrelated
+        );
+        let current_fingerprint = artifact_fingerprint(&process);
+        let unrelated_key = unrelated.iter().next().expect("unrelated key");
+        assert_eq!(
+            current_fingerprint[unrelated_key].1,
+            unrelated_fingerprint[unrelated_key].1
+        );
+    }
+
+    #[test]
+    fn removed_and_new_generic_specializations_preserve_unaffected_identity() {
+        fn source(second_capacity: Option<i32>) -> String {
+            let second_call = second_capacity
+                .map(|capacity| format!(" + second_{capacity}.value()"))
+                .unwrap_or_default();
+            format!(
+                "struct Policy<N: i32> {{ marker: i32; }}\nglobal first: Policy<4>;\nglobal second_7: Policy<7>;\nglobal second_9: Policy<9>;\nfunction value(self: Policy<N>): i32 {{ return N; }}\nfunction unrelated(): i32 {{ return 100; }}\nfunction main(): i32 {{ return first.value(){second_call} + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic_specializations.stasis", source(None));
+        process.compile().expect("single specialization compiles");
+        let retained = generated_artifact_keys(&process);
+        assert_eq!(retained.len(), 1);
+
+        process.upsert_file("generic_specializations.stasis", source(Some(7)));
+        process.compile().expect("second specialization compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(111));
+        let with_seven = generated_artifact_keys(&process);
+        assert_eq!(with_seven.len(), 2);
+        assert!(retained.is_subset(&with_seven));
+        let removed_seven = with_seven
+            .difference(&retained)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let retained_fingerprint = artifact_fingerprint(&process);
+
+        process.upsert_file("generic_specializations.stasis", source(Some(9)));
+        process
+            .compile()
+            .expect("replacement specialization compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(113));
+        let with_nine = generated_artifact_keys(&process);
+        assert_eq!(with_nine.len(), 2);
+        assert!(retained.is_subset(&with_nine));
+        assert!(removed_seven.is_disjoint(&with_nine));
+        let added_nine = with_nine
+            .difference(&retained)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(added_nine.len(), 1);
+        let metadata = process.generation_metadata().expect("replacement metadata");
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.emitted_function_ids),
+            added_nine
+                .union(&artifact_keys_named(&process, "main"))
+                .cloned()
+                .collect(),
+            "only the new specialization and caller are emitted"
+        );
+        assert!(
+            metadata_artifact_keys(&process, &metadata.reused_function_ids).is_superset(&retained)
+        );
+        let current_fingerprint = artifact_fingerprint(&process);
+        for key in retained {
+            assert_eq!(current_fingerprint[&key], retained_fingerprint[&key]);
+        }
+    }
+
+    #[test]
     fn equivalent_generic_argument_spelling_reuses_specialization_and_callers() {
         fn source(argument: &str) -> String {
             format!(
@@ -4157,6 +4420,85 @@ function main(): i32 {
             first_metadata.source_revision,
             "equivalent source spellings should retain the semantic revision"
         );
+    }
+
+    #[test]
+    fn alpha_renamed_qualified_receiver_generic_reuses_identity_and_layout() {
+        fn source(binding: &str, qualified: bool) -> String {
+            let receiver = if qualified { "policy.Policy" } else { "Policy" };
+            format!(
+                "import \"policy.stasis\";\nglobal instance: {receiver}<4>;\nfunction value(self: {receiver}<{binding}>): i32 {{ return {binding}; }}\nfunction unrelated(): i32 {{ return 5; }}\nfunction main(): i32 {{ return instance.value() + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("policy.stasis", "struct Policy<N: i32> { marker: i32; }\n");
+        process.upsert_file("use.stasis", source("T", false));
+        process.compile().expect("alpha identity baseline compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(9));
+
+        let first_metadata = process
+            .generation_metadata()
+            .expect("baseline generation metadata")
+            .clone();
+        let first_layout = process.state_layout();
+        let first_ptrs = process.function_code_ptrs();
+        let first_artifacts: BTreeMap<_, _> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.function_key.name.clone(),
+                    (artifact.body_hash, artifact.code_ptr, artifact.clif.clone()),
+                )
+            })
+            .collect();
+        let first_specialization = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name.starts_with("__stasis_function_"))
+            .expect("receiver specialization artifact")
+            .function_key
+            .clone();
+
+        process.upsert_file("use.stasis", source("U", true));
+        let report = process
+            .compile()
+            .expect("alpha-renamed qualified spelling compiles");
+        assert_eq!(
+            report.emit.emitted_functions, 0,
+            "identity-only edit: {report:?}"
+        );
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(9));
+        assert_eq!(process.state_layout(), first_layout);
+        assert_eq!(process.function_code_ptrs(), first_ptrs);
+
+        let metadata = process
+            .generation_metadata()
+            .expect("updated generation metadata");
+        assert_eq!(metadata.source_revision, first_metadata.source_revision);
+        assert_eq!(metadata.layout_hash, first_metadata.layout_hash);
+        assert!(metadata.emitted_function_ids.is_empty());
+        assert!(metadata.reused_function_ids.len() >= 3);
+        let second_specialization = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name.starts_with("__stasis_function_"))
+            .expect("retained receiver specialization artifact")
+            .function_key
+            .clone();
+        assert_eq!(second_specialization, first_specialization);
+        let second_artifacts: BTreeMap<_, _> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.function_key.name.clone(),
+                    (artifact.body_hash, artifact.code_ptr, artifact.clif.clone()),
+                )
+            })
+            .collect();
+        assert_eq!(second_artifacts, first_artifacts);
     }
 
     #[test]
