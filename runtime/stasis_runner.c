@@ -290,6 +290,27 @@ static char *stasis_trim_ascii(char *text)
     return text;
 }
 
+static int stasis_parse_render_construction_lifecycle_version(
+    const char *value,
+    int *version_out)
+{
+    if (!value || !version_out)
+    {
+        return 0;
+    }
+    if (strcmp(value, "0") == 0)
+    {
+        *version_out = 0;
+        return 1;
+    }
+    if (strcmp(value, "1") == 0)
+    {
+        *version_out = 1;
+        return 1;
+    }
+    return 0;
+}
+
 static int stasis_try_get_self_path(const char *argv0, char *out, size_t out_cap)
 {
     if (!out || out_cap == 0)
@@ -426,6 +447,7 @@ static int stasis_try_load_launch_config(
     size_t tick_out_cap,
     char *render_out,
     size_t render_out_cap,
+    int *render_construction_lifecycle_version_out,
     char *data_json_out,
     size_t data_json_out_cap,
     char *data_meta_out,
@@ -439,6 +461,8 @@ static int stasis_try_load_launch_config(
     char payload_dir[2080];
 #endif
     char line[2048];
+    int saw_render_construction_lifecycle_version = 0;
+    int render_construction_lifecycle_version = 0;
 
     if (!stasis_try_get_self_path(argv0, self_path, sizeof(self_path)))
     {
@@ -500,6 +524,11 @@ static int stasis_try_load_launch_config(
     {
         render_out[0] = '\0';
     }
+    if (render_construction_lifecycle_version_out)
+    {
+        /* Missing metadata keeps legacy lifecycle-0 behavior. */
+        *render_construction_lifecycle_version_out = 0;
+    }
     if (data_json_out && data_json_out_cap > 0)
     {
         data_json_out[0] = '\0';
@@ -553,6 +582,36 @@ static int stasis_try_load_launch_config(
             render_out[render_out_cap - 1] = '\0';
             continue;
         }
+        if (strcmp(key, "render_construction_lifecycle_version") == 0)
+        {
+            int lifecycle_version = 0;
+            if (saw_render_construction_lifecycle_version)
+            {
+                fprintf(
+                    stderr,
+                    "error: duplicate render_construction_lifecycle_version in %s\n",
+                    launch_path);
+                fclose(file);
+                return 0;
+            }
+            if (!stasis_parse_render_construction_lifecycle_version(value, &lifecycle_version))
+            {
+                fprintf(
+                    stderr,
+                    "error: unsupported render construction lifecycle version '%s' in %s (expected 0 or 1)\n",
+                    value,
+                    launch_path);
+                fclose(file);
+                return 0;
+            }
+            if (render_construction_lifecycle_version_out)
+            {
+                *render_construction_lifecycle_version_out = lifecycle_version;
+            }
+            render_construction_lifecycle_version = lifecycle_version;
+            saw_render_construction_lifecycle_version = 1;
+            continue;
+        }
         if (strcmp(key, "data_bind_json") == 0 && data_json_out && data_json_out_cap > 0)
         {
             strncpy(data_json_out, value, data_json_out_cap - 1);
@@ -576,6 +635,16 @@ static int stasis_try_load_launch_config(
         }
     }
     fclose(file);
+
+    if (render_construction_lifecycle_version == 1 &&
+        (!render_out || !render_out[0]))
+    {
+        fprintf(
+            stderr,
+            "error: render_construction_lifecycle_version=1 requires a non-empty render entry in %s\n",
+            launch_path);
+        return 0;
+    }
 
     if (!dll_out || !dll_out[0])
     {
@@ -1700,6 +1769,7 @@ int main(int argc, char **argv)
     char launch_entry_buf[512];
     char launch_tick_buf[512];
     char launch_render_buf[512];
+    int render_construction_lifecycle_version = 0;
     char launch_data_json_buf[2048];
     char launch_data_meta_buf[2048];
     int fps = 60;
@@ -1855,6 +1925,7 @@ int main(int argc, char **argv)
                 sizeof(launch_tick_buf),
                 launch_render_buf,
                 sizeof(launch_render_buf),
+                &render_construction_lifecycle_version,
                 launch_data_json_buf,
                 sizeof(launch_data_json_buf),
                 launch_data_meta_buf,
@@ -1992,11 +2063,12 @@ int main(int argc, char **argv)
     }
     if (runner_diag)
     {
-        fprintf(stderr, "RUNNER_DIAG: dll=%s entry=%s tick=%s render=%s\n",
+        fprintf(stderr, "RUNNER_DIAG: dll=%s entry=%s tick=%s render=%s render_construction_lifecycle_version=%d\n",
                 dll_path ? dll_path : "(null)",
                 entry_name ? entry_name : "(null)",
                 tick_name_override ? tick_name_override : "(auto)",
-                render_name_override ? render_name_override : "(auto)");
+                render_name_override ? render_name_override : "(auto)",
+                render_construction_lifecycle_version);
         fflush(stderr);
     }
 
@@ -2782,7 +2854,12 @@ int main(int argc, char **argv)
     }
     if (runner_diag)
     {
-        fprintf(stderr, "RUNNER_DIAG: dll=%s entry=%s\n", dll_path ? dll_path : "(null)", entry_name ? entry_name : "(null)");
+        fprintf(
+            stderr,
+            "RUNNER_DIAG: dll=%s entry=%s render_construction_lifecycle_version=%d\n",
+            dll_path ? dll_path : "(null)",
+            entry_name ? entry_name : "(null)",
+            render_construction_lifecycle_version);
         fflush(stderr);
     }
 

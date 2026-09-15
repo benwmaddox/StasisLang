@@ -171,6 +171,48 @@ asynchronous consumer needs owned retained storage. Preserve payload capacity an
 use authoritative counts; no arena-wide zeroing is needed. Invalidate writer
 capabilities on abort and hot-generation changes as well as reset.
 
+### Exact owner matrix
+
+`render_construction_lifecycle_version` selects the construction owner in the
+package metadata. It must not result in two wrappers around the same authored
+render entry. Lifecycle 1 is valid only when that package exposes a
+zero-argument authored `render()` export; a tick-only or render-less package
+uses lifecycle 0/absent direct/manual construction:
+
+| Owner / package shape | Lifecycle 1 behavior | Lifecycle 0 or absent behavior |
+| --- | --- | --- |
+| Non-monolithic generated bridge | Generated entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated entry calls authored render directly; it does not synthesize reset or finish. |
+| Windows monolithic generated bindings | Generated AOT binding calls reset -> authored render -> finish exactly once. | Binding calls authored render directly. |
+| Android generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
+| iOS generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
+| `stasis_runner` | Parses/verifies state/launch sidecar metadata when present, invokes the already-exported render entry, and never wraps it or adds reset/finish. | Invokes the legacy direct render entry. |
+| Authored guest render | Draws and requests publication with `end_frame()`; it must not manually call `begin_frame()` inside host-owned rendering. | Explicit `begin_frame()` remains available for legacy/manual/tick-only builders. |
+
+The sidecar check in `stasis_runner` is routing/state verification, not engine
+bundle lifecycle ownership. The generated bridge or generated bindings have
+already completed the construction transaction before the runner submits it.
+
+### Boundary rules and consumer migration
+
+In lifecycle 1, a nested guest `begin_frame()` reaches `gfx_cmd_begin()` while
+the host-owned construction is active. That nested begin marks the construction
+invalid; `finish` then aborts it, so it cannot silently restart or append a
+second pass. Lifecycle negotiation also has no viewport/resolution-cap
+implication: logical coordinates, viewport and safe-viewport transforms,
+drawable resolution, and any maximum-resolution policy remain host-owned and
+unchanged.
+
+After installing a new nightly, a consumer should regenerate its vendored
+stdlib, generated bridge or bindings, and package sidecar/manifest as one unit.
+For a consumer with a temporary compatibility bridge, first verify the new
+lifecycle-1 generated entry, then remove the conditional/manual begin from the
+authored `render()` and retain its normal drawing plus `end_frame()` request.
+Run focused render/ABI checks and search the negotiated render path for any
+remaining manual begin. A lifecycle-0/absent package remains on direct render
+until rebuilt with lifecycle 1; consumers that never shipped a production
+bridge only need the coordinated vendor and metadata refresh. This migration
+does not change viewport or resolution limits.
+
 `end_frame()` remains the compatible spelling for request-publication, set
 idempotently rather than arithmetically added. It is not a resource lifetime
 fence or physical-presentation acknowledgement. Keeping it avoids silently

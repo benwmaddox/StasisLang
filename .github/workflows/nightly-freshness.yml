@@ -1,4 +1,4 @@
-name: Nightly Freshness
+name: Nightly Publication Freshness
 
 on:
   schedule:
@@ -43,7 +43,7 @@ jobs:
             exit 0
           fi
 
-          oldest_unreleased_timestamp="$(git log --reverse --format='%ct' "${last_tag}..HEAD" | head -n1)"
+          oldest_unreleased_timestamp="$(git log --format='%ct' "${last_tag}..HEAD" | tail -n1)"
           unreleased_age_seconds="$(( $(date -u +%s) - oldest_unreleased_timestamp ))"
           maximum_age_seconds="$(( 36 * 60 * 60 ))"
           if (( unreleased_age_seconds > maximum_age_seconds )); then

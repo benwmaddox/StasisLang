@@ -1,3 +1,5 @@
+#![cfg(feature = "packaged-desktop-acceptance")]
+
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -237,7 +239,6 @@ fn assert_binary_only_package(package: &Path) {
 }
 
 #[test]
-#[ignore = "requires a freshly built matching desktop runtime and display host"]
 fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
     if let Ok(expected_arch) = std::env::var("STASIS_EXPECTED_HOST_ARCH") {
         assert_eq!(
@@ -319,6 +320,38 @@ fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
         project_provenance["vendor"]["actual_sha256"]
     );
 
+    let executable_name = executable
+        .file_name()
+        .and_then(|value| value.to_str())
+        .expect("packaged executable file name");
+    let launch_path = if cfg!(windows) {
+        payload.join(format!("{executable_name}.launch"))
+    } else {
+        executable.with_file_name(format!("{executable_name}.launch"))
+    };
+    let (launch_manifest, lifecycle_owner) = if cfg!(windows) {
+        assert!(
+            !launch_path.is_file(),
+            "Windows monolithic package must not require a runner launch sidecar: {}",
+            launch_path.display()
+        );
+        (None, "windows_monolithic_generated_bindings")
+    } else {
+        let launch_manifest =
+            fs::read_to_string(&launch_path).expect("read packaged desktop launch manifest");
+        let lifecycle_versions = launch_manifest
+            .lines()
+            .filter_map(|line| line.strip_prefix("render_construction_lifecycle_version="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lifecycle_versions,
+            vec!["1"],
+            "packaged desktop launch manifest must contain exactly one authoritative lifecycle-v1 entry: {}",
+            launch_path.display()
+        );
+        (Some(launch_manifest), "non_monolithic_generated_bridge")
+    };
+
     let screenshot = tree.0.join("desktop-frame.png");
     let mut launch_command = Command::new(&executable);
     launch_command
@@ -345,6 +378,28 @@ fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
         String::from_utf8_lossy(&launched.stdout),
         String::from_utf8_lossy(&launched.stderr)
     );
+    let runner_diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&launched.stdout),
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    let lifecycle_diagnostic = if cfg!(windows) {
+        assert!(
+            !runner_diagnostics.contains("invalid_magic"),
+            "Windows monolithic render reported an invalid command header; diagnostics={runner_diagnostics}"
+        );
+        None
+    } else {
+        let expected = "render_construction_lifecycle_version=1";
+        assert!(
+            runner_diagnostics.lines().any(|line| {
+                line.starts_with("RUNNER_DIAG:")
+                    && line.split_ascii_whitespace().any(|field| field == expected)
+            }),
+            "packaged runner did not report lifecycle-v1 ownership; diagnostics={runner_diagnostics}"
+        );
+        Some(expected)
+    };
     assert!(
         screenshot.is_file(),
         "packaged runtime did not capture a frame"
@@ -395,6 +450,12 @@ fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
             "entry": "src/main.stasis",
             "results": { "main": 0, "tick": 0, "state_digest": 507 },
             "digest_evidence": "the production render emits teal only when generics_collections_digest_value is exactly 507",
+            "render_construction_lifecycle": {
+                "version": 1,
+                "owner": lifecycle_owner,
+                "launch_manifest": launch_manifest,
+                "runner_diagnostic": lifecycle_diagnostic,
+            },
             "frame": {
                 "width": image.width(), "height": image.height(),
                 "teal_pixels": teal_pixels, "failure_pixels": failure_pixels,

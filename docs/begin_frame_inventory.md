@@ -8,6 +8,12 @@ UI names so that similarly named operations are not silently conflated.
 Third-party ThorVG animation segment documentation is excluded: its "begin frame"
 is an animation range, not a Stasis rendering lifecycle call.
 
+The current lifecycle-1 owner matrix is documented in
+[begin_frame_design.md](begin_frame_design.md#exact-owner-matrix). This historical
+inventory predates the generated `gfx_cmd_construction_reset` /
+`gfx_cmd_construction_finish` entry helpers, so those names and their package
+metadata are intentionally not represented by the reproduction grep below.
+
 Reproduce from the repository root:
 
 ```text
@@ -20,7 +26,9 @@ private batcher definitions are separate legacy-list reset and clear operations.
 UI definitions reset layout/input scratch state only. Remaining application and
 fixture occurrences call those APIs; documentation and source-string CI checks
 are migration consumers, not runtime operations. The AOT audio test definition
-is a test stub. No compiler-specific BeginFrame lowering was found.
+is a test stub. No compiler-specific BeginFrame lowering was found in this
+pre-migration inventory; generated lifecycle ownership is a package-entry concern
+described by the current design, not a new guest lowering.
 
 ## [README.md](../README.md)
 
@@ -281,7 +289,7 @@ is a test stub. No compiler-specific BeginFrame lowering was found.
 - Line 53: `ui_begin_frame(0.0, 0.0, 100.0, 60.0);`
 - Line 56: `ui_begin_frame(0.0, 0.0, 100.0, 60.0);`
 
-## [samples/ui_gallery/ui_single_pass.stasis](../samples/ui_gallery/ui_single_pass.stasis)
+## [samples/ui_gallery/ui_single_pass.stasis (historical; canonical source)](../src/stdlib/ui_single_pass.stasis)
 
 - Line 3: `// Geometry is deliberately ephemeral: 'ui_begin_frame' resets the current`
 - Line 143: `function ui_begin_frame(x: f32, y: f32, w: f32, h: f32): void {`
