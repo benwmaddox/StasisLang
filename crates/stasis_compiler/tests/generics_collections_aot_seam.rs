@@ -292,15 +292,17 @@ fn is_native_bounds_trap(output: &Output) -> bool {
 fn is_jit_bounds_trap(output: &Output) -> bool {
     #[cfg(windows)]
     {
-        matches!(
-            output.status.code(),
-            Some(WINDOWS_ILLEGAL_INSTRUCTION | WINDOWS_ACCESS_VIOLATION)
-        )
+        output.status.code().is_some_and(|code| {
+            code == WINDOWS_ILLEGAL_INSTRUCTION || code == WINDOWS_ACCESS_VIOLATION
+        })
     }
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        matches!(output.status.signal(), Some(4 | 11))
+        output
+            .status
+            .signal()
+            .is_some_and(|signal| signal == 4 || signal == 11)
     }
 }
 

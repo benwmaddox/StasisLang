@@ -403,9 +403,9 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            xvfb-run -a python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --test-threads=1 --nocapture
+            xvfb-run -a python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --ignored --exact full_generics_desktop_package_launches_with_provenance_and_digest_frame --test-threads=1 --nocapture
           else
-            python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --test-threads=1 --nocapture
+            python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --ignored --exact full_generics_desktop_package_launches_with_provenance_and_digest_frame --test-threads=1 --nocapture
           fi
 
       - name: Run packaged generics Web acceptance

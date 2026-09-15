@@ -34,7 +34,7 @@ by every packaged target.
 ```text
 python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_jit_aot_wasm -- --nocapture
 python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_aot_seam -- --nocapture
-python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --nocapture
+python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_desktop -- --ignored --exact full_generics_desktop_package_launches_with_provenance_and_digest_frame --nocapture
 ```
 
 ## Storage contract

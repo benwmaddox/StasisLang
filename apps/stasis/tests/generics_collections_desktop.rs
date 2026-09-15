@@ -226,6 +226,7 @@ fn assert_binary_only_package(package: &Path) {
 }
 
 #[test]
+#[ignore = "requires a freshly built matching desktop runtime and display host"]
 fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
     if let Ok(expected_arch) = std::env::var("STASIS_EXPECTED_HOST_ARCH") {
         assert_eq!(
