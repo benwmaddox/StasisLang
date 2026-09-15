@@ -18,7 +18,9 @@ const STATUS_ROOT: &str = "generics_native_oracle_status";
 const LOW_TRAP_ROOT: &str = "generics_native_bounds_low";
 const HIGH_TRAP_ROOT: &str = "generics_native_bounds_high";
 const TRAP_CHILD_ROOT: &str = "STASIS_GENERICS_TRAP_CHILD_ROOT";
+#[cfg(windows)]
 const TRAP_CHILD_EXE: &str = "STASIS_GENERICS_TRAP_CHILD_EXE";
+#[cfg(windows)]
 const NATIVE_EXE: &str = "STASIS_GENERICS_NATIVE_EXE";
 const EVIDENCE_DIR: &str = "STASIS_GENERICS_DESKTOP_EVIDENCE_DIR";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
