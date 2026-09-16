@@ -5116,6 +5116,14 @@ fn bounded_jit_text_arg_bytes(value_id: i32, limit: usize) -> Option<Vec<u8>> {
     (text.len() <= limit).then(|| text.as_bytes().to_vec())
 }
 
+/// Copy a guest string handle into owned UTF-8 text while the runtime is active.
+pub fn jit_string_value(value_id: i32) -> Result<String, String> {
+    let bytes = bounded_jit_text_arg_bytes(value_id, 1_048_576)
+        .ok_or_else(|| format!("invalid or oversized JIT string handle {value_id}"))?;
+    String::from_utf8(bytes)
+        .map_err(|_| format!("JIT string handle {value_id} contains invalid UTF-8"))
+}
+
 thread_local! {
     static EXTERNAL_URL_HOST: std::cell::Cell<Option<fn(&[u8]) -> i32>> =
         const { std::cell::Cell::new(None) };
@@ -9043,6 +9051,32 @@ mod tests {
             .expect_err("hash collision")
             .contains("collision"));
         assert_eq!(jit_string_literal_value(3), None);
+    }
+
+    #[test]
+    fn jit_string_value_copies_handles_and_rejects_invalid_utf8_and_lengths() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+        let handle = 0x44556677;
+        upsert_jit_string_literal(handle, "literal");
+        assert_eq!(jit_string_value(handle).unwrap(), "literal");
+        assert!(jit_string_value(handle + 1).is_err());
+        stasis_jit_collection_i32_store(handle, 1, 2);
+        stasis_jit_global_i32_array_store(handle, 0, 0, 195);
+        stasis_jit_global_i32_array_store(handle, 0, 1, 169);
+        assert_eq!(jit_string_value(handle).unwrap(), "é");
+        stasis_jit_global_i32_array_store(handle, 0, 0, 255);
+        assert!(jit_string_value(handle).unwrap_err().contains("UTF-8"));
+        stasis_jit_collection_i32_store(handle, 1, -1);
+        assert!(jit_string_value(handle).is_err());
+        stasis_jit_collection_i32_store(handle, 1, 1_048_577);
+        assert!(jit_string_value(handle).is_err());
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
     }
 
     #[test]
