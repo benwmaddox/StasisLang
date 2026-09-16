@@ -12492,6 +12492,9 @@ public final class MainActivity extends Activity {
             }
         }
 
+        private static final AcceptanceFrameSubmission NORMAL_SUCCESS_SUBMISSION =
+                new AcceptanceFrameSubmission(0, -1L, -1, -1);
+
         private final MainActivity activity;
         private final StasisPreviewRenderer renderer;
         private final Runnable performanceRenderPump;
@@ -12756,6 +12759,7 @@ public final class MainActivity extends Activity {
                 }
             }
             if (status == 0 || releaseBatchEnqueued || releaseCancellationApplied) requestRender();
+            if (!acceptance && status == 0) return NORMAL_SUCCESS_SUBMISSION;
             return new AcceptanceFrameSubmission(status, baselinePresentationSerial,
                     submittedFrameToken, submittedTrace);
         }
