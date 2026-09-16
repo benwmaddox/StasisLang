@@ -368,10 +368,6 @@
           "aot_fn_3524799330",
           "aot_fn_3835840966",
           "aot_fn_793665721",
-          "samples",
-          "samples__length",
-          "samples__max_length",
-          "score",
           "stasis_aot_module",
           "stasis_jit_collection_i32_load",
           "stasis_jit_collection_i32_store",
@@ -389,7 +385,11 @@
           "stasis_jit_global_i32_array_ptr",
           "stasis_jit_global_i32_array_store",
           "stasis_jit_global_i32_load",
-          "stasis_jit_global_i32_store"
+          "stasis_jit_global_i32_store",
+          "stasis_state_array__samples",
+          "stasis_state_scalar__samples__length",
+          "stasis_state_scalar__samples__max_length",
+          "stasis_state_scalar__score"
         ]
       },
       "snapshot": {

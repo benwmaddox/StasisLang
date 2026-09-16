@@ -15,6 +15,39 @@ pub struct StateLayout {
     pub opaque: Vec<StateOpaqueLayout>,
 }
 
+/// Identifies the kind of native storage represented by a generated symbol.
+///
+/// Scalar metadata (including collection `.length`/`.max_length` paths) and
+/// collection backing lanes intentionally live in separate namespaces.  The
+/// kind is part of the symbol identity rather than an incidental prefix on one
+/// side, so a user path cannot recreate the other kind's generated symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AotStorageSymbolKind {
+    Scalar,
+    Array,
+}
+
+/// Return the canonical C/native storage symbol for a state path.
+///
+/// The path/field flattening remains the existing ABI spelling.  The explicit
+/// kind namespace is new and is shared by native object storage and generated
+/// C bridges so scalar metadata can never collide with an array field such as
+/// a user-defined `length` field.
+pub fn aot_storage_symbol(kind: AotStorageSymbolKind, path: &str, field: &str) -> String {
+    let namespace = match kind {
+        AotStorageSymbolKind::Scalar => "stasis_state_scalar__",
+        AotStorageSymbolKind::Array => "stasis_state_array__",
+    };
+    let mut symbol = String::with_capacity(namespace.len() + path.len() + field.len() + 2);
+    symbol.push_str(namespace);
+    symbol.push_str(&path.replace('.', "__"));
+    if !field.is_empty() {
+        symbol.push_str("__");
+        symbol.push_str(&field.replace('.', "__"));
+    }
+    symbol
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StateScalarLayout {
     pub path: String,
@@ -628,10 +661,45 @@ fn state_value_type_names(type_table: &TypeTable, type_id: u16) -> Option<(Strin
 
 #[cfg(test)]
 mod tests {
-    use super::build_state_memory_report;
+    use super::{aot_storage_symbol, build_state_memory_report, AotStorageSymbolKind};
     use crate::backend::aot::AotProcess;
     use crate::backend::jit::JitProcess;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn aot_storage_symbol_namespaces_scalar_metadata_and_array_fields() {
+        let scalar = aot_storage_symbol(
+            AotStorageSymbolKind::Scalar,
+            "app.maze_wall_cache.horizontal.length",
+            "",
+        );
+        let array = aot_storage_symbol(
+            AotStorageSymbolKind::Array,
+            "app.maze_wall_cache.horizontal",
+            "length",
+        );
+
+        assert_eq!(
+            scalar,
+            "stasis_state_scalar__app__maze_wall_cache__horizontal__length"
+        );
+        assert_eq!(
+            array,
+            "stasis_state_array__app__maze_wall_cache__horizontal__length"
+        );
+        assert_ne!(scalar, array);
+        assert!(scalar.starts_with("stasis_state_scalar__"));
+        assert!(array.starts_with("stasis_state_array__"));
+        assert_ne!(
+            aot_storage_symbol(
+                AotStorageSymbolKind::Scalar,
+                "stasis_state_array__app.maze_wall_cache.horizontal",
+                "length",
+            ),
+            array,
+            "a scalar user path cannot recreate an array namespace symbol"
+        );
+    }
 
     #[test]
     fn jit_and_aot_share_canonical_state_layout() {

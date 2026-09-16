@@ -18,6 +18,10 @@ extern void stasis_aot_bind_runtime_globals(void);
 extern int32_t stasis_mobile_main_entry(void);
 extern int32_t stasis_mobile_tick_entry(void);
 extern int32_t stasis_mobile_render_entry(void);
+extern int32_t stasis_state_scalar__fixed_walls__length;
+extern int32_t stasis_state_scalar__generic_walls__runs__length;
+extern int32_t stasis_state_array__fixed_walls__length[];
+extern int32_t stasis_state_array__generic_walls__runs__length[];
 
 static int32_t submitted_frames;
 static int32_t rejected_frames;
@@ -295,6 +299,21 @@ int main(void) {
     CHECK(stasis_jit_global_i32_load(hash_path("score")) == 10);
     CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 1);
     CHECK(stasis_jit_global_i32_array_load(hash_path("host_i32"), 0, 10) == 0);
+    /*
+     * The synthetic collection count cells and the user-defined struct
+     * length fields must remain independently addressable after native link.
+     * Touch the generated symbols directly so this oracle also proves the
+     * declarations survived the C compiler/linker, then read the field lanes
+     * written by the Stasis entry point.
+     */
+    stasis_state_scalar__fixed_walls__length = 101;
+    stasis_state_scalar__generic_walls__runs__length = 202;
+    CHECK(stasis_state_scalar__fixed_walls__length == 101);
+    CHECK(stasis_state_scalar__generic_walls__runs__length == 202);
+    CHECK(stasis_state_array__fixed_walls__length[0] == 3);
+    CHECK(stasis_state_array__generic_walls__runs__length[0] == 4);
+    CHECK(stasis_jit_global_i32_load(hash_path("fixed_walls.max_length")) == 2);
+    CHECK(stasis_jit_global_i32_load(hash_path("generic_walls.runs.max_length")) == 2);
     stasis_mobile_runtime_set_paused(1);
     CHECK(pause_transitions == 1);
     CHECK(last_pause_value == 1);
@@ -351,7 +370,7 @@ int main(void) {
             submitted_trace);
     }
     CHECK(submitted_trace == expected_trace);
-    printf("stasis.seam_test.v1 IT-012 state=15 frames=1 rects=1 texts=1 bytes=5 chars=4 trace=%u\n", submitted_trace);
+    printf("stasis.seam_test.v1 IT-012 state=15 frames=1 rects=1 texts=1 bytes=5 chars=4 fixed_count=101 generic_count=202 fixed_field_length=3 generic_field_length=4 trace=%u\n", submitted_trace);
     printf("stasis.seam_test.v1 IT-014 order=123 marker=77 request=41:5:640:360 render_score=15 frames=1\n");
     stasis_mobile_runtime_shutdown();
 
