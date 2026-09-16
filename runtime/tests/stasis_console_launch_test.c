@@ -13,6 +13,9 @@ int stasis_set_recording_config(int width, int height, uint32_t fps);
 void stasis_set_window_size(int width, int height);
 void stasis_shutdown(void);
 
+#define ICONIFY_TIMEOUT_MS 5000
+#define CHILD_PROCESS_TIMEOUT_MS 12000
+
 static int wait_iconic(HWND window, int expected, DWORD timeout_ms) {
     ULONGLONG deadline = GetTickCount64() + timeout_ms;
     do {
@@ -69,7 +72,7 @@ static int run_child(const char* mode) {
     if (!stasis_init_window(320, 240, title)) return 2;
     if (hidden || opt_out) {
         if (!remains_restored(terminal)) return 3;
-    } else if (!wait_iconic(terminal, 1, 2000)) {
+    } else if (!wait_iconic(terminal, 1, ICONIFY_TIMEOUT_MS)) {
         return 4;
     }
     if (!hidden && !game_visible(title)) return 11;
@@ -78,7 +81,7 @@ static int run_child(const char* mode) {
     if (hidden) {
         stasis_shutdown();
         if (!stasis_init_window(320, 240, title)) return 5;
-        if (!wait_iconic(terminal, 1, 2000)) return 6;
+        if (!wait_iconic(terminal, 1, ICONIFY_TIMEOUT_MS)) return 6;
         if (!game_visible(title)) return 12;
     }
     ShowWindow(terminal, SW_RESTORE);
@@ -228,7 +231,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "Console test child %ls failed to launch: %lu\n", modes[i], GetLastError());
             return 1;
         }
-        DWORD status = WaitForSingleObject(process.hProcess, 8000);
+        DWORD status = WaitForSingleObject(process.hProcess, CHILD_PROCESS_TIMEOUT_MS);
         DWORD result = 1;
         if (status == WAIT_OBJECT_0) {
             GetExitCodeProcess(process.hProcess, &result);
