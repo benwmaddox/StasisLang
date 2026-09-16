@@ -147,6 +147,12 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     );
     assert!(bindings.contains("stasis_jit_profile_register_function"));
     assert!(bindings.contains("stasis_jit_profile_configure(1, 2);"));
+    assert!(bindings.contains("stasis_state_scalar__fixed_walls__length"));
+    assert!(bindings.contains("stasis_state_scalar__fixed_walls__max_length"));
+    assert!(bindings.contains("stasis_state_array__fixed_walls__length"));
+    assert!(bindings.contains("stasis_state_scalar__generic_walls__runs__length"));
+    assert!(bindings.contains("stasis_state_scalar__generic_walls__runs__max_length"));
+    assert!(bindings.contains("stasis_state_array__generic_walls__runs__length"));
 
     let (tick_symbol, _) = mobile_aot_function_for(&manifest, "tick").expect("tick symbol");
     let declaration = format!("extern int32_t {tick_symbol}(void);");
@@ -226,7 +232,9 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         .find_map(|field| field.strip_prefix("trace="))
         .and_then(|value| value.parse::<u32>().ok())
         .expect("harness trace");
-    assert!(stdout.contains("state=15 frames=1 rects=1 texts=1 bytes=5 chars=4"));
+    assert!(stdout.contains(
+        "state=15 frames=1 rects=1 texts=1 bytes=5 chars=4 fixed_count=101 generic_count=202 fixed_field_length=3 generic_field_length=4"
+    ));
     assert!(stdout.contains(
         "IT-013 order=123 paused_poll=1 reinit=1 main_stop=11 tick_stop=22 render_stop=33 frames_after_failures=0"
     ));
@@ -257,6 +265,10 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
             "text_bytes": [67, 97, 102, 195, 169, 0],
             "forwarded_byte_length": 5,
             "forwarded_char_length": 4,
+            "fixed_count": 101,
+            "generic_count": 202,
+            "fixed_field_length": 3,
+            "generic_field_length": 4,
             "trace": trace
         },
         "oracle": {"symbol_audit_failure": audit_error}

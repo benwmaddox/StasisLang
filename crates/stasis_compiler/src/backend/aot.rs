@@ -8,7 +8,9 @@ use crate::backend::emit::*;
 use crate::backend::hot_render::HotRenderImageMetadata;
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
 use crate::backend::reachability::matches_root;
-use crate::backend::state_layout::{is_named_scalar_state_path, StateLayout};
+use crate::backend::state_layout::{
+    aot_storage_symbol, is_named_scalar_state_path, AotStorageSymbolKind, StateLayout,
+};
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{
@@ -629,7 +631,7 @@ impl AotProcess {
                     bytes[..4].copy_from_slice(&collection.capacity.to_ne_bytes());
                 }
             }
-            let symbol = aot_storage_symbol(&scalar.path, "");
+            let symbol = aot_storage_symbol(AotStorageSymbolKind::Scalar, &scalar.path, "");
             let data_id =
                 define_standalone_storage_data(&mut module, &symbol, bytes, width as u64)?;
             registrations.push((
@@ -656,7 +658,8 @@ impl AotProcess {
                         collection.path, field.field
                     )
                 })?;
-                let symbol = aot_storage_symbol(&collection.path, &field.field);
+                let symbol =
+                    aot_storage_symbol(AotStorageSymbolKind::Array, &collection.path, &field.field);
                 let data_id = define_standalone_storage_data(
                     &mut module,
                     &symbol,
@@ -1125,14 +1128,6 @@ fn aot_array_lane(
     }
 }
 
-fn aot_storage_symbol(path: &str, field: &str) -> String {
-    if field.is_empty() {
-        path.replace('.', "__")
-    } else {
-        format!("{}__{}", path.replace('.', "__"), field.replace('.', "__"))
-    }
-}
-
 fn define_standalone_storage_data(
     module: &mut ObjectModule,
     symbol: &str,
@@ -1171,7 +1166,11 @@ fn build_aot_direct_storage_bindings(
         if aot_scalar_lane(*type_id, type_table).is_some() {
             bindings.scalars.insert(
                 path.clone(),
-                DirectStorageBinding::Symbol(aot_storage_symbol(path, "")),
+                DirectStorageBinding::Symbol(aot_storage_symbol(
+                    AotStorageSymbolKind::Scalar,
+                    path,
+                    "",
+                )),
             );
         }
     }
@@ -1184,7 +1183,11 @@ fn build_aot_direct_storage_bindings(
             bindings.arrays.insert(
                 (path.clone(), String::new()),
                 crate::backend::emit::DirectArrayStorageBinding {
-                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(path, "")),
+                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(
+                        AotStorageSymbolKind::Array,
+                        path,
+                        "",
+                    )),
                     storage_bytes: aot_lane_bytes(lane),
                     static_len: Some(info.len as usize),
                 },
@@ -1200,7 +1203,11 @@ fn build_aot_direct_storage_bindings(
             bindings.arrays.insert(
                 (path.clone(), field.clone()),
                 crate::backend::emit::DirectArrayStorageBinding {
-                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(path, field)),
+                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(
+                        AotStorageSymbolKind::Array,
+                        path,
+                        field,
+                    )),
                     storage_bytes: aot_lane_bytes(lane),
                     static_len: Some(info.len as usize),
                 },
@@ -1783,6 +1790,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static CLIF_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
+    const STRUCT_LENGTH_FIELDS_FIXTURE: &str = "struct WallRun { x: i32; length: i32; }\n\
+         struct WallCache<N: i32> { runs: WallRun[N]; }\n\
+         global fixed_walls: WallRun[2];\n\
+         global generic_walls: WallCache<2>;\n\
+         function main(): i32 {\n\
+             fixed_walls[0].length = 3;\n\
+             generic_walls.runs[0].length = 4;\n\
+             return fixed_walls[0].length + generic_walls.runs[0].length\n\
+                 + fixed_walls.max_length + generic_walls.runs.max_length;\n\
+         }\n";
 
     #[cfg(windows)]
     fn sign_test_executable(path: &Path) {
@@ -3076,9 +3094,9 @@ mod tests {
 
         assert_eq!(wrapper, "stasis_aot_standalone_entry");
         for expected in [
-            "count",
-            "ints",
-            "bytes",
+            "stasis_state_scalar__count",
+            "stasis_state_array__ints",
+            "stasis_state_array__bytes",
             "stasis_aot_standalone_entry",
             "stasis_jit_register_global_i32_ptr",
             "stasis_jit_register_global_i32_array",
@@ -3095,6 +3113,81 @@ mod tests {
             symbols.contains("ExitProcess"),
             "native Windows wrapper must terminate with the Stasis result: {symbols:?}"
         );
+    }
+
+    #[test]
+    fn standalone_aot_storage_separates_struct_length_fields_from_metadata() {
+        let mut process = AotProcess::new();
+        process.upsert_file("length_fields.stasis", STRUCT_LENGTH_FIELDS_FIXTURE);
+        process.compile().expect("compile struct length fixture");
+        let function_object = File::parse(
+            process
+                .object_bytes
+                .first()
+                .expect("compiled function object")
+                .as_slice(),
+        )
+        .expect("parse function object");
+        let imported_symbols: BTreeSet<String> = function_object
+            .symbols()
+            .filter(|symbol| symbol.is_undefined())
+            .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+            .collect();
+        let (bytes, _) = process
+            .compile_standalone_storage_object("aot_fn_0")
+            .expect("storage object")
+            .expect("storage required");
+        let object = File::parse(bytes.as_slice()).expect("parse storage object");
+        let symbols: BTreeSet<String> = object
+            .symbols()
+            .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+            .collect();
+
+        for expected in [
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "fixed_walls.length", ""),
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "fixed_walls.max_length", ""),
+            aot_storage_symbol(AotStorageSymbolKind::Array, "fixed_walls", "length"),
+            aot_storage_symbol(
+                AotStorageSymbolKind::Scalar,
+                "generic_walls.runs.length",
+                "",
+            ),
+            aot_storage_symbol(
+                AotStorageSymbolKind::Scalar,
+                "generic_walls.runs.max_length",
+                "",
+            ),
+            aot_storage_symbol(AotStorageSymbolKind::Array, "generic_walls.runs", "length"),
+        ] {
+            assert!(
+                imported_symbols.contains(&expected),
+                "function object missing namespaced storage import '{expected}': {imported_symbols:?}"
+            );
+            assert!(
+                symbols.contains(&expected),
+                "storage object missing namespaced symbol '{expected}': {symbols:?}"
+            );
+        }
+        assert!(
+            !symbols.contains("fixed_walls__length"),
+            "legacy flattened name must not be emitted"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn standalone_aot_struct_length_fields_link_and_execute() {
+        let mut process = AotProcess::new();
+        process.upsert_file("length_fields.stasis", STRUCT_LENGTH_FIELDS_FIXTURE);
+        process.compile().expect("compile struct length fixture");
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            eprintln!("skipping linked struct length fixture: no Windows linker found");
+            return;
+        };
+        let result =
+            run_linked_i32_noarg_fixture(&process, "main", "struct_length_fields", &link_config)
+                .expect("linked struct length fixture");
+        assert_eq!(result, 11, "fixed and generic struct length field result");
     }
 
     #[cfg(windows)]
