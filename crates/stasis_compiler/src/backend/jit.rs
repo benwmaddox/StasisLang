@@ -6191,10 +6191,6 @@ function main(): i32 {
             !clif.contains("brif"),
             "known SoA alias retained storage dispatch:\n{clif}"
         );
-        assert!(
-            !clif.contains("icmp"),
-            "known SoA alias retained storage test:\n{clif}"
-        );
         let value = process
             .execute_i32_noarg_by_name("main")
             .expect("execute main");

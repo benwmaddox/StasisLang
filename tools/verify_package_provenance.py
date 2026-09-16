@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 
 
 COMMAND_BUFFER_NAME = "gfx_cmd"
@@ -15,6 +16,7 @@ ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
 ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
 ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"
 ASSET_PACKAGE_IDENTITY_VERSION = 1
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -110,6 +112,122 @@ def validate_command_buffer(parser: argparse.ArgumentParser, manifest: dict) -> 
         f"expected current {CURRENT_COMMAND_BUFFER_VERSION}"
         + f", found {version!r}"
     )
+
+
+def validate_receipt_path(
+    parser: argparse.ArgumentParser, value: object, label: str
+) -> str:
+    if not isinstance(value, str) or not value or "\\" in value:
+        parser.error(f"desktop package provenance has invalid {label} path")
+    relative = pathlib.PurePosixPath(value)
+    if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != value:
+        parser.error(f"desktop package provenance has unsafe {label} path: {value!r}")
+    return value
+
+
+def validate_receipt_sha256(
+    parser: argparse.ArgumentParser, value: object, label: str
+) -> str:
+    if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
+        parser.error(f"desktop package provenance has invalid {label} sha256")
+    return value
+
+
+def validate_captured_input(
+    parser: argparse.ArgumentParser, value: object, label: str
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        parser.error(f"desktop package provenance has malformed {label} input")
+    validate_receipt_path(parser, value["path"], label)
+    validate_receipt_sha256(parser, value["sha256"], label)
+
+
+def validate_desktop_project_receipt(
+    parser: argparse.ArgumentParser,
+    value: object,
+    label: str,
+    package_root: pathlib.Path,
+) -> None:
+    expected = {
+        "manifest", "entry", "reachable_sources", "vendor", "captured_inputs"
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        parser.error(f"desktop package provenance has malformed {label} receipt")
+
+    manifest = value["manifest"]
+    if not isinstance(manifest, dict) or set(manifest) != {"path", "sha256"} \
+            or manifest.get("path") != "stasis.json":
+        parser.error(f"desktop package provenance has malformed {label} manifest")
+    manifest_sha256 = validate_receipt_sha256(
+        parser, manifest["sha256"], f"{label} manifest"
+    )
+    manifest_path = package_root / manifest["path"]
+    if not manifest_path.is_file():
+        parser.error(
+            f"desktop package provenance {label} manifest is missing: {manifest_path}"
+        )
+    actual_manifest_sha256 = sha256(manifest_path)
+    if actual_manifest_sha256 != manifest_sha256:
+        parser.error(
+            f"desktop package provenance {label} manifest hash mismatch: "
+            f"expected {manifest_sha256}, found {actual_manifest_sha256}"
+        )
+
+    entry = value["entry"]
+    if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+        parser.error(f"desktop package provenance has malformed {label} entry")
+    entry_path = validate_receipt_path(parser, entry["path"], f"{label} entry")
+    entry_sha256 = validate_receipt_sha256(
+        parser, entry["sha256"], f"{label} entry"
+    )
+
+    sources = value["reachable_sources"]
+    if not isinstance(sources, dict) or not sources:
+        parser.error(f"desktop package provenance has no {label} reachable sources")
+    for path, digest in sources.items():
+        validate_receipt_path(parser, path, f"{label} source")
+        validate_receipt_sha256(parser, digest, f"{label} source")
+    if sources.get(entry_path) != entry_sha256:
+        parser.error(
+            f"desktop package provenance {label} entry does not match reachable sources"
+        )
+
+    vendor = value["vendor"]
+    if vendor is not None:
+        vendor_keys = {"release_id", "recorded_sha256", "actual_sha256"}
+        if not isinstance(vendor, dict) or set(vendor) != vendor_keys \
+                or not isinstance(vendor.get("release_id"), str) \
+                or not vendor["release_id"]:
+            parser.error(f"desktop package provenance has malformed {label} vendor")
+        validate_receipt_sha256(
+            parser, vendor["recorded_sha256"], f"{label} recorded vendor"
+        )
+        validate_receipt_sha256(
+            parser, vendor["actual_sha256"], f"{label} actual vendor"
+        )
+
+    captured = value["captured_inputs"]
+    captured_keys = {"assets", "data", "entry_support"}
+    if not isinstance(captured, dict) or set(captured) != captured_keys:
+        parser.error(f"desktop package provenance has malformed {label} captured inputs")
+    for name in sorted(captured_keys):
+        validate_captured_input(parser, captured[name], f"{label} {name}")
+
+
+def validate_desktop_package_receipt(
+    parser: argparse.ArgumentParser, value: object, package_root: pathlib.Path
+) -> None:
+    if not isinstance(value, dict) or set(value) != {"project", "network_guest"}:
+        parser.error("desktop package provenance receipt is malformed")
+    validate_desktop_project_receipt(
+        parser, value["project"], "project", package_root
+    )
+    if value["network_guest"] is not None:
+        validate_desktop_project_receipt(
+            parser, value["network_guest"], "network guest", package_root
+        )
 
 
 def verify_mobile_shells(
@@ -263,6 +381,7 @@ def main() -> int:
     parser.add_argument("--release-root", required=True, type=pathlib.Path)
     parser.add_argument("--package-root", required=True, type=pathlib.Path)
     parser.add_argument("--expect-runtime-sources", action="store_true")
+    parser.add_argument("--expect-desktop-package", action="store_true")
     args = parser.parse_args()
 
     release = json.loads(
@@ -273,7 +392,20 @@ def main() -> int:
     )
     validate_command_buffer(parser, release)
     validate_command_buffer(parser, packaged)
-    if release != packaged:
+    packaged_release = dict(packaged)
+    desktop_package_missing = object()
+    desktop_package = packaged_release.pop(
+        "desktop_package", desktop_package_missing
+    )
+    if args.expect_desktop_package:
+        if desktop_package is desktop_package_missing:
+            parser.error("packaged provenance is missing desktop package receipt")
+        validate_desktop_package_receipt(
+            parser, desktop_package, args.package_root
+        )
+    elif desktop_package is not desktop_package_missing:
+        parser.error("packaged provenance unexpectedly contains desktop package receipt")
+    if release != packaged_release:
         parser.error("packaged provenance does not exactly match the release manifest")
     verify_asset_package_identities(parser, args.package_root)
     verify_network_guest_bundles(parser, args.package_root)
