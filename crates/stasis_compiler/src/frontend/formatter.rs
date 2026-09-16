@@ -1154,6 +1154,33 @@ mod tests {
     }
 
     #[test]
+    fn preserves_effects_and_string_results_on_specialized_tests() {
+        let source = "test @effects(state.enemies,state.projectiles)`damage resolves`():string{if(false){return \"damage should resolve\";}return \"\";}";
+        let formatted = format_source(source).expect("format test");
+        assert_eq!(format_source(&formatted).expect("reformat test"), formatted);
+        for text in [source, formatted.as_str()] {
+            let (lowered, tests) = super::super::parser::rewrite_top_level_test_declarations(text)
+                .expect("test remains a valid specialized function");
+            assert_eq!(tests[0].display_name, "damage resolves");
+            assert_eq!(tests[0].return_type_name, "string");
+            let functions = super::super::parser::parse_top_level_functions(&lowered).unwrap();
+            let effects = functions[0]
+                .annotations
+                .iter()
+                .find(|a| a.name == "effects")
+                .unwrap();
+            assert_eq!(
+                effects
+                    .arguments
+                    .iter()
+                    .map(|a| a.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["state.enemies", "state.projectiles"]
+            );
+        }
+    }
+
+    #[test]
     fn formats_nested_generic_angles_and_inferred_calls_without_touching_comparisons() {
         let source = "struct Buffer<T:type,N:i32>{values:T[N];} function clear(value:Buffer<Buffer<T,N>>):void{return;} function main():void{clear(buffer);if(1<2){return;}}";
         let formatted = format_source(source).expect("format generics");

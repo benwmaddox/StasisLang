@@ -28,6 +28,7 @@ Each page solves one system problem for one style of game.
 
 ## Focused references
 
+- [Focused behavioral tests](testing.md)
 - [Geometry and collision](geometry-and-collision.md)
 - [Loading screens around asset IO](loading-screens.md)
 - [Semantic edit and validation](semantic-edit-and-validation.md)

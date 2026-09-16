@@ -2192,6 +2192,42 @@ impl JitProcess {
         stasis_dynload::stasis_jit_global_i32_store(hash_global_path(path), value);
     }
 
+    pub fn execute_string_noarg_by_name(&self, name: &str) -> Result<String, String> {
+        let function = self.unique_function_by_name(name)?;
+        let types = self
+            .program_snapshot
+            .as_ref()
+            .expect("validated compiled program")
+            .types();
+        if types
+            .type_info(function.return_type)
+            .map(|info| info.category)
+            != Some(TypeCategory::Utf8View)
+            || !function.params.is_empty()
+        {
+            return Err(format!(
+                "function '{name}' is not a no-argument string function"
+            ));
+        }
+        let artifact = self
+            .artifact_for_function_id(function.id)
+            .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
+        let handle = stasis_dynload::invoke_noarg_i32(artifact.code_ptr as usize)?;
+        stasis_dynload::jit_string_value(handle)
+    }
+
+    /// Execute either supported test contract and return an optional failure message.
+    pub fn execute_test_noarg_by_name(&self, name: &str) -> Result<Option<String>, String> {
+        let function = self.unique_function_by_name(name)?;
+        if function.return_type == TYPE_ID_BOOL {
+            return self
+                .execute_bool_noarg_by_name(name)
+                .map(|passed| (!passed).then(|| "returned false".to_string()));
+        }
+        self.execute_string_noarg_by_name(name)
+            .map(|message| (!message.is_empty()).then_some(message))
+    }
+
     pub fn execute_bool_noarg_by_name(&self, name: &str) -> Result<bool, String> {
         let function = self
             .compiler
@@ -5528,6 +5564,87 @@ function main(): i32 {
     }
 
     #[cfg(windows)]
+    #[test]
+    fn jit_process_executes_bool_and_owned_string_test_results() {
+        let mut process = JitProcess::new();
+        let source = r#"global message: utf8[16];
+function helper(): string { return "échec 東京"; }
+test `empty`(): string { return ""; }
+test `unicode`(): string { return helper(); }
+test `computed`(): string { message[0] = 98; message[1] = 97; message[2] = 100; message.length = 3; return message; }
+test `boolean pass`(): bool { return true; }
+test `boolean fail`(): bool { return false; }
+"#;
+        let (lowered, tests) =
+            crate::frontend::parser::rewrite_top_level_test_declarations(source).unwrap();
+        process.set_required_emit_roots(
+            &tests
+                .iter()
+                .map(|test| test.generated_function_name.clone())
+                .collect::<Vec<_>>(),
+        );
+        process.upsert_file("results.stasis", lowered);
+        process.compile().expect("compile results");
+        let results = tests
+            .iter()
+            .map(|test| {
+                process
+                    .execute_test_noarg_by_name(&test.generated_function_name)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results,
+            vec![
+                None,
+                Some("échec 東京".to_string()),
+                Some("bad".to_string()),
+                None,
+                Some("returned false".to_string())
+            ]
+        );
+        assert!(process
+            .execute_string_noarg_by_name(&tests[3].generated_function_name)
+            .is_err());
+    }
+
+    #[test]
+    fn jit_process_enforces_transitive_effects_on_specialized_tests() {
+        let mut process = JitProcess::new();
+        let source = "struct State { value: i32; } global state: State; function leaf(): void { state.value += 1; } function middle(): void { leaf(); } test @effects() `restricted`(): bool { middle(); return true; }";
+        let (lowered, tests) =
+            crate::frontend::parser::rewrite_top_level_test_declarations(source).unwrap();
+        process.set_required_emit_roots(&[tests[0].generated_function_name.clone()]);
+        process.upsert_file("effects.stasis", lowered);
+        let error = process
+            .compile()
+            .expect_err("transitive mutation violates empty effects");
+        let diagnostic = process.last_source_diagnostic().expect("effect diagnostic");
+        assert_eq!(diagnostic.symbol, tests[0].generated_function_name);
+        assert!(
+            diagnostic.message.contains("rejects write 'state.value'"),
+            "{error:?}"
+        );
+        assert!(
+            diagnostic.message.contains(" -> middle -> leaf"),
+            "{error:?}"
+        );
+        let allowed = source.replace("@effects()", "@effects(state.value)");
+        let (lowered, tests) =
+            crate::frontend::parser::rewrite_top_level_test_declarations(&allowed).unwrap();
+        process.upsert_file("effects.stasis", lowered);
+        process.set_required_emit_roots(&[tests[0].generated_function_name.clone()]);
+        process
+            .compile()
+            .expect("declared narrow region allows transitive write");
+        assert_eq!(
+            process
+                .execute_test_noarg_by_name(&tests[0].generated_function_name)
+                .unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn jit_process_indexes_ascii_string_literal_view_bytes() {
         let mut process = JitProcess::new();

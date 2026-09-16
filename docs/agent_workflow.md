@@ -112,6 +112,48 @@ For related changes, submit one atomic batch with `stasis symbol apply --request
 The compiler plans the entire batch, reconciles imports, compiles it, runs project tests, and
 rolls every touched file back on failure. Do not use `--no-tests` unless the user explicitly asks.
 
+## Testing standard
+
+Read `vendor/stasis/docs/testing.md` for the standard and the selected toolchain's
+language support. For gameplay and system tests, use:
+
+```text
+setup known state -> perform the real action -> advance deterministically -> observe
+```
+
+Setup may directly construct minimal state. After setup, exercise the actual
+system path rather than write the expected result. Prefer small receiver-form
+helpers over repeated setup when they clarify behavior; keep only handles,
+indexes, initial comparison values, and small bookkeeping in scenario structs.
+
+Use the narrowest practical `@effects(...)` contracts on tests and helpers.
+Prefer `@effects()` for read-only observations
+and pure calculations. The outer test contract constrains the complete call
+tree; helper contracts add local guarantees. Tests are specialized parameterless
+functions and use ordinary attributes, body semantics, and compile-time checking.
+
+For string-result tests, report the first violated behavior explicitly:
+
+```stasis
+if (condition_is_wrong) {
+    return "describe the violated behavior";
+}
+return "";
+```
+
+An empty string means success. For bool tests, return `true` for success
+and `false` for failure. Test transitions, boundaries, ordering, one-time actions,
+idempotence, tie-breaking, capacity, and preservation after rejected actions.
+Prefer semantic expectations over incidental positions, counters, or indexes.
+Assert exact values when cost, damage, reward, duration, capacity, or the exact
+boundary tick is the rule. Define simulation steps as exact authoritative updates;
+use complete tick tooling when input edges or host lifecycle work are relevant.
+
+This gives agents and humans explicit starting conditions, a small vocabulary,
+deterministic completion conditions, compiler-enforced effect boundaries, and
+useful failure feedback. Keep tests focused and avoid a mandatory assertion
+framework or a generic scenario DSL.
+
 ## Prove behavior
 
 - For deterministic logic, add or update a real `.test.stasis` regression test. When practical,
