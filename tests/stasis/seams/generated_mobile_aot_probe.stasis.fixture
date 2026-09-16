@@ -1,5 +1,8 @@
 import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
 
+struct WallRun { x: i32; length: i32; }
+struct WallCache<N: i32> { runs: WallRun[N]; }
+
 global score: i32;
 global lifecycle_mode: i32;
 global entry_trace: i32;
@@ -7,6 +10,8 @@ global tick_host_marker: i32;
 global render_score: i32;
 global forwarded_byte_length: i32;
 global forwarded_char_length: i32;
+global fixed_walls: WallRun[2];
+global generic_walls: WallCache<2>;
 
 function emit_text_leaf(text: utf8[]): void {
     forwarded_byte_length = length_bytes(text);
@@ -25,6 +30,8 @@ function emit_text_outer(text: utf8[]): void {
 function main(): i32 {
     entry_trace = 1;
     score = 10;
+    fixed_walls[0].length = 3;
+    generic_walls.runs[0].length = 4;
     if (lifecycle_mode == 1) {
         return 11;
     }
@@ -33,7 +40,12 @@ function main(): i32 {
 
 function tick(): i32 {
     entry_trace = entry_trace * 10 + 2;
-    tick_host_marker = host_i32[100];
+    tick_host_marker = host_i32[100]
+        + fixed_walls.max_length
+        + generic_walls.runs.max_length
+        + fixed_walls[0].length
+        + generic_walls.runs[0].length
+        - 11;
     score += 5;
     if (lifecycle_mode == 2) {
         return 22;

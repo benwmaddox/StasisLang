@@ -3,7 +3,9 @@ use sha2::{Digest, Sha256};
 use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
-use stasis_compiler::backend::state_layout::StateLayout;
+use stasis_compiler::backend::state_layout::{
+    aot_storage_symbol, AotStorageSymbolKind, StateLayout,
+};
 use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
 use stasis_jit::{
     link_objects_to_dynamic_library, link_objects_to_executable, AotCompileConfig, AotLinkConfig,
@@ -411,6 +413,8 @@ struct PackagedRuntimeField {
     initial_value: Option<serde_json::Value>,
     collection_path: Option<String>,
     collection_field: Option<String>,
+    /// Original state path used for runtime hashes; `name` is a C symbol.
+    runtime_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2425,6 +2429,7 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
                         .as_ref()
                         .map(|table| format!("{}.{}", meta.global_name, table.rows_path)),
                     collection_field,
+                    runtime_path: None,
                 };
                 if let Some(existing) = out.get(&field_name) {
                     if existing != &next {
@@ -2451,6 +2456,7 @@ fn collect_struct_meta_fields(root: &Path) -> Result<Vec<PackagedRuntimeField>, 
                     initial_value,
                     collection_path: None,
                     collection_field: None,
+                    runtime_path: None,
                 };
                 if let Some(existing) = out.get(&field_name) {
                     if existing != &next {
@@ -2776,13 +2782,14 @@ fn state_layout_runtime_fields(
         });
         let storage_type_name = scalar.storage_type_name();
         fields.push(PackagedRuntimeField {
-            name: scalar.path.replace('.', "__"),
+            name: aot_storage_symbol(AotStorageSymbolKind::Scalar, &scalar.path, ""),
             size: field_width(storage_type_name)?,
             field_type: storage_type_name.to_string(),
             array_count: 1,
             initial_value,
             collection_path: None,
             collection_field: None,
+            runtime_path: Some(scalar.path.clone()),
         });
     }
     for collection in &layout.collections {
@@ -2798,15 +2805,8 @@ fn state_layout_runtime_fields(
         for field in &collection.fields {
             let storage_type_name = field.storage_type_name();
             let width = field_width(storage_type_name)?;
-            let name = if field.field.is_empty() {
-                collection.path.replace('.', "__")
-            } else {
-                format!(
-                    "{}__{}",
-                    collection.path.replace('.', "__"),
-                    field.field.replace('.', "__")
-                )
-            };
+            let name =
+                aot_storage_symbol(AotStorageSymbolKind::Array, &collection.path, &field.field);
             fields.push(PackagedRuntimeField {
                 name,
                 size: width.checked_mul(array_count).ok_or_else(|| {
@@ -2817,6 +2817,7 @@ fn state_layout_runtime_fields(
                 initial_value: None,
                 collection_path: Some(collection.path.clone()),
                 collection_field: (!field.field.is_empty()).then(|| field.field.clone()),
+                runtime_path: Some(collection.path.clone()),
             });
         }
     }
@@ -2927,7 +2928,10 @@ fn append_runtime_bridge_field_source(
         Ok(format!("{value:.17}{suffix}"))
     }
 
-    let runtime_path = field.name.replace("__", ".");
+    let runtime_path = field
+        .runtime_path
+        .clone()
+        .unwrap_or_else(|| field.name.replace("__", "."));
     let scalar_hash = crate::hash_global_path(&runtime_path);
     let collection_hash = field
         .collection_path
@@ -3303,6 +3307,70 @@ STASIS_EXPORT int32_t host_req_flags = 0;\n\
 STASIS_EXPORT int32_t host_req_window_w_px = 0;\n\
 STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
     );
+
+    // AOT objects use kind-qualified storage names. Keep the legacy bridge
+    // exports as aliases because the desktop runner discovers these buffers
+    // by their original names.
+    let bridge_storage_aliases = [
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "host_i32", ""),
+            "host_i32",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "host_f32", ""),
+            "host_f32",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_i32", ""),
+            "gfx_cmd_i32",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_f32", ""),
+            "gfx_cmd_f32",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_u8", ""),
+            "gfx_cmd_u8",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_seq", ""),
+            "host_req_seq",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_flags", ""),
+            "host_req_flags",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_window_w_px", ""),
+            "host_req_window_w_px",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_window_h_px", ""),
+            "host_req_window_h_px",
+        ),
+    ];
+    let use_msvc_aliases = matches!(target, stasis_jit::AotTarget::Native) && cfg!(windows);
+    let use_darwin_aliases = matches!(target, stasis_jit::AotTarget::IosArm64)
+        || (matches!(target, stasis_jit::AotTarget::Native) && cfg!(target_os = "macos"));
+    if use_msvc_aliases {
+        for (qualified, legacy) in &bridge_storage_aliases {
+            source.push_str(&format!(
+                "#pragma comment(linker, \"/alternatename:{qualified}={legacy}\")\n"
+            ));
+        }
+    } else if use_darwin_aliases {
+        for (qualified, legacy) in &bridge_storage_aliases {
+            source.push_str(&format!(
+                "__asm__(\".globl _{qualified}\\n_{qualified} = _{legacy}\");\n"
+            ));
+        }
+    } else {
+        for (qualified, legacy) in &bridge_storage_aliases {
+            source.push_str(&format!(
+                "extern __typeof__({legacy}) {qualified} __attribute__((alias(\"{legacy}\")));\n"
+            ));
+        }
+    }
 
     let mut register_lines = vec![
         format!(
@@ -5336,14 +5404,70 @@ mod tests {
         let (source, register_lines) =
             build_aot_direct_storage_source(&layout).expect("build enum storage source");
 
-        assert!(source.contains("STASIS_EXPORT int32_t game__phase = 0;"));
-        assert!(source.contains("STASIS_EXPORT int32_t game__samples[2] = {0};"));
+        assert!(source.contains("STASIS_EXPORT int32_t stasis_state_scalar__game__phase = 0;"));
+        assert!(
+            source.contains("STASIS_EXPORT int32_t stasis_state_array__game__samples[2] = {0};")
+        );
         assert!(register_lines
             .iter()
             .any(|line| line.contains("stasis_jit_register_global_i32_ptr")));
         assert!(register_lines
             .iter()
             .any(|line| line.contains("stasis_jit_register_global_i32_array")));
+    }
+
+    #[test]
+    fn aot_direct_storage_source_separates_collection_metadata_and_field_symbols() {
+        let layout = StateLayout {
+            scalars: vec![
+                stasis_compiler::backend::state_layout::StateScalarLayout {
+                    path: "game.walls.length".to_string(),
+                    type_name: "i32".to_string(),
+                    storage_type_name: "i32".to_string(),
+                },
+                stasis_compiler::backend::state_layout::StateScalarLayout {
+                    path: "game.walls.max_length".to_string(),
+                    type_name: "i32".to_string(),
+                    storage_type_name: "i32".to_string(),
+                },
+            ],
+            collections: vec![
+                stasis_compiler::backend::state_layout::StateCollectionLayout {
+                    path: "game.walls".to_string(),
+                    capacity: 2,
+                    element_shape: "WallRun".to_string(),
+                    fully_migratable: false,
+                    fields: vec![
+                        stasis_compiler::backend::state_layout::StateCollectionFieldLayout {
+                            field: "length".to_string(),
+                            type_name: "i32".to_string(),
+                            storage_type_name: "i32".to_string(),
+                        },
+                    ],
+                },
+            ],
+            structs: Vec::new(),
+            opaque: Vec::new(),
+        };
+
+        let (source, register_lines) =
+            build_aot_direct_storage_source(&layout).expect("build length storage source");
+        assert!(
+            source.contains("STASIS_EXPORT int32_t stasis_state_scalar__game__walls__length = 0;")
+        );
+        assert!(source
+            .contains("STASIS_EXPORT int32_t stasis_state_scalar__game__walls__max_length = 2;"));
+        assert!(source
+            .contains("STASIS_EXPORT int32_t stasis_state_array__game__walls__length[2] = {0};"));
+        assert!(register_lines.iter().any(|line| {
+            line.contains("stasis_jit_register_global_i32_ptr")
+                && line.contains(&crate::hash_global_path("game.walls.length").to_string())
+        }));
+        assert!(register_lines.iter().any(|line| {
+            line.contains("stasis_jit_register_global_i32_array")
+                && line.contains(&crate::hash_global_path("game.walls").to_string())
+                && line.contains(&crate::hash_global_path("length").to_string())
+        }));
     }
 
     #[test]
@@ -5357,6 +5481,7 @@ mod tests {
                 initial_value: Some(serde_json::json!(255)),
                 collection_path: None,
                 collection_field: None,
+                runtime_path: None,
             },
             PackagedRuntimeField {
                 name: "word_values".to_string(),
@@ -5366,6 +5491,7 @@ mod tests {
                 initial_value: Some(serde_json::json!([1, 65535])),
                 collection_path: Some("word_values".to_string()),
                 collection_field: Some(String::new()),
+                runtime_path: None,
             },
             PackagedRuntimeField {
                 name: "wide_value".to_string(),
@@ -5375,6 +5501,7 @@ mod tests {
                 initial_value: Some(serde_json::json!(4294967295_u64)),
                 collection_path: None,
                 collection_field: None,
+                runtime_path: None,
             },
         ];
         let source = build_engine_bundle_runtime_bridge_source(
@@ -5395,6 +5522,90 @@ mod tests {
         assert!(source.contains("stasis_jit_register_global_u8_array"));
         assert!(source.contains("stasis_jit_register_global_u16_array"));
         assert!(source.contains("(int32_t*)&wide_value"));
+    }
+
+    #[test]
+    fn packaged_runtime_bridge_aliases_kind_qualified_bridge_storage() {
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::Native,
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+        )
+        .expect("build runtime bridge");
+        let aliases = [
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "host_i32", ""),
+                "host_i32",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "host_f32", ""),
+                "host_f32",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_i32", ""),
+                "gfx_cmd_i32",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_f32", ""),
+                "gfx_cmd_f32",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_u8", ""),
+                "gfx_cmd_u8",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_seq", ""),
+                "host_req_seq",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_flags", ""),
+                "host_req_flags",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_window_w_px", ""),
+                "host_req_window_w_px",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_window_h_px", ""),
+                "host_req_window_h_px",
+            ),
+        ];
+        for (qualified, legacy) in aliases {
+            let expected = if cfg!(windows) {
+                format!("#pragma comment(linker, \"/alternatename:{qualified}={legacy}\")")
+            } else if cfg!(target_os = "macos") {
+                format!("__asm__(\".globl _{qualified}\\n_{qualified} = _{legacy}\");")
+            } else {
+                format!(
+                    "extern __typeof__({legacy}) {qualified} __attribute__((alias(\"{legacy}\")));"
+                )
+            };
+            assert!(
+                source.contains(&expected),
+                "missing bridge alias {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn packaged_runtime_bridge_aliases_ios_use_macho_assembly() {
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::ios_arm64_default(),
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+        )
+        .expect("build iOS runtime bridge");
+        let qualified = aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_i32", "");
+        assert!(source.contains(&format!(
+            "__asm__(\".globl _{qualified}\\n_{qualified} = _gfx_cmd_i32\");"
+        )));
+        assert!(!source.contains("__attribute__((alias"));
     }
 
     #[test]
@@ -5640,6 +5851,7 @@ mod tests {
             initial_value: Some(serde_json::json!([70, 110, 85])),
             collection_path: None,
             collection_field: None,
+            runtime_path: None,
         }];
         let source = build_engine_bundle_runtime_bridge_source(
             &stasis_jit::AotTarget::Native,
@@ -6643,9 +6855,14 @@ function render(): i32 {
             .expect("AOT lifecycle program snapshot");
         let runtime_fields = merge_runtime_fields(snapshot.state_layout(), &[])
             .expect("derive AOT lifecycle runtime fields");
-        assert!(runtime_fields
-            .iter()
-            .any(|field| field.name == "gfx_sprite_writer_frame_generation"));
+        assert!(runtime_fields.iter().any(|field| {
+            field.name
+                == aot_storage_symbol(
+                    AotStorageSymbolKind::Scalar,
+                    "gfx_sprite_writer_frame_generation",
+                    "",
+                )
+        }));
         let function_symbols = manifest
             .functions
             .iter()
