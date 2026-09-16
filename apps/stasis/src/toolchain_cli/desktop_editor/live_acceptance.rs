@@ -720,6 +720,53 @@ fn approved_models_from_manifest(manifest: &Value) -> Result<Vec<String>, String
 }
 
 #[cfg(target_os = "windows")]
+fn resolved_models_for_task(
+    usage_records: &[Value],
+    task_id: &str,
+    approved_models: &[String],
+) -> Result<Vec<String>, String> {
+    let mut resolved_models = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (record_index, record) in usage_records.iter().enumerate() {
+        if record.get("task_id").and_then(Value::as_str) != Some(task_id) {
+            continue;
+        }
+        let usage = record
+            .get("usage")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                format!("provider usage record {record_index} for {task_id} has no usage evidence")
+            })?;
+        let resolved_model = usage
+            .get("resolved_model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "provider usage record {record_index} for {task_id} has no resolved_model evidence"
+                )
+            })?;
+        if !approved_models
+            .iter()
+            .any(|approved_model| approved_model == resolved_model)
+        {
+            return Err(format!(
+                "provider usage record {record_index} for {task_id} resolved model {resolved_model:?} outside the workspace approved_models list"
+            ));
+        }
+        if seen.insert(resolved_model.to_string()) {
+            resolved_models.push(resolved_model.to_string());
+        }
+    }
+    if resolved_models.is_empty() {
+        return Err(format!(
+            "provider usage has no transport evidence for {task_id}"
+        ));
+    }
+    Ok(resolved_models)
+}
+
+#[cfg(target_os = "windows")]
 fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
     std::fs::create_dir_all(target)
         .map_err(|error| format!("create disposable directory: {error}"))?;
@@ -1181,18 +1228,26 @@ impl LiveAcceptanceApp {
             first.provider.model.as_deref().unwrap_or("unknown"),
             second.provider.model.as_deref().unwrap_or("unknown"),
             self.warmup_ms,
-            self.first_action_ms("task-1").map_or_else(|| "unavailable".to_string(), |value| value.to_string()),
+            self.first_action_ms("task-1")
+                .map_or_else(|| "unavailable".to_string(), |value| value.to_string()),
             first.metrics.elapsed_ms,
             first.metrics.input_tokens,
             first.metrics.output_tokens,
             first.metrics.estimated_cost_micros as f64 / 1_000_000.0,
-            self.apply_wall_ms.get("task-1").copied().unwrap_or_default(),
-            self.first_action_ms("task-2").map_or_else(|| "unavailable".to_string(), |value| value.to_string()),
+            self.apply_wall_ms
+                .get("task-1")
+                .copied()
+                .unwrap_or_default(),
+            self.first_action_ms("task-2")
+                .map_or_else(|| "unavailable".to_string(), |value| value.to_string()),
             second.metrics.elapsed_ms,
             second.metrics.input_tokens,
             second.metrics.output_tokens,
             second.metrics.estimated_cost_micros as f64 / 1_000_000.0,
-            self.apply_wall_ms.get("task-2").copied().unwrap_or_default(),
+            self.apply_wall_ms
+                .get("task-2")
+                .copied()
+                .unwrap_or_default(),
         );
         std::fs::write(self.output.join("report.md"), markdown)
             .map_err(|error| format!("write report markdown: {error}"))?;
@@ -1217,20 +1272,8 @@ impl LiveAcceptanceApp {
         {
             return Err("approved-model task did not preserve its applied edit".into());
         }
-        let resolved_model =
-            task.provider.model.as_deref().ok_or_else(|| {
-                "approved-model task did not record its resolved model".to_string()
-            })?;
-        if resolved_model != self.model
-            || !self
-                .approved_models
-                .iter()
-                .any(|model| model == resolved_model)
-        {
-            return Err(
-                "provider resolved a model outside the workspace approved_models list".into(),
-            );
-        }
+        let resolved_models =
+            resolved_models_for_task(&self.usage_records, task.id.as_str(), &self.approved_models)?;
         if !task.screenshots.is_empty() {
             return Err("approved-model-only task unexpectedly sent image evidence".into());
         }
@@ -1271,7 +1314,8 @@ impl LiveAcceptanceApp {
             "result": "passed",
             "mode": "approved_model_only",
             "provider": "openrouter",
-            "selected_model": resolved_model,
+            "selected_model": self.model,
+            "resolved_models": resolved_models,
             "workspace_approved_models": self.approved_models,
             "model_was_approved": true,
             "image_input_sent": false,
@@ -1299,15 +1343,26 @@ impl LiveAcceptanceApp {
                 .map_err(|error| format!("serialize report: {error}"))?,
         )
         .map_err(|error| format!("write report JSON: {error}"))?;
+        let resolved_models_text = resolved_models
+            .iter()
+            .map(|model| format!("`{model}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let markdown = format!(
-            "# Task 566 approved-model-only live acceptance\n\nOne semantic task ran through the native desktop editor against a disposable running Asset Breakout workspace using OpenRouter model `{resolved_model}`, selected directly from `stasis.json`. No image was attached and no alternate image model was selected. The editor automatically published the reviewed semantic edit, requested a live swap, ran focused tests, and displayed the final passing result.\n\n- Playable warmup: {} ms.\n- First action: {} ms; provider total {} ms, {} input tokens, {} output tokens, ${:.6}; automatic apply/test receipt {} ms.\n- State preservation: one runtime session spans the generation advance; paused tick, `paddle_x`, `bricks_left`, and asset-loader health are unchanged.\n- Final user feedback: Applied / tests passed; {}.\n- Visual evidence: `first-proposal.png`, `final-editor.png`, `editor-flow.mp4`, and `game-motion.mp4`.\n",
+            "# Task 566 approved-model-only live acceptance\n\nOne semantic task ran through the native desktop editor against a disposable running Asset Breakout workspace with OpenRouter model `{}` selected from `stasis.json`. Transport usage evidence recorded the approved model(s) {} across the provider turns. No image was attached and no alternate image model was selected. The editor automatically published the reviewed semantic edit, requested a live swap, ran focused tests, and displayed the final passing result.\n\n- Playable warmup: {} ms.\n- First action: {} ms; provider total {} ms, {} input tokens, {} output tokens, ${:.6}; automatic apply/test receipt {} ms.\n- State preservation: one runtime session spans the generation advance; paused tick, `paddle_x`, `bricks_left`, and asset-loader health are unchanged.\n- Final user feedback: Applied / tests passed; {}.\n- Visual evidence: `first-proposal.png`, `final-editor.png`, `editor-flow.mp4`, and `game-motion.mp4`.\n",
+            self.model,
+            resolved_models_text,
             self.warmup_ms,
-            self.first_action_ms("task-1").map_or_else(|| "unavailable".to_string(), |value| value.to_string()),
+            self.first_action_ms("task-1")
+                .map_or_else(|| "unavailable".to_string(), |value| value.to_string()),
             task.metrics.elapsed_ms,
             task.metrics.input_tokens,
             task.metrics.output_tokens,
             task.metrics.estimated_cost_micros as f64 / 1_000_000.0,
-            self.apply_wall_ms.get("task-1").copied().unwrap_or_default(),
+            self.apply_wall_ms
+                .get("task-1")
+                .copied()
+                .unwrap_or_default(),
             validation_summary,
         );
         std::fs::write(self.output.join("report.md"), markdown)
@@ -1888,6 +1943,18 @@ impl eframe::App for LiveAcceptanceApp {
 mod approved_model_harness_tests {
     use super::*;
 
+    fn usage_record(task_id: &str, resolved_model: Option<&str>) -> Value {
+        let usage = resolved_model.map_or_else(
+            || json!({}),
+            |model| {
+                json!({
+                    "resolved_model": model,
+                })
+            },
+        );
+        json!({"task_id": task_id, "usage": usage})
+    }
+
     #[test]
     fn approved_model_mode_selects_only_the_first_workspace_model() {
         let manifest = json!({
@@ -1913,6 +1980,73 @@ mod approved_model_harness_tests {
         ] {
             assert!(approved_models_from_manifest(&manifest).is_err());
         }
+    }
+
+    #[test]
+    fn approved_fallback_model_is_accepted_from_each_turns_transport_evidence() {
+        let approved = vec!["text/selected".to_string(), "text/fallback".to_string()];
+        let records = vec![
+            usage_record("task-1", Some("text/selected")),
+            usage_record("task-1", Some("text/fallback")),
+        ];
+
+        assert_eq!(
+            resolved_models_for_task(&records, "task-1", &approved).unwrap(),
+            ["text/selected", "text/fallback"]
+        );
+    }
+
+    #[test]
+    fn approved_model_mode_rejects_an_unapproved_later_turn() {
+        let approved = vec!["text/selected".to_string(), "text/fallback".to_string()];
+        let records = vec![
+            usage_record("task-1", Some("text/selected")),
+            usage_record("task-1", Some("text/unapproved")),
+        ];
+
+        assert!(resolved_models_for_task(&records, "task-1", &approved).is_err());
+    }
+
+    #[test]
+    fn approved_model_mode_fails_closed_without_usage_or_model_evidence() {
+        let approved = vec!["text/selected".to_string()];
+        for records in [
+            Vec::new(),
+            vec![json!({"task_id": "task-1"})],
+            vec![usage_record("task-1", None)],
+            vec![usage_record("task-1", Some("  "))],
+        ] {
+            assert!(resolved_models_for_task(&records, "task-1", &approved).is_err());
+        }
+    }
+
+    #[test]
+    fn approved_model_mode_reports_distinct_models_across_mixed_approved_turns() {
+        let approved = vec!["text/selected".to_string(), "text/fallback".to_string()];
+        let records = vec![
+            usage_record("task-1", Some("text/selected")),
+            usage_record("task-1", Some("text/fallback")),
+            usage_record("task-1", Some("text/selected")),
+        ];
+
+        assert_eq!(
+            resolved_models_for_task(&records, "task-1", &approved).unwrap(),
+            ["text/selected", "text/fallback"]
+        );
+    }
+
+    #[test]
+    fn approved_model_mode_ignores_unrelated_task_usage() {
+        let approved = vec!["text/selected".to_string()];
+        let records = vec![
+            usage_record("task-1", Some("text/selected")),
+            usage_record("task-2", Some("text/unapproved")),
+        ];
+
+        assert_eq!(
+            resolved_models_for_task(&records, "task-1", &approved).unwrap(),
+            ["text/selected"]
+        );
     }
 
     #[test]

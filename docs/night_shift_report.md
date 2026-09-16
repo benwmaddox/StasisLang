@@ -395,3 +395,11 @@ the required native desktop generation/import workflow.
 - Visual evidence: not applicable; test scheduling only.
 - Theory gained: correctness gates and timing reports have different execution contracts; the default skip and explicit successful run verify that separation.
 - Good: the benchmark remains available without ordinary CI cost. Bad: the blanket ignore audit conflicted with its intended opt-in status. Adjustment: keep the exception restricted to this named reporting benchmark.
+
+### PR 774 approved-model acceptance review
+
+- Validate each task turn's transport `resolved_model` against the workspace allowlist and report every distinct observed model separately from the configured selection. Approved fallback models pass; missing evidence or an unapproved later turn fails acceptance.
+- Validation: 8 focused harness tests, all 150 Windows desktop editor tests, and 67 ABI/host/roadmap/cache-policy tests passed. Rust formatting and diff checks passed. The repository script stopped on an existing evidence-file permissions error; its ABI check passed with a fresh report path (801 comparisons). Host execution resolved the desktop suite's evidence-file permissions failure. Local tests used the supported unsigned configuration because the optional development certificate was unavailable.
+- The credentialed OpenRouter live run remains unverified because no credential was configured.
+- Visual evidence: not applicable to this report-validation fix; no new graphical behavior.
+- Theory gained: configured model selection is request intent; task-scoped transport usage records describe execution across fallback and repair turns. Mixed-model and unapproved-later-turn tests verify this distinction.
