@@ -59,6 +59,12 @@ function render(): i32 {
         end_frame();
         return 0;
     }
+    if (render_mode == 7) {
+        begin_frame();
+        fill_rect(2.0, 3.0, 4.0, 5.0, 0.4, 0.5, 0.6, 1.0);
+        end_frame();
+        return 0;
+    }
     clear(0.1, 0.2, 0.3, 1.0);
     fill_rect(2.0, 3.0, 4.0, 5.0, 0.4, 0.5, 0.6, 1.0);
     draw_text(0, "x", 1.0, 2.0, 1.0, 1.0, 1.0, 1.0);
@@ -278,6 +284,15 @@ fn negotiated_render_entry_resets_once_and_requires_finished_publication() {
     assert_eq!(i32s[2], 2, "no-clear does not imply background replacement");
     assert_eq!(i32s[24], 1);
 
+    jit.execute_i32_onearg_by_name("set_render_mode", 7)
+        .expect("select nested manual begin");
+    assert_eq!(
+        stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr()),
+        Ok(0)
+    );
+    assert_eq!(i32s[2], 0, "nested manual begin aborts publication");
+    assert_eq!(i32s[24], 0, "nested manual begin discards geometry");
+
     let mut wasm = configured_wasm(FIXTURE_PATH, FIXTURE);
     wasm.compile()
         .expect("compile negotiated construction fixture for Wasm");
@@ -310,7 +325,7 @@ WebAssembly.instantiate(module, {env}).then(instance => {
     return [result, i32[2], i32[24], i32[10]];
   };
   i32[10] = 321;
-  process.stdout.write([run(0), run(1), run(2), run(3), run(4), run(5), run(6)].flat().join(','));
+  process.stdout.write([run(0), run(1), run(2), run(3), run(4), run(5), run(6), run(7)].flat().join(','));
 }).catch(error => { console.error(error); process.exit(1); });
 "#;
     let output = Command::new("node")
@@ -328,7 +343,7 @@ WebAssembly.instantiate(module, {env}).then(instance => {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "0,3,1,321,0,0,0,321,0,0,0,321,0,3,1,321,9,0,0,321,0,2,0,321,0,2,1,321"
+        "0,3,1,321,0,0,0,321,0,0,0,321,0,3,1,321,9,0,0,321,0,2,0,321,0,2,1,321,0,0,0,321"
     );
 }
 

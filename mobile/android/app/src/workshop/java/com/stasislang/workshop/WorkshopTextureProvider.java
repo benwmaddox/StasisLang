@@ -342,6 +342,21 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     public long cachedTextTextureFor(int runHandle) {
         ensureCurrentProject();
         TextTexture cached = textTextures.get(runHandle);
+        JSONObject resolved;
+        try {
+            resolved = new JSONObject(MainActivity.nativeResolveCachedText(
+                    activity.projectRootPath(), runHandle));
+            if (!"ok".equals(resolved.optString("status"))) {
+                throw new IOException(resolved.optString("error", "cached text resolution failed"));
+            }
+        } catch (Exception error) {
+            if (cached != null) {
+                textTextures.remove(runHandle);
+                deleteTexture(cached.texture);
+            }
+            recordFailure("cached_text", runHandle, "<resolved-cached-text>", 0, 0, error);
+            return 0L;
+        }
         if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)) {
             return StasisPreviewRenderer.packTexture(
                 cached.texture, cached.width, cached.height);
@@ -350,11 +365,6 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         if (deferRestoreResource()) return 0L;
         try {
             long rasterStarted = System.nanoTime();
-            JSONObject resolved = new JSONObject(MainActivity.nativeResolveCachedText(
-                    activity.projectRootPath(), runHandle));
-            if (!"ok".equals(resolved.optString("status"))) {
-                throw new IOException(resolved.optString("error", "cached text resolution failed"));
-            }
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
             paint.setColor(0xffffffff);
             paint.setTextSize(resolved.getInt("font_size") * rasterScale);
@@ -405,6 +415,13 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     @Override
     public long textTextureFor(int font, ByteBuffer utf8, int offset, int length) {
         ensureCurrentProject();
+        final FontInfo resolvedFont;
+        try {
+            resolvedFont = fontInfo(font);
+        } catch (Exception error) {
+            recordFailure("text", font, "<resolved-font>", 0, 0, error);
+            return 0L;
+        }
         for (int index = 0; index < dynamicTextTextures.size(); index += 1) {
             DynamicTextTexture cached = dynamicTextTextures.get(index);
             if (cached.texture.matches(surfaceGeneration, rendererGeneration)
@@ -419,9 +436,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             if (dynamicTextTextures.size() >= 4096) throw new IOException("dynamic text cache is full");
             byte[] bytes = new byte[length];
             for (int index = 0; index < length; index += 1) bytes[index] = utf8.get(offset + index);
-            FontInfo fontInfo = fontInfo(font);
             TextTexture texture = rasterText(
-                    fontInfo, new String(bytes, StandardCharsets.UTF_8), rasterScale,
+                    resolvedFont, new String(bytes, StandardCharsets.UTF_8), rasterScale,
                     surfaceGeneration, rendererGeneration);
             long rasterBytes = (long)texture.rasterWidth * texture.rasterHeight * 4L;
             if (!hasTextCacheCapacity(rasterBytes)) {
@@ -430,7 +446,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             }
             dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
             if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
-                acceptanceSourceBytes += fontInfo.sourceBytes;
+                acceptanceSourceBytes += resolvedFont.sourceBytes;
                 acceptanceDecodeBytes += rasterBytes;
                 acceptanceUploadBytes += rasterBytes;
                 acceptanceTextureBytes += rasterBytes;
@@ -461,12 +477,13 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     private FontInfo fontInfo(int handle) throws Exception {
-        FontInfo cached = fonts.get(handle);
-        if (cached != null) return cached;
         JSONObject resolved = new JSONObject(MainActivity.nativeResolveFont(projectRootPath, handle));
         if (!"ok".equals(resolved.optString("status"))) {
+            invalidateFontCaches(handle);
             throw new IOException(resolved.optString("error", "font resolution failed"));
         }
+        FontInfo cached = fonts.get(handle);
+        if (cached != null) return cached;
         File fontFile = new File(resolved.getString("font_path"));
         cached = new FontInfo(Typeface.createFromFile(fontFile),
                 resolved.getInt("font_size"), fontFile.length());
@@ -478,6 +495,16 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             updateAcceptanceMaximums();
         }
         return cached;
+    }
+
+    private void invalidateFontCaches(int handle) {
+        fonts.remove(handle);
+        for (int index = dynamicTextTextures.size() - 1; index >= 0; index -= 1) {
+            DynamicTextTexture cached = dynamicTextTextures.get(index);
+            if (cached.font != handle) continue;
+            dynamicTextTextures.remove(index);
+            deleteTexture(cached.texture.texture);
+        }
     }
 
     private static TextTexture rasterText(FontInfo font, String text, float rasterScale,

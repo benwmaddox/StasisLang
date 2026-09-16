@@ -1,0 +1,9 @@
+struct TypeBox<T: type> {
+    value: T;
+}
+
+global invalid: TypeBox<4>;
+
+function main(): i32 {
+    return 0;
+}

@@ -5,6 +5,9 @@ use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::EngineEntrypoints;
 use stasis_compiler::compiler::CompileError;
 use stasis_compiler::frontend::module_graph::parse_imports;
+use stasis_compiler::frontend::parser::{
+    map_rewritten_test_range_to_original, rewrite_top_level_test_declarations,
+};
 use stasis_compiler::frontend::workshop::{
     find_workshop_symbols, load_workshop_edit_workspace, load_workshop_project,
     load_workshop_source_workspace, plan_workshop_semantic_edits, workshop_completion_items,
@@ -54,6 +57,7 @@ const LIVE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const LIVE_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_LIVE_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LIVE_CAPTURE_PIXELS: u64 = 16 * 1024 * 1024;
+const COMPILER_DIAGNOSTIC_PREFIX: &str = "__STASIS_COMPILER_DIAGNOSTIC__:";
 #[derive(Debug, Clone)]
 pub struct LiveRunConfig {
     pub project_root: PathBuf,
@@ -1406,6 +1410,13 @@ impl LiveWorkspace {
                     "code": diagnostic.code,
                     "source": diagnostic.source,
                     "message": diagnostic.message,
+                    "related": diagnostic.related.iter().map(|related| json!({
+                        "path": related.path,
+                        "start": related.range.start,
+                        "end": related.range.end,
+                        "symbol": related.symbol,
+                        "message": related.message,
+                    })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>()
             }),
         ))
@@ -1769,10 +1780,13 @@ impl LiveWorkspace {
             .take(limit)
             .map(|item| {
                 let mut value = json!({
+                    "symbol_id": item.symbol_id,
                     "kind": item.kind,
                     "name": item.name,
                     "file": item.file,
                     "signature": item.signature,
+                    "source_spans": item.source_spans,
+                    "generic_parameters": item.generic_parameters,
                 });
                 if let Some(owner) = &item.owner {
                     value["owner"] = Value::String(owner.clone());
@@ -2038,7 +2052,7 @@ impl LiveWorkspace {
         let mut prepared = match result {
             Ok(prepared) => prepared,
             Err(error) => {
-                return Some(LiveResponse::failure(preparation.request_id, tick, error));
+                return Some(live_error_response(preparation.request_id, tick, error));
             }
         };
         finalize_runtime_preview(&prepared.candidate, &mut prepared.swap_preview);
@@ -2852,18 +2866,130 @@ fn plan_live_edit(
         }
         target.file = Some(matches[0].file.clone());
     }
-    plan_workshop_semantic_edits(
-        files,
-        &WorkshopSemanticEditBatch {
-            schema_version: 1,
-            edits: vec![WorkshopSemanticEdit {
-                operation,
-                target,
-                new_source: source,
-                expected_source_hash,
-            }],
-        },
-    )
+    let batch = WorkshopSemanticEditBatch {
+        schema_version: 1,
+        edits: vec![WorkshopSemanticEdit {
+            operation,
+            target,
+            new_source: source,
+            expected_source_hash,
+        }],
+    };
+    preflight_live_explicit_generic_updates(files, &batch)?;
+    let (after, plan) = plan_workshop_semantic_edits(files, &batch)?;
+    reject_live_explicit_generic_edits(&after, &plan)?;
+    Ok((after, plan))
+}
+
+fn reject_live_explicit_generic_edits(
+    files: &[WorkshopSourceFile],
+    plan: &WorkshopSemanticEditPlan,
+) -> Result<(), String> {
+    let changed_paths = plan
+        .changed_files
+        .iter()
+        .map(|change| normalize_file(&change.file))
+        .collect::<BTreeSet<_>>();
+    reject_live_explicit_generic_paths(files, &changed_paths)
+}
+
+fn preflight_live_explicit_generic_updates(
+    files: &[WorkshopSourceFile],
+    batch: &WorkshopSemanticEditBatch,
+) -> Result<(), String> {
+    let mut candidate = files.to_vec();
+    let mut changed_paths = BTreeSet::new();
+    for edit in &batch.edits {
+        if edit.operation != WorkshopSemanticEditOperation::Update {
+            continue;
+        }
+        let Some(replacement) = edit.new_source.as_deref() else {
+            continue;
+        };
+        let matches = find_workshop_symbols(&candidate, &edit.target)?;
+        let [symbol] = matches.as_slice() else {
+            continue;
+        };
+        if edit
+            .expected_source_hash
+            .as_deref()
+            .is_some_and(|expected| workshop_source_hash(&symbol.source) != expected)
+        {
+            continue;
+        }
+        let symbol = symbol.clone();
+        let Some(file) = candidate.iter_mut().find(|file| file.path == symbol.file) else {
+            continue;
+        };
+        let Some(span) = symbol.source_spans.iter().find(|span| {
+            file.source
+                .get(span.start as usize..span.end as usize)
+                .is_some_and(|source| source == symbol.source)
+        }) else {
+            continue;
+        };
+        let range = span.start as usize..span.end as usize;
+        if range.end > file.source.len()
+            || !file.source.is_char_boundary(range.start)
+            || !file.source.is_char_boundary(range.end)
+        {
+            continue;
+        }
+        file.source.replace_range(range, replacement);
+        changed_paths.insert(normalize_file(&file.path));
+    }
+    reject_live_explicit_generic_paths(&candidate, &changed_paths)
+}
+
+fn reject_live_explicit_generic_paths(
+    files: &[WorkshopSourceFile],
+    changed_paths: &BTreeSet<String>,
+) -> Result<(), String> {
+    for changed_path in changed_paths {
+        let closure = workshop_reachable_files(files, Path::new(&changed_path))?;
+        let mut compiler = stasis_compiler::compiler::Compiler::new();
+        let mut test_rewrites = BTreeMap::new();
+        for file in closure {
+            // Test declarations are rewritten only for this validation compiler;
+            // the semantic plan and disk sources retain their original spelling.
+            let original = file.source;
+            let (source, declarations) = rewrite_top_level_test_declarations(&original)
+                .unwrap_or_else(|_| (original.clone(), Vec::new()));
+            if !declarations.is_empty() {
+                test_rewrites.insert(file.path.clone(), (original, declarations));
+            }
+            compiler.upsert_file(file.path, source);
+        }
+        if compiler.check().is_err() {
+            if let Some(diagnostic) = compiler.last_source_diagnostic().filter(|diagnostic| {
+                diagnostic.code == stasis_compiler::SourceDiagnosticCode::ExplicitGenericCall
+            }) {
+                let mut diagnostic = diagnostic.clone();
+                if let Some((original, declarations)) = test_rewrites.get(&diagnostic.path) {
+                    let range = map_rewritten_test_range_to_original(
+                        original,
+                        declarations,
+                        diagnostic.start..diagnostic.end,
+                    );
+                    diagnostic.start = range.start;
+                    diagnostic.end = range.end;
+                }
+                for related in &mut diagnostic.related {
+                    if let Some((original, declarations)) = test_rewrites.get(&related.path) {
+                        let range = map_rewritten_test_range_to_original(
+                            original,
+                            declarations,
+                            related.start..related.end,
+                        );
+                        related.start = range.start;
+                        related.end = range.end;
+                    }
+                }
+                return Err(encoded_source_diagnostic(&diagnostic));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn plan_live_edit_batch(
@@ -2901,13 +3027,14 @@ fn plan_live_edit_batch(
             expected_source_hash: edit.expected_source_hash,
         });
     }
-    plan_workshop_semantic_edits(
-        files,
-        &WorkshopSemanticEditBatch {
-            schema_version: 1,
-            edits: semantic_edits,
-        },
-    )
+    let batch = WorkshopSemanticEditBatch {
+        schema_version: 1,
+        edits: semantic_edits,
+    };
+    preflight_live_explicit_generic_updates(files, &batch)?;
+    let (after, plan) = plan_workshop_semantic_edits(files, &batch)?;
+    reject_live_explicit_generic_edits(&after, &plan)?;
+    Ok((after, plan))
 }
 
 fn compile_candidate(
@@ -3633,13 +3760,58 @@ fn files_for_plan(
 fn candidate_diagnostic(candidate: &JitProcess, error: CompileError) -> String {
     candidate
         .last_source_diagnostic()
-        .map(|diagnostic| {
-            format!(
+        .map(encoded_source_diagnostic)
+        .unwrap_or_else(|| format!("live compile failed: {error:?}"))
+}
+
+fn encoded_source_diagnostic(diagnostic: &stasis_compiler::SourceDiagnostic) -> String {
+    format!(
+        "{COMPILER_DIAGNOSTIC_PREFIX}{}",
+        json!({
+            "display_message": format!(
                 "{}:{}-{}: {}",
                 diagnostic.path, diagnostic.start, diagnostic.end, diagnostic.message
-            )
+            ),
+            "diagnostic": source_diagnostic_json(diagnostic),
         })
-        .unwrap_or_else(|| format!("live compile failed: {error:?}"))
+    )
+}
+
+fn source_diagnostic_json(diagnostic: &stasis_compiler::SourceDiagnostic) -> Value {
+    json!({
+        "path": diagnostic.path,
+        "start": diagnostic.start,
+        "end": diagnostic.end,
+        "symbol": diagnostic.symbol,
+        "code": diagnostic.code.as_str(),
+        "message": diagnostic.message,
+        "related": diagnostic.related.iter().map(|related| json!({
+            "path": related.path,
+            "start": related.start,
+            "end": related.end,
+            "symbol": related.symbol,
+            "message": related.message,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn live_error_response(request_id: u64, tick: u64, error: String) -> LiveResponse {
+    let Some(payload) = error
+        .strip_prefix(COMPILER_DIAGNOSTIC_PREFIX)
+        .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
+    else {
+        return LiveResponse::failure(request_id, tick, error);
+    };
+    let public_message = payload
+        .get("display_message")
+        .and_then(Value::as_str)
+        .unwrap_or(&error)
+        .to_string();
+    let mut response = LiveResponse::failure(request_id, tick, public_message);
+    if let Some(diagnostic) = payload.get("diagnostic") {
+        response.data = Some(json!({"diagnostic": diagnostic}));
+    }
+    response
 }
 
 fn inspect_scalar(jit: &JitProcess, path: &str) -> Result<(&'static str, Value), String> {
@@ -4394,6 +4566,72 @@ mod tests {
     }
 
     #[test]
+    fn live_semantic_edits_reject_explicit_generic_calls_in_test_only_files() {
+        let _global_guard = crate::jit_test_support::lock();
+        let (root, config) = project();
+        let valid_test = "test `generic editor`(): bool { capacity(samples); return true; }";
+        let original = format!(
+            "test `before template`(): bool {{ return true; }}\nstruct Buffer<N: i32> {{ values: i32[N]; }}\nfunction capacity(self: Buffer<N>): i32 {{ return N; }}\nglobal samples: Buffer<4>;\n{valid_test}\n"
+        );
+        fs::write(root.join("tests/generic.test.stasis"), &original).expect("generic test");
+        let files = load_workshop_edit_workspace(&root, &config.entry).expect("files");
+        let target = LiveSymbolTarget {
+            name: "generic editor".into(),
+            kind: Some("test".into()),
+            file: Some("tests/generic.test.stasis".into()),
+            owner: None,
+            signature: None,
+        };
+        let replacement = "test `generic editor`(): bool { capacity<4>(samples); return true; }";
+        let staged = original.replace(valid_test, replacement);
+        let assert_exact_call_span = |error: &str| {
+            let payload: Value = serde_json::from_str(
+                error
+                    .strip_prefix(COMPILER_DIAGNOSTIC_PREFIX)
+                    .expect("encoded compiler diagnostic"),
+            )
+            .expect("diagnostic JSON");
+            let diagnostic = &payload["diagnostic"];
+            let start = diagnostic["start"].as_u64().expect("start") as usize;
+            let end = diagnostic["end"].as_u64().expect("end") as usize;
+            assert_eq!(&staged[start..end], "capacity");
+            let related = &diagnostic["related"][0];
+            let related_start = related["start"].as_u64().expect("related start") as usize;
+            let related_end = related["end"].as_u64().expect("related end") as usize;
+            assert_eq!(
+                &staged[related_start..related_end],
+                "function capacity(self: Buffer<N>): i32 "
+            );
+        };
+
+        let single = plan_live_edit(
+            &files,
+            LiveEditOperation::Update,
+            target.clone(),
+            Some(replacement.into()),
+            None,
+        )
+        .expect_err("single edit must reject explicit generic test call");
+        assert!(single.contains("stasis.explicitGenericCall"), "{single}");
+        assert_exact_call_span(&single);
+
+        let batch = plan_live_edit_batch(
+            &files,
+            vec![stasis_runner::live::LiveEdit {
+                operation: LiveEditOperation::Update,
+                target,
+                source: Some(replacement.into()),
+                expected_source_hash: None,
+            }],
+        )
+        .expect_err("batch edit must reject explicit generic test call");
+        assert!(batch.contains("stasis.explicitGenericCall"), "{batch}");
+        assert_exact_call_span(&batch);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn compile_candidate_does_not_reload_imports_under_a_second_path() {
         let _global_guard = crate::jit_test_support::lock();
         let (root, config) = project();
@@ -5106,9 +5344,12 @@ mod tests {
         assert!(items.iter().all(|item| item["kind"] != "imports"));
         assert!(items.iter().all(|item| item.get("source_hash").is_none()));
         assert!(items.iter().all(|item| item.get("source").is_none()));
-        assert!(items
-            .iter()
-            .all(|item| { matches!(item.as_object().map(|object| object.len()), Some(4 | 5)) }));
+        assert!(items.iter().all(|item| {
+            matches!(item.as_object().map(|object| object.len()), Some(7 | 8))
+                && item.get("symbol_id").is_some()
+                && item.get("source_spans").is_some()
+                && item.get("generic_parameters").is_some()
+        }));
         assert!(all.get("files").is_none());
         assert!(all.get("imports").is_none());
         assert!(items
@@ -5778,6 +6019,304 @@ mod tests {
         assert!(fs::read_to_string(root.join("src/main.stasis"))
             .expect("source")
             .contains("score += 1"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn imported_generic_dirty_buffer_preview_apply_and_rejection_are_transactional() {
+        let _global_guard = crate::jit_test_support::lock();
+        let (root, config) = project();
+        let entry = root.join("src/main.stasis");
+        let types_path = root.join("src/types.stasis");
+        let main_source = concat!(
+            "import \"types.stasis\";\n",
+            "extern function reject_code_swap(): void;\n",
+            "global world: types.Nested<i32, 2>;\n",
+            "global scalar: i32;\n",
+            "function main(): i32 { world.inner.values[0] = 7; world.inner.values[1] = 11; scalar = 99; return types.capacity(world.inner); }\n",
+            "function tick(): i32 { return types.capacity(world.inner); }\n",
+            "function render(): i32 { return world.inner.values[1]; }\n",
+            "function on_code_swap(): void { return; }\n",
+        );
+        let types_v1 = concat!(
+            "global generic_side: i32;\n",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n",
+            "struct Nested<T: type, N: i32> { inner: Buffer<T, N>; }\n",
+            "function @effects() capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+        let capacity_v2 = "function @effects() capacity(self: Buffer<T, N>): i32 { return N + 1; }";
+        let capacity_v3 = "function @effects() capacity(self: Buffer<T, N>): i32 { return N + 2; }";
+        let types_v2 = types_v1.replace(
+            "function @effects() capacity(self: Buffer<T, N>): i32 { return N; }",
+            capacity_v2,
+        );
+        let types_v3 = types_v1.replace(
+            "function @effects() capacity(self: Buffer<T, N>): i32 { return N; }",
+            capacity_v3,
+        );
+        fs::write(&entry, main_source).expect("write dirty-buffer entry");
+        fs::write(&types_path, types_v1).expect("write dirty-buffer generic module");
+
+        let (mut jit, package) = compile(&config);
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(2));
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config.clone(), &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+        let capacity_item = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "capacity")
+            .expect("generic capacity source item")
+            .clone();
+        let capacity_target = || LiveSymbolTarget {
+            name: "capacity".into(),
+            kind: Some("function".into()),
+            file: Some("src/types.stasis".into()),
+            owner: None,
+            signature: Some(capacity_item.signature.clone()),
+        };
+        let state = |jit: &JitProcess| {
+            (
+                jit.read_global_collection_scalar("world.inner.values", "", 0),
+                jit.read_global_collection_scalar("world.inner.values", "", 1),
+                jit.read_global_scalar("scalar"),
+                jit.read_global_scalar("generic_side"),
+            )
+        };
+        let initial_state = state(&jit);
+        assert_eq!(initial_state.0, Ok(JitScalarValue::I32(7)));
+        assert_eq!(initial_state.1, Ok(JitScalarValue::I32(11)));
+        assert_eq!(initial_state.2, Ok(JitScalarValue::I32(99)));
+        assert_eq!(initial_state.3, Ok(JitScalarValue::I32(0)));
+
+        let preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                5901,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: capacity_target(),
+                    source: Some(capacity_v2.into()),
+                    expected_source_hash: None,
+                    preview: true,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(preview.ok, "generic preview: {:?}", preview.error);
+        assert_eq!(preview.kind, "edit_preview");
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("preview source"),
+            types_v1
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(2));
+        assert_eq!(state(&jit), initial_state);
+
+        let applied = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(5902, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(applied.ok, "generic apply: {:?}", applied.error);
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("applied source"),
+            types_v2
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(3));
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(render_ptr as usize),
+            Ok(11)
+        );
+        assert_eq!(state(&jit), initial_state);
+        let accepted_tick_ptr = tick_ptr;
+        let accepted_render_ptr = render_ptr;
+        let accepted_snapshot = jit.program_snapshot().expect("accepted snapshot");
+        let accepted_snapshot_evidence = (
+            accepted_snapshot.source_revision(),
+            accepted_snapshot.layout_digest(),
+            accepted_snapshot.functions().to_vec(),
+            accepted_snapshot.state_layout().clone(),
+        );
+        let accepted_artifacts = jit.artifacts().to_vec();
+        let accepted_code_ptrs = jit.function_code_ptrs();
+
+        for (request_id, invalid_source, label) in [
+            (
+                5903,
+                "function @effects() capacity(self: Buffer<T, N>): i32 { return missing; }",
+                "compile",
+            ),
+            (
+                5904,
+                "function @effects() capacity(self: Buffer<T, N>): i32 { return true; }",
+                "type",
+            ),
+            (
+                5905,
+                "function @effects() capacity(self: Buffer<T, N>): i32 { generic_side += 1; return N; }",
+                "effect",
+            ),
+        ] {
+            let rejected = run_request(
+                &client,
+                &mut workspace,
+                &mut jit,
+                &mut tick_ptr,
+                &mut render_ptr,
+                LiveRequest::new(
+                    request_id,
+                    LiveCommand::Edit {
+                        operation: LiveEditOperation::Update,
+                        target: capacity_target(),
+                        source: Some(invalid_source.into()),
+                        expected_source_hash: None,
+                        preview: false,
+                        run_tests: false,
+                    },
+                ),
+            );
+            assert!(!rejected.ok, "invalid generic {label} edit unexpectedly succeeded");
+            assert_eq!(
+                fs::read_to_string(&types_path).expect("rejected source"),
+                types_v2
+            );
+            assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(3));
+            assert_eq!(state(&jit), initial_state);
+            assert_eq!(tick_ptr, accepted_tick_ptr, "{label} tick pointer");
+            assert_eq!(render_ptr, accepted_render_ptr, "{label} render pointer");
+            let rejected_snapshot = jit.program_snapshot().expect("rejected snapshot");
+            assert_eq!(
+                (
+                    rejected_snapshot.source_revision(),
+                    rejected_snapshot.layout_digest(),
+                    rejected_snapshot.functions().to_vec(),
+                    rejected_snapshot.state_layout().clone(),
+                ),
+                accepted_snapshot_evidence,
+                "{label} active snapshot"
+            );
+            assert_eq!(jit.artifacts(), accepted_artifacts, "{label} artifacts");
+            assert_eq!(jit.function_code_ptrs(), accepted_code_ptrs, "{label} code");
+        }
+
+        let hook_item = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "on_code_swap")
+            .expect("hook source item")
+            .clone();
+        let hook_preview = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                5906,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "on_code_swap".into(),
+                        kind: Some("function".into()),
+                        file: Some("src/main.stasis".into()),
+                        owner: None,
+                        signature: Some(hook_item.signature),
+                    },
+                    source: Some(
+                        "function on_code_swap(): void { world.inner.values[0] = 123; scalar = 456; reject_code_swap(); return; }".into(),
+                    ),
+                    expected_source_hash: None,
+                    preview: true,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(hook_preview.ok, "hook preview: {:?}", hook_preview.error);
+        assert_eq!(
+            fs::read_to_string(&entry).expect("hook preview entry source"),
+            main_source
+        );
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("hook preview source"),
+            types_v2
+        );
+        assert_eq!(state(&jit), initial_state);
+
+        let hook_rejected = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(5907, LiveCommand::Apply { run_tests: false }),
+        );
+        assert!(!hook_rejected.ok, "hook rejection unexpectedly succeeded");
+        assert!(hook_rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("hook requested rejection")));
+        assert_eq!(
+            fs::read_to_string(&entry).expect("hook rollback entry source"),
+            main_source
+        );
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("hook rollback source"),
+            types_v2
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(3));
+        assert_eq!(state(&jit), initial_state);
+        assert_eq!(tick_ptr, accepted_tick_ptr);
+        assert_eq!(render_ptr, accepted_render_ptr);
+        let hook_rollback_snapshot = jit.program_snapshot().expect("hook rollback snapshot");
+        assert_eq!(
+            (
+                hook_rollback_snapshot.source_revision(),
+                hook_rollback_snapshot.layout_digest(),
+                hook_rollback_snapshot.functions().to_vec(),
+                hook_rollback_snapshot.state_layout().clone(),
+            ),
+            accepted_snapshot_evidence
+        );
+        assert_eq!(jit.artifacts(), accepted_artifacts);
+        assert_eq!(jit.function_code_ptrs(), accepted_code_ptrs);
+
+        let retry = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                5908,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: capacity_target(),
+                    source: Some(capacity_v3.into()),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(retry.ok, "valid generic retry: {:?}", retry.error);
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("retry source"),
+            types_v3
+        );
+        assert_eq!(stasis_dynload::invoke_noarg_i32(tick_ptr as usize), Ok(4));
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(render_ptr as usize),
+            Ok(11)
+        );
+        assert_eq!(state(&jit), initial_state);
         fs::remove_dir_all(root).ok();
     }
 
@@ -7345,6 +7884,244 @@ mod tests {
         );
         stasis_dynload::invoke_noarg_i32(tick_ptr as usize).expect("old tick");
         assert_eq!(jit.read_global_scalar("score"), Ok(JitScalarValue::I32(2)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn live_generic_tooling_projects_locations_and_recovers_after_explicit_call_failure() {
+        let _global_guard = crate::jit_test_support::lock();
+        let (root, config) = project();
+        let entry = root.join("src/main.stasis");
+        let valid_main = concat!(
+            "import \"types.stasis\";\n",
+            "global samples: types.Buffer<i32, 4>;\n",
+            "function main(): i32 { return types.capacity(samples); }\n",
+            "function tick(): i32 { return 0; }\n",
+            "function render(): i32 { return 0; }\n",
+            "function on_code_swap(): void { return; }\n",
+        );
+        let invalid_call = "types.capacity::<i32, 4>(samples)";
+        let valid_call = "types.capacity(samples)";
+        let main_function = "function main(): i32 { return types.capacity(samples); }";
+        let invalid_main_function = main_function.replace(valid_call, invalid_call);
+        let valid_main_function =
+            "function main(): i32 { return types.capacity(samples) + 0; }".to_string();
+        fs::write(&entry, valid_main).expect("write generic entry");
+        fs::write(
+            root.join("src/types.stasis"),
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\nfunction capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        )
+        .expect("write generic module");
+        let (mut jit, package) = compile(&config);
+        let (client, server) = stasis_runner::live::live_session(8);
+        let mut workspace = LiveWorkspace::new(server, config, &jit).expect("workspace");
+        let mut tick_ptr = package.tick_code_ptr;
+        let mut render_ptr = package.render_code_ptr;
+
+        let symbols = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                801,
+                LiveCommand::Symbols {
+                    query: Some("Buffer".to_string()),
+                    kind: None,
+                    files: Vec::new(),
+                    owner: None,
+                    page: 0,
+                    limit: 32,
+                },
+            ),
+        );
+        assert!(symbols.ok, "symbols response: {:?}", symbols.error);
+        let buffer = symbols.data.expect("symbols data")["items"]
+            .as_array()
+            .expect("symbols items")
+            .iter()
+            .find(|item| item["name"] == "Buffer")
+            .cloned()
+            .expect("generic Buffer symbol");
+        assert_eq!(buffer["generic_parameters"][0]["name"], "T");
+        assert_eq!(buffer["generic_parameters"][1]["name"], "N");
+        assert_eq!(buffer["file"], "src/types.stasis");
+
+        let references = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                802,
+                LiveCommand::References {
+                    symbol: "capacity".to_string(),
+                    limit: 16,
+                },
+            ),
+        );
+        assert!(references.ok, "references response: {:?}", references.error);
+        let references_data = references.data.expect("references data");
+        let references = references_data["references"]
+            .as_array()
+            .expect("references array");
+        assert!(references.iter().any(|reference| {
+            reference["file"] == "src/types.stasis"
+                && reference["source_span"]["start"].as_u64().is_some()
+        }));
+        assert!(references.iter().any(|reference| {
+            reference["file"] == "src/main.stasis"
+                && reference["symbol"] == "capacity"
+                && reference["source_span"]["end"].as_u64().is_some()
+        }));
+
+        let before = fs::read_to_string(&entry).expect("valid entry");
+        let failed = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                803,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "main".to_string(),
+                        kind: Some("function".to_string()),
+                        file: Some("src/main.stasis".to_string()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some(invalid_main_function),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(!failed.ok, "explicit generic call must fail: {failed:?}");
+        let diagnostic =
+            failed.data.as_ref().expect("structured live diagnostic")["diagnostic"].clone();
+        assert_eq!(diagnostic["code"], "stasis.explicitGenericCall");
+        assert!(diagnostic["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("src/main.stasis")));
+        assert_eq!(diagnostic["symbol"], "capacity");
+        assert_eq!(diagnostic["related"][0]["symbol"], "capacity");
+        assert!(diagnostic["related"][0]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("src/types.stasis")));
+        assert_eq!(
+            fs::read_to_string(&entry).expect("entry after failed edit"),
+            before
+        );
+
+        let recovered = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                804,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "main".to_string(),
+                        kind: Some("function".to_string()),
+                        file: Some("src/main.stasis".to_string()),
+                        owner: None,
+                        signature: None,
+                    },
+                    source: Some(valid_main_function),
+                    expected_source_hash: None,
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(recovered.ok, "recovery response: {:?}", recovered.error);
+        assert!(fs::read_to_string(&entry)
+            .expect("recovered entry")
+            .contains(valid_call));
+
+        let capacity = workspace
+            .source_items
+            .iter()
+            .find(|item| item.name == "capacity")
+            .expect("capacity source item")
+            .clone();
+        let types_path = root.join("src/types.stasis");
+        let types_before = fs::read_to_string(&types_path).expect("generic module before stale");
+        let stale = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                805,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "capacity".to_string(),
+                        kind: Some("function".to_string()),
+                        file: Some("src/types.stasis".to_string()),
+                        owner: None,
+                        signature: Some(capacity.signature.clone()),
+                    },
+                    source: Some(
+                        "function capacity(self: Buffer<T, N>): i32 { return N + 1; }".to_string(),
+                    ),
+                    expected_source_hash: Some("0".repeat(64)),
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(!stale.ok);
+        assert!(stale
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("stale semantic edit target")));
+        assert_eq!(
+            fs::read_to_string(&types_path).expect("generic module after stale"),
+            types_before
+        );
+
+        let applied = run_request(
+            &client,
+            &mut workspace,
+            &mut jit,
+            &mut tick_ptr,
+            &mut render_ptr,
+            LiveRequest::new(
+                806,
+                LiveCommand::Edit {
+                    operation: LiveEditOperation::Update,
+                    target: LiveSymbolTarget {
+                        name: "capacity".to_string(),
+                        kind: Some("function".to_string()),
+                        file: Some("src/types.stasis".to_string()),
+                        owner: None,
+                        signature: Some(capacity.signature),
+                    },
+                    source: Some(
+                        "function capacity(self: Buffer<T, N>): i32 { return N + 1; }".to_string(),
+                    ),
+                    expected_source_hash: Some(capacity.source_hash),
+                    preview: false,
+                    run_tests: false,
+                },
+            ),
+        );
+        assert!(applied.ok, "generic semantic apply: {:?}", applied.error);
+        assert!(fs::read_to_string(types_path)
+            .expect("updated generic module")
+            .contains("return N + 1"));
         fs::remove_dir_all(root).ok();
     }
 

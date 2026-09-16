@@ -6,19 +6,30 @@
 //! fixed-layout input.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Range;
 
 use crate::compiler::SourceFile;
 use crate::frontend::indexer::hash_text;
 use crate::frontend::lexer::{lex, TokenKind};
+use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::parser::{
     parse_top_level_extern_functions, parse_top_level_functions,
-    parse_top_level_struct_definitions, parse_top_level_type_layout, ParsedFunctionSignature,
-    ParsedGenericParameter, ParsedGenericParameterKind,
+    parse_top_level_struct_definitions, parse_top_level_type_layout,
+    ParsedExternFunctionDeclaration, ParsedFunctionSignature, ParsedGenericParameter,
+    ParsedGenericParameterKind, ParsedStructDefinitionRange,
 };
 
 const MAX_SPECIALIZATIONS: usize = 4096;
 const MAX_INSTANTIATION_DEPTH: usize = 128;
 const MAX_CONSTANT_EVALUATION_STEPS: usize = 10_000;
+const MAX_CONSTANT_DEPENDENCY_DEPTH: usize = 128;
+const MAX_GENERIC_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EXPANDED_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ELABORATION_WORK_UNITS: usize = 32 * 1024 * 1024;
+const SPECIALIZATION_WORK_UNITS: usize = 1024;
+const MAX_DIAGNOSTIC_RELATED_LOCATIONS: usize = 8;
+const GENERATED_COMPILER_PREFIXES: [&str; 3] =
+    ["__stasis_type_", "__stasis_function_", "__stasis_const_"];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ConcreteArgument {
@@ -41,6 +52,7 @@ struct GenericStructDefinition {
 #[derive(Debug, Clone)]
 struct GenericFunctionDefinition {
     file_index: usize,
+    path: String,
     module_alias: String,
     name: String,
     parameters: Vec<ParsedGenericParameter>,
@@ -67,8 +79,10 @@ struct StructSpecialization {
 #[derive(Debug, Clone)]
 struct FunctionSpecialization {
     definition: usize,
+    generated_name: String,
     source: String,
     param_type_names: Vec<String>,
+    origins: Vec<crate::SourceDiagnosticRelated>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,9 +93,26 @@ struct RawFile {
 
 #[derive(Debug, Clone)]
 struct ConstantDefinition {
+    path: String,
     name: String,
     type_name: String,
     value_text: String,
+}
+
+#[derive(Debug, Clone)]
+struct ConcretePathDefinition {
+    file_index: usize,
+    path: String,
+    type_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct OrdinaryStructDefinition {
+    file_index: usize,
+    path: String,
+    name: String,
+    fields: Vec<crate::frontend::parser::ParsedField>,
+    definition_range: Range<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -89,6 +120,7 @@ struct GenericEnvironment {
     values: BTreeMap<String, i32>,
     types: BTreeMap<String, String>,
     module_alias: Option<String>,
+    source_path: Option<String>,
 }
 
 impl GenericEnvironment {
@@ -134,23 +166,105 @@ impl GenericEnvironment {
 
 struct Expansion {
     files: Vec<RawFile>,
+    input_bytes: usize,
+    module_graph: ModuleGraph,
     generic_structs: BTreeMap<String, GenericStructDefinition>,
     generic_structs_by_name: BTreeMap<String, Vec<String>>,
     generic_functions: Vec<GenericFunctionDefinition>,
     generic_functions_by_name: BTreeMap<String, Vec<usize>>,
     ordinary_function_names: BTreeMap<String, Vec<(usize, String, Vec<String>)>>,
-    visible_module_aliases: BTreeMap<usize, std::collections::BTreeSet<String>>,
-    constants: BTreeMap<String, i32>,
+    constant_definitions: Vec<ConstantDefinition>,
+    constant_values: BTreeMap<String, i32>,
     struct_specializations: BTreeMap<StructSpecializationKey, StructSpecialization>,
     struct_work: VecDeque<(StructSpecializationKey, usize)>,
     function_specializations: BTreeMap<FunctionSpecializationKey, FunctionSpecialization>,
     function_work: VecDeque<(FunctionSpecializationKey, usize)>,
-    struct_fields: BTreeMap<String, Vec<crate::frontend::parser::ParsedField>>,
-    concrete_paths: BTreeMap<String, String>,
+    materialized_function_bytes: usize,
+    generated_specialization_identities: BTreeMap<String, String>,
+    ordinary_structs_by_name: BTreeMap<String, Vec<OrdinaryStructDefinition>>,
+    known_type_files_by_name: BTreeMap<String, BTreeSet<usize>>,
+    concrete_path_definitions: Vec<ConcretePathDefinition>,
+    concrete_paths_by_file: BTreeMap<usize, BTreeMap<String, String>>,
     active_depth: Option<usize>,
 }
 
-pub(crate) fn expand_sources(files: &mut [SourceFile]) -> Result<(), String> {
+pub(crate) struct ExpansionError {
+    pub(crate) path: Option<String>,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) symbol: String,
+    pub(crate) message: String,
+    pub(crate) code: crate::SourceDiagnosticCode,
+    pub(crate) related: Vec<crate::SourceDiagnosticRelated>,
+}
+
+impl ExpansionError {
+    fn without_path(message: String) -> Self {
+        Self {
+            path: None,
+            start: 0,
+            end: usize::MAX,
+            symbol: String::new(),
+            message,
+            code: crate::SourceDiagnosticCode::Generic,
+            related: Vec::new(),
+        }
+    }
+
+    fn for_file(path: String, message: String) -> Self {
+        Self {
+            path: Some(path),
+            start: 0,
+            end: usize::MAX,
+            symbol: String::new(),
+            message,
+            code: crate::SourceDiagnosticCode::Generic,
+            related: Vec::new(),
+        }
+    }
+
+    fn contract(
+        path: String,
+        range: Range<usize>,
+        symbol: String,
+        message: String,
+        code: crate::SourceDiagnosticCode,
+    ) -> Self {
+        Self {
+            path: Some(path),
+            start: range.start,
+            end: range.end,
+            symbol,
+            message,
+            code,
+            related: Vec::new(),
+        }
+    }
+
+    fn with_related(mut self, related: Vec<crate::SourceDiagnosticRelated>) -> Self {
+        self.related = related;
+        self
+    }
+}
+
+impl From<String> for ExpansionError {
+    fn from(message: String) -> Self {
+        Self::without_path(message)
+    }
+}
+
+pub(crate) fn expand_sources(
+    files: &mut [SourceFile],
+    module_graph: &ModuleGraph,
+) -> Result<(), ExpansionError> {
+    let input_bytes = files.iter().try_fold(0usize, |total, file| {
+        total
+            .checked_add(file.original_content.len())
+            .ok_or_else(|| {
+                ExpansionError::without_path("generic source byte count overflowed".to_string())
+            })
+    })?;
+    ensure_generic_source_bytes(input_bytes).map_err(ExpansionError::without_path)?;
     let raw_files = files
         .iter()
         .map(|file| RawFile {
@@ -158,7 +272,20 @@ pub(crate) fn expand_sources(files: &mut [SourceFile]) -> Result<(), String> {
             source: file.original_content.clone(),
         })
         .collect::<Vec<_>>();
-    let mut expansion = Expansion::new(raw_files)?;
+    if raw_files.iter().any(|file| {
+        parse_top_level_type_layout(&file.source).is_err()
+            || parse_top_level_struct_definitions(&file.source).is_err()
+            || parse_top_level_extern_functions(&file.source).is_err()
+            || parse_top_level_functions(&file.source).is_err()
+    }) {
+        for file in files {
+            file.content = file.original_content.clone();
+            file.hash = hash_text(&file.content);
+        }
+        return Ok(());
+    }
+    let mut expansion = Expansion::new(raw_files, input_bytes, module_graph.clone())?;
+    expansion.reject_explicit_generic_calls()?;
     if expansion.generic_structs.is_empty() && expansion.generic_functions.is_empty() {
         for file in files {
             file.content = file.original_content.clone();
@@ -173,66 +300,437 @@ pub(crate) fn expand_sources(files: &mut [SourceFile]) -> Result<(), String> {
 }
 
 impl Expansion {
-    fn new(files: Vec<RawFile>) -> Result<Self, String> {
+    fn environment_for_file(&self, file_index: usize) -> GenericEnvironment {
+        let path = self.files[file_index].path.clone();
+        GenericEnvironment {
+            module_alias: self
+                .module_graph
+                .module(&path)
+                .map(|module| module.alias.clone())
+                .or_else(|| Some(module_alias_for_path(&path))),
+            source_path: Some(path),
+            ..GenericEnvironment::default()
+        }
+    }
+
+    fn imported_alias_target(&self, file_index: usize, alias: &str) -> Option<&str> {
+        self.module_graph
+            .imported_alias_target(&self.files[file_index].path, alias)
+    }
+
+    fn visible_paths(&self, file_index: usize) -> BTreeSet<String> {
+        self.module_graph
+            .dependency_closure(&self.files[file_index].path)
+    }
+
+    fn visible_constant_definition(
+        &self,
+        name: &str,
+        source_path: &str,
+    ) -> Result<Option<&ConstantDefinition>, String> {
+        let local = self
+            .constant_definitions
+            .iter()
+            .filter(|definition| {
+                definition.path == source_path
+                    && definition.name == name
+                    && definition.type_name.trim() == "i32"
+            })
+            .collect::<Vec<_>>();
+        let matches = if local.is_empty() {
+            let visible = self.module_graph.dependency_closure(source_path);
+            self.constant_definitions
+                .iter()
+                .filter(|definition| {
+                    visible.contains(&definition.path)
+                        && definition.name == name
+                        && definition.type_name.trim() == "i32"
+                })
+                .collect::<Vec<_>>()
+        } else {
+            local
+        };
+        match matches.as_slice() {
+            [] => Ok(None),
+            [definition] => Ok(Some(*definition)),
+            _ => Err(format!(
+                "ambiguous compile-time constant '{}' from '{}': {}",
+                name,
+                source_path,
+                sorted_paths(matches.iter().map(|definition| definition.path.as_str()))
+            )),
+        }
+    }
+
+    fn visible_constant_value(
+        &self,
+        name: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<Option<i32>, String> {
+        let Some(source_path) = environment.source_path.as_deref() else {
+            return Ok(None);
+        };
+        let Some(definition) = self.visible_constant_definition(name, source_path)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .constant_values
+            .get(&constant_definition_identity(definition))
+            .copied())
+    }
+
+    fn evaluate_i32_expression(
+        &self,
+        source: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<i32, String> {
+        let mut constants = BTreeMap::new();
+        for token in tokenize_constant_expression(source)? {
+            let ConstantToken::Identifier(identifier) = token else {
+                continue;
+            };
+            if environment.values.contains_key(&identifier) {
+                continue;
+            }
+            if let Some(value) = self.visible_constant_value(&identifier, environment)? {
+                constants.insert(identifier, value);
+            }
+        }
+        evaluate_i32_expression(source, environment, &constants)
+    }
+
+    fn local_constant_values(&self, file_index: usize) -> BTreeMap<String, i32> {
+        let path = &self.files[file_index].path;
+        self.constant_definitions
+            .iter()
+            .filter(|definition| &definition.path == path)
+            .filter_map(|definition| {
+                self.constant_values
+                    .get(&constant_definition_identity(definition))
+                    .copied()
+                    .map(|value| (definition.name.clone(), value))
+            })
+            .collect()
+    }
+
+    fn constant_rewrites_for_source(
+        &self,
+        file_index: usize,
+        source: &str,
+    ) -> Result<BTreeMap<String, (String, i32)>, String> {
+        let duplicate_names = self
+            .constant_definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .filter(|name| {
+                self.constant_definitions
+                    .iter()
+                    .filter(|definition| definition.name == **name)
+                    .map(|definition| definition.path.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    > 1
+            })
+            .collect::<BTreeSet<_>>();
+        let names = constant_identifier_ranges(source, &duplicate_names)?
+            .into_iter()
+            .map(|(start, end)| &source[start..end])
+            .collect::<BTreeSet<_>>();
+        let mut rewrites = BTreeMap::new();
+        for name in names {
+            let Some(definition) =
+                self.visible_constant_definition(name, &self.files[file_index].path)?
+            else {
+                continue;
+            };
+            let identity = constant_definition_identity(definition);
+            let Some(value) = self.constant_values.get(&identity).copied() else {
+                continue;
+            };
+            let generated_name = format!("__stasis_const_{:016x}", hash_text(&identity));
+            rewrites.insert(name.to_string(), (generated_name, value));
+        }
+        Ok(rewrites)
+    }
+
+    fn lookup_ordinary_struct_for_environment(
+        &self,
+        name: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<Option<&OrdinaryStructDefinition>, String> {
+        let name = name.trim();
+        if name.starts_with("__module_type_") {
+            let generated_matches = self
+                .ordinary_structs_by_name
+                .values()
+                .flatten()
+                .filter(|definition| ordinary_struct_generated_name(definition) == name)
+                .collect::<Vec<_>>();
+            match generated_matches.as_slice() {
+                [definition] => return Ok(Some(*definition)),
+                [] => {}
+                _ => return Err(format!("ambiguous generated struct type '{name}'")),
+            }
+        }
+        let short = name.rsplit('.').next().unwrap_or(name);
+        let Some(candidates) = self.ordinary_structs_by_name.get(short) else {
+            return Ok(None);
+        };
+        let Some(caller_path) = environment.source_path.as_deref() else {
+            return Ok(None);
+        };
+        let matches = if let Some((alias, _)) = name.rsplit_once('.') {
+            let Some(target) = self.module_graph.imported_alias_target(caller_path, alias) else {
+                return Ok(None);
+            };
+            candidates
+                .iter()
+                .filter(|definition| definition.path == target)
+                .collect::<Vec<_>>()
+        } else {
+            let local = candidates
+                .iter()
+                .filter(|definition| definition.path == caller_path)
+                .collect::<Vec<_>>();
+            if !local.is_empty() {
+                local
+            } else {
+                let visible = self.module_graph.dependency_closure(caller_path);
+                candidates
+                    .iter()
+                    .filter(|definition| visible.contains(&definition.path))
+                    .collect::<Vec<_>>()
+            }
+        };
+        match matches.as_slice() {
+            [] => Ok(None),
+            [definition] => Ok(Some(*definition)),
+            _ => Err(format!(
+                "ambiguous struct type '{}' from '{}': {}",
+                name,
+                caller_path,
+                sorted_paths(matches.iter().map(|definition| definition.path.as_str()))
+            )),
+        }
+    }
+
+    fn is_known_concrete_type(&self, name: &str, file_index: usize) -> Result<bool, String> {
+        if matches!(
+            name,
+            "void"
+                | "i32"
+                | "f32"
+                | "bool"
+                | "f64"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "ascii"
+                | "utf8"
+                | "string"
+        ) {
+            return Ok(true);
+        }
+        let environment = self.environment_for_file(file_index);
+        if self
+            .lookup_ordinary_struct_for_environment(name, &environment)?
+            .is_some()
+            || self
+                .lookup_generic_struct_for_environment(name, &environment)?
+                .is_some()
+        {
+            return Ok(true);
+        }
+        let short = name.rsplit('.').next().unwrap_or(name);
+        let Some(candidate_files) = self.known_type_files_by_name.get(short) else {
+            return Ok(false);
+        };
+        let caller_path = &self.files[file_index].path;
+        let matches = if let Some((alias, _)) = name.rsplit_once('.') {
+            let Some(target) = self.module_graph.imported_alias_target(caller_path, alias) else {
+                return Ok(false);
+            };
+            candidate_files
+                .iter()
+                .filter(|candidate| self.files[**candidate].path == target)
+                .count()
+        } else if candidate_files.contains(&file_index) {
+            1
+        } else {
+            let visible = self.visible_paths(file_index);
+            candidate_files
+                .iter()
+                .filter(|candidate| visible.contains(&self.files[**candidate].path))
+                .count()
+        };
+        if matches > 1 {
+            return Err(format!("ambiguous type '{}' from '{}'", name, caller_path));
+        }
+        Ok(matches == 1)
+    }
+
+    fn ordinary_type_replacements_for_source(
+        &self,
+        file_index: usize,
+        source: &str,
+    ) -> Result<Vec<(usize, usize, String)>, String> {
+        let environment = self.environment_for_file(file_index);
+        let mut replacements = Vec::new();
+        for (start, end) in type_identifier_ranges(source)? {
+            let name = &source[start..end];
+            let Some(definition) =
+                self.lookup_ordinary_struct_for_environment(name, &environment)?
+            else {
+                continue;
+            };
+            replacements.push((start, end, ordinary_struct_generated_name(definition)));
+        }
+        Ok(replacements)
+    }
+
+    fn reject_explicit_generic_calls(&self) -> Result<(), ExpansionError> {
+        for (file_index, file) in self.files.iter().enumerate() {
+            let result = reject_explicit_generic_calls(&file.source, |name, qualifier| {
+                !self
+                    .generic_function_candidates(name, qualifier, file_index)
+                    .is_empty()
+            });
+            match result {
+                Ok(()) => {}
+                Err(ExplicitGenericCallScanError::Scan(message)) => {
+                    return Err(ExpansionError::for_file(file.path.clone(), message));
+                }
+                Err(ExplicitGenericCallScanError::Call {
+                    name,
+                    qualifier,
+                    range,
+                    message,
+                }) => {
+                    let related = self
+                        .generic_function_candidates(&name, qualifier.as_deref(), file_index)
+                        .into_iter()
+                        .map(|index| {
+                            let definition = &self.generic_functions[index];
+                            crate::SourceDiagnosticRelated {
+                                path: definition.path.clone(),
+                                start: definition.signature.signature_range.start,
+                                end: definition.signature.signature_range.end,
+                                symbol: definition.name.clone(),
+                                message: "generic template declared here".to_string(),
+                            }
+                        })
+                        .collect();
+                    return Err(ExpansionError::contract(
+                        file.path.clone(),
+                        range,
+                        name,
+                        message,
+                        crate::SourceDiagnosticCode::ExplicitGenericCall,
+                    )
+                    .with_related(related));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn new(
+        files: Vec<RawFile>,
+        input_bytes: usize,
+        module_graph: ModuleGraph,
+    ) -> Result<Self, ExpansionError> {
         let mut generic_structs: BTreeMap<String, GenericStructDefinition> = BTreeMap::new();
         let mut generic_structs_by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut generic_functions = Vec::new();
-        let mut generic_functions_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        let mut ordinary_function_names: BTreeMap<String, Vec<(usize, String, Vec<String>)>> =
+        let generic_functions = Vec::new();
+        let generic_functions_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let ordinary_function_names: BTreeMap<String, Vec<(usize, String, Vec<String>)>> =
             BTreeMap::new();
         let mut constant_definitions = Vec::new();
-        let mut struct_fields = BTreeMap::new();
-        let mut concrete_paths = BTreeMap::new();
-        let mut visible_module_aliases = BTreeMap::new();
+        let mut ordinary_structs_by_name: BTreeMap<String, Vec<OrdinaryStructDefinition>> =
+            BTreeMap::new();
+        let mut known_type_files_by_name: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+        let mut concrete_path_definitions = Vec::new();
+        let mut parsed_functions = Vec::new();
 
         for (file_index, file) in files.iter().enumerate() {
-            let mut visible = BTreeSet::new();
-            visible.insert(module_alias_for_path(&file.path));
-            if let Ok(imports) =
-                crate::frontend::module_graph::parse_imports(&file.path, &file.source)
-            {
-                visible.extend(
-                    imports
-                        .into_iter()
-                        .map(|import| module_alias_for_path(&import.target)),
-                );
-            }
-            visible_module_aliases.insert(file_index, visible);
-
             // This discovery pass must not take ownership of malformed-source
             // diagnostics. The canonical parser/indexer below has the source
             // span and function context needed to report those errors.
             let Ok(layout) = parse_top_level_type_layout(&file.source) else {
                 continue;
             };
+            let Ok(struct_ranges) = parse_top_level_struct_definitions(&file.source) else {
+                continue;
+            };
+            for (kind, name) in layout
+                .structs
+                .iter()
+                .map(|item| ("struct", item.name.as_str()))
+                .chain(layout.enums.iter().map(|item| ("enum", item.name.as_str())))
+                .chain(
+                    layout
+                        .globals
+                        .iter()
+                        .map(|item| ("global", item.name.as_str())),
+                )
+                .chain(
+                    layout
+                        .global_blocks
+                        .iter()
+                        .map(|item| ("global block", item.name.as_str())),
+                )
+                .chain(
+                    layout
+                        .constants
+                        .iter()
+                        .map(|item| ("constant", item.name.as_str())),
+                )
+            {
+                reject_reserved_declaration_name(&file.path, kind, name)?;
+            }
             for global in &layout.globals {
-                concrete_paths.insert(global.name.clone(), global.type_name.clone());
+                concrete_path_definitions.push(ConcretePathDefinition {
+                    file_index,
+                    path: global.name.clone(),
+                    type_name: global.type_name.clone(),
+                });
             }
             for block in &layout.global_blocks {
                 for field in &block.fields {
-                    concrete_paths.insert(
-                        format!("{}.{}", block.name, field.name),
-                        field.type_name.clone(),
-                    );
+                    concrete_path_definitions.push(ConcretePathDefinition {
+                        file_index,
+                        path: format!("{}.{}", block.name, field.name),
+                        type_name: field.type_name.clone(),
+                    });
                 }
             }
             for structure in &layout.structs {
+                known_type_files_by_name
+                    .entry(structure.name.clone())
+                    .or_default()
+                    .insert(file_index);
                 if !structure.generic_parameters.is_empty() {
                     continue;
                 }
-                if let Some(existing) = struct_fields.get(&structure.name) {
-                    if existing != &structure.fields {
-                        return Err(format!(
-                            "conflicting struct definition for '{}'",
-                            structure.name
-                        ));
-                    }
-                } else {
-                    struct_fields.insert(structure.name.clone(), structure.fields.clone());
-                }
+                ordinary_structs_by_name
+                    .entry(structure.name.clone())
+                    .or_default()
+                    .push(OrdinaryStructDefinition {
+                        file_index,
+                        path: file.path.clone(),
+                        name: structure.name.clone(),
+                        fields: structure.fields.clone(),
+                        definition_range: find_struct_definition_range(
+                            &struct_ranges,
+                            &structure.name,
+                            &structure.generic_parameters,
+                        )
+                        .map_err(|message| ExpansionError::for_file(file.path.clone(), message))?,
+                    });
             }
             for constant in layout.constants {
                 constant_definitions.push(ConstantDefinition {
+                    path: file.path.clone(),
                     name: constant.name,
                     type_name: constant.type_name,
                     value_text: constant.value_text,
@@ -243,19 +741,20 @@ impl Expansion {
                     continue;
                 }
                 let definition_range = find_struct_definition_range(
-                    &file.source,
+                    &struct_ranges,
                     &structure.name,
                     &structure.generic_parameters,
-                )?;
+                )
+                .map_err(|message| ExpansionError::for_file(file.path.clone(), message))?;
                 if generic_structs_by_name
                     .get(&structure.name)
                     .into_iter()
                     .flatten()
                     .any(|identity| generic_structs[identity].file_index == file_index)
                 {
-                    return Err(format!(
-                        "duplicate generic struct declaration '{}'",
-                        structure.name
+                    return Err(ExpansionError::for_file(
+                        file.path.clone(),
+                        format!("duplicate generic struct declaration '{}'", structure.name),
                     ));
                 }
                 let identity = generic_definition_identity(&file.path, &structure.name);
@@ -265,7 +764,10 @@ impl Expansion {
                         identity: identity.clone(),
                         file_index,
                         path: file.path.clone(),
-                        module_alias: module_alias_for_path(&file.path),
+                        module_alias: module_graph
+                            .module(&file.path)
+                            .map(|module| module.alias.clone())
+                            .unwrap_or_else(|| module_alias_for_path(&file.path)),
                         name: structure.name.clone(),
                         parameters: structure.generic_parameters,
                         fields: structure.fields,
@@ -277,139 +779,715 @@ impl Expansion {
                     .or_default()
                     .push(identity);
             }
-            if let Ok(externs) = parse_top_level_extern_functions(&file.source) {
-                if let Some(extern_decl) = externs
-                    .iter()
-                    .find(|declaration| !declaration.generic_parameters.is_empty())
-                {
-                    return Err(format!(
+            let Ok(externs) = parse_top_level_extern_functions(&file.source) else {
+                continue;
+            };
+            for declaration in &externs {
+                reject_reserved_declaration_name(&file.path, "extern function", &declaration.name)?;
+            }
+            if let Some(extern_decl) = externs
+                .iter()
+                .find(|declaration| !declaration.generic_parameters.is_empty())
+            {
+                return Err(ExpansionError::for_file(
+                    file.path.clone(),
+                    format!(
                         "generic extern function '{}' cannot be a host declaration; use a concrete wrapper",
                         extern_decl.name
-                    ));
-                }
+                    ),
+                ));
             }
             let Ok(functions) = parse_top_level_functions(&file.source) else {
                 continue;
             };
             for function in functions {
-                if function.generic_parameters.is_empty() {
-                    ordinary_function_names
-                        .entry(function.name.clone())
-                        .or_default()
-                        .push((
-                            file_index,
-                            module_alias_for_path(&file.path),
-                            function
-                                .params
-                                .iter()
-                                .map(|parameter| parameter.type_name.clone())
-                                .collect(),
-                        ));
-                    continue;
-                }
-                if is_concrete_only_function_name(&function.name) {
-                    return Err(format!(
-                        "generic function '{}' cannot be a lifecycle or host entry; use a concrete wrapper",
-                        function.name
+                reject_reserved_declaration_name(&file.path, "function", &function.name)?;
+                if !function.generic_parameters.is_empty() {
+                    return Err(ExpansionError::for_file(
+                        file.path.clone(),
+                        format!(
+                            "generic function declaration '{}<...>' is no longer supported; remove the function generic parameter list and bind parameters through the first parameter's generic struct",
+                            function.name,
+                        ),
                     ));
                 }
-                if function
-                    .annotations
-                    .iter()
-                    .any(|annotation| annotation.name == "extern")
-                {
-                    return Err(format!(
-                        "generic function '{}' cannot be an extern declaration; use a concrete wrapper",
-                        function.name
-                    ));
-                }
-                let definition = generic_functions.len();
-                generic_functions_by_name
-                    .entry(function.name.clone())
-                    .or_default()
-                    .push(definition);
-                generic_functions.push(GenericFunctionDefinition {
+                parsed_functions.push((
                     file_index,
-                    module_alias: module_alias_for_path(&file.path),
-                    name: function.name.clone(),
-                    parameters: function.generic_parameters.clone(),
-                    signature: function,
-                });
+                    module_graph
+                        .module(&file.path)
+                        .map(|module| module.alias.clone())
+                        .unwrap_or_else(|| module_alias_for_path(&file.path)),
+                    function,
+                ));
+            }
+            for enumeration in &layout.enums {
+                known_type_files_by_name
+                    .entry(enumeration.name.clone())
+                    .or_default()
+                    .insert(file_index);
             }
         }
 
-        let mut constants = BTreeMap::new();
+        let mut constant_values = BTreeMap::new();
+        let mut constant_evaluation_steps = 0;
         for definition in &constant_definitions {
             if definition.type_name.trim() == "i32" {
-                let value = evaluate_constant_name(
-                    &definition.name,
+                evaluate_constant_definition(
+                    definition,
                     &constant_definitions,
-                    &mut constants,
+                    &module_graph,
+                    &mut constant_values,
                     &mut Vec::new(),
-                    &mut 0,
-                )?;
-                constants.insert(definition.name.clone(), value);
+                    &mut constant_evaluation_steps,
+                )
+                .map_err(|message| ExpansionError::for_file(definition.path.clone(), message))?;
             }
         }
 
-        let expansion = Self {
+        let mut expansion = Self {
             files,
+            input_bytes,
+            module_graph,
             generic_structs,
             generic_structs_by_name,
             generic_functions,
             generic_functions_by_name,
             ordinary_function_names,
-            visible_module_aliases,
-            constants,
+            constant_definitions,
+            constant_values,
             struct_specializations: BTreeMap::new(),
             struct_work: VecDeque::new(),
             function_specializations: BTreeMap::new(),
             function_work: VecDeque::new(),
-            struct_fields,
-            concrete_paths,
+            materialized_function_bytes: 0,
+            generated_specialization_identities: BTreeMap::new(),
+            ordinary_structs_by_name,
+            known_type_files_by_name,
+            concrete_path_definitions,
+            concrete_paths_by_file: BTreeMap::new(),
             active_depth: None,
         };
+        expansion.validate_original_value_contracts(&parsed_functions)?;
+        for (file_index, module_alias, function) in parsed_functions {
+            let parameters = expansion
+                .receiver_generic_parameters(file_index, &function)
+                .map_err(|message| {
+                    ExpansionError::for_file(expansion.files[file_index].path.clone(), message)
+                })?;
+            if let Some(parameters) = parameters {
+                if is_concrete_only_function_name(&function.name) {
+                    return Err(ExpansionError::for_file(
+                        expansion.files[file_index].path.clone(),
+                        format!(
+                            "generic function '{}' cannot be a lifecycle or host entry; use a concrete wrapper",
+                            function.name
+                        ),
+                    ));
+                }
+                let definition = expansion.generic_functions.len();
+                expansion
+                    .generic_functions_by_name
+                    .entry(function.name.clone())
+                    .or_default()
+                    .push(definition);
+                expansion.generic_functions.push(GenericFunctionDefinition {
+                    file_index,
+                    path: expansion.files[file_index].path.clone(),
+                    module_alias,
+                    name: function.name.clone(),
+                    parameters,
+                    signature: function,
+                });
+            } else {
+                expansion
+                    .validate_unbound_function_signature(&function, file_index)
+                    .map_err(|message| {
+                        ExpansionError::for_file(expansion.files[file_index].path.clone(), message)
+                    })?;
+                expansion
+                    .ordinary_function_names
+                    .entry(function.name.clone())
+                    .or_default()
+                    .push((
+                        file_index,
+                        module_alias,
+                        function
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.type_name.clone())
+                            .collect(),
+                    ));
+            }
+        }
         Ok(expansion)
     }
 
-    fn populate_concrete_paths(&mut self) -> Result<(), String> {
-        let roots = self
-            .concrete_paths
-            .iter()
-            .filter(|(path, _)| !path.contains('.'))
-            .map(|(path, type_name)| (path.clone(), type_name.clone()))
-            .collect::<Vec<_>>();
-        let block_fields = self
-            .concrete_paths
-            .iter()
-            .filter(|(path, _)| path.contains('.'))
-            .map(|(path, type_name)| (path.clone(), type_name.clone()))
-            .collect::<Vec<_>>();
-        for (path, type_name) in roots.into_iter().chain(block_fields) {
-            self.populate_concrete_type(
-                &path,
-                &type_name,
+    fn validate_original_value_contracts(
+        &self,
+        parsed_functions: &[(usize, String, ParsedFunctionSignature)],
+    ) -> Result<(), ExpansionError> {
+        for (file_index, _, function) in parsed_functions {
+            let environment = self.environment_for_file(*file_index);
+            if self
+                .is_named_struct_result(&function.return_type_name, &environment)
+                .map_err(|message| {
+                    ExpansionError::for_file(self.files[*file_index].path.clone(), message)
+                })?
+            {
+                return Err(self.unsupported_struct_return_error(
+                    *file_index,
+                    function,
+                    &function.return_type_name,
+                ));
+            }
+        }
+
+        for (file_index, file) in self.files.iter().enumerate() {
+            let Ok(externs) = parse_top_level_extern_functions(&file.source) else {
+                continue;
+            };
+            let environment = self.environment_for_file(file_index);
+            for declaration in externs {
+                if self
+                    .is_named_struct_result(&declaration.return_type_name, &environment)
+                    .map_err(|message| ExpansionError::for_file(file.path.clone(), message))?
+                {
+                    let range = extern_return_type_range(&file.source, &declaration)
+                        .unwrap_or_else(|| declaration.name_range.clone());
+                    return Err(ExpansionError::contract(
+                        file.path.clone(),
+                        range,
+                        declaration.name.clone(),
+                        unsupported_struct_return_message(&declaration.return_type_name),
+                        crate::SourceDiagnosticCode::UnsupportedStructReturn,
+                    ));
+                }
+            }
+        }
+
+        for definitions in self.ordinary_structs_by_name.values() {
+            for definition in definitions {
+                self.validate_stored_view_fields(
+                    definition.file_index,
+                    &definition.name,
+                    &definition.fields,
+                    definition.definition_range.clone(),
+                    &GenericEnvironment::default(),
+                )?;
+            }
+        }
+        for definition in self.generic_structs.values() {
+            self.validate_stored_view_fields(
+                definition.file_index,
+                &definition.name,
+                &definition.fields,
+                definition.definition_range.clone(),
                 &GenericEnvironment::default(),
-                &mut Vec::new(),
             )?;
+        }
+        Ok(())
+    }
+
+    fn validate_stored_view_fields(
+        &self,
+        file_index: usize,
+        struct_name: &str,
+        fields: &[crate::frontend::parser::ParsedField],
+        definition_range: Range<usize>,
+        environment: &GenericEnvironment,
+    ) -> Result<(), ExpansionError> {
+        let file = &self.files[file_index];
+        for field in fields {
+            let materialized = environment
+                .types
+                .get(field.type_name.trim())
+                .map_or(field.type_name.as_str(), String::as_str);
+            if !contains_view_type(materialized) {
+                continue;
+            }
+            let range =
+                struct_field_type_range(&file.source, definition_range.clone(), &field.name)
+                    .unwrap_or_else(|| definition_range.clone());
+            return Err(ExpansionError::contract(
+                file.path.clone(),
+                range,
+                struct_name.to_string(),
+                stored_view_field_message(struct_name, &field.name, materialized),
+                crate::SourceDiagnosticCode::StoredViewField,
+            ));
+        }
+        Ok(())
+    }
+
+    fn is_named_struct_result(
+        &self,
+        type_name: &str,
+        environment: &GenericEnvironment,
+    ) -> Result<bool, String> {
+        let trimmed = type_name.trim();
+        if let Some((element, _)) = split_array_suffix(trimmed) {
+            return self.is_named_struct_result(element, environment);
+        }
+        if let Some(value) = environment.types.get(trimmed) {
+            return self.is_named_struct_result(value, environment);
+        }
+        if let Some((base, _)) = parse_type_application(trimmed)? {
+            return Ok(self
+                .lookup_generic_struct_for_environment(base, environment)?
+                .is_some());
+        }
+        Ok(self
+            .lookup_ordinary_struct_for_environment(trimmed, environment)?
+            .is_some()
+            || self.generated_struct_application(trimmed).is_some())
+    }
+
+    fn unsupported_struct_return_error(
+        &self,
+        file_index: usize,
+        function: &ParsedFunctionSignature,
+        return_type: &str,
+    ) -> ExpansionError {
+        let file = &self.files[file_index];
+        let range = function_return_type_range(&file.source, function)
+            .unwrap_or_else(|| function.signature_range.clone());
+        ExpansionError::contract(
+            file.path.clone(),
+            range,
+            function.name.clone(),
+            unsupported_struct_return_message(return_type),
+            crate::SourceDiagnosticCode::UnsupportedStructReturn,
+        )
+    }
+
+    fn receiver_generic_parameters(
+        &self,
+        file_index: usize,
+        function: &ParsedFunctionSignature,
+    ) -> Result<Option<Vec<ParsedGenericParameter>>, String> {
+        let Some(first) = function.params.first() else {
+            return Ok(None);
+        };
+        let Some((base, arguments)) = parse_type_application(&first.type_name)? else {
+            return Ok(None);
+        };
+        let lookup_environment = self.environment_for_file(file_index);
+        let Some(definition) =
+            self.lookup_generic_struct_for_environment(base, &lookup_environment)?
+        else {
+            return Ok(None);
+        };
+        if definition.parameters.len() != arguments.len() {
+            return Err(format!(
+                "first parameter of generic function '{}' must apply '{}' with {} arguments; got {}",
+                function.name,
+                base,
+                definition.parameters.len(),
+                arguments.len()
+            ));
+        }
+        let mut parameters = Vec::new();
+        for (argument, parameter) in arguments.iter().zip(&definition.parameters) {
+            self.collect_receiver_generic_parameters(
+                argument,
+                parameter.kind,
+                file_index,
+                &mut parameters,
+            )?;
+        }
+        if parameters.is_empty() {
+            return Ok(None);
+        }
+        if let Some(conflict) = function.params.iter().find(|parameter| {
+            parameters
+                .iter()
+                .any(|generic| generic.name == parameter.name)
+        }) {
+            return Err(format!(
+                "receiver generic name '{}' conflicts with an ordinary function parameter",
+                conflict.name
+            ));
+        }
+        self.validate_receiver_signature(function, &parameters, file_index)?;
+        self.validate_receiver_body(function, &parameters, file_index)?;
+        Ok(Some(parameters))
+    }
+
+    fn collect_receiver_generic_parameters(
+        &self,
+        argument: &str,
+        kind: ParsedGenericParameterKind,
+        file_index: usize,
+        parameters: &mut Vec<ParsedGenericParameter>,
+    ) -> Result<(), String> {
+        let argument = argument.trim();
+        match kind {
+            ParsedGenericParameterKind::Type => {
+                if let Some((base, arguments)) = parse_type_application(argument)? {
+                    let lookup_environment = self.environment_for_file(file_index);
+                    let Some(definition) =
+                        self.lookup_generic_struct_for_environment(base, &lookup_environment)?
+                    else {
+                        return Ok(());
+                    };
+                    if definition.parameters.len() != arguments.len() {
+                        return Err(format!(
+                            "nested receiver generic type '{}' has {} arguments; expected {}",
+                            base,
+                            arguments.len(),
+                            definition.parameters.len()
+                        ));
+                    }
+                    for (nested, parameter) in arguments.iter().zip(&definition.parameters) {
+                        self.collect_receiver_generic_parameters(
+                            nested,
+                            parameter.kind,
+                            file_index,
+                            parameters,
+                        )?;
+                    }
+                    return Ok(());
+                }
+                if let Some((element, extent)) = split_array_suffix(argument) {
+                    self.collect_receiver_generic_parameters(
+                        element,
+                        ParsedGenericParameterKind::Type,
+                        file_index,
+                        parameters,
+                    )?;
+                    if !extent.trim().is_empty() {
+                        self.collect_receiver_generic_parameters(
+                            extent,
+                            ParsedGenericParameterKind::I32,
+                            file_index,
+                            parameters,
+                        )?;
+                    }
+                    return Ok(());
+                }
+                if is_identifier_text(argument)
+                    && !self.is_known_concrete_type(argument, file_index)?
+                {
+                    add_receiver_parameter(parameters, argument, ParsedGenericParameterKind::Type)?;
+                } else if !is_type_argument_text(argument) {
+                    return Err(format!(
+                        "receiver generic type argument '{}' is not a type expression",
+                        argument
+                    ));
+                }
+            }
+            ParsedGenericParameterKind::I32 => {
+                let environment = self.environment_for_file(file_index);
+                if is_identifier_text(argument)
+                    && self
+                        .visible_constant_value(argument, &environment)?
+                        .is_none()
+                {
+                    add_receiver_parameter(parameters, argument, ParsedGenericParameterKind::I32)?;
+                } else if self
+                    .evaluate_i32_expression(argument, &environment)
+                    .is_err()
+                {
+                    return Err(format!(
+                        "receiver generic i32 argument '{}' must be a checked constant or identifier",
+                        argument
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_generic_placeholder_name(&self, name: &str) -> bool {
+        let short_name = name.rsplit('.').next().unwrap_or(name);
+        (short_name.len() == 1
+            && short_name
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_uppercase))
+            || self.generic_structs.values().any(|definition| {
+                definition
+                    .parameters
+                    .iter()
+                    .any(|parameter| parameter.name == short_name)
+            })
+    }
+
+    fn validate_receiver_signature(
+        &self,
+        function: &ParsedFunctionSignature,
+        parameters: &[ParsedGenericParameter],
+        file_index: usize,
+    ) -> Result<(), String> {
+        for parameter in function.params.iter().skip(1) {
+            self.validate_receiver_type_expression(
+                &parameter.type_name,
+                parameters,
+                &function.name,
+                file_index,
+            )?;
+        }
+        self.validate_receiver_type_expression(
+            &function.return_type_name,
+            parameters,
+            &function.name,
+            file_index,
+        )?;
+        Ok(())
+    }
+
+    fn validate_receiver_body(
+        &self,
+        function: &ParsedFunctionSignature,
+        parameters: &[ParsedGenericParameter],
+        file_index: usize,
+    ) -> Result<(), String> {
+        let Ok(bindings) =
+            crate::frontend::parser::parse_typed_local_bindings(&self.files[file_index].source)
+        else {
+            // Leave malformed-body diagnostics to the canonical parser.
+            return Ok(());
+        };
+        for binding in bindings.into_iter().filter(|binding| {
+            binding.function_name == function.name
+                && binding.name_range.start >= function.body_range.start
+                && binding.name_range.end <= function.body_range.end
+        }) {
+            self.validate_receiver_type_expression(
+                &binding.type_name,
+                parameters,
+                &function.name,
+                file_index,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_unbound_function_signature(
+        &self,
+        function: &ParsedFunctionSignature,
+        file_index: usize,
+    ) -> Result<(), String> {
+        let no_parameters = [];
+        for parameter in &function.params {
+            self.validate_receiver_type_expression(
+                &parameter.type_name,
+                &no_parameters,
+                &function.name,
+                file_index,
+            )?;
+        }
+        self.validate_receiver_type_expression(
+            &function.return_type_name,
+            &no_parameters,
+            &function.name,
+            file_index,
+        )
+    }
+
+    fn validate_receiver_type_expression(
+        &self,
+        type_name: &str,
+        parameters: &[ParsedGenericParameter],
+        function_name: &str,
+        file_index: usize,
+    ) -> Result<(), String> {
+        let type_name = type_name.trim();
+        if let Some((element, extent)) = split_array_suffix(type_name) {
+            self.validate_receiver_type_expression(element, parameters, function_name, file_index)?;
+            if !extent.trim().is_empty() {
+                self.validate_receiver_i32_expression(
+                    extent,
+                    parameters,
+                    function_name,
+                    file_index,
+                )?;
+            }
+            return Ok(());
+        }
+        if let Some((base, arguments)) = parse_type_application(type_name)? {
+            let environment = self.environment_for_file(file_index);
+            let Some(definition) =
+                self.lookup_generic_struct_for_environment(base, &environment)?
+            else {
+                return Err(format!(
+                    "generic name in function '{}' uses unknown type '{}'; bind it through the first parameter's generic struct",
+                    function_name, base
+                ));
+            };
+            if definition.parameters.len() != arguments.len() {
+                return Err(format!(
+                    "generic receiver function '{}' applies '{}' with {} arguments; expected {}",
+                    function_name,
+                    base,
+                    arguments.len(),
+                    definition.parameters.len()
+                ));
+            }
+            for (argument, parameter) in arguments.iter().zip(&definition.parameters) {
+                self.validate_receiver_argument(
+                    argument,
+                    parameter.kind,
+                    parameters,
+                    function_name,
+                    file_index,
+                )?;
+            }
+            return Ok(());
+        }
+        if is_identifier_text(type_name) {
+            if let Some(parameter) = parameters
+                .iter()
+                .find(|parameter| parameter.name == type_name)
+            {
+                if parameter.kind != ParsedGenericParameterKind::Type {
+                    return Err(format!(
+                        "generic receiver function '{}' uses i32 binding '{}' as a type",
+                        function_name, type_name
+                    ));
+                }
+                return Ok(());
+            }
+            if !self.is_known_concrete_type(type_name, file_index)?
+                && self.is_generic_placeholder_name(type_name)
+            {
+                return Err(format!(
+                    "generic name '{}' in function '{}' is not bound by the first parameter's generic struct",
+                    type_name, function_name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_receiver_argument(
+        &self,
+        argument: &str,
+        kind: ParsedGenericParameterKind,
+        parameters: &[ParsedGenericParameter],
+        function_name: &str,
+        file_index: usize,
+    ) -> Result<(), String> {
+        match kind {
+            ParsedGenericParameterKind::Type => self.validate_receiver_type_expression(
+                argument,
+                parameters,
+                function_name,
+                file_index,
+            ),
+            ParsedGenericParameterKind::I32 => self.validate_receiver_i32_expression(
+                argument,
+                parameters,
+                function_name,
+                file_index,
+            ),
+        }
+    }
+
+    fn validate_receiver_i32_expression(
+        &self,
+        expression: &str,
+        parameters: &[ParsedGenericParameter],
+        function_name: &str,
+        file_index: usize,
+    ) -> Result<(), String> {
+        let Ok(tokens) = tokenize_constant_expression(expression) else {
+            return Err(format!(
+                "generic receiver function '{}' has an invalid i32 expression '{}'; bind it through the first parameter's generic struct",
+                function_name, expression.trim()
+            ));
+        };
+        for token in tokens {
+            let ConstantToken::Identifier(identifier) = token else {
+                continue;
+            };
+            if self
+                .visible_constant_value(&identifier, &self.environment_for_file(file_index))?
+                .is_some()
+                || parameters.iter().any(|parameter| {
+                    parameter.name == identifier
+                        && parameter.kind == ParsedGenericParameterKind::I32
+                })
+            {
+                continue;
+            }
+            return Err(format!(
+                "generic name '{}' in function '{}' is not bound by the first parameter's generic struct",
+                identifier, function_name
+            ));
+        }
+        Ok(())
+    }
+
+    fn populate_concrete_paths(&mut self) -> Result<(), ExpansionError> {
+        for file_index in 0..self.files.len() {
+            let path = self.files[file_index].path.clone();
+            let result = (|| -> Result<(), String> {
+                let visible = self.visible_paths(file_index);
+                let names = self
+                    .concrete_path_definitions
+                    .iter()
+                    .filter(|definition| visible.contains(&self.files[definition.file_index].path))
+                    .map(|definition| definition.path.clone())
+                    .collect::<BTreeSet<_>>();
+                let mut paths = BTreeMap::new();
+                for name in names {
+                    let local = self
+                        .concrete_path_definitions
+                        .iter()
+                        .filter(|definition| {
+                            definition.file_index == file_index && definition.path == name
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let matches = if local.is_empty() {
+                        self.concrete_path_definitions
+                            .iter()
+                            .filter(|definition| {
+                                visible.contains(&self.files[definition.file_index].path)
+                                    && definition.path == name
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    } else {
+                        local
+                    };
+                    let [definition] = matches.as_slice() else {
+                        continue;
+                    };
+                    let environment = self.environment_for_file(definition.file_index);
+                    self.populate_concrete_type(
+                        &mut paths,
+                        &definition.path,
+                        &definition.type_name,
+                        &environment,
+                        &mut Vec::new(),
+                        0,
+                    )?;
+                }
+                self.concrete_paths_by_file.insert(file_index, paths);
+                Ok(())
+            })();
+            result.map_err(|message| ExpansionError::for_file(path, message))?;
         }
         Ok(())
     }
 
     fn populate_concrete_type(
         &mut self,
+        paths: &mut BTreeMap<String, String>,
         path: &str,
         type_name: &str,
         environment: &GenericEnvironment,
         visiting: &mut Vec<String>,
+        generic_depth: usize,
     ) -> Result<(), String> {
         let resolved_type = rewrite_generic_identifiers(type_name, environment);
-        self.materialize_type(&resolved_type, environment)?;
-        self.concrete_paths
-            .insert(path.to_string(), resolved_type.clone());
+        let materialized_type = self.materialize_type(&resolved_type, environment)?;
+        paths.insert(path.to_string(), materialized_type.clone());
 
-        let subject = split_array_suffix(&resolved_type)
-            .map_or(resolved_type.as_str(), |(element, _)| element);
+        let subject = split_array_suffix(&materialized_type)
+            .map_or(materialized_type.as_str(), |(element, _)| element);
         let Some((fields, nested_environment, visit_key)) =
             self.struct_fields_for_type(subject, environment)?
         else {
@@ -418,13 +1496,19 @@ impl Expansion {
         if visiting.iter().any(|existing| existing == &visit_key) {
             return Ok(());
         }
+        let is_generic = visit_key.starts_with("generic:");
+        if is_generic {
+            ensure_instantiation_depth(generic_depth)?;
+        }
         visiting.push(visit_key);
         for field in fields {
             self.populate_concrete_type(
+                paths,
                 &format!("{path}.{}", field.name),
                 &field.type_name,
                 &nested_environment,
                 visiting,
+                generic_depth + usize::from(is_generic),
             )?;
         }
         visiting.pop();
@@ -438,7 +1522,11 @@ impl Expansion {
         source: &str,
         environment: &GenericEnvironment,
     ) -> Result<BTreeMap<String, String>, String> {
-        let mut paths = self.concrete_paths.clone();
+        let mut paths = self
+            .concrete_paths_by_file
+            .get(&file_index)
+            .cloned()
+            .unwrap_or_default();
         for parameter in &function.params {
             let type_name = rewrite_generic_identifiers(&parameter.type_name, environment);
             self.populate_local_type_paths(
@@ -447,6 +1535,7 @@ impl Expansion {
                 &type_name,
                 environment,
                 &mut Vec::new(),
+                0,
             )?;
         }
         if let Ok(bindings) = crate::frontend::parser::parse_typed_local_bindings(source) {
@@ -461,6 +1550,7 @@ impl Expansion {
                     &type_name,
                     environment,
                     &mut Vec::new(),
+                    0,
                 )?;
             }
         }
@@ -475,17 +1565,22 @@ impl Expansion {
         type_name: &str,
         environment: &GenericEnvironment,
         visiting: &mut Vec<String>,
+        generic_depth: usize,
     ) -> Result<(), String> {
         let resolved_type = rewrite_generic_identifiers(type_name, environment);
-        paths.insert(path.to_string(), resolved_type.clone());
-        let _ = self.materialize_type(&resolved_type, environment)?;
-        let subject = split_array_suffix(&resolved_type)
-            .map_or(resolved_type.as_str(), |(element, _)| element);
+        let materialized_type = self.materialize_type(&resolved_type, environment)?;
+        paths.insert(path.to_string(), materialized_type.clone());
+        let subject = split_array_suffix(&materialized_type)
+            .map_or(materialized_type.as_str(), |(element, _)| element);
         if let Some((fields, nested_environment, visit_key)) =
             self.struct_fields_for_type(subject, environment)?
         {
             if visiting.iter().any(|existing| existing == &visit_key) {
                 return Ok(());
+            }
+            let is_generic = visit_key.starts_with("generic:");
+            if is_generic {
+                ensure_instantiation_depth(generic_depth)?;
             }
             visiting.push(visit_key);
             for field in fields {
@@ -495,6 +1590,7 @@ impl Expansion {
                     &field.type_name,
                     &nested_environment,
                     visiting,
+                    generic_depth + usize::from(is_generic),
                 )?;
             }
             visiting.pop();
@@ -502,66 +1598,45 @@ impl Expansion {
         Ok(())
     }
 
-    fn seed_direct_uses(&mut self) -> Result<(), String> {
+    fn seed_direct_uses(&mut self) -> Result<(), ExpansionError> {
         for file_index in 0..self.files.len() {
-            let source = self.files[file_index].source.clone();
-            let source_without_templates = self.source_without_templates(file_index, &source)?;
-            let mut source_environment = GenericEnvironment::default();
-            source_environment.module_alias =
-                Some(module_alias_for_path(&self.files[file_index].path));
-            self.collect_type_applications(&source_without_templates, &source_environment)?;
-            let Ok(functions) = parse_top_level_functions(&source_without_templates) else {
-                continue;
-            };
-            for function in functions {
-                let Some(body) = source_without_templates.get(function.body_range.clone()) else {
-                    continue;
+            let path = self.files[file_index].path.clone();
+            let result = (|| -> Result<(), String> {
+                let source = self.files[file_index].source.clone();
+                let source_without_templates =
+                    self.source_without_templates(file_index, &source)?;
+                let source_environment = self.environment_for_file(file_index);
+                self.collect_type_applications(&source_without_templates, &source_environment)?;
+                let Ok(functions) = parse_top_level_functions(&source_without_templates) else {
+                    return Ok(());
                 };
-                let local_paths = self.local_paths_for_function(
-                    file_index,
-                    &function,
-                    &source_without_templates,
-                    &source_environment,
-                )?;
-                for call in collect_explicit_generic_calls(body)? {
-                    let definitions = self.generic_function_candidates(
-                        &call.name,
-                        call.qualifier.as_deref(),
+                for function in functions {
+                    let Some(body) = source_without_templates.get(function.body_range.clone())
+                    else {
+                        continue;
+                    };
+                    let local_paths = self.local_paths_for_function(
                         file_index,
-                    );
-                    for definition in definitions {
-                        let generic = self.generic_functions[definition].clone();
-                        let parameters = generic.parameters.clone();
-                        let arguments = self.resolve_argument_list(
-                            &parameters,
-                            &call.arguments,
-                            &source_environment,
-                        )?;
-                        let mut actual_types = Vec::new();
-                        if let Some(qualifier) = call.qualifier.as_deref() {
-                            if let Some(type_name) = local_paths.get(qualifier) {
-                                actual_types.push(type_name.clone());
-                            }
-                        }
-                        if let Some(argument_types) = call
-                            .call_arguments
-                            .iter()
-                            .map(|argument| self.infer_expression_type_text(argument, &local_paths))
-                            .collect::<Option<Vec<_>>>()
-                        {
-                            actual_types.extend(argument_types);
-                        } else {
-                            actual_types.clear();
-                        }
-                        if !self.explicit_call_matches(&generic, &arguments, &actual_types) {
-                            continue;
-                        }
-                        self.schedule_function(definition, arguments)?;
-                    }
+                        &function,
+                        &source_without_templates,
+                        &source_environment,
+                    )?;
+                    self.seed_inferred_receiver_calls(
+                        body,
+                        function.body_range.start,
+                        file_index,
+                        &local_paths,
+                    )?;
+                    self.seed_inferred_argument_calls(
+                        body,
+                        function.body_range.start,
+                        file_index,
+                        &local_paths,
+                    )?;
                 }
-                self.seed_inferred_receiver_calls(body, file_index, &local_paths)?;
-                self.seed_inferred_argument_calls(body, file_index, &local_paths)?;
-            }
+                Ok(())
+            })();
+            result.map_err(|message| ExpansionError::for_file(path, message))?;
         }
         Ok(())
     }
@@ -569,20 +1644,22 @@ impl Expansion {
     fn seed_inferred_receiver_calls(
         &mut self,
         source: &str,
+        source_offset: usize,
         file_index: usize,
         local_paths: &BTreeMap<String, String>,
     ) -> Result<(), String> {
         for call in collect_inferred_receiver_calls(source)? {
-            let is_module_call = !self.concrete_paths.contains_key(&call.receiver)
+            let is_module_call = !local_paths.contains_key(&call.receiver)
                 && self
-                    .visible_module_aliases
-                    .get(&file_index)
-                    .is_some_and(|aliases| aliases.contains(&call.receiver));
+                    .imported_alias_target(file_index, &call.receiver)
+                    .is_some();
             if is_module_call {
                 let Some(actual_types) = call
                     .arguments
                     .iter()
-                    .map(|argument| self.infer_expression_type_text(argument, local_paths))
+                    .map(|argument| {
+                        self.infer_expression_type_text(argument, local_paths, file_index)
+                    })
                     .collect::<Option<Vec<_>>>()
                 else {
                     continue;
@@ -606,42 +1683,38 @@ impl Expansion {
                     else {
                         continue;
                     };
-                    self.schedule_function(definition, arguments)?;
+                    self.schedule_function_from_call(
+                        definition,
+                        arguments,
+                        file_index,
+                        source_offset + call.name_start..source_offset + call.name_end,
+                        &call.name,
+                    )?;
                     scheduled = true;
                 }
                 if had_viable_definition && !scheduled {
                     return Err(format!(
-                        "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                        "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                         call.name
                     ));
                 }
                 continue;
             }
-            let Some(actual_type) = local_paths
-                .get(&call.receiver)
-                .or_else(|| self.concrete_paths.get(&call.receiver))
-                .cloned()
-            else {
+            let Some(actual_type) = local_paths.get(&call.receiver).cloned() else {
                 continue;
             };
             let mut actual_types = vec![actual_type];
             let Some(argument_types) = call
                 .arguments
                 .iter()
-                .map(|argument| self.infer_expression_type_text(argument, local_paths))
+                .map(|argument| self.infer_expression_type_text(argument, local_paths, file_index))
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
             };
             actual_types.extend(argument_types);
-            let definitions =
-                self.generic_function_candidates(&call.name, Some(&call.receiver), file_index);
-            if self.has_ordinary_function_candidate(
-                &call.name,
-                Some(&call.receiver),
-                file_index,
-                &actual_types,
-            ) {
+            let definitions = self.generic_function_candidates(&call.name, None, file_index);
+            if self.has_ordinary_function_candidate(&call.name, None, file_index, &actual_types) {
                 continue;
             }
             let had_viable_definition = !definitions.is_empty();
@@ -652,12 +1725,18 @@ impl Expansion {
                 else {
                     continue;
                 };
-                self.schedule_function(definition, arguments)?;
+                self.schedule_function_from_call(
+                    definition,
+                    arguments,
+                    file_index,
+                    source_offset + call.name_start..source_offset + call.name_end,
+                    &call.name,
+                )?;
                 scheduled = true;
             }
             if had_viable_definition && !scheduled {
                 return Err(format!(
-                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                     call.name
                 ));
             }
@@ -668,6 +1747,7 @@ impl Expansion {
     fn seed_inferred_argument_calls(
         &mut self,
         source: &str,
+        source_offset: usize,
         file_index: usize,
         local_paths: &BTreeMap<String, String>,
     ) -> Result<(), String> {
@@ -680,7 +1760,7 @@ impl Expansion {
             let Some(inferred_types) = call
                 .arguments
                 .iter()
-                .map(|argument| self.infer_expression_type_text(argument, local_paths))
+                .map(|argument| self.infer_expression_type_text(argument, local_paths, file_index))
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
@@ -698,13 +1778,19 @@ impl Expansion {
                 if let Some(arguments) =
                     self.infer_generic_call_arguments(&generic, &actual_types)?
                 {
-                    self.schedule_function(definition, arguments)?;
+                    self.schedule_function_from_call(
+                        definition,
+                        arguments,
+                        file_index,
+                        source_offset + call.name_start..source_offset + call.name_end,
+                        &call.name,
+                    )?;
                     scheduled = true;
                 }
             }
             if !scheduled {
                 return Err(format!(
-                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                     call.name
                 ));
             }
@@ -722,157 +1808,48 @@ impl Expansion {
         }
         let mut environment = GenericEnvironment::default();
         environment.module_alias = Some(generic.module_alias.clone());
-        for (parameter, actual) in generic.signature.params.iter().zip(actual_types) {
+        environment.source_path = Some(generic.path.clone());
+        // Generic names are definitionally owned by the first parameter.  It
+        // is the only parameter allowed to introduce bindings; all remaining
+        // parameters merely validate the already-substituted signature.
+        let Some((first_parameter, first_actual)) =
+            generic.signature.params.first().zip(actual_types.first())
+        else {
+            return Ok(None);
+        };
+        if !self.infer_type_pattern(
+            &first_parameter.type_name,
+            first_actual,
+            &generic.parameters,
+            &mut environment,
+        )? {
+            return Ok(None);
+        }
+        for (parameter, actual) in generic.signature.params.iter().zip(actual_types).skip(1) {
+            let before_validation = environment.clone();
+            let mut validation_environment = environment.clone();
             if !self.infer_type_pattern(
                 &parameter.type_name,
                 actual,
                 &generic.parameters,
-                &mut environment,
+                &mut validation_environment,
             )? {
                 return Ok(None);
             }
-        }
-        // A symbolic extent such as N+1 is intentionally not solved during
-        // inference.  Once another occurrence has bound N, run the match
-        // again so the expression is checked rather than merely deferred.
-        for (parameter, actual) in generic.signature.params.iter().zip(actual_types) {
-            if !self.infer_type_pattern(
-                &parameter.type_name,
-                actual,
-                &generic.parameters,
-                &mut environment,
-            )? {
+            if validation_environment.types != before_validation.types
+                || validation_environment.values != before_validation.values
+            {
                 return Ok(None);
             }
         }
         Ok(inferred_arguments(&generic.parameters, &environment))
     }
 
-    fn explicit_call_matches(
-        &self,
-        generic: &GenericFunctionDefinition,
-        arguments: &[ConcreteArgument],
-        actual_types: &[String],
-    ) -> bool {
-        if actual_types.is_empty() {
-            return true;
-        }
-        if generic.signature.params.len() != actual_types.len() {
-            return false;
-        }
-        let Ok(mut environment) =
-            GenericEnvironment::from_parameters(&generic.parameters, arguments)
-        else {
-            return false;
-        };
-        environment.module_alias = Some(generic.module_alias.clone());
-        generic
-            .signature
-            .params
-            .iter()
-            .zip(actual_types)
-            .all(|(parameter, actual)| {
-                let expected = rewrite_generic_identifiers(&parameter.type_name, &environment);
-                self.types_compatible_for_environment(&expected, actual, &environment)
-            })
-    }
-
-    fn types_compatible_for_environment(
-        &self,
-        expected: &str,
-        actual: &str,
-        environment: &GenericEnvironment,
-    ) -> bool {
-        if same_type_name(expected, actual) {
-            return true;
-        }
-        let expected_array = split_array_suffix(expected);
-        let actual_array = split_array_suffix(actual);
-        if let (Some((expected_element, expected_extent)), Some((actual_element, actual_extent))) =
-            (expected_array, actual_array)
-        {
-            if !self.types_compatible_for_environment(expected_element, actual_element, environment)
-            {
-                return false;
-            }
-            if expected_extent.trim().is_empty() {
-                return true;
-            }
-            let Ok(expected_extent) =
-                evaluate_i32_expression(expected_extent, environment, &self.constants)
-            else {
-                return type_names_equivalent(expected_extent, actual_extent);
-            };
-            let Ok(actual_extent) =
-                evaluate_i32_expression(actual_extent, environment, &self.constants)
-            else {
-                return false;
-            };
-            return expected_extent == actual_extent;
-        }
-        let (Some((expected_base, expected_arguments)), Some((actual_base, actual_arguments))) = (
-            parse_type_application(expected).ok().flatten(),
-            parse_type_application(actual).ok().flatten(),
-        ) else {
-            return type_names_equivalent(expected, actual);
-        };
-        if expected_arguments.len() != actual_arguments.len() {
-            return false;
-        }
-        let expected_definition = self
-            .lookup_generic_struct_for_environment(expected_base, environment)
-            .ok()
-            .flatten();
-        let actual_definition = self
-            .lookup_generic_struct_for_environment(actual_base, environment)
-            .ok()
-            .flatten();
-        if let (Some(expected_definition), Some(actual_definition)) =
-            (expected_definition, actual_definition)
-        {
-            if expected_definition.identity != actual_definition.identity
-                || expected_definition.parameters.len() != expected_arguments.len()
-            {
-                return false;
-            }
-            return expected_definition
-                .parameters
-                .iter()
-                .zip(expected_arguments.iter().zip(actual_arguments.iter()))
-                .all(
-                    |(parameter, (expected_argument, actual_argument))| match parameter.kind {
-                        ParsedGenericParameterKind::Type => self.types_compatible_for_environment(
-                            expected_argument,
-                            actual_argument,
-                            environment,
-                        ),
-                        ParsedGenericParameterKind::I32 => {
-                            match (
-                                evaluate_i32_expression(
-                                    expected_argument,
-                                    environment,
-                                    &self.constants,
-                                ),
-                                evaluate_i32_expression(
-                                    actual_argument,
-                                    environment,
-                                    &self.constants,
-                                ),
-                            ) {
-                                (Ok(expected), Ok(actual)) => expected == actual,
-                                _ => false,
-                            }
-                        }
-                    },
-                );
-        }
-        type_names_equivalent(expected, actual)
-    }
-
     fn infer_expression_type_text(
         &self,
         expression: &str,
         local_paths: &BTreeMap<String, String>,
+        file_index: usize,
     ) -> Option<String> {
         let mut expression = expression.trim();
         while has_outer_parentheses(expression) {
@@ -881,7 +1858,12 @@ impl Expansion {
         if let Some(type_name) = local_paths.get(expression) {
             return Some(type_name.clone());
         }
-        if self.constants.contains_key(expression) {
+        if self
+            .visible_constant_value(expression, &self.environment_for_file(file_index))
+            .ok()
+            .flatten()
+            .is_some()
+        {
             return Some("i32".to_string());
         }
         if expression == "true" || expression == "false" {
@@ -901,8 +1883,8 @@ impl Expansion {
             return Some("f32".to_string());
         }
         if let Some((lhs, operator, rhs)) = split_binary_expression(expression) {
-            let lhs = self.infer_expression_type_text(lhs, local_paths)?;
-            let rhs = self.infer_expression_type_text(rhs, local_paths)?;
+            let lhs = self.infer_expression_type_text(lhs, local_paths, file_index)?;
+            let rhs = self.infer_expression_type_text(rhs, local_paths, file_index)?;
             if operator == '<' || operator == '>' || operator == '=' {
                 return Some("bool".to_string());
             }
@@ -915,7 +1897,8 @@ impl Expansion {
             return Some(lhs);
         }
         if let Some((collection, suffix)) = split_indexed_expression(expression) {
-            let collection_type = self.infer_expression_type_text(collection, local_paths)?;
+            let collection_type =
+                self.infer_expression_type_text(collection, local_paths, file_index)?;
             let element_type = split_array_suffix(&collection_type)?.0.to_string();
             if suffix.is_empty() {
                 return Some(element_type);
@@ -923,20 +1906,28 @@ impl Expansion {
             return local_paths
                 .get(&format!("{collection}[0]{suffix}"))
                 .cloned()
-                .or_else(|| self.field_type_from_text(&element_type, suffix));
+                .or_else(|| self.field_type_from_text(&element_type, suffix, file_index));
         }
         None
     }
 
-    fn field_type_from_text(&self, type_name: &str, suffix: &str) -> Option<String> {
+    fn field_type_from_text(
+        &self,
+        type_name: &str,
+        suffix: &str,
+        file_index: usize,
+    ) -> Option<String> {
         let mut current = type_name.trim().to_string();
+        let mut current_environment = self.environment_for_file(file_index);
         for field_name in suffix.trim_start_matches('.').split('.') {
             let fields = if let Some((base, arguments)) = parse_type_application(&current).ok()? {
-                let mut lookup_environment = GenericEnvironment::default();
                 let definition = self
-                    .lookup_generic_struct_for_environment(base, &lookup_environment)
-                    .ok()??;
+                    .lookup_generic_struct_for_environment(base, &current_environment)
+                    .ok()??
+                    .clone();
+                let mut lookup_environment = current_environment.clone();
                 lookup_environment.module_alias = Some(definition.module_alias.clone());
+                lookup_environment.source_path = Some(definition.path.clone());
                 let resolved_arguments = definition
                     .parameters
                     .iter()
@@ -947,7 +1938,7 @@ impl Expansion {
                                 .ok()?,
                         )),
                         ParsedGenericParameterKind::I32 => Some(ConcreteArgument::I32(
-                            evaluate_i32_expression(argument, &lookup_environment, &self.constants)
+                            self.evaluate_i32_expression(argument, &lookup_environment)
                                 .ok()?,
                         )),
                     })
@@ -958,6 +1949,8 @@ impl Expansion {
                 )
                 .ok()?;
                 environment.module_alias = Some(definition.module_alias.clone());
+                environment.source_path = Some(definition.path.clone());
+                current_environment = environment.clone();
                 definition
                     .fields
                     .iter()
@@ -974,6 +1967,8 @@ impl Expansion {
                 let mut environment =
                     GenericEnvironment::from_parameters(&definition.parameters, &arguments).ok()?;
                 environment.module_alias = Some(definition.module_alias.clone());
+                environment.source_path = Some(definition.path.clone());
+                current_environment = environment.clone();
                 definition
                     .fields
                     .iter()
@@ -985,9 +1980,14 @@ impl Expansion {
                             .unwrap_or(substituted)
                     })
             } else {
-                self.struct_fields
-                    .get(&current)
-                    .and_then(|fields| fields.iter().find(|field| field.name == field_name))
+                let definition = self
+                    .lookup_ordinary_struct_for_environment(&current, &current_environment)
+                    .ok()??;
+                current_environment = self.environment_for_file(definition.file_index);
+                definition
+                    .fields
+                    .iter()
+                    .find(|field| field.name == field_name)
                     .map(|field| field.type_name.clone())
             }?;
             current = fields;
@@ -1044,35 +2044,28 @@ impl Expansion {
                 parameter.kind == ParsedGenericParameterKind::I32
                     && parameter.name == pattern_extent
             }) {
-                let value = evaluate_i32_expression(
-                    actual_extent,
-                    &GenericEnvironment::default(),
-                    &self.constants,
-                )?;
+                let value = self.evaluate_i32_expression(actual_extent, environment)?;
                 return bind_inferred_value(environment, &parameter.name, value);
             }
-            let expected =
-                match evaluate_i32_expression(pattern_extent, environment, &self.constants) {
-                    Ok(value) => value,
-                    Err(_)
-                        if expression_mentions_unbound_value(
-                            pattern_extent,
-                            parameters,
-                            environment,
-                        ) =>
-                    {
-                        // Do not solve N+1=capacity.  Another exact occurrence
-                        // may bind N later, after which the expression is checked.
-                        return Ok(true);
-                    }
-                    Err(_) => return Ok(false),
-                };
-            let Some(observed) = evaluate_i32_expression(
-                actual_extent,
-                &GenericEnvironment::default(),
-                &self.constants,
-            )
-            .ok() else {
+            let expected = match self.evaluate_i32_expression(pattern_extent, environment) {
+                Ok(value) => value,
+                Err(_)
+                    if expression_mentions_unbound_value(
+                        pattern_extent,
+                        parameters,
+                        environment,
+                    ) =>
+                {
+                    // Do not solve N+1=capacity.  Another exact occurrence
+                    // may bind N later, after which the expression is checked.
+                    return Ok(true);
+                }
+                Err(_) => return Ok(false),
+            };
+            let Some(observed) = self
+                .evaluate_i32_expression(actual_extent, environment)
+                .ok()
+            else {
                 return Ok(false);
             };
             return Ok(expected == observed);
@@ -1134,18 +2127,12 @@ impl Expansion {
                             .iter()
                             .find(|candidate| candidate.name == pattern_argument.trim())
                         else {
-                            let expected = evaluate_i32_expression(
-                                pattern_argument,
-                                environment,
-                                &self.constants,
-                            )
-                            .ok();
-                            let observed = evaluate_i32_expression(
-                                actual_argument,
-                                &GenericEnvironment::default(),
-                                &self.constants,
-                            )
-                            .ok();
+                            let expected = self
+                                .evaluate_i32_expression(pattern_argument, environment)
+                                .ok();
+                            let observed = self
+                                .evaluate_i32_expression(actual_argument, environment)
+                                .ok();
                             match (expected, observed) {
                                 (Some(expected), Some(observed)) => {
                                     if expected != observed {
@@ -1168,11 +2155,7 @@ impl Expansion {
                         if nested.kind != ParsedGenericParameterKind::I32 {
                             return Ok(false);
                         }
-                        let value = evaluate_i32_expression(
-                            actual_argument,
-                            &GenericEnvironment::default(),
-                            &self.constants,
-                        )?;
+                        let value = self.evaluate_i32_expression(actual_argument, environment)?;
                         if !bind_inferred_value(environment, &nested.name, value)? {
                             return Ok(false);
                         }
@@ -1200,32 +2183,137 @@ impl Expansion {
             }
         }
         removals.sort_by_key(|range| (range.start, range.end));
-        let mut output = String::with_capacity(source.len());
-        let mut cursor = 0usize;
+        // Keep the source in the original byte coordinate space while hiding
+        // generic declarations from the ordinary-function parser.  The
+        // parser's ranges are later used to attach specialization provenance
+        // to the original source.  Concatenating the retained pieces here
+        // would shift every caller after an in-file template (and would be
+        // especially easy to get wrong for UTF-8 byte offsets).
+        let mut output = source.as_bytes().to_vec();
         for range in removals {
-            output.push_str(&source[cursor..range.start]);
-            cursor = range.end;
+            let Some(bytes) = output.get_mut(range.clone()) else {
+                return Err("generic declaration has invalid source range".to_string());
+            };
+            for byte in bytes {
+                if !matches!(*byte, b'\r' | b'\n') {
+                    *byte = b' ';
+                }
+            }
         }
-        output.push_str(&source[cursor..]);
-        Ok(output)
+        String::from_utf8(output)
+            .map_err(|_| "generic declaration masking produced invalid UTF-8".to_string())
     }
 
-    fn process_worklist(&mut self) -> Result<(), String> {
+    fn process_worklist(&mut self) -> Result<(), ExpansionError> {
         while !self.struct_work.is_empty() || !self.function_work.is_empty() {
             if let Some((key, depth)) = self.struct_work.pop_front() {
+                let path = self
+                    .lookup_generic_struct(&key.definition)
+                    .map(|definition| definition.path.clone());
                 let previous_depth = self.active_depth.replace(depth);
-                let result = self.materialize_struct(&key);
+                let result = self
+                    .validate_materialized_struct_contract(&key)
+                    .and_then(|()| {
+                        self.materialize_struct(&key)
+                            .map_err(|message| match path.clone() {
+                                Some(path) => ExpansionError::for_file(path, message),
+                                None => ExpansionError::without_path(message),
+                            })
+                    });
                 self.active_depth = previous_depth;
                 result?;
             }
             if let Some((key, depth)) = self.function_work.pop_front() {
+                let path = self
+                    .generic_functions
+                    .get(key.definition)
+                    .map(|definition| definition.path.clone());
                 let previous_depth = self.active_depth.replace(depth);
-                let result = self.materialize_function(&key);
+                let result = self
+                    .validate_materialized_function_contract(&key)
+                    .and_then(|()| {
+                        self.materialize_function(&key)
+                            .map_err(|message| match path.clone() {
+                                Some(path) => ExpansionError::for_file(path, message),
+                                None => ExpansionError::without_path(message),
+                            })
+                    });
                 self.active_depth = previous_depth;
                 result?;
             }
         }
         Ok(())
+    }
+
+    fn validate_materialized_struct_contract(
+        &mut self,
+        key: &StructSpecializationKey,
+    ) -> Result<(), ExpansionError> {
+        let definition = self
+            .lookup_generic_struct(&key.definition)
+            .cloned()
+            .ok_or_else(|| {
+                ExpansionError::without_path(format!("unknown generic struct '{}'", key.definition))
+            })?;
+        let mut environment =
+            GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)
+                .map_err(ExpansionError::without_path)?;
+        environment.module_alias = Some(definition.module_alias.clone());
+        environment.source_path = Some(definition.path.clone());
+        for field in &definition.fields {
+            let materialized = self
+                .materialize_type(&field.type_name, &environment)
+                .map_err(|message| ExpansionError::for_file(definition.path.clone(), message))?;
+            if !contains_view_type(&materialized) {
+                continue;
+            }
+            let source = &self.files[definition.file_index].source;
+            let range =
+                struct_field_type_range(source, definition.definition_range.clone(), &field.name)
+                    .unwrap_or_else(|| definition.definition_range.clone());
+            return Err(ExpansionError::contract(
+                definition.path.clone(),
+                range,
+                definition.name.clone(),
+                stored_view_field_message(&definition.name, &field.name, &materialized),
+                crate::SourceDiagnosticCode::StoredViewField,
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_materialized_function_contract(
+        &self,
+        key: &FunctionSpecializationKey,
+    ) -> Result<(), ExpansionError> {
+        let generic = self.generic_functions.get(key.definition).ok_or_else(|| {
+            ExpansionError::without_path(
+                "internal error: missing generic function definition".to_string(),
+            )
+        })?;
+        let mut environment =
+            GenericEnvironment::from_parameters(&generic.parameters, &key.arguments)
+                .map_err(ExpansionError::without_path)?;
+        environment.module_alias = Some(generic.module_alias.clone());
+        environment.source_path = Some(generic.path.clone());
+        if !self
+            .is_named_struct_result(&generic.signature.return_type_name, &environment)
+            .map_err(|message| ExpansionError::for_file(generic.path.clone(), message))?
+        {
+            return Ok(());
+        }
+        let origins = self
+            .function_specializations
+            .get(key)
+            .map(|specialization| specialization.origins.clone())
+            .unwrap_or_default();
+        Err(self
+            .unsupported_struct_return_error(
+                generic.file_index,
+                &generic.signature,
+                &generic.signature.return_type_name,
+            )
+            .with_related(origins))
     }
 
     fn collect_type_applications(
@@ -1285,7 +2373,7 @@ impl Expansion {
             if extent.is_empty() {
                 return Ok(format!("{element}[]"));
             }
-            let value = evaluate_i32_expression(extent, environment, &self.constants)?;
+            let value = self.evaluate_i32_expression(extent, environment)?;
             if value < 0 {
                 return Err(format!(
                     "negative array extent {} is invalid after generic substitution",
@@ -1316,6 +2404,11 @@ impl Expansion {
                 trimmed
             ));
         }
+        if let Some(definition) =
+            self.lookup_ordinary_struct_for_environment(trimmed, environment)?
+        {
+            return Ok(ordinary_struct_generated_name(definition));
+        }
         Ok(trimmed.to_string())
     }
 
@@ -1330,7 +2423,7 @@ impl Expansion {
             if extent.is_empty() {
                 return Ok(format!("{element}[]"));
             }
-            let value = evaluate_i32_expression(extent, environment, &self.constants)?;
+            let value = self.evaluate_i32_expression(extent, environment)?;
             if value < 0 {
                 return Err(format!("negative array extent {} is invalid", value));
             }
@@ -1358,24 +2451,16 @@ impl Expansion {
         if let Some(value) = environment.types.get(trimmed) {
             return Ok(value.clone());
         }
+        if let Some(definition) =
+            self.lookup_ordinary_struct_for_environment(trimmed, environment)?
+        {
+            return Ok(ordinary_struct_generated_name(definition));
+        }
         Ok(trimmed.to_string())
     }
 
     fn lookup_generic_struct(&self, name: &str) -> Option<&GenericStructDefinition> {
-        if let Some(definition) = self.generic_structs.get(name) {
-            return Some(definition);
-        }
-        let short = name.rsplit('.').next().unwrap_or(name);
-        let candidates = self.generic_structs_by_name.get(short)?;
-        if let Some(module_alias) = name.rsplit_once('.').map(|(alias, _)| alias) {
-            return candidates
-                .iter()
-                .filter_map(|identity| self.generic_structs.get(identity))
-                .find(|definition| definition.module_alias == module_alias);
-        }
-        (candidates.len() == 1)
-            .then(|| self.generic_structs.get(&candidates[0]))
-            .flatten()
+        self.generic_structs.get(name)
     }
 
     fn lookup_generic_struct_for_environment(
@@ -1390,35 +2475,40 @@ impl Expansion {
         let Some(candidates) = self.generic_structs_by_name.get(short) else {
             return Ok(None);
         };
-        let qualified_alias = name.rsplit_once('.').map(|(alias, _)| alias);
-        let preferred_alias = qualified_alias.or(environment.module_alias.as_deref());
-        let matches = candidates
+        let Some(caller_path) = environment.source_path.as_deref() else {
+            return Ok(None);
+        };
+        let candidate_definitions = candidates
             .iter()
-            .filter_map(|identity| self.generic_structs.get(identity))
-            .filter(|definition| {
-                preferred_alias.is_none_or(|alias| definition.module_alias == alias)
-            })
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [] if preferred_alias.is_some() && qualified_alias.is_none() => {
-                let fallback = candidates
-                    .iter()
-                    .filter_map(|identity| self.generic_structs.get(identity))
-                    .collect::<Vec<_>>();
-                match fallback.as_slice() {
-                    [definition] => Ok(Some(*definition)),
-                    [] => Ok(None),
-                    _ => Err(format!(
-                        "ambiguous generic type '{}'; qualify the declaration with its module",
-                        name
-                    )),
-                }
+            .filter_map(|identity| self.generic_structs.get(identity));
+        let matches = if let Some((alias, _)) = name.rsplit_once('.') {
+            let Some(target_path) = self.module_graph.imported_alias_target(caller_path, alias)
+            else {
+                return Ok(None);
+            };
+            candidate_definitions
+                .filter(|definition| definition.path == target_path)
+                .collect::<Vec<_>>()
+        } else {
+            let local = candidate_definitions
+                .clone()
+                .filter(|definition| definition.path == caller_path)
+                .collect::<Vec<_>>();
+            if !local.is_empty() {
+                local
+            } else {
+                let visible = self.module_graph.dependency_closure(caller_path);
+                candidate_definitions
+                    .filter(|definition| visible.contains(&definition.path))
+                    .collect::<Vec<_>>()
             }
+        };
+        match matches.as_slice() {
             [] => Ok(None),
             [definition] => Ok(Some(*definition)),
             _ => Err(format!(
-                "ambiguous generic type '{}'; qualify the declaration with its module",
-                name
+                "ambiguous generic type '{}' from '{}'; qualify the declaration with a directly imported module",
+                name, caller_path
             )),
         }
     }
@@ -1486,27 +2576,35 @@ impl Expansion {
             let mut nested_environment =
                 GenericEnvironment::from_parameters(&definition.parameters, &resolved_arguments)?;
             nested_environment.module_alias = Some(definition.module_alias.clone());
+            nested_environment.source_path = Some(definition.path.clone());
             return Ok(Some((
                 definition.fields,
                 nested_environment,
-                format!("{}<{resolved_arguments:?}>", definition.identity),
+                format!("generic:{}<{resolved_arguments:?}>", definition.identity),
             )));
         }
         if let Some((definition, arguments)) = self.generated_struct_application(type_name) {
             let mut nested_environment =
                 GenericEnvironment::from_parameters(&definition.parameters, &arguments)?;
             nested_environment.module_alias = Some(definition.module_alias.clone());
+            nested_environment.source_path = Some(definition.path.clone());
             return Ok(Some((
                 definition.fields,
                 nested_environment,
-                format!("{}<{arguments:?}>", definition.identity),
+                format!("generic:{}<{arguments:?}>", definition.identity),
             )));
         }
-        Ok(self
-            .struct_fields
-            .get(type_name.trim())
+        let Some(definition) = self
+            .lookup_ordinary_struct_for_environment(type_name.trim(), environment)?
             .cloned()
-            .map(|fields| (fields, environment.clone(), type_name.trim().to_string())))
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            definition.fields,
+            self.environment_for_file(definition.file_index),
+            format!("struct:{}::{}", definition.path, definition.name),
+        )))
     }
 
     fn resolve_argument_list(
@@ -1526,7 +2624,7 @@ impl Expansion {
         for (parameter, argument) in parameters.iter().zip(arguments) {
             match parameter.kind {
                 ParsedGenericParameterKind::I32 => {
-                    let value = evaluate_i32_expression(argument, environment, &self.constants)?;
+                    let value = self.evaluate_i32_expression(argument, environment)?;
                     resolved.push(ConcreteArgument::I32(value));
                 }
                 ParsedGenericParameterKind::Type => {
@@ -1568,7 +2666,7 @@ impl Expansion {
             .zip(parameters)
             .map(|(argument, parameter)| match parameter.kind {
                 ParsedGenericParameterKind::I32 => Ok(ConcreteArgument::I32(
-                    evaluate_i32_expression(argument, environment, &self.constants)?,
+                    self.evaluate_i32_expression(argument, environment)?,
                 )),
                 ParsedGenericParameterKind::Type => {
                     let value = if is_type_argument_text(argument) {
@@ -1600,8 +2698,14 @@ impl Expansion {
             return Ok(existing.generated_name.clone());
         }
         self.check_specialization_limit()?;
-        let generated_name =
-            mangle_specialization("type", &definition.path, &definition.name, &key.arguments);
+        let identity =
+            specialization_identity("type", &definition.path, &definition.name, &key.arguments);
+        let generated_name = mangle_specialization_identity(&identity);
+        register_specialization_name(
+            &mut self.generated_specialization_identities,
+            &generated_name,
+            &identity,
+        )?;
         self.struct_specializations.insert(
             key.clone(),
             StructSpecialization {
@@ -1618,6 +2722,36 @@ impl Expansion {
         definition: usize,
         arguments: Vec<ConcreteArgument>,
     ) -> Result<(), String> {
+        self.schedule_function_with_origin(definition, arguments, None)
+    }
+
+    fn schedule_function_from_call(
+        &mut self,
+        definition: usize,
+        arguments: Vec<ConcreteArgument>,
+        file_index: usize,
+        range: Range<usize>,
+        symbol: &str,
+    ) -> Result<(), String> {
+        self.schedule_function_with_origin(
+            definition,
+            arguments,
+            Some(crate::SourceDiagnosticRelated {
+                path: self.files[file_index].path.clone(),
+                start: range.start,
+                end: range.end,
+                symbol: symbol.to_string(),
+                message: "generic specialization requested here".to_string(),
+            }),
+        )
+    }
+
+    fn schedule_function_with_origin(
+        &mut self,
+        definition: usize,
+        arguments: Vec<ConcreteArgument>,
+        origin: Option<crate::SourceDiagnosticRelated>,
+    ) -> Result<(), String> {
         let generic = &self.generic_functions[definition];
         if generic.parameters.len() != arguments.len() {
             return Err(format!(
@@ -1631,16 +2765,41 @@ impl Expansion {
             definition,
             arguments,
         };
-        if self.function_specializations.contains_key(&key) {
+        if let Some(existing) = self.function_specializations.get_mut(&key) {
+            if let Some(origin) = origin {
+                if !existing.origins.contains(&origin) {
+                    existing.origins.push(origin);
+                    existing.origins.sort_by(|left, right| {
+                        (&left.path, left.start, left.end, &left.symbol).cmp(&(
+                            &right.path,
+                            right.start,
+                            right.end,
+                            &right.symbol,
+                        ))
+                    });
+                    existing.origins.truncate(MAX_DIAGNOSTIC_RELATED_LOCATIONS);
+                }
+            }
             return Ok(());
         }
         self.check_specialization_limit()?;
+        let identity_path = self.generic_function_identity(generic)?;
+        let identity =
+            specialization_identity("function", &identity_path, &generic.name, &key.arguments);
+        let generated_name = mangle_specialization_identity(&identity);
+        register_specialization_name(
+            &mut self.generated_specialization_identities,
+            &generated_name,
+            &identity,
+        )?;
         self.function_specializations.insert(
             key.clone(),
             FunctionSpecialization {
                 definition,
+                generated_name,
                 source: String::new(),
                 param_type_names: Vec::new(),
+                origins: origin.into_iter().collect(),
             },
         );
         self.enqueue_depth()?;
@@ -1654,13 +2813,7 @@ impl Expansion {
 
     fn enqueue_depth(&self) -> Result<(), String> {
         let depth = self.next_depth();
-        if depth > MAX_INSTANTIATION_DEPTH {
-            return Err(format!(
-                "generic instantiation depth exceeded (maximum {})",
-                MAX_INSTANTIATION_DEPTH
-            ));
-        }
-        Ok(())
+        ensure_instantiation_depth(depth)
     }
 
     fn materialize_struct(&mut self, key: &StructSpecializationKey) -> Result<(), String> {
@@ -1671,6 +2824,7 @@ impl Expansion {
         let mut environment =
             GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
         environment.module_alias = Some(definition.module_alias.clone());
+        environment.source_path = Some(definition.path.clone());
         let generated_name = self
             .struct_specializations
             .get(key)
@@ -1682,12 +2836,6 @@ impl Expansion {
                 return Err(format!(
                     "generic struct '{}<...>' field '{}' cannot contain void after substitution",
                     definition.name, field.name
-                ));
-            }
-            if contains_view_type(&materialized) {
-                return Err(format!(
-                    "generic struct '{}<...>' field '{}' cannot store view type '{}'",
-                    definition.name, field.name, materialized
                 ));
             }
             if contains_type_name(&materialized, &generated_name) {
@@ -1709,37 +2857,45 @@ impl Expansion {
         let mut environment =
             GenericEnvironment::from_parameters(&generic.parameters, &key.arguments)?;
         environment.module_alias = Some(generic.module_alias.clone());
-        let source = self.files[generic.file_index].source.clone();
+        environment.source_path = Some(generic.path.clone());
         let start = generic.signature.signature_range.start;
         let end = generic.signature.body_range.end;
-        let original = source.get(start..end).ok_or_else(|| {
-            format!(
-                "generic function '{}' has invalid source range",
-                generic.name
-            )
+        let stripped = {
+            let source = &self.files[generic.file_index].source;
+            let original = source.get(start..end).ok_or_else(|| {
+                format!(
+                    "generic function '{}' has invalid source range",
+                    generic.name
+                )
+            })?;
+            let body = source
+                .get(generic.signature.body_range.clone())
+                .ok_or_else(|| {
+                    format!("generic function '{}' has invalid body range", generic.name)
+                })?;
+            reject_value_parameter_writes(body, &generic.parameters)?;
+            strip_generic_declaration(original, "function")?
+        };
+        self.next_materialized_function_bytes(stripped.len())?;
+
+        let substituted = rewrite_generic_identifiers_checked(&stripped, &environment, |length| {
+            self.next_materialized_function_bytes(length).map(|_| ())
         })?;
-        let body = source
-            .get(generic.signature.body_range.clone())
-            .ok_or_else(|| format!("generic function '{}' has invalid body range", generic.name))?;
-        reject_value_parameter_writes(body, &generic.parameters)?;
-        let stripped = strip_generic_declaration(original, "function")?;
-
-        for call in collect_explicit_generic_calls(&stripped)? {
-            let definitions = self.generic_function_candidates(
-                &call.name,
-                call.qualifier.as_deref(),
-                generic.file_index,
-            );
-            for definition in definitions {
-                let parameters = self.generic_functions[definition].parameters.clone();
-                let arguments =
-                    self.resolve_argument_list(&parameters, &call.arguments, &environment)?;
-                self.schedule_function(definition, arguments)?;
-            }
-        }
-
-        let substituted = rewrite_generic_identifiers(&stripped, &environment);
         let substituted = self.rewrite_type_applications(&substituted, &environment)?;
+        let constant_rewrites =
+            self.constant_rewrites_for_source(generic.file_index, &substituted)?;
+        let substituted = rewrite_i32_constants_checked(
+            &substituted,
+            &BTreeMap::new(),
+            &constant_rewrites,
+            |length| self.next_materialized_function_bytes(length).map(|_| ()),
+        )?;
+        let ordinary_replacements =
+            self.ordinary_type_replacements_for_source(generic.file_index, &substituted)?;
+        let substituted =
+            apply_replacements_checked(&substituted, &ordinary_replacements, |length| {
+                self.next_materialized_function_bytes(length).map(|_| ())
+            })?;
 
         let parsed_substituted = parse_top_level_functions(&substituted)?;
         let specialized_signature = parsed_substituted
@@ -1756,14 +2912,15 @@ impl Expansion {
         for call in collect_inferred_receiver_calls(&substituted)? {
             let is_module_call = !local_paths.contains_key(&call.receiver)
                 && self
-                    .visible_module_aliases
-                    .get(&generic.file_index)
-                    .is_some_and(|aliases| aliases.contains(&call.receiver));
+                    .imported_alias_target(generic.file_index, &call.receiver)
+                    .is_some();
             if is_module_call {
                 let Some(actual_types) = call
                     .arguments
                     .iter()
-                    .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                    .map(|argument| {
+                        self.infer_expression_type_text(argument, &local_paths, generic.file_index)
+                    })
                     .collect::<Option<Vec<_>>>()
                 else {
                     continue;
@@ -1793,7 +2950,7 @@ impl Expansion {
                 }
                 if !definitions.is_empty() && !scheduled {
                     return Err(format!(
-                        "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                        "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                         call.name
                     ));
                 }
@@ -1805,21 +2962,20 @@ impl Expansion {
             let Some(argument_types) = call
                 .arguments
                 .iter()
-                .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                .map(|argument| {
+                    self.infer_expression_type_text(argument, &local_paths, generic.file_index)
+                })
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
             };
             let mut actual_types = vec![actual_type];
             actual_types.extend(argument_types);
-            let definitions = self.generic_function_candidates(
-                &call.name,
-                Some(&call.receiver),
-                generic.file_index,
-            );
+            let definitions =
+                self.generic_function_candidates(&call.name, None, generic.file_index);
             if self.has_ordinary_function_candidate(
                 &call.name,
-                Some(&call.receiver),
+                None,
                 generic.file_index,
                 &actual_types,
             ) {
@@ -1837,7 +2993,7 @@ impl Expansion {
             }
             if !definitions.is_empty() && !scheduled {
                 return Err(format!(
-                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                     call.name
                 ));
             }
@@ -1849,7 +3005,9 @@ impl Expansion {
             let Some(actual_types) = call
                 .arguments
                 .iter()
-                .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                .map(|argument| {
+                    self.infer_expression_type_text(argument, &local_paths, generic.file_index)
+                })
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
@@ -1874,12 +3032,14 @@ impl Expansion {
             }
             if !definitions.is_empty() && !scheduled {
                 return Err(format!(
-                    "could not infer a complete generic argument list for '{}'; specify explicit arguments",
+                    "could not infer a complete generic argument list for '{}'; the first parameter must provide every generic binding",
                     call.name
                 ));
             }
         }
 
+        let next_materialized_function_bytes =
+            self.next_materialized_function_bytes(substituted.len())?;
         let record = self
             .function_specializations
             .get_mut(key)
@@ -1891,7 +3051,43 @@ impl Expansion {
             .map(|parameter| parameter.type_name.clone())
             .collect();
         record.source = substituted;
+        self.materialized_function_bytes = next_materialized_function_bytes;
         Ok(())
+    }
+
+    fn next_materialized_function_bytes(&self, additional: usize) -> Result<usize, String> {
+        let next = self
+            .materialized_function_bytes
+            .checked_add(additional)
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        ensure_expanded_source_bytes(next)?;
+        ensure_elaboration_work(
+            self.input_bytes,
+            self.struct_specializations.len() + self.function_specializations.len(),
+            next,
+        )?;
+        Ok(next)
+    }
+
+    fn ensure_generated_output_candidate(
+        &self,
+        prior_expanded_bytes: usize,
+        current_file_bytes: usize,
+        specialization_count: usize,
+    ) -> Result<(), String> {
+        let expanded_bytes = prior_expanded_bytes
+            .checked_add(current_file_bytes)
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        ensure_expanded_source_bytes(expanded_bytes)?;
+        let retained_and_expanded = self
+            .materialized_function_bytes
+            .checked_add(expanded_bytes)
+            .ok_or_else(|| "generic elaboration work count overflowed".to_string())?;
+        ensure_elaboration_work(
+            self.input_bytes,
+            specialization_count,
+            retained_and_expanded,
+        )
     }
 
     fn rewrite_type_applications(
@@ -1905,17 +3101,32 @@ impl Expansion {
         while cursor < bytes.len() {
             if bytes[cursor] == b'"' {
                 let end = skip_string(source, cursor)?;
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
             if starts_comment(source, cursor) {
                 let end = skip_comment(source, cursor)?;
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
             if !is_identifier_start(bytes[cursor]) {
+                let next = output
+                    .len()
+                    .checked_add(1)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push(bytes[cursor] as char);
                 cursor += 1;
                 continue;
@@ -1935,9 +3146,19 @@ impl Expansion {
             {
                 let close = matching_angle(source, after)?;
                 let replacement = self.materialize_type(&source[start..=close], environment)?;
+                let next = output
+                    .len()
+                    .checked_add(replacement.len())
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push_str(&replacement);
                 cursor = close + 1;
             } else {
+                let next = output
+                    .len()
+                    .checked_add(qualified_end - start)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                self.next_materialized_function_bytes(next)?;
                 output.push_str(&source[start..qualified_end]);
                 cursor = qualified_end;
             }
@@ -1945,100 +3166,197 @@ impl Expansion {
         Ok(output)
     }
 
-    fn write_sources(&mut self, files: &mut [SourceFile]) -> Result<(), String> {
-        let function_names = self.function_names()?;
-        for (file_index, file) in files.iter_mut().enumerate() {
-            let raw = &self.files[file_index].source;
-            let mut removals = Vec::new();
-            for definition in self.generic_structs.values() {
-                if definition.file_index == file_index {
-                    removals.push(definition.definition_range.clone());
+    fn write_sources(&mut self, files: &mut [SourceFile]) -> Result<(), ExpansionError> {
+        let function_names = self
+            .function_names()
+            .map_err(ExpansionError::without_path)?;
+        let specialization_count =
+            self.struct_specializations.len() + self.function_specializations.len();
+        let mut expanded_files = Vec::with_capacity(files.len());
+        let mut expanded_bytes = 0usize;
+        for file_index in 0..files.len() {
+            let path = self.files[file_index].path.clone();
+            let result = (|| -> Result<String, String> {
+                let raw = self.files[file_index].source.clone();
+                let mut removals = Vec::new();
+                for definition in self.generic_structs.values() {
+                    if definition.file_index == file_index {
+                        removals.push(definition.definition_range.clone());
+                    }
                 }
-            }
-            for definition in &self.generic_functions {
-                if definition.file_index == file_index {
-                    removals.push(
-                        definition.signature.signature_range.start
-                            ..definition.signature.body_range.end,
-                    );
+                for definition in &self.generic_functions {
+                    if definition.file_index == file_index {
+                        removals.push(
+                            definition.signature.signature_range.start
+                                ..definition.signature.body_range.end,
+                        );
+                    }
                 }
-            }
-            removals.sort_by_key(|range| (range.start, range.end));
-            let mut generated =
-                rewrite_kept_source(self, file_index, raw, &removals, &function_names)?;
-            generated = self.rewrite_inferred_generic_calls(
-                file_index,
-                &generated,
-                &GenericEnvironment {
-                    module_alias: Some(module_alias_for_path(&self.files[file_index].path)),
-                    ..GenericEnvironment::default()
-                },
-                &function_names,
-            )?;
-
-            for (key, specialization) in &self.struct_specializations {
-                let Some(definition) = self.lookup_generic_struct(&key.definition) else {
-                    continue;
-                };
-                if definition.file_index != file_index {
-                    continue;
-                }
-                let mut environment =
-                    GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
-                environment.module_alias = Some(definition.module_alias.clone());
-                let mut fields = String::new();
-                for field in &definition.fields {
-                    let field_type =
-                        self.materialize_type_readonly(&field.type_name, &environment)?;
-                    fields.push_str("    ");
-                    fields.push_str(&field.name);
-                    fields.push_str(": ");
-                    fields.push_str(&field_type);
-                    fields.push_str(";\n");
-                }
-                generated.push_str(&format!(
-                    "\nstruct {} {{\n{fields}}}\n",
-                    specialization.generated_name
-                ));
-            }
-
-            let function_specializations = self
-                .function_specializations
-                .iter()
-                .map(|(key, specialization)| (key.clone(), specialization.clone()))
-                .collect::<Vec<_>>();
-            for (key, specialization) in function_specializations {
-                let definition = self.generic_functions[specialization.definition].clone();
-                if definition.file_index != file_index || specialization.source.is_empty() {
-                    continue;
-                }
-                let mut environment =
-                    GenericEnvironment::from_parameters(&definition.parameters, &key.arguments)?;
-                environment.module_alias = Some(definition.module_alias.clone());
-                let source = rewrite_explicit_generic_calls_with_map(
-                    self,
-                    &specialization.source,
-                    &environment,
-                    &function_names,
+                removals.sort_by_key(|range| (range.start, range.end));
+                let mut generated =
+                    rewrite_kept_source(self, file_index, &raw, &removals, |length| {
+                        self.ensure_generated_output_candidate(
+                            expanded_bytes,
+                            length,
+                            specialization_count,
+                        )
+                    })?;
+                generated = self.rewrite_inferred_generic_calls(
                     file_index,
-                )?;
-                let source = self.rewrite_inferred_generic_calls(
-                    file_index,
-                    &source,
-                    &environment,
+                    &generated,
+                    &GenericEnvironment {
+                        module_alias: Some(module_alias_for_path(&self.files[file_index].path)),
+                        source_path: Some(self.files[file_index].path.clone()),
+                        ..GenericEnvironment::default()
+                    },
                     &function_names,
+                    expanded_bytes,
+                    0,
+                    specialization_count,
                 )?;
-                let source = rename_function_declaration(
-                    &source,
-                    &definition.name,
-                    function_names.get(&key).ok_or_else(|| {
-                        "missing generic function specialization name".to_string()
-                    })?,
+                self.ensure_generated_output_candidate(
+                    expanded_bytes,
+                    generated.len(),
+                    specialization_count,
                 )?;
-                generated.push('\n');
-                generated.push_str(&source);
-                generated.push('\n');
-            }
+
+                for (key, specialization) in &self.struct_specializations {
+                    let Some(definition) = self.lookup_generic_struct(&key.definition) else {
+                        continue;
+                    };
+                    if definition.file_index != file_index {
+                        continue;
+                    }
+                    let mut environment = GenericEnvironment::from_parameters(
+                        &definition.parameters,
+                        &key.arguments,
+                    )?;
+                    environment.module_alias = Some(definition.module_alias.clone());
+                    environment.source_path = Some(definition.path.clone());
+                    let mut declaration = String::new();
+                    let mut push_declaration = |piece: &str| -> Result<(), String> {
+                        let declaration_len =
+                            declaration.len().checked_add(piece.len()).ok_or_else(|| {
+                                "generic expansion output byte count overflowed".to_string()
+                            })?;
+                        let current_file_bytes = generated
+                            .len()
+                            .checked_add(declaration_len)
+                            .ok_or_else(|| {
+                                "generic expansion output byte count overflowed".to_string()
+                            })?;
+                        self.ensure_generated_output_candidate(
+                            expanded_bytes,
+                            current_file_bytes,
+                            specialization_count,
+                        )?;
+                        declaration.push_str(piece);
+                        Ok(())
+                    };
+                    push_declaration("\nstruct ")?;
+                    push_declaration(&specialization.generated_name)?;
+                    push_declaration(" {\n")?;
+                    for field in &definition.fields {
+                        let field_type =
+                            self.materialize_type_readonly(&field.type_name, &environment)?;
+                        push_declaration("    ")?;
+                        push_declaration(&field.name)?;
+                        push_declaration(": ")?;
+                        push_declaration(&field_type)?;
+                        push_declaration(";\n")?;
+                    }
+                    push_declaration("}\n")?;
+                    generated.push_str(&declaration);
+                }
+
+                let function_specializations = self
+                    .function_specializations
+                    .iter()
+                    .map(|(key, specialization)| (key.clone(), specialization.clone()))
+                    .collect::<Vec<_>>();
+                for (key, specialization) in function_specializations {
+                    let definition = self.generic_functions[specialization.definition].clone();
+                    if definition.file_index != file_index || specialization.source.is_empty() {
+                        continue;
+                    }
+                    let mut environment = GenericEnvironment::from_parameters(
+                        &definition.parameters,
+                        &key.arguments,
+                    )?;
+                    environment.module_alias = Some(definition.module_alias.clone());
+                    environment.source_path = Some(definition.path.clone());
+                    let source = self.rewrite_inferred_generic_calls(
+                        file_index,
+                        &specialization.source,
+                        &environment,
+                        &function_names,
+                        expanded_bytes,
+                        generated.len().checked_add(2).ok_or_else(|| {
+                            "generic expansion output byte count overflowed".to_string()
+                        })?,
+                        specialization_count,
+                    )?;
+                    let append_base = generated.len().checked_add(2).ok_or_else(|| {
+                        "generic expansion output byte count overflowed".to_string()
+                    })?;
+                    let source = rename_function_declaration_checked(
+                        &source,
+                        &definition.name,
+                        function_names.get(&key).ok_or_else(|| {
+                            "missing generic function specialization name".to_string()
+                        })?,
+                        |length| {
+                            let current_file_bytes =
+                                append_base.checked_add(length).ok_or_else(|| {
+                                    "generic expansion output byte count overflowed".to_string()
+                                })?;
+                            self.ensure_generated_output_candidate(
+                                expanded_bytes,
+                                current_file_bytes,
+                                specialization_count,
+                            )
+                        },
+                    )?;
+                    let next_len = generated
+                        .len()
+                        .checked_add(source.len())
+                        .and_then(|bytes| bytes.checked_add(2))
+                        .ok_or_else(|| {
+                            "generic expansion output byte count overflowed".to_string()
+                        })?;
+                    self.ensure_generated_output_candidate(
+                        expanded_bytes,
+                        next_len,
+                        specialization_count,
+                    )?;
+                    generated.push('\n');
+                    generated.push_str(&source);
+                    generated.push('\n');
+                }
+                Ok(generated)
+            })();
+            let generated = result.map_err(|message| ExpansionError::for_file(path, message))?;
+            expanded_bytes = expanded_bytes.checked_add(generated.len()).ok_or_else(|| {
+                ExpansionError::without_path(
+                    "generic expansion output byte count overflowed".to_string(),
+                )
+            })?;
+            ensure_expanded_source_bytes(expanded_bytes)
+                .and_then(|()| {
+                    let retained_and_expanded = self
+                        .materialized_function_bytes
+                        .checked_add(expanded_bytes)
+                        .ok_or_else(|| "generic elaboration work count overflowed".to_string())?;
+                    ensure_elaboration_work(
+                        self.input_bytes,
+                        specialization_count,
+                        retained_and_expanded,
+                    )
+                })
+                .map_err(ExpansionError::without_path)?;
+            expanded_files.push(generated);
+        }
+        for (file, generated) in files.iter_mut().zip(expanded_files) {
             file.content = generated;
             file.hash = hash_text(&file.content);
         }
@@ -2051,6 +3369,9 @@ impl Expansion {
         source: &str,
         environment: &GenericEnvironment,
         function_names: &BTreeMap<FunctionSpecializationKey, String>,
+        prior_expanded_bytes: usize,
+        append_base: usize,
+        specialization_count: usize,
     ) -> Result<String, String> {
         let functions = parse_top_level_functions(source)?;
         let mut replacements = Vec::new();
@@ -2068,9 +3389,8 @@ impl Expansion {
             for call in collect_inferred_receiver_calls(body)? {
                 let is_module_call = !local_paths.contains_key(&call.receiver)
                     && self
-                        .visible_module_aliases
-                        .get(&file_index)
-                        .is_some_and(|aliases| aliases.contains(&call.receiver));
+                        .imported_alias_target(file_index, &call.receiver)
+                        .is_some();
                 let mut actual_types = Vec::new();
                 if !is_module_call {
                     let Some(receiver_type) = local_paths.get(&call.receiver).cloned() else {
@@ -2081,18 +3401,21 @@ impl Expansion {
                 let Some(argument_types) = call
                     .arguments
                     .iter()
-                    .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                    .map(|argument| {
+                        self.infer_expression_type_text(argument, &local_paths, file_index)
+                    })
                     .collect::<Option<Vec<_>>>()
                 else {
                     continue;
                 };
                 actual_types.extend(argument_types);
+                let qualifier = is_module_call.then_some(call.receiver.as_str());
                 let definitions =
-                    self.generic_function_candidates(&call.name, Some(&call.receiver), file_index);
+                    self.generic_function_candidates(&call.name, qualifier, file_index);
                 if definitions.is_empty()
                     || self.has_ordinary_function_candidate(
                         &call.name,
-                        Some(&call.receiver),
+                        qualifier,
                         file_index,
                         &actual_types,
                     )
@@ -2101,7 +3424,7 @@ impl Expansion {
                 }
                 let targets = self.inferred_generic_target_names(
                     &call.name,
-                    Some(&call.receiver),
+                    qualifier,
                     &actual_types,
                     &definitions,
                     function_names,
@@ -2111,7 +3434,7 @@ impl Expansion {
                     [] => continue,
                     _ => {
                         return Err(format!(
-                            "ambiguous inferred generic call '{}'; specify explicit arguments",
+                            "ambiguous inferred generic call '{}'; generic arguments must be inferred from the first parameter",
                             call.name
                         ));
                     }
@@ -2131,7 +3454,9 @@ impl Expansion {
                 let Some(actual_types) = call
                     .arguments
                     .iter()
-                    .map(|argument| self.infer_expression_type_text(argument, &local_paths))
+                    .map(|argument| {
+                        self.infer_expression_type_text(argument, &local_paths, file_index)
+                    })
                     .collect::<Option<Vec<_>>>()
                 else {
                     continue;
@@ -2152,7 +3477,7 @@ impl Expansion {
                     [] => continue,
                     _ => {
                         return Err(format!(
-                            "ambiguous inferred generic call '{}'; specify explicit arguments",
+                            "ambiguous inferred generic call '{}'; generic arguments must be inferred from the first parameter",
                             call.name
                         ));
                     }
@@ -2165,7 +3490,16 @@ impl Expansion {
             }
         }
         replacements.sort_by_key(|(start, _, _)| *start);
-        apply_replacements(source, &replacements)
+        apply_replacements_checked(source, &replacements, |length| {
+            let current_file_bytes = append_base
+                .checked_add(length)
+                .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+            self.ensure_generated_output_candidate(
+                prior_expanded_bytes,
+                current_file_bytes,
+                specialization_count,
+            )
+        })
     }
 
     fn inferred_generic_target_names(
@@ -2236,16 +3570,7 @@ impl Expansion {
                         "internal error: missing generic function definition".to_string()
                     })?;
                 let name = if needs_mangled_names {
-                    let identity_path = generic_function_identity(
-                        &self.files[definition.file_index].path,
-                        &definition.signature,
-                    );
-                    mangle_specialization(
-                        "function",
-                        &identity_path,
-                        &definition.name,
-                        &key.arguments,
-                    )
+                    specialization.generated_name.clone()
                 } else {
                     definition.name.clone()
                 };
@@ -2255,14 +3580,130 @@ impl Expansion {
         Ok(names)
     }
 
-    fn check_specialization_limit(&self) -> Result<(), String> {
-        let total = self.struct_specializations.len() + self.function_specializations.len();
-        if total >= MAX_SPECIALIZATIONS {
-            return Err(format!(
-                "generic specialization limit exceeded (maximum {})",
-                MAX_SPECIALIZATIONS
+    fn generic_function_identity(
+        &self,
+        generic: &GenericFunctionDefinition,
+    ) -> Result<String, String> {
+        // Receiver-bound generic names are source aliases, not part of a
+        // function's semantic identity.  Resolve the nominal applications to
+        // their defining declarations and name the bindings by their ordered
+        // receiver slots before constructing the stable identity.
+        let mut identity = String::new();
+        push_identity_component(
+            &mut identity,
+            "path",
+            &canonical_identity_path(&generic.path),
+        );
+        push_identity_component(&mut identity, "name", &generic.signature.name);
+        for parameter in &generic.parameters {
+            push_identity_component(
+                &mut identity,
+                "generic",
+                match parameter.kind {
+                    ParsedGenericParameterKind::Type => "type",
+                    ParsedGenericParameterKind::I32 => "i32",
+                },
+            );
+        }
+        for parameter in &generic.signature.params {
+            let type_name = self.canonical_generic_function_type(
+                &parameter.type_name,
+                generic.file_index,
+                &generic.parameters,
+            )?;
+            push_identity_component(&mut identity, "parameter", &type_name);
+        }
+        let return_type = self.canonical_generic_function_type(
+            &generic.signature.return_type_name,
+            generic.file_index,
+            &generic.parameters,
+        )?;
+        push_identity_component(&mut identity, "return", &return_type);
+        Ok(identity)
+    }
+
+    fn canonical_generic_function_type(
+        &self,
+        type_name: &str,
+        file_index: usize,
+        parameters: &[ParsedGenericParameter],
+    ) -> Result<String, String> {
+        let trimmed = type_name.trim();
+        if let Some((element, extent)) = split_array_suffix(trimmed) {
+            let element = self.canonical_generic_function_type(element, file_index, parameters)?;
+            let extent = if extent.trim().is_empty() {
+                String::new()
+            } else {
+                canonical_generic_function_expression(extent, parameters)
+            };
+            return Ok(format!("{element}[{extent}]"));
+        }
+        if let Some((base, arguments)) = parse_type_application(trimmed)? {
+            let environment = self.environment_for_file(file_index);
+            let definition = self
+                .lookup_generic_struct_for_environment(base, &environment)?
+                .ok_or_else(|| format!("unknown generic type '{base}'"))?;
+            if definition.parameters.len() != arguments.len() {
+                return Err(format!(
+                    "generic type '{}' has {} arguments; expected {}",
+                    base,
+                    arguments.len(),
+                    definition.parameters.len()
+                ));
+            }
+            let canonical_arguments = arguments
+                .iter()
+                .zip(&definition.parameters)
+                .map(|(argument, parameter)| match parameter.kind {
+                    ParsedGenericParameterKind::Type => {
+                        self.canonical_generic_function_type(argument, file_index, parameters)
+                    }
+                    ParsedGenericParameterKind::I32 => {
+                        Ok(canonical_generic_function_expression(argument, parameters))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(format!(
+                "generic:{}<{}>",
+                definition.identity,
+                canonical_arguments.join(",")
             ));
         }
+        if let Some(parameter) = parameters
+            .iter()
+            .find(|parameter| parameter.name == trimmed)
+        {
+            let index = parameters
+                .iter()
+                .position(|candidate| candidate.name == parameter.name)
+                .expect("generic parameter exists in its ordered parameter list");
+            return Ok(match parameter.kind {
+                ParsedGenericParameterKind::Type => format!("$type{index}"),
+                ParsedGenericParameterKind::I32 => format!("$i32{index}"),
+            });
+        }
+        let environment = self.environment_for_file(file_index);
+        if let Some(definition) =
+            self.lookup_ordinary_struct_for_environment(trimmed, &environment)?
+        {
+            return Ok(format!(
+                "struct:{}::{}",
+                canonical_identity_path(&definition.path),
+                definition.name
+            ));
+        }
+        Ok(canonical_type_identity_text(trimmed))
+    }
+
+    fn check_specialization_limit(&self) -> Result<(), String> {
+        let next = self
+            .struct_specializations
+            .len()
+            .checked_add(self.function_specializations.len())
+            .and_then(|total| total.checked_add(1))
+            .ok_or_else(|| "generic specialization count overflowed".to_string())?;
+        ensure_specialization_count(next)?;
+        ensure_elaboration_work(self.input_bytes, next, self.materialized_function_bytes)?;
         Ok(())
     }
 
@@ -2276,18 +3717,13 @@ impl Expansion {
             return Vec::new();
         };
         if let Some(qualifier) = qualifier {
-            let is_receiver_path = self.concrete_paths.contains_key(qualifier)
-                || self
-                    .visible_module_aliases
-                    .get(&file_index)
-                    .is_none_or(|aliases| !aliases.contains(qualifier));
-            if is_receiver_path {
-                return all.clone();
-            }
+            let Some(target_path) = self.imported_alias_target(file_index, qualifier) else {
+                return Vec::new();
+            };
             return all
                 .iter()
                 .copied()
-                .filter(|index| self.generic_functions[*index].module_alias == qualifier)
+                .filter(|index| self.generic_functions[*index].path == target_path)
                 .collect();
         }
 
@@ -2299,23 +3735,13 @@ impl Expansion {
         if !local.is_empty() {
             return local;
         }
-        let visible = self
-            .visible_module_aliases
-            .get(&file_index)
-            .cloned()
-            .unwrap_or_default();
+        let visible = self.visible_paths(file_index);
         let imported = all
             .iter()
             .copied()
-            .filter(|index| visible.contains(&self.generic_functions[*index].module_alias))
+            .filter(|index| visible.contains(&self.generic_functions[*index].path))
             .collect::<Vec<_>>();
-        if !imported.is_empty() {
-            return imported;
-        }
-        if all.len() == 1 {
-            return all.clone();
-        }
-        Vec::new()
+        imported
     }
 
     fn has_ordinary_function_candidate(
@@ -2328,17 +3754,25 @@ impl Expansion {
         let Some(all) = self.ordinary_function_names.get(name) else {
             return false;
         };
+        let qualified_target =
+            qualifier.and_then(|alias| self.imported_alias_target(file_index, alias));
+        if qualifier.is_some() && qualified_target.is_none() {
+            return false;
+        }
+        let has_local = qualifier.is_none()
+            && all
+                .iter()
+                .any(|(candidate_file, _, _)| *candidate_file == file_index);
+        let visible = self.visible_paths(file_index);
         all.iter()
-            .filter(|(_, module_alias, _)| {
-                qualifier.is_none_or(|qualifier| *module_alias == qualifier)
-            })
-            .filter(|(candidate_file, module_alias, _)| {
-                qualifier.is_some()
-                    || *candidate_file == file_index
-                    || self
-                        .visible_module_aliases
-                        .get(&file_index)
-                        .is_some_and(|aliases| aliases.contains(module_alias))
+            .filter(|(candidate_file, _, _)| {
+                if let Some(target) = qualified_target {
+                    self.files[*candidate_file].path == target
+                } else if has_local {
+                    *candidate_file == file_index
+                } else {
+                    visible.contains(&self.files[*candidate_file].path)
+                }
             })
             .any(|(_, _, parameter_types)| {
                 parameter_types.len() == actual_types.len()
@@ -2355,7 +3789,7 @@ fn rewrite_kept_source(
     file_index: usize,
     source: &str,
     removals: &[std::ops::Range<usize>],
-    function_names: &BTreeMap<FunctionSpecializationKey, String>,
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0usize;
@@ -2363,20 +3797,29 @@ fn rewrite_kept_source(
         if range.start < cursor || range.end > source.len() {
             return Err("generic declaration range is invalid".to_string());
         }
-        output.push_str(&ordinary_source_piece(
+        let base = output.len();
+        let piece = ordinary_source_piece(
             expansion,
             file_index,
             &source[cursor..range.start],
-            function_names,
-        )?);
+            |length| {
+                let total = base
+                    .checked_add(length)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(total)
+            },
+        )?;
+        output.push_str(&piece);
         cursor = range.end;
     }
-    output.push_str(&ordinary_source_piece(
-        expansion,
-        file_index,
-        &source[cursor..],
-        function_names,
-    )?);
+    let base = output.len();
+    let piece = ordinary_source_piece(expansion, file_index, &source[cursor..], |length| {
+        let total = base
+            .checked_add(length)
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        ensure_output(total)
+    })?;
+    output.push_str(&piece);
     Ok(output)
 }
 
@@ -2384,26 +3827,34 @@ fn ordinary_source_piece(
     expansion: &Expansion,
     file_index: usize,
     source: &str,
-    function_names: &BTreeMap<FunctionSpecializationKey, String>,
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
-    let source = rewrite_i32_constants(source, &expansion.constants)?;
+    let source = apply_replacements_checked(
+        source,
+        &expansion.ordinary_type_replacements_for_source(file_index, source)?,
+        |length| ensure_output(length),
+    )?;
     let mut environment = GenericEnvironment::default();
     environment.module_alias = Some(module_alias_for_path(&expansion.files[file_index].path));
-    let source = expansion.rewrite_type_applications_readonly(&source, &environment)?;
-    rewrite_explicit_generic_calls_with_map(
-        expansion,
+    environment.source_path = Some(expansion.files[file_index].path.clone());
+    let source =
+        expansion.rewrite_type_applications_readonly_checked(&source, &environment, |length| {
+            ensure_output(length)
+        })?;
+    rewrite_i32_constants_checked(
         &source,
-        &environment,
-        function_names,
-        file_index,
+        &expansion.local_constant_values(file_index),
+        &expansion.constant_rewrites_for_source(file_index, &source)?,
+        ensure_output,
     )
 }
 
 impl Expansion {
-    fn rewrite_type_applications_readonly(
+    fn rewrite_type_applications_readonly_checked(
         &self,
         source: &str,
         environment: &GenericEnvironment,
+        mut ensure_output: impl FnMut(usize) -> Result<(), String>,
     ) -> Result<String, String> {
         let bytes = source.as_bytes();
         let mut output = String::with_capacity(source.len());
@@ -2411,17 +3862,32 @@ impl Expansion {
         while cursor < bytes.len() {
             if bytes[cursor] == b'"' {
                 let end = skip_string(source, cursor)?;
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
             if starts_comment(source, cursor) {
                 let end = skip_comment(source, cursor)?;
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
             if !is_identifier_start(bytes[cursor]) {
+                let next = output
+                    .len()
+                    .checked_add(1)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push(bytes[cursor] as char);
                 cursor += 1;
                 continue;
@@ -2442,9 +3908,19 @@ impl Expansion {
                 let close = matching_angle(source, after)?;
                 let replacement =
                     self.materialize_type_readonly(&source[start..=close], environment)?;
+                let next = output
+                    .len()
+                    .checked_add(replacement.len())
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&replacement);
                 cursor = close + 1;
             } else {
+                let next = output
+                    .len()
+                    .checked_add(qualified_end - start)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[start..qualified_end]);
                 cursor = qualified_end;
             }
@@ -2453,31 +3929,289 @@ impl Expansion {
     }
 }
 
+fn reject_reserved_declaration_name(
+    path: &str,
+    kind: &str,
+    name: &str,
+) -> Result<(), ExpansionError> {
+    if let Some(prefix) = GENERATED_COMPILER_PREFIXES
+        .iter()
+        .find(|prefix| name.starts_with(**prefix))
+    {
+        return Err(ExpansionError::for_file(
+            path.to_string(),
+            format!("{kind} name '{name}' uses reserved compiler prefix '{prefix}'"),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_specialization_count(count: usize) -> Result<(), String> {
+    if count > MAX_SPECIALIZATIONS {
+        return Err(format!(
+            "generic specialization limit exceeded (maximum {})",
+            MAX_SPECIALIZATIONS
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_generic_source_bytes(bytes: usize) -> Result<(), String> {
+    if bytes > MAX_GENERIC_SOURCE_BYTES {
+        return Err(format!(
+            "generic source exceeds {} byte limit",
+            MAX_GENERIC_SOURCE_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_instantiation_depth(depth: usize) -> Result<(), String> {
+    if depth > MAX_INSTANTIATION_DEPTH {
+        return Err(format!(
+            "generic instantiation depth exceeded (maximum {})",
+            MAX_INSTANTIATION_DEPTH
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_constant_evaluation_steps(steps: usize) -> Result<(), String> {
+    if steps > MAX_CONSTANT_EVALUATION_STEPS {
+        return Err(format!(
+            "compile-time expression evaluation exceeded {} steps",
+            MAX_CONSTANT_EVALUATION_STEPS
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_constant_dependency_depth(depth: usize) -> Result<(), String> {
+    if depth >= MAX_CONSTANT_DEPENDENCY_DEPTH {
+        return Err(format!(
+            "constant dependency depth exceeded (maximum {})",
+            MAX_CONSTANT_DEPENDENCY_DEPTH
+        ));
+    }
+    Ok(())
+}
+
+fn elaboration_work_units(
+    input_bytes: usize,
+    specialization_count: usize,
+    expanded_bytes: usize,
+) -> Option<usize> {
+    input_bytes
+        .checked_add(specialization_count.checked_mul(SPECIALIZATION_WORK_UNITS)?)?
+        .checked_add(expanded_bytes)
+}
+
+fn ensure_elaboration_work(
+    input_bytes: usize,
+    specialization_count: usize,
+    expanded_bytes: usize,
+) -> Result<(), String> {
+    let work = elaboration_work_units(input_bytes, specialization_count, expanded_bytes)
+        .ok_or_else(|| "generic elaboration work count overflowed".to_string())?;
+    if work > MAX_ELABORATION_WORK_UNITS {
+        return Err(format!(
+            "generic elaboration exceeded {} work units",
+            MAX_ELABORATION_WORK_UNITS
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_expanded_source_bytes(bytes: usize) -> Result<(), String> {
+    if bytes > MAX_EXPANDED_SOURCE_BYTES {
+        return Err(format!(
+            "generic expansion exceeds {} output byte limit",
+            MAX_EXPANDED_SOURCE_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_identity_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 fn generic_definition_identity(path: &str, name: &str) -> String {
-    format!("{path}::{name}")
+    format!("{}::{name}", canonical_identity_path(path))
 }
 
-fn generic_function_identity(path: &str, signature: &ParsedFunctionSignature) -> String {
-    // Keep source offsets out of the identity: edits to constants or comments
-    // before a declaration must not orphan an otherwise reusable specialization.
-    let mut identity = format!("{path}::{}|", signature.name);
-    for parameter in &signature.generic_parameters {
-        identity.push_str(match parameter.kind {
-            ParsedGenericParameterKind::Type => "type",
-            ParsedGenericParameterKind::I32 => "i32",
+fn add_receiver_parameter(
+    parameters: &mut Vec<ParsedGenericParameter>,
+    name: &str,
+    kind: ParsedGenericParameterKind,
+) -> Result<(), String> {
+    if let Some(existing) = parameters.iter().find(|parameter| parameter.name == name) {
+        if existing.kind != kind {
+            return Err(format!(
+                "receiver generic name '{}' is bound with conflicting type and i32 kinds",
+                name
+            ));
+        }
+        return Ok(());
+    }
+    parameters.push(ParsedGenericParameter {
+        name: name.to_string(),
+        kind,
+    });
+    Ok(())
+}
+
+fn is_identifier_text(source: &str) -> bool {
+    let bytes = source.trim().as_bytes();
+    let Some(first) = bytes.first().copied() else {
+        return false;
+    };
+    is_identifier_start(first) && bytes.iter().copied().all(is_identifier_char)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExplicitGenericCallScanError {
+    Scan(String),
+    Call {
+        name: String,
+        qualifier: Option<String>,
+        range: Range<usize>,
+        message: String,
+    },
+}
+
+#[cfg(test)]
+impl ExplicitGenericCallScanError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Scan(message) | Self::Call { message, .. } => message,
+        }
+    }
+}
+
+impl From<String> for ExplicitGenericCallScanError {
+    fn from(message: String) -> Self {
+        Self::Scan(message)
+    }
+}
+
+fn reject_explicit_generic_calls(
+    source: &str,
+    mut is_generic: impl FnMut(&str, Option<&str>) -> bool,
+) -> Result<(), ExplicitGenericCallScanError> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' {
+            cursor = skip_string(source, cursor)?;
+            continue;
+        }
+        if starts_comment(source, cursor) {
+            cursor = skip_comment(source, cursor)?;
+            continue;
+        }
+        if !is_identifier_start(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
+            cursor += 1;
+        }
+        if preceded_by_keyword(source, start, "function") {
+            continue;
+        }
+        let after_name = skip_ascii_whitespace(source, cursor);
+        let (open, legacy) = if source.as_bytes().get(cursor) == Some(&b'<') {
+            // Keep ordinary a < b > (c) expressions intact. The direct
+            // generic-call spelling is recognized only when the angle group
+            // is attached to the callee; the unambiguous :: <...> form
+            // remains whitespace-tolerant for migration diagnostics.
+            (cursor, false)
+        } else if source.as_bytes().get(after_name) == Some(&b':')
+            && source.as_bytes().get(after_name + 1) == Some(&b':')
+        {
+            let open = skip_ascii_whitespace(source, after_name + 2);
+            (open, true)
+        } else {
+            continue;
+        };
+        if source.as_bytes().get(open) != Some(&b'<') {
+            continue;
+        }
+        let close = matching_angle(source, open)?;
+        let after = skip_ascii_whitespace(source, close + 1);
+        if source.as_bytes().get(after) != Some(&b'(') {
+            continue;
+        }
+        let name = source[start..cursor].to_string();
+        let qualifier = preceding_qualified_name(source, start);
+        if !is_generic(&name, qualifier.as_deref()) {
+            cursor = after + 1;
+            continue;
+        }
+        let callee = preceding_qualified_name(source, start)
+            .map(|qualifier| format!("{}{}", qualifier, &source[start..cursor]))
+            .unwrap_or_else(|| source[start..cursor].to_string());
+        let spelling = if legacy { ":: <...>" } else { "<...>" };
+        return Err(ExplicitGenericCallScanError::Call {
+            name,
+            qualifier,
+            range: start..cursor,
+            message: format!(
+                "explicit generic function call '{}' using {} is not supported; remove the explicit arguments and infer from the first parameter's generic struct",
+                callee, spelling
+            ),
         });
-        identity.push('|');
     }
-    for parameter in &signature.params {
-        identity.push_str(&parameter.type_name);
-        identity.push('|');
-    }
-    identity.push_str(&signature.return_type_name);
-    identity
+    Ok(())
 }
 
-fn module_alias_for_path(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
+fn canonical_generic_function_expression(
+    source: &str,
+    parameters: &[ParsedGenericParameter],
+) -> String {
+    let mut environment = GenericEnvironment::default();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let marker = match parameter.kind {
+            ParsedGenericParameterKind::Type => format!("$type{index}"),
+            ParsedGenericParameterKind::I32 => format!("$i32{index}"),
+        };
+        // The identity-only markers are intentionally stored in the type map:
+        // value bindings carry i32s and cannot represent an alpha-renamed
+        // slot.  The identifier rewriter still respects strings, comments,
+        // and qualified segments while replacing the unqualified binding.
+        environment.types.insert(parameter.name.clone(), marker);
+    }
+    canonical_type_identity_text(&rewrite_generic_identifiers(source, &environment))
+}
+
+fn canonical_type_identity_text(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect()
+}
+
+fn push_identity_component(identity: &mut String, tag: &str, value: &str) {
+    identity.push_str(tag);
+    identity.push(':');
+    identity.push_str(&value.len().to_string());
+    identity.push(':');
+    identity.push_str(value);
+    identity.push('|');
+}
+
+pub(super) fn module_alias_for_path(path: &str) -> String {
+    // Compiler callers may pass a workspace path before it has been
+    // canonicalized to project-relative slash-separated form.  Treat both
+    // Windows and POSIX separators as path boundaries so an absolute Windows
+    // path does not become part of the module alias.
+    let name = path
+        .rsplit(|character| character == '/' || character == '\\')
+        .next()
+        .unwrap_or(path);
     let raw = name.strip_suffix(".stasis").unwrap_or(name);
     let mut alias = raw
         .bytes()
@@ -2508,13 +4242,13 @@ fn is_concrete_only_function_name(name: &str) -> bool {
 }
 
 fn find_struct_definition_range(
-    source: &str,
+    definitions: &[ParsedStructDefinitionRange],
     name: &str,
     parameters: &[ParsedGenericParameter],
 ) -> Result<std::ops::Range<usize>, String> {
-    for structure in parse_top_level_struct_definitions(source)? {
+    for structure in definitions {
         if structure.name == name && structure.generic_parameters == parameters {
-            return Ok(structure.definition_range);
+            return Ok(structure.definition_range.clone());
         }
     }
     Err(format!(
@@ -2572,12 +4306,26 @@ fn strip_generic_declaration(source: &str, keyword: &str) -> Result<String, Stri
 }
 
 fn rewrite_generic_identifiers(source: &str, environment: &GenericEnvironment) -> String {
+    rewrite_generic_identifiers_checked(source, environment, |_| Ok(()))
+        .expect("unbounded generic identifier rewrite cannot fail")
+}
+
+fn rewrite_generic_identifiers_checked(
+    source: &str,
+    environment: &GenericEnvironment,
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
+) -> Result<String, String> {
     let bytes = source.as_bytes();
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0usize;
     while cursor < bytes.len() {
         if bytes[cursor] == b'"' {
             if let Ok(end) = skip_string(source, cursor) {
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
@@ -2585,12 +4333,22 @@ fn rewrite_generic_identifiers(source: &str, environment: &GenericEnvironment) -
         }
         if starts_comment(source, cursor) {
             if let Ok(end) = skip_comment(source, cursor) {
+                let next = output
+                    .len()
+                    .checked_add(end - cursor)
+                    .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+                ensure_output(next)?;
                 output.push_str(&source[cursor..end]);
                 cursor = end;
                 continue;
             }
         }
         if !is_identifier_start(bytes[cursor]) {
+            let next = output
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+            ensure_output(next)?;
             output.push(bytes[cursor] as char);
             cursor += 1;
             continue;
@@ -2605,81 +4363,34 @@ fn rewrite_generic_identifiers(source: &str, environment: &GenericEnvironment) -
             .chars()
             .rev()
             .find(|character| !character.is_ascii_whitespace());
-        if previous == Some('.') {
-            output.push_str(identifier);
-        } else if let Some(value) = environment.values.get(identifier) {
-            output.push_str(&value.to_string());
+        let value_text = environment.values.get(identifier).map(i32::to_string);
+        let replacement = if previous == Some('.') {
+            identifier
+        } else if let Some(value) = value_text.as_deref() {
+            value
         } else if let Some(value) = environment.types.get(identifier) {
-            output.push_str(value);
+            value.as_str()
         } else {
-            output.push_str(identifier);
-        }
-    }
-    output
-}
-
-fn rewrite_explicit_generic_calls_with_map(
-    expansion: &Expansion,
-    source: &str,
-    environment: &GenericEnvironment,
-    function_names: &BTreeMap<FunctionSpecializationKey, String>,
-    file_index: usize,
-) -> Result<String, String> {
-    let calls = collect_explicit_generic_calls(source)?;
-    let mut replacements = Vec::with_capacity(calls.len());
-    for call in calls {
-        let definitions = expansion.generic_function_candidates(
-            &call.name,
-            call.qualifier.as_deref(),
-            file_index,
-        );
-        if definitions.is_empty() {
-            return Err(format!(
-                "unknown generic function '{}' in explicit call",
-                call.name
-            ));
-        }
-        let mut targets = Vec::new();
-        for definition in definitions {
-            let parameters = &expansion.generic_functions[definition].parameters;
-            let arguments = expansion.resolve_argument_list_readonly(
-                parameters,
-                &call.arguments,
-                environment,
-            )?;
-            let key = FunctionSpecializationKey {
-                definition,
-                arguments,
-            };
-            if let Some(target) = function_names.get(&key) {
-                if !targets.iter().any(|existing| existing == target) {
-                    targets.push(target.clone());
-                }
-            }
-        }
-        let target = match targets.as_slice() {
-            [target] => target.clone(),
-            [] => {
-                return Err(format!(
-                    "missing specialization for explicit generic call '{}::<...>'",
-                    call.name
-                ));
-            }
-            _ => {
-                return Err(format!("ambiguous explicit generic call '{}'", call.name));
-            }
+            identifier
         };
-        replacements.push((call.name_start, call.end, target));
+        let next = output
+            .len()
+            .checked_add(replacement.len())
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        ensure_output(next)?;
+        output.push_str(&replacement);
     }
-    apply_replacements(source, &replacements)
+    Ok(output)
 }
 
-fn rename_function_declaration(
+fn rename_function_declaration_checked(
     source: &str,
     old_name: &str,
     new_name: &str,
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
     if old_name == new_name {
+        ensure_output(source.len())?;
         return Ok(source.to_string());
     }
     let Some(keyword_start) = source.find("function") else {
@@ -2720,7 +4431,11 @@ fn rename_function_declaration(
             &source[start..cursor]
         ));
     }
-    apply_replacements(source, &[(start, cursor, new_name.to_string())])
+    apply_replacements_checked(
+        source,
+        &[(start, cursor, new_name.to_string())],
+        ensure_output,
+    )
 }
 
 fn reject_value_parameter_writes(
@@ -2786,69 +4501,6 @@ fn reject_value_parameter_writes(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct ExplicitCall {
-    name: String,
-    qualifier: Option<String>,
-    arguments: Vec<String>,
-    call_arguments: Vec<String>,
-    name_start: usize,
-    end: usize,
-}
-
-fn collect_explicit_generic_calls(source: &str) -> Result<Vec<ExplicitCall>, String> {
-    let bytes = source.as_bytes();
-    let mut calls = Vec::new();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'"' {
-            cursor = skip_string(source, cursor)?;
-            continue;
-        }
-        if starts_comment(source, cursor) {
-            cursor = skip_comment(source, cursor)?;
-            continue;
-        }
-        if !is_identifier_start(bytes[cursor]) {
-            cursor += 1;
-            continue;
-        }
-        let start = cursor;
-        cursor += 1;
-        while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
-            cursor += 1;
-        }
-        let name = source[start..cursor].to_string();
-        let after_name = skip_ascii_whitespace(source, cursor);
-        if source.as_bytes().get(after_name) != Some(&b':')
-            || source.as_bytes().get(after_name + 1) != Some(&b':')
-        {
-            continue;
-        }
-        let open = skip_ascii_whitespace(source, after_name + 2);
-        if source.as_bytes().get(open) != Some(&b'<') {
-            continue;
-        }
-        let close = matching_angle(source, open)?;
-        let after = skip_ascii_whitespace(source, close + 1);
-        if source.as_bytes().get(after) != Some(&b'(') {
-            continue;
-        }
-        let call_close = find_matching_byte(source, after, b'(', b')')
-            .ok_or_else(|| "unterminated explicit generic call".to_string())?;
-        calls.push(ExplicitCall {
-            name: name.rsplit('.').next().unwrap_or(&name).to_string(),
-            qualifier: preceding_qualified_name(source, start),
-            arguments: split_top_level_arguments(&source[open + 1..close])?,
-            call_arguments: split_top_level_arguments(&source[after + 1..call_close])?,
-            name_start: start,
-            end: close + 1,
-        });
-        cursor = close + 1;
-    }
-    Ok(calls)
-}
-
 fn preceding_qualified_name(source: &str, start: usize) -> Option<String> {
     let bytes = source.as_bytes();
     let mut cursor = start;
@@ -2875,9 +4527,10 @@ fn preceding_qualified_name(source: &str, start: usize) -> Option<String> {
 
 fn preceded_by_keyword(source: &str, start: usize, keyword: &str) -> bool {
     let prefix = source[..start].trim_end();
-    let Some(keyword_start) = prefix.len().checked_sub(keyword.len()) else {
+    if !prefix.ends_with(keyword) {
         return false;
-    };
+    }
+    let keyword_start = prefix.len() - keyword.len();
     &prefix[keyword_start..] == keyword
         && (keyword_start == 0 || !is_identifier_char(prefix.as_bytes()[keyword_start - 1]))
 }
@@ -3038,13 +4691,141 @@ fn ordinary_types_compatible(parameter: &str, actual: &str) -> bool {
                 && type_names_equivalent(parameter_extent, actual_extent)))
 }
 
+fn unsupported_struct_return_message(type_name: &str) -> String {
+    format!(
+        "named-struct result '{}' is unsupported by the non-owning view ABI; pass it as a parameter and return a scalar or void",
+        type_name.trim()
+    )
+}
+
+fn stored_view_field_message(struct_name: &str, field_name: &str, type_name: &str) -> String {
+    format!(
+        "struct '{}' field '{}' cannot store view type '{}'; use a fixed-capacity field or keep the view as a parameter/local",
+        struct_name,
+        field_name,
+        type_name.trim()
+    )
+}
+
+fn function_return_type_range(
+    source: &str,
+    function: &ParsedFunctionSignature,
+) -> Option<Range<usize>> {
+    let tokens = lex(source).ok()?;
+    let signature_tokens = tokens
+        .iter()
+        .filter(|token| {
+            token.start >= function.signature_range.start
+                && token.end <= function.signature_range.end
+        })
+        .collect::<Vec<_>>();
+    for (index, pair) in signature_tokens.windows(2).enumerate().rev() {
+        if pair[0].kind == TokenKind::RParen && pair[1].kind == TokenKind::Colon {
+            let start = signature_tokens.get(index + 2)?.start;
+            let end = signature_tokens.last()?.end;
+            return (start < end).then_some(start..end);
+        }
+    }
+    None
+}
+
+fn extern_return_type_range(
+    source: &str,
+    declaration: &ParsedExternFunctionDeclaration,
+) -> Option<Range<usize>> {
+    let tokens = lex(source).ok()?;
+    let name_index = tokens.iter().position(|token| {
+        token.start == declaration.name_range.start && token.end == declaration.name_range.end
+    })?;
+    let mut depth = 0usize;
+    let mut parameter_end = None;
+    for (index, token) in tokens.iter().enumerate().skip(name_index + 1) {
+        match token.kind {
+            TokenKind::LParen => depth += 1,
+            TokenKind::RParen => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    parameter_end = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let parameter_end = parameter_end?;
+    if tokens.get(parameter_end + 1)?.kind != TokenKind::Colon {
+        return None;
+    }
+    let type_start = parameter_end + 2;
+    let semicolon = tokens
+        .iter()
+        .enumerate()
+        .skip(type_start)
+        .find(|(_, token)| token.kind == TokenKind::Semicolon)
+        .map(|(index, _)| index)?;
+    let start = tokens.get(type_start)?.start;
+    let end = tokens.get(semicolon.checked_sub(1)?)?.end;
+    (start < end).then_some(start..end)
+}
+
+fn struct_field_type_range(
+    source: &str,
+    definition_range: Range<usize>,
+    field_name: &str,
+) -> Option<Range<usize>> {
+    let tokens = lex(source).ok()?;
+    let mut depth = 0usize;
+    let mut in_definition = false;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.start < definition_range.start || token.end > definition_range.end {
+            continue;
+        }
+        match token.kind {
+            TokenKind::LBrace => {
+                depth += 1;
+                in_definition = true;
+            }
+            TokenKind::RBrace => depth = depth.saturating_sub(1),
+            TokenKind::Identifier
+                if in_definition
+                    && depth == 1
+                    && &source[token.start..token.end] == field_name
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|next| next.kind == TokenKind::Colon) =>
+            {
+                let type_start = index + 2;
+                let semicolon = tokens
+                    .iter()
+                    .enumerate()
+                    .skip(index + 2)
+                    .find(|next| {
+                        next.1.start <= definition_range.end && next.1.kind == TokenKind::Semicolon
+                    })?
+                    .0;
+                let start = tokens.get(type_start)?.start;
+                let end = tokens.get(semicolon.checked_sub(1)?)?.end;
+                return (start < end).then_some(start..end);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn contains_view_type(type_name: &str) -> bool {
     let trimmed = type_name.trim();
     if trimmed == "string" {
         return true;
     }
     if let Some((element, extent)) = split_array_suffix(trimmed) {
-        return extent.trim().is_empty() || contains_view_type(element);
+        if extent.trim().is_empty() {
+            return true;
+        }
+        if element.trim() == "string" {
+            return false;
+        }
+        return contains_view_type(element);
     }
     parse_type_application(trimmed)
         .ok()
@@ -3203,27 +4984,57 @@ fn split_top_level_arguments(source: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-fn mangle_specialization(
+fn specialization_identity(
     kind: &str,
     path: &str,
     name: &str,
     arguments: &[ConcreteArgument],
 ) -> String {
-    let mut identity = format!("{kind}|{path}|{name}|");
+    let mut identity = format!("{kind}|");
+    push_identity_component(&mut identity, "path", &canonical_identity_path(path));
+    push_identity_component(&mut identity, "name", name);
     for argument in arguments {
         match argument {
             ConcreteArgument::Type(value) => {
-                identity.push_str("T:");
-                identity.push_str(value);
+                push_identity_component(
+                    &mut identity,
+                    "type",
+                    &canonical_type_identity_text(value),
+                );
             }
             ConcreteArgument::I32(value) => {
-                identity.push_str("I:");
-                identity.push_str(&value.to_string());
+                push_identity_component(&mut identity, "i32", &value.to_string());
             }
         }
-        identity.push('|');
     }
+    identity
+}
+
+fn mangle_specialization_identity(identity: &str) -> String {
+    let kind = identity.split('|').next().unwrap_or("specialization");
     format!("__stasis_{kind}_{}", fnv1a(identity.as_bytes()))
+}
+
+fn register_specialization_name(
+    identities: &mut BTreeMap<String, String>,
+    generated_name: &str,
+    identity: &str,
+) -> Result<(), String> {
+    if let Some(existing) = identities.get(generated_name) {
+        if existing != identity {
+            let (left, right) = if existing.as_str() <= identity {
+                (existing.as_str(), identity)
+            } else {
+                (identity, existing.as_str())
+            };
+            return Err(format!(
+                "generic specialization symbol collision for '{generated_name}': '{left}' conflicts with '{right}'"
+            ));
+        }
+        return Ok(());
+    }
+    identities.insert(generated_name.to_string(), identity.to_string());
+    Ok(())
 }
 
 fn fnv1a(bytes: &[u8]) -> String {
@@ -3453,48 +5264,294 @@ fn matching_angle(source: &str, open: usize) -> Result<usize, String> {
     Err("missing closing '>' in generic argument list".to_string())
 }
 
-fn evaluate_constant_name(
+fn constant_definition_identity(definition: &ConstantDefinition) -> String {
+    format!("{}::{}", definition.path, definition.name)
+}
+
+fn ordinary_struct_generated_name(definition: &OrdinaryStructDefinition) -> String {
+    format!(
+        "__module_type_{:016x}",
+        hash_text(&format!("{}::{}", definition.path, definition.name))
+    )
+}
+
+fn type_identifier_ranges(source: &str) -> Result<Vec<(usize, usize)>, String> {
+    let tokens = lex(source)?;
+    let mut ranges = Vec::new();
+    let mut in_type = false;
+    let mut angle_depth = 0usize;
+    let mut square_depth = 0usize;
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let token = tokens[index];
+        let text = &source[token.start..token.end];
+        if token.kind == TokenKind::Identifier && text == "struct" {
+            if let Some(name) = tokens
+                .get(index + 1)
+                .filter(|candidate| candidate.kind == TokenKind::Identifier)
+            {
+                ranges.push((name.start, name.end));
+            }
+        }
+        if token.kind == TokenKind::Colon {
+            in_type = true;
+            angle_depth = 0;
+            square_depth = 0;
+            index += 1;
+            continue;
+        }
+        if !in_type {
+            index += 1;
+            continue;
+        }
+        if token.kind == TokenKind::Other {
+            match text {
+                "<" => angle_depth += 1,
+                ">" => angle_depth = angle_depth.saturating_sub(1),
+                "[" => square_depth += 1,
+                "]" => square_depth = square_depth.saturating_sub(1),
+                "=" if angle_depth == 0 && square_depth == 0 => in_type = false,
+                _ => {}
+            }
+        }
+        if angle_depth == 0
+            && square_depth == 0
+            && matches!(
+                token.kind,
+                TokenKind::Comma | TokenKind::RParen | TokenKind::Semicolon | TokenKind::LBrace
+            )
+        {
+            in_type = false;
+            index += 1;
+            continue;
+        }
+        if token.kind == TokenKind::Identifier && angle_depth == 0 && square_depth == 0 {
+            if tokens.get(index + 1).is_some_and(|candidate| {
+                candidate.kind == TokenKind::Other && &source[candidate.start..candidate.end] == "."
+            }) && tokens
+                .get(index + 2)
+                .is_some_and(|candidate| candidate.kind == TokenKind::Identifier)
+            {
+                let end = tokens[index + 2].end;
+                ranges.push((token.start, end));
+                index += 3;
+                continue;
+            }
+            ranges.push((token.start, token.end));
+        }
+        index += 1;
+    }
+    ranges.sort_unstable();
+    ranges.dedup();
+    Ok(ranges)
+}
+
+fn constant_identifier_ranges(
+    source: &str,
+    candidate_names: &BTreeSet<&str>,
+) -> Result<Vec<(usize, usize)>, String> {
+    if candidate_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tokens = lex(source)?;
+    let locals = crate::frontend::parser::parse_local_declarations(source).unwrap_or_default();
+    let functions = parse_top_level_functions(source).unwrap_or_default();
+    let mut enum_ranges = Vec::new();
+    for (index, token) in tokens.iter().copied().enumerate() {
+        if token.kind != TokenKind::Identifier || &source[token.start..token.end] != "enum" {
+            continue;
+        }
+        let Some(open_index) = (index + 1..tokens.len())
+            .find(|candidate| tokens[*candidate].kind == TokenKind::LBrace)
+        else {
+            continue;
+        };
+        let mut depth = 0usize;
+        for candidate in &tokens[open_index..] {
+            match candidate.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        enum_ranges.push(token.start..candidate.end);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut ranges = Vec::new();
+    for (index, token) in tokens.iter().copied().enumerate() {
+        if token.kind != TokenKind::Identifier {
+            continue;
+        }
+        let name = &source[token.start..token.end];
+        if !candidate_names.contains(name) {
+            continue;
+        }
+        let previous = index.checked_sub(1).and_then(|value| tokens.get(value));
+        let next = tokens.get(index + 1);
+        let followed_by_assignment = next.is_some_and(|candidate| {
+            candidate.kind == TokenKind::Other
+                && &source[candidate.start..candidate.end] == "="
+                && !tokens.get(index + 2).is_some_and(|following| {
+                    following.kind == TokenKind::Other
+                        && &source[following.start..following.end] == "="
+                })
+        });
+        let is_constant_declaration = previous.is_some_and(|candidate| {
+            candidate.kind == TokenKind::Identifier
+                && &source[candidate.start..candidate.end] == "const"
+        });
+        if !is_constant_declaration {
+            if enum_ranges
+                .iter()
+                .any(|range| range.start <= token.start && token.end <= range.end)
+            {
+                continue;
+            }
+            if previous.is_some_and(|candidate| {
+                candidate.kind == TokenKind::Other && &source[candidate.start..candidate.end] == "."
+            }) || next.is_some_and(|candidate| {
+                matches!(
+                    candidate.kind,
+                    TokenKind::LParen | TokenKind::LBrace | TokenKind::Colon
+                ) || (candidate.kind == TokenKind::Other
+                    && &source[candidate.start..candidate.end] == ".")
+            }) || previous.is_some_and(|candidate| {
+                candidate.kind == TokenKind::Identifier
+                    && matches!(
+                        &source[candidate.start..candidate.end],
+                        "struct" | "enum" | "global" | "let"
+                    )
+            }) || followed_by_assignment
+            {
+                continue;
+            }
+            if locals.iter().any(|local| {
+                local.name == name
+                    && local.visibility_range.start <= token.start
+                    && token.end <= local.visibility_range.end
+            }) {
+                continue;
+            }
+            if functions.iter().any(|function| {
+                function.body_range.start <= token.start
+                    && token.end <= function.body_range.end
+                    && function
+                        .params
+                        .iter()
+                        .any(|parameter| parameter.name == name)
+            }) {
+                continue;
+            }
+        }
+        ranges.push((token.start, token.end));
+    }
+    Ok(ranges)
+}
+
+fn sorted_paths<'a>(paths: impl Iterator<Item = &'a str>) -> String {
+    let mut paths = paths.collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.dedup();
+    paths.join(", ")
+}
+
+fn visible_constant_definition_in<'a>(
     name: &str,
+    source_path: &str,
+    definitions: &'a [ConstantDefinition],
+    module_graph: &ModuleGraph,
+) -> Result<Option<&'a ConstantDefinition>, String> {
+    let local = definitions
+        .iter()
+        .filter(|definition| {
+            definition.path == source_path
+                && definition.name == name
+                && definition.type_name.trim() == "i32"
+        })
+        .collect::<Vec<_>>();
+    let matches = if local.is_empty() {
+        let visible = module_graph.dependency_closure(source_path);
+        definitions
+            .iter()
+            .filter(|definition| {
+                visible.contains(&definition.path)
+                    && definition.name == name
+                    && definition.type_name.trim() == "i32"
+            })
+            .collect::<Vec<_>>()
+    } else {
+        local
+    };
+    match matches.as_slice() {
+        [] => Ok(None),
+        [definition] => Ok(Some(*definition)),
+        _ => Err(format!(
+            "ambiguous compile-time constant '{}' from '{}': {}",
+            name,
+            source_path,
+            sorted_paths(matches.iter().map(|definition| definition.path.as_str()))
+        )),
+    }
+}
+
+fn evaluate_constant_definition(
+    definition: &ConstantDefinition,
     definitions: &[ConstantDefinition],
+    module_graph: &ModuleGraph,
     resolved: &mut BTreeMap<String, i32>,
     stack: &mut Vec<String>,
     steps: &mut usize,
 ) -> Result<i32, String> {
-    if let Some(value) = resolved.get(name) {
+    let identity = constant_definition_identity(definition);
+    if let Some(value) = resolved.get(&identity) {
         return Ok(*value);
     }
-    if stack.iter().any(|entry| entry == name) {
+    if stack.iter().any(|entry| entry == &identity) {
         let mut chain = stack.clone();
-        chain.push(name.to_string());
+        chain.push(identity.clone());
         return Err(format!("constant reference cycle: {}", chain.join(" -> ")));
     }
-    let definition = definitions
-        .iter()
-        .find(|definition| definition.name == name)
-        .ok_or_else(|| format!("unknown compile-time constant '{name}'"))?;
-    stack.push(name.to_string());
+    ensure_constant_dependency_depth(stack.len())?;
+    stack.push(identity.clone());
     let mut environment = GenericEnvironment::default();
+    environment.source_path = Some(definition.path.clone());
     let tokens = tokenize_constant_expression(&definition.value_text)?;
     for token in tokens {
         let ConstantToken::Identifier(identifier) = token else {
             continue;
         };
-        if identifier == name || environment.values.contains_key(&identifier) {
+        if environment.values.contains_key(&identifier) {
             continue;
         }
-        if let Some(candidate) = definitions
-            .iter()
-            .find(|candidate| candidate.name == identifier && candidate.type_name.trim() == "i32")
-        {
-            let value =
-                evaluate_constant_name(&candidate.name, definitions, resolved, stack, steps)?;
+        if let Some(candidate) = visible_constant_definition_in(
+            &identifier,
+            &definition.path,
+            definitions,
+            module_graph,
+        )? {
+            let value = evaluate_constant_definition(
+                candidate,
+                definitions,
+                module_graph,
+                resolved,
+                stack,
+                steps,
+            )?;
             environment.values.insert(identifier, value);
         }
     }
-    let value =
-        evaluate_i32_expression_with_steps(&definition.value_text, &environment, resolved, steps)?;
+    let value = evaluate_i32_expression_with_steps(
+        &definition.value_text,
+        &environment,
+        &BTreeMap::new(),
+        steps,
+    )?;
     stack.pop();
-    resolved.insert(name.to_string(), value);
+    resolved.insert(identity, value);
     Ok(value)
 }
 
@@ -3584,12 +5641,7 @@ impl<'a> ConstantParser<'a> {
 
     fn parse_prefix(&mut self) -> Result<i32, String> {
         *self.steps = self.steps.saturating_add(1);
-        if *self.steps > MAX_CONSTANT_EVALUATION_STEPS {
-            return Err(format!(
-                "compile-time expression evaluation exceeded {} steps",
-                MAX_CONSTANT_EVALUATION_STEPS
-            ));
-        }
+        ensure_constant_evaluation_steps(*self.steps)?;
         let token = self
             .tokens
             .get(self.cursor)
@@ -3708,12 +5760,15 @@ fn tokenize_constant_expression(source: &str) -> Result<Vec<ConstantToken>, Stri
     Ok(tokens)
 }
 
-fn rewrite_i32_constants(
+fn rewrite_i32_constants_checked(
     source: &str,
     constants: &BTreeMap<String, i32>,
+    renames: &BTreeMap<String, (String, i32)>,
+    ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
     let tokens = lex(source)?;
     let mut replacements = Vec::<(usize, usize, String)>::new();
+    let mut initializer_ranges = Vec::<std::ops::Range<usize>>::new();
     for (index, token) in tokens.iter().copied().enumerate() {
         if token.kind != TokenKind::Identifier || &source[token.start..token.end] != "const" {
             continue;
@@ -3751,25 +5806,53 @@ fn rewrite_i32_constants(
         let Some(value) = constants.get(constant_name) else {
             continue;
         };
+        initializer_ranges.push(tokens[equals_index].end..tokens[semicolon_index].start);
         replacements.push((
             tokens[equals_index].end,
             tokens[semicolon_index].start,
             format!(" {value} "),
         ));
     }
-    apply_replacements(source, &replacements)
+    let rename_names = renames.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    for (start, end) in constant_identifier_ranges(source, &rename_names)? {
+        if initializer_ranges
+            .iter()
+            .any(|range| range.start <= start && end <= range.end)
+        {
+            continue;
+        }
+        let name = &source[start..end];
+        let Some((generated_name, _)) = renames.get(name) else {
+            continue;
+        };
+        replacements.push((start, end, generated_name.clone()));
+    }
+    replacements.sort_by_key(|(start, end, _)| (*start, *end));
+    apply_replacements_checked(source, &replacements, ensure_output)
 }
 
-fn apply_replacements(
+fn apply_replacements_checked(
     source: &str,
     replacements: &[(usize, usize, String)],
+    mut ensure_output: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<String, String> {
-    let mut output = String::with_capacity(source.len());
+    let mut final_len = source.len();
     let mut cursor = 0usize;
     for (start, end, replacement) in replacements {
-        if *start < cursor || *end > source.len() {
+        if *start < cursor || *end < *start || *end > source.len() {
             return Err("overlapping source replacement".to_string());
         }
+        final_len = final_len
+            .checked_sub(end - start)
+            .and_then(|length| length.checked_add(replacement.len()))
+            .ok_or_else(|| "generic expansion output byte count overflowed".to_string())?;
+        cursor = *end;
+    }
+    ensure_output(final_len)?;
+
+    let mut output = String::with_capacity(final_len);
+    cursor = 0;
+    for (start, end, replacement) in replacements {
         output.push_str(&source[cursor..*start]);
         output.push_str(replacement);
         cursor = *end;
@@ -3876,14 +5959,572 @@ fn qualified_identifier_end(source: &str, _start: usize, mut cursor: usize) -> u
 
 #[cfg(test)]
 mod tests {
+    use crate::compiler::Compiler;
+
     use super::*;
+
+    #[test]
+    fn generic_resource_limits_accept_exact_maxima_and_reject_next_values() {
+        for accepted in [MAX_SPECIALIZATIONS - 1, MAX_SPECIALIZATIONS] {
+            ensure_specialization_count(accepted).expect("specialization neighbor is accepted");
+        }
+        assert!(ensure_specialization_count(MAX_SPECIALIZATIONS + 1).is_err());
+
+        for accepted in [MAX_INSTANTIATION_DEPTH - 1, MAX_INSTANTIATION_DEPTH] {
+            ensure_instantiation_depth(accepted).expect("depth neighbor is accepted");
+        }
+        assert!(ensure_instantiation_depth(MAX_INSTANTIATION_DEPTH + 1).is_err());
+
+        for accepted in [
+            MAX_CONSTANT_EVALUATION_STEPS - 1,
+            MAX_CONSTANT_EVALUATION_STEPS,
+        ] {
+            ensure_constant_evaluation_steps(accepted)
+                .expect("constant-evaluation neighbor is accepted");
+        }
+        assert!(ensure_constant_evaluation_steps(MAX_CONSTANT_EVALUATION_STEPS + 1).is_err());
+
+        for accepted in [MAX_GENERIC_SOURCE_BYTES - 1, MAX_GENERIC_SOURCE_BYTES] {
+            ensure_generic_source_bytes(accepted).expect("source byte neighbor is accepted");
+        }
+        assert!(ensure_generic_source_bytes(MAX_GENERIC_SOURCE_BYTES + 1).is_err());
+
+        for accepted in [MAX_EXPANDED_SOURCE_BYTES - 1, MAX_EXPANDED_SOURCE_BYTES] {
+            ensure_expanded_source_bytes(accepted).expect("output byte neighbor is accepted");
+        }
+        assert!(ensure_expanded_source_bytes(MAX_EXPANDED_SOURCE_BYTES + 1).is_err());
+
+        for accepted in [MAX_ELABORATION_WORK_UNITS - 1, MAX_ELABORATION_WORK_UNITS] {
+            ensure_elaboration_work(accepted, 0, 0).expect("work-unit neighbor is accepted");
+        }
+        assert!(ensure_elaboration_work(MAX_ELABORATION_WORK_UNITS + 1, 0, 0).is_err());
+    }
+
+    #[test]
+    fn generated_specialization_identity_is_canonical_and_collision_checked() {
+        let arguments = [
+            ConcreteArgument::Type("i32".to_string()),
+            ConcreteArgument::I32(4),
+        ];
+        let slash = specialization_identity("type", "library/types.stasis", "Buffer", &arguments);
+        let backslash =
+            specialization_identity("type", "library\\types.stasis", "Buffer", &arguments);
+        assert_eq!(slash, backslash);
+        assert_ne!(
+            slash,
+            specialization_identity(
+                "type",
+                "library/types.stasis",
+                "Buffer",
+                &[
+                    ConcreteArgument::Type("i32".to_string()),
+                    ConcreteArgument::I32(8),
+                ]
+            )
+        );
+
+        let mut identities = BTreeMap::new();
+        let injected_digest_name = "__stasis_type_injected_collision";
+        register_specialization_name(&mut identities, injected_digest_name, &slash)
+            .expect("first injected digest is accepted");
+        let error = register_specialization_name(
+            &mut identities,
+            injected_digest_name,
+            "type|other.stasis|Buffer|T:i32|I:4|",
+        )
+        .expect_err("a reused digest for a different full key must fail");
+        assert!(error.contains("specialization symbol collision"));
+        assert!(error.contains(&slash));
+
+        let mut reverse = BTreeMap::new();
+        register_specialization_name(
+            &mut reverse,
+            injected_digest_name,
+            "type|other.stasis|Buffer|T:i32|I:4|",
+        )
+        .expect("reversed first injected digest is accepted");
+        let reverse_error =
+            register_specialization_name(&mut reverse, injected_digest_name, &slash)
+                .expect_err("a reversed collision must fail identically");
+        assert_eq!(error, reverse_error);
+    }
+
+    #[test]
+    fn receiver_generic_function_identity_is_alpha_and_nominally_canonical() {
+        fn generated_function_names(binding: &str, qualified: bool) -> Vec<String> {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file("policy.stasis", "struct Policy<N: i32> { marker: i32; }");
+            let receiver = if qualified { "policy.Policy" } else { "Policy" };
+            compiler.upsert_file(
+                "use.stasis",
+                &format!(
+                    "import \"policy.stasis\";\n\
+                     global instance: {receiver}<4>;\n\
+                     function value(self: {receiver}<{binding}>): i32 {{ return {binding}; }}\n\
+                     function main(): i32 {{ return instance.value(); }}"
+                ),
+            );
+            compiler.check().expect("generic program should compile");
+            let mut names = compiler
+                .functions()
+                .iter()
+                .filter(|function| function.name.starts_with("__stasis_function_"))
+                .map(|function| function.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+
+        let canonical = generated_function_names("T", false);
+        assert!(!canonical.is_empty());
+        assert_eq!(canonical, generated_function_names("U", false));
+        assert_eq!(canonical, generated_function_names("T", true));
+        assert_eq!(canonical, generated_function_names("U", true));
+    }
+
+    #[test]
+    fn source_declarations_cannot_spoof_the_generated_namespace() {
+        for source in [
+            "struct __stasis_type_deadbeef { value: i32; } function main(): i32 { return 0; }",
+            "enum __stasis_type_deadbeef { First, Second } function main(): i32 { return 0; }",
+            "function __stasis_function_deadbeef(): i32 { return 0; } function main(): i32 { return 0; }",
+            "global __stasis_type_deadbeef: i32; function main(): i32 { return 0; }",
+            "global __stasis_type_deadbeef { value: i32; } function main(): i32 { return 0; }",
+            "const __stasis_const_deadbeef: i32 = 1; function main(): i32 { return 0; }",
+            "function @extern(\"host_symbol\") __stasis_function_deadbeef(value: i32): i32; function main(): i32 { return 0; }",
+        ] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file("spoof.stasis", source);
+            let error = compiler
+                .check()
+                .expect_err("the compiler-generated namespace is reserved");
+            let diagnostic = format!("{error:?}");
+            assert!(diagnostic.contains("reserved compiler prefix"), "{diagnostic}");
+        }
+    }
+
+    #[test]
+    fn test_wrapper_namespace_remains_available_to_authored_sources() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "test_wrapper.stasis",
+            "function __stasis_test_wrapper(): i32 { return 7; } function main(): i32 { return __stasis_test_wrapper(); }",
+        );
+        compiler
+            .check()
+            .expect("the test harness namespace must not be reserved by generic expansion");
+    }
+
+    fn repeated_constant_terms(term_count: usize) -> String {
+        std::iter::repeat("0")
+            .take(term_count)
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    #[test]
+    fn constant_evaluation_enforces_9999_10000_10001_step_neighbors() {
+        let environment = GenericEnvironment::default();
+        let constants = BTreeMap::new();
+        for accepted in [9_999, 10_000] {
+            assert_eq!(
+                evaluate_i32_expression(
+                    &repeated_constant_terms(accepted),
+                    &environment,
+                    &constants
+                )
+                .expect("the documented constant-evaluation boundary is accepted"),
+                0
+            );
+        }
+        let error =
+            evaluate_i32_expression(&repeated_constant_terms(10_001), &environment, &constants)
+                .expect_err("one step beyond the documented boundary must fail");
+        assert!(
+            error.contains("compile-time expression evaluation exceeded 10000 steps"),
+            "{error}"
+        );
+    }
+
+    fn shared_constant_step_source(first_steps: usize, second_steps: usize) -> String {
+        format!(
+            "const FIRST: i32 = {};\nconst SECOND: i32 = {};\nstruct Box<N: i32> {{ value: i32; }}\nglobal root: Box<SECOND>;\nfunction main(): i32 {{ return FIRST; }}\n",
+            repeated_constant_terms(first_steps),
+            repeated_constant_terms(second_steps),
+        )
+    }
+
+    #[test]
+    fn compiler_constant_evaluation_shares_9999_10000_10001_step_budget() {
+        for (first, second) in [(5_000, 4_999), (5_000, 5_000)] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file(
+                "shared_constant_steps.stasis",
+                shared_constant_step_source(first, second),
+            );
+            compiler.check().unwrap_or_else(|error| {
+                panic!("shared {first}+{second} step budget failed: {error:?}")
+            });
+        }
+
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "shared_constant_steps.stasis",
+            shared_constant_step_source(5_000, 5_001),
+        );
+        let error = compiler
+            .check()
+            .expect_err("the shared compilation budget must reject step 10001");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("compile-time expression evaluation exceeded 10000 steps"),
+            "{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn constant_cycles_are_rejected_deterministically() {
+        for (name, constants) in [
+            ("self", "const A: i32 = A;\n"),
+            ("mutual", "const A: i32 = B;\nconst B: i32 = A;\n"),
+        ] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file(
+                format!("{name}_constant_cycle.stasis"),
+                format!(
+                    "{constants}struct Box<N: i32> {{ value: i32; }}\nglobal root: Box<A>;\nfunction main(): i32 {{ return 0; }}\n"
+                ),
+            );
+            let error = compiler
+                .check()
+                .expect_err("constant reference cycles must fail expansion");
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains("constant reference cycle"),
+                "{name}: {diagnostic}"
+            );
+        }
+    }
+
+    fn constant_dependency_chain_source(definitions: usize) -> String {
+        let mut source = String::new();
+        for index in (0..definitions).rev() {
+            if index == 0 {
+                source.push_str("const C0: i32 = 0;\n");
+            } else {
+                source.push_str(&format!("const C{index}: i32 = C{};\n", index - 1));
+            }
+        }
+        source.push_str("struct Box<N: i32> { value: i32; }\n");
+        source.push_str(&format!(
+            "global root: Box<C{}>;\nfunction main(): i32 {{ return 0; }}\n",
+            definitions - 1
+        ));
+        source
+    }
+
+    #[test]
+    fn constant_dependency_depth_is_bounded_before_stack_exhaustion() {
+        let mut accepted = crate::compiler::Compiler::new();
+        accepted.upsert_file(
+            "constant_depth_128.stasis",
+            constant_dependency_chain_source(128),
+        );
+        accepted
+            .check()
+            .expect("128 active constant definitions are accepted");
+
+        let mut rejected = crate::compiler::Compiler::new();
+        rejected.upsert_file(
+            "constant_depth_129.stasis",
+            constant_dependency_chain_source(129),
+        );
+        let error = rejected
+            .check()
+            .expect_err("the dependency guard must reject definition 129");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("constant dependency depth exceeded (maximum 128)"),
+            "{diagnostic}"
+        );
+    }
+
+    fn specialization_boundary_source(count: usize) -> String {
+        let mut source = String::from("struct Box<N: i32> { value: i32; }\n");
+        for index in 0..count {
+            source.push_str(&format!("global value_{index}: Box<{index}>;\n"));
+        }
+        source.push_str("function main(): i32 { return 0; }\n");
+        source
+    }
+
+    #[test]
+    fn specialization_count_enforces_4095_4096_4097_neighbors() {
+        for accepted in [4_095, 4_096] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file(
+                "specialization_boundary.stasis",
+                specialization_boundary_source(accepted),
+            );
+            compiler
+                .check()
+                .unwrap_or_else(|error| panic!("{accepted} specializations failed: {error:?}"));
+        }
+
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "specialization_boundary.stasis",
+            specialization_boundary_source(4_097),
+        );
+        let error = compiler
+            .check()
+            .expect_err("4097 specializations must exceed the documented boundary");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("generic specialization limit exceeded (maximum 4096)"),
+            "{diagnostic}"
+        );
+    }
+
+    fn nested_box_source(maximum_depth: usize) -> String {
+        let mut nested = "i32".to_string();
+        for _ in 0..=maximum_depth {
+            nested = format!("Box<{nested}>");
+        }
+        format!(
+            "struct Box<T: type> {{ value: T; }}\nglobal root: {nested};\nfunction main(): i32 {{ return 0; }}\n"
+        )
+    }
+
+    #[test]
+    fn instantiation_depth_enforces_127_128_129_neighbors() {
+        for accepted in [127, 128] {
+            let mut compiler = crate::compiler::Compiler::new();
+            compiler.upsert_file("depth_boundary.stasis", nested_box_source(accepted));
+            compiler.check().unwrap_or_else(|error| {
+                panic!("maximum specialization depth {accepted} failed: {error:?}")
+            });
+        }
+
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file("depth_boundary.stasis", nested_box_source(129));
+        let error = compiler
+            .check()
+            .expect_err("depth 129 must exceed the documented boundary");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("generic instantiation depth exceeded (maximum 128)"),
+            "{diagnostic}"
+        );
+    }
+
+    fn large_receiver_body_multiplication_source() -> String {
+        const INSTANCES: usize = 128;
+        const BODY_PADDING_BYTES: usize = 132_000;
+
+        let mut source = String::from("struct Box<N: i32> { value: i32; }\n");
+        source.push_str("function inspect(self: Box<N>): i32 {");
+        source.push_str(&" ".repeat(BODY_PADDING_BYTES));
+        source.push_str("return self.value; }\n");
+        source.push_str("global output: i32;\n");
+        for index in 0..INSTANCES {
+            source.push_str(&format!("global value_{index}: Box<{index}>;\n"));
+        }
+        source.push_str("function main(): i32 {\n");
+        for index in 0..INSTANCES {
+            source.push_str(&format!("output = value_{index}.inspect();\n"));
+        }
+        source.push_str("return output; }\n");
+        source
+    }
+
+    #[test]
+    fn large_receiver_body_multiplication_fails_before_partial_source_publication() {
+        let source = large_receiver_body_multiplication_source();
+        assert!(source.len() < MAX_GENERIC_SOURCE_BYTES);
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file("large_body.stasis", source.clone());
+
+        let error = compiler
+            .check()
+            .expect_err("specialized bodies exceeding the byte ceiling must fail");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("generic expansion exceeds 16777216 output byte limit"),
+            "{diagnostic}"
+        );
+        assert_eq!(compiler.files().len(), 1);
+        assert_eq!(compiler.files()[0].content, source);
+        assert_eq!(
+            compiler.files()[0].hash,
+            hash_text(&compiler.files()[0].original_content)
+        );
+    }
+
+    fn combined_elaboration_work_source() -> String {
+        const BODY_PADDING_BYTES: usize = 11_200_000;
+
+        let mut source = String::from("struct Box<N: i32> { value: i32; }\n");
+        source.push_str("function inspect(self: Box<N>): i32 {");
+        source.push_str(&" ".repeat(BODY_PADDING_BYTES));
+        source.push_str("return self.value; }\n");
+        source.push_str("global value: Box<1>;\n");
+        source.push_str("function main(): i32 { return value.inspect(); }\n");
+        source
+    }
+
+    #[test]
+    fn combined_elaboration_work_ceiling_is_enforced_by_real_expansion() {
+        let source = combined_elaboration_work_source();
+        assert!(source.len() < MAX_GENERIC_SOURCE_BYTES);
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file("combined_work.stasis", source.clone());
+
+        let error = compiler
+            .check()
+            .expect_err("combined retained and expanded work must exceed 32 MiB");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            diagnostic.contains("generic elaboration exceeded 33554432 work units"),
+            "{diagnostic}"
+        );
+        assert_eq!(compiler.files()[0].content, source);
+    }
+
+    fn accepted_generic_program(capacity: i32) -> String {
+        format!(
+            "struct Buffer<N: i32> {{ value: i32; values: i32[N]; }}\n\
+             global buffer: Buffer<{capacity}>;\n\
+             function capacity(self: Buffer<N>): i32 {{ return N; }}\n\
+             function main(): i32 {{ return buffer.capacity(); }}\n"
+        )
+    }
+
+    const EXPANDING_GENERIC_FAILURE: &str = "struct Node<N: i32> { next: Node<N + 1>; }\n\
+         global root: Node<0>;\n\
+         function main(): i32 { return 0; }\n";
+
+    #[test]
+    fn generic_expansion_failure_preserves_published_outputs_across_check_jit_aot_and_wasm() {
+        use crate::backend::aot::AotProcess;
+        use crate::backend::jit::JitProcess;
+        use crate::backend::wasm::WasmProcess;
+
+        let baseline = accepted_generic_program(4);
+        let recovered = accepted_generic_program(8);
+
+        let mut checker = crate::compiler::Compiler::new();
+        checker.upsert_file("parity.stasis", &baseline);
+        checker.check().expect("baseline check");
+        let checked_functions = checker.functions().to_vec();
+
+        let mut jit = JitProcess::new();
+        jit.upsert_file("parity.stasis", &baseline);
+        jit.compile().expect("baseline JIT compile");
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("baseline JIT execution"),
+            4
+        );
+        let jit_artifacts = jit.artifacts().to_vec();
+        let jit_snapshot = format!("{:?}", jit.program_snapshot());
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("parity.stasis", &baseline);
+        aot.compile().expect("baseline AOT compile");
+        let aot_artifacts = aot.artifacts().to_vec();
+        let aot_snapshot = format!("{:?}", aot.program_snapshot());
+
+        let mut wasm = WasmProcess::new();
+        wasm.set_required_emit_roots(&["main".to_string()]);
+        wasm.upsert_file("parity.stasis", &baseline);
+        wasm.compile().expect("baseline Wasm compile");
+        let wasm_module = wasm.module_bytes().to_vec();
+        let wasm_literals = wasm.string_literals().clone();
+        let wasm_memory = wasm.memory_layout().clone();
+        let wasm_views = wasm.struct_views().clone();
+        let wasm_globals = wasm.global_types().clone();
+        let wasm_imports = wasm.imported_symbols().clone();
+        let wasm_snapshot = format!("{:?}", wasm.program_snapshot());
+
+        checker.upsert_file("parity.stasis", EXPANDING_GENERIC_FAILURE);
+        jit.upsert_file("parity.stasis", EXPANDING_GENERIC_FAILURE);
+        aot.upsert_file("parity.stasis", EXPANDING_GENERIC_FAILURE);
+        wasm.upsert_file("parity.stasis", EXPANDING_GENERIC_FAILURE);
+        let diagnostics = [
+            checker.check().expect_err("check rejects expansion"),
+            jit.compile().expect_err("JIT rejects expansion"),
+            aot.compile().expect_err("AOT rejects expansion"),
+            wasm.compile().expect_err("Wasm rejects expansion"),
+        ]
+        .map(|error| format!("{error:?}"));
+        for diagnostic in &diagnostics {
+            assert_eq!(diagnostic, &diagnostics[0]);
+            assert!(
+                diagnostic.contains("generic instantiation depth exceeded (maximum 128)"),
+                "{diagnostic}"
+            );
+        }
+        for diagnostic in [
+            checker.last_source_diagnostic(),
+            jit.last_source_diagnostic(),
+            aot.last_source_diagnostic(),
+            wasm.last_source_diagnostic(),
+        ] {
+            let diagnostic = diagnostic.expect("generic failure has source diagnostic");
+            assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Generic);
+            assert_eq!(
+                diagnostic.message,
+                "generic instantiation depth exceeded (maximum 128)"
+            );
+        }
+
+        assert_eq!(checker.functions(), checked_functions);
+        assert_eq!(checker.files()[0].content, EXPANDING_GENERIC_FAILURE);
+        assert_eq!(
+            checker.files()[0].hash,
+            hash_text(&checker.files()[0].original_content)
+        );
+
+        assert_eq!(jit.artifacts(), jit_artifacts);
+        assert_eq!(format!("{:?}", jit.program_snapshot()), jit_snapshot);
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("rejected JIT candidate leaves baseline executable"),
+            4
+        );
+        assert_eq!(aot.artifacts(), aot_artifacts);
+        assert_eq!(format!("{:?}", aot.program_snapshot()), aot_snapshot);
+        assert_eq!(wasm.module_bytes(), wasm_module);
+        assert_eq!(wasm.string_literals(), &wasm_literals);
+        assert_eq!(wasm.memory_layout(), &wasm_memory);
+        assert_eq!(wasm.struct_views(), &wasm_views);
+        assert_eq!(wasm.global_types(), &wasm_globals);
+        assert_eq!(wasm.imported_symbols(), &wasm_imports);
+        assert_eq!(format!("{:?}", wasm.program_snapshot()), wasm_snapshot);
+
+        checker.upsert_file("parity.stasis", &recovered);
+        checker.check().expect("check recovers after rejection");
+        jit.upsert_file("parity.stasis", &recovered);
+        jit.compile().expect("JIT recovers after rejection");
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("recovered JIT execution"),
+            8
+        );
+        aot.upsert_file("parity.stasis", &recovered);
+        aot.compile().expect("AOT recovers after rejection");
+        wasm.upsert_file("parity.stasis", &recovered);
+        wasm.compile().expect("Wasm recovers after rejection");
+        assert_ne!(wasm.module_bytes(), wasm_module);
+    }
 
     #[test]
     fn lowers_value_generic_structs_and_functions_before_indexing() {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "main.stasis",
-            "struct Buffer<N: i32> { count: i32; values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction clear<N: i32>(self: Buffer<N>): void { self.count = 0; }\nfunction capacity<N: i32>(): i32 { return N; }\nfunction reset(): void { samples.clear(); }\nfunction main(): i32 { reset(); return capacity::<4>(); }\n",
+            "struct Buffer<N: i32> { count: i32; values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction clear(self: Buffer<N>): void { self.count = 0; }\nfunction capacity(buffer: Buffer<N>): i32 { return N; }\nfunction reset(): void { samples.clear(); }\nfunction main(): i32 { reset(); return capacity(samples); }\n",
         );
         compiler.check().expect("generic program compiles");
         let file = &compiler.files()[0];
@@ -3904,7 +6545,7 @@ mod tests {
         let mut process = crate::backend::jit::JitProcess::new();
         process.upsert_file(
             "main.stasis",
-            "struct Buffer<N: i32> { count: i32; values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction clear<N: i32>(self: Buffer<N>): void { self.count = 0; }\nfunction capacity<N: i32>(): i32 { return N; }\nfunction main(): i32 { samples.clear(); return capacity::<4>(); }\n",
+            "struct Buffer<N: i32> { count: i32; values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction clear(self: Buffer<N>): void { self.count = 0; }\nfunction capacity(buffer: Buffer<N>): i32 { return N; }\nfunction main(): i32 { samples.clear(); return capacity(samples); }\n",
         );
         process.compile().expect("generic JIT program compiles");
         assert_eq!(
@@ -3916,19 +6557,19 @@ mod tests {
     }
 
     #[test]
-    fn keeps_multiple_explicit_value_function_specializations_distinct() {
+    fn keeps_multiple_receiver_value_specializations_distinct() {
         let mut process = crate::backend::jit::JitProcess::new();
         process.upsert_file(
             "main.stasis",
-            "function capacity<N: i32>(): i32 { return N; }\nfunction main(): i32 { return capacity::<4>() + capacity::<8>(); }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal first: Buffer<4>;\nglobal second: Buffer<8>;\nfunction capacity(buffer: Buffer<N>): i32 { return N; }\nfunction main(): i32 { return capacity(first) + second.capacity(); }\n",
         );
         process
             .compile()
-            .expect("multiple explicit generic calls compile");
+            .expect("multiple receiver-inferred generic calls compile");
         assert_eq!(
             process
                 .execute_i32_noarg_by_name("main")
-                .expect("multiple explicit generic calls execute"),
+                .expect("multiple receiver-inferred generic calls execute"),
             12
         );
     }
@@ -3938,7 +6579,7 @@ mod tests {
         let mut process = crate::backend::jit::JitProcess::new();
         process.upsert_file(
             "main.stasis",
-            "struct Buffer<N: i32> { value: i32; }\nglobal first: Buffer<4>;\nglobal second: Buffer<8>;\nfunction capacity<N: i32>(self: Buffer<N>): i32 { return N; }\nfunction main(): i32 { return first.capacity() + second.capacity(); }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal first: Buffer<4>;\nglobal second: Buffer<8>;\nfunction capacity(buffer: Buffer<N>): i32 { return N; }\nfunction main(): i32 { return first.capacity() + second.capacity(); }\n",
         );
         process
             .compile()
@@ -3952,42 +6593,34 @@ mod tests {
     }
 
     #[test]
-    fn infers_value_arguments_from_exact_fixed_array_arguments() {
-        let mut process = crate::backend::jit::JitProcess::new();
-        process.upsert_file(
+    fn rejects_generic_names_bound_only_by_a_fixed_array_view() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
             "main.stasis",
-            "global values: i32[6];\nfunction extent<N: i32>(items: i32[N]): i32 { return N; }\nfunction main(): i32 { return extent(values); }\n",
+            "global values: i32[6];\nfunction extent(items: i32[N]): i32 { return N; }\nfunction main(): i32 { return extent(values); }\n",
         );
-        process.compile().expect("fixed-array generic inference");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("fixed-array inferred generic call executes"),
-            6
-        );
+        let error = compiler
+            .check()
+            .expect_err("fixed-array-only generic binding must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
-    fn infers_value_arguments_from_nested_fixed_array_arguments() {
-        let mut process = crate::backend::jit::JitProcess::new();
-        process.upsert_file(
+    fn rejects_generic_names_bound_only_by_a_nested_fixed_array_view() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
             "main.stasis",
-            "struct State { values: i32[5]; }\nglobal state: State;\nfunction extent<N: i32>(items: i32[N]): i32 { return N; }\nfunction main(): i32 { return extent(state.values); }\n",
+            "struct State { values: i32[5]; }\nglobal state: State;\nfunction extent(items: i32[N]): i32 { return N; }\nfunction main(): i32 { return extent(state.values); }\n",
         );
-        process
-            .compile()
-            .expect("nested fixed-array generic inference");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("nested fixed-array inferred generic call executes"),
-            5
-        );
+        let error = compiler
+            .check()
+            .expect_err("nested fixed-array-only generic binding must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
     fn lowers_value_generic_storage_through_aot_and_wasm() {
-        let source = "struct Buffer<N: i32> { values: i32[N]; }\nglobal samples: Buffer<4>;\nfunction value<N: i32>(): i32 { return N; }\nfunction dead(): i32 { return value::<99>(); }\nfunction main(): i32 { samples.values[0] = 7; return samples.values[0] + value::<4>() + value::<8>(); }\n";
+        let source = "struct Buffer<N: i32> { values: i32[N]; }\nglobal samples: Buffer<4>;\nglobal other: Buffer<8>;\nfunction value(buffer: Buffer<N>): i32 { return buffer.values[0] + N; }\nfunction main(): i32 { samples.values[0] = 7; return value(samples) + value(other); }\n";
 
         let mut aot = crate::backend::aot::AotProcess::new();
         aot.set_required_emit_roots(&["main".to_string()]);
@@ -4048,7 +6681,7 @@ mod tests {
         let mut host_entry = crate::compiler::Compiler::new();
         host_entry.upsert_file(
             "main.stasis",
-            "function main<N: i32>(): i32 { return N; }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal main_buffer: Buffer<4>;\nfunction main(buffer: Buffer<N>): i32 { return N; }\n",
         );
         let error = host_entry
             .check()
@@ -4109,7 +6742,7 @@ mod tests {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "offset.stasis",
-            "function offset<N: i32>(): i32 { return N; }\nfunction main(): i32 { return offset::<-2147483648>(); }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal minimum: Buffer<-2147483648>;\nfunction offset(buffer: Buffer<N>): i32 { return N; }\nfunction main(): i32 { return offset(minimum); }\n",
         );
         compiler.check().expect("minimum i32 value is valid");
 
@@ -4125,16 +6758,81 @@ mod tests {
     }
 
     #[test]
-    fn rejects_expanding_generic_recursion_at_the_deterministic_depth_limit() {
+    fn rejects_explicit_generic_calls_before_specialization() {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "recursive.stasis",
-            "function loop<N: i32>(): i32 { return loop::<N + 1>(); }\nfunction main(): i32 { return loop::<0>(); }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal buffer: Buffer<4>;\nfunction loop(value: Buffer<N>): i32 { return loop::<N + 1>(value); }\nfunction main(): i32 { return loop(buffer); }\n",
         );
         let error = compiler
             .check()
-            .expect_err("expanding generic recursion must be bounded");
-        assert!(format!("{error:?}").contains("generic instantiation depth exceeded"));
+            .expect_err("explicit generic call must be rejected");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+    }
+
+    #[test]
+    fn specialized_template_diagnostic_retains_originating_call_location() {
+        let mut compiler = crate::compiler::Compiler::new();
+        let main = "import \"box.stasis\";\nglobal value: box.Box<box.Item>;\nfunction main(): i32 { box.extract(value); box.extract(value); return 0; }\n";
+        let template = "struct Item { score: i32; }\nstruct Box<T: type> { value: T; }\nfunction extract(box: Box<T>): T { return box.value; }\n";
+        compiler.upsert_file("main.stasis", main);
+        compiler.upsert_file("box.stasis", template);
+
+        let error = compiler
+            .check()
+            .expect_err("named-struct specialization result must fail");
+        assert!(format!("{error:?}").contains("named-struct result"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured specialization diagnostic");
+        assert_eq!(diagnostic.path, "box.stasis");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::UnsupportedStructReturn
+        );
+        assert_eq!(diagnostic.symbol, "extract");
+        assert_eq!(&template[diagnostic.start..diagnostic.end], "T");
+        assert_eq!(diagnostic.related.len(), 2);
+        for origin in &diagnostic.related {
+            assert_eq!(origin.path, "main.stasis");
+            assert_eq!(origin.symbol, "extract");
+            assert_eq!(&main[origin.start..origin.end], "extract");
+        }
+        assert!(diagnostic.related[0].start < diagnostic.related[1].start);
+    }
+
+    #[test]
+    fn specialization_provenance_uses_original_offsets_after_utf8_in_file_template() {
+        let mut compiler = crate::compiler::Compiler::new();
+        let source = concat!(
+            "// café before the template\n",
+            "struct Item { score: i32; }\n",
+            "struct Box<T: type> { value: T; }\n",
+            "function extract(box: Box<T>): T { return box.value; }\n",
+            "global value: Box<Item>;\n",
+            "function main(): i32 { extract(value); return 0; }\n",
+        );
+        compiler.upsert_file("main.stasis", source);
+
+        let error = compiler
+            .check()
+            .expect_err("named-struct specialization result must fail");
+        assert!(format!("{error:?}").contains("named-struct result"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured specialization diagnostic");
+        assert_eq!(diagnostic.path, "main.stasis");
+        assert_eq!(diagnostic.symbol, "extract");
+        assert_eq!(diagnostic.related.len(), 1);
+        let origin = &diagnostic.related[0];
+        assert_eq!(origin.path, "main.stasis");
+        assert_eq!(origin.symbol, "extract");
+        let expected_start = source
+            .find("extract(value)")
+            .expect("generic call in original source");
+        assert_eq!(origin.start, expected_start);
+        assert_eq!(origin.end, expected_start + "extract".len());
+        assert_eq!(&source[origin.start..origin.end], "extract");
     }
 
     #[test]
@@ -4142,7 +6840,7 @@ mod tests {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "write.stasis",
-            "function mutate<N: i32>(): void { N = 3; return; }\nfunction main(): i32 { mutate::<4>(); return 0; }\n",
+            "struct Buffer<N: i32> { value: i32; }\nglobal buffer: Buffer<4>;\nfunction mutate(value: Buffer<N>): void { N = 3; return; }\nfunction main(): i32 { mutate(buffer); return 0; }\n",
         );
         let error = compiler
             .check()
@@ -4163,6 +6861,50 @@ mod tests {
         assert_eq!(diagnostic.path, "broken.stasis");
         assert_eq!(diagnostic.symbol, "broken");
         assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Parse);
+    }
+
+    #[test]
+    fn malformed_function_diagnostic_precedes_stored_view_contract() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "broken_contract.stasis",
+            "struct Rig { bones: i32[]; }\nfunction broken(: i32): void {}\n",
+        );
+        compiler
+            .check()
+            .expect_err("canonical parser must own malformed source diagnostics");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("canonical parser diagnostic");
+        assert_eq!(diagnostic.path, "broken_contract.stasis");
+        assert_eq!(diagnostic.symbol, "broken");
+        assert_eq!(diagnostic.code, crate::SourceDiagnosticCode::Parse);
+    }
+
+    #[test]
+    fn malformed_import_diagnostic_precedes_specialized_stored_view_contract() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"library.stasis\";\nglobal invalid: library.Box<i32[]>;\nfunction main(): i32 { return 0; }\n",
+        );
+        compiler.upsert_file(
+            "library.stasis",
+            "struct Box<T: type> { value: T; }\nfunction broken(: i32): void {}\n",
+        );
+        compiler
+            .check()
+            .expect_err("imported canonical parser diagnostic must precede value contracts");
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("imported canonical parser diagnostic");
+        assert_eq!(diagnostic.path, "library.stasis", "{diagnostic:?}");
+        assert_eq!(diagnostic.symbol, "broken", "{diagnostic:?}");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::Parse,
+            "{diagnostic:?}"
+        );
     }
 
     #[test]
@@ -4199,7 +6941,7 @@ mod tests {
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
              global integers: Buffer<i32, 4>;\n\
              global floats: Buffer<f32, 8>;\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n\
              function main(): i32 { return integers.capacity() + floats.capacity(); }\n",
         );
         process
@@ -4214,23 +6956,18 @@ mod tests {
     }
 
     #[test]
-    fn infers_type_from_fixed_array_for_a_view_without_capturing_capacity() {
-        let mut process = crate::backend::jit::JitProcess::new();
-        process.upsert_file(
+    fn rejects_generic_names_bound_only_by_a_runtime_view() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
             "main.stasis",
             "global values: i32[6];\n\
-             function element<T: type>(items: T[]): T { return items[0]; }\n\
+             function element(items: T[]): T { return items[0]; }\n\
              function main(): i32 { return element(values); }\n",
         );
-        process
-            .compile()
-            .expect("fixed array to generic view inference");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("generic view call executes"),
-            0
-        );
+        let error = compiler
+            .check()
+            .expect_err("runtime-view-only generic binding must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
@@ -4239,32 +6976,29 @@ mod tests {
         compiler.upsert_file(
             "main.stasis",
             "global values: i32[];\n\
-             function extent<T: type, N: i32>(items: T[N]): i32 { return N; }\n\
+             function extent(items: T[N]): i32 { return N; }\n\
              function main(): i32 { return extent(values); }\n",
         );
         let error = compiler
             .check()
             .expect_err("runtime view cannot infer a fixed extent");
-        assert!(format!("{error:?}").contains("could not infer"));
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
-    fn forwards_inferred_type_and_extent_bindings_through_generic_helpers() {
-        let mut process = crate::backend::jit::JitProcess::new();
-        process.upsert_file(
+    fn rejects_generic_helpers_not_bound_by_the_first_parameter() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
             "main.stasis",
             "global values: i32[6];\n\
-             function extent<T: type, N: i32>(items: T[N]): i32 { return N; }\n\
-             function forward<U: type, M: i32>(items: U[M]): i32 { return extent(items); }\n\
+             function extent(items: T[N]): i32 { return N; }\n\
+             function forward(items: T[N]): i32 { return extent(items); }\n\
              function main(): i32 { return forward(values); }\n",
         );
-        process.compile().expect("generic forwarding inference");
-        assert_eq!(
-            process
-                .execute_i32_noarg_by_name("main")
-                .expect("forwarded generic call executes"),
-            6
-        );
+        let error = compiler
+            .check()
+            .expect_err("raw-view generic helper must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
@@ -4274,8 +7008,8 @@ mod tests {
             "main.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
              global values: Buffer<i32, 6>;\n\
-             function extent<T: type, N: i32>(items: Buffer<T, N>): i32 { return N; }\n\
-             function forward<U: type, M: i32>(items: Buffer<U, M>): i32 { return extent(items); }\n\
+             function extent(items: Buffer<T, N>): i32 { return N; }\n\
+             function forward(items: Buffer<U, M>): i32 { return extent(items); }\n\
              function main(): i32 { return forward(values); }\n",
         );
         process
@@ -4297,7 +7031,7 @@ mod tests {
             "struct Item<T: type> { value: T; }\n\
              struct Box<T: type, N: i32> { items: Item<T>[N]; }\n\
              global values: Box<i32, 2>;\n\
-             function first<T: type, N: i32>(self: Box<T, N>): T { return self.items[0].value; }\n\
+             function first(self: Box<T, N>): T { return self.items[0].value; }\n\
              function main(): i32 { return values.first(); }\n",
         );
         process
@@ -4316,14 +7050,15 @@ mod tests {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "main.stasis",
-            "global integer: i32;\n\
+            "struct Box<T: type> { value: T; }\n\
+             global integer: Box<i32>;\n\
              global float: f32;\n\
-             function same<T: type>(left: T, right: T): T { return left; }\n\
+             function same(left: Box<T>, right: T): T { return left.value; }\n\
              function main(): i32 { return same(integer, float); }\n",
         );
         let error = compiler
             .check()
-            .expect_err("repeated generic type bindings must agree");
+            .expect_err("later generic bindings must agree with the receiver");
         assert!(format!("{error:?}").contains("could not infer"));
     }
 
@@ -4336,17 +7071,17 @@ mod tests {
              import \"right/right_box.stasis\";\n\
              global left_value: left_box.Buffer<i32, 4>;\n\
              global right_value: right_box.Buffer<f32, 8>;\n\
-             function main(): i32 { return left_box.capacity::<i32, 4>(left_value) + right_box.capacity::<f32, 8>(right_value); }\n",
+             function main(): i32 { return left_box.capacity(left_value) + right_box.capacity(right_value); }\n",
         );
         process.upsert_file(
             "left/left_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         process.upsert_file(
             "right/right_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         process
             .compile()
@@ -4356,6 +7091,33 @@ mod tests {
                 .execute_i32_noarg_by_name("main")
                 .expect("module-local generic receiver calls execute"),
             12
+        );
+    }
+
+    #[test]
+    fn rewrites_nested_receiver_calls_between_generic_methods() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "import \"library.stasis\";\n\
+             global value: library.Box<4>;\n\
+             function main(): i32 { return value.forward(); }\n",
+        );
+        process.upsert_file(
+            "library.stasis",
+            "struct Item { score: i32; }\n\
+             struct Box<N: i32> { values: Item[N]; }\n\
+             function read(self: Box<N>, score: i32): i32 { return N + score; }\n\
+             function forward(self: Box<N>): i32 { return self.read(self.values[0].score + 1); }\n",
+        );
+        process
+            .compile()
+            .expect("generic methods may call another method through their receiver");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("nested generic receiver call executes"),
+            5
         );
     }
 
@@ -4402,18 +7164,64 @@ mod tests {
     }
 
     #[test]
-    fn does_not_solve_symbolic_extent_equations_during_inference() {
+    fn rejects_mutually_recursive_generic_struct_storage_without_overflowing() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "mutually_recursive.stasis",
+            "struct Left<N: i32> { right: Right<N>; }\n\
+             struct Right<N: i32> { left: Left<N>; }\n\
+             global root: Left<0>;\n\
+             function main(): i32 { return 0; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("mutually recursive generic structs cannot be stored by value");
+        let diagnostic = format!("{error:?}");
+        assert!(diagnostic.contains("recursive"), "{diagnostic}");
+    }
+
+    #[test]
+    fn accepts_finite_nested_specializations_of_the_same_generic_struct() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "finite_nested.stasis",
+            "struct Box<T: type> { value: T; }\n\
+             global nested: Box<Box<i32>>;\n\
+             function main(): i32 { return nested.value.value; }\n",
+        );
+        compiler
+            .check()
+            .expect("finite nesting of one generic definition is valid");
+    }
+
+    #[test]
+    fn rejects_expanding_recursive_generic_struct_storage_without_overflowing() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "expanding_recursive.stasis",
+            "struct Node<N: i32> { next: Node<N + 1>; }\n\
+             global root: Node<0>;\n\
+             function main(): i32 { return 0; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("expanding recursive generic structs cannot be stored by value");
+        assert!(format!("{error:?}").contains("generic instantiation depth exceeded"));
+    }
+
+    #[test]
+    fn rejects_symbolic_extent_generic_names_not_bound_by_the_receiver() {
         let mut compiler = crate::compiler::Compiler::new();
         compiler.upsert_file(
             "main.stasis",
             "global values: i32[6];\n\
-             function shifted<N: i32>(items: i32[N + 1]): i32 { return N; }\n\
+             function shifted(items: i32[N + 1]): i32 { return N; }\n\
              function main(): i32 { return shifted(values); }\n",
         );
         let error = compiler
             .check()
             .expect_err("N + 1 must not be solved from an array capacity");
-        assert!(format!("{error:?}").contains("could not infer"));
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
     }
 
     #[test]
@@ -4429,17 +7237,174 @@ mod tests {
         compiler.upsert_file(
             "left/left_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         compiler.upsert_file(
             "right/right_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         let error = compiler
             .check()
             .expect_err("generic receiver types remain nominal across modules");
-        assert!(format!("{error:?}").contains("missing specialization"));
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(diagnostic.path, "main.stasis");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.symbol, "capacity");
+        let main = compiler
+            .files()
+            .iter()
+            .find(|file| file.path == "main.stasis")
+            .expect("main source");
+        assert_eq!(
+            &main.original_content[diagnostic.start..diagnostic.end],
+            "capacity"
+        );
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "right/right_box.stasis");
+        assert_eq!(diagnostic.related[0].symbol, "capacity");
+    }
+
+    #[test]
+    fn rejects_module_qualified_turbofish_generic_calls_with_template_related_info() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n",
+        );
+        compiler.upsert_file(
+            "types.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("module-qualified turbofish calls must be rejected");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.path, "main.stasis");
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "types.stasis");
+        assert_eq!(diagnostic.related[0].symbol, "capacity");
+    }
+
+    #[test]
+    fn rejects_project_relative_module_qualified_turbofish_generic_calls() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "src/main.stasis",
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n",
+        );
+        compiler.upsert_file(
+            "src/types.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("project-relative turbofish calls must be rejected");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.path, "src/main.stasis");
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "src/types.stasis");
+    }
+
+    #[test]
+    fn rejects_absolute_module_qualified_turbofish_generic_calls() {
+        let root = std::env::current_dir().expect("compiler checkout path");
+        let main_path = root.join("src/main.stasis");
+        let types_path = root.join("src/types.stasis");
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler
+            .set_project_root(root.to_string_lossy())
+            .expect("absolute project root");
+        compiler.upsert_file(
+            main_path.to_string_lossy(),
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n",
+        );
+        compiler.upsert_file(
+            types_path.to_string_lossy(),
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("absolute-path turbofish calls must be rejected");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.path, "src/main.stasis");
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "src/types.stasis");
+    }
+
+    #[test]
+    fn rejects_module_qualified_turbofish_in_a_replaced_entry_function() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "src/main.stasis",
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n\
+             function tick(): i32 { return 0; }\n\
+             function render(): i32 { return 0; }\n\
+             function on_code_swap(): void { return; }\n",
+        );
+        compiler.upsert_file(
+            "src/types.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = compiler
+            .check()
+            .expect_err("replaced entry functions must still reject turbofish calls");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
     }
 
     #[test]
@@ -4454,7 +7419,7 @@ mod tests {
         process.upsert_file(
             "left/left_box.stasis",
             "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
-             function capacity<T: type, N: i32>(self: Buffer<T, N>): i32 { return N; }\n",
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
         );
         process
             .compile()
@@ -4464,6 +7429,105 @@ mod tests {
                 .execute_i32_noarg_by_name("main")
                 .expect("qualified inferred generic call executes"),
             4
+        );
+    }
+
+    #[test]
+    fn jit_rejects_module_qualified_turbofish_generic_calls_with_template_related_info() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "src/main.stasis",
+            "import \"types.stasis\";\n\
+             global samples: types.Buffer<i32, 4>;\n\
+             function main(): i32 { return types.capacity::<i32, 4>(samples); }\n",
+        );
+        process.upsert_file(
+            "src/types.stasis",
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n\
+             function capacity(self: Buffer<T, N>): i32 { return N; }\n",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("JIT must reject module-qualified turbofish calls");
+        assert!(format!("{error:?}").contains("explicit generic function call"));
+        let diagnostic = process
+            .last_source_diagnostic()
+            .expect("structured explicit-call diagnostic");
+        assert_eq!(
+            diagnostic.code,
+            crate::SourceDiagnosticCode::ExplicitGenericCall
+        );
+        assert_eq!(diagnostic.symbol, "capacity");
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(diagnostic.related[0].path, "src/types.stasis");
+    }
+
+    #[test]
+    fn rejects_legacy_function_declarations_with_a_migration_diagnostic() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "legacy.stasis",
+            "function capacity<N: i32>(value: i32): i32 { return N + value; }\nfunction main(): i32 { return 0; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("legacy function generic declarations must fail");
+        assert!(format!("{error:?}").contains("generic function declaration"));
+        assert!(!format!("{error:?}").contains("specify explicit"));
+    }
+
+    #[test]
+    fn rejects_body_only_generic_type_names() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "body_only.stasis",
+            "struct Buffer<N: i32> { value: i32; }\nglobal buffer: Buffer<4>;\nfunction body_only(value: Buffer<N>): i32 { let unknown: U = 0; return N; }\nfunction main(): i32 { return body_only(buffer); }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("body-only generic names must fail");
+        assert!(format!("{error:?}").contains("not bound by the first parameter"));
+    }
+
+    #[test]
+    fn rejects_direct_and_turbofish_generic_calls_without_confusing_comparisons() {
+        let direct = reject_explicit_generic_calls("capacity<i32>(value);", |name, qualifier| {
+            name == "capacity" && qualifier.is_none()
+        })
+        .expect_err("direct generic call must be rejected");
+        assert!(direct.message().contains("using <...>"));
+
+        let turbofish =
+            reject_explicit_generic_calls("module.capacity :: <i32>(value);", |name, qualifier| {
+                name == "capacity" && qualifier == Some("module")
+            })
+            .expect_err("turbofish generic call must be rejected");
+        assert!(turbofish.message().contains("using :: <...>"));
+
+        reject_explicit_generic_calls("a < b > (c);", |_, _| true)
+            .expect("comparison expression must remain ordinary syntax");
+    }
+
+    #[test]
+    fn explicit_call_scanner_handles_utf8_source() {
+        let error =
+            reject_explicit_generic_calls("// 世\ncapacity<i32>(value);", |name, qualifier| {
+                name == "capacity" && qualifier.is_none()
+            })
+            .expect_err("generic call after UTF-8 source must still be diagnosed");
+        assert!(error.message().contains("explicit generic function call"));
+    }
+
+    #[test]
+    fn module_alias_for_path_handles_windows_absolute_paths() {
+        assert_eq!(
+            module_alias_for_path(r"C:\workspace\src\types.stasis"),
+            "types"
+        );
+        assert_eq!(
+            module_alias_for_path("C:/workspace/src/types.stasis"),
+            "types"
         );
     }
 }

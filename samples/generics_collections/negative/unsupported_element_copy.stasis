@@ -10,7 +10,7 @@ struct Buffer<T: type, N: i32> {
 global items: Buffer<Item, 2>;
 global source: Item;
 
-function append<T: type, N: i32>(self: Buffer<T, N>, value: T): bool {
+function append(self: Buffer<T, N>, value: T): bool {
     self.values[0] = value;
     return true;
 }

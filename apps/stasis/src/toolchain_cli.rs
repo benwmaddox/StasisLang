@@ -14,8 +14,10 @@ use stasis::{
     resolve_play_data_binding_paths, run_live_in_process, run_live_in_process_with_data,
     run_play_in_process_with_replay, run_play_in_process_with_window_title,
     run_project_tests_bounded_with_receipt, run_self_host_aot_cli_with_desktop_network,
-    run_self_host_aot_cli_with_options, sign_artifacts, signing_status, verify_artifacts,
-    DesktopNetworkMode, LiveRunConfig, PlayReplayConfig, SigningOptions, StasisTestRunSession,
+    run_self_host_aot_cli_with_desktop_network_and_artifact_root,
+    run_self_host_aot_cli_with_options, run_self_host_aot_cli_with_options_and_artifact_root,
+    sign_artifacts, signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig,
+    PlayReplayConfig, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
@@ -26,17 +28,21 @@ use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::{JitExternProfile, JitProcess};
 use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
-use stasis_compiler::backend::wasm::WasmProcess;
+use stasis_compiler::backend::wasm::{WasmProcess, COLLECTION_VIEW_ABI_VERSION};
 use stasis_compiler::frontend::formatter::format_source;
+use stasis_compiler::frontend::parser::{
+    map_rewritten_test_range_to_original, rewrite_top_level_test_declarations,
+};
 use stasis_compiler::frontend::types::{TYPE_ID_F32, TYPE_ID_I32};
 use stasis_compiler::frontend::workshop::{
-    find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
-    plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
-    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
-    write_workshop_semantic_receipt, WorkshopExposure, WorkshopSemanticEdit,
-    WorkshopSemanticEditBatch, WorkshopSemanticEditOperation, WorkshopSemanticEditPlan,
-    WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    classify_workshop_reload, find_workshop_references, find_workshop_symbols,
+    load_workshop_edit_workspace, plan_workshop_semantic_edits, workshop_direct_import_files,
+    workshop_reachable_files, workshop_source_hash, workshop_source_items,
+    write_workshop_semantic_plan, write_workshop_semantic_receipt, WorkshopExposure,
+    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
+    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
+use stasis_compiler::SourceDiagnostic;
 use stasis_jit::AotTarget;
 pub(super) use stasis_runner::live::LiveValidationRequirement as RuntimeValidationRequirement;
 use stasis_runner::live::{
@@ -66,8 +72,11 @@ mod source_catalog;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
+const MAX_DESKTOP_FILE_WRITES: usize = 8;
+const MAX_DESKTOP_FILE_WRITE_BYTES: usize = 1024 * 1024;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
+const COMPILER_DIAGNOSTIC_PREFIX: &str = "__STASIS_COMPILER_DIAGNOSTIC__:";
 const GFX_CMD_NAME: &str = "gfx_cmd";
 const GFX_CMD_VERSION: i64 = 8;
 const GFX_CMD_LEGACY_VERSION: i64 = 7;
@@ -98,6 +107,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",
     "stasis_performance_metrics.h",
+    "stasis_package_provenance_reader.h",
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
     "stasis_graphics.c",
@@ -1150,13 +1160,26 @@ pub(super) fn try_run() -> Option<i32> {
             Some(result.code)
         }
         Err(message) => {
+            let compiler_diagnostic = message
+                .strip_prefix(COMPILER_DIAGNOSTIC_PREFIX)
+                .and_then(|payload| serde_json::from_str::<Value>(payload).ok());
+            let public_message = compiler_diagnostic
+                .as_ref()
+                .and_then(|payload| payload.get("display_message"))
+                .and_then(Value::as_str)
+                .unwrap_or(&message);
             if parsed.json {
                 let mut error = json!({
                     "ok": false,
                     "command": command_name,
                     "code": "command_failed",
-                    "message": &message,
+                    "message": public_message,
                 });
+                if let Some(payload) = compiler_diagnostic {
+                    if let Some(diagnostic) = payload.get("diagnostic") {
+                        error["diagnostic"] = diagnostic.clone();
+                    }
+                }
                 if let Some(payload) = message
                     .strip_prefix(crate::release_assets::ASSET_DIAGNOSTIC_PREFIX)
                     .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
@@ -1167,7 +1190,7 @@ pub(super) fn try_run() -> Option<i32> {
                 }
                 eprintln!("{error}");
             } else {
-                eprintln!("stasis {command_name}: {message}");
+                eprintln!("stasis {command_name}: {public_message}");
             }
             Some(1)
         }
@@ -1379,9 +1402,12 @@ fn execute(
                 _ => None,
             });
             let vendor_gate = match &other {
-                ToolchainCommand::Fmt { .. } => VendorGate::Inspect,
-                ToolchainCommand::Vendor { .. } => VendorGate::Inspect,
-                ToolchainCommand::Prepare => VendorGate::Inspect,
+                ToolchainCommand::Fmt { .. }
+                | ToolchainCommand::Vendor { .. }
+                | ToolchainCommand::Prepare
+                | ToolchainCommand::Check
+                | ToolchainCommand::Test { .. }
+                | ToolchainCommand::Record { .. } => VendorGate::Inspect,
                 ToolchainCommand::Symbol { command } if command.is_read_only() => {
                     VendorGate::ReadOnly
                 }
@@ -2610,15 +2636,14 @@ fn compile_workspace_jit_with_options(
     }
     jit.compile().map_err(|error| {
         if let Some(diagnostic) = jit.last_source_diagnostic() {
-            let source = sources
-                .get(&diagnostic.path)
-                .map(String::as_str)
-                .unwrap_or("");
+            let source =
+                source_for_diagnostic(&sources, &workspace.root, &diagnostic.path).unwrap_or("");
             let (line, column) = line_column(source, diagnostic.start);
-            format!(
+            let display_message = format!(
                 "{}:{}:{}: {}",
                 diagnostic.path, line, column, diagnostic.message
-            )
+            );
+            encoded_source_diagnostic(diagnostic, display_message)
         } else {
             format!("{error:?}")
         }
@@ -4125,7 +4150,7 @@ fn build_workspace(
     mode: BuildMode,
     output: Option<&Path>,
 ) -> Result<CommandResult, String> {
-    build_workspace_with_desktop_network(workspace, mode, output, None)
+    build_workspace_with_desktop_network(workspace, mode, output, None, None)
 }
 
 struct DesktopNetworkBuild<'a> {
@@ -4139,6 +4164,7 @@ fn build_workspace_with_desktop_network(
     mode: BuildMode,
     output: Option<&Path>,
     desktop_network: Option<DesktopNetworkBuild<'_>>,
+    aot_artifact_root: Option<&Path>,
 ) -> Result<CommandResult, String> {
     match mode {
         BuildMode::Dev => {
@@ -4207,16 +4233,38 @@ fn build_workspace_with_desktop_network(
             }
             let entry = Path::new(&workspace.manifest.entry);
             let summary = if let Some(network) = desktop_network.as_ref() {
-                run_self_host_aot_cli_with_desktop_network(
-                    &workspace.root,
-                    &output,
-                    entry,
-                    network.library,
-                    network.include_dir,
-                    network.mode,
-                )?
+                if let Some(artifact_root) = aot_artifact_root {
+                    run_self_host_aot_cli_with_desktop_network_and_artifact_root(
+                        &workspace.root,
+                        &output,
+                        entry,
+                        network.library,
+                        network.include_dir,
+                        network.mode,
+                        artifact_root,
+                    )?
+                } else {
+                    run_self_host_aot_cli_with_desktop_network(
+                        &workspace.root,
+                        &output,
+                        entry,
+                        network.library,
+                        network.include_dir,
+                        network.mode,
+                    )?
+                }
             } else {
-                run_self_host_aot_cli_with_options(&workspace.root, &output, None, Some(entry))?
+                if let Some(artifact_root) = aot_artifact_root {
+                    run_self_host_aot_cli_with_options_and_artifact_root(
+                        &workspace.root,
+                        &output,
+                        None,
+                        Some(entry),
+                        artifact_root,
+                    )?
+                } else {
+                    run_self_host_aot_cli_with_options(&workspace.root, &output, None, Some(entry))?
+                }
             };
             let build_snapshot = summary.program_snapshot.as_ref().ok_or_else(|| {
                 "release build did not publish its authoritative ProgramSnapshot".to_string()
@@ -4464,6 +4512,61 @@ fn validate_network_client_target(
     ))
 }
 
+const DESKTOP_PACKAGE_AOT_ARTIFACT_PREFIX: &str = "stasis-pkg-aot";
+
+struct DesktopPackageAotArtifactRoot {
+    path: Option<PathBuf>,
+}
+
+impl DesktopPackageAotArtifactRoot {
+    fn new() -> Result<Self, String> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let path = env::temp_dir().join(format!(
+            "{DESKTOP_PACKAGE_AOT_ARTIFACT_PREFIX}-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).map_err(|error| {
+            format!(
+                "failed to create temporary desktop package AOT artifact root {}: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Self { path: Some(path) })
+    }
+
+    fn path(&self) -> &Path {
+        self.path
+            .as_deref()
+            .expect("desktop package AOT artifact root already cleaned")
+    }
+
+    fn cleanup(&mut self) -> Result<(), String> {
+        let Some(path) = self.path.take() else {
+            return Ok(());
+        };
+        match fs::remove_dir_all(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                self.path = Some(path.clone());
+                Err(format!(
+                    "failed to remove temporary desktop package AOT artifact root {}: {error}",
+                    path.display()
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for DesktopPackageAotArtifactRoot {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
 fn package_workspace(
     workspace: &Workspace,
     target: PackageTarget,
@@ -4503,6 +4606,7 @@ fn package_workspace(
         );
     }
     validate_desktop_network_guest_contract(&workspace.manifest)?;
+    validate_desktop_package_output_location(workspace, &package_root)?;
     let staging_name = format!(
         ".{}.staging",
         package_root
@@ -4517,7 +4621,22 @@ fn package_workspace(
             staging_root.display()
         ));
     }
-    let provenance = resolve_package_provenance(development_build)?;
+    let manifest_path = workspace.root.join(MANIFEST_NAME);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "failed to read desktop package manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest_snapshot: ProjectManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
+    if manifest_snapshot != workspace.manifest {
+        return Err(format!(
+            "desktop package manifest changed after workspace load: {}",
+            manifest_path.display()
+        ));
+    }
+    let mut provenance = resolve_package_provenance(development_build)?;
     let network_enabled = workspace
         .manifest
         .capabilities
@@ -4528,24 +4647,41 @@ fn package_workspace(
         .capabilities
         .as_ref()
         .is_some_and(|capabilities| capabilities.network_client);
+    let mut aot_artifact_root = DesktopPackageAotArtifactRoot::new()?;
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let executable_file_name = executable_name(&workspace.manifest.name);
     let assembled = (|| -> Result<(), String> {
+        let source_snapshot_root = staging_root.join(".source-snapshot");
+        let snapshot_workspace =
+            capture_desktop_package_workspace(workspace, &manifest_bytes, &source_snapshot_root)?;
+        provenance["desktop_package"] =
+            desktop_package_project_provenance(&snapshot_workspace, &manifest_bytes)?;
+        let package_assembly_root = source_snapshot_root.join(".package-output");
+        fs::create_dir_all(&package_assembly_root).map_err(|error| {
+            format!(
+                "failed to create desktop package assembly {}: {error}",
+                package_assembly_root.display()
+            )
+        })?;
         let network_build = if network_enabled || network_client_enabled {
             if network_enabled {
-                stage_desktop_network_guest(workspace, &staging_root, development_build)?;
+                stage_desktop_network_guest(
+                    &snapshot_workspace,
+                    &package_assembly_root,
+                    development_build,
+                )?;
             }
             Some(build_desktop_network_library(
-                &staging_root,
+                &package_assembly_root,
                 development_build,
             )?)
         } else {
             None
         };
-        let executable = staging_root.join(&executable_file_name);
+        let executable = package_assembly_root.join(&executable_file_name);
         build_workspace_with_desktop_network(
-            workspace,
+            &snapshot_workspace,
             BuildMode::Release,
             Some(&executable),
             network_build
@@ -4559,8 +4695,9 @@ fn package_workspace(
                         DesktopNetworkMode::Client
                     },
                 }),
+            Some(aot_artifact_root.path()),
         )?;
-        let network_target = staging_root.join(".network-rust-target");
+        let network_target = package_assembly_root.join(".network-rust-target");
         if network_target.exists() {
             fs::remove_dir_all(&network_target).map_err(|error| {
                 format!("failed to remove temporary desktop network build: {error}")
@@ -4578,17 +4715,37 @@ fn package_workspace(
                 )
             })?;
         }
+        let current_manifest_bytes =
+            fs::read(source_snapshot_root.join(MANIFEST_NAME)).map_err(|error| {
+                format!("failed to verify captured desktop package manifest: {error}")
+            })?;
+        if current_manifest_bytes != manifest_bytes {
+            return Err("captured desktop package manifest changed during packaging".to_string());
+        }
+        let current_project_provenance =
+            desktop_package_project_provenance(&snapshot_workspace, &current_manifest_bytes)?;
+        if current_project_provenance != provenance["desktop_package"] {
+            return Err(
+                "captured desktop package host source, network guest source, or vendored runtime changed during packaging"
+                    .to_string(),
+            );
+        }
+        move_dir_contents(&package_assembly_root, &staging_root)?;
+        fs::remove_dir_all(&source_snapshot_root).map_err(|error| {
+            format!(
+                "failed to remove captured desktop package workspace {}: {error}",
+                source_snapshot_root.display()
+            )
+        })?;
         #[cfg(windows)]
-        nest_windows_desktop_payload(&staging_root, &executable)?;
+        nest_windows_desktop_payload(&staging_root, &staging_root.join(&executable_file_name))?;
         let payload_root = if cfg!(windows) {
             staging_root.join(WINDOWS_DESKTOP_PAYLOAD_DIR)
         } else {
             staging_root.clone()
         };
-        copy_file(
-            &workspace.root.join(MANIFEST_NAME),
-            &payload_root.join(MANIFEST_NAME),
-        )?;
+        fs::write(payload_root.join(MANIFEST_NAME), &manifest_bytes)
+            .map_err(|error| format!("failed to stage desktop package manifest: {error}"))?;
         if !cfg!(windows) && !network_enabled && !network_client_enabled {
             if let Some(runtime) = installed_runtime_library() {
                 copy_file(
@@ -4597,10 +4754,23 @@ fn package_workspace(
                 )?;
             }
         }
+        let staged_manifest = fs::read(payload_root.join(MANIFEST_NAME)).map_err(|error| {
+            format!("failed to verify staged desktop package manifest: {error}")
+        })?;
+        if staged_manifest != manifest_bytes {
+            return Err(
+                "staged desktop package manifest does not match the compiled project".to_string(),
+            );
+        }
         write_json_file(&payload_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
         Ok(())
     })();
+    let cleanup = aot_artifact_root.cleanup();
     if let Err(error) = assembled {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(error);
+    }
+    if let Err(error) = cleanup {
         let _ = fs::remove_dir_all(&staging_root);
         return Err(error);
     }
@@ -4721,11 +4891,406 @@ fn prepare_web_wasm(
     })
 }
 
+fn normalize_web_package_source_path(path: &str) -> String {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.to_string_lossy().replace('\\', "/")
+}
+
+fn package_input_directory_provenance(
+    workspace: &Workspace,
+    relative: &Path,
+) -> Result<Value, String> {
+    validate_relative_path("desktop package input", relative)?;
+    let directory = workspace.root.join(relative);
+    if !directory.exists() {
+        return Ok(Value::Null);
+    }
+    if !directory.is_dir() {
+        return Err(format!(
+            "desktop package input is not a directory: {}",
+            directory.display()
+        ));
+    }
+    Ok(json!({
+        "path": normalize_web_package_source_path(&relative.to_string_lossy()),
+        "sha256": directory_sha256(&directory)?,
+    }))
+}
+
+fn desktop_entry_support_path(entry: &str) -> Result<PathBuf, String> {
+    let entry_path = Path::new(entry);
+    validate_relative_path("desktop package entry", entry_path)?;
+    let entry_stem = entry_path.file_stem().ok_or_else(|| {
+        format!(
+            "desktop package entry has no file name: {}",
+            entry_path.display()
+        )
+    })?;
+    Ok(entry_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(entry_stem))
+}
+
+fn resolve_destination_path(candidate: &Path) -> Result<PathBuf, String> {
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!("failed to resolve path {}", candidate.display()));
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let mut ancestor = normalized.as_path();
+    let mut missing = Vec::new();
+    while !ancestor.exists() {
+        let name = ancestor
+            .file_name()
+            .ok_or_else(|| format!("failed to resolve path {}", candidate.display()))?;
+        missing.push(name.to_os_string());
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| format!("failed to resolve path {}", candidate.display()))?;
+    }
+    let mut resolved = ancestor
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve path {}: {error}", candidate.display()))?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn destination_starts_with(candidate: &Path, base: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let mut candidate = candidate.components();
+        for expected in base.components() {
+            let Some(actual) = candidate.next() else {
+                return false;
+            };
+            if !actual
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
+            {
+                return false;
+            }
+        }
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        candidate.starts_with(base)
+    }
+}
+
+fn validate_desktop_package_output_location(
+    workspace: &Workspace,
+    package_root: &Path,
+) -> Result<(), String> {
+    let resolved_output = resolve_destination_path(package_root)?;
+    let mut captured_inputs = vec![
+        PathBuf::from("vendor"),
+        PathBuf::from("assets"),
+        PathBuf::from("data"),
+    ];
+    captured_inputs.push(desktop_entry_support_path(&workspace.manifest.entry)?);
+    if workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network)
+    {
+        if let Some(web_entry) = workspace
+            .manifest
+            .web
+            .as_ref()
+            .map(|web| web.entry.as_str())
+            .filter(|entry| !entry.is_empty())
+        {
+            captured_inputs.push(desktop_entry_support_path(web_entry)?);
+        }
+    }
+    captured_inputs.sort();
+    captured_inputs.dedup();
+
+    for relative in captured_inputs {
+        let input = workspace.root.join(&relative);
+        let resolved_input = resolve_destination_path(&input)?;
+        if destination_starts_with(&resolved_output, &resolved_input) {
+            return Err(format!(
+                "desktop package output must not be inside captured input directory {}",
+                input.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn package_project_provenance(
+    workspace: &Workspace,
+    entry: &str,
+    manifest_bytes: &[u8],
+) -> Result<Value, String> {
+    let files = load_workshop_edit_workspace(&workspace.root, Path::new(entry))?;
+    let files = workshop_reachable_files(&files, Path::new(entry))?;
+    let reachable_sources = files
+        .iter()
+        .map(|file| {
+            let source_path = Path::new(&file.path);
+            let relative = source_path
+                .strip_prefix(&workspace.root)
+                .unwrap_or(source_path);
+            (
+                normalize_web_package_source_path(&relative.to_string_lossy()),
+                format!("{:x}", Sha256::digest(file.source.as_bytes())),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let normalized_entry = normalize_web_package_source_path(entry);
+    let entry_sha256 = reachable_sources
+        .get(&normalized_entry)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "compiled package entry is missing from reachable source provenance: {normalized_entry}"
+            )
+        })?;
+    let vendor = workspace
+        .manifest
+        .vendor
+        .as_ref()
+        .map(|vendor| {
+            let actual_sha256 = directory_sha256(&workspace.root.join("vendor/stasis"));
+            actual_sha256.map(|actual_sha256| {
+                json!({
+                    "release_id": vendor.stasis.release_id,
+                    "recorded_sha256": vendor.stasis.sha256,
+                    "actual_sha256": actual_sha256,
+                })
+            })
+        })
+        .transpose()?;
+    let entry_support = desktop_entry_support_path(entry)?;
+    Ok(json!({
+        "manifest": {
+            "path": MANIFEST_NAME,
+            "sha256": format!("{:x}", Sha256::digest(manifest_bytes)),
+        },
+        "entry": {
+            "path": normalized_entry,
+            "sha256": entry_sha256,
+        },
+        "reachable_sources": reachable_sources,
+        "vendor": vendor,
+        "captured_inputs": {
+            "assets": package_input_directory_provenance(workspace, Path::new("assets"))?,
+            "data": package_input_directory_provenance(workspace, Path::new("data"))?,
+            "entry_support": package_input_directory_provenance(workspace, &entry_support)?,
+        },
+    }))
+}
+
+fn capture_desktop_package_workspace(
+    workspace: &Workspace,
+    manifest_bytes: &[u8],
+    snapshot_root: &Path,
+) -> Result<Workspace, String> {
+    if snapshot_root.exists() {
+        return Err(format!(
+            "desktop package source snapshot already exists: {}",
+            snapshot_root.display()
+        ));
+    }
+
+    let mut entries = vec![workspace.manifest.entry.as_str()];
+    if workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network)
+    {
+        let web_entry = workspace
+            .manifest
+            .web
+            .as_ref()
+            .map(|web| web.entry.as_str())
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                "network-enabled desktop projects must declare web.entry for the guest bundle"
+                    .to_string()
+            })?;
+        entries.push(web_entry);
+    }
+
+    let mut sources = BTreeMap::<PathBuf, String>::new();
+    for entry in &entries {
+        let files = load_workshop_edit_workspace(&workspace.root, Path::new(entry))?;
+        for file in workshop_reachable_files(&files, Path::new(entry))? {
+            let source_path = Path::new(&file.path);
+            let relative = if source_path.is_absolute() {
+                source_path.strip_prefix(&workspace.root).map_err(|_| {
+                    format!(
+                        "desktop package source resolves outside the workspace: {}",
+                        source_path.display()
+                    )
+                })?
+            } else {
+                source_path
+            };
+            validate_relative_path("desktop package source", relative)?;
+            if let Some(previous) = sources.insert(relative.to_path_buf(), file.source.clone()) {
+                if previous != file.source {
+                    return Err(format!(
+                        "desktop package source changed while capturing it: {}",
+                        relative.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    fs::create_dir_all(snapshot_root).map_err(|error| {
+        format!(
+            "failed to create desktop package source snapshot {}: {error}",
+            snapshot_root.display()
+        )
+    })?;
+    fs::write(snapshot_root.join(MANIFEST_NAME), manifest_bytes).map_err(|error| {
+        format!(
+            "failed to capture desktop package manifest in {}: {error}",
+            snapshot_root.display()
+        )
+    })?;
+    for directory in ["vendor", "assets", "data"] {
+        copy_dir_if_exists(
+            &workspace.root.join(directory),
+            &snapshot_root.join(directory),
+        )?;
+    }
+    stasis::rewrite_packaged_json_asset_paths(&snapshot_root.join("data"), "data")?;
+    for entry in entries {
+        let entry = Path::new(entry);
+        validate_relative_path("desktop package entry", entry)?;
+        let package_dir_name = entry.file_stem().ok_or_else(|| {
+            format!(
+                "desktop package entry has no file name: {}",
+                entry.display()
+            )
+        })?;
+        let package_dir_name = package_dir_name.to_str().ok_or_else(|| {
+            format!(
+                "desktop package entry has a non-UTF-8 file name: {}",
+                entry.display()
+            )
+        })?;
+        let support_relative = entry
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(package_dir_name);
+        copy_dir_if_exists(
+            &workspace.root.join(&support_relative),
+            &snapshot_root.join(&support_relative),
+        )?;
+        stasis::rewrite_packaged_json_asset_paths(
+            &snapshot_root.join(&support_relative),
+            package_dir_name,
+        )?;
+    }
+    for (relative, source) in sources {
+        let destination = snapshot_root.join(&relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create captured source directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::write(&destination, source).map_err(|error| {
+            format!(
+                "failed to capture desktop package source {}: {error}",
+                destination.display()
+            )
+        })?;
+    }
+
+    Ok(Workspace {
+        root: canonical_workspace_root(snapshot_root)?,
+        manifest: workspace.manifest.clone(),
+    })
+}
+
+fn desktop_package_project_provenance(
+    workspace: &Workspace,
+    manifest_bytes: &[u8],
+) -> Result<Value, String> {
+    let project =
+        package_project_provenance(workspace, workspace.manifest.entry.as_str(), manifest_bytes)?;
+    let network_enabled = workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network);
+    let network_guest = if network_enabled {
+        let web_entry = workspace
+            .manifest
+            .web
+            .as_ref()
+            .map(|web| web.entry.as_str())
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                "network-enabled desktop projects must declare web.entry for the guest bundle"
+                    .to_string()
+            })?;
+        Some(package_project_provenance(
+            workspace,
+            web_entry,
+            manifest_bytes,
+        )?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "project": project,
+        "network_guest": network_guest,
+    }))
+}
+
 fn package_web_workspace(
     workspace: &Workspace,
     package_root: &Path,
     development_build: bool,
 ) -> Result<CommandResult, String> {
+    let manifest_path = workspace.root.join(MANIFEST_NAME);
+    let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "failed to read Web package manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest_snapshot: ProjectManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
+    if manifest_snapshot != workspace.manifest {
+        return Err(format!(
+            "Web package manifest changed after workspace load: {}",
+            manifest_path.display()
+        ));
+    }
     let staging_name = format!(
         ".{}.staging",
         package_root
@@ -4754,6 +5319,43 @@ fn package_web_workspace(
             .unwrap_or(workspace.manifest.entry.as_str());
         let files = load_workshop_edit_workspace(&workspace.root, Path::new(web_entry))?;
         let files = workshop_reachable_files(&files, Path::new(web_entry))?;
+        let source_provenance = files
+            .iter()
+            .map(|file| {
+                let source_path = Path::new(&file.path);
+                let relative = source_path
+                    .strip_prefix(&workspace.root)
+                    .unwrap_or(source_path);
+                (
+                    normalize_web_package_source_path(&relative.to_string_lossy()),
+                    format!("{:x}", Sha256::digest(file.source.as_bytes())),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let normalized_web_entry = normalize_web_package_source_path(web_entry);
+        let entry_sha256 = source_provenance
+            .get(&normalized_web_entry)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "compiled Web entry is missing from reachable source provenance: {normalized_web_entry}"
+                )
+            })?;
+        let vendor_provenance = workspace
+            .manifest
+            .vendor
+            .as_ref()
+            .map(|vendor| {
+                let actual_sha256 = directory_sha256(&workspace.root.join("vendor/stasis"));
+                actual_sha256.map(|actual_sha256| {
+                    json!({
+                        "release_id": vendor.stasis.release_id,
+                        "recorded_sha256": vendor.stasis.sha256,
+                        "actual_sha256": actual_sha256,
+                    })
+                })
+            })
+            .transpose()?;
         let mut process = WasmProcess::new();
         process.set_debug_symbols(development_build);
         process.set_project_root(display_path(&workspace.root))?;
@@ -4772,15 +5374,14 @@ fn package_web_workspace(
         }
         process.compile().map_err(|error| {
             if let Some(diagnostic) = process.last_source_diagnostic() {
-                let source = sources
-                    .get(&diagnostic.path)
-                    .map(String::as_str)
+                let source = source_for_diagnostic(&sources, &workspace.root, &diagnostic.path)
                     .unwrap_or("");
                 let (line, column) = line_column(source, diagnostic.start);
-                format!(
+                let display_message = format!(
                     "{}:{}:{}: {}",
                     diagnostic.path, line, column, diagnostic.message
-                )
+                );
+                encoded_source_diagnostic(diagnostic, display_message)
             } else {
                 format!("{error:?}")
             }
@@ -4855,6 +5456,18 @@ fn package_web_workspace(
         provenance["web_package"] = json!({
             "asset_metadata_audit": audit_asset_metadata,
             "size_metrics": size_metrics.clone(),
+            "project": {
+                "manifest": {
+                    "path": MANIFEST_NAME,
+                    "sha256": format!("{:x}", Sha256::digest(&manifest_bytes)),
+                },
+                "entry": {
+                    "path": normalized_web_entry,
+                    "sha256": entry_sha256,
+                },
+                "reachable_sources": source_provenance,
+                "vendor": vendor_provenance,
+            },
         });
         let wasm_path = staging_root.join("game.wasm");
         fs::write(&wasm_path, &wasm.bytes)
@@ -4947,6 +5560,23 @@ fn package_web_workspace(
             return Err(error);
         }
     };
+    let current_manifest_bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(format!(
+                "failed to re-read Web package manifest {}: {error}",
+                manifest_path.display()
+            ));
+        }
+    };
+    if current_manifest_bytes != manifest_bytes {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(format!(
+            "Web package manifest changed while packaging: {}",
+            manifest_path.display()
+        ));
+    }
     publish_package_output(&staging_root, package_root)?;
     let optimization = if wasm_optimized {
         "wasm-opt -Oz"
@@ -5046,8 +5676,8 @@ fn web_index_html(
     let viewport = viewport.unwrap_or(DEFAULT_WEB_VIEWPORT);
     let (hud_style, hud) = if development_build {
         (
-            "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; }",
-            r#"<div id="stasis-hud" role="status">Starting Wasm...</div>"#,
+            "#stasis-hud { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #000b; border: 1px solid #53d8fb88; line-height: 1.4; pointer-events: none; } #stasis-hud[hidden] { display: none !important; }",
+            r#"<div id="stasis-hud" role="status" aria-live="polite" aria-hidden="true" hidden>Starting Wasm...</div>"#,
         )
     } else {
         ("", "")
@@ -5214,6 +5844,7 @@ fn web_runtime_config(
                 path.clone(),
                 json!({
                     "hash": stasis_compiler::backend::wasm::wasm_global_hash(path),
+                    "handle": layout.handle,
                     "offset": layout.offset,
                     "type_id": layout.type_id,
                     "length": layout.length,
@@ -5254,6 +5885,7 @@ fn web_runtime_config(
         "views": views,
         "globals": globals,
         "assets": {},
+        "collectionViewAbiVersion": COLLECTION_VIEW_ABI_VERSION,
         "renderContractVersion": if render_construction_lifecycle_version == 1 { GFX_CMD_VERSION } else { GFX_CMD_LEGACY_VERSION },
         "renderConstructionLifecycleVersion": render_construction_lifecycle_version,
     });
@@ -5264,6 +5896,22 @@ fn web_runtime_config(
 }
 
 fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTreeSet<String>) {
+    let retain_byte_backed_memory = [
+        "sys_memcpy_u8",
+        "stasis_jit_storage_load_ascii",
+        "stasis_jit_storage_save_ascii",
+        "stasis_jit_clipboard_load_ascii",
+        "stasis_jit_clipboard_save_ascii",
+    ]
+    .iter()
+    .any(|symbol| imported_symbols.contains(*symbol));
+    let retain_f32_memory = [
+        "sys_memcpy_f32",
+        "audio_push_f32_interleaved",
+        "stasis_jit_audio_push_f32_interleaved",
+    ]
+    .iter()
+    .any(|symbol| imported_symbols.contains(*symbol));
     let views = config["views"].as_object_mut().expect("generated views");
     views.retain(|_, fields| {
         let fields = fields.as_object_mut().expect("generated view fields");
@@ -5301,12 +5949,10 @@ fn prune_release_web_runtime_config(config: &mut Value, imported_symbols: &BTree
             retained_paths.contains(path.as_str())
                 || WEB_RUNTIME_BUFFERS.contains(&path.as_str())
                 || dynamic_text_paths.contains(path)
-                || (imported_symbols.contains("sys_memcpy_u8")
-                    && layout["byte_backed"].as_bool() == Some(true))
+                || (retain_byte_backed_memory && layout["byte_backed"].as_bool() == Some(true))
                 || (imported_symbols.contains("sys_memcpy_i32")
                     && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_I32)))
-                || (imported_symbols.contains("sys_memcpy_f32")
-                    && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_F32)))
+                || (retain_f32_memory && layout["type_id"].as_i64() == Some(i64::from(TYPE_ID_F32)))
         });
     config["globals"]
         .as_object_mut()
@@ -6991,10 +7637,13 @@ fn symbol_workspace(
                 .into_iter()
                 .map(|item| {
                     let mut value = json!({
+                        "symbol_id": item.symbol_id,
                         "kind": item.kind,
                         "name": item.name,
                         "file": item.file,
                         "signature": item.signature,
+                        "source_spans": item.source_spans,
+                        "generic_parameters": item.generic_parameters,
                     });
                     if let Some(owner) = item.owner {
                         value["owner"] = Value::String(owner);
@@ -7164,11 +7813,137 @@ fn plan_symbol_batch(
     mut batch: WorkshopSemanticEditBatch,
 ) -> Result<WorkshopSemanticEditPlan, String> {
     normalize_cli_semantic_batch(editable_files, &mut batch)?;
+    preflight_explicit_generic_updates(workspace, query_files, &batch)?;
     let (after, plan) = plan_workshop_semantic_edits(editable_files, &batch)?;
     ensure_editable_semantic_plan(&plan)?;
     let validation_files = overlay_workshop_files(query_files, &after);
+    reject_explicit_generic_edits(workspace, &validation_files, &plan)?;
     validate_semantic_files(workspace, &validation_files)?;
     Ok(plan)
+}
+
+fn reject_explicit_generic_edits(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+    plan: &WorkshopSemanticEditPlan,
+) -> Result<(), String> {
+    let changed_paths = plan
+        .changed_files
+        .iter()
+        .map(|change| normalize_symbol_file(&change.file))
+        .collect::<BTreeSet<_>>();
+    reject_explicit_generic_paths(workspace, files, &changed_paths)
+}
+
+fn preflight_explicit_generic_updates(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+    batch: &WorkshopSemanticEditBatch,
+) -> Result<(), String> {
+    let mut candidate = files.to_vec();
+    let mut changed_paths = BTreeSet::new();
+    for edit in &batch.edits {
+        if edit.operation != WorkshopSemanticEditOperation::Update {
+            continue;
+        }
+        let Some(replacement) = edit.new_source.as_deref() else {
+            continue;
+        };
+        let matches = find_workshop_symbols(&candidate, &edit.target)?;
+        let [symbol] = matches.as_slice() else {
+            continue;
+        };
+        if edit
+            .expected_source_hash
+            .as_deref()
+            .is_some_and(|expected| workshop_source_hash(&symbol.source) != expected)
+        {
+            // Preserve the planner's stale-hash diagnostic precedence.
+            continue;
+        }
+        let symbol = symbol.clone();
+        let Some(file) = candidate.iter_mut().find(|file| file.path == symbol.file) else {
+            continue;
+        };
+        let Some(span) = symbol.source_spans.iter().find(|span| {
+            file.source
+                .get(span.start as usize..span.end as usize)
+                .is_some_and(|source| source == symbol.source)
+        }) else {
+            continue;
+        };
+        let range = span.start as usize..span.end as usize;
+        if range.end > file.source.len()
+            || !file.source.is_char_boundary(range.start)
+            || !file.source.is_char_boundary(range.end)
+        {
+            continue;
+        }
+        file.source.replace_range(range, replacement);
+        changed_paths.insert(normalize_symbol_file(&file.path));
+    }
+    reject_explicit_generic_paths(workspace, &candidate, &changed_paths)
+}
+
+fn reject_explicit_generic_paths(
+    workspace: &Workspace,
+    files: &[WorkshopSourceFile],
+    changed_paths: &BTreeSet<String>,
+) -> Result<(), String> {
+    for changed_path in changed_paths {
+        let closure = workshop_reachable_files(files, Path::new(&changed_path))?;
+        let mut compiler = stasis_compiler::compiler::Compiler::new();
+        let mut sources = BTreeMap::new();
+        let mut test_rewrites = BTreeMap::new();
+        for file in closure {
+            // Test declarations are rewritten only for this validation compiler;
+            // the semantic plan and disk sources retain their original spelling.
+            let original = file.source;
+            let (source, declarations) = rewrite_top_level_test_declarations(&original)
+                .unwrap_or_else(|_| (original.clone(), Vec::new()));
+            sources.insert(file.path.clone(), original.clone());
+            if !declarations.is_empty() {
+                test_rewrites.insert(file.path.clone(), (original, declarations));
+            }
+            compiler.upsert_file(file.path, source);
+        }
+        if compiler.check().is_err() {
+            if let Some(diagnostic) = compiler.last_source_diagnostic().filter(|diagnostic| {
+                diagnostic.code == stasis_compiler::SourceDiagnosticCode::ExplicitGenericCall
+            }) {
+                let mut diagnostic = diagnostic.clone();
+                if let Some((original, declarations)) = test_rewrites.get(&diagnostic.path) {
+                    let range = map_rewritten_test_range_to_original(
+                        original,
+                        declarations,
+                        diagnostic.start..diagnostic.end,
+                    );
+                    diagnostic.start = range.start;
+                    diagnostic.end = range.end;
+                }
+                for related in &mut diagnostic.related {
+                    if let Some((original, declarations)) = test_rewrites.get(&related.path) {
+                        let range = map_rewritten_test_range_to_original(
+                            original,
+                            declarations,
+                            related.start..related.end,
+                        );
+                        related.start = range.start;
+                        related.end = range.end;
+                    }
+                }
+                let source = source_for_diagnostic(&sources, &workspace.root, &diagnostic.path)
+                    .unwrap_or("");
+                let (line, column) = line_column(source, diagnostic.start);
+                let display_message = format!(
+                    "{}:{}:{}: {}",
+                    diagnostic.path, line, column, diagnostic.message
+                );
+                return Err(encoded_source_diagnostic(&diagnostic, display_message));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn apply_symbol_plan(
@@ -7294,6 +8069,22 @@ fn desktop_preview_semantic_batch(
     payload: Value,
 ) -> Result<DesktopSemanticPreview, String> {
     let workspace = load_workspace(Some(root))?;
+    if let Some(transaction) = desktop_file_transaction(&workspace.root, &payload)? {
+        let source_fingerprint = desktop_file_fingerprint(&workspace.root, &transaction)?;
+        let changes = transaction.changes();
+        let mut reload = classify_workshop_reload(&[], &[])?;
+        reload.reason = "Non-source project files are updated atomically after review.".into();
+        return Ok(DesktopSemanticPreview {
+            payload,
+            source_fingerprint,
+            plan: WorkshopSemanticEditPlan {
+                schema_version: 1,
+                edits: Vec::new(),
+                changed_files: changes,
+                reload,
+            },
+        });
+    }
     let source_fingerprint = desktop_source_fingerprint(root, &[])?;
     let files =
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
@@ -7315,6 +8106,520 @@ fn desktop_preview_semantic_batch(
         source_fingerprint,
         plan,
     })
+}
+
+#[derive(Clone, Debug)]
+struct DesktopFileWrite {
+    relative: String,
+    target: PathBuf,
+    before: String,
+    before_exists: bool,
+    content: String,
+}
+
+#[derive(Clone, Debug)]
+struct DesktopFileTransaction {
+    writes: Vec<DesktopFileWrite>,
+}
+
+struct AppliedDesktopFileTransaction {
+    backups: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl DesktopFileTransaction {
+    fn changes(&self) -> Vec<stasis_compiler::frontend::workshop::WorkshopSemanticFileChange> {
+        self.writes
+            .iter()
+            .map(
+                |write| stasis_compiler::frontend::workshop::WorkshopSemanticFileChange {
+                    file: write.relative.clone(),
+                    before_hash: workshop_source_hash(&write.before),
+                    after_hash: workshop_source_hash(&write.content),
+                    before_source: write.before.clone(),
+                    after_source: write.content.clone(),
+                },
+            )
+            .collect()
+    }
+
+    fn apply(&self, root: &Path) -> Result<AppliedDesktopFileTransaction, String> {
+        let mut backups = Vec::with_capacity(self.writes.len() * 2);
+        for write in &self.writes {
+            if let Err(error) = validate_desktop_file_target(root, &write.relative) {
+                restore_desktop_file_writes(&backups)?;
+                return Err(error);
+            }
+            let prior = match fs::read(&write.target) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    restore_desktop_file_writes(&backups)?;
+                    return Err(format!(
+                        "failed reading {}: {error}",
+                        write.target.display()
+                    ));
+                }
+            };
+            let expected = write.before_exists.then_some(write.before.as_bytes());
+            if prior.as_deref() != expected {
+                restore_desktop_file_writes(&backups)?;
+                return Err(format!(
+                    "file-write target changed after preview: {}",
+                    write.relative
+                ));
+            }
+            if let Some(parent) = write.target.parent() {
+                if let Err(error) = fs::create_dir_all(parent) {
+                    restore_desktop_file_writes(&backups)?;
+                    return Err(format!("failed creating {}: {error}", parent.display()));
+                }
+            }
+            backups.push((write.target.clone(), prior));
+            if let Err(error) = fs::write(&write.target, write.content.as_bytes()) {
+                restore_desktop_file_writes(&backups)?;
+                return Err(format!(
+                    "failed writing {}: {error}",
+                    write.target.display()
+                ));
+            }
+        }
+        if let Err(error) = validate_desktop_file_transaction(root, self) {
+            restore_desktop_file_writes(&backups)?;
+            return Err(error);
+        }
+        if let Err(error) = sync_desktop_file_assets(root, self, &mut backups) {
+            restore_desktop_file_writes(&backups)?;
+            return Err(error);
+        }
+        Ok(AppliedDesktopFileTransaction { backups })
+    }
+}
+
+impl AppliedDesktopFileTransaction {
+    fn rollback(self) -> Result<(), String> {
+        restore_desktop_file_writes(&self.backups)
+    }
+}
+
+fn desktop_file_transaction(
+    root: &Path,
+    payload: &Value,
+) -> Result<Option<DesktopFileTransaction>, String> {
+    let Some(object) = payload.as_object() else {
+        return Ok(None);
+    };
+    let Some(file_writes) = object.get("file_writes") else {
+        return Ok(None);
+    };
+    if object.len() != 2 || !object.contains_key("schema_version") {
+        return Err(
+            "proposed file-write payload accepts only schema_version and file_writes".into(),
+        );
+    }
+    if payload.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return Err("invalid proposed file-write schema version".into());
+    }
+    let mut writes = file_writes
+        .as_array()
+        .filter(|writes| !writes.is_empty() && writes.len() <= MAX_DESKTOP_FILE_WRITES)
+        .ok_or_else(|| {
+            format!(
+                "proposed file edit must contain 1..={} writes",
+                MAX_DESKTOP_FILE_WRITES
+            )
+        })?
+        .iter()
+        .map(|write| desktop_file_write(root, write))
+        .collect::<Result<Vec<_>, _>>()?;
+    writes.sort_by(|left, right| left.relative.cmp(&right.relative));
+    if writes
+        .windows(2)
+        .any(|pair| pair[0].relative.eq_ignore_ascii_case(&pair[1].relative))
+    {
+        return Err("proposed file edit contains a duplicate path".into());
+    }
+    derive_asset_manifest_write(root, &mut writes)?;
+    Ok(Some(DesktopFileTransaction { writes }))
+}
+
+fn desktop_file_write(root: &Path, value: &Value) -> Result<DesktopFileWrite, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "each proposed file write must be an object".to_string())?;
+    if object.len() != 2 || !object.contains_key("path") || !object.contains_key("content") {
+        return Err("each proposed file write accepts only path and content".into());
+    }
+    let relative = object["path"]
+        .as_str()
+        .ok_or_else(|| "file-write path must be a string".to_string())?
+        .replace('\\', "/");
+    let content = object["content"]
+        .as_str()
+        .ok_or_else(|| "file-write content must be a string".to_string())?;
+    if content.len() > MAX_DESKTOP_FILE_WRITE_BYTES {
+        return Err(format!(
+            "file-write content exceeds {} UTF-8 bytes",
+            MAX_DESKTOP_FILE_WRITE_BYTES
+        ));
+    }
+    let target = validate_desktop_file_target(root, &relative)?;
+    if target
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+    {
+        gauntlet::assets::validate_svg(content)?;
+    }
+    let (before, before_exists) = match fs::read(&target) {
+        Ok(bytes) => (
+            String::from_utf8(bytes)
+                .map_err(|_| format!("file-write preview requires UTF-8 text: {relative}"))?,
+            true,
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (String::new(), false),
+        Err(error) => return Err(format!("failed reading {}: {error}", target.display())),
+    };
+    if before == content {
+        return Err(format!("file write made no change: {relative}"));
+    }
+    Ok(DesktopFileWrite {
+        relative,
+        target,
+        before,
+        before_exists,
+        content: content.to_string(),
+    })
+}
+
+fn validate_desktop_file_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    if relative.is_empty() || relative.len() > 512 || relative.contains(':') {
+        return Err("file-write path must be a bounded project-relative path".into());
+    }
+    let path = Path::new(relative);
+    let components = path.components().collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("file-write path escapes the project: {relative}"));
+    }
+    let names = components
+        .iter()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if names
+        .iter()
+        .any(|name| matches!(name.as_str(), ".git" | ".stasis_cache" | ".codex" | ".env"))
+        || names
+            .first()
+            .is_some_and(|name| matches!(name.as_str(), "build" | "target"))
+    {
+        return Err(format!("file-write path is host-controlled: {relative}"));
+    }
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stasis"))
+    {
+        return Err("use propose_semantic_edit for Stasis source files".into());
+    }
+    let target = root.join(path);
+    let mut cursor = root.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            unreachable!("validated normal component")
+        };
+        cursor.push(name);
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
+                return Err(format!(
+                    "file-write path crosses a link or reparse point: {relative}"
+                ));
+            }
+            Ok(metadata) if index + 1 < components.len() && !metadata.is_dir() => {
+                return Err(format!(
+                    "file-write path crosses a non-directory: {relative}"
+                ));
+            }
+            Ok(metadata) if index + 1 == components.len() && !metadata.is_file() => {
+                return Err(format!(
+                    "file-write target is not a regular file: {relative}"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(format!("failed inspecting {}: {error}", cursor.display())),
+        }
+    }
+    Ok(target)
+}
+
+fn derive_asset_manifest_write(
+    root: &Path,
+    writes: &mut Vec<DesktopFileWrite>,
+) -> Result<(), String> {
+    if !writes
+        .iter()
+        .any(|write| is_desktop_asset_path(&write.relative))
+    {
+        return Ok(());
+    }
+    if writes.iter().any(|write| {
+        write
+            .relative
+            .eq_ignore_ascii_case(DEFAULT_ASSET_MANIFEST_PATH)
+    }) {
+        return Ok(());
+    }
+    let manifest_path = root.join(DEFAULT_ASSET_MANIFEST_PATH);
+    let before = match fs::read_to_string(&manifest_path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("failed reading asset manifest: {error}")),
+    };
+    let mut manifest: Value = serde_json::from_str(&before)
+        .map_err(|error| format!("invalid asset manifest: {error}"))?;
+    let Some(assets) = manifest.get_mut("assets").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for write in writes.iter() {
+        for asset in assets.iter_mut().filter(|asset| {
+            asset.get("path").and_then(Value::as_str) == Some(write.relative.as_str())
+        }) {
+            asset["content_sha256"] =
+                json!(format!("{:x}", Sha256::digest(write.content.as_bytes())));
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let mut content = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("failed encoding asset manifest: {error}"))?;
+    content.push('\n');
+    writes.push(DesktopFileWrite {
+        relative: DEFAULT_ASSET_MANIFEST_PATH.replace('\\', "/"),
+        target: manifest_path,
+        before,
+        before_exists: true,
+        content,
+    });
+    writes.sort_by(|left, right| left.relative.cmp(&right.relative));
+    Ok(())
+}
+
+fn desktop_file_fingerprint(
+    root: &Path,
+    transaction: &DesktopFileTransaction,
+) -> Result<String, String> {
+    let mut inputs = desktop_validation_inputs(root, &[])?;
+    for write in &transaction.writes {
+        inputs.insert(
+            write.relative.clone(),
+            if write.before_exists {
+                workshop_source_hash(&write.before)
+            } else {
+                "missing".into()
+            },
+        );
+    }
+    Ok(desktop_inputs_fingerprint(&inputs))
+}
+
+fn desktop_file_committed_fingerprint(
+    root: &Path,
+    transaction: &DesktopFileTransaction,
+) -> Result<String, String> {
+    let mut inputs = desktop_validation_inputs(root, &[])?;
+    for write in &transaction.writes {
+        inputs.insert(write.relative.clone(), workshop_source_hash(&write.content));
+    }
+    Ok(desktop_inputs_fingerprint(&inputs))
+}
+
+fn validate_desktop_file_transaction(
+    root: &Path,
+    transaction: &DesktopFileTransaction,
+) -> Result<(), String> {
+    load_workspace(Some(root))?;
+    let touches_assets = transaction
+        .writes
+        .iter()
+        .any(|write| is_desktop_asset_path(&write.relative));
+    if touches_assets && root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        load_project_asset_manifest(root, AssetLimits::default())
+            .map_err(|error| format!("file-write asset validation failed: {error}"))?;
+    }
+    Ok(())
+}
+
+fn sync_desktop_file_assets(
+    root: &Path,
+    transaction: &DesktopFileTransaction,
+    backups: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
+) -> Result<(), String> {
+    let asset_writes = transaction
+        .writes
+        .iter()
+        .filter(|write| {
+            is_desktop_asset_path(&write.relative)
+                && !write
+                    .relative
+                    .eq_ignore_ascii_case(DEFAULT_ASSET_MANIFEST_PATH)
+        })
+        .collect::<Vec<_>>();
+    if asset_writes.is_empty() {
+        return Ok(());
+    }
+    let cache_root = root.join(".stasis_cache");
+    match fs::symlink_metadata(&cache_root) {
+        Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
+            return Err(format!(
+                "asset cache root is a link or reparse point: {}",
+                cache_root.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(format!(
+                "asset cache root is not a directory: {}",
+                cache_root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "failed inspecting asset cache root {}: {error}",
+                cache_root.display()
+            ));
+        }
+    }
+    let prepared_root = root.join(".stasis_cache/play-assets");
+    match fs::symlink_metadata(&prepared_root) {
+        Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
+            return Err(format!(
+                "prepared asset root is a link or reparse point: {}",
+                prepared_root.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(format!(
+                "prepared asset root is not a directory: {}",
+                prepared_root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "failed inspecting prepared asset root {}: {error}",
+                prepared_root.display()
+            ));
+        }
+    }
+    for write in asset_writes {
+        let target = validate_desktop_prepared_asset_target(&prepared_root, &write.relative)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed creating prepared asset directory: {error}"))?;
+        }
+        let prior = match fs::read(&target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "failed reading prepared asset {}: {error}",
+                    target.display()
+                ));
+            }
+        };
+        backups.push((target.clone(), prior));
+        fs::write(&target, write.content.as_bytes()).map_err(|error| {
+            format!(
+                "failed syncing prepared asset {}: {error}",
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn is_desktop_asset_path(relative: &str) -> bool {
+    let relative = relative.to_ascii_lowercase();
+    relative == "assets" || relative.starts_with("assets/")
+}
+
+fn desktop_path_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn validate_desktop_prepared_asset_target(
+    prepared_root: &Path,
+    relative: &str,
+) -> Result<PathBuf, String> {
+    let target = prepared_root.join(relative);
+    let mut cursor = prepared_root.to_path_buf();
+    let components = Path::new(relative).components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(format!(
+                "prepared asset path is not project-relative: {relative}"
+            ));
+        };
+        cursor.push(name);
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
+                return Err(format!(
+                    "prepared asset path crosses a link or reparse point: {relative}"
+                ));
+            }
+            Ok(metadata) if index + 1 < components.len() && !metadata.is_dir() => {
+                return Err(format!(
+                    "prepared asset path crosses a non-directory: {relative}"
+                ));
+            }
+            Ok(metadata) if index + 1 == components.len() && !metadata.is_file() => {
+                return Err(format!(
+                    "prepared asset target is not a regular file: {relative}"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "failed inspecting prepared asset path {}: {error}",
+                    cursor.display()
+                ));
+            }
+        }
+    }
+    Ok(target)
+}
+
+fn restore_desktop_file_writes(backups: &[(PathBuf, Option<Vec<u8>>)]) -> Result<(), String> {
+    for (path, prior) in backups.iter().rev() {
+        match prior {
+            Some(bytes) => fs::write(path, bytes)
+                .map_err(|error| format!("failed restoring {}: {error}", path.display()))?,
+            None if path.exists() => fs::remove_file(path)
+                .map_err(|error| format!("failed removing {}: {error}", path.display()))?,
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 fn desktop_validate_semantic_preview(
@@ -7342,7 +8647,7 @@ fn desktop_validate_semantic_preview(
     )
     .map_err(|error| format!("candidate compile or tests failed: {error}"))?;
     desktop_require_executed_tests(&test_result)?;
-    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
+    if desktop_preview_fingerprint(root, &preview.payload)? != preview.source_fingerprint {
         return Err("project sources changed during candidate validation".into());
     }
     Ok(test_result)
@@ -7366,7 +8671,11 @@ fn desktop_apply_semantic_preview_with_progress(
         progress,
         stasis_ai::task_controller::ProgressStage::InspectingSymbols,
     );
-    let current_fingerprint = desktop_source_fingerprint(root, &[])?;
+    let file_transaction = desktop_file_transaction(root, &preview.payload)?;
+    let current_fingerprint = match &file_transaction {
+        Some(transaction) => desktop_file_fingerprint(root, transaction)?,
+        None => desktop_source_fingerprint(root, &[])?,
+    };
     if current_fingerprint != preview.source_fingerprint {
         return Err("stale semantic preview: project sources changed; generate a new preview before applying".into());
     }
@@ -7375,6 +8684,41 @@ fn desktop_apply_semantic_preview_with_progress(
     if replanned.source_fingerprint != preview.source_fingerprint || replanned.plan != preview.plan
     {
         return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+    }
+
+    if let Some(transaction) = file_transaction {
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+        );
+        let applied = transaction.apply(root)?;
+        let committed_fingerprint = desktop_file_committed_fingerprint(root, &transaction);
+        let committed_fingerprint = match committed_fingerprint {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                report_toolchain_progress(
+                    progress,
+                    stasis_ai::task_controller::ProgressStage::RollingBack,
+                );
+                applied.rollback().map_err(|rollback| {
+                    format!("file-write fingerprint failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(format!(
+                    "file-write fingerprint failed and all writes were rolled back: {error}"
+                ));
+            }
+        };
+        return Ok((
+            format!(
+                "applied {} project file change(s)",
+                preview.plan.changed_files.len()
+            ),
+            json!({
+                "status": "files_applied",
+                "changed_files": preview.plan.changed_files.iter().map(|change| &change.file).collect::<Vec<_>>(),
+                "source_fingerprint": committed_fingerprint,
+            }),
+        ));
     }
 
     let workspace = load_workspace(Some(root))?;
@@ -7459,6 +8803,55 @@ fn desktop_publish_semantic_preview_with_progress(
         progress,
         stasis_ai::task_controller::ProgressStage::InspectingSymbols,
     );
+    let workspace = load_workspace(Some(root))?;
+    if let Some(transaction) = desktop_file_transaction(&workspace.root, &preview.payload)? {
+        let current_fingerprint = desktop_file_fingerprint(&workspace.root, &transaction)?;
+        if current_fingerprint != preview.source_fingerprint {
+            return Err(
+                "stale semantic preview: project sources changed; generate a new preview before applying"
+                    .into(),
+            );
+        }
+        let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
+        if replanned.source_fingerprint != preview.source_fingerprint
+            || replanned.plan != preview.plan
+        {
+            return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
+        }
+        report_toolchain_progress(
+            progress,
+            stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
+        );
+        let applied = transaction.apply(&workspace.root)?;
+        let committed_fingerprint =
+            desktop_file_committed_fingerprint(&workspace.root, &transaction);
+        let committed_fingerprint = match committed_fingerprint {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                report_toolchain_progress(
+                    progress,
+                    stasis_ai::task_controller::ProgressStage::RollingBack,
+                );
+                applied.rollback().map_err(|rollback| {
+                    format!("file-write fingerprint failed: {error}; rollback failed: {rollback}")
+                })?;
+                return Err(format!(
+                    "file-write fingerprint failed and all writes were rolled back: {error}"
+                ));
+            }
+        };
+        return Ok((
+            format!(
+                "applied {} project file change(s)",
+                preview.plan.changed_files.len()
+            ),
+            json!({
+                "status": "files_applied",
+                "changed_files": preview.plan.changed_files.iter().map(|change| &change.file).collect::<Vec<_>>(),
+                "source_fingerprint": committed_fingerprint,
+            }),
+        ));
+    }
     if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
         return Err(
             "stale semantic preview: project sources changed; generate a new preview before applying"
@@ -7553,6 +8946,14 @@ fn desktop_source_fingerprint(root: &Path, relevant_tests: &[String]) -> Result<
         root,
         relevant_tests,
     )?))
+}
+
+fn desktop_preview_fingerprint(root: &Path, payload: &Value) -> Result<String, String> {
+    let workspace = load_workspace(Some(root))?;
+    match desktop_file_transaction(&workspace.root, payload)? {
+        Some(transaction) => desktop_file_fingerprint(&workspace.root, &transaction),
+        None => desktop_source_fingerprint(&workspace.root, &[]),
+    }
 }
 
 fn desktop_require_executed_tests(receipt: &Value) -> Result<(), String> {
@@ -7717,24 +9118,27 @@ fn validate_semantic_files(
         "render".to_string(),
         "on_code_swap".to_string(),
     ]);
+    let mut sources = BTreeMap::new();
     for file in &files {
-        let path = workspace.root.join(&file.path);
-        let compiler_path = path
-            .canonicalize()
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
+        // The compiler already owns `workspace.root`; keep source identities
+        // project-relative so import aliases and diagnostic paths use the same
+        // canonical spelling on Windows and Unix.
+        let compiler_path = file.path.replace('\\', "/");
+        sources.insert(compiler_path.clone(), file.source.clone());
         jit.upsert_file(compiler_path, file.source.clone());
     }
     jit.compile().map_err(|error| {
-        jit.last_source_diagnostic()
-            .map(|diagnostic| {
-                format!(
-                    "{}:{}-{}: {}",
-                    diagnostic.path, diagnostic.start, diagnostic.end, diagnostic.message
-                )
-            })
-            .unwrap_or_else(|| format!("{error:?}"))
+        let Some(diagnostic) = jit.last_source_diagnostic() else {
+            return format!("{error:?}");
+        };
+        let source =
+            source_for_diagnostic(&sources, &workspace.root, &diagnostic.path).unwrap_or("");
+        let (line, column) = line_column(source, diagnostic.start);
+        let display_message = format!(
+            "{}:{}:{}: {}",
+            diagnostic.path, line, column, diagnostic.message
+        );
+        encoded_source_diagnostic(diagnostic, display_message)
     })?;
     Ok(())
 }
@@ -8416,6 +9820,31 @@ fn copy_dir_if_exists(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn move_dir_contents(source: &Path, destination: &Path) -> Result<(), String> {
+    let mut entries: Vec<_> = fs::read_dir(source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to enumerate {}: {error}", source.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let target = destination.join(entry.file_name());
+        if target.exists() {
+            return Err(format!(
+                "desktop package assembly conflicts with {}",
+                target.display()
+            ));
+        }
+        fs::rename(entry.path(), &target).map_err(|error| {
+            format!(
+                "failed to move desktop package assembly {} to {}: {error}",
+                entry.path().display(),
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
     fs::copy(source, destination).map(|_| ()).map_err(|error| {
         format!(
@@ -8569,9 +9998,420 @@ fn line_column(source: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
+fn source_for_diagnostic<'a>(
+    sources: &'a BTreeMap<String, String>,
+    workspace_root: &Path,
+    diagnostic_path: &str,
+) -> Option<&'a str> {
+    if let Some(source) = sources.get(diagnostic_path) {
+        return Some(source);
+    }
+
+    let path = Path::new(diagnostic_path);
+    let workspace_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    };
+    let canonical = workspace_path.canonicalize().unwrap_or(workspace_path);
+    let normalized = normalized_comparison_path(&canonical);
+
+    sources.iter().find_map(|(candidate, source)| {
+        let candidate_path = Path::new(candidate);
+        let candidate_workspace_path = if candidate_path.is_absolute() {
+            candidate_path.to_path_buf()
+        } else {
+            workspace_root.join(candidate_path)
+        };
+        let candidate_canonical = candidate_workspace_path
+            .canonicalize()
+            .unwrap_or(candidate_workspace_path);
+        (normalized_comparison_path(&candidate_canonical) == normalized).then_some(source.as_str())
+    })
+}
+
+fn normalized_comparison_path(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn encoded_source_diagnostic(diagnostic: &SourceDiagnostic, display_message: String) -> String {
+    format!(
+        "{COMPILER_DIAGNOSTIC_PREFIX}{}",
+        json!({
+            "display_message": display_message,
+            "diagnostic": source_diagnostic_json(diagnostic),
+        })
+    )
+}
+
+fn source_diagnostic_json(diagnostic: &SourceDiagnostic) -> Value {
+    json!({
+        "path": diagnostic.path,
+        "start": diagnostic.start,
+        "end": diagnostic.end,
+        "symbol": diagnostic.symbol,
+        "code": diagnostic.code.as_str(),
+        "message": diagnostic.message,
+        "related": diagnostic.related.iter().map(|related| json!({
+            "path": related.path,
+            "start": related.start,
+            "end": related.end,
+            "symbol": related.symbol,
+            "message": related.message,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_source_lookup_resolves_project_relative_path_against_absolute_map() {
+        let root = temp_dir("diagnostic_source_lookup");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        let source_path = root.join("src/main.stasis");
+        fs::write(
+            &source_path,
+            "// source\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("source file");
+        let absolute = source_path.canonicalize().expect("canonical source path");
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            display_path(&absolute),
+            "// source\nfunction main(): i32 { return 0; }\n".to_string(),
+        );
+
+        let source = source_for_diagnostic(&sources, &root, "src/main.stasis")
+            .expect("relative diagnostic path should resolve");
+        assert!(source.contains("function main"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn diagnostic_source_lookup_resolves_absolute_path_against_project_relative_map() {
+        let root = temp_dir("diagnostic_source_lookup_reverse");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        let source_path = root.join("src/main.stasis");
+        fs::write(
+            &source_path,
+            "// source\nfunction main(): i32 { return 0; }\n",
+        )
+        .expect("source file");
+        let absolute = source_path.canonicalize().expect("canonical source path");
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "src/main.stasis".to_string(),
+            "// source\nfunction main(): i32 { return 0; }\n".to_string(),
+        );
+
+        let source = source_for_diagnostic(&sources, &root, &display_path(&absolute))
+            .expect("absolute diagnostic path should resolve");
+        assert!(source.contains("function main"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_package_project_provenance_detects_source_mutation() {
+        let root = temp_dir("desktop_package_project_provenance");
+        create_project(
+            root.clone(),
+            "desktop_package_project_provenance".to_string(),
+        )
+        .expect("create project");
+        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
+        let before = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("capture project provenance");
+        fs::write(
+            root.join(&workspace.manifest.entry),
+            "function main(): i32 { return 41; }\n",
+        )
+        .expect("mutate package entry");
+        let after = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("recapture project provenance");
+        assert_ne!(
+            before, after,
+            "source mutation must change package provenance"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_package_output_rejects_captured_input_descendants() {
+        let root = temp_dir("desktop_package_output_location");
+        create_project(root.clone(), "desktop_package_output_location".to_string())
+            .expect("create project");
+        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+
+        validate_desktop_package_output_location(&workspace, &root.join("dist/game"))
+            .expect("ordinary distribution output");
+        validate_desktop_package_output_location(&workspace, &root.join("data/../dist/game"))
+            .expect("normalized distribution output");
+        for output in [
+            root.join("assets/package"),
+            root.join("data/package"),
+            root.join("vendor/package"),
+            root.join("src/main/package"),
+        ] {
+            let error = validate_desktop_package_output_location(&workspace, &output)
+                .expect_err("captured input descendant must be rejected");
+            assert!(
+                error.contains("must not be inside captured input directory"),
+                "unexpected error for {}: {error}",
+                output.display()
+            );
+        }
+        #[cfg(windows)]
+        assert!(
+            validate_desktop_package_output_location(&workspace, &root.join("ASSETS/package"))
+                .is_err(),
+            "Windows captured-input matching must be case-insensitive"
+        );
+        let error = package_workspace(
+            &workspace,
+            PackageTarget::Desktop,
+            Some(Path::new("data/package")),
+            true,
+        )
+        .expect_err("desktop package command must reject a captured-input output");
+        assert!(error.contains("must not be inside captured input directory"));
+        assert!(!root.join("data/.package.staging").exists());
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_package_project_provenance_detects_network_guest_mutation() {
+        let root = temp_dir("desktop_package_network_guest_provenance");
+        create_project(
+            root.clone(),
+            "desktop_package_network_guest_provenance".to_string(),
+        )
+        .expect("create project");
+        fs::write(
+            root.join("src/guest.stasis"),
+            "function main(): i32 { return 42; }\n",
+        )
+        .expect("write guest entry");
+        let mut manifest: ProjectManifest = serde_json::from_slice(
+            &fs::read(root.join(MANIFEST_NAME)).expect("read generated manifest"),
+        )
+        .expect("parse generated manifest");
+        manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/guest.stasis".to_string(),
+            loading_font: None,
+            viewport: None,
+        });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
+        let workspace = load_workspace(Some(&root)).expect("load network workspace");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
+        let before = desktop_package_project_provenance(&workspace, &manifest_bytes)
+            .expect("capture desktop provenance");
+
+        fs::write(
+            root.join("src/guest.stasis"),
+            "function main(): i32 { return 43; }\n",
+        )
+        .expect("mutate guest entry");
+        let after = desktop_package_project_provenance(&workspace, &manifest_bytes)
+            .expect("recapture desktop provenance");
+
+        assert_eq!(
+            before["project"], after["project"],
+            "host source graph must be unchanged"
+        );
+        assert_ne!(
+            before["network_guest"], after["network_guest"],
+            "guest source mutation must change desktop package provenance"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_package_project_provenance_hashes_non_source_inputs() {
+        let root = temp_dir("desktop_package_non_source_provenance");
+        create_project(
+            root.clone(),
+            "desktop_package_non_source_provenance".to_string(),
+        )
+        .expect("create project");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        fs::create_dir_all(root.join("data")).expect("create data");
+        fs::create_dir_all(root.join("src/main")).expect("create entry support");
+        fs::write(root.join("assets/marker.png"), b"asset-a").expect("write asset");
+        fs::write(root.join("data/config.json"), b"data-a").expect("write data");
+        fs::write(root.join("src/main/config.json"), b"support-a").expect("write entry support");
+        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
+        let before = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("capture non-source provenance");
+
+        fs::write(root.join("assets/marker.png"), b"asset-b").expect("mutate asset");
+        let after_asset = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("recapture asset provenance");
+        assert_ne!(
+            before["captured_inputs"]["assets"],
+            after_asset["captured_inputs"]["assets"]
+        );
+
+        fs::write(root.join("data/config.json"), b"data-b").expect("mutate data");
+        let after_data = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("recapture data provenance");
+        assert_ne!(
+            after_asset["captured_inputs"]["data"],
+            after_data["captured_inputs"]["data"]
+        );
+
+        fs::write(root.join("src/main/config.json"), b"support-b").expect("mutate entry support");
+        let after_support = package_project_provenance(
+            &workspace,
+            workspace.manifest.entry.as_str(),
+            &manifest_bytes,
+        )
+        .expect("recapture entry-support provenance");
+        assert_ne!(
+            after_data["captured_inputs"]["entry_support"],
+            after_support["captured_inputs"]["entry_support"]
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_package_workspace_snapshot_isolated_from_original_source_mutation() {
+        let root = temp_dir("desktop_package_workspace_snapshot");
+        create_project(
+            root.clone(),
+            "desktop_package_workspace_snapshot".to_string(),
+        )
+        .expect("create project");
+        fs::write(
+            root.join("src/main.stasis"),
+            "function main(): i32 { return 40; }\n",
+        )
+        .expect("write host entry");
+        fs::write(
+            root.join("src/guest.stasis"),
+            "function main(): i32 { return 42; }\n",
+        )
+        .expect("write guest entry");
+        fs::create_dir_all(root.join("external")).expect("create external asset directory");
+        let external_asset = root.join("external/source.png");
+        fs::write(&external_asset, b"captured-asset").expect("write external asset");
+        fs::create_dir_all(root.join("src/main")).expect("create entry support directory");
+        fs::write(
+            root.join("src/main/config.json"),
+            serde_json::to_vec(&json!({
+                "value": 40,
+                "asset": display_path(&external_asset),
+            }))
+            .expect("serialize entry support data"),
+        )
+        .expect("write entry support data");
+        fs::create_dir_all(root.join("data")).expect("create project data");
+        fs::write(root.join("data/package.txt"), "captured\n").expect("write project data");
+        let mut manifest: ProjectManifest = serde_json::from_slice(
+            &fs::read(root.join(MANIFEST_NAME)).expect("read generated manifest"),
+        )
+        .expect("parse generated manifest");
+        manifest.capabilities = Some(ProjectCapabilities {
+            network: true,
+            ..ProjectCapabilities::default()
+        });
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/guest.stasis".to_string(),
+            loading_font: None,
+            viewport: None,
+        });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
+        let workspace = load_workspace(Some(&root)).expect("load network workspace");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
+        let snapshot_root = root.join(".desktop-source-snapshot");
+        let snapshot =
+            capture_desktop_package_workspace(&workspace, &manifest_bytes, &snapshot_root)
+                .expect("capture desktop package workspace");
+        let captured_provenance = desktop_package_project_provenance(&snapshot, &manifest_bytes)
+            .expect("capture snapshot provenance");
+
+        fs::write(
+            root.join(&workspace.manifest.entry),
+            "function main(): i32 { return 41; }\n",
+        )
+        .expect("mutate original host entry");
+        fs::write(
+            root.join("src/guest.stasis"),
+            "function main(): i32 { return 43; }\n",
+        )
+        .expect("mutate original guest entry");
+        fs::write(root.join("data/package.txt"), "mutated\n").expect("mutate original data");
+        fs::write(root.join("src/main/config.json"), "{\"value\":41}\n")
+            .expect("mutate original entry support data");
+        fs::write(&external_asset, b"mutated-asset").expect("mutate original external asset");
+
+        assert_eq!(
+            desktop_package_project_provenance(&snapshot, &manifest_bytes)
+                .expect("re-read snapshot provenance"),
+            captured_provenance,
+            "original source mutations must not alter captured package inputs"
+        );
+        assert_eq!(
+            fs::read_to_string(snapshot.root.join("data/package.txt")).expect("read captured data"),
+            "captured\n"
+        );
+        let captured_support: Value = serde_json::from_slice(
+            &fs::read(snapshot.root.join("src/main/config.json"))
+                .expect("read captured entry support data"),
+        )
+        .expect("parse captured entry support data");
+        assert_eq!(captured_support["value"], 40);
+        let captured_asset = captured_support["asset"]
+            .as_str()
+            .expect("captured package-relative asset path");
+        assert!(captured_asset.starts_with("main/assets/external/"));
+        assert!(captured_asset.ends_with("-source.png"));
+        assert_eq!(
+            fs::read(snapshot.root.join("src").join(captured_asset))
+                .expect("read captured absolute asset"),
+            b"captured-asset"
+        );
+        let jit = compile_workspace_jit(&snapshot).expect("compile captured workspace");
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("execute captured host entry"),
+            40,
+            "the captured workspace, not the mutated original, must be compiled"
+        );
+        remove_temp(&root);
+    }
 
     #[test]
     fn generated_graphical_project_has_effect_boundaries_and_checks() {
@@ -8613,6 +10453,8 @@ mod tests {
 
         let development = web_index_html("development-game", true, None, None);
         assert!(development.contains(r#"id="stasis-hud""#));
+        assert!(development.contains(r#"aria-live="polite" aria-hidden="true" hidden"#));
+        assert!(development.contains("#stasis-hud[hidden] { display: none !important; }"));
         assert!(development.contains(r#"<h1 id="stasis-loading-title">development-game</h1>"#));
         for html in [&release, &development] {
             assert!(!html.contains("__STASIS_"));
@@ -8662,6 +10504,7 @@ mod tests {
                 height: 900,
             }),
         });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write project manifest");
         let workspace = Workspace {
             root: root.clone(),
             manifest,
@@ -8704,6 +10547,7 @@ mod tests {
             loading_font: None,
             viewport: None,
         });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write project manifest");
         let workspace = Workspace {
             root: root.clone(),
             manifest,
@@ -8761,6 +10605,18 @@ mod tests {
                 "accepted invalid web loading font path {path}"
             );
         }
+    }
+
+    #[test]
+    fn web_package_source_paths_match_workshop_normalization() {
+        assert_eq!(
+            normalize_web_package_source_path("./src/./main.stasis"),
+            "src/main.stasis"
+        );
+        assert_eq!(
+            normalize_web_package_source_path("src\\main.stasis"),
+            "src/main.stasis"
+        );
     }
 
     #[test]
@@ -8909,6 +10765,50 @@ mod tests {
         let runtime = link_web_runtime(&process, false, false).expect("link Web runtime");
         assert!(runtime.contains("const sysMemcpyU8 ="));
         assert!(runtime.contains("sys_memcpy_u8: sysMemcpyU8"));
+    }
+
+    #[test]
+    fn release_web_runtime_retains_layouts_for_direct_collection_host_calls() {
+        let runtime_config = || {
+            json!({
+                "views": {},
+                "globals": {},
+                "memory": {
+                    "text": { "byte_backed": true, "type_id": TYPE_ID_U8 },
+                    "samples": { "byte_backed": false, "type_id": TYPE_ID_F32 },
+                    "unrelated": { "byte_backed": false, "type_id": TYPE_ID_I32 },
+                },
+            })
+        };
+
+        for symbol in [
+            "stasis_jit_storage_load_ascii",
+            "stasis_jit_storage_save_ascii",
+            "stasis_jit_clipboard_load_ascii",
+            "stasis_jit_clipboard_save_ascii",
+        ] {
+            let mut config = runtime_config();
+            prune_release_web_runtime_config(&mut config, &BTreeSet::from([symbol.to_string()]));
+            let memory = config["memory"].as_object().expect("release memory");
+            assert!(memory.contains_key("text"), "{symbol} omitted ASCII memory");
+            assert!(!memory.contains_key("samples"));
+            assert!(!memory.contains_key("unrelated"));
+        }
+
+        for symbol in [
+            "audio_push_f32_interleaved",
+            "stasis_jit_audio_push_f32_interleaved",
+        ] {
+            let mut config = runtime_config();
+            prune_release_web_runtime_config(&mut config, &BTreeSet::from([symbol.to_string()]));
+            let memory = config["memory"].as_object().expect("release memory");
+            assert!(
+                memory.contains_key("samples"),
+                "{symbol} omitted f32 sample memory"
+            );
+            assert!(!memory.contains_key("text"));
+            assert!(!memory.contains_key("unrelated"));
+        }
     }
 
     #[test]
@@ -9580,6 +11480,131 @@ mod tests {
                 .map(|change| change.file.as_str())
                 .collect::<Vec<_>>(),
             ["src/main.stasis", "src/values.stasis"]
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_file_write_preview_is_non_mutating_and_updates_tracked_asset() {
+        let root = desktop_editor_fixture("file_write_preview_apply");
+        fs::create_dir_all(root.join("assets/generated")).unwrap();
+        let svg_path = root.join("assets/generated/brown-background.svg");
+        let original = "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><rect width='64' height='64' fill='#246'/></svg>";
+        fs::write(&svg_path, original).unwrap();
+        let original_hash = format!("{:x}", Sha256::digest(original.as_bytes()));
+        fs::write(
+            root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            format!(r#"{{"schema":"stasis-assets","version":2,"display":null,"dynamic_assets":[],"assets":[{{"id":"brown-background","path":"assets/generated/brown-background.svg","content_sha256":"{original_hash}","format":{{"kind":"sprite","encoding":"svg","width":64,"height":64}},"dependencies":[]}}]}}"#),
+        )
+        .unwrap();
+        let prepared_svg_path =
+            root.join(".stasis_cache/play-assets/assets/generated/brown-background.svg");
+        fs::create_dir_all(prepared_svg_path.parent().unwrap()).unwrap();
+        fs::write(&prepared_svg_path, original).unwrap();
+        let payload = json!({
+            "schema_version": 1,
+            "file_writes": [{
+                    "path": "assets/generated/brown-background.svg",
+                    "content": "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><rect width='64' height='64' fill='#5b3825'/></svg>"
+            }]
+        });
+
+        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
+        assert_eq!(fs::read_to_string(&svg_path).unwrap(), original);
+        assert_eq!(preview.plan.edits, Vec::new());
+        assert_eq!(preview.plan.changed_files.len(), 2);
+        assert!(preview
+            .plan
+            .changed_files
+            .iter()
+            .any(|change| change.file == "assets/generated/brown-background.svg"));
+
+        let (_, receipt) = desktop_apply_semantic_preview(&root, &preview).unwrap();
+        assert_eq!(receipt["status"], "files_applied");
+        assert!(fs::read_to_string(&svg_path)
+            .unwrap()
+            .contains("fill='#5b3825'"));
+        assert!(fs::read_to_string(&prepared_svg_path)
+            .unwrap()
+            .contains("fill='#5b3825'"));
+        let manifest = load_project_asset_manifest(&root, AssetLimits::default()).unwrap();
+        let asset = manifest
+            .assets
+            .iter()
+            .find(|asset| asset.entry.id == "brown-background")
+            .unwrap();
+        assert_eq!(asset.entry.content_sha256, sha256_file(&svg_path).unwrap());
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_file_write_rejects_source_internal_escape_and_active_svg() {
+        let root = desktop_editor_fixture("file_write_rejections");
+        for (path, content, message) in [
+            ("../outside.txt", "no", "escapes the project"),
+            (".stasis_cache/state.json", "no", "host-controlled"),
+            (
+                "src/main.stasis",
+                "function main(): i32 { return 2; }",
+                "propose_semantic_edit",
+            ),
+            (
+                "assets/generated/unsafe.svg",
+                "<svg><script>alert(1)</script></svg>",
+                "forbidden",
+            ),
+        ] {
+            let error = desktop_preview_semantic_batch(
+                &root,
+                json!({"schema_version": 1, "file_writes": [{"path": path, "content": content}]}),
+            )
+            .unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_file_write_rejects_stale_preview_and_rolls_back_invalid_manifest() {
+        let root = desktop_editor_fixture("file_write_stale_rollback");
+        let note = root.join("notes.txt");
+        fs::write(&note, "before\n").unwrap();
+        let preview = desktop_preview_semantic_batch(
+            &root,
+            json!({"schema_version": 1, "file_writes": [{"path": "notes.txt", "content": "after\n"}]}),
+        )
+        .unwrap();
+        fs::write(&note, "changed elsewhere\n").unwrap();
+        assert!(desktop_apply_semantic_preview(&root, &preview)
+            .unwrap_err()
+            .contains("stale semantic preview"));
+        assert_eq!(fs::read_to_string(&note).unwrap(), "changed elsewhere\n");
+
+        let missing = desktop_preview_semantic_batch(
+            &root,
+            json!({"schema_version": 1, "file_writes": [{"path": "new.txt", "content": "created\n"}]}),
+        )
+        .unwrap();
+        fs::write(root.join("new.txt"), "").unwrap();
+        assert!(desktop_apply_semantic_preview(&root, &missing)
+            .unwrap_err()
+            .contains("stale semantic preview"));
+        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "");
+
+        let original_manifest = fs::read_to_string(root.join(MANIFEST_NAME)).unwrap();
+        let invalid = desktop_preview_semantic_batch(
+            &root,
+            json!({"schema_version": 1, "file_writes": [
+                {"path": "notes.txt", "content": "transactional\n"},
+                {"path": MANIFEST_NAME, "content": "{}"}
+            ]}),
+        )
+        .unwrap();
+        assert!(desktop_apply_semantic_preview(&root, &invalid).is_err());
+        assert_eq!(fs::read_to_string(&note).unwrap(), "changed elsewhere\n");
+        assert_eq!(
+            fs::read_to_string(root.join(MANIFEST_NAME)).unwrap(),
+            original_manifest
         );
         remove_temp(&root);
     }
@@ -10468,6 +12493,78 @@ mod tests {
         }
         assert!(PROJECT_PRE_COMMIT_HOOK.contains("stasis format src tests"));
         assert!(!PROJECT_PRE_COMMIT_HOOK.contains("if ! stasis format;"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn local_validation_preserves_nightly_vendor_pin_and_snapshot() {
+        let root = temp_dir("validation_preserves_vendor");
+        create_project(root.clone(), "validation_preserves_vendor".into()).expect("create project");
+        let manifest_path = root.join(MANIFEST_NAME);
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest")).unwrap();
+        fs::write(
+            root.join("vendor/stasis/docs/README.md"),
+            "pinned nightly documentation\n",
+        )
+        .expect("write pinned vendor documentation");
+        manifest["vendor"]["stasis"]["release_id"] = json!("nightly-20260909-299");
+        manifest["vendor"]["stasis"]["sha256"] =
+            json!(directory_sha256(&root.join("vendor/stasis")).unwrap());
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize pinned manifest"),
+        )
+        .expect("write pinned manifest");
+
+        let original_manifest = fs::read(&manifest_path).expect("read pinned manifest");
+        let original_vendor = directory_sha256(&root.join("vendor/stasis")).unwrap();
+        let assert_preserved = || {
+            assert_eq!(
+                fs::read(&manifest_path).expect("read manifest after validation"),
+                original_manifest
+            );
+            assert_eq!(
+                directory_sha256(&root.join("vendor/stasis")).unwrap(),
+                original_vendor
+            );
+        };
+
+        execute(ToolchainCommand::Check, Some(root.clone()), false)
+            .expect("check against pinned vendor");
+        assert_preserved();
+
+        execute(
+            ToolchainCommand::Test { path: None },
+            Some(root.clone()),
+            false,
+        )
+        .expect("test against pinned vendor");
+        assert_preserved();
+
+        let error = execute(
+            ToolchainCommand::Record {
+                args: record::RecordArgs {
+                    entry: None,
+                    output: root.join("recording"),
+                    width: 1,
+                    height: 1,
+                    fps: 0,
+                    frames: Some(1),
+                    duration: None,
+                    input_script: None,
+                    before_tick: None,
+                    replay: None,
+                    record_replay: None,
+                },
+            },
+            Some(root.clone()),
+            false,
+        )
+        .expect_err("invalid recording bounds should fail before runtime work");
+        assert!(error.contains("--fps must be between"), "{error}");
+        assert_preserved();
+
         remove_temp(&root);
     }
 
@@ -12445,6 +14542,88 @@ mod tests {
         )
         .is_ok());
         remove_temp(&root);
+    }
+
+    #[test]
+    fn compiler_diagnostic_json_preserves_primary_and_related_provenance() {
+        let diagnostic = SourceDiagnostic::new(
+            "src/main.stasis",
+            42,
+            50,
+            "capacity",
+            "explicit generic calls are unsupported",
+        )
+        .with_code(stasis_compiler::SourceDiagnosticCode::ExplicitGenericCall)
+        .with_related(stasis_compiler::SourceDiagnosticRelated {
+            path: "src/buffer.stasis".to_string(),
+            start: 7,
+            end: 61,
+            symbol: "capacity".to_string(),
+            message: "generic template declared here".to_string(),
+        });
+
+        assert_eq!(
+            source_diagnostic_json(&diagnostic),
+            json!({
+                "path": "src/main.stasis",
+                "start": 42,
+                "end": 50,
+                "symbol": "capacity",
+                "code": "stasis.explicitGenericCall",
+                "message": "explicit generic calls are unsupported",
+                "related": [{
+                    "path": "src/buffer.stasis",
+                    "start": 7,
+                    "end": 61,
+                    "symbol": "capacity",
+                    "message": "generic template declared here",
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn desktop_package_aot_artifact_root_is_temp_scoped_and_cleans_up() {
+        let artifact_path = {
+            let mut artifact_root = DesktopPackageAotArtifactRoot::new()
+                .expect("create desktop package AOT artifact root");
+            let artifact_path = artifact_root.path().to_path_buf();
+            let temp_root = env::temp_dir();
+            assert_eq!(
+                artifact_path.parent(),
+                Some(temp_root.as_path()),
+                "package AOT artifacts must live directly below the OS temp directory"
+            );
+            assert!(
+                artifact_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(DESKTOP_PACKAGE_AOT_ARTIFACT_PREFIX)),
+                "package AOT artifact root must have a recognizable transaction-scoped name"
+            );
+            fs::write(artifact_path.join("marker"), "temporary").expect("write marker");
+            artifact_root
+                .cleanup()
+                .expect("clean package AOT artifacts");
+            assert!(!artifact_path.exists());
+            artifact_path
+        };
+        assert!(
+            !artifact_path.exists(),
+            "the package AOT artifact root must stay removed after its guard is dropped"
+        );
+
+        let dropped_path = {
+            let artifact_root = DesktopPackageAotArtifactRoot::new()
+                .expect("create second desktop package AOT artifact root");
+            let dropped_path = artifact_root.path().to_path_buf();
+            fs::write(dropped_path.join("marker"), "temporary").expect("write drop marker");
+            dropped_path
+        };
+        assert!(
+            !dropped_path.exists(),
+            "failed package paths must be cleaned when the guard unwinds"
+        );
     }
 
     #[test]

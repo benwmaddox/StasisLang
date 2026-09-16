@@ -1,0 +1,9 @@
+struct Item {
+    score: i32;
+}
+
+global items: Item[2];
+
+function expose_items(): Item[] {
+    return items;
+}

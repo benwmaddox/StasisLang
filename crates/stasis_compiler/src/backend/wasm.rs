@@ -11,6 +11,7 @@ use crate::backend::compile_analysis::{
 };
 use crate::backend::emit::hash_global_path;
 use crate::backend::program_snapshot::ProgramSnapshot;
+use crate::backend::reachability::matches_root;
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
@@ -30,17 +31,7 @@ pub fn wasm_global_hash(path: &str) -> i32 {
     hash_global_path(path)
 }
 
-fn is_wasm_host_export(name: &str) -> bool {
-    matches!(
-        name,
-        "main"
-            | "tick"
-            | "render"
-            | "on_code_swap"
-            | "gfx_cmd_construction_reset"
-            | "gfx_cmd_construction_finish"
-    )
-}
+pub const COLLECTION_VIEW_ABI_VERSION: i32 = 2;
 
 #[derive(Debug, Clone, Default)]
 pub struct WasmProcess {
@@ -161,8 +152,8 @@ impl WasmProcess {
         }
 
         self.string_literals = collect_string_literals(&lowered, &analysis.constant_values);
-        let (memory_bindings, _) =
-            build_memory_bindings(&analysis, &types).map_err(CompileError::Backend)?;
+        let (memory_bindings, _) = build_memory_bindings(&analysis, &types, &self.string_literals)
+            .map_err(CompileError::Backend)?;
         self.memory_layout = memory_bindings
             .into_iter()
             .map(|(path, binding)| {
@@ -171,6 +162,7 @@ impl WasmProcess {
                 (
                     path,
                     WasmMemoryLayout {
+                        handle: binding.handle,
                         offset: binding.offset,
                         type_id: binding.type_id,
                         length: binding.len,
@@ -248,19 +240,28 @@ struct WasmSignature {
 
 fn lower_wasm_signature(
     signature: &Signature,
+    types: &TypeTable,
     named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
 ) -> Result<WasmSignature, String> {
-    let mut params = Vec::with_capacity(physical_param_count(&signature.params, named_structs));
+    let mut params = Vec::with_capacity(physical_param_count(
+        &signature.params,
+        types,
+        named_structs,
+    ));
     for type_id in &signature.params {
-        if is_struct_view_type(*type_id, named_structs) {
+        if is_wasm_struct_view_type(*type_id, types, named_structs) {
             params.extend([I32, I32, I32]);
         } else {
             params.push(wasm_value_type(*type_id)?);
         }
     }
-    let result = (signature.result != TYPE_ID_VOID)
-        .then(|| wasm_value_type(signature.result))
-        .transpose()?;
+    let result = if signature.result == TYPE_ID_VOID {
+        None
+    } else if is_wasm_struct_view_type(signature.result, types, named_structs) {
+        return Err("web named-struct array and struct-view returns are unsupported".to_string());
+    } else {
+        Some(wasm_value_type(signature.result)?)
+    };
     Ok(WasmSignature { params, result })
 }
 
@@ -283,6 +284,10 @@ fn is_i32_lane(type_id: TypeId) -> bool {
         type_id,
         TYPE_ID_I32 | TYPE_ID_BOOL | TYPE_ID_U8 | TYPE_ID_U16 | TYPE_ID_U32
     )
+}
+
+fn is_unsigned_i32_lane(type_id: TypeId) -> bool {
+    matches!(type_id, TYPE_ID_U8 | TYPE_ID_U16 | TYPE_ID_U32)
 }
 
 fn is_web_index_type(type_id: TypeId, context: &EncodeContext<'_>) -> bool {
@@ -325,21 +330,66 @@ fn is_struct_view_type(
     named_structs.contains_key(&type_id)
 }
 
+fn named_struct_array_element_type(
+    type_id: TypeId,
+    types: &TypeTable,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+) -> Option<TypeId> {
+    let category = types.type_info(type_id)?.category;
+    if !matches!(category, TypeCategory::ArrayFixed | TypeCategory::ArrayView) {
+        return None;
+    }
+    let element_type = types.indexed_element_type_id(type_id)?;
+    named_structs
+        .contains_key(&element_type)
+        .then_some(element_type)
+}
+
+fn is_named_struct_array_type(
+    type_id: TypeId,
+    types: &TypeTable,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+) -> bool {
+    named_struct_array_element_type(type_id, types, named_structs).is_some()
+}
+
+fn is_wasm_struct_view_type(
+    type_id: TypeId,
+    types: &TypeTable,
+    named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+) -> bool {
+    is_struct_view_type(type_id, named_structs)
+        || is_named_struct_array_type(type_id, types, named_structs)
+}
+
 fn physical_param_count(
     params: &[TypeId],
+    types: &TypeTable,
     named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
 ) -> usize {
     params
         .iter()
         .map(|type_id| {
-            usize::from(!is_struct_view_type(*type_id, named_structs))
-                + 3 * usize::from(is_struct_view_type(*type_id, named_structs))
+            usize::from(!is_wasm_struct_view_type(*type_id, types, named_structs))
+                + 3 * usize::from(is_wasm_struct_view_type(*type_id, types, named_structs))
         })
         .sum()
 }
 
+fn is_host_export(function: &FunctionMeta) -> bool {
+    matches!(
+        function.name.as_str(),
+        "main"
+            | "render"
+            | "on_code_swap"
+            | "gfx_cmd_construction_reset"
+            | "gfx_cmd_construction_finish"
+    ) || matches_root(function, "tick")
+}
+
 #[derive(Debug, Clone)]
 struct MemoryBinding {
+    handle: i32,
     offset: u32,
     type_id: TypeId,
     len: i32,
@@ -358,6 +408,7 @@ struct StringLiteralMemoryBinding {
 #[derive(Debug, Clone)]
 struct StructCollectionBinding {
     base: i32,
+    collection_type_id: TypeId,
     type_id: TypeId,
     len: i32,
     fields: BTreeMap<String, MemoryBinding>,
@@ -403,6 +454,7 @@ fn build_struct_scalars(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmMemoryLayout {
+    pub handle: i32,
     pub offset: u32,
     pub type_id: TypeId,
     pub length: i32,
@@ -508,6 +560,7 @@ fn struct_memory_scalar_paths(
 fn build_memory_bindings(
     analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
     types: &TypeTable,
+    string_literals: &BTreeMap<i32, String>,
 ) -> Result<(BTreeMap<String, MemoryBinding>, u32), String> {
     let mut offset = 0u32;
     let mut bindings = BTreeMap::new();
@@ -520,6 +573,7 @@ fn build_memory_bindings(
             bindings.insert(
                 path.clone(),
                 MemoryBinding {
+                    handle: 0,
                     offset,
                     type_id,
                     len: collection.len,
@@ -549,6 +603,7 @@ fn build_memory_bindings(
             bindings.insert(
                 field_path,
                 MemoryBinding {
+                    handle: 0,
                     offset,
                     type_id: *type_id,
                     len: collection.len,
@@ -599,6 +654,7 @@ fn build_memory_bindings(
         bindings.insert(
             path.clone(),
             MemoryBinding {
+                handle: 0,
                 offset,
                 type_id,
                 len: 1,
@@ -610,6 +666,32 @@ fn build_memory_bindings(
         offset = offset
             .checked_add(width)
             .ok_or_else(|| "web memory layout overflow".to_string())?;
+    }
+    let mut reserved_handles = string_literals.keys().copied().collect::<BTreeSet<_>>();
+    reserved_handles.extend(
+        analysis
+            .global_path_types
+            .keys()
+            .map(|path| hash_global_path(path)),
+    );
+    reserved_handles.extend(
+        analysis
+            .collection_infos
+            .keys()
+            .map(|path| hash_global_path(path)),
+    );
+    let mut next_handle = i32::MIN;
+    for binding in bindings.values_mut().filter(|binding| !binding.scalar) {
+        while reserved_handles.contains(&next_handle) {
+            next_handle = next_handle
+                .checked_add(1)
+                .ok_or_else(|| "web collection handle space exhausted".to_string())?;
+        }
+        binding.handle = next_handle;
+        reserved_handles.insert(next_handle);
+        next_handle = next_handle
+            .checked_add(1)
+            .ok_or_else(|| "web collection handle space exhausted".to_string())?;
     }
     Ok((bindings, offset))
 }
@@ -689,6 +771,7 @@ fn build_struct_collections(
             path.clone(),
             StructCollectionBinding {
                 base: hash_global_path(path),
+                collection_type_id: collection_type,
                 type_id,
                 len: collection.len,
                 fields,
@@ -767,6 +850,29 @@ fn encode_module(
 
     let (called, imports) = collect_imports(functions, analysis)?;
 
+    for (name, _, signature) in &imports {
+        if signature.params.iter().any(|type_id| {
+            is_named_struct_array_type(*type_id, types, &analysis.named_struct_field_types)
+        }) {
+            return Err(format!(
+                "web extern '{name}' cannot expose the internal named-struct array-view convention"
+            ));
+        }
+    }
+    for (function, _) in functions
+        .iter()
+        .filter(|(function, _)| is_host_export(function))
+    {
+        if function.params.iter().any(|type_id| {
+            is_named_struct_array_type(*type_id, types, &analysis.named_struct_field_types)
+        }) {
+            return Err(format!(
+                "web export '{}' cannot expose the internal named-struct array-view convention",
+                function.name
+            ));
+        }
+    }
+
     let imported_names = imports
         .iter()
         .map(|(name, _, _)| name.clone())
@@ -793,7 +899,7 @@ fn encode_module(
         signatures.push(signature);
     }
 
-    let (memory_bindings, memory_bytes) = build_memory_bindings(analysis, types)?;
+    let (memory_bindings, memory_bytes) = build_memory_bindings(analysis, types, string_literals)?;
     let (string_literal_memory, total_memory_bytes) =
         build_string_literal_memory(string_literals, memory_bytes)?;
     let has_memory = memory_bytes > 0 || !string_literal_memory.is_empty();
@@ -861,9 +967,15 @@ fn encode_module(
     let signature_type_indices = signatures
         .iter()
         .map(|signature| {
-            lower_wasm_signature(signature, &analysis.named_struct_field_types).map(|signature| {
-                intern_wasm_signature(signature, &mut wasm_signature_indices, &mut wasm_signatures)
-            })
+            lower_wasm_signature(signature, types, &analysis.named_struct_field_types).map(
+                |signature| {
+                    intern_wasm_signature(
+                        signature,
+                        &mut wasm_signature_indices,
+                        &mut wasm_signatures,
+                    )
+                },
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     let accessor_type_indices = accessor_signatures.map(|signature| {
@@ -952,27 +1064,28 @@ fn encode_module(
         section(5, memory_section, &mut module);
     }
 
-    if !globals.is_empty() {
-        let mut global_section = Vec::new();
-        uleb(globals.len() as u32, &mut global_section);
-        for (_, type_id, initial_i32) in &globals {
-            global_section.extend([wasm_value_type(*type_id)?, 1]);
-            if let Some(value) = initial_i32 {
-                global_section.push(0x41);
-                sleb(*value, &mut global_section);
-            } else {
-                encode_zero(*type_id, &mut global_section)?;
-            }
-            global_section.push(0x0b);
+    let mut global_section = Vec::new();
+    uleb(globals.len() as u32 + 1, &mut global_section);
+    for (_, type_id, initial_i32) in &globals {
+        global_section.extend([wasm_value_type(*type_id)?, 1]);
+        if let Some(value) = initial_i32 {
+            global_section.push(0x41);
+            sleb(*value, &mut global_section);
+        } else {
+            encode_zero(*type_id, &mut global_section)?;
         }
-        section(6, global_section, &mut module);
+        global_section.push(0x0b);
     }
+    global_section.extend([I32, 0, 0x41]);
+    sleb(COLLECTION_VIEW_ABI_VERSION, &mut global_section);
+    global_section.push(0x0b);
+    section(6, global_section, &mut module);
 
     let mut export_section = Vec::new();
     uleb(
         functions
             .iter()
-            .filter(|(function, _)| is_wasm_host_export(&function.name))
+            .filter(|(function, _)| is_host_export(function))
             .count() as u32
             + if debug_symbols {
                 globals.len() as u32
@@ -980,11 +1093,12 @@ fn encode_module(
                 0
             }
             + u32::from(has_memory)
+            + 1
             + 4,
         &mut export_section,
     );
     for (index, (function, _)) in functions.iter().enumerate() {
-        if !is_wasm_host_export(&function.name) {
+        if !is_host_export(function) {
             continue;
         }
         string(&function.name, &mut export_section);
@@ -1003,6 +1117,9 @@ fn encode_module(
         export_section.push(2);
         uleb(0, &mut export_section);
     }
+    string("__stasis_collection_view_abi_version", &mut export_section);
+    export_section.push(3);
+    uleb(globals.len() as u32, &mut export_section);
     let accessor_base = (imports.len() + functions.len()) as u32;
     for (offset, name) in [
         "__stasis_global_get_i32",
@@ -1118,7 +1235,7 @@ fn encode_module(
         functions
             .iter()
             .enumerate()
-            .filter(|(_, (function, _))| is_wasm_host_export(&function.name))
+            .filter(|(_, (function, _))| is_host_export(function))
             .map(|(index, (function, _))| ((imports.len() + index) as u32, function.name.clone()))
             .collect()
     };
@@ -1313,7 +1430,7 @@ fn encode_function(
     let mut physical_cursor = 0u32;
     for (name, type_id) in function.param_names.iter().zip(function.params.iter()) {
         let struct_view =
-            is_struct_view_type(*type_id, named_structs).then_some(StructViewBinding {
+            is_wasm_struct_view_type(*type_id, types, named_structs).then_some(StructViewBinding {
                 index: physical_cursor + 1,
                 len: physical_cursor + 2,
             });
@@ -1336,7 +1453,7 @@ fn encode_function(
             LocalBinding {
                 index: physical_cursor,
                 type_id: *type_id,
-                struct_view: is_struct_view_type(*type_id, named_structs).then_some(
+                struct_view: is_wasm_struct_view_type(*type_id, types, named_structs).then_some(
                     StructViewBinding {
                         index: physical_cursor + 1,
                         len: physical_cursor + 2,
@@ -1344,7 +1461,7 @@ fn encode_function(
                 ),
             },
         );
-        physical_cursor += if is_struct_view_type(*type_id, named_structs) {
+        physical_cursor += if is_wasm_struct_view_type(*type_id, types, named_structs) {
             3
         } else {
             1
@@ -1353,7 +1470,7 @@ fn encode_function(
 
     let mut local_types = Vec::new();
     for (_, type_id) in &local_declarations {
-        if is_struct_view_type(*type_id, named_structs) {
+        if is_wasm_struct_view_type(*type_id, types, named_structs) {
             for _ in 0..3 {
                 local_types.push(I32);
             }
@@ -1362,13 +1479,16 @@ fn encode_function(
         }
     }
     let scratch_index = physical_cursor;
-    let scratch_address = scratch_index + 1;
+    let saved_address = scratch_index + 1;
     let scratch_i32 = scratch_index + 2;
     let scratch_i32_b = scratch_index + 3;
     let scratch_i32_c = scratch_index + 4;
     let scratch_f32 = scratch_index + 5;
     let scratch_f64 = scratch_index + 6;
-    local_types.extend([I32, I32, I32, I32, I32, F32, F64]);
+    let saved_view_owner = scratch_index + 7;
+    let saved_view_start = scratch_index + 8;
+    let saved_view_len = scratch_index + 9;
+    local_types.extend([I32, I32, I32, I32, I32, F32, F64, I32, I32, I32]);
     let mut body = Vec::new();
     encode_local_declarations(&local_types, &mut body);
     let context = EncodeContext {
@@ -1387,13 +1507,16 @@ fn encode_function(
         internal_overloads,
         signatures,
         scratch_index,
-        scratch_address,
         return_type: function.return_type,
         scratch_i32,
         scratch_i32_b,
         scratch_i32_c,
         scratch_f32,
         scratch_f64,
+        saved_address,
+        saved_view_owner,
+        saved_view_start,
+        saved_view_len,
         foreach: BTreeMap::new(),
         continue_depth: None,
     };
@@ -1515,13 +1638,16 @@ struct EncodeContext<'a> {
     internal_overloads: &'a BTreeMap<String, Vec<u32>>,
     signatures: &'a [Signature],
     scratch_index: u32,
-    scratch_address: u32,
     return_type: TypeId,
     scratch_i32: u32,
     scratch_i32_b: u32,
     scratch_i32_c: u32,
     scratch_f32: u32,
     scratch_f64: u32,
+    saved_address: u32,
+    saved_view_owner: u32,
+    saved_view_start: u32,
+    saved_view_len: u32,
     foreach: BTreeMap<String, WebForeachBinding>,
     continue_depth: Option<u32>,
 }
@@ -1600,8 +1726,33 @@ fn encode_statements(
             } => {
                 let binding = local_binding(context, name)?;
                 if let Some(view) = binding.struct_view {
-                    let value_type = encode_struct_view_expr(expression, context, out)?;
-                    require_same_struct_type(binding.type_id, value_type, "local initializer")?;
+                    let value_type = if is_named_struct_array_type(
+                        binding.type_id,
+                        context.types,
+                        context.named_structs,
+                    ) {
+                        let value_type =
+                            encode_named_struct_array_view_expr(expression, context, out)?;
+                        if !context
+                            .types
+                            .is_argument_compatible_with_param(value_type, binding.type_id)
+                        {
+                            return Err(format!(
+                                "web local initializer struct-array type mismatch: expected {}, found {value_type}",
+                                binding.type_id
+                            ));
+                        }
+                        value_type
+                    } else {
+                        encode_struct_view_expr(expression, context, out)?
+                    };
+                    if !is_named_struct_array_type(
+                        binding.type_id,
+                        context.types,
+                        context.named_structs,
+                    ) {
+                        require_same_struct_type(binding.type_id, value_type, "local initializer")?;
+                    }
                     set_struct_view_locals(binding.index, view, out);
                     continue;
                 }
@@ -1634,6 +1785,31 @@ fn encode_statements(
                             )?;
                             continue;
                         }
+                        if suffix.is_empty()
+                            && local_named_struct_array_binding(context, collection_path)?.is_some()
+                        {
+                            encode_local_struct_collection_copy(
+                                collection_path,
+                                index,
+                                expression,
+                                context,
+                                out,
+                            )?;
+                            continue;
+                        }
+                        if suffix.is_empty()
+                            && receiver_struct_collection_candidates(collection_path, context)?
+                                .is_some()
+                        {
+                            encode_receiver_struct_collection_copy(
+                                collection_path,
+                                index,
+                                expression,
+                                context,
+                                out,
+                            )?;
+                            continue;
+                        }
                     }
                 }
                 if *op != AssignOp::Set
@@ -1644,7 +1820,9 @@ fn encode_statements(
                     continue;
                 }
                 let target_type = target_type(target, context)?;
-                if *op == AssignOp::Set && is_struct_view_type(target_type, context.named_structs) {
+                if *op == AssignOp::Set
+                    && is_wasm_struct_view_type(target_type, context.types, context.named_structs)
+                {
                     let AssignTarget::Local(name) = target else {
                         return Err(
                             "web struct views can only be assigned to local bindings".to_string()
@@ -1654,8 +1832,32 @@ fn encode_statements(
                     let view = binding.struct_view.ok_or_else(|| {
                         format!("web struct local '{name}' is missing view storage")
                     })?;
-                    let value_type = encode_struct_view_expr(expression, context, out)?;
-                    require_same_struct_type(target_type, value_type, "assignment")?;
+                    let value_type = if is_named_struct_array_type(
+                        target_type,
+                        context.types,
+                        context.named_structs,
+                    ) {
+                        let value_type =
+                            encode_named_struct_array_view_expr(expression, context, out)?;
+                        if !context
+                            .types
+                            .is_argument_compatible_with_param(value_type, target_type)
+                        {
+                            return Err(format!(
+                                "web assignment struct-array type mismatch: expected {target_type}, found {value_type}"
+                            ));
+                        }
+                        value_type
+                    } else {
+                        encode_struct_view_expr(expression, context, out)?
+                    };
+                    if !is_named_struct_array_type(
+                        target_type,
+                        context.types,
+                        context.named_structs,
+                    ) {
+                        require_same_struct_type(target_type, value_type, "assignment")?;
+                    }
                     set_struct_view_locals(binding.index, view, out);
                     continue;
                 }
@@ -1733,14 +1935,25 @@ fn encode_statements(
             } => {
                 let index_name = foreach_index_name(item_name, index_name.as_deref());
                 let index = local_binding(context, &index_name)?;
-                let len = collection_len(context, collection_path)?;
                 out.extend([0x41, 0, 0x21]);
                 uleb(index.index, out);
                 out.extend([0x02, 0x40, 0x03, 0x40, 0x20]);
                 uleb(index.index, out);
-                out.push(0x41);
-                sleb(len, out);
-                out.extend([0x4e, 0x0d, 0x01]);
+                if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
+                    let view = binding.local.struct_view.ok_or_else(|| {
+                        "web foreach named-struct array is missing view metadata".to_string()
+                    })?;
+                    out.push(0x20);
+                    uleb(view.len, out);
+                } else if let Some(len) = receiver_struct_collection_len(collection_path, context)?
+                {
+                    out.push(0x41);
+                    sleb(len, out);
+                } else {
+                    out.push(0x41);
+                    sleb(collection_len(context, collection_path)?, out);
+                }
+                out.extend([0x4f, 0x0d, 0x01]);
                 let mut nested = context.clone();
                 nested.foreach.insert(
                     item_name.clone(),
@@ -1779,15 +1992,68 @@ fn encode_receiver_array_compound_assignment(
     else {
         return Ok(false);
     };
+    if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
+        if suffix.is_empty() {
+            return Ok(false);
+        }
+        let field_type = named_struct_array_field_type(&binding, suffix, context)?;
+        encode_local_struct_array_address(&binding, suffix, index, context, out)?;
+        out.push(0x21);
+        uleb(context.saved_address, out);
+        out.push(0x20);
+        uleb(context.saved_address, out);
+        encode_memory_load(field_type, out)?;
+        let value_type = encode_expr_as(expression, Some(field_type), context, out)?;
+        require_same_type(field_type, value_type, "assignment")?;
+        out.push(arithmetic_opcode(op, field_type)?);
+        let value_local = scratch_local(context, field_type)?;
+        out.push(0x21);
+        uleb(value_local, out);
+        out.push(0x20);
+        uleb(context.saved_address, out);
+        out.push(0x20);
+        uleb(value_local, out);
+        encode_memory_store(field_type, out)?;
+        return Ok(true);
+    }
+    if let Some(field_type) =
+        receiver_struct_collection_field_type(collection_path, suffix, context)?
+    {
+        encode_receiver_struct_collection_field_address(
+            collection_path,
+            suffix,
+            index,
+            context,
+            out,
+        )?
+        .expect("receiver field type implies address metadata");
+        out.push(0x21);
+        uleb(context.saved_address, out);
+        out.push(0x20);
+        uleb(context.saved_address, out);
+        encode_memory_load(field_type, out)?;
+        let value_type = encode_expr_as(expression, Some(field_type), context, out)?;
+        require_same_type(field_type, value_type, "assignment")?;
+        out.push(arithmetic_opcode(op, field_type)?);
+        let value_local = scratch_local(context, field_type)?;
+        out.push(0x21);
+        uleb(value_local, out);
+        out.push(0x20);
+        uleb(context.saved_address, out);
+        out.push(0x20);
+        uleb(value_local, out);
+        encode_memory_store(field_type, out)?;
+        return Ok(true);
+    }
     let Some(binding) = receiver_array_binding(context, collection_path, suffix)? else {
         return Ok(false);
     };
 
     encode_receiver_array_address(&binding, index, context, out)?;
     out.push(0x21);
-    uleb(context.scratch_address, out);
+    uleb(context.saved_address, out);
     out.push(0x20);
-    uleb(context.scratch_address, out);
+    uleb(context.saved_address, out);
     encode_memory_load(binding.element_type, out)?;
     let value_type = encode_expr_as(expression, Some(binding.element_type), context, out)?;
     require_same_type(binding.element_type, value_type, "assignment")?;
@@ -1797,7 +2063,7 @@ fn encode_receiver_array_compound_assignment(
     out.push(0x21);
     uleb(value_local, out);
     out.push(0x20);
-    uleb(context.scratch_address, out);
+    uleb(context.saved_address, out);
     out.push(0x20);
     uleb(value_local, out);
     encode_memory_store(binding.element_type, out)?;
@@ -1827,7 +2093,9 @@ fn arithmetic_opcode(op: AssignOp, type_id: TypeId) -> Result<u8, String> {
         (AssignOp::Add, I32) => Ok(0x6a),
         (AssignOp::Sub, I32) => Ok(0x6b),
         (AssignOp::Mul, I32) => Ok(0x6c),
+        (AssignOp::Div, I32) if is_unsigned_i32_lane(type_id) => Ok(0x6e),
         (AssignOp::Div, I32) => Ok(0x6d),
+        (AssignOp::Mod, I32) if is_unsigned_i32_lane(type_id) => Ok(0x70),
         (AssignOp::Mod, I32) => Ok(0x6f),
         (AssignOp::Add, F32) => Ok(0x92),
         (AssignOp::Sub, F32) => Ok(0x93),
@@ -1853,6 +2121,20 @@ fn encode_target_get(
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 encode_foreach_load(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                if is_named_struct_array_type(binding.type_id, context.types, context.named_structs)
+                {
+                    if suffix != "max_length" {
+                        return Err(format!(
+                            "web named-struct array metadata '{suffix}' is unsupported"
+                        ));
+                    }
+                    let view = binding.struct_view.ok_or_else(|| {
+                        "web named-struct array is missing view metadata".to_string()
+                    })?;
+                    out.push(0x20);
+                    uleb(view.len, out);
+                    return Ok(TYPE_ID_I32);
+                }
                 let candidates = collection_meta_candidates(context, suffix);
                 encode_collection_meta_load(
                     binding.index,
@@ -1861,6 +2143,14 @@ fn encode_target_get(
                     context.string_literal_memory,
                     out,
                 )?;
+                Ok(TYPE_ID_I32)
+            } else if let Some(len) = receiver_struct_collection_meta_len(name, context)? {
+                out.push(0x41);
+                sleb(len, out);
+                Ok(TYPE_ID_I32)
+            } else if let Some(len) = receiver_array_meta_len(name, context)? {
+                out.push(0x41);
+                sleb(len, out);
                 Ok(TYPE_ID_I32)
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 encode_struct_field_load(binding, suffix, context, out)
@@ -1890,6 +2180,14 @@ fn encode_target_get(
                     out,
                 )?;
                 Ok(TYPE_ID_I32)
+            } else if let Some(len) = receiver_struct_collection_meta_len(name, context)? {
+                out.push(0x41);
+                sleb(len, out);
+                Ok(TYPE_ID_I32)
+            } else if let Some(len) = receiver_array_meta_len(name, context)? {
+                out.push(0x41);
+                sleb(len, out);
+                Ok(TYPE_ID_I32)
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 encode_struct_field_load(binding, suffix, context, out)
             } else if let Some(binding) = scalar_memory_binding(context, name) {
@@ -1906,10 +2204,31 @@ fn encode_target_get(
             index,
             suffix,
         } => {
+            if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
+                if suffix.is_empty() {
+                    return Err(format!(
+                        "web named-struct array element '{collection_path}' requires view context"
+                    ));
+                }
+                let field =
+                    encode_local_struct_array_address(&binding, suffix, index, context, out)?;
+                encode_memory_load(field.type_id, out)?;
+                return Ok(field.type_id);
+            }
             if suffix.is_empty() {
                 if let Some(local) = context.locals.get(collection_path).copied() {
                     return encode_local_collection_load(local, index, context, out);
                 }
+            }
+            if let Some(field_type) = encode_receiver_struct_collection_field_address(
+                collection_path,
+                suffix,
+                index,
+                context,
+                out,
+            )? {
+                encode_memory_load(field_type, out)?;
+                return Ok(field_type);
             }
             if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
                 encode_receiver_array_address(&binding, index, context, out)?;
@@ -1991,6 +2310,21 @@ fn encode_target_set(
             index,
             suffix,
         } => {
+            if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
+                if suffix.is_empty() {
+                    return Err(format!(
+                        "web named-struct array element '{collection_path}' requires field-wise assignment"
+                    ));
+                }
+                let field_type = named_struct_array_field_type(&binding, suffix, context)?;
+                let temp = scratch_local(context, field_type)?;
+                out.push(0x21);
+                uleb(temp, out);
+                encode_local_struct_array_address(&binding, suffix, index, context, out)?;
+                out.push(0x20);
+                uleb(temp, out);
+                return encode_memory_store(field_type, out);
+            }
             if suffix.is_empty() {
                 if let Some(local) = context.locals.get(collection_path).copied() {
                     let element_type = context
@@ -2004,6 +2338,24 @@ fn encode_target_set(
                     uleb(temp, out);
                     return encode_local_collection_store(local, index, temp, context, out);
                 }
+            }
+            if let Some(field_type) =
+                receiver_struct_collection_field_type(collection_path, suffix, context)?
+            {
+                let temp = scratch_local(context, field_type)?;
+                out.push(0x21);
+                uleb(temp, out);
+                encode_receiver_struct_collection_field_address(
+                    collection_path,
+                    suffix,
+                    index,
+                    context,
+                    out,
+                )?
+                .expect("receiver field type implies address metadata");
+                out.push(0x20);
+                uleb(temp, out);
+                return encode_memory_store(field_type, out);
             }
             if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
                 let temp = scratch_local(context, binding.element_type)?;
@@ -2091,7 +2443,19 @@ fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<Typ
     match target {
         AssignTarget::Local(name) => {
             if let Some((binding, suffix)) = foreach_path(context, name) {
-                Ok(memory_binding(context, &binding.collection_path, suffix)?.type_id)
+                if let Some(collection) =
+                    local_named_struct_array_binding(context, &binding.collection_path)?
+                {
+                    named_struct_array_field_type(&collection, suffix, context)
+                } else if let Some(field_type) = receiver_struct_collection_field_type(
+                    &binding.collection_path,
+                    suffix,
+                    context,
+                )? {
+                    Ok(field_type)
+                } else {
+                    Ok(memory_binding(context, &binding.collection_path, suffix)?.type_id)
+                }
             } else if local_collection_meta(context, name).is_some() {
                 Ok(TYPE_ID_I32)
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
@@ -2112,7 +2476,19 @@ fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<Typ
         }
         AssignTarget::GlobalPath(name) => {
             if let Some((binding, suffix)) = foreach_path(context, name) {
-                Ok(memory_binding(context, &binding.collection_path, suffix)?.type_id)
+                if let Some(collection) =
+                    local_named_struct_array_binding(context, &binding.collection_path)?
+                {
+                    named_struct_array_field_type(&collection, suffix, context)
+                } else if let Some(field_type) = receiver_struct_collection_field_type(
+                    &binding.collection_path,
+                    suffix,
+                    context,
+                )? {
+                    Ok(field_type)
+                } else {
+                    Ok(memory_binding(context, &binding.collection_path, suffix)?.type_id)
+                }
             } else if local_collection_meta(context, name).is_some() {
                 Ok(TYPE_ID_I32)
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
@@ -2131,6 +2507,12 @@ fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<Typ
             suffix,
             ..
         } => {
+            if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
+                if suffix.is_empty() {
+                    return Ok(binding.element_type);
+                }
+                return named_struct_array_field_type(&binding, suffix, context);
+            }
             if suffix.is_empty() {
                 if let Some(local) = context.locals.get(collection_path) {
                     return context
@@ -2141,12 +2523,180 @@ fn target_type(target: &AssignTarget, context: &EncodeContext<'_>) -> Result<Typ
                         });
                 }
             }
+            if let Some(field_type) =
+                receiver_struct_collection_field_type(collection_path, suffix, context)?
+            {
+                return Ok(field_type);
+            }
             if let Some(binding) = receiver_array_binding(context, collection_path, suffix)? {
                 return Ok(binding.element_type);
             }
             Ok(memory_binding(context, collection_path, suffix)?.type_id)
         }
     }
+}
+
+struct LocalNamedStructArrayBinding<'a> {
+    local: &'a LocalBinding,
+    element_type: TypeId,
+    candidates: Vec<&'a StructCollectionBinding>,
+}
+
+fn local_named_struct_array_binding<'a>(
+    context: &'a EncodeContext<'_>,
+    collection_path: &str,
+) -> Result<Option<LocalNamedStructArrayBinding<'a>>, String> {
+    let Some(local) = context.locals.get(collection_path) else {
+        return Ok(None);
+    };
+    let Some(element_type) =
+        named_struct_array_element_type(local.type_id, context.types, context.named_structs)
+    else {
+        return Ok(None);
+    };
+    let candidates = context
+        .struct_collections
+        .values()
+        .filter(|collection| collection.type_id == element_type)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err(format!(
+            "web named-struct array view '{collection_path}' has no compatible storage"
+        ));
+    }
+    let fields = context.named_structs.get(&element_type).ok_or_else(|| {
+        format!("web named-struct array element {element_type} has no field layout")
+    })?;
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidates[..index]
+            .iter()
+            .any(|previous| previous.base == candidate.base)
+        {
+            return Err(format!(
+                "web named-struct array view '{collection_path}' has ambiguous owner identity {}",
+                candidate.base
+            ));
+        }
+        for (suffix, field_type) in fields {
+            let field = candidate.fields.get(suffix).ok_or_else(|| {
+                format!(
+                    "web named-struct array owner {} is missing field plane '{suffix}'",
+                    candidate.base
+                )
+            })?;
+            let expected_width = storage_width(*field_type, context.types, context.named_structs)?;
+            if field.type_id != *field_type
+                || field.width != expected_width
+                || field.stride != expected_width
+            {
+                return Err(format!(
+                    "web named-struct array owner {} has incompatible field plane '{suffix}'",
+                    candidate.base
+                ));
+            }
+        }
+    }
+    Ok(Some(LocalNamedStructArrayBinding {
+        local,
+        element_type,
+        candidates,
+    }))
+}
+
+fn named_struct_array_field_type(
+    binding: &LocalNamedStructArrayBinding<'_>,
+    suffix: &str,
+    context: &EncodeContext<'_>,
+) -> Result<TypeId, String> {
+    context
+        .named_structs
+        .get(&binding.element_type)
+        .and_then(|fields| fields.get(suffix))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "unknown web named-struct array element field '{}.{suffix}'",
+                binding.element_type
+            )
+        })
+}
+
+fn emit_dynamic_index_bounds_check(index_local: u32, len_local: u32, out: &mut Vec<u8>) {
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x20);
+    uleb(len_local, out);
+    out.extend([0x4f, 0x04, 0x40, 0x00, 0x0b]);
+}
+
+fn encode_local_struct_array_address_for_index_local(
+    binding: &LocalNamedStructArrayBinding<'_>,
+    suffix: &str,
+    index_local: u32,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<MemoryBinding, String> {
+    let view = binding
+        .local
+        .struct_view
+        .ok_or_else(|| "web named-struct array binding has no view metadata".to_string())?;
+    let field_type = named_struct_array_field_type(binding, suffix, context)?;
+    let candidates = binding
+        .candidates
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            candidate
+                .fields
+                .get(suffix)
+                .is_some_and(|field| field.type_id == field_type)
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err(format!(
+            "web named-struct array field '{}.{suffix}' has no compatible field plane",
+            binding.element_type
+        ));
+    }
+    let field = encode_selected_field_offset(binding.local.index, suffix, &candidates, out)?;
+    out.push(0x20);
+    uleb(view.index, out);
+    out.push(0x20);
+    uleb(index_local, out);
+    out.push(0x6a);
+    out.push(0x41);
+    sleb(field.stride as i32, out);
+    out.extend([0x6c, 0x6a]);
+    Ok(field)
+}
+
+fn encode_local_struct_array_address(
+    binding: &LocalNamedStructArrayBinding<'_>,
+    suffix: &str,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<MemoryBinding, String> {
+    let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(index_type, context) {
+        return Err(format!(
+            "web collection index must be i32-compatible, found type {index_type}"
+        ));
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+    let view = binding
+        .local
+        .struct_view
+        .ok_or_else(|| "web named-struct array binding has no view metadata".to_string())?;
+    emit_dynamic_index_bounds_check(context.scratch_index, view.len, out);
+    encode_local_struct_array_address_for_index_local(
+        binding,
+        suffix,
+        context.scratch_index,
+        context,
+        out,
+    )
 }
 
 struct ReceiverArrayCandidate<'a> {
@@ -2325,6 +2875,26 @@ fn encode_receiver_array_address(
     Ok(())
 }
 
+fn encode_receiver_array_handle(binding: &ReceiverArrayBinding<'_>, out: &mut Vec<u8>) {
+    fn select(receiver_base: u32, candidates: &[ReceiverArrayCandidate<'_>], out: &mut Vec<u8>) {
+        let Some((candidate, rest)) = candidates.split_first() else {
+            out.push(0x00);
+            return;
+        };
+        out.push(0x20);
+        uleb(receiver_base, out);
+        out.push(0x41);
+        sleb(candidate.base, out);
+        out.extend([0x46, 0x04, I32, 0x41]);
+        sleb(candidate.memory.handle, out);
+        out.push(0x05);
+        select(receiver_base, rest, out);
+        out.push(0x0b);
+    }
+
+    select(binding.receiver.index, &binding.candidates, out);
+}
+
 fn memory_binding<'a>(
     context: &'a EncodeContext<'_>,
     collection_path: &str,
@@ -2342,6 +2912,12 @@ fn memory_binding<'a>(
 }
 
 fn collection_len(context: &EncodeContext<'_>, collection_path: &str) -> Result<i32, String> {
+    if let Some(len) = receiver_struct_collection_len(collection_path, context)? {
+        return Ok(len);
+    }
+    if let Some(binding) = receiver_array_binding(context, collection_path, "")? {
+        return Ok(binding.candidates[0].memory.len);
+    }
     context
         .memory
         .get(collection_path)
@@ -2445,7 +3021,7 @@ fn encode_collection_meta_load(
     out.push(0x20);
     uleb(base_local, out);
     out.push(0x41);
-    sleb(memory.offset as i32, out);
+    sleb(memory.handle, out);
     out.extend([0x46, 0x04, I32]);
     if matches!(suffix, "length" | "char_length") {
         match *backing {
@@ -2515,7 +3091,7 @@ fn encode_collection_meta_store(
     out.push(0x20);
     uleb(base_local, out);
     out.push(0x41);
-    sleb(memory.offset as i32, out);
+    sleb(memory.handle, out);
     out.extend([0x46, 0x04, 0x40]);
     match *backing {
         Some(CollectionMetaBacking::Global(global)) => {
@@ -2539,6 +3115,366 @@ fn encode_collection_meta_store(
     Ok(())
 }
 
+struct ReceiverStructCollectionCandidate<'a> {
+    receiver_base: i32,
+    collection: &'a StructCollectionBinding,
+    slice_len: i32,
+    indexed_receiver: bool,
+}
+
+fn receiver_struct_collection_candidates<'a>(
+    value: &str,
+    context: &'a EncodeContext<'_>,
+) -> Result<Option<(&'a LocalBinding, Vec<ReceiverStructCollectionCandidate<'a>>)>, String> {
+    let Some((receiver_name, field_path)) = value.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(receiver) = context.locals.get(receiver_name).filter(|binding| {
+        binding.struct_view.is_some() && is_struct_view_type(binding.type_id, context.named_structs)
+    }) else {
+        return Ok(None);
+    };
+    let mut candidates = Vec::new();
+    for (owner_path, owner) in context.struct_scalars {
+        if owner.type_id != receiver.type_id {
+            continue;
+        }
+        let child_path = format!("{owner_path}.{field_path}");
+        if let Some(collection) = context.struct_collections.get(&child_path) {
+            let slice_len = context
+                .types
+                .fixed_collection_len(collection.collection_type_id)
+                .unwrap_or(collection.len);
+            candidates.push(ReceiverStructCollectionCandidate {
+                receiver_base: owner.base,
+                collection,
+                slice_len,
+                indexed_receiver: false,
+            });
+        }
+    }
+    for (owner_path, owner) in context.struct_collections {
+        if owner.type_id != receiver.type_id {
+            continue;
+        }
+        let child_path = format!("{owner_path}.{field_path}");
+        if let Some(collection) = context.struct_collections.get(&child_path) {
+            let slice_len = context
+                .types
+                .fixed_collection_len(collection.collection_type_id)
+                .unwrap_or(collection.len);
+            candidates.push(ReceiverStructCollectionCandidate {
+                receiver_base: owner.base,
+                collection,
+                slice_len,
+                indexed_receiver: true,
+            });
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let element_type = candidates[0].collection.type_id;
+    if candidates
+        .iter()
+        .any(|candidate| candidate.collection.type_id != element_type)
+    {
+        return Err(format!(
+            "web receiver named-struct array '{value}' has ambiguous element types"
+        ));
+    }
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidates[..index]
+            .iter()
+            .any(|previous| previous.receiver_base == candidate.receiver_base)
+        {
+            return Err(format!(
+                "web receiver named-struct array '{value}' has ambiguous caller identity {}",
+                candidate.receiver_base
+            ));
+        }
+    }
+    Ok(Some((receiver, candidates)))
+}
+
+fn receiver_struct_collection_len(
+    value: &str,
+    context: &EncodeContext<'_>,
+) -> Result<Option<i32>, String> {
+    let Some((_, candidates)) = receiver_struct_collection_candidates(value, context)? else {
+        return Ok(None);
+    };
+    let len = candidates[0].slice_len;
+    if candidates
+        .iter()
+        .any(|candidate| candidate.slice_len != len)
+    {
+        return Err(format!(
+            "web receiver named-struct array '{value}' has ambiguous lengths"
+        ));
+    }
+    Ok(Some(len))
+}
+
+fn receiver_struct_collection_meta_len(
+    value: &str,
+    context: &EncodeContext<'_>,
+) -> Result<Option<i32>, String> {
+    let Some(collection_path) = value.strip_suffix(".max_length") else {
+        return Ok(None);
+    };
+    receiver_struct_collection_len(collection_path, context)
+}
+
+fn receiver_array_meta_len(
+    value: &str,
+    context: &EncodeContext<'_>,
+) -> Result<Option<i32>, String> {
+    let Some(collection_path) = value.strip_suffix(".max_length") else {
+        return Ok(None);
+    };
+    Ok(receiver_array_binding(context, collection_path, "")?
+        .map(|binding| binding.candidates[0].memory.len))
+}
+
+fn receiver_struct_collection_field_type(
+    collection_path: &str,
+    suffix: &str,
+    context: &EncodeContext<'_>,
+) -> Result<Option<TypeId>, String> {
+    let Some((_, candidates)) = receiver_struct_collection_candidates(collection_path, context)?
+    else {
+        return Ok(None);
+    };
+    if suffix.is_empty() {
+        return Err(format!(
+            "web receiver named-struct array '{collection_path}' requires field access"
+        ));
+    }
+    let field_type = candidates[0]
+        .collection
+        .fields
+        .get(suffix)
+        .map(|field| field.type_id)
+        .ok_or_else(|| {
+            format!("unknown web receiver named-struct field '{collection_path}.{suffix}'")
+        })?;
+    if candidates.iter().any(|candidate| {
+        candidate
+            .collection
+            .fields
+            .get(suffix)
+            .is_none_or(|field| field.type_id != field_type)
+    }) {
+        return Err(format!(
+            "web receiver named-struct field '{collection_path}.{suffix}' has ambiguous layouts"
+        ));
+    }
+    Ok(Some(field_type))
+}
+
+fn encode_receiver_struct_collection_field_address(
+    collection_path: &str,
+    suffix: &str,
+    index: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<Option<TypeId>, String> {
+    let Some((receiver, candidates)) =
+        receiver_struct_collection_candidates(collection_path, context)?
+    else {
+        return Ok(None);
+    };
+    let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(index_type, context) {
+        return Err(format!(
+            "web collection index must be i32-compatible, found type {index_type}"
+        ));
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+
+    let field_type = encode_receiver_struct_collection_field_address_for_index_local(
+        collection_path,
+        receiver,
+        &candidates,
+        suffix,
+        context.scratch_index,
+        out,
+    )?;
+    Ok(Some(field_type))
+}
+
+fn encode_receiver_struct_collection_field_address_for_index_local(
+    collection_path: &str,
+    receiver: &LocalBinding,
+    candidates: &[ReceiverStructCollectionCandidate<'_>],
+    suffix: &str,
+    index_local: u32,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let field_type = candidates[0]
+        .collection
+        .fields
+        .get(suffix)
+        .map(|field| field.type_id)
+        .ok_or_else(|| {
+            format!("unknown web receiver named-struct field '{collection_path}.{suffix}'")
+        })?;
+    if candidates.iter().any(|candidate| {
+        candidate
+            .collection
+            .fields
+            .get(suffix)
+            .is_none_or(|field| field.type_id != field_type)
+    }) {
+        return Err(format!(
+            "web receiver named-struct field '{collection_path}.{suffix}' has ambiguous layouts"
+        ));
+    }
+
+    fn select(
+        receiver: &LocalBinding,
+        index_local: u32,
+        suffix: &str,
+        candidates: &[ReceiverStructCollectionCandidate<'_>],
+        out: &mut Vec<u8>,
+    ) {
+        let Some((candidate, rest)) = candidates.split_first() else {
+            out.push(0x00);
+            return;
+        };
+        let field = &candidate.collection.fields[suffix];
+        out.push(0x20);
+        uleb(receiver.index, out);
+        out.push(0x41);
+        sleb(candidate.receiver_base, out);
+        out.extend([0x46, 0x04, I32]);
+        emit_index_bounds_check(index_local, candidate.slice_len, out);
+        out.push(0x41);
+        sleb(field.offset as i32, out);
+        if candidate.indexed_receiver {
+            let view = receiver
+                .struct_view
+                .expect("receiver struct collection has view metadata");
+            out.push(0x20);
+            uleb(view.index, out);
+            out.push(0x41);
+            sleb(candidate.slice_len, out);
+            out.push(0x6c);
+            out.push(0x20);
+            uleb(index_local, out);
+            out.push(0x6a);
+        } else {
+            out.push(0x20);
+            uleb(index_local, out);
+        }
+        out.push(0x41);
+        sleb(field.stride as i32, out);
+        out.extend([0x6c, 0x6a, 0x05]);
+        select(receiver, index_local, suffix, rest, out);
+        out.push(0x0b);
+    }
+
+    select(receiver, index_local, suffix, candidates, out);
+    Ok(field_type)
+}
+
+#[derive(Clone, Copy)]
+enum StructCollectionViewComponent {
+    Owner,
+    Start,
+    Length,
+}
+
+fn encode_receiver_struct_collection_component(
+    receiver: &LocalBinding,
+    candidates: &[ReceiverStructCollectionCandidate<'_>],
+    component: StructCollectionViewComponent,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((candidate, rest)) = candidates.split_first() else {
+        out.push(0x00);
+        return Ok(());
+    };
+    out.push(0x20);
+    uleb(receiver.index, out);
+    out.push(0x41);
+    sleb(candidate.receiver_base, out);
+    out.extend([0x46, 0x04, I32]);
+    match component {
+        StructCollectionViewComponent::Owner => {
+            out.push(0x41);
+            sleb(candidate.collection.base, out);
+        }
+        StructCollectionViewComponent::Start if candidate.indexed_receiver => {
+            let view = receiver
+                .struct_view
+                .ok_or_else(|| "web receiver is missing view metadata".to_string())?;
+            out.push(0x20);
+            uleb(view.index, out);
+            out.push(0x41);
+            sleb(candidate.slice_len, out);
+            out.push(0x6c);
+        }
+        StructCollectionViewComponent::Start => out.extend([0x41, 0]),
+        StructCollectionViewComponent::Length => {
+            out.push(0x41);
+            sleb(candidate.slice_len, out);
+        }
+    }
+    out.push(0x05);
+    encode_receiver_struct_collection_component(receiver, rest, component, out)?;
+    out.push(0x0b);
+    Ok(())
+}
+
+fn encode_named_struct_array_view_expr(
+    value: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let SimpleExpr::Identifier(name) = value else {
+        return Err(
+            "web named-struct array view must be a collection path or existing view".to_string(),
+        );
+    };
+    if let Some(binding) = context.locals.get(name) {
+        if is_named_struct_array_type(binding.type_id, context.types, context.named_structs) {
+            let view = binding
+                .struct_view
+                .ok_or_else(|| format!("web named-struct array '{name}' has no view storage"))?;
+            for index in [binding.index, view.index, view.len] {
+                out.push(0x20);
+                uleb(index, out);
+            }
+            return Ok(binding.type_id);
+        }
+    }
+    if let Some(collection) = context.struct_collections.get(name) {
+        out.push(0x41);
+        sleb(collection.base, out);
+        out.extend([0x41, 0, 0x41]);
+        let len = context
+            .types
+            .fixed_collection_len(collection.collection_type_id)
+            .unwrap_or(collection.len);
+        sleb(len, out);
+        return Ok(collection.collection_type_id);
+    }
+    if let Some((receiver, candidates)) = receiver_struct_collection_candidates(name, context)? {
+        for component in [
+            StructCollectionViewComponent::Owner,
+            StructCollectionViewComponent::Start,
+            StructCollectionViewComponent::Length,
+        ] {
+            encode_receiver_struct_collection_component(receiver, &candidates, component, out)?;
+        }
+        return Ok(candidates[0].collection.collection_type_id);
+    }
+    Err(format!("unknown web named-struct array view '{name}'"))
+}
+
 fn encode_struct_view_expr(
     value: &SimpleExpr,
     context: &EncodeContext<'_>,
@@ -2557,6 +3493,62 @@ fn encode_struct_view_expr(
                 return Ok(binding.type_id);
             }
             if let Some(binding) = context.foreach.get(name) {
+                if let Some(collection) =
+                    local_named_struct_array_binding(context, &binding.collection_path)?
+                {
+                    let view = collection.local.struct_view.ok_or_else(|| {
+                        "web foreach named-struct array is missing view metadata".to_string()
+                    })?;
+                    out.push(0x20);
+                    uleb(collection.local.index, out);
+                    out.push(0x20);
+                    uleb(view.index, out);
+                    let index = local_binding(context, &binding.index_name)?;
+                    out.push(0x20);
+                    uleb(index.index, out);
+                    out.push(0x6a);
+                    out.push(0x20);
+                    uleb(view.index, out);
+                    out.push(0x20);
+                    uleb(view.len, out);
+                    out.push(0x6a);
+                    return Ok(collection.element_type);
+                }
+                if receiver_struct_collection_candidates(&binding.collection_path, context)?
+                    .is_some()
+                {
+                    let collection_type = encode_named_struct_array_view_expr(
+                        &SimpleExpr::Identifier(binding.collection_path.clone()),
+                        context,
+                        out,
+                    )?;
+                    for local in [context.scratch_i32_c, context.scratch_i32_b] {
+                        out.push(0x21);
+                        uleb(local, out);
+                    }
+                    let index = local_binding(context, &binding.index_name)?;
+                    out.push(0x20);
+                    uleb(context.scratch_i32_b, out);
+                    out.push(0x20);
+                    uleb(index.index, out);
+                    out.push(0x6a);
+                    out.push(0x20);
+                    uleb(context.scratch_i32_b, out);
+                    out.push(0x20);
+                    uleb(context.scratch_i32_c, out);
+                    out.push(0x6a);
+                    return named_struct_array_element_type(
+                        collection_type,
+                        context.types,
+                        context.named_structs,
+                    )
+                    .ok_or_else(|| {
+                        format!(
+                            "web receiver collection '{}' has no named-struct element",
+                            binding.collection_path
+                        )
+                    });
+                }
                 let collection = context
                     .struct_collections
                     .get(&binding.collection_path)
@@ -2587,7 +3579,69 @@ fn encode_struct_view_expr(
             index,
             suffix,
         } if suffix.is_empty() => {
-            let _ = receiver_array_binding(context, collection_path, suffix)?;
+            if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
+                let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
+                if !is_web_index_type(index_type, context) {
+                    return Err("web struct collection index must be i32-compatible".to_string());
+                }
+                out.push(0x21);
+                uleb(context.scratch_index, out);
+                let view = binding.local.struct_view.ok_or_else(|| {
+                    "web named-struct array binding has no view metadata".to_string()
+                })?;
+                emit_dynamic_index_bounds_check(context.scratch_index, view.len, out);
+                out.push(0x20);
+                uleb(binding.local.index, out);
+                out.push(0x20);
+                uleb(view.index, out);
+                out.push(0x20);
+                uleb(context.scratch_index, out);
+                out.push(0x6a);
+                out.push(0x20);
+                uleb(view.index, out);
+                out.push(0x20);
+                uleb(view.len, out);
+                out.push(0x6a);
+                return Ok(binding.element_type);
+            }
+            if receiver_struct_collection_candidates(collection_path, context)?.is_some() {
+                let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
+                if !is_web_index_type(index_type, context) {
+                    return Err("web struct collection index must be i32-compatible".to_string());
+                }
+                out.push(0x21);
+                uleb(context.scratch_index, out);
+                let collection_type = encode_named_struct_array_view_expr(
+                    &SimpleExpr::Identifier(collection_path.clone()),
+                    context,
+                    out,
+                )?;
+                for local in [context.scratch_i32_c, context.scratch_i32_b] {
+                    out.push(0x21);
+                    uleb(local, out);
+                }
+                emit_dynamic_index_bounds_check(context.scratch_index, context.scratch_i32_c, out);
+                out.push(0x20);
+                uleb(context.scratch_i32_b, out);
+                out.push(0x20);
+                uleb(context.scratch_index, out);
+                out.push(0x6a);
+                out.push(0x20);
+                uleb(context.scratch_i32_b, out);
+                out.push(0x20);
+                uleb(context.scratch_i32_c, out);
+                out.push(0x6a);
+                return named_struct_array_element_type(
+                    collection_type,
+                    context.types,
+                    context.named_structs,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "web receiver collection '{collection_path}' has no named-struct element"
+                    )
+                });
+            }
             let collection = context
                 .struct_collections
                 .get(collection_path)
@@ -2598,6 +3652,11 @@ fn encode_struct_view_expr(
             if !is_web_index_type(index_type, context) {
                 return Err("web struct collection index must be i32-compatible".to_string());
             }
+            out.push(0x21);
+            uleb(context.scratch_index, out);
+            emit_index_bounds_check(context.scratch_index, collection.len, out);
+            out.push(0x20);
+            uleb(context.scratch_index, out);
             out.push(0x41);
             sleb(collection.len, out);
             Ok(collection.type_id)
@@ -2620,9 +3679,9 @@ fn encode_struct_collection_copy(
     let source_type = encode_struct_view_expr(source, context, out)?;
     require_same_struct_type(collection.type_id, source_type, "collection assignment")?;
     for local in [
-        context.scratch_i32_c,
-        context.scratch_i32_b,
-        context.scratch_i32,
+        context.saved_view_len,
+        context.saved_view_start,
+        context.saved_view_owner,
     ] {
         out.push(0x21);
         uleb(local, out);
@@ -2636,11 +3695,11 @@ fn encode_struct_collection_copy(
     emit_index_bounds_check(context.scratch_index, collection.len, out);
 
     let source_binding = LocalBinding {
-        index: context.scratch_i32,
+        index: context.saved_view_owner,
         type_id: source_type,
         struct_view: Some(StructViewBinding {
-            index: context.scratch_i32_b,
-            len: context.scratch_i32_c,
+            index: context.saved_view_start,
+            len: context.saved_view_len,
         }),
     };
     for (suffix, target_field) in &collection.fields {
@@ -2658,6 +3717,136 @@ fn encode_struct_collection_copy(
             "struct collection field assignment",
         )?;
         encode_memory_store(target_field.type_id, out)?;
+    }
+    Ok(())
+}
+
+fn encode_local_struct_collection_copy(
+    collection_path: &str,
+    target_index: &SimpleExpr,
+    source: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let target = local_named_struct_array_binding(context, collection_path)?
+        .ok_or_else(|| format!("unknown web named-struct array view '{collection_path}'"))?;
+    let source_type = encode_struct_view_expr(source, context, out)?;
+    require_same_struct_type(target.element_type, source_type, "collection assignment")?;
+    for local in [
+        context.saved_view_len,
+        context.saved_view_start,
+        context.saved_view_owner,
+    ] {
+        out.push(0x21);
+        uleb(local, out);
+    }
+    let target_type = encode_expr_as(target_index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(target_type, context) {
+        return Err("web struct collection index must be i32-compatible".to_string());
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+    let target_view = target
+        .local
+        .struct_view
+        .ok_or_else(|| "web named-struct array is missing view metadata".to_string())?;
+    emit_dynamic_index_bounds_check(context.scratch_index, target_view.len, out);
+
+    let source_binding = LocalBinding {
+        index: context.saved_view_owner,
+        type_id: source_type,
+        struct_view: Some(StructViewBinding {
+            index: context.saved_view_start,
+            len: context.saved_view_len,
+        }),
+    };
+    let fields = context
+        .named_structs
+        .get(&target.element_type)
+        .ok_or_else(|| {
+            format!(
+                "web named-struct array element {} has no field layout",
+                target.element_type
+            )
+        })?;
+    for suffix in fields.keys() {
+        let target_field = encode_local_struct_array_address_for_index_local(
+            &target,
+            suffix,
+            context.scratch_index,
+            context,
+            out,
+        )?;
+        let source_field_type = encode_struct_field_load(&source_binding, suffix, context, out)?;
+        require_same_type(
+            target_field.type_id,
+            source_field_type,
+            "struct collection field assignment",
+        )?;
+        encode_memory_store(target_field.type_id, out)?;
+    }
+    Ok(())
+}
+
+fn encode_receiver_struct_collection_copy(
+    collection_path: &str,
+    target_index: &SimpleExpr,
+    source: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let Some((receiver, candidates)) =
+        receiver_struct_collection_candidates(collection_path, context)?
+    else {
+        return Err(format!(
+            "unknown web receiver named-struct array '{collection_path}'"
+        ));
+    };
+    let target_type = candidates[0].collection.type_id;
+    let source_type = encode_struct_view_expr(source, context, out)?;
+    require_same_struct_type(target_type, source_type, "collection assignment")?;
+    for local in [
+        context.saved_view_len,
+        context.saved_view_start,
+        context.saved_view_owner,
+    ] {
+        out.push(0x21);
+        uleb(local, out);
+    }
+    let index_type = encode_expr_as(target_index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(index_type, context) {
+        return Err("web struct collection index must be i32-compatible".to_string());
+    }
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+
+    let source_binding = LocalBinding {
+        index: context.saved_view_owner,
+        type_id: source_type,
+        struct_view: Some(StructViewBinding {
+            index: context.saved_view_start,
+            len: context.saved_view_len,
+        }),
+    };
+    let fields = context.named_structs.get(&target_type).ok_or_else(|| {
+        format!("web named-struct array element {target_type} has no field layout")
+    })?;
+    for suffix in fields.keys() {
+        let target_field = encode_receiver_struct_collection_field_address_for_index_local(
+            collection_path,
+            receiver,
+            &candidates,
+            suffix,
+            context.scratch_index,
+            out,
+        )?;
+        let source_field_type = encode_struct_field_load(&source_binding, suffix, context, out)?;
+        require_same_type(
+            target_field,
+            source_field_type,
+            "struct collection field assignment",
+        )?;
+        encode_memory_store(target_field, out)?;
     }
     Ok(())
 }
@@ -2757,6 +3946,7 @@ fn encode_struct_field_address(
         // Keep the unreachable collection arm valid without inventing storage.
         out.push(0x00);
         return Ok(MemoryBinding {
+            handle: 0,
             offset: 0,
             type_id: field_type,
             len: 0,
@@ -2888,6 +4078,41 @@ fn encode_foreach_load(
     context: &EncodeContext<'_>,
     out: &mut Vec<u8>,
 ) -> Result<TypeId, String> {
+    if let Some(collection) = local_named_struct_array_binding(context, &binding.collection_path)? {
+        if suffix.is_empty() {
+            return Err("web foreach named-struct element requires field access".to_string());
+        }
+        let index = local_binding(context, &binding.index_name)?;
+        let field = encode_local_struct_array_address_for_index_local(
+            &collection,
+            suffix,
+            index.index,
+            context,
+            out,
+        )?;
+        encode_memory_load(field.type_id, out)?;
+        return Ok(field.type_id);
+    }
+    if let Some(field_type) = encode_receiver_struct_collection_field_address(
+        &binding.collection_path,
+        suffix,
+        &SimpleExpr::Identifier(binding.index_name.clone()),
+        context,
+        out,
+    )? {
+        encode_memory_load(field_type, out)?;
+        return Ok(field_type);
+    }
+    if let Some(receiver) = receiver_array_binding(context, &binding.collection_path, suffix)? {
+        encode_receiver_array_address(
+            &receiver,
+            &SimpleExpr::Identifier(binding.index_name.clone()),
+            context,
+            out,
+        )?;
+        encode_memory_load(receiver.element_type, out)?;
+        return Ok(receiver.element_type);
+    }
     let memory = memory_binding(context, &binding.collection_path, suffix)?;
     encode_memory_address(
         memory,
@@ -2905,6 +4130,58 @@ fn encode_foreach_store(
     context: &EncodeContext<'_>,
     out: &mut Vec<u8>,
 ) -> Result<(), String> {
+    if let Some(collection) = local_named_struct_array_binding(context, &binding.collection_path)? {
+        if suffix.is_empty() {
+            return Err("web foreach named-struct element requires field access".to_string());
+        }
+        let field_type = named_struct_array_field_type(&collection, suffix, context)?;
+        let temp = scratch_local(context, field_type)?;
+        out.push(0x21);
+        uleb(temp, out);
+        let index = local_binding(context, &binding.index_name)?;
+        encode_local_struct_array_address_for_index_local(
+            &collection,
+            suffix,
+            index.index,
+            context,
+            out,
+        )?;
+        out.push(0x20);
+        uleb(temp, out);
+        return encode_memory_store(field_type, out);
+    }
+    if let Some(field_type) =
+        receiver_struct_collection_field_type(&binding.collection_path, suffix, context)?
+    {
+        let temp = scratch_local(context, field_type)?;
+        out.push(0x21);
+        uleb(temp, out);
+        encode_receiver_struct_collection_field_address(
+            &binding.collection_path,
+            suffix,
+            &SimpleExpr::Identifier(binding.index_name.clone()),
+            context,
+            out,
+        )?
+        .expect("receiver field type implies address metadata");
+        out.push(0x20);
+        uleb(temp, out);
+        return encode_memory_store(field_type, out);
+    }
+    if let Some(receiver) = receiver_array_binding(context, &binding.collection_path, suffix)? {
+        let temp = scratch_local(context, receiver.element_type)?;
+        out.push(0x21);
+        uleb(temp, out);
+        encode_receiver_array_address(
+            &receiver,
+            &SimpleExpr::Identifier(binding.index_name.clone()),
+            context,
+            out,
+        )?;
+        out.push(0x20);
+        uleb(temp, out);
+        return encode_memory_store(receiver.element_type, out);
+    }
     let memory = memory_binding(context, &binding.collection_path, suffix)?;
     let temp_index = scratch_local(context, memory.type_id)?;
     out.push(0x21);
@@ -3016,7 +4293,7 @@ fn encode_registered_collection_store(
     out.push(0x20);
     uleb(handle_local, out);
     out.push(0x41);
-    sleb(memory.offset as i32, out);
+    sleb(memory.handle, out);
     out.extend([0x46, 0x04, 0x40]);
     if wasm_value_type(memory.type_id)? != wasm_value_type(element_type)? {
         return Err(format!(
@@ -3124,7 +4401,7 @@ fn encode_registered_collection_load(
     out.push(0x20);
     uleb(handle_local, out);
     out.push(0x41);
-    sleb(memory.offset as i32, out);
+    sleb(memory.handle, out);
     let element_lane = wasm_value_type(element_type)?;
     let memory_lane = wasm_value_type(memory.type_id)?;
     if memory_lane != element_lane {
@@ -3369,7 +4646,17 @@ fn encode_call_arguments(
     }
     let mut encoded = Vec::new();
     for (arg, param_type) in args.iter().zip(signature.params.iter()) {
-        if is_struct_view_type(*param_type, context.named_structs) {
+        if is_named_struct_array_type(*param_type, context.types, context.named_structs) {
+            let actual = encode_named_struct_array_view_expr(arg, context, &mut encoded)?;
+            if !context
+                .types
+                .is_argument_compatible_with_param(actual, *param_type)
+            {
+                return Err(format!(
+                    "web call argument type mismatch: expected {param_type}, found {actual}"
+                ));
+            }
+        } else if is_struct_view_type(*param_type, context.named_structs) {
             let actual = encode_struct_view_expr(arg, context, &mut encoded)?;
             require_same_struct_type(*param_type, actual, "call argument")?;
         } else {
@@ -3493,10 +4780,49 @@ fn infer_struct_view_type(value: &SimpleExpr, context: &EncodeContext<'_>) -> Op
             .map(|binding| binding.type_id)
             .or_else(|| {
                 context
-                    .foreach
+                    .struct_collections
                     .get(name)
-                    .and_then(|binding| context.struct_collections.get(&binding.collection_path))
-                    .map(|binding| binding.type_id)
+                    .map(|binding| binding.collection_type_id)
+            })
+            .or_else(|| {
+                receiver_struct_collection_candidates(name, context)
+                    .ok()
+                    .flatten()
+                    .and_then(|(_, candidates)| {
+                        candidates
+                            .first()
+                            .map(|candidate| candidate.collection.collection_type_id)
+                    })
+            })
+            .or_else(|| {
+                context.foreach.get(name).and_then(|binding| {
+                    context
+                        .locals
+                        .get(&binding.collection_path)
+                        .and_then(|local| {
+                            named_struct_array_element_type(
+                                local.type_id,
+                                context.types,
+                                context.named_structs,
+                            )
+                        })
+                        .or_else(|| {
+                            receiver_struct_collection_candidates(&binding.collection_path, context)
+                                .ok()
+                                .flatten()
+                                .and_then(|(_, candidates)| {
+                                    candidates
+                                        .first()
+                                        .map(|candidate| candidate.collection.type_id)
+                                })
+                        })
+                        .or_else(|| {
+                            context
+                                .struct_collections
+                                .get(&binding.collection_path)
+                                .map(|collection| collection.type_id)
+                        })
+                })
             })
             .or_else(|| {
                 context
@@ -3509,9 +4835,27 @@ fn infer_struct_view_type(value: &SimpleExpr, context: &EncodeContext<'_>) -> Op
             suffix,
             ..
         } if suffix.is_empty() => context
-            .struct_collections
+            .locals
             .get(collection_path)
-            .map(|binding| binding.type_id),
+            .and_then(|local| {
+                named_struct_array_element_type(local.type_id, context.types, context.named_structs)
+            })
+            .or_else(|| {
+                receiver_struct_collection_candidates(collection_path, context)
+                    .ok()
+                    .flatten()
+                    .and_then(|(_, candidates)| {
+                        candidates
+                            .first()
+                            .map(|candidate| candidate.collection.type_id)
+                    })
+            })
+            .or_else(|| {
+                context
+                    .struct_collections
+                    .get(collection_path)
+                    .map(|binding| binding.type_id)
+            }),
         _ => None,
     }
 }
@@ -3570,6 +4914,20 @@ fn encode_expr_as(
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 encode_foreach_load(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                if is_named_struct_array_type(binding.type_id, context.types, context.named_structs)
+                {
+                    if suffix != "max_length" {
+                        return Err(format!(
+                            "web named-struct array metadata '{suffix}' is unsupported"
+                        ));
+                    }
+                    let view = binding.struct_view.ok_or_else(|| {
+                        "web named-struct array is missing view metadata".to_string()
+                    })?;
+                    out.push(0x20);
+                    uleb(view.len, out);
+                    return Ok(TYPE_ID_I32);
+                }
                 let candidates = collection_meta_candidates(context, suffix);
                 encode_collection_meta_load(
                     binding.index,
@@ -3579,6 +4937,22 @@ fn encode_expr_as(
                     out,
                 )?;
                 Ok(TYPE_ID_I32)
+            } else if let Some(len) = receiver_struct_collection_meta_len(name, context)? {
+                out.push(0x41);
+                sleb(len, out);
+                Ok(TYPE_ID_I32)
+            } else if let Some(len) = receiver_array_meta_len(name, context)? {
+                out.push(0x41);
+                sleb(len, out);
+                Ok(TYPE_ID_I32)
+            } else if expected
+                .is_some_and(|type_id| context.types.indexed_element_type_id(type_id).is_some())
+                && receiver_array_binding(context, name, "")?.is_some()
+            {
+                let binding = receiver_array_binding(context, name, "")?
+                    .expect("receiver array binding checked above");
+                encode_receiver_array_handle(&binding, out);
+                Ok(expected.expect("collection view expectation checked above"))
             } else if let Some((binding, suffix)) = local_struct_path(context, name) {
                 encode_struct_field_load(binding, suffix, context, out)
             } else if let Some(binding) = context.locals.get(name) {
@@ -3596,7 +4970,7 @@ fn encode_expr_as(
                     Ok(binding.type_id)
                 } else {
                     out.push(0x41);
-                    sleb(binding.offset as i32, out);
+                    sleb(binding.handle, out);
                     Ok(expected.unwrap_or(TYPE_ID_I32))
                 }
             } else if let Some(index) = context.globals.get(name) {
@@ -3646,13 +5020,25 @@ fn encode_expr_as(
             suffix,
         } => {
             if suffix.is_empty()
-                && expected
-                    .is_some_and(|type_id| is_struct_view_type(type_id, context.named_structs))
+                && expected.is_some_and(|type_id| {
+                    is_wasm_struct_view_type(type_id, context.types, context.named_structs)
+                })
             {
                 let _ = receiver_array_binding(context, collection_path, suffix)?;
                 return Err(format!(
                     "web struct collection element '{collection_path}' requires view context"
                 ));
+            }
+            if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
+                if suffix.is_empty() {
+                    return Err(format!(
+                        "web named-struct array element '{collection_path}' requires view context"
+                    ));
+                }
+                let field =
+                    encode_local_struct_array_address(&binding, suffix, index, context, out)?;
+                encode_memory_load(field.type_id, out)?;
+                return Ok(field.type_id);
             }
             if suffix.is_empty() {
                 if let Some(local) = context.locals.get(collection_path).copied() {
@@ -3835,9 +5221,13 @@ fn comparison_opcode(op: ComparisonOp, type_id: TypeId) -> Result<u8, String> {
     match (op, wasm_value_type(type_id)?) {
         (ComparisonOp::Eq, I32) => Ok(0x46),
         (ComparisonOp::Ne, I32) => Ok(0x47),
+        (ComparisonOp::Lt, I32) if is_unsigned_i32_lane(type_id) => Ok(0x49),
         (ComparisonOp::Lt, I32) => Ok(0x48),
+        (ComparisonOp::Gt, I32) if is_unsigned_i32_lane(type_id) => Ok(0x4b),
         (ComparisonOp::Gt, I32) => Ok(0x4a),
+        (ComparisonOp::Le, I32) if is_unsigned_i32_lane(type_id) => Ok(0x4d),
         (ComparisonOp::Le, I32) => Ok(0x4c),
+        (ComparisonOp::Ge, I32) if is_unsigned_i32_lane(type_id) => Ok(0x4f),
         (ComparisonOp::Ge, I32) => Ok(0x4e),
         (ComparisonOp::Eq, F32) => Ok(0x5b),
         (ComparisonOp::Ne, F32) => Ok(0x5c),
@@ -4025,6 +5415,36 @@ mod tests {
         0
     }
 
+    fn exported_function_names(module: &[u8]) -> Vec<String> {
+        let mut cursor = 8;
+        while cursor < module.len() {
+            let section_id = module[cursor];
+            cursor += 1;
+            let section_len = read_test_uleb(module, &mut cursor) as usize;
+            let section_end = cursor + section_len;
+            if section_id != 7 {
+                cursor = section_end;
+                continue;
+            }
+            let count = read_test_uleb(module, &mut cursor);
+            let mut names = Vec::new();
+            for _ in 0..count {
+                let name_len = read_test_uleb(module, &mut cursor) as usize;
+                let name = String::from_utf8(module[cursor..cursor + name_len].to_vec())
+                    .expect("valid export name");
+                cursor += name_len;
+                let kind = module[cursor];
+                cursor += 1;
+                let _index = read_test_uleb(module, &mut cursor);
+                if kind == 0 {
+                    names.push(name);
+                }
+            }
+            return names;
+        }
+        Vec::new()
+    }
+
     #[test]
     fn encodes_one_unsigned_bounds_trap_for_both_invalid_regions() {
         let mut bytes = Vec::new();
@@ -4037,6 +5457,22 @@ mod tests {
                 "unsigned comparison changed bounds semantics for {index}"
             );
         }
+    }
+
+    #[test]
+    fn uses_unsigned_wasm_opcodes_for_unsigned_integer_lanes() {
+        for type_id in [TYPE_ID_U8, TYPE_ID_U16, TYPE_ID_U32] {
+            assert_eq!(arithmetic_opcode(AssignOp::Div, type_id), Ok(0x6e));
+            assert_eq!(arithmetic_opcode(AssignOp::Mod, type_id), Ok(0x70));
+            assert_eq!(comparison_opcode(ComparisonOp::Lt, type_id), Ok(0x49));
+            assert_eq!(comparison_opcode(ComparisonOp::Gt, type_id), Ok(0x4b));
+            assert_eq!(comparison_opcode(ComparisonOp::Le, type_id), Ok(0x4d));
+            assert_eq!(comparison_opcode(ComparisonOp::Ge, type_id), Ok(0x4f));
+        }
+        assert_eq!(arithmetic_opcode(AssignOp::Div, TYPE_ID_I32), Ok(0x6d));
+        assert_eq!(arithmetic_opcode(AssignOp::Mod, TYPE_ID_I32), Ok(0x6f));
+        assert_eq!(comparison_opcode(ComparisonOp::Lt, TYPE_ID_I32), Ok(0x48));
+        assert_eq!(comparison_opcode(ComparisonOp::Ge, TYPE_ID_I32), Ok(0x4e));
     }
 
     #[test]
@@ -4092,6 +5528,25 @@ mod tests {
                 .windows(name.len())
                 .any(|window| window == name.as_bytes()));
         }
+    }
+
+    #[test]
+    fn parameterized_tick_is_not_a_wasm_host_export() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "web.stasis",
+            "function tick(value: i32): i32 { return value; }\n\
+             function tick(): i32 { return 7; }\n\
+             function main(): i32 { return tick(1); }\n\
+             function render(): i32 { return 0; }\n",
+        );
+        process.compile().expect("compile overloaded web tick");
+
+        let exports = exported_function_names(process.module_bytes());
+        assert_eq!(exports.iter().filter(|name| *name == "tick").count(), 1);
+        assert!(exports.iter().any(|name| name == "main"));
+        assert!(exports.iter().any(|name| name == "render"));
     }
 
     #[test]
@@ -4206,7 +5661,7 @@ function render(): i32 { return 0; }
     }
 
     #[test]
-    fn passes_fixed_collection_offsets_to_array_view_host_imports() {
+    fn publishes_opaque_collection_handles_for_array_view_host_imports() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
         process.upsert_file(
@@ -4215,10 +5670,79 @@ function render(): i32 { return 0; }
         );
         process.compile().expect("compile web audio view module");
         assert_eq!(process.memory_layout()["samples"].offset, 0);
+        assert_ne!(
+            process.memory_layout()["samples"].handle,
+            process.memory_layout()["samples"].offset as i32
+        );
         assert!(process
             .module_bytes()
             .windows("audio_push_f32_interleaved".len())
             .any(|window| window == b"audio_push_f32_interleaved"));
+        assert!(process
+            .module_bytes()
+            .windows("__stasis_collection_view_abi_version".len())
+            .any(|window| window == b"__stasis_collection_view_abi_version"));
+    }
+
+    #[test]
+    fn zero_extent_collections_share_no_identity_or_storage_bytes() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into()]);
+        process.upsert_file(
+            "zero_views.stasis",
+            "global first: i32[0]; global second: i32[0]; global values: i32[2]; function inspect(view: i32[]): i32 { return view.max_length; } function main(): i32 { return inspect(first) + inspect(second) + inspect(values); }",
+        );
+        process.compile().expect("compile zero-extent web views");
+
+        let first = &process.memory_layout()["first"];
+        let second = &process.memory_layout()["second"];
+        let values = &process.memory_layout()["values"];
+        assert_eq!((first.offset, second.offset, values.offset), (0, 0, 0));
+        assert_eq!((first.length, second.length, values.length), (0, 0, 2));
+        assert_ne!(first.handle, 0);
+        assert_ne!(second.handle, 0);
+        assert_ne!(values.handle, 0);
+        assert_ne!(first.handle, second.handle);
+        assert_ne!(first.handle, values.handle);
+        assert_ne!(second.handle, values.handle);
+    }
+
+    #[test]
+    fn zero_extent_only_module_keeps_handles_without_exporting_memory() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into()]);
+        process.upsert_file(
+            "zero_only_views.stasis",
+            "global first: i32[0]; global second: i32[0]; extern function capture(view: i32[]): i32; function main(): i32 { return capture(first) + capture(second); }",
+        );
+        process
+            .compile()
+            .expect("compile memory-free zero-extent web views");
+
+        assert_eq!(section_entry_count(process.module_bytes(), 5), 0);
+        assert_ne!(
+            process.memory_layout()["first"].handle,
+            process.memory_layout()["second"].handle
+        );
+    }
+
+    #[test]
+    fn keeps_named_struct_array_views_off_the_host_abi() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into()]);
+        process.upsert_file(
+            "struct_view_import.stasis",
+            "struct Item { value: i32; } global items: Item[2]; extern function consume(values: Item[]): i32; function main(): i32 { return consume(items); }",
+        );
+        let error = process
+            .compile()
+            .expect_err("named-struct views must remain an internal web convention");
+        assert!(
+            format!("{error:?}").contains(
+                "web extern 'consume' cannot expose the internal named-struct array-view convention"
+            ),
+            "unexpected named-struct host ABI diagnostic: {error:?}"
+        );
     }
 
     #[test]
@@ -4520,22 +6044,97 @@ function render(): i32 { return 0; }
     }
 
     #[test]
-    fn rejects_whole_receiver_struct_array_elements_with_stable_error() {
+    fn forwards_receiver_named_struct_array_views_with_foreach_and_copy() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into()]);
         process.upsert_file(
-            "whole_receiver_element.stasis",
-            "struct Bone { parent: i32; } struct Rig { bones: Bone[2]; } global rig: Rig; function read(value: Bone): i32 { return value.parent; } function inspect(self: Rig): i32 { return read(self.bones[0]); } function main(): i32 { return rig.inspect(); }",
-        );
-        let error = process
-            .compile()
-            .expect_err("whole receiver struct-array elements must stay unsupported");
-        assert!(
-            format!("{error:?}")
-                .contains("does not support whole-element access; access a named scalar field"),
-            "unexpected whole-element diagnostic: {error:?}"
-        );
+            "receiver_array_views.stasis",
+            r#"
+struct ViewItem { value: i32; }
+struct ViewBox { items: ViewItem[2]; }
+struct ViewOuter { inner: ViewBox; }
 
+global view_left: ViewBox;
+global view_right: ViewBox;
+global view_nested: ViewOuter;
+
+function view_fill(self: ViewBox, base: i32): void {
+    self.items[0].value = base;
+    self.items[1].value = base + 1;
+}
+
+function view_sum(items: ViewItem[]): i32 {
+    let total: i32 = 0;
+    foreach (let item in items) {
+        total += item.value;
+    }
+    return total + items.max_length;
+}
+
+function view_copy_first(items: ViewItem[]): void {
+    items[1] = items[0];
+}
+
+function view_copy_receiver(self: ViewBox): void {
+    self.items[0] = self.items[1];
+}
+
+function view_item_value(item: ViewItem): i32 {
+    return item.value;
+}
+
+function view_box_score(self: ViewBox): i32 {
+    return view_sum(self.items) + view_item_value(self.items[0]);
+}
+
+function view_nested_score(self: ViewOuter): i32 {
+    return view_sum(self.inner.items) + view_item_value(self.inner.items[0]);
+}
+
+function main(): i32 {
+    view_left.view_fill(10);
+    view_right.view_fill(20);
+    view_nested.inner.view_fill(30);
+    view_copy_first(view_left.items);
+    view_right.view_copy_receiver();
+    return view_left.view_box_score() + view_right.view_box_score() + view_nested.view_nested_score();
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("compile forwarded receiver named-struct array views for web");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_receiver_array_views_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes())
+            .expect("write forwarded receiver array-view wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run forwarded receiver array-view wasm in Node");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "190");
+    }
+
+    #[test]
+    fn rejects_unbacked_receiver_struct_array_views_with_stable_error() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into()]);
         process.upsert_file(
@@ -4546,7 +6145,7 @@ function render(): i32 { return 0; }
             .compile()
             .expect_err("receiver struct-array views must stay unsupported");
         assert!(
-            format!("{error:?}").contains("has no supported layout"),
+            format!("{error:?}").contains("cannot store view type 'Bone[]'"),
             "unexpected receiver array layout diagnostic: {error:?}"
         );
     }
@@ -4676,8 +6275,8 @@ function render(): i32 { return 0; }
         }
         assert_eq!(
             section_entry_count(process.module_bytes(), 6),
-            1,
-            "only the true top-level scalar should remain a Wasm global"
+            2,
+            "only the true top-level scalar and collection-view ABI marker should be Wasm globals"
         );
         assert_eq!(
             section_entry_count(process.module_bytes(), 11),

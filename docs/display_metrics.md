@@ -132,14 +132,17 @@ and tier key before becoming drawable.
 
 SVG entries are keyed by canonical source identity, logical target extent, the
 current raster scale, and the fixed raster options used by the shared runtime.
-Font and cached-text entries use logical font size plus the same raster scale.
-Raster dimensions use checked, bounded `ceil(logical_extent * raster_scale)`;
-the logical draw size remains unchanged.
+Font and cached-text entries use logical font size plus a bounded backing scale.
+Desktop fonts use at least 2x backing resolution for small fitted text, or the
+higher current raster scale up to 8x, and use linear filtering when drawn down.
+Raster dimensions use checked, bounded `ceil(logical_extent * font_scale)`;
+measurement, layout, and draw geometry divide by that exact scale, so the
+logical size remains unchanged.
 
-Desktop resource extent calculation uses the exact integer logical/full-backing
-ratio rather than applying `ceil` to a rounded floating-point scale. For
-example, an 18-pixel font at a `1920 / 720` backing ratio prepares exactly 48
-pixels, not 49 due to binary float drift. With `STASIS_GFX_LOG_SPRITES=1`, each
+Desktop sprite extent calculation uses the exact integer logical/full-backing
+ratio rather than applying `ceil` to a rounded floating-point scale. Font
+backing uses the bounded font scale described above. With
+`STASIS_GFX_LOG_SPRITES=1`, each
 successful initial or replacement preparation emits a current-resource receipt
 containing its handle, source bytes, logical and raster extents, and density
 generation; font receipts also include the live atlas extent.

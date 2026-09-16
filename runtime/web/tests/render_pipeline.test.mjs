@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 const MAGIC = 1196967473;
@@ -57,7 +58,7 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
   return gl;
 }
 
-async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null } = {}) {
+async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "" } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, I32_COUNT);
   const f32 = new Float32Array(memory.buffer, F32_OFFSET, F32_COUNT);
@@ -89,7 +90,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     getBoundingClientRect: () => ({ left: 0, top: 0, width: cssExtent[0], height: cssExtent[1] }),
     addEventListener(type, callback) { canvasListeners.set(type, callback); }, setPointerCapture() {}, focus() {}, requestFullscreen: async () => {}
   };
-  const hud = { textContent: "" };
+  const hud = { textContent: "", hidden: false, dataset: {}, setAttribute(name, value) { this[name] = value; } };
   const body = { dataset: {} };
   const offscreenListeners = new Map();
   const offscreen = {
@@ -196,13 +197,27 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       });
     }
   }};
+  const game = {
+    memory: {
+      gfx_cmd_i32: { offset: 0, length: I32_COUNT },
+      gfx_cmd_f32: { offset: F32_OFFSET, length: F32_COUNT },
+      host_i32: { offset: 900000, length: 768 },
+      host_f32: { offset: 903072, length: 64 },
+    },
+    strings: {}, assets, asset_metadata: assetMetadata,
+  };
+  installCollectionViewAbi(game, instance.exports);
   const raf = [];
+  const windowListeners = new Map();
+  const location = { search: hudQuery, origin: "https://example.test", protocol: "https:", host: "example.test", hash: "" };
   const contextObject = {
     document, screen: { width: 640, height: 360 }, devicePixelRatio: 1,
-    performance: { now: () => now }, WebAssembly: { instantiate: async (_bytes, imports) => { env = imports.env; return { instance }; } },
+    location,
+    URLSearchParams,
+    performance: { now: () => now }, WebAssembly: { Global: WebAssembly.Global, instantiate: async (_bytes, imports) => { env = imports.env; return { instance }; } },
     fetch: async source => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0), blob: async () => fetchBlob ? fetchBlob(source) : { source } }),
     requestAnimationFrame: callback => { raf.push(callback); return raf.length; }, cancelAnimationFrame() {},
-    addEventListener() {}, console, Image: class { constructor() { stats.imageConstructed += 1; this.complete = imageReady; this.naturalWidth = imageReady ? imageExtent[0] : 0; this.naturalHeight = imageReady ? imageExtent[1] : 0; } decode() { stats.imageDecodeCalls += 1; return imageDecode ? imageDecode(this) : Promise.resolve(); } }, FontFace: class { load() { return Promise.resolve(this); } },
+    addEventListener(type, callback) { windowListeners.set(type, callback); }, console, Image: class { constructor() { stats.imageConstructed += 1; this.complete = imageReady; this.naturalWidth = imageReady ? imageExtent[0] : 0; this.naturalHeight = imageReady ? imageExtent[1] : 0; } decode() { stats.imageDecodeCalls += 1; return imageDecode ? imageDecode(this) : Promise.resolve(); } }, FontFace: class { load() { return Promise.resolve(this); } },
     AudioContext: class { constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; } close() {} resume() {} },
     TextDecoder, TextEncoder, setTimeout, clearTimeout, devicePixelRatio: dpr,
   };
@@ -212,7 +227,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       return createImageBitmap(source, options, stats.bitmapCalls.length);
     };
   }
-  contextObject.window = { STASIS_GAME: { memory: { gfx_cmd_i32: { offset: 0, length: I32_COUNT }, gfx_cmd_f32: { offset: F32_OFFSET, length: F32_COUNT }, host_i32: { offset: 900000, length: 768 }, host_f32: { offset: 903072, length: 64 } }, strings: {}, assets, asset_metadata: assetMetadata }, screen: contextObject.screen };
+  contextObject.window = { STASIS_GAME: game, screen: contextObject.screen };
   vm.runInNewContext(source, contextObject, { filename: "runtime/web/game.js" });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
@@ -228,6 +243,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       contextObject.window.STASIS_GAME.strings[textId] = text;
       textFixture = { font, handle: env.stasis_jit_gfx_cache_text(font, textId) };
     },
+    dispatchKey: event => windowListeners.get("keydown")?.(event),
     loseContext: () => { stats.contextLost = true; canvasListeners.get("webglcontextlost")?.({ preventDefault() {} }); },
     restoreContext: () => { stats.contextLost = false; canvasListeners.get("webglcontextrestored")?.({}); }
   };
@@ -1239,4 +1255,29 @@ test("runtime publishes split timing phases and HUD labels", async () => {
   assert.match(runtime.hud.textContent, /guest render/);
   assert.match(runtime.hud.textContent, /host replay/);
   assert.match(runtime.hud.textContent, /frame work/);
+});
+
+test("performance HUD is hidden by default while telemetry remains available", async () => {
+  const runtime = await loadRuntime({ timing: true });
+  assert.equal(runtime.hud.hidden, true);
+  assert.equal(runtime.hud.dataset.visible, "false");
+  runtime.frame();
+  assert.equal(runtime.body.dataset.tickMs, "2.000");
+  assert.match(runtime.hud.textContent, /frame work/);
+  let prevented = false;
+  runtime.dispatchKey({ code: "F3", preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(runtime.hud.hidden, false);
+  assert.equal(runtime.hud.dataset.visible, "true");
+  assert.equal(runtime.hud["aria-hidden"], "false");
+  runtime.dispatchKey({ code: "F3", preventDefault() {} });
+  assert.equal(runtime.hud.hidden, true);
+  assert.equal(runtime.hud.dataset.visible, "false");
+});
+
+test("performance HUD query opt-in starts development overlay visible", async () => {
+  const runtime = await loadRuntime({ hudQuery: "?stasis-hud=1" });
+  assert.equal(runtime.hud.hidden, false);
+  assert.equal(runtime.hud.dataset.visible, "true");
+  assert.equal(runtime.hud["aria-hidden"], "false");
 });

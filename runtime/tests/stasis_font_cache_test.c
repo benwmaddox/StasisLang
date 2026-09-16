@@ -17,6 +17,7 @@ int stasis_init_window(int width, int height, const char* title);
 void stasis_shutdown(void);
 int stasis_set_asset_root(const char* path);
 int stasis_load_font(const char* path, int font_size);
+void stasis_gfx_release_font(int handle);
 int stasis_gfx_cache_text(int font, const char* text);
 int stasis_gfx_replace_text(int handle, int font, const char* text);
 float stasis_gfx_measure_text_cached(int handle);
@@ -102,9 +103,17 @@ int main(void) {
     int second_size = stasis_load_font(STASIS_TEST_FONT_PATH, 20);
     CHECK(second_size > 0);
     CHECK(second_size != first);
+    int retained_fixed_run = stasis_gfx_cache_text(second_size, "retained before compaction");
+    CHECK(retained_fixed_run > 0);
 
     int fixed_run = stasis_gfx_cache_text(first, "score 0");
     CHECK(fixed_run > 0);
+    for (int i = 0; i < 16; i++) stasis_gfx_release_font(first);
+    CHECK(stasis_gfx_measure_text_cached(fixed_run) > 0.0f);
+    int shared_first = stasis_load_font(STASIS_TEST_FONT_PATH, 18);
+    CHECK(shared_first == first);
+    stasis_gfx_release_font(shared_first);
+    CHECK(stasis_gfx_measure_text_cached(fixed_run) > 0.0f);
     CHECK(stasis_gfx_cache_text(first, "score 0") == fixed_run);
     int dynamic_run = stasis_gfx_replace_text(fixed_run, first, "score 0");
     CHECK(dynamic_run > 0 && dynamic_run != fixed_run);
@@ -139,6 +148,50 @@ int main(void) {
     int large = stasis_load_font(STASIS_TEST_FONT_PATH, 100);
     CHECK(large > 0);
     CHECK(stasis_load_font(STASIS_TEST_FONT_PATH, 100) == large);
+
+    stasis_gfx_release_font(first);
+    CHECK(stasis_gfx_measure_text_cached(fixed_run) == 0.0f);
+    CHECK(stasis_gfx_measure_text_cached(dynamic_run) == prior_width);
+    CHECK(stasis_gfx_cache_text(first, "stale handle") == 0);
+    int appended_after_compaction = stasis_gfx_cache_text(second_size, "appended after compaction");
+    CHECK(appended_after_compaction > 0);
+    stasis_gfx_release_font(large);
+    CHECK(stasis_gfx_measure_text_cached(retained_fixed_run) > 0.0f);
+    CHECK(stasis_gfx_measure_text_cached(appended_after_compaction) > 0.0f);
+    stasis_gfx_release_font(large);
+    stasis_gfx_release_font(second_size);
+    int reused = stasis_load_font(STASIS_TEST_FONT_PATH, 19);
+    CHECK(reused > 0);
+    CHECK(reused != first);
+    int reused_run = stasis_gfx_cache_text(reused, "reused safely");
+    CHECK(reused_run > 0);
+    stasis_gfx_release_font(reused);
+    CHECK(stasis_gfx_cache_text(reused, "retired handle") == 0);
+    int after_release = stasis_load_font(STASIS_TEST_FONT_PATH, 21);
+    CHECK(after_release > 0 && after_release != reused);
+    int after_release_run = stasis_gfx_cache_text(after_release, "new generation");
+    CHECK(after_release_run > 0 && after_release_run != reused_run);
+    CHECK(stasis_gfx_measure_text_cached(reused_run) == 0.0f);
+    stasis_gfx_release_font(after_release);
+
+    int previous_font = 0;
+    for (int size = 4; size < 68; size++) {
+        int font = stasis_load_font(STASIS_TEST_FONT_PATH, size);
+        CHECK(font > 0 && font != previous_font);
+        stasis_gfx_release_font(font);
+        CHECK(stasis_gfx_cache_text(font, "released resize font") == 0);
+        previous_font = font;
+    }
+
+    int stale_reset_font = stasis_load_font(STASIS_TEST_FONT_PATH, 69);
+    int stale_reset_run = stasis_gfx_cache_text(stale_reset_font, "stale across reset");
+    CHECK(stale_reset_font > 0 && stale_reset_run > 0);
+    stasis_shutdown();
+    CHECK(stasis_init_window(64, 64, "stasis_font_cache_test_reset"));
+    int reset_replacement = stasis_load_font(STASIS_TEST_FONT_PATH, 69);
+    CHECK(reset_replacement > 0 && reset_replacement != stale_reset_font);
+    CHECK(stasis_gfx_measure_text_cached(stale_reset_run) == 0.0f);
+    stasis_gfx_release_font(reset_replacement);
 
     size_t identity_size = 0;
     unsigned char* identity_bytes = read_file(STASIS_TEST_FONT_PATH, &identity_size);

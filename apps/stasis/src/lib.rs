@@ -18,9 +18,13 @@ mod window_config;
 pub mod windows_signing;
 
 pub use compiler_backend::build_aot_direct_storage_source;
+#[doc(hidden)]
+pub use compiler_backend::rewrite_packaged_json_asset_paths;
 pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_desktop_network;
+pub use compiler_backend::run_self_host_aot_cli_with_desktop_network_and_artifact_root;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
+pub use compiler_backend::run_self_host_aot_cli_with_options_and_artifact_root;
 pub use compiler_backend::sign_output_artifact_if_configured;
 pub use compiler_backend::DesktopNetworkMode;
 pub use events::RunnerEvent;
@@ -5830,8 +5834,12 @@ function render(): void {{ {draws} return; }}
             "successful replacements must publish current preparation receipts"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("stasis_current_scaled_extent(font->font_size)"),
-            "resource preparation must derive from the full-backing density scale"
+            STASIS_GRAPHICS_SOURCE.contains("stasis_display_font_raster_scale(g_pixel_scale)")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("stasis_display_font_scaled_extent_for_backing(")
+                && STASIS_GRAPHICS_SOURCE.contains("g_display_metrics.logical_w,")
+                && STASIS_GRAPHICS_SOURCE.contains("g_display_metrics.drawable_w,"),
+            "font preparation must derive from the exact bounded backing ratio"
         );
         let capture_start = graphics_source
             .find("static int stasis_gfx_dump_image(")
@@ -6509,6 +6517,27 @@ function render(): void {{ {draws} return; }}
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
                 "sprite lifetime ownership should contain {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn font_release_is_generation_safe_and_keeps_unrelated_text_runs() {
+        for required in [
+            "stasis_gfx_release_font",
+            "FONT_HANDLE_INDEX_BITS",
+            "FONT_HANDLE_GENERATION_MASK",
+            "stasis_font_get(handle)",
+            "!g_fonts[i].active && !g_fonts[i].retired",
+            "stasis_release_text_runs_for_font(handle)",
+            "STASIS_TEXT_RUN_HANDLE_GENERATION_MASK",
+            "stasis_text_run_get(run_handle)",
+            "SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR)",
+            "stasis_display_font_raster_scale(g_pixel_scale)",
+        ] {
+            assert!(
+                STASIS_GRAPHICS_SOURCE.contains(required),
+                "font lifetime and raster quality should contain {required}"
             );
         }
     }
@@ -7478,6 +7507,198 @@ function render(): void {{ {draws} return; }}
             "watch publication must advance from the intervening live revision"
         );
         fs::remove_dir_all(root).expect("remove watch patch fixture");
+    }
+
+    #[test]
+    fn notify_watch_service_reloads_imported_generic_source_through_real_jit_commit() {
+        let _global_guard = crate::jit_test_support::lock();
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
+
+        let stamp = UNIX_EPOCH.elapsed().unwrap_or_default().as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "stasis-task590-generic-watch-{}-{stamp}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create generic watch fixture");
+        let entry = root.join("main.stasis");
+        let imported = root.join("generic.stasis");
+        let source = "import \"generic.stasis\";\n\
+global world: generic.Nested<2>;\n\
+global untouched: i32;\n\
+function main(): i32 { world.inner.items[0].value = 7; world.inner.items[1].value = 11; world.inner.items[0].active = true; world.inner.items[1].active = true; untouched = 99; return generic.capacity(world.inner); }\n\
+function tick(): i32 { return generic.capacity(world.inner); }\n\
+function render(): i32 { return world.inner.items[1].value; }\n\
+function on_code_swap(): void { return; }\n";
+        let generic_v1 = "struct Item { value: i32; active: bool; }\n\
+struct Buffer<N: i32> { items: Item[N]; }\n\
+struct Nested<N: i32> { inner: Buffer<N>; }\n\
+function capacity(self: Buffer<N>): i32 { return N; }\n";
+        let generic_v2 = "struct Item { value: i32; active: bool; }\n\
+struct Buffer<N: i32> { items: Item[N]; }\n\
+struct Nested<N: i32> { inner: Buffer<N>; }\n\
+function capacity(self: Buffer<N>): i32 { return N + 1; }\n";
+        fs::write(&entry, source).expect("write generic watch entry");
+        fs::write(&imported, generic_v1).expect("write generic watch module");
+
+        let entry_text = entry.to_string_lossy().to_string();
+        let imported_text = imported.to_string_lossy().to_string();
+        let mut active = JitProcess::new();
+        active
+            .set_project_root(root.to_string_lossy())
+            .expect("set generic watch project root");
+        active.set_required_emit_roots(&[
+            "main".to_string(),
+            "tick".to_string(),
+            "render".to_string(),
+            "on_code_swap".to_string(),
+        ]);
+        active.upsert_file(entry_text.clone(), source);
+        active.upsert_file(imported_text, generic_v1);
+        active.compile().expect("compile generic watch baseline");
+        assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(2));
+        assert_eq!(
+            active.read_global_collection_scalar("world.inner.items", "value", 0),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(7))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("world.inner.items", "value", 1),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("world.inner.items", "active", 0),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::Bool(true))
+        );
+
+        let active_package = active
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect("build generic watch package");
+        stasis_dynload::begin_jit_host_entry_session(
+            active_package
+                .host_entry_targets(1)
+                .expect("generic watch host targets"),
+        )
+        .expect("publish generic watch baseline");
+        let tick_trampoline = stasis_dynload::jit_host_tick_trampoline_ptr() as u64;
+        let render_trampoline = stasis_dynload::jit_host_render_trampoline_ptr() as u64;
+        let imported_canonical = imported.canonicalize().expect("canonical generic module");
+
+        let mut watcher = WatchService::start(&root).expect("start actual notify watcher");
+        fs::write(&imported, generic_v2).expect("write changed imported generic module");
+
+        let event_deadline = Instant::now() + Duration::from_secs(10);
+        let imported_event = loop {
+            let event = watcher.drain_stasis_changes().into_iter().find(|event| {
+                event.change_kind == FileChangeKind::Modified
+                    && event.text_source == TextSource::FileWatcher
+                    && event.path.canonicalize().ok().as_deref()
+                        == Some(imported_canonical.as_path())
+            });
+            if event.is_some() {
+                break event;
+            }
+            assert!(
+                Instant::now() < event_deadline,
+                "actual notify watcher did not observe imported generic source"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            imported_event.is_some(),
+            "imported generic event must be physical"
+        );
+
+        let job = start_watch_patch_job(
+            2,
+            active.staged_candidate(),
+            root.clone(),
+            entry.clone(),
+            entry.to_string_lossy().to_string(),
+        )
+        .expect("start real staged generic watch compile");
+        let prepared = job
+            .receiver
+            .recv_timeout(Duration::from_secs(60))
+            .expect("generic watch compile result")
+            .expect("generic watch compile");
+        job.worker.join().expect("join generic watch compile");
+        let metadata = prepared
+            .candidate
+            .generation_metadata()
+            .expect("generic watch patch metadata")
+            .clone();
+        let emitted = metadata
+            .emitted_function_ids
+            .iter()
+            .filter_map(|id| prepared.candidate.program_snapshot()?.function_by_id(*id))
+            .map(|function| function.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let reused = metadata
+            .reused_function_ids
+            .iter()
+            .filter_map(|id| prepared.candidate.program_snapshot()?.function_by_id(*id))
+            .map(|function| function.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            emitted
+                .iter()
+                .any(|name| name.starts_with("__stasis_function_")),
+            "the generated capacity specialization must be re-JITed: {emitted:?}"
+        );
+        assert!(
+            emitted.contains("main"),
+            "generic caller main must be re-JITed"
+        );
+        assert!(
+            emitted.contains("tick"),
+            "generic caller tick must be re-JITed"
+        );
+        assert!(reused.contains("render"), "unrelated render must be reused");
+        assert!(
+            reused.contains("on_code_swap"),
+            "unchanged hook must be reused"
+        );
+
+        let published =
+            commit_play_candidate_between_ticks(&mut active, prepared.candidate, &prepared.package)
+                .expect("commit real generic watch candidate");
+        assert_eq!(
+            published.tick_code_ptr, tick_trampoline,
+            "host tick trampoline remains stable across commit"
+        );
+        assert_eq!(published.render_code_ptr, render_trampoline);
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(published.tick_code_ptr as usize),
+            Ok(3),
+            "the imported generic source must affect the committed JIT code"
+        );
+        assert_eq!(
+            stasis_dynload::invoke_noarg_i32(published.render_code_ptr as usize),
+            Ok(11),
+            "nested SoA state must survive the generic code-only swap"
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("world.inner.items", "value", 0),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(7))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("world.inner.items", "value", 1),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(11))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("world.inner.items", "active", 1),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::Bool(true))
+        );
+        assert_eq!(
+            active.read_global_scalar("untouched"),
+            Ok(stasis_compiler::backend::jit::JitScalarValue::I32(99))
+        );
+
+        drop(watcher);
+        fs::remove_dir_all(root).expect("remove generic watch fixture");
+        stasis_dynload::clear_jit_i32_global_table();
+        stasis_dynload::clear_jit_i32_array_global_table();
     }
 
     #[test]

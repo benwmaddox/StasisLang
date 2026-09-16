@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -86,10 +87,11 @@ async function runSequence(first, second, options = {}) {
       render: () => 0,
     }
   };
+  installCollectionViewAbi(game, instance.exports);
   let actionCount = 0;
   const contextObject = {
     document, screen, devicePixelRatio: options.dpr ?? 1, performance: { now: () => now },
-    WebAssembly: { instantiate: async () => ({ instance }) },
+    WebAssembly: { Global: WebAssembly.Global, instantiate: async () => ({ instance }) },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
     requestAnimationFrame: callback => { raf.push(callback); return raf.length; },
     cancelAnimationFrame() {},

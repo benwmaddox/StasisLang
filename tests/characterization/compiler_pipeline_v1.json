@@ -1180,6 +1180,11 @@
             "name": "render"
           },
           {
+            "index": 3,
+            "kind": 3,
+            "name": "__stasis_collection_view_abi_version"
+          },
+          {
             "index": 4,
             "kind": 0,
             "name": "on_code_swap"

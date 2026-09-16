@@ -20,6 +20,7 @@ extern int32_t stasis_mobile_tick_entry(void);
 extern int32_t stasis_mobile_render_entry(void);
 
 static int32_t submitted_frames;
+static int32_t rejected_frames;
 static uint32_t submitted_trace;
 static int32_t submitted_rects;
 static int32_t submitted_text_count;
@@ -81,6 +82,11 @@ void stasis_host_bulk_apply_requests(
 }
 void stasis_gfx_submit_u8(int32_t *i32s, const float *f32s, const uint8_t *u8s) {
     if (record_step_order) step_order = step_order * 10 + 3;
+    if (stasis_render_validate(i32s, f32s) != STASIS_RENDER_VALID ||
+        (i32s[STASIS_RENDER_I_FLAGS] & STASIS_RENDER_FLAG_PRESENT) == 0) {
+        rejected_frames += 1;
+        return;
+    }
     submitted_frames += 1;
     submitted_trace = stasis_render_trace(i32s, f32s, u8s);
     submitted_rects = i32s[STASIS_RENDER_I_RECT_COUNT];
@@ -152,6 +158,7 @@ int stasis_asset_task_poll(int task) { return task > 0 ? 3 : 0; }
 int stasis_asset_task_take_handle(int task) { return task > 0 ? 33 : 0; }
 void stasis_asset_task_cancel(int task) { (void)task; }
 void stasis_gfx_release_sprite(int handle) { (void)handle; }
+void stasis_gfx_release_font(int handle) { (void)handle; }
 int stasis_gfx_dump_bmp(const char *path) { return path != NULL; }
 int stasis_gfx_dump_png(const char *path) { return path != NULL; }
 int stasis_gfx_cache_text(int font, const char *text) { return font + (text != NULL); }
@@ -186,6 +193,7 @@ static void bind_runtime_with_mode(void) {
 
 static void reset_frame_observations(void) {
     submitted_frames = 0;
+    rejected_frames = 0;
     submitted_trace = 0;
     submitted_rects = 0;
     submitted_text_count = 0;
@@ -303,6 +311,8 @@ int main(void) {
     stasis_jit_global_i32_store(hash_path("host_req_window_w_px"), 640);
     stasis_jit_global_i32_store(hash_path("host_req_window_h_px"), 360);
     record_step_order = 1;
+    const int32_t generation_before_render =
+        stasis_jit_global_i32_load(hash_path("gfx_sprite_writer_frame_generation"));
     CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_OK);
     record_step_order = 0;
     CHECK(stasis_jit_global_i32_load(hash_path("score")) == 15);
@@ -314,6 +324,10 @@ int main(void) {
     CHECK(applied_width == 640 && applied_height == 360);
     CHECK(submit_tick_marker == 77 && submit_render_score == 15);
     CHECK(submitted_frames == 1);
+    CHECK(rejected_frames == 0);
+    CHECK(
+        stasis_jit_global_i32_load(hash_path("gfx_sprite_writer_frame_generation")) ==
+        generation_before_render + 1);
     CHECK(submitted_rects == 1);
     CHECK(submitted_text_count == 1);
     CHECK(submitted_text_bytes_used == 6);
@@ -373,6 +387,20 @@ int main(void) {
     CHECK(submitted_frames == 0);
     stasis_mobile_runtime_shutdown();
 
+    next_bind_mode = 4;
+    reset_frame_observations();
+    CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
+    const int32_t generation_before_nested_begin =
+        stasis_jit_global_i32_load(hash_path("gfx_sprite_writer_frame_generation"));
+    CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_OK);
+    CHECK(
+        stasis_jit_global_i32_load(hash_path("gfx_sprite_writer_frame_generation")) ==
+        generation_before_nested_begin + 2);
+    CHECK(submitted_frames == 0);
+    CHECK(rejected_frames == 1);
+    stasis_mobile_runtime_shutdown();
+    printf("stasis.seam_test.v1 IT-015 generated_render_reset=1 nested_begin_rejected=1 abort_reset=1\n");
+
     next_bind_mode = 1;
     reset_frame_observations();
     CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
@@ -381,7 +409,7 @@ int main(void) {
     CHECK(stasis_jit_global_i32_load(hash_path("entry_trace")) == 1);
     CHECK(submitted_frames == 0);
     stasis_mobile_runtime_shutdown();
-    CHECK(shutdowns == 5);
+    CHECK(shutdowns == 6);
     printf("stasis.seam_test.v1 IT-013 order=123 paused_poll=1 reinit=1 main_stop=11 tick_stop=22 render_stop=33 frames_after_failures=0\n");
     return 0;
 }

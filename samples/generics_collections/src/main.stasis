@@ -1,5 +1,6 @@
 import "live_edit_helper.stasis";
-import "/.stasis_cache/toolchain/src/stdlib/rig2d.stasis";
+import "/vendor/stasis/stdlib/rig2d.stasis";
+import "/vendor/stasis/stdlib/graphics.stasis";
 
 // Fixed storage is explicit. A generic collection owns exactly one declared
 // array and never allocates, resizes, or copies its backing storage.
@@ -8,15 +9,15 @@ struct Buffer<T: type, N: i32> {
     values: T[N];
 }
 
-function buffer_clear<T: type, N: i32>(self: Buffer<T, N>): void {
+function buffer_clear(self: Buffer<T, N>): void {
     self.count = 0;
 }
 
-function buffer_capacity<T: type, N: i32>(self: Buffer<T, N>): i32 {
+function buffer_capacity(self: Buffer<T, N>): i32 {
     return N;
 }
 
-function buffer_append<T: type, N: i32>(self: Buffer<T, N>, value: T): bool {
+function buffer_append(self: Buffer<T, N>, value: T): bool {
     if (self.count < 0 || self.count >= N) {
         return false;
     }
@@ -25,11 +26,11 @@ function buffer_append<T: type, N: i32>(self: Buffer<T, N>, value: T): bool {
     return true;
 }
 
-function buffer_at<T: type, N: i32>(self: Buffer<T, N>, index: i32): T {
+function buffer_at(self: Buffer<T, N>, index: i32): T {
     return self.values[index];
 }
 
-function integer_buffer_sum<N: i32>(self: Buffer<i32, N>): i32 {
+function integer_buffer_sum(self: Buffer<i32, N>): i32 {
     let total: i32 = 0;
     let index: i32 = 0;
     for (index = 0; index < self.count; index = index + 1) {
@@ -38,8 +39,8 @@ function integer_buffer_sum<N: i32>(self: Buffer<i32, N>): i32 {
     return total;
 }
 
-// A view-only generic algorithm works with fixed arrays of different sizes.
-function first_value<T: type>(items: T[]): T {
+// Views do not introduce generic parameters. This sample only needs i32 values.
+function first_value(items: i32[]): i32 {
     return items[0];
 }
 
@@ -48,11 +49,11 @@ struct SampleWindow<N: i32> {
     samples: f32[N];
 }
 
-function window_clear<N: i32>(self: SampleWindow<N>): void {
+function window_clear(self: SampleWindow<N>): void {
     self.count = 0;
 }
 
-function window_push<N: i32>(self: SampleWindow<N>, value: f32): bool {
+function window_push(self: SampleWindow<N>, value: f32): bool {
     if (self.count < 0 || self.count >= N) {
         return false;
     }
@@ -61,7 +62,7 @@ function window_push<N: i32>(self: SampleWindow<N>, value: f32): bool {
     return true;
 }
 
-function window_mean<N: i32>(self: SampleWindow<N>): f32 {
+function window_mean(self: SampleWindow<N>): f32 {
     if (self.count <= 0) {
         return 0.0;
     }
@@ -81,12 +82,12 @@ struct Ring<T: type, N: i32> {
     values: T[N];
 }
 
-function ring_clear<T: type, N: i32>(self: Ring<T, N>): void {
+function ring_clear(self: Ring<T, N>): void {
     self.count = 0;
     self.head = 0;
 }
 
-function ring_push<T: type, N: i32>(self: Ring<T, N>, value: T): bool {
+function ring_push(self: Ring<T, N>, value: T): bool {
     if (self.count < 0 || self.count >= N) {
         return false;
     }
@@ -96,7 +97,7 @@ function ring_push<T: type, N: i32>(self: Ring<T, N>, value: T): bool {
     return true;
 }
 
-function ring_drop<T: type, N: i32>(self: Ring<T, N>): bool {
+function ring_drop(self: Ring<T, N>): bool {
     if (self.count <= 0) {
         return false;
     }
@@ -105,7 +106,7 @@ function ring_drop<T: type, N: i32>(self: Ring<T, N>): bool {
     return true;
 }
 
-function ring_peek<T: type, N: i32>(self: Ring<T, N>): T {
+function ring_peek(self: Ring<T, N>): T {
     return self.values[self.head];
 }
 
@@ -120,11 +121,11 @@ struct EntityPool<N: i32> {
     entities: Entity[N];
 }
 
-function entity_pool_clear<N: i32>(self: EntityPool<N>): void {
+function entity_pool_clear(self: EntityPool<N>): void {
     self.count = 0;
 }
 
-function entity_pool_spawn<N: i32>(self: EntityPool<N>, id: i32, x: f32, y: f32): i32 {
+function entity_pool_spawn(self: EntityPool<N>, id: i32, x: f32, y: f32): i32 {
     if (self.count < 0 || self.count >= N) {
         return -1;
     }
@@ -136,7 +137,7 @@ function entity_pool_spawn<N: i32>(self: EntityPool<N>, id: i32, x: f32, y: f32)
     return index;
 }
 
-function entity_pool_release_last<N: i32>(self: EntityPool<N>): bool {
+function entity_pool_release_last(self: EntityPool<N>): bool {
     if (self.count <= 0) {
         return false;
     }
@@ -147,7 +148,7 @@ function entity_pool_release_last<N: i32>(self: EntityPool<N>): bool {
     return true;
 }
 
-function entity_pool_id<N: i32>(self: EntityPool<N>, index: i32): i32 {
+function entity_pool_id(self: EntityPool<N>, index: i32): i32 {
     if (index < 0 || index >= self.count || index >= N) {
         return -1;
     }
@@ -162,16 +163,20 @@ struct Nested<T: type, N: i32> {
     inner: Buffer<T, N>;
 }
 
-function nested_capacity<T: type, N: i32>(self: Nested<T, N>): i32 {
+function nested_capacity(self: Nested<T, N>): i32 {
     return N;
 }
 
-// N is a compile-time value, but it is not inherently an array capacity.
-function apply_offset<N: i32>(value: i32): i32 {
+// Compile-time values are introduced by a generic struct in parameter one.
+struct CompileValue<N: i32> {
+    marker: i32;
+}
+
+function apply_offset(config: CompileValue<N>, value: i32): i32 {
     return value + N;
 }
 
-function apply_mode<N: i32>(value: i32): i32 {
+function apply_mode(config: CompileValue<N>, value: i32): i32 {
     if (N == 0) {
         return value;
     }
@@ -190,6 +195,12 @@ global ring: Ring<i32, 3>;
 global entity_pool: EntityPool<2>;
 global courier_rig: Rig2D<24>;
 global boss_rig: Rig2D<64>;
+global negative_three: CompileValue<-3>;
+global mode_zero: CompileValue<0>;
+global mode_one: CompileValue<1>;
+global mode_two: CompileValue<2>;
+global web_bounds_probe_index: i32;
+global generics_collections_digest_value: i32;
 
 function near(actual: f32, expected: f32): bool {
     let difference: f32 = actual - expected;
@@ -197,13 +208,33 @@ function near(actual: f32, expected: f32): bool {
 }
 
 function tick(): i32 {
+    let probed_id: i32 = entity_pool.entities[web_bounds_probe_index].id;
+    return probed_id - probed_id;
+}
+
+function render(): i32 {
+    clear(0.04, 0.08, 0.16, 1.0);
+    if (generics_collections_digest_value == 507) {
+        fill_rect(48.0, 48.0, 160.0, 96.0, 0.16, 0.72, 0.52, 1.0);
+    } else {
+        fill_rect(48.0, 48.0, 160.0, 96.0, 0.85, 0.08, 0.08, 1.0);
+    }
+    end_frame();
     return 0;
+}
+
+function generics_collections_state_digest(): i32 {
+    return integer_buffer_sum(integer_buffer) + integer_buffer_sum(wide_buffer) + integer_buffer_sum(nested_buffer.inner) + ring_peek(ring) + entity_pool_id(
+        entity_pool,
+        0
+    ) + entity_pool_id(entity_pool, 1) + integer_buffer.count + wide_buffer.count + float_buffer.count + nested_buffer.inner.count + sample_window.count + ring.count + entity_pool.count + live_edit_state + courier_rig.count + boss_rig.count;
 }
 
 function main(): i32 {
     buffer_clear(integer_buffer);
     buffer_clear(wide_buffer);
     buffer_clear(float_buffer);
+    buffer_clear(nested_buffer.inner);
     window_clear(sample_window);
     ring_clear(ring);
     entity_pool_clear(entity_pool);
@@ -211,7 +242,7 @@ function main(): i32 {
     courier_rig.clear();
     boss_rig.clear();
 
-    if (buffer_capacity(integer_buffer) != 4 || buffer_capacity::<f32, 3>(float_buffer) != 3) {
+    if (buffer_capacity(integer_buffer) != 4 || buffer_capacity(float_buffer) != 3) {
         return 1;
     }
     if (
@@ -308,7 +339,12 @@ function main(): i32 {
         return 14;
     }
 
-    if (apply_offset::<-3>(10) != 7 || apply_mode::<0>(5) != 5 || apply_mode::<1>(5) != 10 || apply_mode::<2>(5) != 7) {
+    if (
+        apply_offset(negative_three, 10) != 7
+        || apply_mode(mode_zero, 5) != 5
+        || apply_mode(mode_one, 5) != 10
+        || apply_mode(mode_two, 5) != 7
+    ) {
         return 15;
     }
 
@@ -329,5 +365,7 @@ function main(): i32 {
     if (live_edit_tick() != 8 || live_edit_tick() != 9) {
         return 19;
     }
+    web_bounds_probe_index = 0;
+    generics_collections_digest_value = generics_collections_state_digest();
     return 0;
 }

@@ -90,6 +90,12 @@ endif()
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_MOBILE_RUNTIME)
     if(STASIS_GRAPHICS_BUNDLE_SDL)
         include(FetchContent)
+        if(DEFINED ENV{STASIS_SDL3_SOURCE} AND NOT "$ENV{STASIS_SDL3_SOURCE}" STREQUAL "")
+            set(FETCHCONTENT_SOURCE_DIR_STASIS_SDL3 "$ENV{STASIS_SDL3_SOURCE}")
+        endif()
+        if(DEFINED ENV{STASIS_SDL3_IMAGE_SOURCE} AND NOT "$ENV{STASIS_SDL3_IMAGE_SOURCE}" STREQUAL "")
+            set(FETCHCONTENT_SOURCE_DIR_STASIS_SDL3_IMAGE "$ENV{STASIS_SDL3_IMAGE_SOURCE}")
+        endif()
         set(CMAKE_POSITION_INDEPENDENT_CODE ON)
         set(SDL_SHARED OFF CACHE BOOL "" FORCE)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -166,6 +172,12 @@ if(STASIS_GRAPHICS_BUILD_TESTS)
     enable_testing()
     add_executable(stasis_mixed_quad_planner_test tests/stasis_mixed_quad_planner_test.c)
     add_test(NAME stasis_mixed_quad_planner_test COMMAND stasis_mixed_quad_planner_test)
+    add_executable(stasis_package_provenance_test tests/stasis_package_provenance_test.c)
+    target_include_directories(stasis_package_provenance_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(WIN32)
+        target_compile_definitions(stasis_package_provenance_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME stasis_package_provenance_contract COMMAND stasis_package_provenance_test)
 endif()
 
 function(configure_stasis_target target is_static)
@@ -269,7 +281,8 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
     install(
         FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
-              stasis_network_join_card.h stasis_performance_metrics.h stasis_platform_services.h
+              stasis_network_join_card.h stasis_performance_metrics.h stasis_package_provenance_reader.h
+              stasis_platform_services.h
         DESTINATION include
     )
 endif()
@@ -657,6 +670,23 @@ if(STASIS_BUILD_RUNNER)
         add_library(stasis_runner_package_game SHARED tests/stasis_runner_package_game.c)
         target_link_libraries(stasis_runner_package_game PRIVATE m)
         set_target_properties(stasis_runner_package_game PROPERTIES PREFIX "")
+        add_library(
+            stasis_runner_package_lifecycle_graphics
+            SHARED
+            tests/stasis_runner_package_lifecycle_graphics.c
+        )
+        set_target_properties(
+            stasis_runner_package_lifecycle_graphics
+            PROPERTIES
+                OUTPUT_NAME stasis_graphics_lifecycle
+        )
+        add_library(
+            stasis_runner_package_lifecycle_game
+            SHARED
+            tests/stasis_runner_package_lifecycle_game.c
+        )
+        target_link_libraries(stasis_runner_package_lifecycle_game PRIVATE m)
+        set_target_properties(stasis_runner_package_lifecycle_game PROPERTIES PREFIX "")
         add_test(
             NAME stasis_runner_packaged_unix_contract
             COMMAND ${CMAKE_COMMAND}
@@ -664,6 +694,8 @@ if(STASIS_BUILD_RUNNER)
                 -DRUNNER=$<TARGET_FILE:stasis_runner>
                 -DGRAPHICS=$<TARGET_FILE:stasis_runner_package_graphics>
                 -DGAME=$<TARGET_FILE:stasis_runner_package_game>
+                -DLIFECYCLE_GRAPHICS=$<TARGET_FILE:stasis_runner_package_lifecycle_graphics>
+                -DLIFECYCLE_GAME=$<TARGET_FILE:stasis_runner_package_lifecycle_game>
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/stasis_runner_package_test.cmake
         )
     endif()

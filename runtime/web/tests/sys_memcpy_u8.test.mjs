@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -47,6 +48,7 @@ async function loadRuntime(game, memory) {
       render: () => 0,
     }
   };
+  installCollectionViewAbi(game, instance.exports);
   let env;
   const webAssembly = {
     Global: WebAssembly.Global,
@@ -89,10 +91,10 @@ test("web sys_memcpy_u8 matches native registered-buffer and literal semantics",
   const memory = new WebAssembly.Memory({ initial: 1 });
   const game = {
     memory: {
-      source: { hash: 101, offset: 0, type_id: 5, length: 8, stride: 1 },
-      destination: { hash: 202, offset: 16, type_id: 5, length: 8, stride: 1 },
-      collision: { hash: 303, offset: 32, type_id: 5, length: 4, stride: 1 },
-      invalid: { hash: 404, offset: -1, type_id: 5, length: 4, stride: 1 },
+      source: { hash: 101, handle: 1101, offset: 0, type_id: 5, length: 8, stride: 1 },
+      destination: { hash: 202, handle: 1202, offset: 16, type_id: 5, length: 8, stride: 1 },
+      collision: { hash: 303, handle: 1303, offset: 32, type_id: 5, length: 4, stride: 1 },
+      invalid: { hash: 404, handle: 1404, offset: -1, type_id: 5, length: 4, stride: 1 },
     },
     strings: {
       "303": "literal loses",
@@ -106,25 +108,25 @@ test("web sys_memcpy_u8 matches native registered-buffer and literal semantics",
   bytes.set([7, 8, 9, 10], 32);
   const copy = await loadRuntime(game, memory);
 
-  copy(202, 1, 101, 1, 5);
+  copy(1202, 1, 1101, 1, 5);
   assert.deepEqual(Array.from(bytes.slice(16, 24)), [0, 2, 3, 4, 5, 0, 0, 0]);
 
   bytes.fill(0, 16, 24);
-  copy(202, 0, 303, 0, 4);
+  copy(1202, 0, 1303, 0, 4);
   assert.deepEqual(Array.from(bytes.slice(16, 20)), [7, 8, 9, 10]);
 
   bytes.fill(0, 16, 24);
-  copy(202, 0, 505, 0, 4);
+  copy(1202, 0, 505, 0, 4);
   assert.deepEqual(Array.from(bytes.slice(16, 20)), [0xc3, 0xa9, 0x41, 0]);
 
   bytes.set([1, 2, 3, 4, 5], 0);
-  copy(101, 1, 101, 0, 4);
+  copy(1101, 1, 1101, 0, 4);
   assert.deepEqual(Array.from(bytes.slice(0, 5)), [1, 1, 2, 3, 4]);
 
   bytes.fill(9, 16, 24);
-  copy(202, 0, 404, 0, 2);
-  copy(202, 7, 505, 0, 3);
-  copy(202, 0, 505, 0, 0);
+  copy(1202, 0, 1404, 0, 2);
+  copy(1202, 7, 505, 0, 3);
+  copy(1202, 0, 505, 0, 0);
   assert.deepEqual(Array.from(bytes.slice(16, 24)), [0, 0, 9, 9, 9, 9, 9, 0xc3]);
 });
 
@@ -132,8 +134,8 @@ test("web sys_memcpy_u8 copies byte-backed ascii and utf8 layouts with their dec
   const memory = new WebAssembly.Memory({ initial: 1 });
   const game = {
     memory: {
-      source_utf8: { hash: 101, offset: 0, type_id: 69, length: 4, stride: 4, byte_backed: true },
-      destination_ascii: { hash: 202, offset: 64, type_id: 70, length: 4, stride: 4, byte_backed: true },
+      source_utf8: { hash: 101, handle: 1101, offset: 0, type_id: 69, length: 4, stride: 4, byte_backed: true },
+      destination_ascii: { hash: 202, handle: 1202, offset: 64, type_id: 70, length: 4, stride: 4, byte_backed: true },
     },
     strings: {},
     assets: {},
@@ -143,18 +145,18 @@ test("web sys_memcpy_u8 copies byte-backed ascii and utf8 layouts with their dec
   bytes[4] = 0xa9;
   const copy = await loadRuntime(game, memory);
 
-  copy(202, 0, 101, 0, 2);
+  copy(1202, 0, 1101, 0, 2);
 
   assert.equal(bytes[64], 0xc3);
   assert.equal(bytes[68], 0xa9);
 });
 
-test("web sys_memcpy_u8 accepts Wasm linear-memory offsets for registered layouts", async () => {
+test("web sys_memcpy_u8 uses opaque handles for registered layouts", async () => {
   const memory = new WebAssembly.Memory({ initial: 1 });
   const game = {
     memory: {
-      source: { hash: 101, offset: 0, type_id: 69, length: 4, stride: 4, byte_backed: true },
-      destination: { hash: 202, offset: 64, type_id: 70, length: 4, stride: 4, byte_backed: true },
+      source: { hash: 101, handle: 1101, offset: 0, type_id: 69, length: 4, stride: 4, byte_backed: true },
+      destination: { hash: 202, handle: 1202, offset: 64, type_id: 70, length: 4, stride: 4, byte_backed: true },
     },
     strings: {},
     assets: {},
@@ -164,7 +166,7 @@ test("web sys_memcpy_u8 accepts Wasm linear-memory offsets for registered layout
   bytes[4] = 66;
   const copy = await loadRuntime(game, memory);
 
-  copy(64, 0, 0, 0, 2);
+  copy(1202, 0, 1101, 0, 2);
 
   assert.equal(bytes[64], 65);
   assert.equal(bytes[68], 66);

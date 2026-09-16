@@ -519,14 +519,14 @@ pub fn run_android_workshop_stasis_tests(
         }
         for test in tests {
             let (line, column) = source_line_column(&source, test.declaration_range.start);
-            match jit.execute_bool_noarg_by_name(&test.generated_function_name) {
-                Ok(true) => {
+            match jit.execute_test_noarg_by_name(&test.generated_function_name) {
+                Ok(None) => {
                     passed += 1;
                     results.push(serde_json::json!({"file": relative_path, "line": line, "column": column, "name": test.display_name, "passed": true, "status": "passed"}));
                 }
-                Ok(false) => {
+                Ok(Some(message)) => {
                     failed += 1;
-                    results.push(serde_json::json!({"file": relative_path, "line": line, "column": column, "name": test.display_name, "passed": false, "status": "failed"}));
+                    results.push(serde_json::json!({"file": relative_path, "line": line, "column": column, "name": test.display_name, "passed": false, "status": "failed", "error": message}));
                 }
                 Err(error) => {
                     failed += 1;
@@ -573,8 +573,10 @@ pub fn android_workshop_references(
         .into_iter()
         .map(|reference| {
             serde_json::json!({
+                "symbol": reference.symbol,
                 "kind": reference.kind,
                 "file": reference.file,
+                "source_span": reference.source_span,
                 "containing_kind": reference.containing_kind,
                 "containing_name": reference.containing_name,
                 "containing_signature": reference.containing_signature,
@@ -967,6 +969,8 @@ pub fn run_android_workshop_tick(
 }
 
 const MAX_EMBEDDED_FONTS: usize = 64;
+const FONT_HANDLE_INDEX_BITS: u32 = 7;
+const FONT_HANDLE_GENERATION_MASK: u32 = 0x00ff_ffff;
 const MAX_EMBEDDED_TEXT_RUNS: usize = 4096;
 const MAX_EMBEDDED_TEXT_BYTES: usize = 262_144;
 const MAX_EMBEDDED_DYNAMIC_TEXT_BYTES: usize = 4096;
@@ -976,6 +980,10 @@ const MAX_PENDING_SPRITE_RELEASES: usize = 256;
 #[derive(Clone)]
 struct EmbeddedFont {
     handle: i32,
+    generation: u32,
+    retired: bool,
+    active: bool,
+    ref_count: usize,
     path: PathBuf,
     size: i32,
 }
@@ -1001,6 +1009,7 @@ struct EmbeddedResourceCatalog {
     assets: ResolvedAssetManifest,
     fonts: Vec<EmbeddedFont>,
     text_runs: Vec<EmbeddedTextRun>,
+    next_text_run_handle: i32,
     sprite_refs: Vec<EmbeddedSpriteRef>,
     pending_sprite_releases: Vec<i32>,
     pending_sprite_release_cancellations: Vec<i32>,
@@ -1027,6 +1036,7 @@ fn install_embedded_resource_host(project_root: &Path) -> Result<(), String> {
         load_sprite: embedded_load_sprite,
         release_sprite: embedded_release_sprite,
         load_font: embedded_load_font,
+        release_font: embedded_release_font,
         measure_text: embedded_measure_text,
         cache_text: embedded_cache_text,
         replace_text: embedded_replace_text,
@@ -1057,6 +1067,7 @@ fn prepare_embedded_resource_catalog(
     let (
         fonts,
         text_runs,
+        next_text_run_handle,
         sprite_refs,
         pending_sprite_releases,
         pending_sprite_release_cancellations,
@@ -1070,6 +1081,7 @@ fn prepare_embedded_resource_catalog(
                 (
                     catalog.fonts.clone(),
                     catalog.text_runs.clone(),
+                    catalog.next_text_run_handle,
                     catalog.sprite_refs.clone(),
                     catalog.pending_sprite_releases.clone(),
                     catalog.pending_sprite_release_cancellations.clone(),
@@ -1079,6 +1091,7 @@ fn prepare_embedded_resource_catalog(
                 (
                     Vec::with_capacity(MAX_EMBEDDED_FONTS),
                     Vec::with_capacity(MAX_EMBEDDED_TEXT_RUNS),
+                    1,
                     Vec::with_capacity(MAX_EMBEDDED_SPRITES),
                     Vec::with_capacity(MAX_PENDING_SPRITE_RELEASES),
                     Vec::with_capacity(MAX_EMBEDDED_SPRITES),
@@ -1088,6 +1101,7 @@ fn prepare_embedded_resource_catalog(
         (
             Vec::with_capacity(MAX_EMBEDDED_FONTS),
             Vec::with_capacity(MAX_EMBEDDED_TEXT_RUNS),
+            1,
             Vec::with_capacity(MAX_EMBEDDED_SPRITES),
             Vec::with_capacity(MAX_PENDING_SPRITE_RELEASES),
             Vec::with_capacity(MAX_EMBEDDED_SPRITES),
@@ -1098,6 +1112,7 @@ fn prepare_embedded_resource_catalog(
         assets,
         fonts,
         text_runs,
+        next_text_run_handle,
         sprite_refs,
         pending_sprite_releases,
         pending_sprite_release_cancellations,
@@ -1373,24 +1388,80 @@ fn embedded_load_font(path: &[u8], size: i32) -> i32 {
         );
         return 0;
     }
-    if let Some(font) = catalog
+    if let Some(index) = catalog
         .fonts
         .iter()
-        .find(|font| font.path == absolute && font.size == size)
+        .position(|font| font.active && font.path == absolute && font.size == size)
     {
-        return font.handle;
+        let Some(ref_count) = catalog.fonts[index].ref_count.checked_add(1) else {
+            set_embedded_resource_error(catalog, "font reference count overflow".to_string());
+            return 0;
+        };
+        catalog.fonts[index].ref_count = ref_count;
+        return catalog.fonts[index].handle;
+    }
+    if let Some(index) = catalog
+        .fonts
+        .iter()
+        .position(|font| !font.active && !font.retired)
+    {
+        let font = &mut catalog.fonts[index];
+        let handle = ((font.generation << FONT_HANDLE_INDEX_BITS) | (index as u32 + 1)) as i32;
+        font.handle = handle;
+        font.active = true;
+        font.ref_count = 1;
+        font.path = absolute;
+        font.size = size;
+        return handle;
     }
     if catalog.fonts.len() >= MAX_EMBEDDED_FONTS {
         set_embedded_resource_error(catalog, "font registry is full".to_string());
         return 0;
     }
-    let handle = catalog.fonts.len() as i32 + 1;
+    let index = catalog.fonts.len();
+    let handle = (index as u32 + 1) as i32;
     catalog.fonts.push(EmbeddedFont {
         handle,
+        generation: 0,
+        retired: false,
+        active: true,
+        ref_count: 1,
         path: absolute,
         size,
     });
     handle
+}
+
+fn embedded_release_font(handle: i32) {
+    if handle <= 0 {
+        return;
+    }
+    let Ok(mut slot) = embedded_resource_catalog().lock() else {
+        return;
+    };
+    let Some(catalog) = slot.as_mut() else {
+        return;
+    };
+    let Some(index) = catalog
+        .fonts
+        .iter()
+        .position(|font| font.active && font.handle == handle)
+    else {
+        return;
+    };
+    if catalog.fonts[index].ref_count > 1 {
+        catalog.fonts[index].ref_count -= 1;
+        return;
+    }
+    let next_generation = (catalog.fonts[index].generation + 1) & FONT_HANDLE_GENERATION_MASK;
+    catalog.fonts[index].active = false;
+    catalog.fonts[index].ref_count = 0;
+    catalog.fonts[index].handle = 0;
+    catalog.fonts[index].generation = next_generation;
+    catalog.fonts[index].retired = next_generation == 0;
+    catalog.fonts[index].path = PathBuf::new();
+    catalog.fonts[index].size = 0;
+    catalog.text_runs.retain(|run| run.font != handle);
 }
 
 fn embedded_measure_text(font: i32, text: &[u8]) -> f32 {
@@ -1400,10 +1471,24 @@ fn embedded_measure_text(font: i32, text: &[u8]) -> f32 {
     let Some(catalog) = slot.as_ref() else {
         return 0.0;
     };
-    let Some(font) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
+    let Some(font) = catalog
+        .fonts
+        .iter()
+        .find(|entry| entry.active && entry.handle == font)
+    else {
         return 0.0;
     };
     text.len() as f32 * font.size as f32 * 0.6
+}
+
+fn embedded_take_text_run_handle(catalog: &mut EmbeddedResourceCatalog) -> i32 {
+    let handle = catalog.next_text_run_handle;
+    let Some(next) = handle.checked_add(1) else {
+        set_embedded_resource_error(catalog, "cached text handle space is exhausted".to_string());
+        return 0;
+    };
+    catalog.next_text_run_handle = next;
+    handle
 }
 
 fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
@@ -1417,10 +1502,15 @@ fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
         set_embedded_resource_error(catalog, "cached text is not valid UTF-8".to_string());
         return 0;
     };
-    let Some(font_entry) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
+    let Some(font_entry) = catalog
+        .fonts
+        .iter()
+        .find(|entry| entry.active && entry.handle == font)
+    else {
         set_embedded_resource_error(catalog, format!("font handle {font} was not loaded"));
         return 0;
     };
+    let font_size = font_entry.size;
     if let Some(run) = catalog
         .text_runs
         .iter()
@@ -1443,14 +1533,17 @@ fn embedded_cache_text(font: i32, text: &[u8]) -> i32 {
         set_embedded_resource_error(catalog, "cached text registry is full".to_string());
         return 0;
     }
-    let handle = catalog.text_runs.len() as i32 + 1;
-    let measured_width = text.len() as f32 * font_entry.size as f32 * 0.6;
+    let handle = embedded_take_text_run_handle(catalog);
+    if handle == 0 {
+        return 0;
+    }
+    let measured_width = text.len() as f32 * font_size as f32 * 0.6;
     catalog.text_runs.push(EmbeddedTextRun {
         handle,
         font,
         text: text.to_string(),
         measured_width,
-        measured_height: font_entry.size as f32,
+        measured_height: font_size as f32,
         replaceable: false,
     });
     handle
@@ -1472,9 +1565,14 @@ fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
     if text.len() > MAX_EMBEDDED_DYNAMIC_TEXT_BYTES {
         return 0;
     }
-    let Some(font_entry) = catalog.fonts.iter().find(|entry| entry.handle == font) else {
+    let Some(font_entry) = catalog
+        .fonts
+        .iter()
+        .find(|entry| entry.active && entry.handle == font)
+    else {
         return 0;
     };
+    let font_size = font_entry.size;
     let existing = catalog
         .text_runs
         .iter()
@@ -1492,8 +1590,8 @@ fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
     if retained - prior_len + text.len() > MAX_EMBEDDED_TEXT_BYTES {
         return 0;
     }
-    let measured_width = text.len() as f32 * font_entry.size as f32 * 0.6;
-    let measured_height = font_entry.size as f32;
+    let measured_width = text.len() as f32 * font_size as f32 * 0.6;
+    let measured_height = font_size as f32;
     if let Some(index) = replace_index {
         let replacement = text.to_string();
         let run = &mut catalog.text_runs[index];
@@ -1503,7 +1601,10 @@ fn embedded_replace_text(handle: i32, font: i32, text: &[u8]) -> i32 {
         run.measured_height = measured_height;
         return run.handle;
     }
-    let handle = catalog.text_runs.len() as i32 + 1;
+    let handle = embedded_take_text_run_handle(catalog);
+    if handle == 0 {
+        return 0;
+    }
     catalog.text_runs.push(EmbeddedTextRun {
         handle,
         font,
@@ -2747,17 +2848,35 @@ fn format_compiler_source_diagnostic(
         percent_encode(&symbol),
         percent_encode(&diagnostic.message),
     );
-    if matches!(
-        diagnostic.code,
-        stasis_compiler::SourceDiagnosticCode::Generic
-    ) {
-        return legacy;
-    }
     let stage = diagnostic_stage(&diagnostic.code);
     let causes = [format!("{stage} phase"), diagnostic.message.clone()];
+    let primary = diagnostic_location_json(
+        project_root,
+        &canonical_root,
+        &diagnostic.path,
+        diagnostic.start,
+        diagnostic.end,
+        &diagnostic.symbol,
+        &diagnostic.message,
+    );
+    let related = diagnostic
+        .related
+        .iter()
+        .map(|related| {
+            diagnostic_location_json(
+                project_root,
+                &canonical_root,
+                &related.path,
+                related.start,
+                related.end,
+                &related.symbol,
+                &related.message,
+            )
+        })
+        .collect::<Vec<_>>();
     format!(
         "{legacy}{}",
-        format_native_diagnostic(
+        format_native_diagnostic_with_locations(
             stage,
             diagnostic.code.as_str(),
             &diagnostic.message,
@@ -2769,8 +2888,50 @@ fn format_compiler_source_diagnostic(
             },
             None,
             &causes,
+            Some(primary),
+            &related,
         )
     )
+}
+
+fn diagnostic_location_json(
+    project_root: &Path,
+    canonical_root: &Path,
+    path: &str,
+    start: usize,
+    end: usize,
+    symbol: &str,
+    message: &str,
+) -> serde_json::Value {
+    let path = Path::new(path);
+    let disk_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    };
+    let source = fs::read_to_string(&disk_path).unwrap_or_default();
+    let bounded_start = start.min(source.len());
+    let bounded_end = end.max(bounded_start).min(source.len());
+    let (line, column) = source_line_column(&source, bounded_start);
+    let (end_line, end_column) = source_line_column(&source, bounded_end);
+    let file = disk_path
+        .strip_prefix(project_root)
+        .or_else(|_| disk_path.strip_prefix(canonical_root))
+        .unwrap_or(&disk_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    serde_json::json!({
+        "file": file.clone(),
+        "path": file,
+        "start": start,
+        "end": end,
+        "line": line,
+        "column": column,
+        "end_line": end_line,
+        "end_column": end_column,
+        "symbol": symbol,
+        "message": message,
+    })
 }
 
 fn sanitize_legacy_prefix(value: &str) -> String {
@@ -2804,6 +2965,30 @@ fn format_native_diagnostic(
     resource: Option<&str>,
     causes: &[String],
 ) -> String {
+    format_native_diagnostic_with_locations(
+        stage,
+        code,
+        detail,
+        file,
+        symbol,
+        resource,
+        causes,
+        None,
+        &[],
+    )
+}
+
+fn format_native_diagnostic_with_locations(
+    stage: &str,
+    code: &str,
+    detail: &str,
+    file: Option<&str>,
+    symbol: Option<&str>,
+    resource: Option<&str>,
+    causes: &[String],
+    primary: Option<serde_json::Value>,
+    related: &[serde_json::Value],
+) -> String {
     let cause_values = if causes.is_empty() {
         vec![detail.to_string()]
     } else {
@@ -2828,7 +3013,7 @@ fn format_native_diagnostic(
             serde_json::Value::String(resource.to_string()),
         );
     }
-    let envelope = serde_json::json!({
+    let mut envelope = serde_json::json!({
         "schema": "stasis.native_diagnostic.v1",
         "version": 1,
         "stage": stage,
@@ -2836,8 +3021,16 @@ fn format_native_diagnostic(
         "context": context,
         "detail": detail,
         "causes": &cause_values,
-    })
-    .to_string();
+    });
+    if let Some(object) = envelope.as_object_mut() {
+        if let Some(primary) = primary {
+            object.insert("primary".to_string(), primary);
+        }
+        if !related.is_empty() {
+            object.insert("related".to_string(), serde_json::json!(related));
+        }
+    }
+    let envelope = envelope.to_string();
     format!(
         "|diagnostic_schema=stasis.native_diagnostic.v1|diagnostic_version=1|diagnostic_stage={}|diagnostic_code={}|diagnostic_detail={}|diagnostic_causes={}|diagnostic_envelope={}",
         percent_encode(stage),
@@ -3528,6 +3721,54 @@ mod tests {
         CString::new(message).expect("encoded compiler diagnostic crosses C boundary");
     }
 
+    #[test]
+    fn compiler_source_diagnostic_envelope_preserves_primary_and_related_locations() {
+        let root = temp_project("source_diagnostic_locations");
+        let primary_source =
+            "import \"types.stasis\";\nfunction main(): i32 { return capacity(); }\n";
+        let related_source = "function capacity(): i32 { return 4; }\n";
+        fs::write(root.join("src/main.stasis"), primary_source).expect("write primary source");
+        fs::write(root.join("src/types.stasis"), related_source).expect("write related source");
+        let start = primary_source.find("capacity").expect("primary symbol");
+        let end = start + "capacity".len();
+        let diagnostic = stasis_compiler::SourceDiagnostic::new(
+            "src/main.stasis",
+            start,
+            end,
+            "capacity",
+            "explicit generic calls are unsupported",
+        )
+        .with_code(stasis_compiler::SourceDiagnosticCode::ExplicitGenericCall)
+        .with_related(stasis_compiler::SourceDiagnosticRelated {
+            path: "src/types.stasis".to_string(),
+            start: 9,
+            end: 37,
+            symbol: "capacity".to_string(),
+            message: "generic template declared here".to_string(),
+        });
+        let message = format_compiler_source_diagnostic(&root, &diagnostic);
+        let envelope = message
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("source diagnostic envelope");
+        assert_eq!(envelope["code"], "stasis.explicitGenericCall");
+        assert_eq!(envelope["primary"]["path"], "src/main.stasis");
+        assert_eq!(envelope["primary"]["start"], start);
+        assert_eq!(envelope["primary"]["end"], end);
+        assert_eq!(envelope["primary"]["symbol"], "capacity");
+        assert_eq!(envelope["related"][0]["path"], "src/types.stasis");
+        assert_eq!(envelope["related"][0]["start"], 9);
+        assert_eq!(envelope["related"][0]["end"], 37);
+        assert_eq!(envelope["related"][0]["symbol"], "capacity");
+        assert_eq!(
+            envelope["related"][0]["message"],
+            "generic template declared here"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
     fn percent_decode_for_test(value: &str) -> String {
         let mut output = Vec::new();
         let bytes = value.as_bytes();
@@ -3557,6 +3798,7 @@ mod tests {
             },
             fonts: Vec::new(),
             text_runs: Vec::new(),
+            next_text_run_handle: 1,
             sprite_refs: vec![EmbeddedSpriteRef {
                 handle: 17,
                 refs: 2,
@@ -3598,6 +3840,7 @@ mod tests {
             },
             fonts: Vec::new(),
             text_runs: Vec::new(),
+            next_text_run_handle: 1,
             sprite_refs: vec![EmbeddedSpriteRef {
                 handle: 31,
                 refs: usize::MAX,
@@ -3625,6 +3868,7 @@ mod tests {
             },
             fonts: Vec::new(),
             text_runs: Vec::new(),
+            next_text_run_handle: 1,
             sprite_refs: (1..=300)
                 .map(|handle| EmbeddedSpriteRef { handle, refs: 1 })
                 .collect(),
@@ -3657,6 +3901,7 @@ mod tests {
             },
             fonts: Vec::new(),
             text_runs: Vec::new(),
+            next_text_run_handle: 1,
             sprite_refs: Vec::new(),
             pending_sprite_releases: Vec::new(),
             pending_sprite_release_cancellations: Vec::new(),
@@ -6803,6 +7048,38 @@ function tick(): void {}
     }
 
     #[test]
+    fn android_test_string_results_preserve_failure_messages() {
+        let root = temp_project("string_test_results");
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("tests/results.test.stasis"),
+            r#"
+            global message: utf8[8];
+            test @effects() `empty`(): string { return ""; }
+            test `unicode`(): string { return "@MESSAGE@"; }
+            test `computed`(): string { message[0] = 98; message.length = 1; return message; }
+            test `bool`(): bool { return false; }
+        "#
+            .replace("@MESSAGE@", "\u{e9}chec \u{6771}\u{4eac}"),
+        )
+        .unwrap();
+        let result = run_android_workshop_stasis_tests(&root).unwrap();
+        assert_eq!(result["passed"], 1, "{result}");
+        assert_eq!(result["failed"], 3, "{result}");
+        let results = result["results"].as_array().unwrap();
+        for (name, message) in [
+            ("unicode", "\u{e9}chec \u{6771}\u{4eac}"),
+            ("computed", "b"),
+            ("bool", "returned false"),
+        ] {
+            let failure = results.iter().find(|item| item["name"] == name).unwrap();
+            assert_eq!(failure["status"], "failed", "{failure}");
+            assert_eq!(failure["error"], message, "{failure}");
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn android_test_success_reports_status_and_declaration_coordinates() {
         let root = temp_project("test_success_location");
         fs::create_dir_all(root.join("tests")).expect("create tests");
@@ -7533,6 +7810,10 @@ function on_code_swap(): void {}\n";
             let catalog = slot.as_mut().expect("installed resource catalog");
             catalog.fonts.push(EmbeddedFont {
                 handle: 1,
+                generation: 0,
+                retired: false,
+                active: true,
+                ref_count: 1,
                 path: root.join("assets/font.ttf"),
                 size: 18,
             });
@@ -7544,6 +7825,7 @@ function on_code_swap(): void {}\n";
                 measured_height: 18.0,
                 replaceable: false,
             });
+            catalog.next_text_run_handle = 2;
         }
 
         assert_eq!(embedded_measure_text_cached(1), 75.6);
@@ -7561,6 +7843,67 @@ function on_code_swap(): void {}\n";
     }
 
     #[test]
+    fn embedded_font_release_never_aliases_text_handles() {
+        let _guard = bridge_runtime_test_guard();
+        let root = temp_project("embedded_font_release_handles");
+        install_embedded_resource_host(&root).expect("install embedded resource host");
+        {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            let catalog = slot.as_mut().unwrap();
+            catalog.fonts.push(EmbeddedFont {
+                handle: 1,
+                generation: 0,
+                retired: false,
+                active: true,
+                ref_count: 2,
+                path: root.join("assets/first.ttf"),
+                size: 18,
+            });
+            catalog.fonts.push(EmbeddedFont {
+                handle: 2,
+                generation: 0,
+                retired: false,
+                active: true,
+                ref_count: 1,
+                path: root.join("assets/second.ttf"),
+                size: 24,
+            });
+        }
+
+        let stale_run = embedded_cache_text(1, b"released");
+        let retained_run = embedded_cache_text(2, b"retained");
+        assert_eq!(stale_run, 1);
+        assert_eq!(retained_run, 2);
+        embedded_release_font(1);
+        assert!(embedded_measure_text_cached(stale_run) > 0.0);
+        embedded_release_font(1);
+        assert_eq!(embedded_measure_text_cached(stale_run), 0.0);
+        assert!(embedded_measure_text_cached(retained_run) > 0.0);
+        {
+            let mut slot = embedded_resource_catalog().lock().unwrap();
+            let font = &mut slot.as_mut().unwrap().fonts[0];
+            font.handle = (font.generation << FONT_HANDLE_INDEX_BITS | 1) as i32;
+            font.active = true;
+            font.ref_count = 1;
+            font.path = root.join("assets/replacement.ttf");
+            font.size = 20;
+        }
+        let replacement_font = {
+            let slot = embedded_resource_catalog().lock().unwrap();
+            slot.as_ref().unwrap().fonts[0].handle
+        };
+        let replacement_run = embedded_cache_text(replacement_font, b"replacement");
+        assert_eq!(replacement_run, 3);
+        assert_ne!(replacement_run, stale_run);
+        assert_ne!(replacement_run, retained_run);
+        assert_eq!(embedded_measure_text_cached(stale_run), 0.0);
+        assert!(embedded_measure_text_cached(retained_run) > 0.0);
+        *embedded_resource_catalog().lock().unwrap() = None;
+        stasis_dynload::set_embedded_graphics_host(None);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn embedded_dynamic_text_churn_is_bounded_and_transactional() {
         let _guard = bridge_runtime_test_guard();
         let root = temp_project("embedded_dynamic_text_churn");
@@ -7570,11 +7913,19 @@ function on_code_swap(): void {}\n";
             let catalog = slot.as_mut().unwrap();
             catalog.fonts.push(EmbeddedFont {
                 handle: 1,
+                generation: 0,
+                retired: false,
+                active: true,
+                ref_count: 1,
                 path: root.join("assets/first.ttf"),
                 size: 18,
             });
             catalog.fonts.push(EmbeddedFont {
                 handle: 2,
+                generation: 0,
+                retired: false,
+                active: true,
+                ref_count: 1,
                 path: root.join("assets/second.ttf"),
                 size: 30,
             });
@@ -7765,6 +8116,131 @@ function on_code_swap(): void {}\n";
             .all(|reference| reference.get("source_hash").is_none()
                 && reference.get("source").is_none()));
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn c_generic_bridge_preserves_items_references_diagnostics_and_stale_guards() {
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("generic_tooling_ffi");
+        let entry = Path::new("src/main.stasis");
+        let valid_main = "import \"types.stasis\";\nglobal samples: types.Buffer<i32, 4>;\nfunction main(): i32 { return types.capacity(samples); }\nfunction tick(): void {}\nfunction render(): void {}\nfunction on_code_swap(): void {}\n";
+        let invalid_main = valid_main.replace(
+            "types.capacity(samples)",
+            "types.capacity::<i32, 4>(samples)",
+        );
+        let types = "struct Buffer<T: type, N: i32> { values: T[N]; }\nfunction capacity(self: Buffer<T, N>): i32 { return N; }\n";
+        fs::write(root.join(entry), valid_main).expect("write generic entry");
+        fs::write(root.join("src/types.stasis"), types).expect("write generic module");
+        let root_c = CString::new(root.to_string_lossy().as_bytes()).expect("root cstr");
+        let entry_c = CString::new(entry.to_string_lossy().as_bytes()).expect("entry cstr");
+
+        let items = ffi_json(stasis_android_bridge_source_items(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+        ));
+        let items = items["items"].as_array().expect("generic source items");
+        let buffer = items
+            .iter()
+            .find(|item| item["name"] == "Buffer")
+            .expect("generic Buffer item");
+        assert_eq!(buffer["file"], "src/types.stasis");
+        assert_eq!(buffer["generic_parameters"][0]["name"], "T");
+        assert_eq!(buffer["generic_parameters"][1]["name"], "N");
+        let capacity = items
+            .iter()
+            .find(|item| item["name"] == "capacity")
+            .expect("generic capacity item");
+        assert_eq!(capacity["file"], "src/types.stasis");
+        assert_eq!(capacity["generic_parameters"][0]["name"], "T");
+        assert_eq!(capacity["generic_parameters"][1]["name"], "N");
+
+        let symbol_c = CString::new("capacity").expect("symbol cstr");
+        let references = ffi_json(stasis_android_bridge_find_references(
+            root_c.as_ptr(),
+            entry_c.as_ptr(),
+            symbol_c.as_ptr(),
+            16,
+        ));
+        let references = references["references"]
+            .as_array()
+            .expect("generic references");
+        assert!(references.iter().any(|reference| {
+            reference["file"] == "src/types.stasis"
+                && reference["source_span"]["start"].as_u64().is_some()
+        }));
+        assert!(references.iter().any(|reference| {
+            reference["file"] == "src/main.stasis"
+                && reference["symbol"] == "capacity"
+                && reference["source_span"]["end"].as_u64().is_some()
+        }));
+
+        fs::write(root.join(entry), &invalid_main).expect("write explicit generic call");
+        let error = compile_android_workshop_project(&root, entry)
+            .expect_err("explicit generic call must fail");
+        let envelope = error
+            .split("diagnostic_envelope=")
+            .nth(1)
+            .map(percent_decode_for_test)
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+            .expect("explicit-call diagnostic envelope");
+        assert_eq!(envelope["code"], "stasis.explicitGenericCall");
+        assert_eq!(envelope["primary"]["path"], "src/main.stasis");
+        assert_eq!(envelope["primary"]["symbol"], "capacity");
+        assert_eq!(envelope["related"][0]["path"], "src/types.stasis");
+        assert_eq!(envelope["related"][0]["symbol"], "capacity");
+        fs::write(root.join(entry), valid_main).expect("restore valid generic call");
+        compile_android_workshop_project(&root, entry).expect("generic call recovers");
+
+        let capacity_source_hash = capacity["source_hash"]
+            .as_str()
+            .expect("capacity source hash")
+            .to_string();
+        let stale_batch = WorkshopSemanticEditBatch {
+            schema_version: 1,
+            edits: vec![WorkshopSemanticEdit {
+                operation: WorkshopSemanticEditOperation::Update,
+                target: WorkshopSymbolSelector {
+                    symbol_id: capacity["symbol_id"].as_str().map(str::to_string),
+                    name: "capacity".to_string(),
+                    kind: Some(WorkshopSourceItemKind::Function),
+                    file: Some("src/types.stasis".to_string()),
+                    owner: None,
+                    signature: capacity["signature"].as_str().map(str::to_string),
+                },
+                new_source: Some(
+                    "function capacity(self: Buffer<T, N>): i32 { return N + 1; }".to_string(),
+                ),
+                expected_source_hash: Some("0".repeat(64)),
+            }],
+        };
+        let before = fs::read_to_string(root.join("src/types.stasis")).expect("before stale edit");
+        let stale =
+            execute_android_workshop_semantic_edit(&root, entry, &stale_batch, false, true, false)
+                .expect_err("stale generic edit must be rejected");
+        assert!(stale.contains("stale semantic edit target"), "{stale}");
+        assert_eq!(
+            fs::read_to_string(root.join("src/types.stasis")).expect("after stale edit"),
+            before
+        );
+
+        let mut applied_batch = stale_batch;
+        applied_batch.edits[0].expected_source_hash = Some(capacity_source_hash);
+        let applied = execute_android_workshop_semantic_edit(
+            &root,
+            entry,
+            &applied_batch,
+            false,
+            true,
+            false,
+        )
+        .expect("valid generic semantic edit");
+        assert_eq!(applied["status"], "applied");
+        assert!(fs::read_to_string(root.join("src/types.stasis"))
+            .expect("updated generic module")
+            .contains("return N + 1"));
+        clear_runtime_session_for_test();
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

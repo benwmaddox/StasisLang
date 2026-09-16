@@ -106,6 +106,7 @@ pub(super) fn completion_kind(kind: &str) -> CompletionItemKind {
         "enum_variant" => CompletionItemKind::ENUM_MEMBER,
         "field" | "state_path" => CompletionItemKind::FIELD,
         "parameter" => CompletionItemKind::VARIABLE,
+        "generic_parameter" => CompletionItemKind::TYPE_PARAMETER,
         "local" | "global" => CompletionItemKind::VARIABLE,
         "constant" => CompletionItemKind::CONSTANT,
         "keyword" | "command" => CompletionItemKind::KEYWORD,
@@ -263,5 +264,19 @@ pub(super) fn semantic_token_style(kind: &str) -> (u32, u32) {
         "field" | "state_path" => (6, 0),
         "parameter" => (7, 0),
         _ => (8, 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_parameter_completion_uses_type_parameter_kind() {
+        assert_eq!(
+            completion_kind("generic_parameter"),
+            CompletionItemKind::TYPE_PARAMETER
+        );
+        assert_eq!(completion_kind("parameter"), CompletionItemKind::VARIABLE);
     }
 }

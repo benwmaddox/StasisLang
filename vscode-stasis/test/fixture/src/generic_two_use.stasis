@@ -1,0 +1,11 @@
+import "generic_two.stasis";
+
+global two_box: generic_two.Box<8>;
+
+function second_generic_free_probe(): i32 {
+    return score(two_box);
+}
+
+function second_generic_dot_probe(): i32 {
+    return two_box.score();
+}

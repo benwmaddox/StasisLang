@@ -176,8 +176,20 @@ final class WorkshopDiagnosticSeamAcceptance {
             evidence.put("location", new JSONObject().put("expected", expectedLocation)
                     .put("actual", actualLocation));
         }
-        Log.i(LOG_TAG, "Stasis Workshop IT-031 case: " + evidence);
+        // Keep logcat evidence below its per-record limit. The full display text
+        // remains in the returned acceptance result; this bounded projection
+        // records the detail that was verified above plus the native/UI objects.
+        JSONObject logEvidence = boundedLogEvidence(evidence, nativeDiagnostic.detail);
+        Log.i(LOG_TAG, "Stasis Workshop IT-031 case: " + logEvidence);
         return evidence;
+    }
+
+    static JSONObject boundedLogEvidence(JSONObject evidence, String displayedDetail)
+            throws Exception {
+        JSONObject bounded = new JSONObject(evidence.toString());
+        bounded.remove("displayed_text");
+        return bounded.put("displayed_detail", displayedDetail)
+                .put("displayed_text_contains_detail", true);
     }
 
     private static JSONArray caseNames(JSONArray cases) throws Exception {

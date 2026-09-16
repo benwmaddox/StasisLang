@@ -2,7 +2,7 @@
 
 Stasis shipping packages use one renderer process on desktop, Android, and iOS:
 
-1. JIT or AOT game code writes the stable `gfx_cmd` family buffers (current schema v7).
+1. JIT or AOT game code writes the stable `gfx_cmd` family buffers (canonical schema v8; v7 is accepted only as a legacy input).
 2. `stasis_gfx_submit_u8` validates and interprets that versioned buffer.
 3. `stasis_graphics.c` owns frame order, resources, blending, filtering,
    clipping state, fallback sprites, and renderer shutdown.
@@ -17,8 +17,10 @@ magic or versions are rejected without drawing.
 
 ## Command contract
 
-Schema v7 keeps clear and present as frame boundaries and records each line,
-filled rectangle, sprite, direct-text, or cached-text submission in one bounded cross-category
+Schema v8 keeps clear and present as frame boundaries and records each line,
+filled rectangle, sprite, direct-text, or cached-text submission in one bounded
+cross-category order stream; the renderer accepts schema v7 only through the
+documented legacy path.
 order stream. It also records bounded logical top-origin clip descriptors and
 ordered clip-push/clip-pop entries in that same stream. Payloads remain in typed category arrays;
 each order entry names its category and payload index. The trace mixes an explicit kind marker and every
@@ -34,6 +36,40 @@ instances. Calls to `gfx_cmd_line`, `gfx_cmd_rect`, `gfx_cmd_sprite`, and
 writer publishes one entry at finalization. Games do not need a layer API or
 batching-driven reordering. Hosts reject invalid or out-of-range references
 transactionally.
+
+## Construction lifecycle boundary
+
+The shared renderer consumes the frame after construction. Package metadata
+selects exactly one construction owner; the renderer and device lifecycle do not
+add a second one:
+
+| Owner / package shape | Lifecycle 1 behavior | Lifecycle 0 or absent behavior |
+| --- | --- | --- |
+| Non-monolithic generated bridge | Reset -> authored render -> finish exactly once. | Direct authored render; no generated reset/finish. |
+| Windows monolithic generated bindings | Generated AOT binding performs reset -> authored render -> finish exactly once. | Direct authored render. |
+| Android generated AOT bindings | Shared mobile AOT entry performs `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
+| iOS generated AOT bindings | Shared mobile AOT entry performs `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
+| `stasis_runner` | Verifies state/launch sidecar metadata when present and invokes the exported render entry; it never wraps again. | Invokes the legacy direct render entry. |
+
+Lifecycle 1 is a render-entry contract and therefore requires a zero-argument
+authored `render()` export. A tick-only or render-less package must stay on
+lifecycle 0/absent direct/manual construction; lifecycle 1 must not be attached
+to `main` or `tick` as a substitute for a render entry.
+
+The generated entry calls `gfx_cmd_construction_reset()` and
+`gfx_cmd_construction_finish(result)`; `stasis_begin_frame()` and
+`stasis_end_frame()` remain host-private device/submission operations. A guest
+`begin_frame()` nested inside lifecycle-1 authored render invalidates the active
+construction and causes finish to abort. Construction lifecycle negotiation has
+no implication for logical coordinates, viewport/safe viewport, drawable
+resolution, or a resolution cap. See the [full owner matrix and migration
+rules](begin_frame_design.md#exact-owner-matrix).
+
+Once a new nightly is installed, consumers should regenerate vendor snapshots,
+generated bindings, and package metadata together, verify the lifecycle-1 entry,
+then remove any temporary manual-begin compatibility bridge from authored
+`render()` code. Lifecycle-0/absent consumers remain direct-render packages
+until rebuilt; this migration does not alter display limits.
 
 Coordinates are logical top-left pixels. Clip rectangles use the same logical
 top-origin coordinates; native GL/GLES converts them to drawable bottom-origin

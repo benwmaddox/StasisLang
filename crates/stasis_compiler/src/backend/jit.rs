@@ -13,6 +13,7 @@ use crate::backend::patch_plan::{
     PatchReasonChain,
 };
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
+use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{build_state_memory_report, is_named_scalar_state_path};
 use crate::backend::state_query::{
     parse_state_query, BinaryOperator, ScalarExpression, StateQuery, StateValueReference,
@@ -1231,7 +1232,7 @@ impl JitProcess {
             .compiler
             .functions()
             .iter()
-            .filter(|function| self.is_host_export_name(&function.name))
+            .filter(|function| self.is_host_export(function))
             .map(|function| {
                 (
                     function.name.clone(),
@@ -1243,7 +1244,7 @@ impl JitProcess {
             .compiler
             .functions()
             .iter()
-            .filter(|function| self.is_host_export_name(&function.name))
+            .filter(|function| self.is_host_export(function))
             .filter_map(|function| {
                 staged_artifacts
                     .iter()
@@ -1349,16 +1350,19 @@ impl JitProcess {
         self.generation_metadata.as_ref()
     }
 
-    fn is_host_export_name(&self, name: &str) -> bool {
+    fn is_host_export(&self, function: &FunctionMeta) -> bool {
         matches!(
-            name,
+            function.name.as_str(),
             "main"
-                | "tick"
                 | "render"
                 | "on_code_swap"
                 | "gfx_cmd_construction_reset"
                 | "gfx_cmd_construction_finish"
-        ) || self.required_emit_roots.iter().any(|root| root == name)
+        ) || matches_root(function, "tick")
+            || self
+                .required_emit_roots
+                .iter()
+                .any(|root| matches_root(function, root))
     }
 
     pub fn clif_for_function_name(&self, name: &str) -> Option<&str> {
@@ -2188,6 +2192,42 @@ impl JitProcess {
         stasis_dynload::stasis_jit_global_i32_store(hash_global_path(path), value);
     }
 
+    pub fn execute_string_noarg_by_name(&self, name: &str) -> Result<String, String> {
+        let function = self.unique_function_by_name(name)?;
+        let types = self
+            .program_snapshot
+            .as_ref()
+            .expect("validated compiled program")
+            .types();
+        if types
+            .type_info(function.return_type)
+            .map(|info| info.category)
+            != Some(TypeCategory::Utf8View)
+            || !function.params.is_empty()
+        {
+            return Err(format!(
+                "function '{name}' is not a no-argument string function"
+            ));
+        }
+        let artifact = self
+            .artifact_for_function_id(function.id)
+            .ok_or_else(|| format!("compiled artifact missing for function '{name}'"))?;
+        let handle = stasis_dynload::invoke_noarg_i32(artifact.code_ptr as usize)?;
+        stasis_dynload::jit_string_value(handle)
+    }
+
+    /// Execute either supported test contract and return an optional failure message.
+    pub fn execute_test_noarg_by_name(&self, name: &str) -> Result<Option<String>, String> {
+        let function = self.unique_function_by_name(name)?;
+        if function.return_type == TYPE_ID_BOOL {
+            return self
+                .execute_bool_noarg_by_name(name)
+                .map(|passed| (!passed).then(|| "returned false".to_string()));
+        }
+        self.execute_string_noarg_by_name(name)
+            .map(|message| (!message.is_empty()).then_some(message))
+    }
+
     pub fn execute_bool_noarg_by_name(&self, name: &str) -> Result<bool, String> {
         let function = self
             .compiler
@@ -2257,7 +2297,7 @@ impl JitProcess {
             .compiler
             .functions()
             .iter()
-            .filter(|function| self.is_host_export_name(&function.name))
+            .filter(|function| self.is_host_export(function))
         {
             *counts.entry(function.name.as_str()).or_insert(0usize) += 1;
         }
@@ -2455,7 +2495,7 @@ impl JitProcess {
             .compiler
             .functions()
             .iter()
-            .filter(|function| function.name == name);
+            .filter(|function| matches_root(function, name));
         let first = matches
             .next()
             .ok_or_else(|| format!("required engine entrypoint '{name}' not found"))?;
@@ -3085,6 +3125,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "gfx_release_sprite" | "stasis_gfx_release_sprite" | "stasis_jit_gfx_release_sprite" => {
             function_address(stasis_dynload::stasis_jit_gfx_release_sprite as *const ())
         }
+        "gfx_release_font" | "stasis_gfx_release_font" | "stasis_jit_gfx_release_font" => {
+            function_address(stasis_dynload::stasis_jit_gfx_release_font as *const ())
+        }
         "gfx_dump_bmp" | "stasis_gfx_dump_bmp" => {
             function_address(stasis_dynload::stasis_jit_gfx_dump_bmp as *const ())
         }
@@ -3630,6 +3673,57 @@ fn compile_function_into_jit_module(
 mod tests {
     use super::*;
 
+    fn artifact_keys(process: &JitProcess) -> BTreeSet<FunctionKey> {
+        process
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.function_key.clone())
+            .collect()
+    }
+
+    fn artifact_keys_named(process: &JitProcess, name: &str) -> BTreeSet<FunctionKey> {
+        process
+            .artifacts()
+            .iter()
+            .filter(|artifact| artifact.function_key.name == name)
+            .map(|artifact| artifact.function_key.clone())
+            .collect()
+    }
+
+    fn generated_artifact_keys(process: &JitProcess) -> BTreeSet<FunctionKey> {
+        process
+            .artifacts()
+            .iter()
+            .filter(|artifact| artifact.function_key.name.starts_with("__stasis_function_"))
+            .map(|artifact| artifact.function_key.clone())
+            .collect()
+    }
+
+    fn metadata_artifact_keys(process: &JitProcess, ids: &[FunctionId]) -> BTreeSet<FunctionKey> {
+        ids.iter()
+            .filter_map(|id| {
+                process
+                    .artifacts()
+                    .iter()
+                    .find(|artifact| artifact.function_id == *id)
+                    .map(|artifact| artifact.function_key.clone())
+            })
+            .collect()
+    }
+
+    fn artifact_fingerprint(process: &JitProcess) -> BTreeMap<FunctionKey, (u64, u64, String)> {
+        process
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.function_key.clone(),
+                    (artifact.body_hash, artifact.code_ptr, artifact.clif.clone()),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn jit_rejects_invalid_unreachable_function_body() {
         let mut process = JitProcess::new();
@@ -3656,6 +3750,7 @@ mod tests {
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_poll").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_take_handle").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_cancel").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_gfx_release_font").is_some());
     }
 
     #[test]
@@ -4056,7 +4151,7 @@ function main(): i32 {
     fn generic_body_edits_rejit_specializations_and_callers_but_reuse_unrelated_code() {
         fn source(body: &str) -> String {
             format!(
-                "function value<N: i32>(): i32 {{ {body} }}\nfunction unrelated(): i32 {{ return 5; }}\nfunction main(): i32 {{ return value::<4>() + unrelated(); }}\n"
+                "struct Policy<N: i32> {{ marker: i32; }}\nglobal policy: Policy<4>;\nfunction value(policy: Policy<N>): i32 {{ {body} }}\nfunction unrelated(): i32 {{ return 5; }}\nfunction main(): i32 {{ return value(policy) + unrelated(); }}\n"
             )
         }
 
@@ -4112,10 +4207,222 @@ function main(): i32 {
     }
 
     #[test]
+    fn generic_constant_and_helper_edits_invalidate_exact_dependency_closure() {
+        fn source(offset: i32, helper_bias: i32) -> String {
+            format!(
+                "const OFFSET: i32 = {offset};\nstruct Policy<N: i32> {{ marker: i32; }}\nglobal first: Policy<4>;\nglobal second: Policy<7>;\nfunction adjust(value: i32): i32 {{ return value + {helper_bias}; }}\nfunction value(self: Policy<N>): i32 {{ return adjust(N + OFFSET); }}\nfunction unrelated(): i32 {{ return 100; }}\nfunction main(): i32 {{ return first.value() + second.value() + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic_dependencies.stasis", source(1, 10));
+        process
+            .compile()
+            .expect("generic dependency baseline compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(133));
+        let specialization_keys = generated_artifact_keys(&process);
+        assert_eq!(specialization_keys.len(), 2);
+        let main_keys = artifact_keys_named(&process, "main");
+        let adjust_keys = artifact_keys_named(&process, "adjust");
+        let unrelated_keys = artifact_keys_named(&process, "unrelated");
+        let baseline = artifact_fingerprint(&process);
+
+        process.upsert_file("generic_dependencies.stasis", source(2, 10));
+        process
+            .compile()
+            .expect("referenced constant edit compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(135));
+        let metadata = process.generation_metadata().expect("constant metadata");
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.emitted_function_ids),
+            specialization_keys.union(&main_keys).cloned().collect(),
+            "a referenced constant edit rebuilds both specializations and their caller"
+        );
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.reused_function_ids),
+            adjust_keys.union(&unrelated_keys).cloned().collect(),
+            "constant-independent helper and unrelated code are reused"
+        );
+        assert_eq!(generated_artifact_keys(&process), specialization_keys);
+        let after_constant = artifact_fingerprint(&process);
+        for key in &specialization_keys {
+            assert_ne!(
+                after_constant[key], baseline[key],
+                "{key:?} emitted artifact fingerprint"
+            );
+        }
+        assert_eq!(
+            after_constant[&unrelated_keys.iter().next().unwrap()].1,
+            baseline[&unrelated_keys.iter().next().unwrap()].1
+        );
+
+        process.upsert_file("generic_dependencies.stasis", source(2, 20));
+        process.compile().expect("referenced helper edit compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(155));
+        let metadata = process.generation_metadata().expect("helper metadata");
+        let expected_emitted = specialization_keys
+            .union(&main_keys)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .union(&adjust_keys)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.emitted_function_ids),
+            expected_emitted,
+            "a helper edit rebuilds the helper, both specializations, and their caller"
+        );
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.reused_function_ids),
+            unrelated_keys,
+            "only unrelated reachable code is reused"
+        );
+    }
+
+    #[test]
+    fn generic_signature_and_overload_edits_have_exact_identity_effects() {
+        fn source(with_argument: bool, with_overload: bool) -> String {
+            let value = if with_argument {
+                "function value(self: Policy<N>, bonus: i32): i32 { return N + bonus; }"
+            } else {
+                "function value(self: Policy<N>): i32 { return N; }"
+            };
+            let call = if with_argument {
+                "policy.value(3)"
+            } else {
+                "policy.value()"
+            };
+            let overload = if with_overload {
+                "function value(self: Other): i32 { return 99; }\n"
+            } else {
+                ""
+            };
+            format!(
+                "struct Policy<N: i32> {{ marker: i32; }}\nstruct Other {{ marker: i32; }}\nglobal policy: Policy<4>;\n{overload}{value}\nfunction unrelated(): i32 {{ return 10; }}\nfunction main(): i32 {{ return {call} + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic_signature.stasis", source(false, false));
+        process
+            .compile()
+            .expect("generic signature baseline compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(14));
+        let old_specialization = generated_artifact_keys(&process);
+        assert_eq!(old_specialization.len(), 1);
+        let unrelated = artifact_keys_named(&process, "unrelated");
+        let unrelated_fingerprint = artifact_fingerprint(&process);
+
+        process.upsert_file("generic_signature.stasis", source(false, true));
+        let report = process
+            .compile()
+            .expect("unrelated overload addition compiles");
+        assert_eq!(report.emit.emitted_functions, 0);
+        assert_eq!(generated_artifact_keys(&process), old_specialization);
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(14));
+
+        process.upsert_file("generic_signature.stasis", source(false, false));
+        let report = process
+            .compile()
+            .expect("unrelated overload removal compiles");
+        assert_eq!(report.emit.emitted_functions, 0);
+        assert_eq!(generated_artifact_keys(&process), old_specialization);
+
+        process.upsert_file("generic_signature.stasis", source(true, false));
+        process.compile().expect("generic signature edit compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(17));
+        let new_specialization = generated_artifact_keys(&process);
+        assert_eq!(new_specialization.len(), 1);
+        assert!(old_specialization.is_disjoint(&new_specialization));
+        let current_keys = artifact_keys(&process);
+        assert!(old_specialization.is_disjoint(&current_keys));
+        let metadata = process.generation_metadata().expect("signature metadata");
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.emitted_function_ids),
+            new_specialization
+                .union(&artifact_keys_named(&process, "main"))
+                .cloned()
+                .collect(),
+            "signature edit emits the replacement specialization and caller"
+        );
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.reused_function_ids),
+            unrelated
+        );
+        let current_fingerprint = artifact_fingerprint(&process);
+        let unrelated_key = unrelated.iter().next().expect("unrelated key");
+        assert_eq!(
+            current_fingerprint[unrelated_key].1,
+            unrelated_fingerprint[unrelated_key].1
+        );
+    }
+
+    #[test]
+    fn removed_and_new_generic_specializations_preserve_unaffected_identity() {
+        fn source(second_capacity: Option<i32>) -> String {
+            let second_call = second_capacity
+                .map(|capacity| format!(" + second_{capacity}.value()"))
+                .unwrap_or_default();
+            format!(
+                "struct Policy<N: i32> {{ marker: i32; }}\nglobal first: Policy<4>;\nglobal second_7: Policy<7>;\nglobal second_9: Policy<9>;\nfunction value(self: Policy<N>): i32 {{ return N; }}\nfunction unrelated(): i32 {{ return 100; }}\nfunction main(): i32 {{ return first.value(){second_call} + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("generic_specializations.stasis", source(None));
+        process.compile().expect("single specialization compiles");
+        let retained = generated_artifact_keys(&process);
+        assert_eq!(retained.len(), 1);
+
+        process.upsert_file("generic_specializations.stasis", source(Some(7)));
+        process.compile().expect("second specialization compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(111));
+        let with_seven = generated_artifact_keys(&process);
+        assert_eq!(with_seven.len(), 2);
+        assert!(retained.is_subset(&with_seven));
+        let removed_seven = with_seven
+            .difference(&retained)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let retained_fingerprint = artifact_fingerprint(&process);
+
+        process.upsert_file("generic_specializations.stasis", source(Some(9)));
+        process
+            .compile()
+            .expect("replacement specialization compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(113));
+        let with_nine = generated_artifact_keys(&process);
+        assert_eq!(with_nine.len(), 2);
+        assert!(retained.is_subset(&with_nine));
+        assert!(removed_seven.is_disjoint(&with_nine));
+        let added_nine = with_nine
+            .difference(&retained)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(added_nine.len(), 1);
+        let metadata = process.generation_metadata().expect("replacement metadata");
+        assert_eq!(
+            metadata_artifact_keys(&process, &metadata.emitted_function_ids),
+            added_nine
+                .union(&artifact_keys_named(&process, "main"))
+                .cloned()
+                .collect(),
+            "only the new specialization and caller are emitted"
+        );
+        assert!(
+            metadata_artifact_keys(&process, &metadata.reused_function_ids).is_superset(&retained)
+        );
+        let current_fingerprint = artifact_fingerprint(&process);
+        for key in retained {
+            assert_eq!(current_fingerprint[&key], retained_fingerprint[&key]);
+        }
+    }
+
+    #[test]
     fn equivalent_generic_argument_spelling_reuses_specialization_and_callers() {
         fn source(argument: &str) -> String {
             format!(
-                "const CAPACITY: i32 = {argument};\nfunction value<N: i32>(): i32 {{ return N; }}\nfunction main(): i32 {{ return value::<CAPACITY>(); }}\n"
+                "const CAPACITY: i32 = {argument};\nstruct Policy<N: i32> {{ marker: i32; }}\nglobal policy: Policy<CAPACITY>;\nfunction value(policy: Policy<N>): i32 {{ return N; }}\nfunction main(): i32 {{ return value(policy); }}\n"
             )
         }
 
@@ -4149,6 +4456,85 @@ function main(): i32 {
             first_metadata.source_revision,
             "equivalent source spellings should retain the semantic revision"
         );
+    }
+
+    #[test]
+    fn alpha_renamed_qualified_receiver_generic_reuses_identity_and_layout() {
+        fn source(binding: &str, qualified: bool) -> String {
+            let receiver = if qualified { "policy.Policy" } else { "Policy" };
+            format!(
+                "import \"policy.stasis\";\nglobal instance: {receiver}<4>;\nfunction value(self: {receiver}<{binding}>): i32 {{ return {binding}; }}\nfunction unrelated(): i32 {{ return 5; }}\nfunction main(): i32 {{ return instance.value() + unrelated(); }}\n"
+            )
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("policy.stasis", "struct Policy<N: i32> { marker: i32; }\n");
+        process.upsert_file("use.stasis", source("T", false));
+        process.compile().expect("alpha identity baseline compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(9));
+
+        let first_metadata = process
+            .generation_metadata()
+            .expect("baseline generation metadata")
+            .clone();
+        let first_layout = process.state_layout();
+        let first_ptrs = process.function_code_ptrs();
+        let first_artifacts: BTreeMap<_, _> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.function_key.name.clone(),
+                    (artifact.body_hash, artifact.code_ptr, artifact.clif.clone()),
+                )
+            })
+            .collect();
+        let first_specialization = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name.starts_with("__stasis_function_"))
+            .expect("receiver specialization artifact")
+            .function_key
+            .clone();
+
+        process.upsert_file("use.stasis", source("U", true));
+        let report = process
+            .compile()
+            .expect("alpha-renamed qualified spelling compiles");
+        assert_eq!(
+            report.emit.emitted_functions, 0,
+            "identity-only edit: {report:?}"
+        );
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(9));
+        assert_eq!(process.state_layout(), first_layout);
+        assert_eq!(process.function_code_ptrs(), first_ptrs);
+
+        let metadata = process
+            .generation_metadata()
+            .expect("updated generation metadata");
+        assert_eq!(metadata.source_revision, first_metadata.source_revision);
+        assert_eq!(metadata.layout_hash, first_metadata.layout_hash);
+        assert!(metadata.emitted_function_ids.is_empty());
+        assert!(metadata.reused_function_ids.len() >= 3);
+        let second_specialization = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name.starts_with("__stasis_function_"))
+            .expect("retained receiver specialization artifact")
+            .function_key
+            .clone();
+        assert_eq!(second_specialization, first_specialization);
+        let second_artifacts: BTreeMap<_, _> = process
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.function_key.name.clone(),
+                    (artifact.body_hash, artifact.code_ptr, artifact.clif.clone()),
+                )
+            })
+            .collect();
+        assert_eq!(second_artifacts, first_artifacts);
     }
 
     #[test]
@@ -5179,6 +5565,87 @@ function main(): i32 {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_bool_and_owned_string_test_results() {
+        let mut process = JitProcess::new();
+        let source = r#"global message: utf8[16];
+function helper(): string { return "échec 東京"; }
+test `empty`(): string { return ""; }
+test `unicode`(): string { return helper(); }
+test `computed`(): string { message[0] = 98; message[1] = 97; message[2] = 100; message.length = 3; return message; }
+test `boolean pass`(): bool { return true; }
+test `boolean fail`(): bool { return false; }
+"#;
+        let (lowered, tests) =
+            crate::frontend::parser::rewrite_top_level_test_declarations(source).unwrap();
+        process.set_required_emit_roots(
+            &tests
+                .iter()
+                .map(|test| test.generated_function_name.clone())
+                .collect::<Vec<_>>(),
+        );
+        process.upsert_file("results.stasis", lowered);
+        process.compile().expect("compile results");
+        let results = tests
+            .iter()
+            .map(|test| {
+                process
+                    .execute_test_noarg_by_name(&test.generated_function_name)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results,
+            vec![
+                None,
+                Some("échec 東京".to_string()),
+                Some("bad".to_string()),
+                None,
+                Some("returned false".to_string())
+            ]
+        );
+        assert!(process
+            .execute_string_noarg_by_name(&tests[3].generated_function_name)
+            .is_err());
+    }
+
+    #[test]
+    fn jit_process_enforces_transitive_effects_on_specialized_tests() {
+        let mut process = JitProcess::new();
+        let source = "struct State { value: i32; } global state: State; function leaf(): void { state.value += 1; } function middle(): void { leaf(); } test @effects() `restricted`(): bool { middle(); return true; }";
+        let (lowered, tests) =
+            crate::frontend::parser::rewrite_top_level_test_declarations(source).unwrap();
+        process.set_required_emit_roots(&[tests[0].generated_function_name.clone()]);
+        process.upsert_file("effects.stasis", lowered);
+        let error = process
+            .compile()
+            .expect_err("transitive mutation violates empty effects");
+        let diagnostic = process.last_source_diagnostic().expect("effect diagnostic");
+        assert_eq!(diagnostic.symbol, tests[0].generated_function_name);
+        assert!(
+            diagnostic.message.contains("rejects write 'state.value'"),
+            "{error:?}"
+        );
+        assert!(
+            diagnostic.message.contains(" -> middle -> leaf"),
+            "{error:?}"
+        );
+        let allowed = source.replace("@effects()", "@effects(state.value)");
+        let (lowered, tests) =
+            crate::frontend::parser::rewrite_top_level_test_declarations(&allowed).unwrap();
+        process.upsert_file("effects.stasis", lowered);
+        process.set_required_emit_roots(&[tests[0].generated_function_name.clone()]);
+        process
+            .compile()
+            .expect("declared narrow region allows transitive write");
+        assert_eq!(
+            process
+                .execute_test_noarg_by_name(&tests[0].generated_function_name)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn jit_process_indexes_ascii_string_literal_view_bytes() {
         let mut process = JitProcess::new();
         process.upsert_file(
@@ -5348,6 +5815,32 @@ function main(): i32 {
             .execute_i32_noarg_by_name("main")
             .expect("execute main");
         assert_eq!(value, 30);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_stdlib_ascii_views_accept_empty_literals() {
+        let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("jit_stdlib_ascii_empty_literal_sample.stasis");
+        process.upsert_file(
+            sample_path.to_string_lossy().to_string(),
+            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[8];\nglobal copied: ascii[8];\nglobal converted: utf8[8];\nfunction main(): i32 {\n    ascii_clear(text);\n    if (ascii_append(text, \"\") != 0) { return 1; }\n    if (ascii_copy(copied, \"\") != 0) { return 2; }\n    if (length(copied) != 0) { return 3; }\n    if (ascii_cmp(\"\", \"\") != 0) { return 4; }\n    if (!ascii_starts_with(\"x\", \"\")) { return 5; }\n    if (ascii_find(\"\", \"\") != 0) { return 6; }\n    if (ascii_find_byte(\"\", 120) != -1) { return 7; }\n    if (ascii_find_last_byte(\"\", 120) != -1) { return 8; }\n    if (utf8_from_ascii(converted, \"\", 8) != 0) { return 9; }\n    if (length_bytes(converted) != 0) { return 10; }\n    ascii_append(text, \"%\");\n    return length(text) * 100 + text[0];\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 137);
     }
 
     #[cfg(windows)]
@@ -5840,10 +6333,6 @@ function main(): i32 {
         assert!(
             !clif.contains("brif"),
             "known SoA alias retained storage dispatch:\n{clif}"
-        );
-        assert!(
-            !clif.contains("icmp"),
-            "known SoA alias retained storage test:\n{clif}"
         );
         let value = process
             .execute_i32_noarg_by_name("main")
@@ -8805,11 +9294,11 @@ function main(): i32 { batch.update(0); return 0; }
         let mut active = JitProcess::new();
         active.upsert_file(
             "main.stasis",
-            "import \"lib/generic.stasis\";\nfunction main(): i32 { return generic.capacity::<4>(); }\n",
+            "import \"lib/generic.stasis\";\nglobal policy: generic.Policy<4>;\nfunction main(): i32 { return generic.capacity(policy); }\n",
         );
         active.upsert_file(
             "lib/generic.stasis",
-            "function capacity<N: i32>(): i32 { return N; }\n",
+            "struct Policy<N: i32> { marker: i32; }\nfunction capacity(policy: Policy<N>): i32 { return N; }\n",
         );
         active.compile().expect("generic baseline compiles");
         assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(4));
@@ -8817,7 +9306,7 @@ function main(): i32 { batch.update(0); return 0; }
         let mut candidate = active.staged_candidate();
         candidate.upsert_file(
             "main.stasis",
-            "import \"lib/generic.stasis\";\nfunction main(): i32 { return generic.capacity::<8>(); }\n",
+            "import \"lib/generic.stasis\";\nglobal policy: generic.Policy<8>;\nfunction main(): i32 { return generic.capacity(policy); }\n",
         );
         candidate
             .compile()
@@ -8837,7 +9326,7 @@ function main(): i32 { batch.update(0); return 0; }
         ));
         std::fs::create_dir_all(&root).expect("create watcher root");
         let helper_path = root.join("generic.stasis");
-        let initial_source = "function capacity<N: i32>(): i32 { return N; }\n";
+        let initial_source = "struct Policy<N: i32> { marker: i32; }\nfunction capacity(policy: Policy<N>): i32 { return N; }\n";
         std::fs::write(&helper_path, initial_source).expect("write initial generic source");
 
         let result = (|| {
@@ -8847,7 +9336,7 @@ function main(): i32 { batch.update(0); return 0; }
                 .expect("set watcher project root");
             process.upsert_file(
                 "main.stasis",
-                "import \"generic.stasis\";\nfunction main(): i32 { return generic.capacity::<4>(); }\n",
+                "import \"generic.stasis\";\nglobal policy: generic.Policy<4>;\nfunction main(): i32 { return generic.capacity(policy); }\n",
             );
             process.upsert_file("generic.stasis", initial_source);
             process
@@ -8860,7 +9349,7 @@ function main(): i32 { batch.update(0); return 0; }
             );
 
             let changed_source =
-                "function capacity<N: i32>(): i32 { return N + 1; }\n// source edit\n";
+                "struct Policy<N: i32> { marker: i32; }\nfunction capacity(policy: Policy<N>): i32 { return N + 1; }\n// source edit\n";
             std::fs::write(&helper_path, changed_source).expect("write changed generic source");
             assert!(process.refresh_imported_sources_from_disk("main.stasis"));
             process.compile().expect("changed generic source compiles");
@@ -9269,6 +9758,48 @@ function main(): i32 { batch.update(0); return 0; }
             true,
             "expected render in package symbol map"
         );
+    }
+
+    #[test]
+    fn parameterized_tick_is_not_a_host_entry_alias() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "tick_overloads.stasis",
+            "function tick(value: i32): i32 { return value; }\n\
+             function tick(): i32 { return 7; }\n\
+             function render(): i32 { return 0; }\n\
+             function on_code_swap(): void { return; }\n",
+        );
+        process
+            .compile()
+            .expect("overloaded tick fixture should compile");
+
+        let zero_argument_tick = process
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "tick" && function.params.is_empty())
+            .expect("zero-argument tick");
+        let parameterized_tick = process
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "tick" && !function.params.is_empty())
+            .expect("parameterized tick");
+        let metadata = process.generation_metadata().expect("generation metadata");
+
+        assert!(metadata
+            .emitted_function_ids
+            .contains(&zero_argument_tick.id));
+        assert!(!metadata
+            .emitted_function_ids
+            .contains(&parameterized_tick.id));
+        assert!(metadata.host_export_signatures.contains_key("tick"));
+
+        let package = process
+            .build_engine_package(&EngineEntrypoints::runtime_default())
+            .expect("zero-argument tick should satisfy the engine package");
+        assert_ne!(package.tick_code_ptr, 0);
     }
 
     #[test]

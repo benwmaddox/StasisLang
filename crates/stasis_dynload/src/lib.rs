@@ -1097,7 +1097,7 @@ pub fn invoke_i32_i32_i32_f32_to_void(
 // stasis_graphics host API (dev in-process runner)
 // ============================================================
 
-const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 3;
+const STASIS_GRAPHICS_RUNTIME_ABI_VERSION: i32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DesktopRect {
@@ -1903,6 +1903,7 @@ struct StasisGraphicsAssetsApi {
     stasis_asset_task_take_handle: Option<usize>,
     stasis_asset_task_cancel: Option<usize>,
     stasis_gfx_release_sprite: usize,
+    stasis_gfx_release_font: usize,
     stasis_gfx_dump_bmp: usize,
     stasis_gfx_dump_png: Option<usize>,
     stasis_host_schedule_screenshot: Option<usize>,
@@ -1983,6 +1984,7 @@ impl StasisGraphicsAssetsApi {
             stasis_asset_task_take_handle: lib.symbol_address("stasis_asset_task_take_handle").ok(),
             stasis_asset_task_cancel: lib.symbol_address("stasis_asset_task_cancel").ok(),
             stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,
+            stasis_gfx_release_font: lib.symbol_address("stasis_gfx_release_font")?,
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
             // PNG capture was added after the original asset ABI. Keep older runtimes usable for
             // all pre-existing calls and report PNG as unsupported.
@@ -5114,6 +5116,14 @@ fn bounded_jit_text_arg_bytes(value_id: i32, limit: usize) -> Option<Vec<u8>> {
     (text.len() <= limit).then(|| text.as_bytes().to_vec())
 }
 
+/// Copy a guest string handle into owned UTF-8 text while the runtime is active.
+pub fn jit_string_value(value_id: i32) -> Result<String, String> {
+    let bytes = bounded_jit_text_arg_bytes(value_id, 1_048_576)
+        .ok_or_else(|| format!("invalid or oversized JIT string handle {value_id}"))?;
+    String::from_utf8(bytes)
+        .map_err(|_| format!("JIT string handle {value_id} contains invalid UTF-8"))
+}
+
 thread_local! {
     static EXTERNAL_URL_HOST: std::cell::Cell<Option<fn(&[u8]) -> i32>> =
         const { std::cell::Cell::new(None) };
@@ -5206,6 +5216,7 @@ pub struct EmbeddedGraphicsHost {
     pub load_sprite: fn(&[u8], i32, i32) -> i32,
     pub release_sprite: fn(i32),
     pub load_font: fn(&[u8], i32) -> i32,
+    pub release_font: fn(i32),
     pub measure_text: fn(i32, &[u8]) -> f32,
     pub cache_text: fn(i32, &[u8]) -> i32,
     pub replace_text: fn(i32, i32, &[u8]) -> i32,
@@ -5503,6 +5514,23 @@ pub extern "C" fn stasis_jit_gfx_release_sprite(handle: i32) {
     #[cfg(not(windows))]
     let callback: extern "C" fn(i32) =
         unsafe { std::mem::transmute(api.stasis_gfx_release_sprite) };
+    callback(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_gfx_release_font(handle: i32) {
+    if let Some(host) = embedded_graphics_host() {
+        (host.release_font)(handle);
+        return;
+    }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return;
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) =
+        unsafe { std::mem::transmute(api.stasis_gfx_release_font) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(api.stasis_gfx_release_font) };
     callback(handle);
 }
 
@@ -6423,6 +6451,11 @@ pub extern "C" fn stasis_get_time_us() -> i32 {
 #[no_mangle]
 pub extern "C" fn stasis_gfx_cache_text(font: i32, text_id: i32) -> i32 {
     stasis_jit_gfx_cache_text(font, text_id)
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_gfx_release_font(handle: i32) {
+    stasis_jit_gfx_release_font(handle);
 }
 
 #[no_mangle]
@@ -7904,6 +7937,8 @@ mod tests {
         1
     }
 
+    fn test_font_release(_: i32) {}
+
     fn test_measure_text(_: i32, _: &[u8]) -> f32 {
         1.0
     }
@@ -8140,6 +8175,7 @@ mod tests {
             load_sprite: test_sprite_load,
             release_sprite: test_sprite_release,
             load_font: test_font_load,
+            release_font: test_font_release,
             measure_text: test_measure_text,
             cache_text: test_cache_text,
             replace_text: test_replace_text,
@@ -8179,6 +8215,7 @@ mod tests {
             load_sprite: test_sprite_load,
             release_sprite: test_sprite_release,
             load_font: test_font_load,
+            release_font: test_font_release,
             measure_text: test_measure_text,
             cache_text: test_cache_text,
             replace_text: test_replace_text,
@@ -9014,6 +9051,32 @@ mod tests {
             .expect_err("hash collision")
             .contains("collision"));
         assert_eq!(jit_string_literal_value(3), None);
+    }
+
+    #[test]
+    fn jit_string_value_copies_handles_and_rejects_invalid_utf8_and_lengths() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
+        let handle = 0x44556677;
+        upsert_jit_string_literal(handle, "literal");
+        assert_eq!(jit_string_value(handle).unwrap(), "literal");
+        assert!(jit_string_value(handle + 1).is_err());
+        stasis_jit_collection_i32_store(handle, 1, 2);
+        stasis_jit_global_i32_array_store(handle, 0, 0, 195);
+        stasis_jit_global_i32_array_store(handle, 0, 1, 169);
+        assert_eq!(jit_string_value(handle).unwrap(), "é");
+        stasis_jit_global_i32_array_store(handle, 0, 0, 255);
+        assert!(jit_string_value(handle).unwrap_err().contains("UTF-8"));
+        stasis_jit_collection_i32_store(handle, 1, -1);
+        assert!(jit_string_value(handle).is_err());
+        stasis_jit_collection_i32_store(handle, 1, 1_048_577);
+        assert!(jit_string_value(handle).is_err());
+        clear_jit_i32_global_table();
+        clear_jit_i32_array_global_table();
+        clear_jit_string_literal_table();
     }
 
     #[test]

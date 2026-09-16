@@ -41,6 +41,7 @@ use stasis_ai::{
     ProviderUsage, TaskController, TaskControllerEvent, ToolCall, ToolExecutor, ToolObservation,
     ToolSpec,
 };
+use stasis_assets::{load_project_asset_manifest, AssetLimits};
 use stasis_runner::live::{LiveCommand, LiveRequest, LiveRuntimeIdentity, LiveSessionClient};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
@@ -134,6 +135,7 @@ impl ProposalTools {
         description: &str,
         payload: &Value,
         repair: bool,
+        kind: stasis_ai::ActionKind,
     ) -> Result<(), String> {
         if self.proposals.iter().any(|proposal| proposal.id == id) {
             return Err(format!(
@@ -154,7 +156,7 @@ impl ProposalTools {
             }
             (false, Some(_)) => {
                 return Err(format!(
-                    "proposal_id {id} already exists; use repair_semantic_edit only for rejected work"
+                    "proposal_id {id} already exists; use the matching repair tool only for rejected work"
                 ));
             }
             (false, None) => {}
@@ -177,12 +179,7 @@ impl ProposalTools {
         )
         .map_err(|error| error.to_string())?;
         validator
-            .propose_action_with_payload(
-                id,
-                stasis_ai::ActionKind::Edit,
-                description,
-                payload.clone(),
-            )
+            .propose_action_with_payload(id, kind, description, payload.clone())
             .map_err(|error| format!("invalid proposal: {error}"))?;
         if let Some(root) = &self.project_root {
             let preview = super::desktop_preview_semantic_batch(root, payload.clone())
@@ -201,7 +198,6 @@ impl ProposalTools {
         source_catalog::inspect(&self.sources, args, MAX_SOURCE_CONTEXT_BYTES)
     }
 
-    #[cfg(test)]
     fn read_source_symbol(&self, args: &Value) -> Result<Value, String> {
         self.inspect_source(args)
     }
@@ -215,13 +211,18 @@ impl ToolExecutor for ProposalTools {
                 if canceled.load(Ordering::Acquire) {
                     return ToolObservation::error(&call.tool, "AI request canceled");
                 }
-                let repair = call.tool == "repair_semantic_edit";
+                let repair = matches!(
+                    call.tool.as_str(),
+                    "repair_semantic_edit" | "repair_file_write"
+                );
                 let result: Result<Value, String> = (|| {
                     match call.tool.as_str() {
-                        "inspect_source" | "read_source_symbol" => {
-                            return self.inspect_source(&call.args)
-                        }
-                        "propose_semantic_edit" | "repair_semantic_edit" => {}
+                        "inspect_source" => return self.inspect_source(&call.args),
+                        "read_source_symbol" => return self.read_source_symbol(&call.args),
+                        "propose_semantic_edit"
+                        | "repair_semantic_edit"
+                        | "propose_file_write"
+                        | "repair_file_write" => {}
                         _ => return Err(format!("Unknown desktop editor tool: {}", call.tool)),
                     }
                     let id = call
@@ -234,12 +235,31 @@ impl ToolExecutor for ProposalTools {
                         .get("description")
                         .and_then(Value::as_str)
                         .ok_or_else(|| "description must be a string".to_string())?;
-                    let mut payload = call
-                        .args
-                        .get("batch")
-                        .cloned()
-                        .ok_or_else(|| "batch is required".to_string())?;
-                    canonicalize_proposal_payload(&mut payload);
+                    let file_write = matches!(
+                        call.tool.as_str(),
+                        "propose_file_write" | "repair_file_write"
+                    );
+                    let payload = if file_write {
+                        let writes = call
+                            .args
+                            .get("writes")
+                            .cloned()
+                            .ok_or_else(|| "writes is required".to_string())?;
+                        validate_file_write_arguments(&writes)?;
+                        json!({
+                            "schema_version": 1,
+                            "file_writes": writes,
+                        })
+                    } else {
+                        call.args
+                            .get("batch")
+                            .cloned()
+                            .ok_or_else(|| "batch is required".to_string())?
+                    };
+                    let mut payload = payload;
+                    if !file_write {
+                        canonicalize_proposal_payload(&mut payload);
+                    }
                     if payload
                         .get("edits")
                         .and_then(Value::as_array)
@@ -247,14 +267,17 @@ impl ToolExecutor for ProposalTools {
                     {
                         return Err("semantic proposal exceeds the 64-edit batch limit".into());
                     }
-                    serde_json::from_value::<
-                        stasis_compiler::frontend::workshop::WorkshopSemanticEditBatch,
-                    >(payload.clone())
-                    .map_err(|error| format!("invalid semantic edit batch: {error}"))?;
-                    self.validate_proposal(id, description, &payload, repair)?;
+                    if !file_write {
+                        serde_json::from_value::<
+                            stasis_compiler::frontend::workshop::WorkshopSemanticEditBatch,
+                        >(payload.clone())
+                        .map_err(|error| format!("invalid semantic edit batch: {error}"))?;
+                    }
+                    let kind = stasis_ai::ActionKind::Edit;
+                    self.validate_proposal(id, description, &payload, repair, kind.clone())?;
                     self.proposals.push(ProviderActionProposal {
                         id: id.to_string(),
-                        kind: stasis_ai::ActionKind::Edit,
+                        kind,
                         description: description.to_string(),
                         payload,
                         repair,
@@ -274,6 +297,43 @@ impl ToolExecutor for ProposalTools {
             .last()
             .map(|proposal| proposal.description.clone())
     }
+}
+
+fn validate_file_write_arguments(writes: &Value) -> Result<(), String> {
+    let writes = writes
+        .as_array()
+        .filter(|writes| !writes.is_empty() && writes.len() <= super::MAX_DESKTOP_FILE_WRITES)
+        .ok_or_else(|| {
+            format!(
+                "writes must contain 1..={} file writes",
+                super::MAX_DESKTOP_FILE_WRITES
+            )
+        })?;
+    for write in writes {
+        let object = write
+            .as_object()
+            .ok_or_else(|| "each file write must be an object".to_string())?;
+        if object.len() != 2 || !object.contains_key("path") || !object.contains_key("content") {
+            return Err("each file write accepts only path and content".into());
+        }
+        let path = object["path"]
+            .as_str()
+            .ok_or_else(|| "file-write path must be a string".to_string())?
+            .replace('\\', "/");
+        if path.is_empty() || path.len() > 512 {
+            return Err("file-write path must be a bounded project-relative path".into());
+        }
+        let content = object["content"]
+            .as_str()
+            .ok_or_else(|| "file-write content must be a string".to_string())?;
+        if content.len() > super::MAX_DESKTOP_FILE_WRITE_BYTES {
+            return Err(format!(
+                "file-write content exceeds {} UTF-8 bytes",
+                super::MAX_DESKTOP_FILE_WRITE_BYTES
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn proposal_tool_specs() -> Vec<ToolSpec> {
@@ -301,6 +361,35 @@ fn proposal_tool_specs() -> Vec<ToolSpec> {
     })
     .collect();
     specs.push(source_inspection_tool_spec());
+    specs.push(ToolSpec {
+        tool: "read_source_symbol".to_string(),
+        action_id: action_id_for_tool("read_source_symbol"),
+        purpose: "Read exact source and target metadata from the request's immutable source snapshot before proposing edits. Calls for multiple symbols can be batched.".to_string(),
+        required_args: vec!["symbol_id".to_string()],
+        optional_args: Vec::new(),
+    });
+    specs.extend([
+        ToolSpec {
+            tool: "propose_file_write".to_string(),
+            action_id: action_id_for_tool("propose_file_write"),
+            purpose: "Propose one atomic batch of bounded UTF-8 project file writes for explicit user acceptance. Paths are project-relative; Stasis source and host-control paths are rejected.".to_string(),
+            required_args: ["proposal_id", "description", "writes"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            optional_args: Vec::new(),
+        },
+        ToolSpec {
+            tool: "repair_file_write".to_string(),
+            action_id: action_id_for_tool("repair_file_write"),
+            purpose: "Replace only a rejected or needs-repair file-write proposal; accepted work is retained.".to_string(),
+            required_args: ["proposal_id", "description", "writes"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            optional_args: Vec::new(),
+        },
+    ]);
     specs
 }
 
@@ -600,6 +689,15 @@ fn run_reply_provider_with_config(
         ..ProposalTools::default()
     };
     let source_catalog = tools.source_catalog()?;
+    let asset_catalog = load_project_asset_manifest(&project_root, AssetLimits::default())
+        .map(|manifest| {
+            manifest
+                .assets
+                .into_iter()
+                .map(|asset| asset.entry)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let mut initial_context = source_catalog.as_str().unwrap_or_default().to_string();
     let mut append_context = |label: &str, value: &Value| -> Result<(), String> {
         initial_context.push_str(label);
@@ -628,10 +726,13 @@ fn run_reply_provider_with_config(
             &json!(&request.context[..request.context.len() - 1]),
         )?;
     }
+    append_context("task_id", &json!(request.task_id))?;
+    append_context("project_summary", &json!(request.project_summary))?;
+    append_context("assets", &json!(asset_catalog))?;
     let initial_context = Value::String(initial_context);
     let profile = AgentProfile {
         role: "Stasis desktop task assistant".to_string(),
-        instruction: "Solve the task with tools. Stasis is typed and C-like: import, struct, global, function, test `name`(): bool. No array literals or collection iteration; copy local loop forms. Follow local syntax; invent no APIs. Catalog IDs are hypermedia leads. IDs are one letter plus digits: for example, f6 lists that file's symbols and s203 returns exact source. Copy a shown ID exactly; fN and sN are not IDs. Continue with newly revealed links or file changes. search TERMS returns matching links; search-source TERMS includes top bodies. Before adding, inspect one same-kind source in the target file. Batch every independent call and all related code/tests. Wait for prerequisites; never guess. Preserve live state. Use on_code_swap when the requested change needs migration or immediate visual setup; change only the minimum state, such as player position or phase, needed to reveal it. Submit at most one atomic proposal; the editor applies, hot-swaps, and tests it. Use repair only for rejected work. Return only response-contract JSON.".to_string(),
+        instruction: "Solve the task with tools. Stasis is typed and C-like: import, struct, global, function, test `name`(): bool. No array literals or collection iteration; copy local loop forms. Follow local syntax; invent no APIs. Catalog IDs are hypermedia leads. IDs are one letter plus digits: for example, f6 lists that file's symbols and s203 returns exact source. Copy a shown ID exactly; fN and sN are not IDs. Continue with newly revealed links or file changes. search TERMS returns matching links; search-source TERMS includes top bodies. Before adding, inspect one same-kind source in the target file. Batch every independent call and all related code/tests. Wait for prerequisites; never guess. Preserve live state. Use on_code_swap when the requested change needs migration or immediate visual setup; change only the minimum state, such as player position or phase, needed to reveal it. Use read_source_symbol or inspect_source to inspect exact source before proposing changes. Use propose_semantic_edit for Stasis source changes and propose_file_write for bounded UTF-8 non-source project files such as SVG, JSON, and documentation. Batch files that must change together. Reuse existing asset paths when replacing visuals; the host refreshes tracked asset hashes automatically. When adding an asset, include any required manifest update in the same file-write batch. The host previews exact diffs, blocks project escapes and protected internal paths, validates relevant manifests, and waits for explicit acceptance. Submit at most one atomic proposal; the editor applies, hot-swaps, and tests it. Use repair_semantic_edit or repair_file_write only for rejected or needs-repair work. Never regenerate or replace accepted work. Return only response-contract JSON.".to_string(),
         max_turns: 8,
         compact_request: true,
         ..AgentProfile::default()
@@ -1200,7 +1301,7 @@ fn refresh_semantic_preview_staleness(
     records: &mut BTreeMap<SemanticPreviewKey, SemanticPreviewRecord>,
     next_check: &mut Instant,
     now: Instant,
-    fingerprint: impl FnOnce() -> Result<String, String>,
+    mut fingerprint: impl FnMut(&super::DesktopSemanticPreview) -> Result<String, String>,
 ) {
     if now < *next_check
         || !records
@@ -1210,9 +1311,9 @@ fn refresh_semantic_preview_staleness(
         return;
     }
     *next_check = now + Duration::from_millis(500);
-    let current = fingerprint();
     for record in records.values_mut() {
         if let Some(Ok(preview)) = &record.result {
+            let current = fingerprint(preview);
             record.stale |= current
                 .as_ref()
                 .map_or(true, |hash| hash != &preview.source_fingerprint);
@@ -1270,7 +1371,7 @@ impl DesktopEditor {
             &mut self.state.semantic_previews,
             &mut self.next_semantic_check,
             Instant::now(),
-            move || super::desktop_source_fingerprint(project_root, &[]),
+            move |preview| super::desktop_preview_fingerprint(project_root, &preview.payload),
         );
         if self.semantic_job.is_none() {
             if let Some((key, payload)) = queued.into_iter().next() {
@@ -3683,7 +3784,7 @@ impl EditorState {
         if record.stale
             || preview.payload != *payload
             || (read_sources
-                && super::desktop_source_fingerprint(root, &[])? != preview.source_fingerprint)
+                && super::desktop_preview_fingerprint(root, payload)? != preview.source_fingerprint)
         {
             return Err(
                 "Stale preview: sources changed. Request a new proposal for the current sources."
@@ -6817,6 +6918,60 @@ mod tests {
     }
 
     #[test]
+    fn generic_file_preview_uses_file_fingerprint_for_acceptance_and_staleness() {
+        let (mut editor, root, _) = review_fixture("preview_editor_file_write");
+        let note = root.join("notes.txt");
+        std::fs::write(&note, "before\n").unwrap();
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .actions
+            .get_mut("value")
+            .unwrap()
+            .payload = Some(json!({
+            "schema_version": 1,
+            "file_writes": [{"path": "notes.txt", "content": "after\n"}],
+        }));
+        finish_preview(&mut editor);
+        assert!(editor.state.check_preview("task-1", "value", true).is_ok());
+
+        std::fs::write(&note, "changed elsewhere\n").unwrap();
+        editor.next_semantic_check = Instant::now();
+        editor.poll_semantic_previews();
+        assert!(editor.state.reviewed_preview("task-1", "value").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accepted_generic_file_write_flows_through_review_and_apply() {
+        let (mut editor, root, _) = review_fixture("accepted_file_write");
+        let note = root.join("notes.txt");
+        std::fs::write(&note, "before\n").unwrap();
+        editor
+            .state
+            .session
+            .active_task_mut()
+            .unwrap()
+            .actions
+            .get_mut("value")
+            .unwrap()
+            .payload = Some(json!({
+            "schema_version": 1,
+            "file_writes": [{"path": "notes.txt", "content": "after\n"}],
+        }));
+        finish_preview(&mut editor);
+        editor
+            .state
+            .handle(TaskSessionCommand::AcceptAction)
+            .unwrap();
+        finish_apply(&mut editor);
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), "after\n");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn semantic_preview_never_regenerates_accepted_or_applied_work() {
         let (mut editor, root, _) = review_fixture("preview_editor_immutable");
         finish_preview(&mut editor);
@@ -8656,7 +8811,7 @@ mod tests {
             &mut editor.state.semantic_previews,
             &mut next_check,
             due,
-            || {
+            |_| {
                 reads += 1;
                 Ok("unused".into())
             },
@@ -8671,7 +8826,7 @@ mod tests {
             &mut editor.state.semantic_previews,
             &mut next_check,
             due,
-            || {
+            |_| {
                 reads += 1;
                 Ok("unused".into())
             },
@@ -8696,7 +8851,7 @@ mod tests {
             &mut editor.state.semantic_previews,
             &mut next_check,
             due,
-            || {
+            |_| {
                 reads += 1;
                 Ok(expected.clone())
             },
@@ -8712,7 +8867,7 @@ mod tests {
             &mut editor.state.semantic_previews,
             &mut next_check,
             due,
-            || {
+            |_| {
                 reads += 1;
                 Ok(expected.clone())
             },
@@ -8729,7 +8884,7 @@ mod tests {
             &mut editor.state.semantic_previews,
             &mut next_check,
             due,
-            || {
+            |_| {
                 reads += 1;
                 Ok(expected.clone())
             },

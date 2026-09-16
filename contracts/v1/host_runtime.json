@@ -53,7 +53,7 @@
       "STASIS_RENDER_MAGIC": 1196967473,
       "STASIS_RENDER_VERSION": 8,
       "STASIS_RENDER_TRACE_VERSION": 8,
-      "STASIS_GRAPHICS_RUNTIME_ABI_VERSION": 3,
+      "STASIS_GRAPHICS_RUNTIME_ABI_VERSION": 4,
       "STASIS_RENDER_I32_COUNT": 67888,
       "STASIS_RENDER_F32_COUNT": 146564,
       "STASIS_RENDER_U8_COUNT": 65536,
@@ -121,6 +121,11 @@
     "snapshot_fields": ["surface_generation", "renderer_generation", "restore_attempts", "restore_failures", "state", "state_before_pause", "reason"],
     "platform_extensions": {"java_reasons": ["renderer_created"], "javascript_snapshot": "unsupported"}
   },
+  "wasm_collection_view": {
+    "version": 2,
+    "package_field": "collectionViewAbiVersion",
+    "wasm_export": "__stasis_collection_view_abi_version"
+  },
   "guest_entrypoints": {
     "main": {"symbol": "main", "signature": "() -> i32", "required": true},
     "tick": {"symbol": "tick", "signature": "() -> i32", "required": true},
@@ -133,7 +138,7 @@
     "version": 1,
     "severity_tags": ["Error", "Warning", "Note"],
     "fields": ["code", "severity", "message", "path", "line", "column"],
-    "source_codes": ["stasis.generic", "stasis.parse", "stasis.unresolvedExtern", "stasis.missingModule", "stasis.duplicateImportAlias"],
+    "source_codes": ["stasis.generic", "stasis.explicitGenericCall", "stasis.parse", "stasis.unresolvedExtern", "stasis.missingModule", "stasis.duplicateImportAlias", "stasis.unsupportedStructReturn", "stasis.storedViewField"],
     "asset_codes": ["asset_root_unavailable", "asset_manifest_missing", "asset_manifest_outside_project", "asset_manifest_too_large", "asset_manifest_read_failed", "asset_manifest_invalid_json", "asset_manifest_too_many_entries", "asset_manifest_schema_unsupported", "asset_manifest_version_unsupported", "asset_display_requires_v2", "asset_prepare_display_missing", "asset_display_dimensions_invalid", "asset_id_invalid", "asset_id_duplicate", "asset_handle_collision", "asset_content_hash_invalid", "asset_prepared_source_hash_invalid", "asset_sprite_dimensions_invalid", "asset_sprite_layout_invalid", "asset_audio_metadata_invalid", "asset_audio_metadata_requires_manifest", "asset_prepare_non_sprite", "asset_prepare_invalid", "asset_format_extension_mismatch", "asset_format_inference_unsupported", "asset_metadata_inference_failed", "asset_path_invalid", "asset_path_case_mismatch", "asset_file_missing", "asset_path_outside_assets", "asset_file_read_failed", "asset_file_too_large", "asset_content_hash_mismatch", "asset_svg_line_endings_not_lf", "asset_dependency_invalid", "asset_dependency_missing", "asset_dependency_cycle", "asset_dynamic_path_undeclared", "asset_package_schema_unsupported", "asset_package_version_unsupported", "asset_package_manifest_path_invalid", "asset_package_manifest_hash_invalid"]
   },
   "compile_transaction": {

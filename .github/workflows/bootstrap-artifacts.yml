@@ -68,7 +68,7 @@ jobs:
         run: >-
           sudo apt-get update && sudo apt-get install --yes pkg-config
           libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev
-          libxi-dev libxss-dev libxtst-dev libxkbcommon-dev
+          libxi-dev libxss-dev libxtst-dev libxkbcommon-dev xvfb
 
       - name: Install SDL development packages (macos)
         if: runner.os == 'macOS'
@@ -144,7 +144,7 @@ jobs:
           cp "build/codex-cargo-target/release/libstasis_network.a" "${out}/desktop/network/${network_target}/"
           cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"
           mkdir -p "${out}/runtime"
-          cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_network_join_card.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stasis_platform_services.c runtime/stasis_platform_services.h runtime/stb_truetype.h "${out}/runtime/"
+          cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_package_provenance_reader.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_network_join_card.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stasis_platform_services.c runtime/stasis_platform_services.h runtime/stb_truetype.h "${out}/runtime/"
           cp -R runtime/third_party "${out}/runtime/"
           mkdir -p "${out}/docs"
           cp docs/agent_workflow.md docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md docs/release_provenance.md docs/sdl3_migration.md "${out}/docs/"
@@ -203,7 +203,7 @@ jobs:
           Copy-Item "build/codex-cargo-target/release/stasis-network-supervise.exe" "$out/" -ErrorAction Stop
           Copy-Item tools/diagnose_desktop_network.ps1 "$out/tools/" -ErrorAction Stop
           New-Item -ItemType Directory -Force -Path "$out/runtime" | Out-Null
-          @('CMakeLists.txt', 'MINIMP3-LICENSE.txt', 'minimp3.h', 'minimp3_ex.h', 'stasis_svg.cpp', 'stasis_svg.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_render_contract.h', 'stasis_renderer_lifecycle.h', 'stasis_performance_metrics.h', 'stasis_audio_assets.c', 'stasis_audio_assets.h', 'stasis_graphics.c', 'stasis_mixed_quad_planner.h', 'stasis_sprite_atlas_policy.h', 'stasis_image_writer.c', 'stasis_image_writer.h', 'stasis_runner.manifest', 'stasis_runner_macos.plist.in', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stasis_network_join_card.h', 'stasis_platform_storage.c', 'stasis_platform_storage.h', 'stasis_platform_services.c', 'stasis_platform_services.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
+          @('CMakeLists.txt', 'MINIMP3-LICENSE.txt', 'minimp3.h', 'minimp3_ex.h', 'stasis_svg.cpp', 'stasis_svg.h', 'stasis_asset_path.h', 'stasis_display_scale.h', 'stasis_render_contract.h', 'stasis_renderer_lifecycle.h', 'stasis_performance_metrics.h', 'stasis_package_provenance_reader.h', 'stasis_audio_assets.c', 'stasis_audio_assets.h', 'stasis_graphics.c', 'stasis_mixed_quad_planner.h', 'stasis_sprite_atlas_policy.h', 'stasis_image_writer.c', 'stasis_image_writer.h', 'stasis_runner.manifest', 'stasis_runner_macos.plist.in', 'stasis_mobile_aot_runtime.c', 'stasis_mobile_aot_runtime.h', 'stasis_mobile_runtime.c', 'stasis_mobile_runtime.h', 'stasis_network_join_card.h', 'stasis_platform_storage.c', 'stasis_platform_storage.h', 'stasis_platform_services.c', 'stasis_platform_services.h', 'stb_truetype.h') | ForEach-Object { Copy-Item "runtime/$_" "$out/runtime/" -Force }
           Copy-Item "runtime/third_party" "$out/runtime/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
           Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md,docs/network_supervision.md "$out/docs/" -Force
@@ -281,7 +281,7 @@ jobs:
           if (-not (Test-Path "cli-smoke/dist/ios/ios/StasisMobile.xcodeproj/project.pbxproj")) { throw "iOS mobile shell missing" }
           Pop-Location
           if ("${{ github.event_name }}" -ne "workflow_dispatch") {
-            python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop/app"
+            python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop/app" --expect-desktop-package
             python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/android" --expect-runtime-sources
             python tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ios" --expect-runtime-sources
           }
@@ -300,7 +300,11 @@ jobs:
           if [[ "${{ runner.os }}" == "macOS" ]]; then
             smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"
           fi
-          python3 - "${smoke_executable}" <<'PY'
+          smoke_driver=(python3)
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            smoke_driver=(xvfb-run -a python3)
+          fi
+          "${smoke_driver[@]}" - "${smoke_executable}" <<'PY'
           import subprocess
           import sys
 
@@ -330,13 +334,34 @@ jobs:
             package_flag=()
           fi
           ./bin/stasis --workspace cli-smoke package --target desktop "${package_flag[@]}"
-          desktop_diagnostics="$(./cli-smoke/dist/ci_smoke-desktop/ci_smoke 2>&1)"
+          package_executable="./cli-smoke/dist/ci_smoke-desktop/ci_smoke"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            package_executable="./cli-smoke/dist/ci_smoke-desktop/ci_smoke.app/Contents/MacOS/ci_smoke"
+          fi
+          desktop_diagnostics="$("${smoke_driver[@]}" - "${package_executable}" <<'PY'
+          import subprocess
+          import sys
+
+          process = subprocess.Popen(
+              [sys.argv[1]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+          try:
+              output, _ = process.communicate(timeout=5)
+          except subprocess.TimeoutExpired:
+              process.kill()
+              output, _ = process.communicate()
+          else:
+              if process.returncode != 0:
+                  raise SystemExit(
+                      f"packaged ci_smoke exited early with code {process.returncode}:\n{output}")
+          print(output, end="")
+          PY
+          )"
           grep -q 'Stasis package provenance:' <<<"${desktop_diagnostics}"
           ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/android "${package_flag[@]}"
           ./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios "${package_flag[@]}"
           popd
           if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-            python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop"
+            python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ci_smoke-desktop" --expect-desktop-package
             python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/android" --expect-runtime-sources
             python3 tools/verify_package_provenance.py --release-root "dist/stasis-release-${{ runner.os }}" --package-root "dist/stasis-release-${{ runner.os }}/cli-smoke/dist/ios" --expect-runtime-sources
           fi

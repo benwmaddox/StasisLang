@@ -116,7 +116,8 @@ groups. Larger standalone images receive a dedicated SDL texture domain with
 the same reserved regions. Padding is edge-extruded at load, density-change, or
 renderer-generation rebuild time.
 
-The v7 order stream remains declarative. Adjacent sprite runs and solid
+The canonical v8 order stream remains declarative; v7 is accepted only as a
+legacy input. Adjacent sprite runs and solid
 rectangles are lowered in exact painter order to fixed reusable
 `SDL_RenderGeometry` storage. A solid uses the active page or bounded lookahead
 to the next sprite page, so it does not create an avoidable texture transition.
@@ -133,8 +134,8 @@ host ABI details, not public guest calls.
 | Function | Description |
 |----------|-------------|
 | `stasis_init_window(w, h, title)` | Create the SDL window and renderer |
-| `stasis_begin_frame()` | Start a new frame |
-| `stasis_end_frame()` | Render queued lines, swap buffers |
+| `stasis_begin_frame()` | Host-private backend preparation for submission; not the guest command-builder reset |
+| `stasis_end_frame()` | Host-private queued-line flush/present; not the guest construction finish |
 | `stasis_clear(r, g, b, a)` | Clear screen with color |
 | `stasis_draw_line(x1, y1, x2, y2, r, g, b, a)` | Queue a line for rendering |
 | `stasis_draw_lines_f32(lines, count)` | Batch: queue `count` lines from an `f32` array (8 floats per line) |
@@ -203,6 +204,35 @@ Application code should read keyboard/pointer/quit state through the public wrap
 `src/stdlib/graphics.stasis`. The fixed HostFrame layout is
 private to `src/stdlib/internal/host_frame_raw.stasis`; integration tests may import it directly,
 while ordinary tests should use `src/stdlib/testing/input_testkit.stasis`.
+
+## Packaged render construction ownership
+
+The package's `render_construction_lifecycle_version` controls command-builder
+construction, not the native device or viewport lifecycle. For lifecycle 1,
+the non-monolithic generated bridge and the Windows monolithic generated AOT
+bindings, plus the shared Android/iOS generated AOT bindings, each call reset ->
+authored render -> finish exactly once. Lifecycle 1 requires a zero-argument
+authored `render()` entry; tick-only or render-less packages stay on lifecycle
+0/absent direct/manual construction. For
+lifecycle 0 or absent metadata, the generated entry calls the authored render
+directly and preserves the legacy explicit-builder behavior.
+
+`stasis_runner` may parse and verify state/launch sidecar metadata for routing,
+but it never wraps an exported render entry or adds another reset/finish. The
+native `stasis_begin_frame()` and `stasis_end_frame()` exports above are
+host-private backend preparation/submission operations; they are not guest
+command-builder reset/finish hooks. If lifecycle-1 guest code calls
+`begin_frame()` during host-owned render, the nested `gfx_cmd_begin()` marks the
+construction invalid and finish aborts it.
+
+This boundary does not change logical coordinates, viewport or safe-viewport
+transforms, drawable resolution, or any resolution cap. After a new nightly is
+installed, regenerate the consumer's vendored stdlib, generated bindings, and
+package metadata together; verify the lifecycle-1 entry, then remove any
+temporary manual-begin compatibility bridge from authored `render()` code.
+Lifecycle-0/absent packages remain direct-render until rebuilt, and consumers
+without such a bridge need only the coordinated vendor/metadata refresh. See
+the [full lifecycle owner matrix](../docs/begin_frame_design.md#exact-owner-matrix).
 
 ## SDL Scancodes
 

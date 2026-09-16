@@ -32,6 +32,16 @@ class ActionVersionTests(unittest.TestCase):
                 self.assertTrue(validate(source.replace(before, after)))
         self.assertTrue(validate(source + '\nNODE_NO_WARNINGS: 1\n'))
 
+    def test_android_setup_excludes_retired_tools_package(self):
+        source = (ROOT / ".github/workflows/pr-ci.yml").read_text()
+        self.assertTrue(
+            validate(
+                source.replace(
+                    "packages: platform-tools", "packages: tools platform-tools"
+                )
+            )
+        )
+
     def test_local_reusable_workflow_is_allowed(self):
         self.assertEqual(validate("    uses: ./.github/workflows/pr-ci.yml"), [])
 

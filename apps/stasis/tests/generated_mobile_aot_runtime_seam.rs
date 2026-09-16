@@ -141,6 +141,10 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     .expect("write generated mobile bindings");
     let bindings = fs::read_to_string(&bindings_path).expect("read generated bindings");
     audit_mobile_aot_bindings(&manifest, &bindings).expect("audit generated bindings");
+    assert_eq!(
+        manifest["render_construction_lifecycle_version"], 1,
+        "generated native AOT bundle must negotiate lifecycle v1"
+    );
     assert!(bindings.contains("stasis_jit_profile_register_function"));
     assert!(bindings.contains("stasis_jit_profile_configure(1, 2);"));
 
@@ -186,7 +190,9 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         .arg(runtime.join("stasis_platform_services.c"))
         .arg(runtime.join("stasis_render_trace.c"))
         .arg(&bindings_path);
-    if !compiler_is_clang {
+    if compiler_is_clang {
+        command.arg("/clang:-Wno-unused-function");
+    } else {
         command.arg("/experimental:c11atomics");
     }
     for path in bundle.object_paths_by_function_id.values() {
@@ -226,6 +232,9 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     ));
     assert!(
         stdout.contains("IT-014 order=123 marker=77 request=41:5:640:360 render_score=15 frames=1")
+    );
+    assert!(
+        stdout.contains("IT-015 generated_render_reset=1 nested_begin_rejected=1 abort_reset=1")
     );
 
     let evidence = json!({
@@ -298,4 +307,23 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     )
     .expect("write ordering evidence");
     eprintln!("IT-014 evidence: {ordering_evidence}");
+
+    let render_lifecycle_evidence = json!({
+        "schema": "stasis.seam_test.v1",
+        "test_id": "IT-015",
+        "status": "passed",
+        "target": "windows-native-aot+generated-monolithic-bindings",
+        "generated_render_reset_count": 1,
+        "nested_begin_rejected": true,
+        "abort_reset_count": 1,
+        "submitted_frames_after_rejection": 0
+    });
+    let render_lifecycle_path = evidence_root().join("it-015-generated-render-lifecycle.json");
+    fs::write(
+        render_lifecycle_path,
+        serde_json::to_vec_pretty(&render_lifecycle_evidence)
+            .expect("serialize generated render lifecycle evidence"),
+    )
+    .expect("write generated render lifecycle evidence");
+    eprintln!("IT-015 evidence: {render_lifecycle_evidence}");
 }

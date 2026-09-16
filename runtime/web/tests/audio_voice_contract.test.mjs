@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { fakeWebGL2 } from "./fake_webgl2.mjs";
+import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
 
@@ -98,6 +99,7 @@ async function createRuntime({ deferredDecode = false, stereoPanner = true } = {
   const body = { dataset: {} };
   const game = { memory: {}, strings: { 7: "sound.wav" }, assets: {} };
   const instance = { exports: { memory, main: () => 0, tick() {}, render() {} } };
+  installCollectionViewAbi(game, instance.exports);
   const contextObject = {
     document: {
       body,

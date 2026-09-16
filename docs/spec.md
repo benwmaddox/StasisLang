@@ -108,6 +108,9 @@ Header access:
 - The storage header still carries `max_length` so bounds metadata remains available at runtime.
 - Reads of `.max_length` through a statically named fixed collection are compile-time constants. Views
   retain runtime `.max_length` metadata because their capacity belongs to the referenced collection.
+- A struct field cannot store `Type[]` or another view type. Fields that own
+  collection storage must declare a fixed capacity such as `Type[N]`; borrowed
+  views remain parameters or locals.
 
 `ascii[N]` layout:
 - header `byte_length: i32`
@@ -128,6 +131,70 @@ Rules:
 - `utf8[N]` payload mutation must go through checked helper APIs (direct raw-byte mutation is not allowed in source-level semantics).
 - Mutations must keep header values synchronized with payload contents.
 - Invalid updates that break these invariants are compile-time errors (when statically known) or runtime errors through checked runtime helpers.
+
+### 4.2.2 Generic Types and Compile-Time Value Parameters
+
+Generic structs declare ordered type and compile-time value parameters. A
+function may use those names only when its first parameter is an application of
+that generic struct:
+
+```stasis
+struct Buffer<T: type, N: i32> {
+    count: i32;
+    values: T[N];
+}
+
+function capacity(self: Buffer<T, N>): i32 {
+    return N;
+}
+```
+
+`T: type` is substituted with a concrete supported type. `N: i32` is a checked,
+compile-time signed 32-bit value, not a runtime parameter and not inherently an
+array capacity. Value arguments may use literals, named constants, enclosing
+generic values, parentheses, unary signs, and checked integer `+`, `-`, `*`,
+`/`, and `%` expressions. Overflow, division by zero, and an invalid
+substituted fixed-array extent are diagnostics. Ordinary runtime parameters
+remain runtime values.
+
+Generic applications use angle brackets only in type positions. Function calls
+never accept explicit generic arguments. Free and receiver spelling resolve to
+the same canonical function:
+
+```stasis
+global samples: Buffer<f32, 128>;
+let free_size: i32 = capacity(samples);
+let receiver_size: i32 = samples.capacity();
+```
+
+The concrete first argument binds the generic struct's declared parameters.
+Names used only by later parameters, the return type, body, or a raw `T[]` view
+are not implicit generics. Function-owned `<...>` declarations and both
+`f<T>(...)` and `f::<T>(...)` calls are migration diagnostics. Conflicting or
+ambiguous receiver bindings are compile-time errors.
+
+Each specialization has nominal identity based on its defining declaration and
+canonical ordered arguments. Equal evaluated value expressions share identity;
+different arguments do not. Generic parameter names are alpha-renamed by their
+ordered declaration slots, so renaming a parameter and its receiver-bound uses
+does not change concrete specialization identity. Equivalent qualified generic-
+or ordinary-struct type spellings resolve to the same defining declaration
+before identity is computed. Generic structs use the existing concrete layout,
+alignment, fixed-array header, SoA field-path, backing, and state-inspection
+rules. Generic syntax never adds allocation, resizing, runtime array length, or
+implicit deep copies. Struct and element parameters remain caller-backed views.
+
+Operations depending on `T` are checked after substitution by the ordinary
+semantic checker. Generics do not add traits, implicit operators, conversions,
+memcpy, or field contracts. Generic enums, aliases, defaults, variadic and
+higher-kinded parameters, runtime value arguments, non-`i32` value parameters,
+and arbitrary unsupported composite copies are deferred.
+
+The current reference coverage and backend boundary are recorded in
+[`docs/generics.md`](generics.md). Bounded named-struct arrays use caller-backed
+views in JIT, native AOT, and internal Wasm calls. Stored views and named-struct
+returns are rejected by the shared frontend; no aggregate is silently copied
+or returned across an internal, lifecycle, host, or generated-wrapper boundary.
 
 ### 4.3 Numeric Conversion Semantics
 
@@ -546,8 +613,10 @@ state.enemies[i].damage(5);
 Receiver-owned fixed arrays of named structs support scalar field reads and
 writes, such as `self.bones[index].parent` and `self.bones[index].local_x`.
 The receiver retains its owner's storage identity through nested calls. Indexed
-access retains the fixed-array bounds contract in section 4.2.1; selecting a whole
-struct element as a scalar value is rejected.
+access retains the fixed-array bounds contract in section 4.2.1. Selecting a
+whole struct element forms a caller-backed scalar view for typed internal calls
+and explicit field-wise indexed copies; it does not materialize a standalone
+struct value or cross a host import, export, or return boundary.
 
 Entry files should normally group application-owned mutable state beneath one
 root global. Fixed host ABI globals are an explicit exception.
@@ -567,11 +636,12 @@ Receiver-scoped declarations with different parameter 0 types may use their natu
 
 ### 7.5 Struct and Array Returns
 
-Struct and array returns are allowed.
-
-Stasis treats these as strongly typed references/views, not implicit by-value copies.
-- Struct/array returns must reference global-backed storage (for example a global struct field/element path).
-- Struct-typed temporaries are not materialized as standalone local value objects in Stasis.
+Named-struct returns, including fixed or view arrays whose element is a named
+struct, are not supported. This is a shared frontend rule for ordinary and
+generic functions, methods, lifecycle functions, extern declarations, and
+generated wrappers. Pass caller-backed struct storage as a parameter and return
+a scalar or `void`. Struct-typed temporaries are not materialized as standalone
+local value objects in Stasis.
 
 ### 7.6 Compiled Call Generations
 
@@ -708,7 +778,10 @@ Rules:
 
 ## 10. Testing Construct
 
-Stasis supports language-level tests:
+Stasis supports language-level tests as specialized parameterless functions.
+They use normal function bodies, calls, types, and compile-time checking. Their
+display names, tooling discovery, result interpretation, and exclusion from
+production builds provide the test-specific behavior:
 
 ```stasis
 test `enemy takes damage`(): bool {
@@ -720,11 +793,26 @@ Rules:
 - Tests are discoverable by tooling.
 - Tests are excluded from production builds.
 - Test execution should be deterministic.
+- Tests have no parameters or generic parameters and require a body. Accepted
+  result types are `bool` and `string`: `true` or an empty string means success;
+  `false` or a non-empty string means failure. A failure string describes the
+  first violated expectation.
+- Tests use ordinary function attributes after the `test` keyword, for example
+  ``test @effects(state.world) `name`(): string``. Effect checking uses the same
+  transitive call-tree restrictions as function contracts in section 7.8;
+  helper contracts provide additional local restrictions.
+- Tooling lowers test syntax to an ordinary function with a generated internal
+  symbol and `@test("display name")` metadata, preserving its attributes,
+  signature, and body. This metadata is an internal representation, not a
+  required alternative source syntax.
 - Runtime test discovery modes:
 - entry-file mode: discover tests in the entry file only (no cascading import traversal)
 - directory mode: discover tests in all `.stasis` files in the target directory (including root)
 - Tests run in deterministic sorted natural path order (numeric path segments compare numerically, not lexicographically).
 - Tests may call extern/runtime functions.
+
+See [standard testing guidance](testing.md) for setup, normal system actions,
+deterministic progression, receiver-form helpers, and behavioral expectations.
 
 ### 10.1 Headless Scenario Tests
 

@@ -1,0 +1,179 @@
+const ORACLE_CAPACITY: i32 = 3;
+
+import "generics_parity_module.stasis";
+
+struct OracleItem {
+    score: i32;
+    byte_lane: u8;
+    short_lane: u16;
+    wide_lane: u32;
+    active: bool;
+    weight: f32;
+    precise: f64;
+}
+
+struct OraclePool<N: i32> {
+    items: OracleItem[N];
+}
+
+struct OracleNested<N: i32> {
+    pool: OraclePool<N>;
+}
+
+global oracle_left: OraclePool<ORACLE_CAPACITY>;
+global oracle_right: OraclePool<ORACLE_CAPACITY>;
+global oracle_nested: OracleNested<2>;
+global oracle_index_calls: i32;
+global oracle_qualified: generics_parity_module.OracleQualified<4>;
+
+function oracle_set(items: OracleItem[], index: i32, score: i32): void {
+    items[index].score = score;
+    items[index].byte_lane = 201;
+    items[index].short_lane = 40001;
+    items[index].wide_lane = 4294967295;
+    items[index].active = true;
+    items[index].weight = 1.5;
+    items[index].precise = 2.5;
+}
+
+function oracle_fill(self: OraclePool<N>, base: i32): void {
+    let index: i32 = 0;
+    for (index = 0; index < N; index += 1) {
+        self.items[index].score = base *(index + 1);
+        self.items[index].byte_lane = 201;
+        self.items[index].short_lane = 40001;
+        self.items[index].wide_lane = 4294967295;
+        self.items[index].active = true;
+        self.items[index].weight = 1.5;
+        self.items[index].precise = 2.5;
+    }
+}
+
+function oracle_sum(items: OracleItem[]): i32 {
+    let total: i32 = 0;
+    let index: i32 = 0;
+    for (index = 0; index < items.max_length; index += 1) {
+        total += items[index].score;
+    }
+    return total;
+}
+
+function oracle_forward_sum(items: OracleItem[]): i32 {
+    return oracle_sum(items);
+}
+
+function oracle_recursive(self: OraclePool<N>, depth: i32): i32 {
+    if (depth <= 0) {
+        return N;
+    }
+    return oracle_recursive(self, depth - 1) + 1;
+}
+
+function oracle_overload(self: OraclePool<N>): i32 {
+    return N;
+}
+
+function oracle_overload(self: OraclePool<N>, extra: i32): i32 {
+    return N + extra;
+}
+
+function oracle_view_capacity(items: OracleItem[]): i32 {
+    return items.max_length;
+}
+
+function oracle_item_score(item: OracleItem): i32 {
+    return item.score;
+}
+
+function oracle_next_index(): i32 {
+    oracle_index_calls += 1;
+    return 1;
+}
+
+function oracle_bump_once(items: OracleItem[]): void {
+    items[oracle_next_index()].score += 5;
+}
+
+function oracle_copy(items: OracleItem[], target: i32, source: i32): void {
+    items[target] = items[source];
+}
+
+function oracle_unsigned_lanes(items: OracleItem[]): bool {
+    if (items[0].wide_lane <= 2147483647) {
+        return false;
+    }
+    if (items[0].wide_lane / 2 != 2147483647 || items[0].wide_lane % 100 != 95) {
+        return false;
+    }
+    items[2].wide_lane /= 2;
+    items[2].wide_lane %= 100;
+    return items[2].wide_lane == 47;
+}
+
+function oracle_read_bound(items: OracleItem[], index: i32): i32 {
+    let item: OracleItem = items[index];
+    return item.score;
+}
+
+function generics_oracle_state_digest(): i32 {
+    return oracle_forward_sum(oracle_left.items) + oracle_forward_sum(oracle_right.items) + oracle_forward_sum(oracle_nested.pool.items) + oracle_view_capacity(
+        oracle_left.items
+    ) + oracle_view_capacity(oracle_right.items) + oracle_view_capacity(oracle_nested.pool.items) + oracle_item_score(oracle_left.items[2]) + oracle_index_calls;
+}
+
+function main(): i32 {
+    oracle_index_calls = 0;
+    oracle_fill(oracle_left, 10);
+    oracle_right.oracle_fill(100);
+    oracle_nested.pool.oracle_fill(7);
+
+    oracle_copy(oracle_left.items, 2, 0);
+    oracle_bump_once(oracle_left.items);
+    if (oracle_index_calls != 1) {
+        return -1;
+    }
+    if (!oracle_unsigned_lanes(oracle_left.items)) {
+        return -2;
+    }
+    if (
+        oracle_left.items[0].byte_lane != 201
+        || oracle_left.items[2].short_lane != 40001
+        || !oracle_left.items[2].active
+        || oracle_left.items[2].weight != 1.5
+        || oracle_left.items[2].precise != 2.5
+    ) {
+        return -3;
+    }
+    oracle_set(oracle_left.items, 0, 10);
+    let foreach_total: i32 = 0;
+    foreach (let item in oracle_left.items) {
+        foreach_total += item.score;
+    }
+    if (foreach_total != 45) {
+        return -4;
+    }
+    if (oracle_forward_sum(oracle_right.items) != 600 || oracle_forward_sum(oracle_nested.pool.items) != 21) {
+        return -5;
+    }
+    if (
+        oracle_recursive(oracle_left, 2) != 5
+        || oracle_left.oracle_recursive(1) != 4
+        || oracle_overload(oracle_left) != 3
+        || oracle_left.oracle_overload(4) != 7
+    ) {
+        return -6;
+    }
+    oracle_qualified.value = 6;
+    if (generics_parity_module.oracle_qualified_score(oracle_qualified) != 10) {
+        return -7;
+    }
+    return generics_oracle_state_digest();
+}
+
+function tick(): i32 {
+    return generics_oracle_state_digest();
+}
+
+function render(index: i32): i32 {
+    return oracle_read_bound(oracle_left.items, index);
+}

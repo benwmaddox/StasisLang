@@ -1,0 +1,36 @@
+struct PlatformerState {
+    player_y: i32;
+    player_vy: i32;
+    floor_y: i32;
+    grounded: bool;
+}
+
+global platformer: PlatformerState;
+
+function reset_platformer(): void {
+    platformer.player_y = 0;
+    platformer.player_vy = 0;
+    platformer.floor_y = 10;
+    platformer.grounded = false;
+}
+
+function main(): i32 {
+    reset_platformer();
+    return 0;
+}
+
+function tick(): i32 {
+    platformer.player_vy += 1;
+    platformer.player_y += platformer.player_vy;
+    platformer.grounded = false;
+    if (platformer.player_y >= platformer.floor_y) {
+        platformer.player_y = platformer.floor_y;
+        platformer.player_vy = 0;
+        platformer.grounded = true;
+    }
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}

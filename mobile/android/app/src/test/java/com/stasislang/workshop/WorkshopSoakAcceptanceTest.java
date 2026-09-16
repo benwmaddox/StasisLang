@@ -61,4 +61,26 @@ public final class WorkshopSoakAcceptanceTest {
         assertEquals(-1, counter.lastToken());
         assertTrue(counter.ordered());
     }
+
+    @Test
+    public void presentationBarrierRejectsStaleRepeatedTokenAcrossProjectChanges() {
+        StasisPreviewRenderer.PresentationState presentation =
+                new StasisPreviewRenderer.PresentationState();
+        presentation.observe(17, 101);
+        long beforeProjectChange = presentation.serial();
+        assertFalse(presentation.matches(17, 101, beforeProjectChange));
+
+        presentation.observe(17, 101);
+        assertTrue(presentation.matches(17, 101, beforeProjectChange));
+        long beforeTraceChange = presentation.serial();
+        presentation.observe(17, 202);
+
+        assertFalse(presentation.matches(17, 101, beforeTraceChange));
+        assertTrue(presentation.matches(17, 202, beforeTraceChange));
+        long beforeNormalSubmission = presentation.serial();
+        presentation.observe(17, -1);
+        assertFalse(presentation.matches(17, 202, beforeNormalSubmission));
+        assertTrue(presentation.matches(17, -1, beforeNormalSubmission));
+        assertFalse(presentation.matches(17, 202, presentation.serial()));
+    }
 }

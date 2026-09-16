@@ -9,8 +9,8 @@ use crate::compiler::{source_workshop_items, Compiler};
 use crate::data_flow::CompilerLocalType;
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{
-    parse_local_declarations, parse_top_level_functions, parse_top_level_type_layout,
-    ParsedGenericParameter, ParsedGenericParameterKind,
+    parse_local_declarations, parse_top_level_extern_functions, parse_top_level_functions,
+    parse_top_level_type_layout, ParsedGenericParameter, ParsedGenericParameterKind,
 };
 use crate::identity::{
     canonical_source_path, overload_discriminator, CanonicalSourcePath, SymbolId,
@@ -43,6 +43,58 @@ pub struct WorkshopGenericParameter {
     pub kind: WorkshopGenericParameterKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkshopGenericStructDefinition {
+    module_alias: String,
+    name: String,
+    parameters: Vec<ParsedGenericParameter>,
+}
+
+fn workshop_generic_struct_definitions(
+    files: &[WorkshopSourceFile],
+) -> Result<Vec<WorkshopGenericStructDefinition>, String> {
+    let mut definitions = Vec::new();
+    for file in files {
+        let module_alias = super::generics::module_alias_for_path(&file.path);
+        for definition in parse_top_level_type_layout(&file.source)?.structs {
+            definitions.push(WorkshopGenericStructDefinition {
+                module_alias: module_alias.clone(),
+                name: definition.name,
+                parameters: definition.generic_parameters,
+            });
+        }
+    }
+    Ok(definitions)
+}
+
+fn resolve_workshop_generic_struct<'a>(
+    definitions: &'a [WorkshopGenericStructDefinition],
+    name: &str,
+    current_module_alias: &str,
+) -> Option<&'a WorkshopGenericStructDefinition> {
+    let short = name.rsplit('.').next().unwrap_or(name);
+    let qualified_alias = name.rsplit_once('.').map(|(alias, _)| alias);
+    let preferred_alias = qualified_alias.unwrap_or(current_module_alias);
+    let preferred = definitions
+        .iter()
+        .filter(|definition| definition.name == short && definition.module_alias == preferred_alias)
+        .collect::<Vec<_>>();
+    match preferred.as_slice() {
+        [definition] => Some(*definition),
+        [] if qualified_alias.is_none() => {
+            let candidates = definitions
+                .iter()
+                .filter(|definition| definition.name == short)
+                .collect::<Vec<_>>();
+            match candidates.as_slice() {
+                [definition] => Some(*definition),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn workshop_generic_parameters(
     parameters: &[ParsedGenericParameter],
 ) -> Vec<WorkshopGenericParameter> {
@@ -56,6 +108,217 @@ fn workshop_generic_parameters(
             },
         })
         .collect()
+}
+
+fn derive_workshop_function_generic_parameters(
+    function: &crate::frontend::parser::ParsedFunctionSignature,
+    current_module_alias: &str,
+    generic_structs: &[WorkshopGenericStructDefinition],
+    known_type_names: &BTreeSet<String>,
+    constants: &BTreeSet<String>,
+) -> Vec<WorkshopGenericParameter> {
+    let Some(first_param) = function.params.first() else {
+        return Vec::new();
+    };
+    let Some((struct_path, arguments)) = parse_workshop_type_application(&first_param.type_name)
+    else {
+        return Vec::new();
+    };
+    let Some(definition) =
+        resolve_workshop_generic_struct(generic_structs, struct_path, current_module_alias)
+    else {
+        return Vec::new();
+    };
+    let mut derived = Vec::new();
+    for (argument, parameter) in arguments.into_iter().zip(&definition.parameters) {
+        collect_workshop_generic_parameters(
+            argument,
+            parameter.kind,
+            current_module_alias,
+            generic_structs,
+            known_type_names,
+            constants,
+            &mut derived,
+        );
+    }
+    derived
+}
+
+fn collect_workshop_generic_parameters(
+    argument: &str,
+    kind: ParsedGenericParameterKind,
+    current_module_alias: &str,
+    generic_structs: &[WorkshopGenericStructDefinition],
+    known_type_names: &BTreeSet<String>,
+    constants: &BTreeSet<String>,
+    out: &mut Vec<WorkshopGenericParameter>,
+) {
+    let argument = argument.trim();
+    match kind {
+        ParsedGenericParameterKind::Type => {
+            if let Some((element, extent)) = split_workshop_array_suffix(argument) {
+                collect_workshop_generic_parameters(
+                    element,
+                    ParsedGenericParameterKind::Type,
+                    current_module_alias,
+                    generic_structs,
+                    known_type_names,
+                    constants,
+                    out,
+                );
+                collect_workshop_generic_parameters(
+                    extent,
+                    ParsedGenericParameterKind::I32,
+                    current_module_alias,
+                    generic_structs,
+                    known_type_names,
+                    constants,
+                    out,
+                );
+                return;
+            }
+            if let Some((struct_path, arguments)) = parse_workshop_type_application(argument) {
+                if let Some(definition) = resolve_workshop_generic_struct(
+                    generic_structs,
+                    struct_path,
+                    current_module_alias,
+                ) {
+                    for (nested, parameter) in arguments.into_iter().zip(&definition.parameters) {
+                        collect_workshop_generic_parameters(
+                            nested,
+                            parameter.kind,
+                            current_module_alias,
+                            generic_structs,
+                            known_type_names,
+                            constants,
+                            out,
+                        );
+                    }
+                }
+                return;
+            }
+            if is_workshop_identifier(argument) && !known_type_names.contains(argument) {
+                add_workshop_generic_parameter(out, argument, WorkshopGenericParameterKind::Type);
+            }
+        }
+        ParsedGenericParameterKind::I32 => {
+            if is_workshop_identifier(argument) && !constants.contains(argument) {
+                add_workshop_generic_parameter(out, argument, WorkshopGenericParameterKind::I32);
+            }
+        }
+    }
+}
+
+fn add_workshop_generic_parameter(
+    out: &mut Vec<WorkshopGenericParameter>,
+    name: &str,
+    kind: WorkshopGenericParameterKind,
+) {
+    if !out.iter().any(|parameter| parameter.name == name) {
+        out.push(WorkshopGenericParameter {
+            name: name.to_string(),
+            kind,
+        });
+    }
+}
+
+fn workshop_builtin_type_names() -> BTreeSet<String> {
+    BTreeSet::from([
+        "void".to_string(),
+        "i32".to_string(),
+        "f32".to_string(),
+        "f64".to_string(),
+        "bool".to_string(),
+        "u8".to_string(),
+        "u16".to_string(),
+        "u32".to_string(),
+        "ascii".to_string(),
+        "utf8".to_string(),
+        "string".to_string(),
+    ])
+}
+
+/// Parse the outermost generic application of a type name without imposing a
+/// second parser on Workshop.  Nested applications and array suffixes are
+/// retained as text; only direct identifier arguments can bind placeholders.
+fn parse_workshop_type_application(type_name: &str) -> Option<(&str, Vec<&str>)> {
+    let open = type_name.find('<')?;
+    let base = type_name[..open].trim();
+    if base
+        .split('.')
+        .any(|segment| !is_workshop_identifier(segment))
+    {
+        return None;
+    }
+    let bytes = type_name.as_bytes();
+    let mut depth = 0usize;
+    let mut close = None;
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'<' => depth = depth.checked_add(1)?,
+            b'>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    if !type_name[close + 1..].trim().is_empty() && !type_name[close + 1..].trim().starts_with('[')
+    {
+        return None;
+    }
+    let arguments = split_workshop_generic_arguments(&type_name[open + 1..close])?;
+    Some((base, arguments))
+}
+
+fn split_workshop_array_suffix(type_name: &str) -> Option<(&str, &str)> {
+    let close = type_name.trim_end().strip_suffix(']')?.len();
+    let open = type_name[..close].rfind('[')?;
+    let element = type_name[..open].trim();
+    if element.is_empty() {
+        return None;
+    }
+    Some((element, type_name[open + 1..close].trim()))
+}
+
+fn split_workshop_generic_arguments(arguments: &str) -> Option<Vec<&str>> {
+    if arguments.trim().is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut angle_depth = 0usize;
+    let mut array_depth = 0usize;
+    for (index, byte) in arguments.bytes().enumerate() {
+        match byte {
+            b'<' => angle_depth = angle_depth.checked_add(1)?,
+            b'>' => angle_depth = angle_depth.checked_sub(1)?,
+            b'[' => array_depth = array_depth.checked_add(1)?,
+            b']' => array_depth = array_depth.checked_sub(1)?,
+            b',' if angle_depth == 0 && array_depth == 0 => {
+                let part = arguments[start..index].trim();
+                if part.is_empty() {
+                    return None;
+                }
+                parts.push(part);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if angle_depth != 0 || array_depth != 0 {
+        return None;
+    }
+    let part = arguments[start..].trim();
+    if part.is_empty() {
+        return None;
+    }
+    parts.push(part);
+    Some(parts)
 }
 
 /// Discovery exposure for Workshop-facing compiler metadata.
@@ -327,7 +590,7 @@ fn plan_workshop_function_placement(
     request: &WorkshopSymbolPlacementRequest,
     known_structs: &BTreeSet<String>,
 ) -> Result<WorkshopSymbolPlacement, String> {
-    if is_lifecycle_function(&request.name) {
+    if is_lifecycle_function(&request.name, request.params.len()) {
         return Ok(WorkshopSymbolPlacement {
             file: "src/main.stasis".to_string(),
             group: "Main".to_string(),
@@ -429,15 +692,25 @@ pub fn build_workshop_symbol_tree(
         })?;
     }
     let mut struct_names = BTreeSet::new();
+    let generic_structs = workshop_generic_struct_definitions(files)?;
+    let mut known_type_names = workshop_builtin_type_names();
+    let mut constants = BTreeSet::new();
     let mut structs_by_file: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for file in files {
         let layout = source_workshop_items(&file.source)?.layout;
-        for parsed in layout.structs {
+        for parsed in &layout.structs {
             struct_names.insert(parsed.name.clone());
+            known_type_names.insert(parsed.name.clone());
             structs_by_file
                 .entry(file.path.as_str())
                 .or_default()
-                .push(parsed.name);
+                .push(parsed.name.clone());
+        }
+        for parsed in &layout.enums {
+            known_type_names.insert(parsed.name.clone());
+        }
+        for parsed in &layout.constants {
+            constants.insert(parsed.name.clone());
         }
     }
 
@@ -446,6 +719,9 @@ pub fn build_workshop_symbol_tree(
         pending.extend(index_file_symbols(
             file,
             &struct_names,
+            &generic_structs,
+            &known_type_names,
+            &constants,
             structs_by_file
                 .get(file.path.as_str())
                 .map(Vec::as_slice)
@@ -494,6 +770,9 @@ pub fn build_workshop_symbol_tree(
 fn index_file_symbols(
     file: &WorkshopSourceFile,
     struct_names: &BTreeSet<String>,
+    generic_structs: &[WorkshopGenericStructDefinition],
+    known_type_names: &BTreeSet<String>,
+    constants: &BTreeSet<String>,
     file_structs: &[String],
 ) -> Result<Vec<PendingSymbol>, String> {
     let canonical_path = CanonicalSourcePath::project_relative(&file.path)?;
@@ -536,43 +815,44 @@ fn index_file_symbols(
         );
         let full_range = function.signature_range.start..function.body_range.end;
         let source = source_for_range(&file.source, full_range.clone())?;
-        let generic_parameters = workshop_generic_parameters(&function.generic_parameters);
-        let signature = format_function_signature(
-            &function.name,
-            &generic_parameters,
-            &function.params,
-            &function.return_type_name,
+        let generic_parameters = derive_workshop_function_generic_parameters(
+            &function,
+            &super::generics::module_alias_for_path(&file.path),
+            generic_structs,
+            known_type_names,
+            constants,
         );
+        let signature =
+            format_function_signature(&function.name, &function.params, &function.return_type_name);
         let mut overload_types = function
             .params
             .iter()
             .map(|param| param.type_name.clone())
             .collect::<Vec<_>>();
-        if !generic_parameters.is_empty() {
-            overload_types.insert(
-                0,
-                format!(
-                    "<{}>",
-                    generic_parameters
-                        .iter()
-                        .map(|parameter| generic_parameter_kind_name(parameter.kind))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ),
-            );
+        for (index, parameter) in generic_parameters.iter().enumerate() {
+            for overload_type in &mut overload_types {
+                *overload_type =
+                    replace_identifier(overload_type, &parameter.name, &format!("$G{index}"));
+            }
         }
         let owner = function_owner(
             &file.path,
             &function.name,
+            function.params.len(),
             function
                 .params
                 .first()
-                .map(|param| workshop_base_type_name(param.type_name.as_str())),
+                .map(|param| workshop_unqualified_type_name(param.type_name.as_str())),
             &function.return_type_name,
             file_structs,
             struct_names,
         );
-        let (group_kind, group_name) = function_group(&file.path, &function.name, owner.as_deref());
+        let (group_kind, group_name) = function_group(
+            &file.path,
+            &function.name,
+            function.params.len(),
+            owner.as_deref(),
+        );
         out.push(PendingSymbol {
             group_kind,
             group_name,
@@ -879,23 +1159,27 @@ fn parse_simple_top_level_symbols(source: &str) -> Result<Vec<ParsedSimpleSymbol
 fn function_owner(
     path: &str,
     function_name: &str,
+    parameter_count: usize,
     first_param_type: Option<&str>,
     return_type: &str,
     file_structs: &[String],
     struct_names: &BTreeSet<String>,
 ) -> Option<String> {
-    if is_lifecycle_function(function_name) || is_system_path(path) || is_root_path(path) {
+    if is_lifecycle_function(function_name, parameter_count)
+        || is_system_path(path)
+        || is_root_path(path)
+    {
         return None;
     }
 
     if let Some(param_type) = first_param_type {
-        let base_type = workshop_base_type_name(param_type);
+        let base_type = workshop_unqualified_type_name(param_type);
         if struct_names.contains(base_type) {
             return Some(base_type.to_string());
         }
     }
 
-    let base_return_type = workshop_base_type_name(return_type);
+    let base_return_type = workshop_unqualified_type_name(return_type);
     if file_structs.iter().any(|name| name == base_return_type) {
         return Some(base_return_type.to_string());
     }
@@ -910,9 +1194,10 @@ fn function_owner(
 fn function_group(
     path: &str,
     function_name: &str,
+    parameter_count: usize,
     owner: Option<&str>,
 ) -> (WorkshopSymbolGroupKind, String) {
-    if is_lifecycle_function(function_name) || is_main_path(path) {
+    if is_lifecycle_function(function_name, parameter_count) || is_main_path(path) {
         return (WorkshopSymbolGroupKind::Main, "Main".to_string());
     }
     if let Some(owner) = owner {
@@ -929,17 +1214,15 @@ fn function_group(
 
 fn format_function_signature(
     name: &str,
-    generic_parameters: &[WorkshopGenericParameter],
     params: &[crate::frontend::parser::ParsedParam],
     return_type_name: &str,
 ) -> String {
-    let generic = format_generic_parameters(generic_parameters);
     let params = params
         .iter()
         .map(|param| format!("{}: {}", param.name, param.type_name))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{name}{generic}({params}): {return_type_name}")
+    format!("{name}({params}): {return_type_name}")
 }
 
 fn format_struct_signature(name: &str, generic_parameters: &[WorkshopGenericParameter]) -> String {
@@ -1028,8 +1311,124 @@ fn generic_parameter_name_range(
     None
 }
 
-fn is_lifecycle_function(name: &str) -> bool {
-    matches!(name, "main" | "init" | "tick" | "render" | "on_code_swap")
+fn workshop_function_generic_parameter_ranges(
+    source: &str,
+    function: &crate::frontend::parser::ParsedFunctionSignature,
+    parameters: &[WorkshopGenericParameter],
+) -> BTreeMap<String, Range<usize>> {
+    if parameters.is_empty() {
+        return BTreeMap::new();
+    }
+    let Ok(tokens) = lex(source) else {
+        return BTreeMap::new();
+    };
+    let signature_tokens = tokens
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, token)| {
+            function.signature_range.start <= token.start
+                && token.end <= function.signature_range.end
+        })
+        .map(|(index, token)| (index, token))
+        .collect::<Vec<_>>();
+    let Some(open_position) = signature_tokens
+        .iter()
+        .position(|(_, token)| token.kind == TokenKind::LParen)
+    else {
+        return BTreeMap::new();
+    };
+    let Some((_, colon)) = signature_tokens
+        .iter()
+        .skip(open_position + 1)
+        .find(|(_, token)| token.kind == TokenKind::Colon)
+    else {
+        return BTreeMap::new();
+    };
+    let Some(colon_index) = tokens
+        .iter()
+        .position(|token| token.start == colon.start && token.end == colon.end)
+    else {
+        return BTreeMap::new();
+    };
+    let mut application_open = None;
+    for (index, token) in tokens.iter().copied().enumerate().skip(colon_index + 1) {
+        if token.start >= function.signature_range.end {
+            break;
+        }
+        let text = token_text(source, token);
+        if matches!(text, "," | ")") {
+            break;
+        }
+        if text == "<" {
+            application_open = Some(index);
+            break;
+        }
+    }
+    let Some(application_open) = application_open else {
+        return BTreeMap::new();
+    };
+
+    let mut depth = 1usize;
+    let mut argument_tokens = Vec::<Token>::new();
+    let mut arguments = Vec::<Vec<Token>>::new();
+    let mut close = None;
+    for token in tokens.iter().copied().skip(application_open + 1) {
+        if token.start >= function.signature_range.end {
+            break;
+        }
+        match token_text(source, token) {
+            "<" => {
+                depth += 1;
+                argument_tokens.push(token);
+            }
+            ">" => {
+                depth = depth.checked_sub(1).unwrap_or_default();
+                if depth == 0 {
+                    if !argument_tokens.is_empty() {
+                        arguments.push(std::mem::take(&mut argument_tokens));
+                    }
+                    close = Some(token);
+                    break;
+                }
+                argument_tokens.push(token);
+            }
+            "," if depth == 1 => {
+                if argument_tokens.is_empty() {
+                    return BTreeMap::new();
+                }
+                arguments.push(std::mem::take(&mut argument_tokens));
+            }
+            _ => argument_tokens.push(token),
+        }
+    }
+    if close.is_none() || depth != 0 {
+        return BTreeMap::new();
+    }
+
+    let mut ranges = BTreeMap::new();
+    for token in arguments
+        .into_iter()
+        .flat_map(|argument| argument.into_iter())
+    {
+        if token.kind != TokenKind::Identifier {
+            continue;
+        }
+        if let Some(parameter) = parameters
+            .iter()
+            .find(|parameter| parameter.name == token_text(source, token))
+        {
+            ranges
+                .entry(parameter.name.clone())
+                .or_insert_with(|| token.start..token.end);
+        }
+    }
+    ranges
+}
+
+fn is_lifecycle_function(name: &str, parameter_count: usize) -> bool {
+    matches!(name, "main" | "init" | "render" | "on_code_swap")
+        || (name == "tick" && parameter_count == 0)
 }
 
 fn is_main_path(path: &str) -> bool {
@@ -1464,21 +1863,39 @@ pub fn workshop_type_hierarchy(
     let struct_symbols = symbols
         .iter()
         .filter(|symbol| symbol.kind == WorkshopSymbolKind::Struct)
-        .map(|symbol| (symbol.name.clone(), symbol))
+        .map(|symbol| {
+            (
+                (workshop_module_identity(&symbol.file), symbol.name.clone()),
+                symbol,
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let items = struct_symbols
         .values()
         .map(|symbol| hierarchy_item(files, symbol))
         .collect::<Result<Vec<_>, _>>()?;
+    let known_structs = struct_symbols.keys().cloned().collect::<BTreeSet<_>>();
     let mut edges = Vec::new();
     for file in files {
         for definition in source_workshop_items(&file.source)?.layout.structs {
-            let Some(container) = struct_symbols.get(&definition.name) else {
+            let container_key = (
+                workshop_module_identity(&file.path),
+                definition.name.clone(),
+            );
+            let Some(container) = struct_symbols.get(&container_key) else {
                 continue;
             };
             for field in definition.fields {
-                let component_name = workshop_base_type_name(&field.type_name);
-                let Some(component) = struct_symbols.get(component_name) else {
+                let Some(component_key) = resolve_workshop_struct_key(
+                    files,
+                    &file.path,
+                    &field.type_name,
+                    &known_structs,
+                )?
+                else {
+                    continue;
+                };
+                let Some(component) = struct_symbols.get(&component_key) else {
                     continue;
                 };
                 edges.push(WorkshopTypeHierarchyEdge {
@@ -1731,9 +2148,41 @@ pub fn find_workshop_references(
     }
     let limit = limit.clamp(1, 256);
     let items = workshop_source_items(files)?;
+    let catalog = workshop_completion_items(files)?;
+    let generic_items = catalog
+        .iter()
+        .filter(|item| item.kind == "generic_parameter" && item.text == symbol)
+        .collect::<Vec<_>>();
+    let has_non_generic_item = catalog
+        .iter()
+        .any(|item| item.text == symbol && item.kind != "generic_parameter");
+    if generic_items.len() == 1 && !has_non_generic_item {
+        return generic_parameter_workshop_references(
+            files,
+            &items,
+            &catalog,
+            generic_items,
+            symbol,
+            limit,
+        );
+    }
+    if generic_items.len() > 1 && !has_non_generic_item {
+        return Err(format!(
+            "generic parameter '{symbol}' is ambiguous without a source position"
+        ));
+    }
     let definition = match field_definition_reference(files, &segments, &items)? {
         Some(reference) => Some(reference),
-        None => global_definition_reference(files, &segments, &items)?,
+        None => match global_definition_reference(files, &segments, &items)? {
+            Some(reference) => Some(reference),
+            None => match method_definition_reference(files, &segments, &items)? {
+                Some(reference) => Some(reference),
+                None => match function_definition_reference(files, &segments, &items)? {
+                    Some(reference) => Some(reference),
+                    None => struct_definition_reference(files, &segments, &items)?,
+                },
+            },
+        },
     };
     let mut references = definition.into_iter().collect::<Vec<_>>();
     for file in files {
@@ -1746,6 +2195,17 @@ pub fn find_workshop_references(
             };
             let start = tokens[start_index].start;
             let end = tokens[end_index].end;
+            if generic_items.iter().any(|generic_item| {
+                generic_parameter_item_contains_token(
+                    &catalog,
+                    generic_item,
+                    &file.path,
+                    start,
+                    end,
+                )
+            }) {
+                continue;
+            }
             let Some(item) = items
                 .iter()
                 .filter(|item| {
@@ -1794,6 +2254,187 @@ pub fn find_workshop_references(
         }
     }
     Ok(references)
+}
+
+pub fn find_workshop_generic_parameter_references_at(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    byte_offset: usize,
+    limit: usize,
+) -> Result<Option<Vec<WorkshopReference>>, String> {
+    let normalized_file = normalize_project_path_text(request_file);
+    let file = files
+        .iter()
+        .find(|file| normalize_project_path_text(&file.path) == normalized_file)
+        .ok_or_else(|| format!("reference file is not indexed: {request_file}"))?;
+    if byte_offset > file.source.len() || !file.source.is_char_boundary(byte_offset) {
+        return Err(format!("reference offset {byte_offset} is invalid"));
+    }
+    let Some(token) = lex(&file.source)?.into_iter().find(|token| {
+        token.kind == TokenKind::Identifier
+            && token.start <= byte_offset
+            && byte_offset <= token.end
+    }) else {
+        return Ok(None);
+    };
+    let symbol = token_text(&file.source, token);
+    let catalog = workshop_completion_items(files)?;
+    let generic_items = catalog
+        .iter()
+        .filter(|item| {
+            item.kind == "generic_parameter"
+                && item.text == symbol
+                && generic_parameter_item_contains_token(
+                    &catalog,
+                    item,
+                    &file.path,
+                    token.start,
+                    token.end,
+                )
+        })
+        .collect::<Vec<_>>();
+    let generic_item = match generic_items.as_slice() {
+        [] => return Ok(None),
+        [generic_item] => *generic_item,
+        _ => {
+            return Err(format!(
+                "multiple generic parameters named '{symbol}' are visible at the reference position"
+            ))
+        }
+    };
+    if generic_item.scope.is_none() {
+        return Ok(None);
+    }
+    let items = workshop_source_items(files)?;
+    generic_parameter_workshop_references(
+        files,
+        &items,
+        &catalog,
+        vec![generic_item],
+        symbol,
+        limit.clamp(1, 256),
+    )
+    .map(Some)
+}
+
+fn generic_parameter_item_contains_token(
+    catalog: &[WorkshopCompletionItem],
+    generic_item: &WorkshopCompletionItem,
+    file: &str,
+    start: usize,
+    end: usize,
+) -> bool {
+    let Some(scope) = generic_item.scope.as_ref() else {
+        return false;
+    };
+    scope.file == file
+        && scope.visible_from <= start
+        && end <= scope.visible_to
+        && !generic_parameter_shadow_ranges(catalog, generic_item)
+            .iter()
+            .any(|range| range.start <= start && end <= range.end)
+}
+
+fn generic_parameter_workshop_references(
+    files: &[WorkshopSourceFile],
+    items: &[WorkshopSourceItem],
+    catalog: &[WorkshopCompletionItem],
+    generic_items: Vec<&WorkshopCompletionItem>,
+    symbol: &str,
+    limit: usize,
+) -> Result<Vec<WorkshopReference>, String> {
+    let mut references = Vec::new();
+    for generic_item in generic_items {
+        let Some(scope) = generic_item.scope.as_ref() else {
+            continue;
+        };
+        let Some(file) = files.iter().find(|file| file.path == scope.file) else {
+            continue;
+        };
+        let shadowed = generic_parameter_shadow_ranges(catalog, generic_item);
+        for token in lex(&file.source)? {
+            if token.kind != TokenKind::Identifier
+                || token_text(&file.source, token) != symbol
+                || token.start < scope.visible_from
+                || token.end > scope.visible_to
+                || shadowed
+                    .iter()
+                    .any(|range| range.start <= token.start && token.end <= range.end)
+            {
+                continue;
+            }
+            let Some(item) = items
+                .iter()
+                .filter(|item| {
+                    item.file == file.path
+                        && item.source_spans.iter().any(|span| {
+                            span.start as usize <= token.start && token.end <= span.end as usize
+                        })
+                })
+                .min_by_key(|item| {
+                    item.source_spans
+                        .iter()
+                        .map(|span| span.end.saturating_sub(span.start))
+                        .min()
+                        .unwrap_or(u32::MAX)
+                })
+            else {
+                continue;
+            };
+            let is_definition = scope_declaration_range(scope)
+                .is_some_and(|range| range.start == token.start && range.end == token.end);
+            references.push(WorkshopReference {
+                symbol: symbol.to_string(),
+                kind: if is_definition {
+                    WorkshopReferenceKind::Definition
+                } else {
+                    WorkshopReferenceKind::Read
+                },
+                file: file.path.clone(),
+                source_span: span_from_range(token.start..token.end)?,
+                containing_kind: item.kind,
+                containing_name: item.name.clone(),
+                containing_signature: item.signature.clone(),
+                containing_source_hash: item.source_hash.clone(),
+            });
+        }
+    }
+    references.sort_by_key(|reference| {
+        (
+            reference.file.clone(),
+            reference.source_span.start,
+            reference.source_span.end,
+        )
+    });
+    references.dedup_by(|left, right| {
+        left.file == right.file
+            && left.source_span == right.source_span
+            && left.symbol == right.symbol
+    });
+    references.truncate(limit);
+    Ok(references)
+}
+
+fn generic_parameter_shadow_ranges(
+    catalog: &[WorkshopCompletionItem],
+    generic_item: &WorkshopCompletionItem,
+) -> Vec<Range<usize>> {
+    let Some(scope) = generic_item.scope.as_ref() else {
+        return Vec::new();
+    };
+    catalog
+        .iter()
+        .filter(|item| {
+            item.text == generic_item.text
+                && matches!(item.kind.as_str(), "local" | "parameter")
+                && item.file == scope.file
+        })
+        .filter_map(|item| item.scope.as_ref())
+        .filter(|other| {
+            scope.visible_from < other.visible_from && other.visible_to <= scope.visible_to
+        })
+        .map(|other| other.visible_from..other.visible_to)
+        .collect()
 }
 
 pub fn plan_workshop_rename(
@@ -2504,6 +3145,7 @@ fn global_definition_reference(
     let [name] = segments else {
         return Ok(None);
     };
+    let mut definitions = Vec::new();
     for file in files {
         let tokens = lex(&file.source)?;
         let Some(name_token) = tokens.windows(2).find_map(|pair| {
@@ -2520,7 +3162,7 @@ fn global_definition_reference(
         else {
             continue;
         };
-        return Ok(Some(WorkshopReference {
+        definitions.push(WorkshopReference {
             symbol: name.to_string(),
             kind: WorkshopReferenceKind::Definition,
             file: file.path.clone(),
@@ -2534,9 +3176,293 @@ fn global_definition_reference(
             containing_name: container.name.clone(),
             containing_signature: container.signature.clone(),
             containing_source_hash: container.source_hash.clone(),
-        }));
+        });
     }
-    Ok(None)
+    Ok((definitions.len() == 1).then(|| definitions.remove(0)))
+}
+
+fn function_definition_reference(
+    files: &[WorkshopSourceFile],
+    segments: &[&str],
+    items: &[WorkshopSourceItem],
+) -> Result<Option<WorkshopReference>, String> {
+    let [module_alias, name] = segments else {
+        return Ok(None);
+    };
+    let candidates = items
+        .iter()
+        .filter(|item| {
+            item.kind == WorkshopSourceItemKind::Function
+                && item.name == *name
+                && super::generics::module_alias_for_path(&item.file) == *module_alias
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() > 1 {
+        return Ok(None);
+    }
+
+    let mut definitions = Vec::new();
+    if let Some(item) = candidates.first() {
+        let Some(reference) = function_item_definition_reference(files, segments, item)? else {
+            return Ok(None);
+        };
+        definitions.push(reference);
+    }
+    definitions.extend(extern_function_definition_references(
+        files,
+        segments,
+        module_alias,
+        name,
+    )?);
+    Ok((definitions.len() == 1).then(|| definitions.remove(0)))
+}
+
+fn extern_function_definition_references(
+    files: &[WorkshopSourceFile],
+    segments: &[&str],
+    module_alias: &str,
+    name: &str,
+) -> Result<Vec<WorkshopReference>, String> {
+    // Body functions are represented by WorkshopSourceItem, but semicolon-style
+    // extern declarations are intentionally parser-owned records only.
+    let mut definitions = Vec::new();
+    for file in files {
+        if super::generics::module_alias_for_path(&file.path) != module_alias {
+            continue;
+        }
+        for function in parse_top_level_extern_functions(&file.source)? {
+            if function.name != name {
+                continue;
+            }
+            definitions.push(WorkshopReference {
+                symbol: segments.join("."),
+                kind: WorkshopReferenceKind::Definition,
+                file: file.path.clone(),
+                source_span: span_from_range(function.name_range.clone())?,
+                containing_kind: WorkshopSourceItemKind::Function,
+                containing_name: function.name.clone(),
+                containing_signature: format_function_signature(
+                    &function.name,
+                    &function.params,
+                    &function.return_type_name,
+                ),
+                containing_source_hash: workshop_source_hash(&file.source),
+            });
+        }
+    }
+    Ok(definitions)
+}
+
+fn method_definition_reference(
+    files: &[WorkshopSourceFile],
+    segments: &[&str],
+    items: &[WorkshopSourceItem],
+) -> Result<Option<WorkshopReference>, String> {
+    let [binding, method] = segments else {
+        return Ok(None);
+    };
+    let layouts = files
+        .iter()
+        .map(|file| Ok((file, source_workshop_items(&file.source)?.layout)))
+        .collect::<Result<Vec<_>, String>>()?;
+    let known_structs = layouts
+        .iter()
+        .flat_map(|(file, layout)| {
+            let module = workshop_module_identity(&file.path);
+            layout
+                .structs
+                .iter()
+                .map(move |definition| (module.clone(), definition.name.clone()))
+        })
+        .collect::<BTreeSet<_>>();
+    let globals = layouts
+        .iter()
+        .filter_map(|(file, layout)| {
+            layout
+                .globals
+                .iter()
+                .find(|global| global.name == *binding)
+                .map(|global| (file.path.clone(), global.type_name.clone()))
+        })
+        .collect::<Vec<_>>();
+    let [(binding_file, binding_type)] = globals.as_slice() else {
+        return Ok(None);
+    };
+    let Some((module, struct_name)) =
+        resolve_workshop_struct_key(files, binding_file, binding_type, &known_structs)?
+    else {
+        return Ok(None);
+    };
+    let candidates = items
+        .iter()
+        .filter(|item| {
+            item.kind == WorkshopSourceItemKind::Function
+                && item.name == *method
+                && item.owner.as_deref() == Some(struct_name.as_str())
+                && workshop_module_identity(&item.file) == module
+        })
+        .collect::<Vec<_>>();
+    let [item] = candidates.as_slice() else {
+        return Ok(None);
+    };
+    function_item_definition_reference(files, segments, item)
+}
+
+fn struct_definition_reference(
+    files: &[WorkshopSourceFile],
+    segments: &[&str],
+    items: &[WorkshopSourceItem],
+) -> Result<Option<WorkshopReference>, String> {
+    let [module_alias, name] = segments else {
+        return Ok(None);
+    };
+    let candidates = items
+        .iter()
+        .filter(|item| {
+            item.kind == WorkshopSourceItemKind::Struct
+                && item.name == *name
+                && super::generics::module_alias_for_path(&item.file) == *module_alias
+        })
+        .collect::<Vec<_>>();
+    let [item] = candidates.as_slice() else {
+        return Ok(None);
+    };
+    let Some(file) = files
+        .iter()
+        .find(|file| workshop_same_path(&file.path, &item.file))
+    else {
+        return Ok(None);
+    };
+    let tokens = lex(&file.source)?;
+    let Some(span) = item.source_spans.first() else {
+        return Ok(None);
+    };
+    let Some(token) = tokens.iter().enumerate().find_map(|(index, token)| {
+        (token.start >= span.start as usize
+            && token.end <= span.end as usize
+            && token.kind == TokenKind::Identifier
+            && token_text(&file.source, *token) == *name
+            && tokens
+                .get(index.checked_sub(1)?)
+                .is_some_and(|previous| token_text(&file.source, *previous) == "struct"))
+        .then_some(*token)
+    }) else {
+        return Ok(None);
+    };
+    Ok(Some(WorkshopReference {
+        symbol: segments.join("."),
+        kind: WorkshopReferenceKind::Definition,
+        file: file.path.clone(),
+        source_span: WorkshopSourceSpan {
+            start: u32::try_from(token.start)
+                .map_err(|_| "struct definition start exceeds u32".to_string())?,
+            end: u32::try_from(token.end)
+                .map_err(|_| "struct definition end exceeds u32".to_string())?,
+        },
+        containing_kind: item.kind,
+        containing_name: item.name.clone(),
+        containing_signature: item.signature.clone(),
+        containing_source_hash: item.source_hash.clone(),
+    }))
+}
+
+fn function_item_definition_reference(
+    files: &[WorkshopSourceFile],
+    segments: &[&str],
+    item: &WorkshopSourceItem,
+) -> Result<Option<WorkshopReference>, String> {
+    let Some(file) = files
+        .iter()
+        .find(|file| workshop_same_path(&file.path, &item.file))
+    else {
+        return Ok(None);
+    };
+    let tokens = lex(&file.source)?;
+    let Some(span) = item.source_spans.first() else {
+        return Ok(None);
+    };
+    let Some(token) = function_item_name_token(&file.source, &tokens, item, span) else {
+        return Ok(None);
+    };
+    Ok(Some(WorkshopReference {
+        symbol: segments.join("."),
+        kind: WorkshopReferenceKind::Definition,
+        file: file.path.clone(),
+        source_span: WorkshopSourceSpan {
+            start: u32::try_from(token.start)
+                .map_err(|_| "function definition start exceeds u32".to_string())?,
+            end: u32::try_from(token.end)
+                .map_err(|_| "function definition end exceeds u32".to_string())?,
+        },
+        containing_kind: item.kind,
+        containing_name: item.name.clone(),
+        containing_signature: item.signature.clone(),
+        containing_source_hash: item.source_hash.clone(),
+    }))
+}
+
+fn function_item_name_token(
+    source: &str,
+    tokens: &[Token],
+    item: &WorkshopSourceItem,
+    item_span: &WorkshopSourceSpan,
+) -> Option<Token> {
+    let function = parse_top_level_functions(source)
+        .ok()?
+        .into_iter()
+        .find(|function| {
+            function.name == item.name
+                && item_span.start as usize <= function.signature_range.start
+                && function.body_range.end <= item_span.end as usize
+        })?;
+    let function_index = tokens.iter().position(|token| {
+        token.kind == TokenKind::FunctionKw && token.start == function.signature_range.start
+    })?;
+    let mut cursor = function_index + 1;
+    for annotation in &function.annotations {
+        let at = tokens.get(cursor)?;
+        if at.kind != TokenKind::Other || token_text(source, *at) != "@" {
+            return None;
+        }
+        cursor += 1;
+        let annotation_name = tokens.get(cursor)?;
+        if annotation_name.kind != TokenKind::Identifier
+            || token_text(source, *annotation_name) != annotation.name
+        {
+            return None;
+        }
+        cursor += 1;
+        if annotation.has_parentheses {
+            cursor = skip_parenthesized_tokens(tokens, cursor)?;
+        }
+    }
+    let name = *tokens.get(cursor)?;
+    (name.kind == TokenKind::Identifier
+        && name.start >= function.signature_range.start
+        && name.end <= function.signature_range.end
+        && token_text(source, name) == item.name)
+        .then_some(name)
+}
+
+fn skip_parenthesized_tokens(tokens: &[Token], mut cursor: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    while let Some(token) = tokens.get(cursor) {
+        match token.kind {
+            TokenKind::LParen => depth = depth.checked_add(1)?,
+            TokenKind::RParen => {
+                depth = depth.checked_sub(1)?;
+                cursor += 1;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+                continue;
+            }
+            TokenKind::Eof => return None,
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
 }
 
 fn is_workshop_identifier(value: &str) -> bool {
@@ -2591,36 +3517,7 @@ fn reference_match_end(
             cursor += 1;
         }
     }
-    if let Some(close) = explicit_generic_group_end(source, tokens, cursor) {
-        return Some(close);
-    }
     Some(cursor)
-}
-
-fn explicit_generic_group_end(source: &str, tokens: &[Token], name_index: usize) -> Option<usize> {
-    let colon_one = tokens.get(name_index + 1).copied()?;
-    let colon_two = tokens.get(name_index + 2).copied()?;
-    let open = tokens.get(name_index + 3).copied()?;
-    if token_text(source, colon_one) != ":"
-        || token_text(source, colon_two) != ":"
-        || token_text(source, open) != "<"
-    {
-        return None;
-    }
-    let mut depth = 0usize;
-    for (index, token) in tokens.iter().copied().enumerate().skip(name_index + 3) {
-        match token_text(source, token) {
-            "<" => depth += 1,
-            ">" => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn field_definition_reference(
@@ -2635,55 +3532,143 @@ fn field_definition_reference(
     for file in files {
         layouts.push((file, source_workshop_items(&file.source)?.layout));
     }
-    let mut type_name = layouts.iter().find_map(|(_, layout)| {
-        layout
-            .globals
-            .iter()
-            .find(|global| global.name == segments[0])
-            .map(|global| global.type_name.clone())
-    });
-    if type_name.is_none()
-        && layouts.iter().any(|(_, layout)| {
+    let known_structs = layouts
+        .iter()
+        .flat_map(|(file, layout)| {
+            let module = workshop_module_identity(&file.path);
             layout
                 .structs
                 .iter()
-                .any(|definition| definition.name == segments[0])
+                .map(move |definition| (module.clone(), definition.name.clone()))
         })
-    {
-        type_name = Some(segments[0].to_string());
-    }
-    let mut owner = None;
-    for field_name in &segments[1..] {
-        let Some(current) = type_name.as_deref().map(workshop_base_type_name) else {
-            return Ok(None);
-        };
-        let field = layouts.iter().find_map(|(_, layout)| {
+        .collect::<BTreeSet<_>>();
+
+    let globals = layouts
+        .iter()
+        .filter_map(|(file, layout)| {
             layout
-                .structs
+                .globals
                 .iter()
-                .find(|definition| definition.name == current)
-                .and_then(|definition| {
-                    definition
-                        .fields
+                .find(|global| global.name == segments[0])
+                .map(|global| (file.path.clone(), global.type_name.clone()))
+        })
+        .collect::<Vec<_>>();
+    let (mut type_name, mut context_file, field_start) = match globals.as_slice() {
+        [(file, type_name)] => (Some(type_name.clone()), Some(file.clone()), 1),
+        [] => {
+            if segments.len() >= 3 {
+                let qualified = layouts
+                    .iter()
+                    .filter_map(|(file, layout)| {
+                        let alias = super::generics::module_alias_for_path(&file.path);
+                        (alias == segments[0])
+                            .then(|| {
+                                layout
+                                    .structs
+                                    .iter()
+                                    .find(|definition| definition.name == segments[1])
+                                    .map(|definition| {
+                                        (file.path.clone(), format!("{alias}.{}", definition.name))
+                                    })
+                            })
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>();
+                if let [(file, type_name)] = qualified.as_slice() {
+                    (Some(type_name.clone()), Some(file.clone()), 2)
+                } else {
+                    let candidates = known_structs
                         .iter()
-                        .find(|field| field.name == *field_name)
-                        .map(|field| (definition.name.clone(), field.type_name.clone()))
-                })
-        });
-        let Some((field_owner, field_type)) = field else {
-            return Ok(None);
-        };
-        owner = Some(field_owner);
-        type_name = Some(field_type);
-    }
-    let Some(owner) = owner else {
+                        .filter(|(_, name)| name == segments[0])
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    match candidates.as_slice() {
+                        [(_, _)] => {
+                            let key = &candidates[0];
+                            let file = layouts.iter().find_map(|(file, layout)| {
+                                (workshop_module_identity(&file.path) == key.0
+                                    && layout
+                                        .structs
+                                        .iter()
+                                        .any(|definition| definition.name == key.1))
+                                .then(|| file.path.clone())
+                            });
+                            (Some(segments[0].to_string()), file, 1)
+                        }
+                        _ => (None, None, 1),
+                    }
+                }
+            } else {
+                let candidates = known_structs
+                    .iter()
+                    .filter(|(_, name)| name == segments[0])
+                    .cloned()
+                    .collect::<Vec<_>>();
+                match candidates.as_slice() {
+                    [(_, _)] => {
+                        let key = &candidates[0];
+                        let file = layouts.iter().find_map(|(file, layout)| {
+                            (workshop_module_identity(&file.path) == key.0
+                                && layout
+                                    .structs
+                                    .iter()
+                                    .any(|definition| definition.name == key.1))
+                            .then(|| file.path.clone())
+                        });
+                        (Some(segments[0].to_string()), file, 1)
+                    }
+                    _ => (None, None, 1),
+                }
+            }
+        }
+        _ => (None, None, 1),
+    };
+    let (Some(mut type_name), Some(mut context_file)) = (type_name.take(), context_file.take())
+    else {
         return Ok(None);
     };
-    let field_name = segments.last().copied().unwrap_or_default();
-    let Some(item) = items
-        .iter()
-        .find(|item| item.kind == WorkshopSourceItemKind::Struct && item.name == owner)
-    else {
+
+    let mut owner_file = None;
+    let mut owner = None;
+    for field_name in &segments[field_start..] {
+        let Some(struct_key) =
+            resolve_workshop_struct_key(files, &context_file, &type_name, &known_structs)?
+        else {
+            return Ok(None);
+        };
+        let Some((struct_file, definition)) = layouts.iter().find_map(|(file, layout)| {
+            (workshop_module_identity(&file.path) == struct_key.0)
+                .then(|| {
+                    layout
+                        .structs
+                        .iter()
+                        .find(|definition| definition.name == struct_key.1)
+                        .map(|definition| (*file, definition))
+                })
+                .flatten()
+        }) else {
+            return Ok(None);
+        };
+        let Some(field) = definition
+            .fields
+            .iter()
+            .find(|field| field.name == *field_name)
+        else {
+            return Ok(None);
+        };
+        owner_file = Some(struct_file.path.clone());
+        owner = Some(definition.name.clone());
+        type_name = field.type_name.clone();
+        context_file = struct_file.path.clone();
+    }
+    let Some((owner_file, owner)) = owner_file.zip(owner) else {
+        return Ok(None);
+    };
+    let Some(item) = items.iter().find(|item| {
+        item.kind == WorkshopSourceItemKind::Struct
+            && workshop_same_path(&item.file, &owner_file)
+            && item.name == owner
+    }) else {
         return Ok(None);
     };
     let Some(file) = files.iter().find(|file| file.path == item.file) else {
@@ -2693,6 +3678,7 @@ fn field_definition_reference(
     let Some(span) = item.source_spans.first() else {
         return Ok(None);
     };
+    let field_name = segments.last().copied().unwrap_or_default();
     let Some(token) = tokens.iter().enumerate().find_map(|(index, token)| {
         (token.start >= span.start as usize
             && token.end <= span.end as usize
@@ -2728,6 +3714,132 @@ pub fn workshop_base_type_name(type_name: &str) -> &str {
         return without_array;
     };
     without_array[..open].trim()
+}
+
+fn workshop_unqualified_type_name(type_name: &str) -> &str {
+    let base = workshop_base_type_name(type_name);
+    base.rsplit('.').next().unwrap_or(base)
+}
+
+type WorkshopStructKey = (String, String);
+
+fn workshop_module_identity(path: &str) -> String {
+    canonical_source_path(None, path).unwrap_or_else(|_| normalize_project_path_text(path))
+}
+
+fn workshop_same_path(left: &str, right: &str) -> bool {
+    normalize_project_path_text(left) == normalize_project_path_text(right)
+}
+
+fn workshop_resolved_imports(
+    files: &[WorkshopSourceFile],
+    file_path: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let Some(file) = files
+        .iter()
+        .find(|file| workshop_same_path(&file.path, file_path))
+    else {
+        return Ok(Vec::new());
+    };
+    parse_workshop_import_paths(&file.source)?
+        .into_iter()
+        .map(|import| {
+            let target = crate::frontend::module_graph::resolve_import_path(&file.path, &import)?;
+            Ok((
+                super::generics::module_alias_for_path(&target),
+                workshop_module_identity(&target),
+            ))
+        })
+        .collect()
+}
+
+fn workshop_module_identity_for_alias(
+    files: &[WorkshopSourceFile],
+    file_path: &str,
+    alias: &str,
+) -> Result<Option<String>, String> {
+    let direct = workshop_resolved_imports(files, file_path)?
+        .into_iter()
+        .filter(|(candidate, _)| candidate == alias)
+        .map(|(_, target)| target)
+        .collect::<Vec<_>>();
+    match direct.as_slice() {
+        [target] => return Ok(Some(target.clone())),
+        [] => {}
+        _ => return Ok(None),
+    }
+
+    let candidates = files
+        .iter()
+        .filter(|file| super::generics::module_alias_for_path(&file.path) == alias)
+        .map(|file| workshop_module_identity(&file.path))
+        .collect::<BTreeSet<_>>();
+    Ok((candidates.len() == 1).then(|| candidates.into_iter().next().expect("one candidate")))
+}
+
+fn workshop_visible_module_identities(
+    files: &[WorkshopSourceFile],
+    file_path: &str,
+) -> Result<BTreeSet<String>, String> {
+    let by_identity = files
+        .iter()
+        .map(|file| (workshop_module_identity(&file.path), file))
+        .collect::<BTreeMap<_, _>>();
+    let start = workshop_module_identity(file_path);
+    let mut visible = BTreeSet::from([start.clone()]);
+    let mut pending = VecDeque::from([start]);
+    while let Some(current) = pending.pop_front() {
+        let Some(file) = by_identity.get(&current) else {
+            continue;
+        };
+        for (_, target) in workshop_resolved_imports(files, &file.path)? {
+            if by_identity.contains_key(&target) && visible.insert(target.clone()) {
+                pending.push_back(target);
+            }
+        }
+    }
+    Ok(visible)
+}
+
+fn resolve_workshop_struct_key(
+    files: &[WorkshopSourceFile],
+    file_path: &str,
+    type_name: &str,
+    known_structs: &BTreeSet<WorkshopStructKey>,
+) -> Result<Option<WorkshopStructKey>, String> {
+    let base = workshop_base_type_name(type_name).trim();
+    let short = base.rsplit('.').next().unwrap_or(base);
+    if let Some((alias, _)) = base.rsplit_once('.') {
+        let Some(module) = workshop_module_identity_for_alias(files, file_path, alias)? else {
+            return Ok(None);
+        };
+        let key = (module, short.to_string());
+        return Ok(known_structs.contains(&key).then_some(key));
+    }
+
+    let local = (workshop_module_identity(file_path), short.to_string());
+    if known_structs.contains(&local) {
+        return Ok(Some(local));
+    }
+
+    let visible = workshop_visible_module_identities(files, file_path)?;
+    let candidates = known_structs
+        .iter()
+        .filter(|(module, name)| name == short && visible.contains(module))
+        .cloned()
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [candidate] => Ok(Some(candidate.clone())),
+        [] => {
+            let all = known_structs
+                .iter()
+                .filter(|(_, name)| name == short)
+                .cloned()
+                .collect::<Vec<_>>();
+            Ok((all.len() == 1).then(|| all.into_iter().next().expect("one candidate")))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn classify_workshop_reference(
@@ -2778,7 +3890,7 @@ pub fn workshop_completion_items(
     files: &[WorkshopSourceFile],
 ) -> Result<Vec<WorkshopCompletionItem>, String> {
     let mut items = Vec::new();
-    let mut struct_fields = BTreeMap::<String, Vec<(String, String)>>::new();
+    let mut struct_fields = BTreeMap::<WorkshopStructKey, Vec<(String, String)>>::new();
     let parsed_files = files
         .iter()
         .map(|file| {
@@ -2794,11 +3906,27 @@ pub fn workshop_completion_items(
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let generic_structs = workshop_generic_struct_definitions(files)?;
+    let mut known_type_names = workshop_builtin_type_names();
+    let mut constants = BTreeSet::new();
     let mut struct_scopes = BTreeMap::<(String, String), WorkshopCompletionScope>::new();
     for (file, layout, _, _, _, ranges) in &parsed_files {
         for definition in &layout.structs {
-            struct_fields.insert(
+            known_type_names.insert(definition.name.clone());
+        }
+        for definition in &layout.enums {
+            known_type_names.insert(definition.name.clone());
+        }
+        for constant in &layout.constants {
+            constants.insert(constant.name.clone());
+        }
+        for definition in &layout.structs {
+            let key = (
+                workshop_module_identity(&file.path),
                 definition.name.clone(),
+            );
+            struct_fields.insert(
+                key,
                 definition
                     .fields
                     .iter()
@@ -2829,7 +3957,7 @@ pub fn workshop_completion_items(
 
     let source_items = workshop_source_items(files)?;
     let mut methods = BTreeMap::<
-        String,
+        WorkshopStructKey,
         Vec<(
             String,
             String,
@@ -2859,18 +3987,20 @@ pub fn workshop_completion_items(
         completion.exposure = item.exposure;
         items.push(completion);
         if item.kind == WorkshopSourceItemKind::Function {
-            if let Some(owner) = item
-                .owner
-                .as_ref()
-                .filter(|owner| struct_fields.contains_key(*owner))
-            {
-                methods.entry(owner.clone()).or_default().push((
-                    item.name.clone(),
-                    item.signature.clone(),
-                    item.file.clone(),
-                    item.generic_parameters.clone(),
-                    item.exposure,
-                ));
+            if let Some(owner) = item.owner.as_ref().filter(|owner| {
+                struct_fields
+                    .contains_key(&(workshop_module_identity(&item.file), (*owner).clone()))
+            }) {
+                methods
+                    .entry((workshop_module_identity(&item.file), owner.clone()))
+                    .or_default()
+                    .push((
+                        item.name.clone(),
+                        item.signature.clone(),
+                        item.file.clone(),
+                        item.generic_parameters.clone(),
+                        item.exposure,
+                    ));
             }
         }
     }
@@ -3011,7 +4141,6 @@ pub fn workshop_completion_items(
                     function.body_range.clone(),
                     format_function_signature(
                         &function.name,
-                        &workshop_generic_parameters(&function.generic_parameters),
                         &function.params,
                         &function.return_type_name,
                     ),
@@ -3031,11 +4160,21 @@ pub fn workshop_completion_items(
         for function in functions {
             let owner_signature = format_function_signature(
                 &function.name,
-                &workshop_generic_parameters(&function.generic_parameters),
                 &function.params,
                 &function.return_type_name,
             );
-            let generic_parameters = workshop_generic_parameters(&function.generic_parameters);
+            let generic_parameters = derive_workshop_function_generic_parameters(
+                &function,
+                &super::generics::module_alias_for_path(&file.path),
+                &generic_structs,
+                &known_type_names,
+                &constants,
+            );
+            let generic_parameter_ranges = workshop_function_generic_parameter_ranges(
+                &file.source,
+                &function,
+                &generic_parameters,
+            );
             for parameter in &generic_parameters {
                 let mut scope = WorkshopCompletionScope {
                     owner: function.name.clone(),
@@ -3047,13 +4186,10 @@ pub fn workshop_completion_items(
                     visible_from: function.signature_range.start,
                     visible_to: function.body_range.end,
                 };
-                if let Some(range) = generic_parameter_name_range(
-                    &file.source,
-                    function.signature_range.clone(),
-                    &parameter.name,
-                ) {
+                if let Some(range) = generic_parameter_ranges.get(&parameter.name) {
                     scope.declaration_from = Some(range.start);
                     scope.declaration_to = Some(range.end);
+                    scope.visible_from = range.start;
                 }
                 items.push(scoped_completion_catalog_item(
                     &parameter.name,
@@ -3181,8 +4317,11 @@ pub fn workshop_completion_items(
         }
     }
 
+    let known_structs = struct_fields.keys().cloned().collect::<BTreeSet<_>>();
     for binding in typed_bindings {
-        if let Some(fields) = struct_fields.get(workshop_base_type_name(&binding.type_name)) {
+        let struct_key =
+            resolve_workshop_struct_key(files, &binding.file, &binding.type_name, &known_structs)?;
+        if let Some(fields) = struct_key.as_ref().and_then(|key| struct_fields.get(key)) {
             for (field, field_type) in fields {
                 let text = format!("{}.{field}", binding.name);
                 let detail = format!(
@@ -3215,7 +4354,7 @@ pub fn workshop_completion_items(
                 items.push(item);
             }
         }
-        if let Some(owner_methods) = methods.get(workshop_base_type_name(&binding.type_name)) {
+        if let Some(owner_methods) = struct_key.as_ref().and_then(|key| methods.get(key)) {
             for (method, signature, method_file, generic_parameters, exposure) in owner_methods {
                 let text = format!("{}.{method}", binding.name);
                 let detail = format!(
@@ -5638,6 +6777,24 @@ mod placement_tests {
         assert_eq!(tick.file, "src/main.stasis");
         assert_eq!(tick.group, "Main");
 
+        let parameterized_tick = plan_workshop_symbol_placement(
+            &files,
+            &WorkshopSymbolPlacementRequest {
+                kind: WorkshopPlacementSymbolKind::Function,
+                name: "tick".to_string(),
+                params: vec![WorkshopFunctionParam {
+                    name: "value".to_string(),
+                    type_name: "i32".to_string(),
+                }],
+                return_type: Some("i32".to_string()),
+                owner: None,
+                system: None,
+            },
+        )
+        .expect("parameterized tick placement");
+        assert_eq!(parameterized_tick.file, "src/root.stasis");
+        assert_eq!(parameterized_tick.group, "Root");
+
         let utility = plan_workshop_symbol_placement(
             &files,
             &WorkshopSymbolPlacementRequest {
@@ -5811,7 +6968,7 @@ mod workshop_contract_tests {
 
     #[test]
     fn generic_symbols_completion_references_and_parameter_rename_share_parser_metadata() {
-        let source = "struct Buffer<N: i32> { values: i32[N]; }\nfunction clear<N: i32>(self: Buffer<N>): void { let count: i32 = N; return; }\nglobal samples: Buffer<4>;\nfunction main(): void { clear::<4>(samples); }";
+        let source = "struct Buffer<T: type, N: i32> { values: T[N]; }\nfunction clear(buffer: Buffer<T, N>, value: T): bool { let count: i32 = N; return true; }\nglobal samples: Buffer<f32, 4>;\nfunction main(): void { clear(samples, 1); }";
         let files = vec![WorkshopSourceFile {
             path: "src/main.stasis".to_string(),
             source: source.to_string(),
@@ -5822,31 +6979,523 @@ mod workshop_contract_tests {
             .iter()
             .find(|symbol| symbol.kind == WorkshopSymbolKind::Struct)
             .expect("generic struct symbol");
-        assert_eq!(buffer.signature, "struct Buffer<N: i32>");
-        assert_eq!(buffer.generic_parameters[0].name, "N");
+        assert_eq!(buffer.signature, "struct Buffer<T: type, N: i32>");
+        assert_eq!(
+            buffer
+                .generic_parameters
+                .iter()
+                .map(|parameter| (parameter.name.as_str(), parameter.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("T", WorkshopGenericParameterKind::Type),
+                ("N", WorkshopGenericParameterKind::I32),
+            ]
+        );
+        let clear = symbols
+            .iter()
+            .find(|symbol| symbol.kind == WorkshopSymbolKind::Function)
+            .expect("generic receiver function symbol");
+        assert_eq!(
+            clear.signature,
+            "clear(buffer: Buffer<T, N>, value: T): bool"
+        );
+        assert_eq!(clear.generic_parameters.len(), 2);
+        assert!(!clear.signature.contains("<type"));
 
         let completions = workshop_completion_items(&files).expect("generic completions");
-        assert!(completions.iter().any(|item| {
-            item.text == "N"
-                && item.kind == "generic_parameter"
-                && item.owner.as_deref() == Some("clear")
+        for (name, kind) in [("T", "type"), ("N", "i32")] {
+            let item = completions
+                .iter()
+                .find(|item| {
+                    item.text == name
+                        && item.kind == "generic_parameter"
+                        && item.owner.as_deref() == Some("clear")
+                })
+                .expect("receiver generic completion");
+            assert_eq!(item.type_name.as_deref(), Some(kind));
+            let scope = item.scope.as_ref().expect("receiver generic scope");
+            assert_eq!(scope.owner, "clear");
+            let declaration = scope
+                .declaration_from
+                .zip(scope.declaration_to)
+                .expect("receiver generic declaration range");
+            assert_eq!(&source[declaration.0..declaration.1], name);
+            assert_eq!(scope.visible_from, declaration.0);
+        }
+        assert!(completions.iter().all(|item| {
+            item.signature
+                .as_deref()
+                .is_none_or(|signature| !signature.contains("<type"))
         }));
+        let semantic_tokens =
+            workshop_semantic_tokens(&files, "src/main.stasis").expect("generic semantic tokens");
+        let generic_token_texts = semantic_tokens
+            .iter()
+            .filter(|token| token.kind == "generic_parameter")
+            .map(|token| {
+                source[token.source_span.start as usize..token.source_span.end as usize].to_string()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            generic_token_texts
+                .iter()
+                .filter(|text| *text == "T")
+                .count()
+                >= 2
+        );
+        assert!(
+            generic_token_texts
+                .iter()
+                .filter(|text| *text == "N")
+                .count()
+                >= 2
+        );
         assert_eq!(workshop_base_type_name("Buffer<4>[2]"), "Buffer");
 
         let references = find_workshop_references(&files, "clear", 16).expect("generic refs");
         assert!(references.iter().any(|reference| {
             reference.kind == WorkshopReferenceKind::Call
                 && &source[reference.source_span.start as usize..reference.source_span.end as usize]
-                    == "clear::<4>"
+                    == "clear"
+        }));
+        let receiver_t = source
+            .find("function clear(buffer: Buffer<T")
+            .expect("receiver T")
+            + "function clear(buffer: Buffer<".len();
+        let generic_references = find_workshop_generic_parameter_references_at(
+            &files,
+            "src/main.stasis",
+            receiver_t,
+            16,
+        )
+        .expect("generic refs")
+        .expect("generic target");
+        assert!(generic_references.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Definition
+                && reference.source_span.start as usize == receiver_t
+                && reference.source_span.end as usize == receiver_t + 1
         }));
 
-        let rename_offset = source.find("function clear<N").expect("function") + 15;
-        let (after, plan) = plan_workshop_rename(&files, "src/main.stasis", rename_offset, "Count")
+        let rename_offset = source
+            .find("function clear(buffer: Buffer<T")
+            .expect("first receiver placeholder")
+            + "function clear(buffer: Buffer<".len();
+        let (after, plan) = plan_workshop_rename(&files, "src/main.stasis", rename_offset, "Value")
             .expect("generic parameter rename");
         assert_eq!(plan.kind, "generic_parameter");
-        assert!(after[0].source.contains("function clear<Count: i32>"));
-        assert!(after[0].source.contains("Buffer<Count>"));
-        assert!(after[0].source.contains("= Count;"));
+        assert!(after[0].source.contains("Buffer<Value, N>"));
+        assert!(after[0].source.contains("values: T[N]"));
+        assert!(after[0]
+            .source
+            .contains("clear(buffer: Buffer<Value, N>, value: Value)"));
+    }
+
+    #[test]
+    fn generic_receiver_metadata_preserves_module_identity() {
+        let left = WorkshopSourceFile {
+            path: "src/left.stasis".to_string(),
+            source: concat!(
+                "struct Policy<T: type> { value: T; }\n",
+                "function apply_left_local(value: Policy<T>, item: T): void { return; }",
+            )
+            .to_string(),
+        };
+        let right = WorkshopSourceFile {
+            path: "src/right.stasis".to_string(),
+            source: concat!(
+                "struct Policy<N: i32> { values: i32[N]; }\n",
+                "function apply_right_local(value: Policy<N>): i32 { return N; }",
+            )
+            .to_string(),
+        };
+        let main = WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: concat!(
+                "import \"left.stasis\"; import \"right.stasis\";\n",
+                "struct Wrapper<X: type> { value: X; }\n",
+                "function apply_left(value: left.Policy<T>, item: T): void { return; }\n",
+                "function apply_right(value: right.Policy<N>, count: i32): i32 { return N; }\n",
+                "function apply_nested(value: Wrapper<right.Policy<M>>): i32 { return M; }",
+            )
+            .to_string(),
+        };
+
+        for files in [
+            vec![left.clone(), right.clone(), main.clone()],
+            vec![right.clone(), left.clone(), main.clone()],
+        ] {
+            let symbols = workshop_symbols(&files).expect("module-aware generic symbols");
+            let left_function = symbols
+                .iter()
+                .find(|symbol| symbol.name == "apply_left")
+                .expect("left receiver function");
+            assert_eq!(
+                left_function.generic_parameters,
+                vec![WorkshopGenericParameter {
+                    name: "T".to_string(),
+                    kind: WorkshopGenericParameterKind::Type,
+                }]
+            );
+            let right_function = symbols
+                .iter()
+                .find(|symbol| symbol.name == "apply_right")
+                .expect("right receiver function");
+            assert_eq!(
+                right_function.generic_parameters,
+                vec![WorkshopGenericParameter {
+                    name: "N".to_string(),
+                    kind: WorkshopGenericParameterKind::I32,
+                }]
+            );
+            let nested_function = symbols
+                .iter()
+                .find(|symbol| symbol.name == "apply_nested")
+                .expect("nested receiver function");
+            assert_eq!(
+                nested_function.generic_parameters,
+                vec![WorkshopGenericParameter {
+                    name: "M".to_string(),
+                    kind: WorkshopGenericParameterKind::I32,
+                }]
+            );
+            for (function, parameter, kind) in [
+                ("apply_left_local", "T", WorkshopGenericParameterKind::Type),
+                ("apply_right_local", "N", WorkshopGenericParameterKind::I32),
+            ] {
+                let local_function = symbols
+                    .iter()
+                    .find(|symbol| symbol.name == function)
+                    .expect("file-local receiver function");
+                assert_eq!(
+                    local_function.generic_parameters,
+                    vec![WorkshopGenericParameter {
+                        name: parameter.to_string(),
+                        kind,
+                    }]
+                );
+            }
+
+            let completions = workshop_completion_items(&files).expect("module-aware completions");
+            assert!(completions.iter().any(|item| {
+                item.text == "T"
+                    && item.kind == "generic_parameter"
+                    && item.owner.as_deref() == Some("apply_left")
+                    && item.type_name.as_deref() == Some("type")
+            }));
+            assert!(completions.iter().any(|item| {
+                item.text == "N"
+                    && item.kind == "generic_parameter"
+                    && item.owner.as_deref() == Some("apply_right")
+                    && item.type_name.as_deref() == Some("i32")
+            }));
+
+            let right_n = right
+                .source
+                .find("function apply_right_local(value: Policy<N>")
+                .expect("right local receiver")
+                + "function apply_right_local(value: Policy<".len();
+            let semantic_tokens = workshop_semantic_tokens(&files, &right.path)
+                .expect("module-aware semantic tokens");
+            assert!(semantic_tokens.iter().any(|token| {
+                token.kind == "generic_parameter"
+                    && token.source_span.start as usize == right_n
+                    && token.source_span.end as usize == right_n + 1
+            }));
+        }
+    }
+
+    #[test]
+    fn same_named_generic_modules_keep_completion_and_reference_identity() {
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: concat!(
+                    "import \"one.stasis\"; import \"two.stasis\";\n",
+                    "global first: one.Box<4>;\n",
+                    "global second: two.Box<7>;\n",
+                    "function main(): i32 { first.value = 2; second.value = 3; return first.score() + second.score(); }\n",
+                )
+                .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/one.stasis".to_string(),
+                source: concat!(
+                    "struct Box<N: i32> { value: i32; }\n",
+                    "function score(value: Box<N>): i32 { return N + value.value; }\n",
+                )
+                .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/two.stasis".to_string(),
+                source: concat!(
+                    "struct Box<N: i32> { value: i32; }\n",
+                    "function score(value: Box<N>): i32 { return N + value.value + 1; }\n",
+                )
+                .to_string(),
+            },
+        ];
+
+        let symbols = workshop_symbols(&files).expect("same-named generic symbols");
+        let boxes = symbols
+            .iter()
+            .filter(|symbol| symbol.kind == WorkshopSymbolKind::Struct && symbol.name == "Box")
+            .collect::<Vec<_>>();
+        assert_eq!(boxes.len(), 2);
+        assert_ne!(boxes[0].symbol_id, boxes[1].symbol_id);
+        assert_eq!(
+            boxes
+                .iter()
+                .map(|symbol| symbol.file.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["src/one.stasis", "src/two.stasis"])
+        );
+
+        let completions = workshop_completion_items(&files).expect("same-named completions");
+        for (binding, module) in [("first", "src/one.stasis"), ("second", "src/two.stasis")] {
+            let methods = completions
+                .iter()
+                .filter(|item| item.text == format!("{binding}.score") && item.kind == "method")
+                .collect::<Vec<_>>();
+            assert_eq!(methods.len(), 1, "{binding} method candidates");
+            assert_eq!(methods[0].file, module);
+            assert_eq!(methods[0].generic_parameters.len(), 1);
+            assert_eq!(methods[0].generic_parameters[0].name, "N");
+
+            let fields = completions
+                .iter()
+                .filter(|item| item.text == format!("{binding}.value") && item.kind == "field")
+                .collect::<Vec<_>>();
+            assert_eq!(fields.len(), 1, "{binding} field candidates");
+            assert_eq!(
+                fields[0].owner.as_deref(),
+                Some(if binding == "first" {
+                    "one.Box<4>"
+                } else {
+                    "two.Box<7>"
+                })
+            );
+        }
+
+        for (path, expected_definition) in [
+            ("first.value", "src/one.stasis"),
+            ("second.value", "src/two.stasis"),
+        ] {
+            let references = find_workshop_references(&files, path, 16).expect("field references");
+            let definitions = references
+                .iter()
+                .filter(|reference| reference.kind == WorkshopReferenceKind::Definition)
+                .collect::<Vec<_>>();
+            assert_eq!(definitions.len(), 1, "{path} definitions");
+            assert_eq!(definitions[0].file, expected_definition);
+            assert!(references.iter().any(|reference| {
+                reference.kind == WorkshopReferenceKind::Write
+                    && reference.containing_name == "main"
+            }));
+        }
+
+        let one_score =
+            find_workshop_references(&files, "one.score", 16).expect("qualified method references");
+        assert!(one_score.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Definition
+                && reference.file == "src/one.stasis"
+        }));
+        assert!(one_score.iter().all(|reference| {
+            reference.kind == WorkshopReferenceKind::Definition
+                || reference.file == "src/main.stasis"
+        }));
+
+        for (path, expected_definition) in [
+            ("first.score", "src/one.stasis"),
+            ("second.score", "src/two.stasis"),
+        ] {
+            let references =
+                find_workshop_references(&files, path, 16).expect("receiver method references");
+            let definitions = references
+                .iter()
+                .filter(|reference| reference.kind == WorkshopReferenceKind::Definition)
+                .collect::<Vec<_>>();
+            assert_eq!(definitions.len(), 1, "{path} method definitions");
+            assert_eq!(definitions[0].file, expected_definition);
+        }
+
+        for (path, expected_definition) in
+            [("one.Box", "src/one.stasis"), ("two.Box", "src/two.stasis")]
+        {
+            let references =
+                find_workshop_references(&files, path, 16).expect("qualified template references");
+            let definitions = references
+                .iter()
+                .filter(|reference| reference.kind == WorkshopReferenceKind::Definition)
+                .collect::<Vec<_>>();
+            assert_eq!(definitions.len(), 1, "{path} template definitions");
+            assert_eq!(definitions[0].file, expected_definition);
+        }
+
+        let (hierarchy, edges) = workshop_type_hierarchy(&files).expect("type hierarchy");
+        assert_eq!(
+            hierarchy
+                .iter()
+                .filter(|item| item.name == "Box")
+                .map(|item| item.file.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["src/one.stasis", "src/two.stasis"])
+        );
+        assert!(
+            edges.is_empty(),
+            "primitive fields do not create type edges"
+        );
+    }
+
+    #[test]
+    fn concrete_text_types_are_not_derived_as_function_generics() {
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: concat!(
+                "struct Buffer<T: type, N: i32> { values: T[N]; }\n",
+                "function clear_ascii(value: Buffer<ascii, N>): i32 { return N; }\n",
+                "function clear_utf8(value: Buffer<utf8, M>): i32 { return M; }",
+            )
+            .to_string(),
+        }];
+
+        let symbols = workshop_symbols(&files).expect("text receiver symbols");
+        for (function, parameter) in [("clear_ascii", "N"), ("clear_utf8", "M")] {
+            let symbol = symbols
+                .iter()
+                .find(|symbol| symbol.name == function)
+                .expect("text receiver function");
+            assert_eq!(
+                symbol.generic_parameters,
+                vec![WorkshopGenericParameter {
+                    name: parameter.to_string(),
+                    kind: WorkshopGenericParameterKind::I32,
+                }]
+            );
+        }
+        let completions = workshop_completion_items(&files).expect("text receiver completions");
+        assert!(completions.iter().all(|item| {
+            item.kind != "generic_parameter" || !matches!(item.text.as_str(), "ascii" | "utf8")
+        }));
+        let semantic_tokens =
+            workshop_semantic_tokens(&files, "src/main.stasis").expect("text semantic tokens");
+        assert!(semantic_tokens.iter().all(|token| {
+            token.kind != "generic_parameter" || !matches!(token.text.as_str(), "ascii" | "utf8")
+        }));
+    }
+
+    #[test]
+    fn positioned_generic_references_select_one_declaration_scope() {
+        let source = concat!(
+            "struct Buffer<T: type, N: i32> { values: T[N]; }\n",
+            "global N: i32;\n",
+            "function first(value: Buffer<T, N>): i32 { return N; }\n",
+            "function second(value: Buffer<T, N>): i32 { return N; }\n",
+            "function main(): i32 { return N; }",
+        );
+        let files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: source.to_string(),
+        }];
+
+        for function in ["first", "second"] {
+            let declaration = source
+                .find(&format!("function {function}(value: Buffer<T, N>"))
+                .expect("generic function")
+                + format!("function {function}(value: Buffer<T, ").len();
+            let references = find_workshop_generic_parameter_references_at(
+                &files,
+                "src/main.stasis",
+                declaration,
+                16,
+            )
+            .expect("positioned generic references")
+            .expect("generic target");
+            assert_eq!(references.len(), 2);
+            assert!(references
+                .iter()
+                .all(|reference| reference.containing_name == function));
+            assert!(references.iter().any(|reference| {
+                reference.kind == WorkshopReferenceKind::Definition
+                    && reference.source_span.start as usize == declaration
+            }));
+        }
+
+        let global_references = find_workshop_references(&files, "N", 16)
+            .expect("nongeneric references with same name");
+        assert!(global_references
+            .iter()
+            .any(|reference| reference.containing_name == "main"));
+        assert!(global_references.iter().all(|reference| {
+            !matches!(reference.containing_name.as_str(), "first" | "second")
+        }));
+
+        let first_declaration = source
+            .find("function first(value: Buffer<T, N>")
+            .expect("first generic function")
+            + "function first(value: Buffer<T, ".len();
+        let (renamed, plan) =
+            plan_workshop_rename(&files, "src/main.stasis", first_declaration, "Count")
+                .expect("scoped generic rename");
+        assert_eq!(plan.kind, "generic_parameter");
+        assert!(renamed[0]
+            .source
+            .contains("function first(value: Buffer<T, Count>): i32 { return Count; }"));
+        assert!(renamed[0]
+            .source
+            .contains("function second(value: Buffer<T, N>): i32 { return N; }"));
+        assert!(renamed[0].source.contains("global N: i32;"));
+
+        let ambiguous_source = source
+            .replace("global N: i32;\n", "")
+            .replace("function main(): i32 { return N; }", "");
+        let error = find_workshop_references(
+            &[WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: ambiguous_source,
+            }],
+            "N",
+            16,
+        )
+        .expect_err("text-only generic query must be ambiguous");
+        assert!(error.contains("ambiguous without a source position"));
+    }
+
+    #[test]
+    fn receiver_generic_metadata_is_safe_for_unknown_or_malformed_applications() {
+        let unresolved = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "function use(value: Missing<T>): void { return; }".to_string(),
+        }];
+        let symbols = workshop_symbols(&unresolved).expect("unresolved receiver symbols");
+        let function = symbols
+            .iter()
+            .find(|symbol| symbol.kind == WorkshopSymbolKind::Function)
+            .expect("function symbol");
+        assert!(function.generic_parameters.is_empty());
+        assert_eq!(function.signature, "use(value: Missing<T>): void");
+        assert!(workshop_completion_items(&unresolved)
+            .expect("unresolved completions")
+            .iter()
+            .all(|item| item.kind != "generic_parameter" || item.owner.as_deref() != Some("use")));
+
+        let concrete_files = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "struct Buffer<T: type> { value: T; }\nfunction concrete(value: Buffer<f32>): void { return; }"
+                .to_string(),
+        }];
+        let symbols = workshop_symbols(&concrete_files).expect("well-formed concrete application");
+        let concrete = symbols
+            .iter()
+            .find(|symbol| symbol.name == "concrete")
+            .expect("concrete receiver function");
+        assert!(concrete.generic_parameters.is_empty());
+
+        let malformed = vec![WorkshopSourceFile {
+            path: "src/main.stasis".to_string(),
+            source: "struct Buffer<T: type> { value: T; }\nfunction use(value: Buffer<T): void { return; } function broken(value: Buffer<T): void { return;"
+                .to_string(),
+        }];
+        assert!(workshop_symbols(&malformed).is_err());
     }
 
     fn semantic_selector(
@@ -6020,6 +7669,66 @@ mod workshop_contract_tests {
         assert!(references.iter().any(|reference| {
             reference.kind == WorkshopReferenceKind::Read && reference.containing_name == "current"
         }));
+    }
+
+    #[test]
+    fn qualified_function_references_find_annotated_imported_declarations() {
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: concat!(
+                    "import \"api.stasis\";\n",
+                    "function main(): i32 { return api.plain() + api.internal_helper() + api.effect_helper() + api.extern_helper() + api.extern_declaration(); }\n",
+                )
+                .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/api.stasis".to_string(),
+                source: concat!(
+                    "function plain(): i32 { return 1; }\n",
+                    "function @internal internal_helper(): i32 { return 2; }\n",
+                    "function @effects(effect_helper) effect_helper(): i32 { return 3; }\n",
+                    "function @extern(\"extern_helper\") extern_helper(): i32 { return 4; }\n",
+                    "function @internal @effects(extern_declaration)@extern(\"extern_symbol\") extern_declaration(): i32;\n",
+                )
+                .to_string(),
+            },
+        ];
+
+        let api_source = &files[1].source;
+        for name in [
+            "plain",
+            "internal_helper",
+            "effect_helper",
+            "extern_helper",
+            "extern_declaration",
+        ] {
+            let symbol = format!("api.{name}");
+            let references = find_workshop_references(&files, &symbol, 16)
+                .expect("qualified annotated function references");
+            let definitions = references
+                .iter()
+                .filter(|reference| reference.kind == WorkshopReferenceKind::Definition)
+                .collect::<Vec<_>>();
+            assert_eq!(definitions.len(), 1, "{symbol} definition count");
+            assert_eq!(definitions[0].file, "src/api.stasis");
+            let expected_start = api_source
+                .find(&format!("{name}():"))
+                .expect("function name");
+            assert_eq!(
+                definitions[0].source_span,
+                WorkshopSourceSpan {
+                    start: expected_start as u32,
+                    end: (expected_start + name.len()) as u32,
+                },
+                "{symbol} definition span",
+            );
+            assert!(references.iter().any(|reference| {
+                reference.kind == WorkshopReferenceKind::Call
+                    && reference.file == "src/main.stasis"
+                    && reference.containing_name == "main"
+            }));
+        }
     }
 
     #[test]
