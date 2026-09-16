@@ -24,7 +24,8 @@ test("sprite loader publishes the opaque reference field", () => {
   );
 });
 
-function fakeGl(stats, available = true, throwing = false, textureThrow = false) {
+function fakeGl(stats, available = true, throwing = false, textureThrow = false,
+  maxTextureSize = 4096, textureFailureAt = 0, glErrorAt = 0) {
   if (!available) return null;
   const gl = {
     VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, COMPILE_STATUS: 3, LINK_STATUS: 4,
@@ -34,7 +35,7 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
     TEXTURE_MIN_FILTER: 17, TEXTURE_MAG_FILTER: 18, CLAMP_TO_EDGE: 19, LINEAR: 20,
     RGBA: 21, UNSIGNED_BYTE: 22, TEXTURE0: 23, UNPACK_FLIP_Y_WEBGL: 24,
     LINEAR_MIPMAP_LINEAR: 25, NO_ERROR: 0,
-    createShader: () => { if (throwing) throw new Error("fake shader failure"); return {}; }, createProgram: () => ({}), createVertexArray: () => ({}), createBuffer: () => ({}), createTexture: () => ({}),
+    createShader: () => { if (throwing) throw new Error("fake shader failure"); return {}; }, createProgram: () => ({}), createVertexArray: () => ({}), createBuffer: () => ({}), createTexture: () => { stats.createdTextures += 1; return {}; },
     deleteTexture() { stats.deletedTextures += 1; }, deleteBuffer() {}, deleteVertexArray() {}, deleteProgram() {},
     shaderSource() {}, compileShader() {}, getShaderParameter: () => true,
     attachShader() {}, linkProgram() {}, getProgramParameter: () => true,
@@ -48,8 +49,8 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
     viewport(_x, _y, width, height) { stats.viewports.push([width, height]); }, clearColor() {}, clear() {}, useProgram() {}, uniform2f(_location, width, height) {
       stats.uniforms.push([width, height]);
     }, uniform1i() {},
-    texParameteri() {}, pixelStorei() {}, texImage2D() { if (textureThrow) throw new Error("fake texture failure"); }, texSubImage2D() { if (textureThrow) throw new Error("fake texture failure"); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError: () => 0,
-    isContextLost: () => stats.contextLost, getParameter: () => 4096,
+    texParameteri() {}, pixelStorei() {}, texImage2D() { stats.texImageCalls += 1; if (textureThrow || (textureFailureAt && stats.texImageCalls === textureFailureAt)) throw new Error("fake texture failure"); }, texSubImage2D() { stats.texSubImageCalls += 1; if (textureThrow) throw new Error("fake texture failure"); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError: () => { stats.getErrorCalls += 1; return glErrorAt && stats.getErrorCalls === glErrorAt ? 1280 : 0; },
+    isContextLost: () => stats.contextLost, getParameter: () => maxTextureSize,
     enable() {}, disable() {}, scissor(x, y, width, height) { stats.scissors.push([x, y, width, height]); }, blendFunc() {}, blendFuncSeparate() {}, drawArraysInstanced(_mode, _first, _vertices, count) {
       stats.instanced += 1;
       stats.instances.push(count);
@@ -58,11 +59,11 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false)
   return gl;
 }
 
-async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "" } = {}) {
+async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, textureFailureAt = 0, glErrorAt = 0, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "", atlasBudgetBytes = undefined, maxTextureSize = 4096, expectReady = true } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, I32_COUNT);
   const f32 = new Float32Array(memory.buffer, F32_OFFSET, F32_COUNT);
-  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], viewports: [], scissors: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], deletedTextures: 0 };
+  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], viewports: [], scissors: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], createdTextures: 0, texImageCalls: 0, texSubImageCalls: 0, getErrorCalls: 0, deletedTextures: 0 };
   let now = 0;
   const context2d = {
     globalAlpha: 1,
@@ -76,12 +77,12 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
   };
   const rasterStats = { draws: 0, images: [], clears: [] };
   const rasterContext = {
-    imageSmoothingEnabled: true, imageSmoothingQuality: "high",
+    imageSmoothingEnabled: true, imageSmoothingQuality: "high", fillRect() {},
     clearRect(...args) { rasterStats.clears.push(args); }, drawImage(...args) { rasterStats.draws += 1; rasterStats.images.push(args); },
     measureText(text) { return { width: String(text).length * 8, actualBoundingBoxDescent: 4 }; },
     fillText() {}, save() {}, restore() {}
   };
-  const gl = fakeGl(stats, true, throwing, textureThrow);
+  const gl = fakeGl(stats, true, throwing, textureThrow, maxTextureSize, textureFailureAt, glErrorAt);
   const canvasListeners = new Map();
   const canvas = {
     width: 640, height: 360, style: {}, parentElement: { style: {} },
@@ -92,6 +93,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
   };
   const hud = { textContent: "", hidden: false, dataset: {}, setAttribute(name, value) { this[name] = value; } };
   const body = { dataset: {} };
+  const errorBox = { textContent: "" };
   const offscreenListeners = new Map();
   const offscreen = {
     width: 0, height: 0,
@@ -104,7 +106,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     getElementById(id) {
       if (id === "stasis-canvas") return canvas;
       if (id === "stasis-hud") return hud;
-      if (id === "stasis-error") return { textContent: "" };
+      if (id === "stasis-error") return errorBox;
       if (id === "stasis-audio") return { addEventListener() {}, disabled: false, textContent: "" };
       return null;
     },
@@ -206,6 +208,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     },
     strings: {}, assets, asset_metadata: assetMetadata,
   };
+  if (atlasBudgetBytes !== undefined) game.atlasBudgetBytes = atlasBudgetBytes;
   installCollectionViewAbi(game, instance.exports);
   const raf = [];
   const windowListeners = new Map();
@@ -229,11 +232,14 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
   }
   contextObject.window = { STASIS_GAME: game, screen: contextObject.screen };
   vm.runInNewContext(source, contextObject, { filename: "runtime/web/game.js" });
+  const expectedFailure = expectReady
+    ? null : assert.rejects(contextObject.window.STASIS_RUNTIME_PROMISE);
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(body.dataset.ready, "true");
+  if (expectReady) assert.equal(body.dataset.ready, "true");
+  else await expectedFailure;
   return {
-    stats, body, hud, rasterStats, canvas, offscreen, env, contextObject, frame: () => raf.shift()(now),
+    stats, body, errorBox, hud, rasterStats, canvas, offscreen, env, contextObject, frame: () => raf.shift()(now),
     setPresentation(width, height, nextDpr = contextObject.devicePixelRatio) {
       cssExtent[0] = width;
       cssExtent[1] = height;
@@ -305,6 +311,16 @@ test("WebGL initialization failure has an unsupported state and no fallback code
   assert.match(source, /dataset\.backend = "unsupported"/);
   assert.match(source, /WebGL2 is required by the Stasis Web renderer/);
   assert.doesNotMatch(source, /context\.drawImage\(target|context\.fillRect|context\.fillText/);
+});
+
+test("invalid atlas budgets fail visibly with the manifest field name", async () => {
+  for (const atlasBudgetBytes of [0, -1, 1.5, "4096", null, Number.MAX_SAFE_INTEGER + 1]) {
+    const runtime = await loadRuntime({ atlasBudgetBytes, expectReady: false });
+    assert.equal(runtime.body.dataset.ready, "false");
+    assert.match(runtime.errorBox.textContent, /web\.atlas_budget_bytes/);
+    assert.match(runtime.body.dataset.gpuError, /web\.atlas_budget_bytes/);
+    assert.equal(runtime.stats.createdTextures, 0);
+  }
 });
 
 test("large same-handle sprite run uploads the private 64-byte records", async () => {
@@ -728,13 +744,73 @@ test("failed density refresh retains the old sprite cache and atlas ownership", 
   assert.equal(runtime.body.dataset.assetRefreshState, "none");
   assert.equal(bitmaps[0].closed, true);
   assert.equal(replacement.closed, false);
-  assert.equal(runtime.stats.deletedTextures, 1);
+  assert.equal(runtime.stats.deletedTextures, 0, "transactional refresh reuses the retained page");
   runtime.stats.instanced = 0;
   runtime.frame();
   assert.equal(runtime.stats.instanced, 1);
   runtime.env.gfx_release_sprite(1);
   assert.equal(replacement.closed, true);
-  assert.equal(runtime.stats.deletedTextures, 2);
+  assert.equal(runtime.stats.deletedTextures, 1);
+});
+
+test("budget-failed density refresh rolls back staged atlas state before lower-tier recovery", async () => {
+  const pageBytes = 512 * 512 * 4;
+  const pending = [];
+  const bitmaps = [];
+  const makeBitmap = (width, height) => {
+    const bitmap = { width, height, closed: false, close() { this.closed = true; } };
+    bitmaps.push(bitmap);
+    return bitmap;
+  };
+  const runtime = await loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteSize: [200, 200], dpr: 1,
+    atlasBudgetBytes: pageBytes,
+    assets: { "": "refresh-budget.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 200, prepared_height: 200 } },
+    createImageBitmap: (_source, options, call) => {
+      if (call === 1) return makeBitmap(options.resizeWidth, options.resizeHeight);
+      return new Promise(resolve => pending.push({ resolve, options }));
+    }
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+
+  runtime.contextObject.devicePixelRatio = 2;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 1);
+  const highTier = makeBitmap(pending[0].options.resizeWidth, pending[0].options.resizeHeight);
+  pending[0].resolve(highTier);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.stats.instanced = 0;
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, 1, "the retained low tier still draws after rejection");
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "200");
+  assert.equal(runtime.body.dataset.assetRefreshState, "failed");
+  assert.match(runtime.body.dataset.assetRefreshError, /atlas memory budget exhausted/);
+  assert.match(runtime.body.dataset.gpuError, /atlas memory budget exhausted/);
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+  assert.equal(runtime.stats.createdTextures, 1, "the rejected 1024px page is checked before createTexture");
+  assert.equal(runtime.stats.deletedTextures, 0);
+  assert.equal(bitmaps[0].closed, false);
+  assert.equal(highTier.closed, true, "the failed replacement cache lease is cleaned up");
+
+  runtime.contextObject.devicePixelRatio = 1;
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "200");
+  assert.equal(runtime.body.dataset.assetRefreshState, "none");
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+  runtime.stats.instanced = 0;
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, 1);
+  assert.equal(bitmaps[0].closed, false);
 });
 
 test("equivalent density scales reuse one stable requested-tier preparation", async () => {
@@ -1178,22 +1254,283 @@ test("oversize sprites within MAX_TEXTURE_SIZE use a dedicated WebGL atlas domai
   assert.equal(runtime.body.dataset.composites, "0");
 });
 
+test("an exact atlas budget admits nine 1024px pages", async () => {
+  const pageCount = 9;
+  const handles = Array.from({ length: pageCount }, (_, index) => index + 1);
+  const pageBytes = 1024 * 1024 * 4;
+  const runtime = await loadRuntime({
+    sprites: pageCount,
+    spriteHandles: handles,
+    spriteSizes: handles.map(() => [1016, 1016]),
+    atlasBudgetBytes: pageCount * pageBytes,
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.atlasPages, String(pageCount));
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageCount * pageBytes));
+  assert.equal(runtime.stats.createdTextures, pageCount);
+  assert.equal(runtime.stats.deletedTextures, 0);
+});
+
+test("omitting the atlas budget leaves page allocation unlimited", async () => {
+  const pageCount = 9;
+  const handles = Array.from({ length: pageCount }, (_, index) => index + 1);
+  const runtime = await loadRuntime({
+    sprites: pageCount,
+    spriteHandles: handles,
+    spriteSizes: handles.map(() => [1016, 1016]),
+    maxTextureSize: 4096,
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.atlasPages, String(pageCount));
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageCount * 1024 * 1024 * 4));
+  assert.equal(runtime.stats.createdTextures, pageCount);
+});
+
+test("three 4096px pages remain available without a global page or byte cap", async () => {
+  const pageCount = 3;
+  const handles = Array.from({ length: pageCount }, (_, index) => index + 1);
+  const runtime = await loadRuntime({
+    sprites: pageCount,
+    spriteHandles: handles,
+    spriteSizes: handles.map(() => [4090, 4090]),
+    maxTextureSize: 4096,
+  });
+  runtime.frame();
+  const pageBytes = 4096 * 4096 * 4;
+  assert.equal(runtime.body.dataset.atlasPages, String(pageCount));
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageCount * pageBytes));
+  assert.equal(runtime.stats.createdTextures, pageCount);
+});
+
+test("an explicit atlas budget above the legacy cap admits three supported 4096px pages", async () => {
+  const pageCount = 3;
+  const pageBytes = 4096 * 4096 * 4;
+  const handles = Array.from({ length: pageCount }, (_, index) => index + 1);
+  const runtime = await loadRuntime({
+    sprites: pageCount,
+    spriteHandles: handles,
+    spriteSizes: handles.map(() => [4090, 4090]),
+    atlasBudgetBytes: pageCount * pageBytes,
+    maxTextureSize: 4096,
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+  assert.equal(runtime.body.dataset.atlasPages, String(pageCount));
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageCount * pageBytes));
+  assert.ok(Number(runtime.body.dataset.assetAtlasBytes) > 128 * 1024 * 1024);
+});
+
+test("configured residency accounts for full and source atlas variants", async () => {
+  const pageBytes = 512 * 512 * 4;
+  const runtime = await loadRuntime({
+    sprites: 64, spriteHandles: Array(64).fill(1), spriteSize: [16, 16],
+    spriteUv: [0, 0, 0.5, 0.5], atlasBudgetBytes: pageBytes,
+    assets: { "": "budget-sheet.svg" },
+    assetMetadata: { "": { encoding: "svg", prepared_width: 64, prepared_height: 32 } },
+    createImageBitmap: (_source, options) => ({
+      width: options.resizeWidth, height: options.resizeHeight, close() {}
+    })
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "2");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+  runtime.env.gfx_release_sprite(1);
+  assert.equal(runtime.body.dataset.assetAtlasBytes, "0");
+  assert.equal(runtime.stats.deletedTextures, 1);
+});
+
+test("configured solid and text residency returns bytes when the text resource is released", async () => {
+  const pageBytes = 512 * 512 * 4;
+  const runtime = await loadRuntime({ rects: 1, atlasBudgetBytes: pageBytes * 2 });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+  const font = runtime.env.load_font(0, 18);
+  runtime.setTextFixture(font, "budget text");
+  runtime.frame();
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "2");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+  runtime.env.gfx_release_font(font);
+  runtime.frame();
+  assert.equal(runtime.body.dataset.atlasLiveEntries, "1");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+});
+
+test("released atlas pages return budget capacity for later allocation", async () => {
+  const handles = [1];
+  const pageBytes = 512 * 512 * 4;
+  const runtime = await loadRuntime({
+    sprites: 1,
+    spriteHandles: handles,
+    spriteSize: [256, 256],
+    atlasBudgetBytes: pageBytes,
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+
+  runtime.env.gfx_release_sprite(1);
+  assert.equal(runtime.body.dataset.assetAtlasBytes, "0");
+  assert.equal(runtime.stats.deletedTextures, 1);
+
+  const replacement = runtime.env.gfx_load_sprite(0, 256, 256);
+  handles.fill(replacement);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.frame();
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.stats.createdTextures, 2);
+  assert.equal(runtime.stats.deletedTextures, 1);
+});
+
+test("releasing one page preserves the other page and returns only its budget bytes", async () => {
+  const handles = [1, 2];
+  const pageBytes = 1024 * 1024 * 4;
+  const runtime = await loadRuntime({
+    sprites: 2,
+    spriteHandles: handles,
+    spriteSize: [1016, 1016],
+    atlasBudgetBytes: 2 * pageBytes,
+  });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(2 * pageBytes));
+  assert.equal(runtime.body.dataset.atlasPages, "2");
+
+  runtime.env.gfx_release_sprite(1);
+  handles[0] = 2;
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
+  assert.equal(runtime.body.dataset.atlasPages, "1");
+  assert.equal(runtime.stats.deletedTextures, 1);
+
+  handles[0] = runtime.env.gfx_load_sprite(0, 1016, 1016);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.frame();
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String(2 * pageBytes));
+  assert.equal(runtime.body.dataset.atlasPages, "2");
+  assert.equal(runtime.stats.createdTextures, 3);
+  assert.equal(runtime.stats.deletedTextures, 1);
+});
+
+test("atlas budget rejects the next page before its GPU texture allocation", async () => {
+  const pageCount = 9;
+  const handles = Array.from({ length: pageCount }, (_, index) => index + 1);
+  const pageBytes = 1024 * 1024 * 4;
+  const runtime = await loadRuntime({
+    sprites: pageCount,
+    spriteHandles: handles,
+    spriteSizes: handles.map(() => [1016, 1016]),
+    atlasBudgetBytes: pageCount * pageBytes - 1,
+  });
+  runtime.frame();
+  assert.equal(
+    runtime.body.dataset.gpuError,
+    `Error: WebGL2 atlas memory budget exhausted (web.atlas_budget_bytes): budget=${pageCount * pageBytes - 1} current=${(pageCount - 1) * pageBytes} requested=${pageBytes} pages=${pageCount - 1}`
+  );
+  assert.equal(runtime.stats.createdTextures, pageCount - 1);
+  assert.equal(runtime.stats.texImageCalls, pageCount - 1);
+  assert.equal(runtime.body.dataset.backend, "WebGL2");
+  assert.equal(runtime.body.dataset.assetAtlasBytes, String((pageCount - 1) * pageBytes));
+});
+
+test("an over-MAX sprite is a visible GPU failure and never a missing-sprite placeholder", async () => {
+  const runtime = await loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteSize: [4095, 4095], maxTextureSize: 4096
+  });
+  runtime.frame();
+  assert.match(runtime.body.dataset.gpuError, /MAX_TEXTURE_SIZE/);
+  assert.equal(runtime.stats.instanced, 0);
+  assert.equal(runtime.stats.images, 0);
+  assert.equal(runtime.body.dataset.assetAtlasBytes, "0");
+  assert.equal(runtime.stats.createdTextures, 0);
+});
+
+test("a successful frame preserves an unrelated resource GPU error", async () => {
+  const handles = [1];
+  const runtime = await loadRuntime({
+    sprites: 1, spriteHandles: handles, spriteSize: [4095, 4095], spriteUv: [0, 0, 1, 1], maxTextureSize: 4096
+  });
+  assert.match(runtime.body.dataset.gpuError, /MAX_TEXTURE_SIZE/);
+
+  const healthyHandle = runtime.env.gfx_load_sprite(0, 16, 16);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  handles[0] = healthyHandle;
+  runtime.stats.instanced = 0;
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, 1);
+  assert.match(runtime.body.dataset.gpuError, /MAX_TEXTURE_SIZE/);
+
+  runtime.env.gfx_release_sprite(1);
+  runtime.frame();
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+});
+
+test("a one-shot atlas upload WebGL error is visible and deletes its new texture", async () => {
+  const runtime = await loadRuntime({ sprites: 1, spriteHandles: [1], glErrorAt: 2 });
+  runtime.frame();
+  assert.match(runtime.body.dataset.gpuError, /WebGL error \(1280\)/);
+  assert.equal(runtime.stats.instanced, 0);
+  assert.equal(runtime.stats.images, 0);
+  assert.equal(runtime.stats.createdTextures, 1);
+  assert.equal(runtime.stats.deletedTextures, 1);
+  assert.equal(runtime.body.dataset.assetAtlasBytes, "0");
+});
+
 test("texture failure and context loss never select another renderer", async () => {
   const failed = await loadRuntime({ sprites: 64, spriteHandles: Array(64).fill(1), textureThrow: true });
   failed.frame();
   assert.equal(failed.stats.instanced, 0);
   assert.equal(failed.stats.images, 0);
   assert.match(failed.body.dataset.gpuError, /fake texture failure/);
+  assert.ok(failed.stats.createdTextures > 0);
+  assert.equal(failed.stats.deletedTextures, failed.stats.createdTextures);
 
   const recovered = await loadRuntime({ sprites: 64, spriteHandles: Array(64).fill(1) });
   recovered.frame();
   recovered.loseContext();
+  assert.equal(recovered.stats.deletedTextures, 1);
   recovered.frame();
   assert.equal(recovered.stats.instanced, 1);
   assert.equal(recovered.stats.images, 0);
   recovered.restoreContext();
   recovered.frame();
   assert.equal(recovered.stats.instanced, 2);
+  assert.equal(recovered.body.dataset.assetAtlasBytes, String(512 * 512 * 4));
+});
+
+test("failed context restore disposes pages rebuilt before the failing resource", async () => {
+  const runtime = await loadRuntime({
+    sprites: 2, spriteHandles: [1, 2], spriteSize: [1016, 1016], textureFailureAt: 4
+  });
+  runtime.frame();
+  assert.equal(runtime.stats.createdTextures, 2);
+  runtime.loseContext();
+  assert.equal(runtime.stats.deletedTextures, 2);
+
+  // Restore call 1 creates page 3 for the first resource, then fails while
+  // creating page 4 for the second. Both the partially rebuilt page and the
+  // just-created failing texture must be deleted.
+  runtime.restoreContext();
+  assert.equal(runtime.stats.createdTextures, 4);
+  assert.equal(runtime.stats.deletedTextures, 4);
+  assert.match(runtime.body.dataset.gpuError, /fake texture failure/);
+
+  // A later restore can recover and clears only the restore-owned error.
+  runtime.restoreContext();
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+  runtime.frame();
+  assert.equal(runtime.stats.images, 0);
+  assert.equal(runtime.body.dataset.atlasPages, "2");
 });
 
 test("prepared text LRU remains bounded and releases evicted atlas entries", async () => {

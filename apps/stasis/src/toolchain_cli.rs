@@ -5,7 +5,7 @@ use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
 use oxc_minifier::{CompressOptions, Minifier, MinifierOptions};
 use oxc_parser::Parser as JavaScriptParser;
 use oxc_span::SourceType;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::run_staged_project_tests_bounded;
@@ -851,6 +851,12 @@ struct WebProjectManifest {
     loading_font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     viewport: Option<WebViewportManifest>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_json_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    atlas_budget_bytes: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -993,6 +999,7 @@ impl ProjectManifest {
             if let Some(path) = web.loading_font.as_deref() {
                 normalize_web_loading_font_path(path)?;
             }
+            validate_web_atlas_budget(web.atlas_budget_bytes.as_ref())?;
             if let Some(viewport) = web.viewport {
                 for (field, value) in [
                     ("web.viewport.width", viewport.width),
@@ -1008,6 +1015,43 @@ impl ProjectManifest {
         }
         Ok(())
     }
+}
+
+const MAX_WEB_ATLAS_BUDGET_BYTES: u64 = 9_007_199_254_740_991;
+
+fn deserialize_optional_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
+fn validate_web_atlas_budget(value: Option<&Value>) -> Result<Option<u64>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let budget = value
+        .as_u64()
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| {
+                    number.is_finite()
+                        && number.fract() == 0.0
+                        && *number > 0.0
+                        && *number <= MAX_WEB_ATLAS_BUDGET_BYTES as f64
+                })
+                .map(|number| number as u64)
+        })
+        .ok_or_else(|| {
+            "web.atlas_budget_bytes must be a positive JavaScript safe integer".to_string()
+        })?;
+    if budget == 0 || budget > MAX_WEB_ATLAS_BUDGET_BYTES {
+        return Err(
+            "web.atlas_budget_bytes must be a positive JavaScript safe integer".to_string(),
+        );
+    }
+    Ok(Some(budget))
 }
 
 fn validate_android_application_id(value: &str) -> Result<(), String> {
@@ -5889,6 +5933,13 @@ fn web_runtime_config(
         "renderContractVersion": if render_construction_lifecycle_version == 1 { GFX_CMD_VERSION } else { GFX_CMD_LEGACY_VERSION },
         "renderConstructionLifecycleVersion": render_construction_lifecycle_version,
     });
+    if let Some(web) = workspace.manifest.web.as_ref() {
+        if let Some(budget) = validate_web_atlas_budget(web.atlas_budget_bytes.as_ref())
+            .expect("validated Web manifest atlas budget")
+        {
+            config["atlasBudgetBytes"] = json!(budget);
+        }
+    }
     if !development_build {
         prune_release_web_runtime_config(&mut config, process.imported_symbols());
     }
@@ -10219,6 +10270,7 @@ mod tests {
             entry: "src/guest.stasis".to_string(),
             loading_font: None,
             viewport: None,
+            atlas_budget_bytes: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
         let workspace = load_workspace(Some(&root)).expect("load network workspace");
@@ -10351,6 +10403,7 @@ mod tests {
             entry: "src/guest.stasis".to_string(),
             loading_font: None,
             viewport: None,
+            atlas_budget_bytes: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
         let workspace = load_workspace(Some(&root)).expect("load network workspace");
@@ -10503,6 +10556,7 @@ mod tests {
                 width: 1600,
                 height: 900,
             }),
+            atlas_budget_bytes: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write project manifest");
         let workspace = Workspace {
@@ -10546,6 +10600,7 @@ mod tests {
             entry: "src/guest.stasis".to_string(),
             loading_font: None,
             viewport: None,
+            atlas_budget_bytes: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write project manifest");
         let workspace = Workspace {
@@ -13573,6 +13628,7 @@ mod tests {
             entry: "src/main.stasis".to_string(),
             loading_font: None,
             viewport: None,
+            atlas_budget_bytes: None,
         });
         let ios_network = root.join("ios-network-package");
         fs::create_dir_all(ios_network.join("ios/network/include"))
@@ -13981,6 +14037,7 @@ mod tests {
                 width: 1600,
                 height: 900,
             }),
+            atlas_budget_bytes: None,
         });
         assert!(manifest.validate().is_ok());
 
@@ -14000,6 +14057,45 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(missing_height.contains("missing field `height`"));
+    }
+
+    #[test]
+    fn manifest_validates_web_atlas_budget_as_a_javascript_safe_integer() {
+        let mut manifest = ProjectManifest::new("atlas_budget".to_string());
+        manifest.web = Some(WebProjectManifest {
+            entry: String::new(),
+            loading_font: None,
+            viewport: None,
+            atlas_budget_bytes: Some(json!(1)),
+        });
+        assert!(manifest.validate().is_ok());
+        manifest.web.as_mut().unwrap().atlas_budget_bytes = Some(json!(MAX_WEB_ATLAS_BUDGET_BYTES));
+        assert!(manifest.validate().is_ok());
+        for (value, expected) in [(json!(1.0), 1), (json!(1e6), 1_000_000)] {
+            manifest.web.as_mut().unwrap().atlas_budget_bytes = Some(value);
+            assert!(manifest.validate().is_ok());
+            assert_eq!(
+                validate_web_atlas_budget(
+                    manifest.web.as_ref().unwrap().atlas_budget_bytes.as_ref()
+                ),
+                Ok(Some(expected))
+            );
+        }
+
+        for value in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!("4096"),
+            Value::Null,
+            json!(MAX_WEB_ATLAS_BUDGET_BYTES + 1),
+        ] {
+            manifest.web.as_mut().unwrap().atlas_budget_bytes = Some(value);
+            assert_eq!(
+                manifest.validate().unwrap_err(),
+                "web.atlas_budget_bytes must be a positive JavaScript safe integer"
+            );
+        }
     }
 
     #[test]
@@ -14145,6 +14241,7 @@ mod tests {
             entry: "src/guest_main.stasis".to_string(),
             loading_font: None,
             viewport: None,
+            atlas_budget_bytes: None,
         });
         assert!(manifest.validate().is_ok());
         assert!(validate_desktop_network_guest_contract(&manifest).is_ok());
