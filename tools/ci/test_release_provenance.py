@@ -16,6 +16,7 @@ from tools.generate_release_provenance import (
     render_contract_version,
 )
 from tools.verify_package_provenance import (
+    validate_desktop_package_receipt,
     verify_asset_package_identities,
     verify_mobile_shells,
     verify_network_guest_bundles,
@@ -27,6 +28,120 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    @staticmethod
+    def desktop_package_receipt(manifest=b"{}\n"):
+        digest = hashlib.sha256(manifest).hexdigest()
+        project = {
+            "manifest": {"path": "stasis.json", "sha256": digest},
+            "entry": {"path": "src/main.stasis", "sha256": digest},
+            "reachable_sources": {"src/main.stasis": digest},
+            "vendor": None,
+            "captured_inputs": {
+                "assets": {"path": "assets", "sha256": digest},
+                "data": None,
+                "entry_support": None,
+            },
+        }
+        return {"project": project, "network_guest": None}
+
+    def test_desktop_package_receipt_is_fail_closed(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary)
+            (package / "stasis.json").write_bytes(b"{}\n")
+            receipt = self.desktop_package_receipt()
+            validate_desktop_package_receipt(Parser(), receipt, package)
+
+            malformed = json.loads(json.dumps(receipt))
+            malformed["project"]["entry"]["path"] = "../outside.stasis"
+            with self.assertRaisesRegex(ValueError, "unsafe project entry path"):
+                validate_desktop_package_receipt(Parser(), malformed, package)
+
+            malformed = json.loads(json.dumps(receipt))
+            malformed["project"]["entry"]["sha256"] = "not-a-hash"
+            with self.assertRaisesRegex(ValueError, "invalid project entry sha256"):
+                validate_desktop_package_receipt(Parser(), malformed, package)
+
+            malformed = json.loads(json.dumps(receipt))
+            malformed["unexpected"] = True
+            with self.assertRaisesRegex(ValueError, "receipt is malformed"):
+                validate_desktop_package_receipt(Parser(), malformed, package)
+
+    def test_desktop_package_verifier_preserves_exact_release_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            release = root / "release"
+            package = root / "package"
+            release.mkdir()
+            package.mkdir()
+            manifest = {
+                "command_buffer": {"name": "gfx_cmd", "version": 8},
+                "release_tag": "nightly-test",
+            }
+            (release / "stasis_release_provenance.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            packaged_manifest = b'{"name":"ci_smoke"}\n'
+            (package / "stasis.json").write_bytes(packaged_manifest)
+            packaged = dict(manifest)
+            packaged["desktop_package"] = self.desktop_package_receipt(
+                packaged_manifest
+            )
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(packaged), encoding="utf-8"
+            )
+            command = [
+                sys.executable, str(VERIFY),
+                "--release-root", str(release),
+                "--package-root", str(package),
+                "--expect-desktop-package",
+            ]
+            self.assertEqual(subprocess.run(command, check=False).returncode, 0)
+
+            (package / "stasis.json").write_bytes(b'{"name":"tampered"}\n')
+            tampered_manifest = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(tampered_manifest.returncode, 0)
+            self.assertIn("project manifest hash mismatch", tampered_manifest.stderr)
+
+            (package / "stasis.json").unlink()
+            missing_manifest = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(missing_manifest.returncode, 0)
+            self.assertIn("project manifest is missing", missing_manifest.stderr)
+            (package / "stasis.json").write_bytes(packaged_manifest)
+
+            missing_mode = subprocess.run(
+                command[:-1], check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(missing_mode.returncode, 0)
+            self.assertIn("unexpectedly contains desktop package receipt", missing_mode.stderr)
+
+            packaged["release_tag"] = "substituted"
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(packaged), encoding="utf-8"
+            )
+            mismatch = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(mismatch.returncode, 0)
+            self.assertIn("does not exactly match", mismatch.stderr)
+
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            missing_receipt = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(missing_receipt.returncode, 0)
+            self.assertIn("missing desktop package receipt", missing_receipt.stderr)
+
     def test_android_network_client_shell_provenance(self):
         class Parser:
             @staticmethod
@@ -538,6 +653,29 @@ class ReleaseProvenanceTests(unittest.TestCase):
             next_step = workflow.index("\n      - name:", install_start + 1)
             install_block = workflow[install_start:next_step]
             self.assertRegex(install_block, r"\bxvfb\b", workflow_name)
+
+    def test_desktop_package_provenance_calls_require_desktop_receipt(self):
+        for workflow_name in (
+            ".github/workflows/nightly-release.yml",
+            ".github/workflows/bootstrap-artifacts.yml",
+        ):
+            workflow = (ROOT / workflow_name).read_text(encoding="utf-8")
+            calls = [
+                line for line in workflow.splitlines()
+                if "verify_package_provenance.py" in line
+                and "ci_smoke-desktop" in line
+            ]
+            self.assertTrue(calls, workflow_name)
+            for call in calls:
+                self.assertIn("--expect-desktop-package", call, workflow_name)
+        network_call = next(
+            line for line in (
+                ROOT / ".github/workflows/nightly-release.yml"
+            ).read_text(encoding="utf-8").splitlines()
+            if "verify_package_provenance.py" in line
+            and "network-desktop" in line
+        )
+        self.assertIn("--expect-desktop-package", network_call)
 
     def test_bootstrap_packaged_runner_uses_platform_path_and_bounded_smoke(self):
         workflow = (ROOT / ".github/workflows/bootstrap-artifacts.yml").read_text(
