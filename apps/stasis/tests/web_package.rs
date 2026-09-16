@@ -1178,6 +1178,117 @@ fn configured_web_loading_font_is_staged_and_missing_font_fails_check() {
 }
 
 #[test]
+fn web_atlas_budget_projects_to_runtime_and_rejects_malformed_manifest_values() {
+    let source = repo_root().join("samples/windows_launch_smoke");
+    let workspace = repo_root()
+        .join("build")
+        .join(format!("web-atlas-budget-test-{}", stamp()));
+    copy_tree(&source, &workspace);
+    let manifest_path = workspace.join("stasis.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read atlas budget manifest"))
+            .expect("parse atlas budget manifest");
+    let exact_budget = 9_u64 * 1024 * 1024 * 4;
+    manifest["web"] = serde_json::json!({"atlas_budget_bytes": exact_budget});
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize configured atlas budget"),
+    )
+    .expect("write configured atlas budget");
+
+    let release_output = package(&workspace, Path::new("build/web-atlas-budget-release"));
+    let release_runtime =
+        fs::read_to_string(release_output.join("game.js")).expect("read release atlas runtime");
+    assert_eq!(
+        runtime_config(&release_runtime)["atlasBudgetBytes"],
+        exact_budget
+    );
+    fs::remove_dir_all(&release_output).expect("clean release atlas package");
+
+    let development_output =
+        package_development(&workspace, Path::new("build/web-atlas-budget-development"));
+    let development_runtime = fs::read_to_string(development_output.join("game.js"))
+        .expect("read development atlas runtime");
+    assert_eq!(
+        runtime_config(&development_runtime)["atlasBudgetBytes"],
+        exact_budget
+    );
+    fs::remove_dir_all(&development_output).expect("clean development atlas package");
+
+    manifest["web"] = serde_json::json!({});
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize omitted atlas budget"),
+    )
+    .expect("write omitted atlas budget");
+    let omitted_output = package(&workspace, Path::new("build/web-atlas-budget-omitted"));
+    let omitted_runtime =
+        fs::read_to_string(omitted_output.join("game.js")).expect("read omitted atlas runtime");
+    assert!(runtime_config(&omitted_runtime)
+        .get("atlasBudgetBytes")
+        .is_none());
+    fs::remove_dir_all(&omitted_output).expect("clean omitted atlas package");
+
+    for (value, expected) in [
+        (serde_json::json!(1.0), 1_u64),
+        (serde_json::json!(1e6), 1_000_000_u64),
+    ] {
+        manifest["web"] = serde_json::json!({"atlas_budget_bytes": value});
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize integral atlas budget"),
+        )
+        .expect("write integral atlas budget");
+        let integral_output = package(&workspace, Path::new("build/web-atlas-budget-integral"));
+        let integral_runtime = fs::read_to_string(integral_output.join("game.js"))
+            .expect("read integral atlas runtime");
+        assert_eq!(
+            runtime_config(&integral_runtime)["atlasBudgetBytes"],
+            expected
+        );
+        fs::remove_dir_all(&integral_output).expect("clean integral atlas package");
+    }
+
+    for value in [
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::json!("4096"),
+        serde_json::Value::Null,
+        serde_json::json!(9_007_199_254_740_992_u64),
+    ] {
+        manifest["web"] = serde_json::json!({"atlas_budget_bytes": value});
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize invalid atlas budget"),
+        )
+        .expect("write invalid atlas budget");
+        let check = Command::new(env!("CARGO_BIN_EXE_stasis"))
+            .arg("check")
+            .arg("--workspace")
+            .arg(&workspace)
+            .output()
+            .expect("run invalid atlas budget check");
+        assert!(
+            !check.status.success(),
+            "invalid atlas budget unexpectedly passed"
+        );
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&check.stdout),
+            String::from_utf8_lossy(&check.stderr)
+        );
+        assert!(
+            diagnostics
+                .contains("web.atlas_budget_bytes must be a positive JavaScript safe integer"),
+            "invalid atlas budget diagnostic was not field-specific: {diagnostics}"
+        );
+    }
+
+    fs::remove_dir_all(&workspace).expect("clean atlas budget fixture");
+}
+
+#[test]
 fn rooted_web_asset_paths_emit_package_relative_assets() {
     let root = repo_root();
     let source_workspace = root.join("samples/windows_launch_smoke");

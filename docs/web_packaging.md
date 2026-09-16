@@ -92,6 +92,31 @@ or fullscreen controls. Browser resize and orientation changes never rewrite log
 guest code may still intentionally request a new logical canvas size later through the existing
 host request contract.
 
+## Atlas memory budget
+
+Web packages may set an optional byte budget for live WebGL sprite and text atlas pages:
+
+```json
+{
+  "web": {
+    "atlas_budget_bytes": 67108864
+  }
+}
+```
+
+The value must be a positive JavaScript safe integer. An omitted field applies no game budget;
+browser and GPU allocation limits still apply. Packaging projects the field to
+`STASIS_GAME.atlasBudgetBytes` in both development and
+release bundles. The runtime checks the requested page size and currently allocated page bytes
+before creating a GPU texture, and reports the configured budget, current allocation, requested
+page bytes, and live page count when the budget would be exceeded. Releasing a sprite or text
+resource returns an empty page's bytes to the live budget; context restoration rebuilds the live
+accounting for the new WebGL context.
+
+Atlas pages use the browser's `MAX_TEXTURE_SIZE`. Texture creation, upload, context loss, and
+budget failures remain visible WebGL errors. The runtime does not downscale or switch to a
+Canvas2D fallback when a page cannot be allocated.
+
 Web packages do not render an audio-enable control. The runtime requests audio immediately and
 automatically retries on the first pointer or keyboard gesture when browser autoplay policy starts
 the audio context suspended.

@@ -33,6 +33,50 @@
   let pendingExternalActionGeneration = 0;
   const commands = [];
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
+  class StasisGpuError extends Error {
+    constructor(message, cause) {
+      super(message);
+      // Keep the existing Error: text receipt while carrying an explicit
+      // runtime type for failures that must never become a placeholder.
+      this.name = "Error";
+      this.stasisGpuError = true;
+      if (cause !== undefined) this.cause = cause;
+    }
+  }
+  class StasisConfigError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "Error";
+      this.stasisConfigError = true;
+    }
+  }
+  const isGpuError = error => Boolean(error?.stasisGpuError);
+  const isVisibleRuntimeError = error => isGpuError(error) || Boolean(error?.stasisConfigError);
+  const gpuFailure = (message, cause) => isGpuError(cause)
+    ? cause : new StasisGpuError(message || String(cause || "WebGL failure"), cause);
+  const activeGpuErrors = new Map();
+  const publishGpuError = (error, owner = "runtime") => {
+    if (!error) return;
+    activeGpuErrors.set(owner, error);
+    if (document.body?.dataset) document.body.dataset.gpuError = String(error);
+    if (errorBox) errorBox.textContent = String(error?.stack || error);
+  };
+  const clearGpuError = owner => {
+    activeGpuErrors.delete(owner);
+    const current = Array.from(activeGpuErrors.values()).at(-1);
+    if (current) {
+      if (document.body?.dataset) document.body.dataset.gpuError = String(current);
+      if (errorBox) errorBox.textContent = String(current?.stack || current);
+    } else {
+      if (document.body?.dataset) delete document.body.dataset.gpuError;
+      if (errorBox) errorBox.textContent = "";
+    }
+  };
+  const hasAtlasBudget = Object.prototype.hasOwnProperty.call(game, "atlasBudgetBytes");
+  const atlasBudgetBytes = hasAtlasBudget && Number.isSafeInteger(game.atlasBudgetBytes)
+    && game.atlasBudgetBytes > 0 ? game.atlasBudgetBytes : null;
+  const atlasBudgetError = hasAtlasBudget && atlasBudgetBytes === null
+    ? new StasisConfigError("web.atlas_budget_bytes must be a positive JavaScript safe integer") : null;
   const COLLECTION_VIEW_ABI_VERSION = 2;
   const collectionViewAbiVersion = game.collectionViewAbiVersion ?? 1;
   const sprites = new Map();
@@ -387,11 +431,9 @@
   const SPRITE_CAP = GFX_MAX_SPRITES;
   const spriteScratch = new Float32Array(SPRITE_CAP * 16);
   const ATLAS_PAGE_SIZE = 512;
+  // WebGL exposes MAX_TEXTURE_SIZE on real contexts; retain the historical
+  // fallback only for test/minimal contexts that do not expose the query.
   const ATLAS_PAGE_MAX = 2048;
-  const ATLAS_MAX_PAGES = 8;
-  // A dedicated 4096² page plus the ordinary shared page must coexist for an
-  // oversize resource without selecting another renderer.
-  const ATLAS_MAX_BYTES = 128 * 1024 * 1024;
   const ATLAS_PADDING = 2;
   const startedAt = performance.now();
 
@@ -1493,46 +1535,82 @@
   };
   const commitSpritePreparation = (resource, prepared) => {
     const { request, result, entry, lease } = prepared;
-    if (!lease.commit()) return false;
     const oldCacheEntry = resource.cacheEntry;
     const retained = Boolean(resource.ready && resource.drawable && oldCacheEntry);
-    gpuBatcher?.releaseResource(resource);
-    resource.drawable = result.drawable;
-    resource.width = result.width;
-    resource.height = result.height;
-    resource.fallback = result.fallback || "none";
-    resource.sourceIdentity = request.sourceIdentity;
-    resource.sourceDrawable = result.sourceDrawable || null;
-    resource.sourceDrawableWidth = result.sourceDrawableWidth || 0;
-    resource.sourceDrawableHeight = result.sourceDrawableHeight || 0;
-    resource.sourceDrawableOwned = Boolean(result.sourceDrawableOwned);
-    resource.sourceWidth = result.sourceWidth || 0;
-    resource.sourceHeight = result.sourceHeight || 0;
-    resource.sourceBytes = result.sourceBytes || 0;
-    resource.decodedWidth = result.decodedWidth || 0;
-    resource.decodedHeight = result.decodedHeight || 0;
-    resource.decodedBytes = result.decodedBytes || 0;
-    resource.logicalWidth = request.logicalWidth;
-    resource.logicalHeight = request.logicalHeight;
-    resource.tier = request.tier;
-    resource.tierKey = request.key;
-    resource.cacheEntry = entry;
-    resource.refreshing = false;
-    resource.refreshError = null;
-    resource.refreshFallback = "none";
-    trimSpriteCache(entry);
-    resource.pendingLease = null;
-    resource.pendingEntry = null;
-    resource.ready = true;
     const renderer = getGpuBatcher();
-    if (!renderer) throw new Error("WebGL2 renderer unavailable during sprite publication");
-    renderer.atlasFor(resource, spriteVariantFor(resource, false));
-    if (resource.sourceDrawable && resource.sourceDrawableWidth && resource.sourceDrawableHeight) {
-      renderer.atlasFor(resource, spriteVariantFor(resource, true));
+    if (!renderer) throw gpuFailure("WebGL2 renderer unavailable during sprite publication");
+    const candidate = {
+      ...resource,
+      drawable: result.drawable,
+      width: result.width,
+      height: result.height,
+      fallback: result.fallback || "none",
+      sourceIdentity: request.sourceIdentity,
+      sourceDrawable: result.sourceDrawable || null,
+      sourceDrawableWidth: result.sourceDrawableWidth || 0,
+      sourceDrawableHeight: result.sourceDrawableHeight || 0,
+      sourceDrawableOwned: Boolean(result.sourceDrawableOwned),
+      sourceWidth: result.sourceWidth || 0,
+      sourceHeight: result.sourceHeight || 0,
+      sourceBytes: result.sourceBytes || 0,
+      decodedWidth: result.decodedWidth || 0,
+      decodedHeight: result.decodedHeight || 0,
+      decodedBytes: result.decodedBytes || 0,
+      logicalWidth: request.logicalWidth,
+      logicalHeight: request.logicalHeight,
+      tier: request.tier,
+      tierKey: request.key,
+      cacheEntry: entry,
+      refreshing: false,
+      refreshError: null,
+      refreshFallback: "none",
+      pendingLease: null,
+      pendingEntry: null,
+      error: null,
+      ready: true
+    };
+    const variants = [spriteVariantFor(candidate, false)];
+    if (candidate.sourceDrawable && candidate.sourceDrawableWidth && candidate.sourceDrawableHeight) {
+      variants.push(spriteVariantFor(candidate, true));
     }
+    const transaction = renderer.stageResource(resource, candidate, variants);
+    if (!lease.commit()) {
+      transaction.rollback();
+      return false;
+    }
+    transaction.commit();
+    Object.assign(resource, candidate);
+    trimSpriteCache(entry);
     if (oldCacheEntry) releaseSpriteCacheEntry(oldCacheEntry);
+    clearGpuError(resource);
     publishAssetReceipt(resource);
     return { retained };
+  };
+  const publishFailedPreparation = (resource, request, result) => {
+    // Keep the prepared dimensions and source receipt useful for diagnostics
+    // even when the first GPU publication is rejected. The resource remains
+    // unready and its cache lease is still cancelled by the caller.
+    Object.assign(resource, {
+      drawable: result.drawable,
+      width: result.width,
+      height: result.height,
+      fallback: result.fallback || "none",
+      sourceIdentity: request.sourceIdentity,
+      sourceDrawable: result.sourceDrawable || null,
+      sourceDrawableWidth: result.sourceDrawableWidth || 0,
+      sourceDrawableHeight: result.sourceDrawableHeight || 0,
+      sourceDrawableOwned: Boolean(result.sourceDrawableOwned),
+      sourceWidth: result.sourceWidth || 0,
+      sourceHeight: result.sourceHeight || 0,
+      sourceBytes: result.sourceBytes || 0,
+      decodedWidth: result.decodedWidth || 0,
+      decodedHeight: result.decodedHeight || 0,
+      decodedBytes: result.decodedBytes || 0,
+      logicalWidth: request.logicalWidth,
+      logicalHeight: request.logicalHeight,
+      tier: request.tier,
+      tierKey: request.key
+    });
   };
   const startSpritePreparation = (resource, onReady) => {
     const retained = Boolean(resource.ready && resource.drawable && resource.cacheEntry);
@@ -1583,12 +1661,17 @@
           resource.refreshError = error;
           resource.refreshFallback = request.fallback === "none"
             ? "refresh-error" : request.fallback;
+          if (isVisibleRuntimeError(error)) publishGpuError(error, resource);
           publishAssetReceipt(resource);
           return resource;
         }
         resource.error = error;
         resource.ready = false;
+        if (preparation.entry?.result) {
+          publishFailedPreparation(resource, request, preparation.entry.result);
+        }
         resource.fallback = request.fallback || "bitmap-resize-unavailable";
+        if (isVisibleRuntimeError(error)) publishGpuError(error, resource);
         publishAssetReceipt(resource);
         onReady?.(resource, false);
         return resource;
@@ -1736,6 +1819,7 @@
       if (resource.fontHandle !== handle) continue;
       preparedText.delete(key);
       preparedTextBytes = Math.max(0, preparedTextBytes - resource.byteLength);
+      clearGpuError(resource);
       gpuBatcher?.releaseResource(resource);
     }
     font.pendingRuns.length = 0;
@@ -1756,6 +1840,7 @@
   const releaseSprite = handle => {
     const resource = sprites.get(handle);
     if (resource) {
+      clearGpuError(resource);
       resource.generation += 1;
       resource.pendingLease?.cancel();
       resource.pendingLease = null;
@@ -2458,9 +2543,10 @@
       const atlasByResource = new WeakMap();
       const maxTextureSize = Math.max(1, Number(gl.getParameter?.(gl.MAX_TEXTURE_SIZE)) || ATLAS_PAGE_MAX);
       // Upload counters are cumulative for this helper/context lifetime;
-      // page and live-entry counts describe the current bounded atlas.
+      // page and live-entry counts describe the current atlas.
       let atlasUploadCount = 0;
       let atlasUploadBytes = 0;
+      let atlasAllocatedBytes = 0;
       let frameTextureBinds = 0;
       let frameAtlasTransitions = 0;
       let lastTexture = null;
@@ -2468,15 +2554,27 @@
       let stagingContext;
       let lost = false;
       const failIfLost = () => {
-        if (lost || (typeof gl.isContextLost === "function" && gl.isContextLost())) throw new Error("WebGL context lost");
+        if (lost || (typeof gl.isContextLost === "function" && gl.isContextLost())) {
+          throw gpuFailure("WebGL context lost");
+        }
       };
       const failIfBad = () => {
         failIfLost();
-        if (typeof gl.getError === "function" && gl.getError() !== (gl.NO_ERROR ?? 0)) throw new Error("WebGL error");
+        if (typeof gl.getError === "function") {
+          const error = gl.getError();
+          if (error !== (gl.NO_ERROR ?? 0)) throw gpuFailure(`WebGL error (${error})`);
+        }
       };
+      let disposed = false;
       const dispose = () => {
-        for (const page of atlasPages) gl.deleteTexture?.(page.texture);
+        if (disposed) return;
+        disposed = true;
+        for (const page of atlasPages) {
+          gl.deleteTexture?.(page.texture);
+          page.deleted = true;
+        }
         atlasPages.length = 0;
+        atlasAllocatedBytes = 0;
         gl.deleteBuffer?.(instanceBuffer);
         gl.deleteBuffer?.(unitBuffer);
         gl.deleteVertexArray?.(spriteVao);
@@ -2508,46 +2606,61 @@
             }
             for (const resource of preparedText.values()) restored.atlasFor(resource, null);
           } catch (error) {
-            document.body.dataset.gpuError = String(error);
+            restored.dispose?.();
+            publishGpuError(error, "context");
             gpuBatcher = null;
+            return;
           }
+          clearGpuError("context");
         });
       }
       const createAtlasPage = size => {
-        if (atlasPages.length >= ATLAS_MAX_PAGES) throw new Error("WebGL2 atlas page capacity exhausted");
-        if (size > maxTextureSize) throw new Error("WebGL2 atlas page exceeds MAX_TEXTURE_SIZE");
-        const allocatedBytes = atlasPages.reduce((total, page) => total + page.size * page.size * 4, 0);
-        if (allocatedBytes + size * size * 4 > ATLAS_MAX_BYTES) {
-          throw new Error("WebGL2 atlas memory capacity exhausted");
+        if (size > maxTextureSize) throw gpuFailure("WebGL2 atlas page exceeds MAX_TEXTURE_SIZE");
+        const pageBytes = size * size * 4;
+        if (atlasBudgetBytes !== null && atlasAllocatedBytes + pageBytes > atlasBudgetBytes) {
+          throw gpuFailure(
+            `WebGL2 atlas memory budget exhausted (web.atlas_budget_bytes): budget=${atlasBudgetBytes} current=${atlasAllocatedBytes} requested=${pageBytes} pages=${atlasPages.length}`
+          );
         }
-        const texture = gl.createTexture();
-        if (!texture) throw new Error("WebGL atlas texture allocation failed");
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0,
-          gl.RGBA, gl.UNSIGNED_BYTE, null);
+        let texture;
         const solidPixels = new Uint8Array([
           255, 255, 255, 255, 255, 255, 255, 255,
           255, 255, 255, 255, 255, 255, 255, 255
         ]);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 2, 2, gl.RGBA, gl.UNSIGNED_BYTE, solidPixels);
-        failIfBad();
+        try {
+          texture = gl.createTexture();
+          if (!texture) throw gpuFailure("WebGL atlas texture allocation failed");
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0,
+            gl.RGBA, gl.UNSIGNED_BYTE, null);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 2, 2, gl.RGBA, gl.UNSIGNED_BYTE, solidPixels);
+          failIfBad();
+        } catch (error) {
+          try { if (texture) gl.deleteTexture?.(texture); } catch (_) { /* preserve the upload error */ }
+          throw isGpuError(error) ? error : gpuFailure(String(error?.message || error), error);
+        }
         const page = {
           texture, size, cursorX: 2, cursorY: 0, rowHeight: 2,
-          solidUv: 0.5 / size,
+          allocatedBytes: pageBytes, solidUv: 0.5 / size,
           entries: new Set(), freeRects: []
         };
         atlasUploadCount += 1;
         atlasUploadBytes += solidPixels.byteLength;
         atlasPages.push(page);
+        atlasAllocatedBytes += pageBytes;
         return page;
       };
       const deleteAtlasPage = page => {
+        if (!page || page.deleted) return;
         const index = atlasPages.indexOf(page);
-        if (index >= 0) atlasPages.splice(index, 1);
+        if (index >= 0) {
+          atlasPages.splice(index, 1);
+          atlasAllocatedBytes = Math.max(0, atlasAllocatedBytes - page.allocatedBytes);
+        }
         gl.deleteTexture?.(page.texture);
         page.deleted = true;
       };
@@ -2665,10 +2778,15 @@
           0, ATLAS_PADDING + height, ATLAS_PADDING, ATLAS_PADDING);
         stagingContext.drawImage(variant.drawable, width - 1, height - 1, 1, 1,
           ATLAS_PADDING + width, ATLAS_PADDING + height, ATLAS_PADDING, ATLAS_PADDING);
-        gl.bindTexture(gl.TEXTURE_2D, page.texture);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, entry.x - ATLAS_PADDING, entry.y - ATLAS_PADDING,
-          gl.RGBA, gl.UNSIGNED_BYTE, stagingCanvas);
-        failIfBad();
+        try {
+          gl.bindTexture(gl.TEXTURE_2D, page.texture);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, entry.x - ATLAS_PADDING, entry.y - ATLAS_PADDING,
+            gl.RGBA, gl.UNSIGNED_BYTE, stagingCanvas);
+          failIfBad();
+        } catch (error) {
+          throw isGpuError(error)
+            ? error : gpuFailure(`WebGL atlas upload failed: ${String(error?.message || error)}`, error);
+        }
         atlasUploadCount += 1;
         atlasUploadBytes += paddedWidth * paddedHeight * 4;
       };
@@ -2689,7 +2807,7 @@
         const paddedWidth = selected.width + ATLAS_PADDING * 2;
         const paddedHeight = selected.height + ATLAS_PADDING * 2;
         if (paddedWidth > maxTextureSize || paddedHeight > maxTextureSize) {
-          throw new Error("Sprite exceeds WebGL2 MAX_TEXTURE_SIZE");
+          throw gpuFailure("Sprite exceeds WebGL2 MAX_TEXTURE_SIZE");
         }
         let pageSize = ATLAS_PAGE_SIZE;
         while (pageSize < paddedWidth || pageSize < paddedHeight) pageSize *= 2;
@@ -2740,6 +2858,44 @@
         }
         variants.set(variantKey, entry);
         return entry;
+      };
+      const releaseAtlasVariants = variants => {
+        if (!variants) return;
+        for (const entry of variants.values()) releaseAtlasEntry(entry);
+      };
+      const releaseResource = resource => {
+        const variants = atlasByResource.get(resource);
+        if (!variants) return;
+        atlasByResource.delete(resource);
+        releaseAtlasVariants(variants);
+      };
+      const stageResource = (target, candidate, variants) => {
+        const stagedVariants = new Map();
+        atlasByResource.set(candidate, stagedVariants);
+        try {
+          for (const variant of variants) atlasFor(candidate, variant);
+        } catch (error) {
+          releaseResource(candidate);
+          throw error;
+        }
+        let settled = false;
+        return {
+          commit: () => {
+            if (settled || atlasByResource.get(candidate) !== stagedVariants) {
+              throw gpuFailure("WebGL atlas staging transaction is no longer active");
+            }
+            const oldVariants = atlasByResource.get(target);
+            atlasByResource.set(target, stagedVariants);
+            atlasByResource.delete(candidate);
+            releaseAtlasVariants(oldVariants);
+            settled = true;
+          },
+          rollback: () => {
+            if (settled) return;
+            releaseResource(candidate);
+            settled = true;
+          }
+        };
       };
       const draw = (values, count, texture) => {
         const width = display.backingWidth;
@@ -2794,6 +2950,7 @@
           gl.scissor(x, display.backingHeight - bottom, Math.max(0, right - x), Math.max(0, bottom - top));
         },
         atlasFor,
+        stageResource,
         solidFor: preferredPage => {
           const page = (!preferredPage?.deleted && preferredPage)
             || atlasPages.find(candidate => !candidate.deleted) || createAtlasPage(ATLAS_PAGE_SIZE);
@@ -2801,15 +2958,13 @@
         },
         drawSprites: (values, count, page) => draw(values, count, page.texture),
         releaseResource: resource => {
-          const variants = atlasByResource.get(resource);
-          if (!variants) return;
-          atlasByResource.delete(resource);
-          for (const entry of variants.values()) releaseAtlasEntry(entry);
+          releaseResource(resource);
         },
+        dispose,
         metrics: () => ({
           pages: atlasPages.length,
           liveEntries: atlasPages.reduce((total, page) => total + page.entries.size, 0),
-          allocatedBytes: atlasPages.reduce((total, page) => total + page.size * page.size * 4, 0),
+          allocatedBytes: atlasAllocatedBytes,
           width: atlasPages.reduce((total, page) => total + page.size, 0),
           height: atlasPages.reduce((maximum, page) => Math.max(maximum, page.size), 0),
           generation: atlasPages.reduce((maximum, page) => Math.max(
@@ -2822,7 +2977,7 @@
         })
       });
     } catch (error) {
-      document.body.dataset.gpuError = String(error);
+      publishGpuError(error, "renderer");
       document.body.dataset.backend = "unsupported";
       setLoading("This game requires WebGL2.", "failed");
       if (errorBox) errorBox.textContent = String(error?.message || error);
@@ -2857,7 +3012,7 @@
     const renderer = getGpuBatcher();
     if (!renderer) return false;
     const atlas = renderer.solidFor();
-    if (!atlas) throw new Error("WebGL2 solid atlas allocation failed");
+    if (!atlas) throw gpuFailure("WebGL2 solid atlas allocation failed");
     writeQuad(0, x, y, width, height, atlas, red, green, blue, alpha, radians, pivotX, pivotY);
     renderer.drawSprites(spriteScratch, 1, atlas.page);
     performanceWorkload.instances += 1;
@@ -2926,7 +3081,7 @@
     if (!resource) return;
     try {
       const entry = renderer.atlasFor(resource, null);
-      if (!entry) throw new Error("WebGL2 text atlas allocation failed");
+      if (!entry) throw gpuFailure("WebGL2 text atlas allocation failed");
       writeQuad(0, x, y, resource.width, resource.height, {
         u0: entry.x / entry.page.size, v0: entry.y / entry.page.size,
         u1: (entry.x + entry.width) / entry.page.size,
@@ -3015,9 +3170,10 @@
         Math.atan2(dy, dx), 0, 0.5);
     };
     const drawRectRun = (start, count, ordered) => {
+      if (count <= 0) return;
       performanceWorkload.rectangles += count;
       const solid = batcher.solidFor();
-      if (!solid) throw new Error("WebGL2 solid atlas allocation failed");
+      if (!solid) throw gpuFailure("WebGL2 solid atlas allocation failed");
       for (let first = 0; first < count; first += SPRITE_CAP) {
         const chunk = Math.min(SPRITE_CAP, count - first);
         for (let offset = 0; offset < chunk; offset += 1) {
@@ -3040,6 +3196,9 @@
       const baseF = GFX_F_SPRITE_BASE + index * spriteStride;
       let resource = sprites.get(i32[baseI]);
       if (!resource?.ready || !resource.drawable || !resource.width || !resource.height) {
+        if (resource?.error && isVisibleRuntimeError(resource.error)) {
+          throw resource.error;
+        }
         resource = deterministicMissingSprite();
       }
       const x = f32[baseF];
@@ -3077,7 +3236,7 @@
       const info = spriteInfo(index);
       if (!info) return;
       const atlas = batcher.atlasFor(info.resource, info.variant);
-      if (!atlas) throw new Error("WebGL2 sprite atlas allocation failed");
+      if (!atlas) throw gpuFailure("WebGL2 sprite atlas allocation failed");
       writeQuad(0,
         info.x + info.pivotX - info.pivotX * info.scaleX,
         info.y + info.pivotY - info.pivotY * info.scaleY,
@@ -3103,7 +3262,7 @@
           const value = spriteInfo(start + offset + batchCount);
           if (!value) { if (batchCount === 0) offset += 1; break; }
           const atlas = batcher.atlasFor(value.resource, value.variant);
-          if (!atlas) throw new Error("WebGL2 sprite atlas allocation failed");
+          if (!atlas) throw gpuFailure("WebGL2 sprite atlas allocation failed");
           if (!atlas || (page && atlas.page !== page)) break;
           page ||= atlas.page;
           writeQuad(batchCount * 16,
@@ -3181,7 +3340,7 @@
           atlas = batcher.atlasFor(value.resource, value.variant);
         }
         if (!atlas) {
-          throw new Error("WebGL2 atlas allocation failed");
+          throw gpuFailure("WebGL2 atlas allocation failed");
         }
         if (page && atlas.page !== page) flush();
         if (batchCount >= SPRITE_CAP) flush();
@@ -3255,7 +3414,6 @@
         flush();
         return true;
       } catch (error) {
-        document.body.dataset.gpuError = String(error);
         throw error;
       }
     };
@@ -3572,10 +3730,12 @@
     try {
       executeCommands();
     } catch (error) {
-      document.body.dataset.gpuError = String(error);
+      publishGpuError(error, "frame");
+      document.body.dataset.backend = performanceBackend;
       requestAnimationFrame(frame);
       return;
     }
+    clearGpuError("frame");
     const browserReplayMs = performance.now() - replayStart;
     const atlasMetrics = gpuBatcher?.metrics?.();
     performanceWorkload.atlasPages = atlasMetrics?.pages ?? -1;
@@ -3724,6 +3884,7 @@
   window.STASIS_RUNTIME_PROMISE = (async () => {
     try {
       setLoading("Preparing…", "loading");
+      if (atlasBudgetError) throw atlasBudgetError;
       if (!getGpuBatcher()) throw new Error("WebGL2 is required by the Stasis Web renderer");
       const result = await WebAssembly.instantiate(await wasmBytes(), imports);
       instance = result.instance;
@@ -3751,6 +3912,7 @@
       requestAnimationFrame(frame);
     } catch (error) {
       document.body.dataset.ready = "false";
+      if (isVisibleRuntimeError(error)) publishGpuError(error, "startup");
       setLoading(`Unable to start this game. ${String(error && error.message || error)}`, "failed");
       if (instance) {
         for (const [label, name] of [
