@@ -145,7 +145,10 @@ def validate_captured_input(
 
 
 def validate_desktop_project_receipt(
-    parser: argparse.ArgumentParser, value: object, label: str
+    parser: argparse.ArgumentParser,
+    value: object,
+    label: str,
+    package_root: pathlib.Path,
 ) -> None:
     expected = {
         "manifest", "entry", "reachable_sources", "vendor", "captured_inputs"
@@ -157,7 +160,20 @@ def validate_desktop_project_receipt(
     if not isinstance(manifest, dict) or set(manifest) != {"path", "sha256"} \
             or manifest.get("path") != "stasis.json":
         parser.error(f"desktop package provenance has malformed {label} manifest")
-    validate_receipt_sha256(parser, manifest["sha256"], f"{label} manifest")
+    manifest_sha256 = validate_receipt_sha256(
+        parser, manifest["sha256"], f"{label} manifest"
+    )
+    manifest_path = package_root / manifest["path"]
+    if not manifest_path.is_file():
+        parser.error(
+            f"desktop package provenance {label} manifest is missing: {manifest_path}"
+        )
+    actual_manifest_sha256 = sha256(manifest_path)
+    if actual_manifest_sha256 != manifest_sha256:
+        parser.error(
+            f"desktop package provenance {label} manifest hash mismatch: "
+            f"expected {manifest_sha256}, found {actual_manifest_sha256}"
+        )
 
     entry = value["entry"]
     if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
@@ -201,14 +217,16 @@ def validate_desktop_project_receipt(
 
 
 def validate_desktop_package_receipt(
-    parser: argparse.ArgumentParser, value: object
+    parser: argparse.ArgumentParser, value: object, package_root: pathlib.Path
 ) -> None:
     if not isinstance(value, dict) or set(value) != {"project", "network_guest"}:
         parser.error("desktop package provenance receipt is malformed")
-    validate_desktop_project_receipt(parser, value["project"], "project")
+    validate_desktop_project_receipt(
+        parser, value["project"], "project", package_root
+    )
     if value["network_guest"] is not None:
         validate_desktop_project_receipt(
-            parser, value["network_guest"], "network guest"
+            parser, value["network_guest"], "network guest", package_root
         )
 
 
@@ -382,7 +400,9 @@ def main() -> int:
     if args.expect_desktop_package:
         if desktop_package is desktop_package_missing:
             parser.error("packaged provenance is missing desktop package receipt")
-        validate_desktop_package_receipt(parser, desktop_package)
+        validate_desktop_package_receipt(
+            parser, desktop_package, args.package_root
+        )
     elif desktop_package is not desktop_package_missing:
         parser.error("packaged provenance unexpectedly contains desktop package receipt")
     if release != packaged_release:

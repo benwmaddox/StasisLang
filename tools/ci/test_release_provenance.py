@@ -29,8 +29,8 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 class ReleaseProvenanceTests(unittest.TestCase):
     @staticmethod
-    def desktop_package_receipt():
-        digest = "a" * 64
+    def desktop_package_receipt(manifest=b"{}\n"):
+        digest = hashlib.sha256(manifest).hexdigest()
         project = {
             "manifest": {"path": "stasis.json", "sha256": digest},
             "entry": {"path": "src/main.stasis", "sha256": digest},
@@ -50,23 +50,26 @@ class ReleaseProvenanceTests(unittest.TestCase):
             def error(message):
                 raise ValueError(message)
 
-        receipt = self.desktop_package_receipt()
-        validate_desktop_package_receipt(Parser(), receipt)
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary)
+            (package / "stasis.json").write_bytes(b"{}\n")
+            receipt = self.desktop_package_receipt()
+            validate_desktop_package_receipt(Parser(), receipt, package)
 
-        malformed = json.loads(json.dumps(receipt))
-        malformed["project"]["entry"]["path"] = "../outside.stasis"
-        with self.assertRaisesRegex(ValueError, "unsafe project entry path"):
-            validate_desktop_package_receipt(Parser(), malformed)
+            malformed = json.loads(json.dumps(receipt))
+            malformed["project"]["entry"]["path"] = "../outside.stasis"
+            with self.assertRaisesRegex(ValueError, "unsafe project entry path"):
+                validate_desktop_package_receipt(Parser(), malformed, package)
 
-        malformed = json.loads(json.dumps(receipt))
-        malformed["project"]["entry"]["sha256"] = "not-a-hash"
-        with self.assertRaisesRegex(ValueError, "invalid project entry sha256"):
-            validate_desktop_package_receipt(Parser(), malformed)
+            malformed = json.loads(json.dumps(receipt))
+            malformed["project"]["entry"]["sha256"] = "not-a-hash"
+            with self.assertRaisesRegex(ValueError, "invalid project entry sha256"):
+                validate_desktop_package_receipt(Parser(), malformed, package)
 
-        malformed = json.loads(json.dumps(receipt))
-        malformed["unexpected"] = True
-        with self.assertRaisesRegex(ValueError, "receipt is malformed"):
-            validate_desktop_package_receipt(Parser(), malformed)
+            malformed = json.loads(json.dumps(receipt))
+            malformed["unexpected"] = True
+            with self.assertRaisesRegex(ValueError, "receipt is malformed"):
+                validate_desktop_package_receipt(Parser(), malformed, package)
 
     def test_desktop_package_verifier_preserves_exact_release_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -82,8 +85,12 @@ class ReleaseProvenanceTests(unittest.TestCase):
             (release / "stasis_release_provenance.json").write_text(
                 json.dumps(manifest), encoding="utf-8"
             )
+            packaged_manifest = b'{"name":"ci_smoke"}\n'
+            (package / "stasis.json").write_bytes(packaged_manifest)
             packaged = dict(manifest)
-            packaged["desktop_package"] = self.desktop_package_receipt()
+            packaged["desktop_package"] = self.desktop_package_receipt(
+                packaged_manifest
+            )
             (package / "stasis_provenance.json").write_text(
                 json.dumps(packaged), encoding="utf-8"
             )
@@ -94,6 +101,21 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "--expect-desktop-package",
             ]
             self.assertEqual(subprocess.run(command, check=False).returncode, 0)
+
+            (package / "stasis.json").write_bytes(b'{"name":"tampered"}\n')
+            tampered_manifest = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(tampered_manifest.returncode, 0)
+            self.assertIn("project manifest hash mismatch", tampered_manifest.stderr)
+
+            (package / "stasis.json").unlink()
+            missing_manifest = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(missing_manifest.returncode, 0)
+            self.assertIn("project manifest is missing", missing_manifest.stderr)
+            (package / "stasis.json").write_bytes(packaged_manifest)
 
             missing_mode = subprocess.run(
                 command[:-1], check=False, capture_output=True, text=True
