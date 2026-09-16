@@ -369,7 +369,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private boolean restorePlaceholderPending;
     private long restorePlaceholderUntilNanos;
     private int renderAcceptanceFrameCount;
-    private int lastPresentedFrameToken = -1;
+    private final PresentationState presentation = new PresentationState();
     private int lastAcceptanceGlesEvidenceToken = -1;
     private int lastHotEditGlesEvidenceToken = -1;
     private int acceptanceTrace = -1;
@@ -665,7 +665,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 drawCalls = frameDrawCalls;
                 presented = true;
                 int frameToken = frameI32.get(I_FRAME_TOKEN);
-                lastPresentedFrameToken = frameToken;
+                int presentedTrace = acceptanceTraceToken == frameToken
+                        ? acceptanceTrace : -1;
+                presentation.observe(frameToken, presentedTrace);
                 if (workshopSoakAcceptanceActive) workshopSoakPresentations.observe(frameToken);
                 notifyAll();
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
@@ -747,11 +749,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return performanceSamples != null && !performanceSamples.isComplete();
     }
 
-    // Acceptance synchronization waits for the GL thread to consume the exact
-    // token written by the preceding JNI call. It is never used by production.
+    // Legacy acceptance synchronization waits for the GL thread to consume a
+    // token. New acceptance paths use the serial-and-trace barrier below.
     synchronized boolean awaitPresentedFrameToken(int token, long timeoutMillis) {
         long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
-        while (lastPresentedFrameToken != token) {
+        while (presentation.token() != token) {
             long remaining = deadline - System.nanoTime();
             if (remaining <= 0L) return false;
             try {
@@ -766,9 +768,39 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return true;
     }
 
+    // Acceptance synchronization requires both a presentation after the frame
+    // request and the command trace produced by that request. A token alone is
+    // not sufficient because a new project can reuse an earlier token.
+    synchronized boolean awaitPresentedFrame(int token, int trace,
+            long afterPresentationSerial, long timeoutMillis) {
+        long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
+        while (!presentation.matches(token, trace, afterPresentationSerial)) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0L) return false;
+            try {
+                long millis = remaining / 1_000_000L;
+                int nanos = (int)(remaining % 1_000_000L);
+                wait(Math.max(1L, millis), nanos);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    synchronized long presentationSerial() {
+        return presentation.serial();
+    }
+
     synchronized void setAcceptanceTrace(int token, int trace) {
         acceptanceTraceToken = token;
         acceptanceTrace = trace;
+    }
+
+    synchronized void clearAcceptanceTrace() {
+        acceptanceTraceToken = -1;
+        acceptanceTrace = -1;
     }
 
     synchronized void setWorkshopSoakAcceptanceActive(boolean active) {
@@ -805,6 +837,27 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int count() { return count; }
         int lastToken() { return lastToken; }
         boolean ordered() { return ordered; }
+    }
+
+    static final class PresentationState {
+        private long serial;
+        private int token = -1;
+        private int trace = -1;
+
+        void observe(int token, int trace) {
+            serial += 1L;
+            this.token = token;
+            this.trace = trace;
+        }
+
+        long serial() { return serial; }
+        int token() { return token; }
+
+        boolean matches(int expectedToken, int expectedTrace, long afterSerial) {
+            return serial > afterSerial
+                    && token == expectedToken
+                    && trace == expectedTrace;
+        }
     }
 
     synchronized int acceptanceTrace() {
