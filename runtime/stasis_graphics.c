@@ -26,6 +26,7 @@
 #include "stasis_display_scale.h"
 #include "stasis_renderer_lifecycle.h"
 #include "stasis_performance_metrics.h"
+#include "stasis_package_provenance_reader.h"
 #include "stasis_platform_services.h"
 #include "stasis_image_writer.h"
 #include "stasis_sprite_atlas_policy.h"
@@ -93,16 +94,27 @@ static void log_package_provenance(void) {
     if (written < 0 || (size_t)written >= sizeof(path)) return;
     FILE* file = fopen(path, "rb");
     if (!file) return;
-    char manifest[65537];
-    size_t count = fread(manifest, 1, sizeof(manifest) - 1, file);
-    int overflow = fgetc(file) != EOF;
-    fclose(file);
-    if (overflow) {
-        SDL_Log("Stasis package provenance is invalid: manifest exceeds 65536 bytes path=%s", path);
+    char* manifest = (char*)malloc(STASIS_PACKAGE_PROVENANCE_MAX_BYTES);
+    if (!manifest) {
+        fclose(file);
+        SDL_Log("Stasis package provenance is invalid: allocation failed path=%s", path);
         return;
     }
-    manifest[count] = '\0';
-    SDL_Log("Stasis package provenance: path=%s manifest=%s", path, manifest);
+    size_t count = 0;
+    StasisPackageProvenanceReadResult result = stasis_read_package_provenance(
+        file, manifest, STASIS_PACKAGE_PROVENANCE_MAX_BYTES, &count);
+    fclose(file);
+    if (result != STASIS_PACKAGE_PROVENANCE_READ_OK) {
+        const char* reason = result == STASIS_PACKAGE_PROVENANCE_READ_TOO_LARGE ?
+            "manifest exceeds 1048576 bytes" :
+            result == STASIS_PACKAGE_PROVENANCE_READ_EMBEDDED_NUL ?
+                "manifest contains an embedded NUL" : "manifest read failed";
+        SDL_Log("Stasis package provenance is invalid: %s path=%s", reason, path);
+        free(manifest);
+        return;
+    }
+    SDL_Log("Stasis package provenance: path=%s manifest=%.*s", path, (int)count, manifest);
+    free(manifest);
 }
 
 #if defined(STASIS_GRAPHICS_STATIC)

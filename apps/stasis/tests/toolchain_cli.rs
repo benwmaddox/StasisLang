@@ -2879,7 +2879,8 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/stasis_graphics.c"),
     )
     .expect("read desktop graphics runtime");
-    assert!(graphics_source.contains("Stasis package provenance: path=%s manifest=%s"));
+    assert!(graphics_source.contains("STASIS_PACKAGE_PROVENANCE_MAX_BYTES"));
+    assert!(graphics_source.contains("Stasis package provenance: path=%s manifest=%.*s"));
 
     let refused = stasis(
         &[

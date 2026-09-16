@@ -4,6 +4,7 @@ global png_sprite: Sprite;
 global svg_sprite: Sprite;
 global smoke_label: TextRun;
 global smoke_writer: SpriteRunWriter;
+global empty_literal_probe: ascii[8];
 global ticks: i32;
 global windows_smoke_host_frame: HostFrame;
 
@@ -31,6 +32,10 @@ function smoke_write_sprite(sprite: Sprite, x: f32, y: f32): bool {
 }
 
 function main(): i32 {
+    ascii_clear(empty_literal_probe);
+    if (ascii_append(empty_literal_probe, "") != 0 || length(empty_literal_probe) != 0) {
+        return 19;
+    }
     if (!init_window(320, 180, "Stasis Windows launch smoke")) {
         return 20;
     }

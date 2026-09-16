@@ -172,6 +172,12 @@ if(STASIS_GRAPHICS_BUILD_TESTS)
     enable_testing()
     add_executable(stasis_mixed_quad_planner_test tests/stasis_mixed_quad_planner_test.c)
     add_test(NAME stasis_mixed_quad_planner_test COMMAND stasis_mixed_quad_planner_test)
+    add_executable(stasis_package_provenance_test tests/stasis_package_provenance_test.c)
+    target_include_directories(stasis_package_provenance_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(WIN32)
+        target_compile_definitions(stasis_package_provenance_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    add_test(NAME stasis_package_provenance_contract COMMAND stasis_package_provenance_test)
 endif()
 
 function(configure_stasis_target target is_static)
@@ -275,7 +281,8 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
     install(
         FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
-              stasis_network_join_card.h stasis_performance_metrics.h stasis_platform_services.h
+              stasis_network_join_card.h stasis_performance_metrics.h stasis_package_provenance_reader.h
+              stasis_platform_services.h
         DESTINATION include
     )
 endif()
