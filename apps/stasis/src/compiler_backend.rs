@@ -3308,6 +3308,70 @@ STASIS_EXPORT int32_t host_req_window_w_px = 0;\n\
 STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
     );
 
+    // AOT objects use kind-qualified storage names. Keep the legacy bridge
+    // exports as aliases because the desktop runner discovers these buffers
+    // by their original names.
+    let bridge_storage_aliases = [
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "host_i32", ""),
+            "host_i32",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "host_f32", ""),
+            "host_f32",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_i32", ""),
+            "gfx_cmd_i32",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_f32", ""),
+            "gfx_cmd_f32",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_u8", ""),
+            "gfx_cmd_u8",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_seq", ""),
+            "host_req_seq",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_flags", ""),
+            "host_req_flags",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_window_w_px", ""),
+            "host_req_window_w_px",
+        ),
+        (
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_window_h_px", ""),
+            "host_req_window_h_px",
+        ),
+    ];
+    let use_msvc_aliases = matches!(target, stasis_jit::AotTarget::Native) && cfg!(windows);
+    let use_darwin_aliases = matches!(target, stasis_jit::AotTarget::IosArm64)
+        || (matches!(target, stasis_jit::AotTarget::Native) && cfg!(target_os = "macos"));
+    if use_msvc_aliases {
+        for (qualified, legacy) in &bridge_storage_aliases {
+            source.push_str(&format!(
+                "#pragma comment(linker, \"/alternatename:{qualified}={legacy}\")\n"
+            ));
+        }
+    } else if use_darwin_aliases {
+        for (qualified, legacy) in &bridge_storage_aliases {
+            source.push_str(&format!(
+                "__asm__(\".globl _{qualified}\\n_{qualified} = _{legacy}\");\n"
+            ));
+        }
+    } else {
+        for (qualified, legacy) in &bridge_storage_aliases {
+            source.push_str(&format!(
+                "extern __typeof__({legacy}) {qualified} __attribute__((alias(\"{legacy}\")));\n"
+            ));
+        }
+    }
+
     let mut register_lines = vec![
         format!(
             "stasis_jit_register_global_i32_array({host_i32_hash}, 0, host_i32, 768);"
@@ -5461,6 +5525,90 @@ mod tests {
     }
 
     #[test]
+    fn packaged_runtime_bridge_aliases_kind_qualified_bridge_storage() {
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::Native,
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+        )
+        .expect("build runtime bridge");
+        let aliases = [
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "host_i32", ""),
+                "host_i32",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "host_f32", ""),
+                "host_f32",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_i32", ""),
+                "gfx_cmd_i32",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_f32", ""),
+                "gfx_cmd_f32",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_u8", ""),
+                "gfx_cmd_u8",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_seq", ""),
+                "host_req_seq",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_flags", ""),
+                "host_req_flags",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_window_w_px", ""),
+                "host_req_window_w_px",
+            ),
+            (
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "host_req_window_h_px", ""),
+                "host_req_window_h_px",
+            ),
+        ];
+        for (qualified, legacy) in aliases {
+            let expected = if cfg!(windows) {
+                format!("#pragma comment(linker, \"/alternatename:{qualified}={legacy}\")")
+            } else if cfg!(target_os = "macos") {
+                format!("__asm__(\".globl _{qualified}\\n_{qualified} = _{legacy}\");")
+            } else {
+                format!(
+                    "extern __typeof__({legacy}) {qualified} __attribute__((alias(\"{legacy}\")));"
+                )
+            };
+            assert!(
+                source.contains(&expected),
+                "missing bridge alias {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn packaged_runtime_bridge_aliases_ios_use_macho_assembly() {
+        let source = build_engine_bundle_runtime_bridge_source(
+            &stasis_jit::AotTarget::ios_arm64_default(),
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+        )
+        .expect("build iOS runtime bridge");
+        let qualified = aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_i32", "");
+        assert!(source.contains(&format!(
+            "__asm__(\".globl _{qualified}\\n_{qualified} = _gfx_cmd_i32\");"
+        )));
+        assert!(!source.contains("__attribute__((alias"));
+    }
+
+    #[test]
     fn package_support_capture_closes_nested_absolute_asset_graph() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -6707,9 +6855,14 @@ function render(): i32 {
             .expect("AOT lifecycle program snapshot");
         let runtime_fields = merge_runtime_fields(snapshot.state_layout(), &[])
             .expect("derive AOT lifecycle runtime fields");
-        assert!(runtime_fields
-            .iter()
-            .any(|field| field.name == "gfx_sprite_writer_frame_generation"));
+        assert!(runtime_fields.iter().any(|field| {
+            field.name
+                == aot_storage_symbol(
+                    AotStorageSymbolKind::Scalar,
+                    "gfx_sprite_writer_frame_generation",
+                    "",
+                )
+        }));
         let function_symbols = manifest
             .functions
             .iter()
