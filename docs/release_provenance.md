@@ -27,8 +27,9 @@ asset root and compile a small generated header into the lifecycle adapter. At
 startup, the adapter logs the build label, release tag, source commit, and
 `gfx_cmd` renderer family with schema 7. Package validation accepts only the
 current command-buffer schema; generated artifacts must be rebuilt with the matching toolchain.
-The desktop graphics runtime logs the bounded
-sidecar manifest from the resolved runtime payload directory during initialization.
+The desktop graphics runtime logs up to 1 MiB of the sidecar manifest from the
+resolved runtime payload directory during initialization. It rejects larger,
+unreadable, or embedded-NUL payloads without relying on a terminating sentinel.
 
 Web package provenance additionally contains `web_package.asset_metadata_audit`,
 `web_package.size_metrics`, and `web_package.project`. The project record names

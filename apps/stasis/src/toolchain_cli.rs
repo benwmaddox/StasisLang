@@ -107,6 +107,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",
     "stasis_performance_metrics.h",
+    "stasis_package_provenance_reader.h",
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
     "stasis_graphics.c",

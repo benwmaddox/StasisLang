@@ -5702,6 +5702,32 @@ function main(): i32 {
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_stdlib_ascii_views_accept_empty_literals() {
+        let mut process = JitProcess::new();
+        process
+            .set_project_root(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .to_string_lossy(),
+            )
+            .expect("set repository root");
+        let sample_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("jit_stdlib_ascii_empty_literal_sample.stasis");
+        process.upsert_file(
+            sample_path.to_string_lossy().to_string(),
+            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[8];\nglobal copied: ascii[8];\nglobal converted: utf8[8];\nfunction main(): i32 {\n    ascii_clear(text);\n    if (ascii_append(text, \"\") != 0) { return 1; }\n    if (ascii_copy(copied, \"\") != 0) { return 2; }\n    if (length(copied) != 0) { return 3; }\n    if (ascii_cmp(\"\", \"\") != 0) { return 4; }\n    if (!ascii_starts_with(\"x\", \"\")) { return 5; }\n    if (ascii_find(\"\", \"\") != 0) { return 6; }\n    if (ascii_find_byte(\"\", 120) != -1) { return 7; }\n    if (ascii_find_last_byte(\"\", 120) != -1) { return 8; }\n    if (utf8_from_ascii(converted, \"\", 8) != 0) { return 9; }\n    if (length_bytes(converted) != 0) { return 10; }\n    ascii_append(text, \"%\");\n    return length(text) * 100 + text[0];\n}\n",
+        );
+        process.compile().expect("compile");
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(value, 137);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_platform_service_mailbox_reports_unsupported_without_adapter() {
         let mut process = JitProcess::new();
         process

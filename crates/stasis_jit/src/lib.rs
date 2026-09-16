@@ -428,6 +428,7 @@ fn native_unix_executable_launcher_source(entry_symbol: &str) -> Result<String, 
     Ok(format!(
         "#include <stdint.h>\n\
 #include <stdio.h>\n\
+#include <stdlib.h>\n\
 #include <string.h>\n\
 #if defined(__APPLE__)\n\
 #include <mach-o/dyld.h>\n\
@@ -435,6 +436,7 @@ fn native_unix_executable_launcher_source(entry_symbol: &str) -> Result<String, 
 #include <unistd.h>\n\
 #endif\n\
 extern int32_t {entry_symbol}(void);\n\
+#define STASIS_PACKAGE_PROVENANCE_MAX_BYTES (1024U * 1024U)\n\
 static const char *stasis_executable_path(char *buffer, size_t capacity, const char *fallback) {{\n\
 #if defined(__APPLE__)\n\
     uint32_t size = (uint32_t)capacity;\n\
@@ -457,13 +459,18 @@ static void stasis_log_package_provenance(const char *program) {{\n\
     strcpy(path + directory, name);\n\
     FILE *file = fopen(path, \"rb\");\n\
     if (!file) return;\n\
-    char manifest[65537];\n\
-    size_t count = fread(manifest, 1, sizeof(manifest) - 1, file);\n\
-    int overflow = fgetc(file) != EOF;\n\
+    char *manifest = (char *)malloc(STASIS_PACKAGE_PROVENANCE_MAX_BYTES);\n\
+    if (!manifest) {{ fclose(file); fprintf(stderr, \"Stasis package provenance is invalid: allocation failed path=%s\\n\", path); return; }}\n\
+    size_t count = fread(manifest, 1, STASIS_PACKAGE_PROVENANCE_MAX_BYTES, file);\n\
+    int read_error = ferror(file);\n\
+    int overflow = !read_error && count == STASIS_PACKAGE_PROVENANCE_MAX_BYTES && fgetc(file) != EOF;\n\
+    read_error = read_error || ferror(file);\n\
     fclose(file);\n\
-    if (overflow) {{ fprintf(stderr, \"Stasis package provenance is invalid: manifest exceeds 65536 bytes path=%s\\n\", path); return; }}\n\
-    manifest[count] = 0;\n\
-    fprintf(stderr, \"Stasis package provenance: path=%s manifest=%s\\n\", path, manifest);\n\
+    if (read_error) {{ fprintf(stderr, \"Stasis package provenance is invalid: manifest read failed path=%s\\n\", path); free(manifest); return; }}\n\
+    if (overflow) {{ fprintf(stderr, \"Stasis package provenance is invalid: manifest exceeds 1048576 bytes path=%s\\n\", path); free(manifest); return; }}\n\
+    if (memchr(manifest, 0, count)) {{ fprintf(stderr, \"Stasis package provenance is invalid: manifest contains an embedded NUL path=%s\\n\", path); free(manifest); return; }}\n\
+    fprintf(stderr, \"Stasis package provenance: path=%s manifest=%.*s\\n\", path, (int)count, manifest);\n\
+    free(manifest);\n\
 }}\n\
 int main(int argc, char **argv) {{ (void)argc; stasis_log_package_provenance(argv ? argv[0] : 0); return (int){entry_symbol}(); }}\n"
     ))
@@ -655,7 +662,9 @@ mod tests {
         assert!(source.contains("extern int32_t aot_fn_0(void);"));
         assert!(source.contains("return (int)aot_fn_0();"));
         assert!(source.contains("stasis_provenance.json"));
-        assert!(source.contains("manifest exceeds 65536 bytes"));
+        assert!(source.contains("STASIS_PACKAGE_PROVENANCE_MAX_BYTES"));
+        assert!(source.contains("manifest exceeds 1048576 bytes"));
+        assert!(source.contains("manifest=%.*s"));
         assert!(source.contains("/proc/self/exe"));
         assert!(source.contains("_NSGetExecutablePath"));
     }
