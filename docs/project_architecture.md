@@ -19,6 +19,21 @@ These rules prevent common game bugs: repeated clicks at high simulation speed,
 preview and execution disagreeing, render-dependent behavior, hidden update
 order, and hot reload leaving old cached data behind.
 
+## Test behavior through system boundaries
+
+Follow the [Stasis testing standard](testing.md) (available in generated projects
+at `vendor/stasis/docs/testing.md`). Establish minimal explicit state, perform
+the action through the real intent/system path, advance deterministic simulation,
+and observe the resulting behavior. Setup may directly construct state; the
+action should exercise the rule being verified.
+
+Use small receiver-form helpers and narrow effect contracts. Check transitions,
+exact boundaries, ordering, one-time actions, and invariants rather than incidental
+coordinates or private helper calls. Assert exact numbers when they are rules,
+such as reward amounts, capacities, or cooldown durations. Observe stage boundaries
+when system order matters. Use complete tick/input integration tests when the
+claim depends on `HostFrame` refresh or input edges rather than simulation alone.
+
 ## Start with one obvious game loop
 
 A contributor should be able to open `main.stasis` and quickly find four entry

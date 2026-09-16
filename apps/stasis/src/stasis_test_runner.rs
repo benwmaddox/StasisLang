@@ -253,8 +253,8 @@ fn run_discovered_tests(
 ) {
     for test in tests {
         summary.tests_run += 1;
-        match process.execute_bool_noarg_by_name(&test.generated_function_name) {
-            Ok(true) => {
+        match process.execute_test_noarg_by_name(&test.generated_function_name) {
+            Ok(None) => {
                 summary.tests_passed += 1;
                 summary.passed_tests.push(format!(
                     "{} :: {}",
@@ -262,12 +262,13 @@ fn run_discovered_tests(
                     test.display_name
                 ));
             }
-            Ok(false) => {
+            Ok(Some(message)) => {
                 summary.tests_failed += 1;
                 summary.failures.push(format!(
-                    "{} :: {} :: returned false",
+                    "{} :: {} :: {}",
                     file_path.display(),
-                    test.display_name
+                    test.display_name,
+                    message
                 ));
             }
             Err(error) => {
@@ -498,6 +499,54 @@ mod tests {
         assert_eq!(summary.failures.len(), 1);
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn run_jit_tests_reports_string_and_boolean_failure_messages() {
+        let _global_guard = crate::jit_test_support::lock();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stasis_string_test_runner_{stamp}"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("results.test.stasis"),
+            r#"
+            global message: utf8[8];
+            test @effects() `empty`(): string { return ""; }
+            test `unicode`(): string { return "@MESSAGE@"; }
+            test `computed`(): string { message[0] = 98; message.length = 1; return message; }
+            test `bool`(): bool { return false; }
+        "#
+            .replace("@MESSAGE@", "\u{e9}chec \u{6771}\u{4eac}"),
+        )
+        .unwrap();
+        let summary = run_jit_tests_in_directory(&root).unwrap();
+        assert_eq!(summary.tests_passed, 1, "{summary:?}");
+        assert_eq!(summary.tests_failed, 3, "{summary:?}");
+        assert!(
+            summary
+                .failures
+                .iter()
+                .any(|message| message.contains("unicode :: \u{e9}chec \u{6771}\u{4eac}")),
+            "{summary:?}"
+        );
+        assert!(
+            summary
+                .failures
+                .iter()
+                .any(|message| message.contains("computed :: b")),
+            "{summary:?}"
+        );
+        assert!(
+            summary
+                .failures
+                .iter()
+                .any(|message| message.contains("bool :: returned false")),
+            "{summary:?}"
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

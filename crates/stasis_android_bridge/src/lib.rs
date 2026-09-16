@@ -519,14 +519,14 @@ pub fn run_android_workshop_stasis_tests(
         }
         for test in tests {
             let (line, column) = source_line_column(&source, test.declaration_range.start);
-            match jit.execute_bool_noarg_by_name(&test.generated_function_name) {
-                Ok(true) => {
+            match jit.execute_test_noarg_by_name(&test.generated_function_name) {
+                Ok(None) => {
                     passed += 1;
                     results.push(serde_json::json!({"file": relative_path, "line": line, "column": column, "name": test.display_name, "passed": true, "status": "passed"}));
                 }
-                Ok(false) => {
+                Ok(Some(message)) => {
                     failed += 1;
-                    results.push(serde_json::json!({"file": relative_path, "line": line, "column": column, "name": test.display_name, "passed": false, "status": "failed"}));
+                    results.push(serde_json::json!({"file": relative_path, "line": line, "column": column, "name": test.display_name, "passed": false, "status": "failed", "error": message}));
                 }
                 Err(error) => {
                     failed += 1;
@@ -7044,6 +7044,38 @@ function tick(): void {}
         assert_eq!(result["results"][0]["name"], "intentional failure");
         assert_eq!(result["results"][0]["column"], 1);
         assert_eq!(result["results"][0]["status"], "failed");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn android_test_string_results_preserve_failure_messages() {
+        let root = temp_project("string_test_results");
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("tests/results.test.stasis"),
+            r#"
+            global message: utf8[8];
+            test @effects() `empty`(): string { return ""; }
+            test `unicode`(): string { return "@MESSAGE@"; }
+            test `computed`(): string { message[0] = 98; message.length = 1; return message; }
+            test `bool`(): bool { return false; }
+        "#
+            .replace("@MESSAGE@", "\u{e9}chec \u{6771}\u{4eac}"),
+        )
+        .unwrap();
+        let result = run_android_workshop_stasis_tests(&root).unwrap();
+        assert_eq!(result["passed"], 1, "{result}");
+        assert_eq!(result["failed"], 3, "{result}");
+        let results = result["results"].as_array().unwrap();
+        for (name, message) in [
+            ("unicode", "\u{e9}chec \u{6771}\u{4eac}"),
+            ("computed", "b"),
+            ("bool", "returned false"),
+        ] {
+            let failure = results.iter().find(|item| item["name"] == name).unwrap();
+            assert_eq!(failure["status"], "failed", "{failure}");
+            assert_eq!(failure["error"], message, "{failure}");
+        }
         fs::remove_dir_all(root).ok();
     }
 

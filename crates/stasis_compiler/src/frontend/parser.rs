@@ -445,6 +445,9 @@ fn matching_token_index(
 pub struct ParsedTestDeclaration {
     pub display_name: String,
     pub generated_function_name: String,
+    pub return_type_name: String,
+    generated_header: String,
+    header_source_ranges: Vec<(Range<usize>, Range<usize>)>,
     pub declaration_range: Range<usize>,
     pub body_range: Range<usize>,
 }
@@ -475,8 +478,20 @@ pub fn parse_top_level_test_declarations(
         if depth == 0 && starts_with_keyword(source, cursor, "test") {
             let declaration_start = cursor;
             cursor += "test".len();
+            let attributes_start = cursor;
             cursor = skip_ascii_whitespace_and_comments(source, cursor);
-
+            while bytes.get(cursor) == Some(&b'@') {
+                cursor += 1;
+                let (_, next) = parse_identifier(source, cursor)?;
+                cursor = skip_ascii_whitespace_and_comments(source, next);
+                if bytes.get(cursor) == Some(&b'(') {
+                    cursor = find_matching_delimiter(source, cursor, b'(', b')')
+                        .ok_or_else(|| "unterminated test attribute".to_string())?
+                        + 1;
+                    cursor = skip_ascii_whitespace_and_comments(source, cursor);
+                }
+            }
+            let attributes_end = cursor;
             if bytes.get(cursor).copied() != Some(b'`') {
                 return Err(format!(
                     "test declaration missing backtick name near '{}'",
@@ -492,45 +507,29 @@ pub fn parse_top_level_test_declarations(
                 return Err("unterminated test name (missing closing backtick)".to_string());
             }
             let display_name = source[name_start..name_end].to_string();
-            cursor = name_end + 1;
-            cursor = skip_ascii_whitespace_and_comments(source, cursor);
-
-            if bytes.get(cursor).copied() != Some(b'(') {
+            let signature_start = name_end + 1;
+            cursor = skip_ascii_whitespace_and_comments(source, signature_start);
+            if bytes.get(cursor) != Some(&b'(') {
                 return Err(format!(
-                    "test '{}' missing parameter list '()'",
+                    "test '{}' must not declare generic parameters and requires '()'",
                     display_name
                 ));
             }
             let params_close = find_matching_delimiter(source, cursor, b'(', b')')
                 .ok_or_else(|| format!("test '{}' missing ')'", display_name))?;
-            let params = source[cursor + 1..params_close].trim();
-            if !params.is_empty() {
+            cursor = skip_ascii_whitespace_and_comments(source, params_close + 1);
+            if bytes.get(cursor) != Some(&b':') {
                 return Err(format!(
-                    "test '{}' must not declare parameters",
+                    "test '{}' missing ': bool' or ': string' return type",
                     display_name
                 ));
             }
-            cursor = params_close + 1;
-            cursor = skip_ascii_whitespace_and_comments(source, cursor);
-
-            if bytes.get(cursor).copied() != Some(b':') {
-                return Err(format!(
-                    "test '{}' missing ': bool' return type",
-                    display_name
-                ));
-            }
-            cursor += 1;
-            cursor = skip_ascii_whitespace_and_comments(source, cursor);
-            let (return_type, after_return_type) = parse_identifier(source, cursor)?;
-            if return_type != "bool" {
-                return Err(format!(
-                    "test '{}' return type must be bool, found '{}'",
-                    display_name, return_type
-                ));
-            }
-            cursor = skip_ascii_whitespace_and_comments(source, after_return_type);
-
-            if bytes.get(cursor).copied() != Some(b'{') {
+            let (return_type, next) = parse_identifier(
+                source,
+                skip_ascii_whitespace_and_comments(source, cursor + 1),
+            )?;
+            cursor = skip_ascii_whitespace_and_comments(source, next);
+            if bytes.get(cursor) != Some(&b'{') {
                 return Err(format!("test '{}' missing body block", display_name));
             }
             let body_start = cursor;
@@ -538,9 +537,74 @@ pub fn parse_top_level_test_declarations(
                 .ok_or_else(|| format!("test '{}' missing closing '}}'", display_name))?;
             let body_end = body_close + 1;
             let declaration_end = body_end;
+            let mut symbol_index = out.len();
+            let generated_function_name = loop {
+                let candidate = format!("__stasis_test_{symbol_index}");
+                if !source.contains(&candidate)
+                    && !out.iter().any(|test: &ParsedTestDeclaration| {
+                        test.generated_function_name == candidate
+                    })
+                {
+                    break candidate;
+                }
+                symbol_index += 1;
+            };
+            let label = display_name
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+                .replace('\0', "\\0");
+            let prefix_len = format!("function @test(\"{}\") ", label).len();
+            let generated_header = format!(
+                "function @test(\"{}\") {}{}{}",
+                label,
+                &source[attributes_start..attributes_end],
+                generated_function_name,
+                &source[signature_start..body_start]
+            );
+            let lowered = format!("{}{}", generated_header, &source[body_start..body_end]);
+            let functions = parse_top_level_functions(&lowered)?;
+            let function = functions
+                .first()
+                .ok_or_else(|| format!("invalid test '{}'", display_name))?;
+            if !function.params.is_empty() {
+                return Err(format!(
+                    "test '{}' must not declare parameters",
+                    display_name
+                ));
+            }
+            if return_type != "bool" && return_type != "string" {
+                return Err(format!(
+                    "test '{}' return type must be bool or string, found '{}'",
+                    display_name, return_type
+                ));
+            }
+            if function
+                .annotations
+                .iter()
+                .any(|annotation| annotation.name == "extern")
+            {
+                return Err(format!("test '{}' cannot be extern", display_name));
+            }
             out.push(ParsedTestDeclaration {
                 display_name,
-                generated_function_name: format!("__stasis_test_{}", out.len()),
+                return_type_name: function.return_type_name.clone(),
+                header_source_ranges: vec![
+                    (
+                        prefix_len..prefix_len + attributes_end - attributes_start,
+                        attributes_start..attributes_end,
+                    ),
+                    (
+                        prefix_len + attributes_end - attributes_start
+                            + generated_function_name.len()
+                            ..generated_header.len(),
+                        signature_start..body_start,
+                    ),
+                ],
+                generated_header,
+                generated_function_name,
                 declaration_range: declaration_start..declaration_end,
                 body_range: body_start..body_end,
             });
@@ -569,10 +633,8 @@ pub fn rewrite_top_level_test_declarations(
         }
         rewritten.push_str(&source[cursor..declaration.declaration_range.start]);
         let body = &source[declaration.body_range.clone()];
-        rewritten.push_str(&format!(
-            "function {}(): bool {}",
-            declaration.generated_function_name, body
-        ));
+        rewritten.push_str(&declaration.generated_header);
+        rewritten.push_str(body);
         cursor = declaration.declaration_range.end;
     }
     rewritten.push_str(&source[cursor..]);
@@ -604,9 +666,14 @@ pub fn map_rewritten_test_range_to_original(
             }
             rewritten_cursor = rewritten_cursor.saturating_add(unchanged_len);
 
-            let generated_header_len =
-                format!("function {}(): bool ", declaration.generated_function_name).len();
+            let generated_header_len = declaration.generated_header.len();
             if offset < rewritten_cursor.saturating_add(generated_header_len) {
+                let relative = offset.saturating_sub(rewritten_cursor);
+                for (generated, original) in &declaration.header_source_ranges {
+                    if generated.contains(&relative) {
+                        return original.start + relative - generated.start;
+                    }
+                }
                 return declaration.declaration_range.start;
             }
             rewritten_cursor = rewritten_cursor.saturating_add(generated_header_len);
@@ -2703,7 +2770,8 @@ function tick(): i32 {
         let source = "test `alpha`(): bool { return true; }\n";
         let (rewritten, parsed) = rewrite_top_level_test_declarations(source).expect("rewrite");
         assert_eq!(parsed.len(), 1);
-        assert!(rewritten.contains("function __stasis_test_0(): bool { return true; }"));
+        assert!(rewritten
+            .contains("function @test(\"alpha\")  __stasis_test_0(): bool { return true; }"));
         assert!(!rewritten.contains("test `alpha`(): bool"));
     }
 
@@ -2717,6 +2785,59 @@ function tick(): i32 {
         let original = map_rewritten_test_range_to_original(source, &parsed, rewritten_range);
 
         assert_eq!(&source[original], "capacity<4>");
+    }
+
+    #[test]
+    fn test_lowering_preserves_function_attributes_and_source_ranges() {
+        let source = r#"function __stasis_test_0(): bool { return true; }
+test @inline @effects(state.value) `quoted "label"`(): string { return "échec"; }
+test @effects() `second`(): bool { return false; }
+"#;
+        let (rewritten, tests) = rewrite_top_level_test_declarations(source).expect("lower tests");
+        let functions = parse_top_level_functions(&rewritten).expect("ordinary functions");
+        assert_ne!(tests[0].generated_function_name, "__stasis_test_0");
+        assert_ne!(
+            tests[0].generated_function_name,
+            tests[1].generated_function_name
+        );
+        assert_eq!(tests[0].return_type_name, "string");
+        assert_eq!(
+            functions[1]
+                .annotations
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test", "inline", "effects"]
+        );
+        assert_eq!(
+            parse_string_literal_text(&functions[1].annotations[0].arguments[0].text).unwrap(),
+            "quoted \"label\""
+        );
+        for text in ["state.value", "return \"échec\"", "return false"] {
+            let start = rewritten.find(text).unwrap();
+            let mapped =
+                map_rewritten_test_range_to_original(source, &tests, start..start + text.len());
+            assert_eq!(&source[mapped], text);
+        }
+    }
+
+    #[test]
+    fn test_lowering_reuses_attribute_argument_validation() {
+        let error = rewrite_top_level_test_declarations(
+            "test @effects(state,) `bad`(): bool { return true; }",
+        )
+        .unwrap_err();
+        assert!(error.contains("@effects"), "{error}");
+        for source in [
+            "test `parameters`(x: i32): bool { return true; }",
+            "test `generic`<T>(): bool { return true; }",
+            "test @extern(\"external\") `external`(): bool { return true; }",
+        ] {
+            assert!(
+                rewrite_top_level_test_declarations(source).is_err(),
+                "{source}"
+            );
+        }
     }
 
     #[test]

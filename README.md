@@ -40,6 +40,10 @@ That constraint is intentional. The state declaration becomes a readable model o
 
 This makes replays, tests, debugging, and lockstep-style simulation natural consequences of the model rather than features bolted on afterward.
 
+Prefer focused tests that set up known state, exercise the normal system path,
+advance deterministically, and inspect meaningful behavior. Use narrow effect
+contracts on tests and helpers. See the [Stasis testing standard](docs/testing.md).
+
 ### Cost should be visible
 
 Stasis favors fixed-size arrays, explicit loops, static layouts, and bounded work. Source code uses convenient struct-array syntax while the compiler can lower fields into predictable structure-of-arrays storage.

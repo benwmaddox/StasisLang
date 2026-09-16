@@ -778,7 +778,10 @@ Rules:
 
 ## 10. Testing Construct
 
-Stasis supports language-level tests:
+Stasis supports language-level tests as specialized parameterless functions.
+They use normal function bodies, calls, types, and compile-time checking. Their
+display names, tooling discovery, result interpretation, and exclusion from
+production builds provide the test-specific behavior:
 
 ```stasis
 test `enemy takes damage`(): bool {
@@ -790,11 +793,26 @@ Rules:
 - Tests are discoverable by tooling.
 - Tests are excluded from production builds.
 - Test execution should be deterministic.
+- Tests have no parameters or generic parameters and require a body. Accepted
+  result types are `bool` and `string`: `true` or an empty string means success;
+  `false` or a non-empty string means failure. A failure string describes the
+  first violated expectation.
+- Tests use ordinary function attributes after the `test` keyword, for example
+  ``test @effects(state.world) `name`(): string``. Effect checking uses the same
+  transitive call-tree restrictions as function contracts in section 7.8;
+  helper contracts provide additional local restrictions.
+- Tooling lowers test syntax to an ordinary function with a generated internal
+  symbol and `@test("display name")` metadata, preserving its attributes,
+  signature, and body. This metadata is an internal representation, not a
+  required alternative source syntax.
 - Runtime test discovery modes:
 - entry-file mode: discover tests in the entry file only (no cascading import traversal)
 - directory mode: discover tests in all `.stasis` files in the target directory (including root)
 - Tests run in deterministic sorted natural path order (numeric path segments compare numerically, not lexicographically).
 - Tests may call extern/runtime functions.
+
+See [standard testing guidance](testing.md) for setup, normal system actions,
+deterministic progression, receiver-form helpers, and behavioral expectations.
 
 ### 10.1 Headless Scenario Tests
 

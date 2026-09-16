@@ -46,6 +46,7 @@
 - Ship work in feature slices from `docs/build_checklist.md` and include tests in the same PR.
 - For Night Shift or inbox-driven work, only implement changes that map to the selected GitHub issue, PR, review, or review comments. Use repo docs and plans as context, not as a competing source of task selection.
 - Prefer deterministic, isolated tests with explicit expected output/state.
+- Follow `docs/testing.md` for Stasis behavior tests: minimal setup, real system action, deterministic progression, and meaningful observation. Use narrow effect contracts on helpers and supported test declarations; distinguish exact contractual values from incidental internals.
 - If test can reasonably be written in stasis for stasis code, do so. It can be in a .test.stasis file next to the .stasis file.
 - Cover parser/semantics/lowering/JIT boundaries and hot-swap safety behavior.
 - Keep each test command bounded to 15 minutes max (900 seconds); split/shard runs when needed, and treat overruns as stability regressions.
