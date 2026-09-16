@@ -189,6 +189,48 @@ Bone indexes, `add_bone`, `set_local`, `blend_local`, `reset_pose`, `solve`,
 `parent`, and world accessors otherwise retain the proof's behavior. Courier
 attachment rendering and pose tuning do not move upstream.
 
+## Preparing AI-generated artwork for a cutout rig
+
+The Afterlight investigation established a useful workflow when an AI-generated
+title illustration already has the desired anatomy. Preserve that illustration
+as the visual reference, then derive the rig's visible attachments from it.
+Generating separate replacement limbs can change proportions, perspective, and
+hand or foot orientation even when each individual piece looks plausible.
+
+1. Keep an immutable original image and record its dimensions and hash. Use
+   deterministic pixel masks to separate visible parts into transparent layers.
+   Verify that their neutral recomposition reproduces the original RGBA pixels,
+   with no unintended missing pixels or overlapping ownership.
+2. Identify near and far limbs separately. Preserve their distinct silhouettes
+   and perspective; do not mirror one leg or foot into both sides. Measure joint
+   pivots and attachment rectangles in the original image's coordinate system.
+3. Build a parent-first hierarchy from those measured pivots. Compute local
+   translations from parent/child pivot differences, and attachment offsets from
+   their source rectangles. Retain returned bone indexes or use named bindings;
+   do not silently depend on unrelated numeric draw-order indexes.
+4. Establish a neutral pose that matches the original before tuning animation.
+   Compare the actual rendered rig and original side by side and with aligned
+   overlays at identical position, size, and scale. Check each attachment's
+   transformed corners as well as the composed silhouette and interior pixels.
+5. Verify both source-resolution rendering and the game's real display size.
+   Exact mask recomposition and correct transforms do not guarantee identical
+   rendered pixels: separately sampled layers can expose filtering, rounding,
+   atlas padding, or seam differences when downscaled. Diagnose those separately
+   from anatomy rather than changing a correctly measured pose to hide them.
+6. Only after the neutral comparison passes, add small joint movements and
+   inspect motion captures for both sides, occlusion, exposed gaps, and joint
+   comfort. Extend masks or use ImageGen to fill genuinely hidden joint regions
+   if needed; keep already accepted visible anatomy unchanged.
+
+In Afterlight, this approach preserved the original visible pixels in 15 masked
+attachments. A transform comparison exposed four incorrect arm-to-bone index
+bindings. Correcting those bindings produced approximately 99.85% silhouette
+intersection-over-union at the original 384 by 576 size. The game's 252 by 378
+render still showed sampling/seam differences and remained under investigation;
+the source-resolution result was not acceptance of the smaller render or motion.
+This is an asset-authoring lesson, not a promise of pixel-exact raster composition
+from `Rig2D` or a completed validation of Afterlight's shipping rig.
+
 ## Validation
 
 `tests/stasis/rig2d.test.stasis` covers capacity and parent validation, rotated
