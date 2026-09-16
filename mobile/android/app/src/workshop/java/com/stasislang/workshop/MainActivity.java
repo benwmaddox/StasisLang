@@ -5135,16 +5135,18 @@ public final class MainActivity extends Activity {
             if (viewTouchActive != touchActive) {
                 return "{\"status\":\"failed\",\"error\":\"view touch state mismatch\"}";
             }
-            int status = gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
+            GamePreviewView.AcceptanceFrameSubmission submission =
+                    gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
                     gamePreview.touchY(), viewTouchActive, screenWidth, screenHeight,
                     nativeFrameValues);
+            int status = submission.status();
             if (status != 0) {
                 return "{\"status\":\"failed\",\"error\":"
                         + JSONObject.quote(nativeLastFrameError()) + "}";
             }
-            int token = gamePreview.frameToken();
-            long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
-            boolean presented = gamePreview.awaitPresentedFrameToken(token, 5_000L);
+            int token = submission.frameToken();
+            long trace = Integer.toUnsignedLong(submission.trace());
+            boolean presented = gamePreview.awaitPresentedFrame(submission, 5_000L);
             if (!presented) {
                 return "{\"status\":\"failed\",\"error\":\"GLES token timeout\"}";
             }
@@ -5202,15 +5204,17 @@ public final class MainActivity extends Activity {
         int screenWidth = Math.max(1, gamePreview.getWidth());
         int screenHeight = Math.max(1, gamePreview.getHeight());
         try {
-            int status = gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
+            GamePreviewView.AcceptanceFrameSubmission submission =
+                    gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
                     screenWidth, screenHeight, nativeFrameValues);
+            int status = submission.status();
             if (status != 0) {
                 return "{\"status\":\"failed\",\"error\":"
                         + JSONObject.quote(nativeLastFrameError()) + "}";
             }
-            int token = gamePreview.frameToken();
-            long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
-            if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
+            int token = submission.frameToken();
+            long trace = Integer.toUnsignedLong(submission.trace());
+            if (!gamePreview.awaitPresentedFrame(submission, 5_000L)) {
                 return "{\"status\":\"failed\",\"error\":\"GLES token timeout\"}";
             }
             JSONObject runtime = new JSONObject(nativeInspectRuntimeState(projectRoot));
@@ -5257,13 +5261,15 @@ public final class MainActivity extends Activity {
         if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || gamePreview == null) {
             throw new IllegalStateException("IT-029 preview unavailable");
         }
-        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
+        GamePreviewView.AcceptanceFrameSubmission submission =
+                gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
                 Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
                 nativeFrameValues);
+        int status = submission.status();
         if (status != 0) throw new IllegalStateException(nativeLastFrameError());
-        int token = gamePreview.frameToken();
-        long commandTrace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
-        if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
+        int token = submission.frameToken();
+        long commandTrace = Integer.toUnsignedLong(submission.trace());
+        if (!gamePreview.awaitPresentedFrame(submission, 5_000L)) {
             throw new IllegalStateException("IT-029 GLES token timeout");
         }
         final Bitmap[] captured = new Bitmap[1];
@@ -5366,13 +5372,18 @@ public final class MainActivity extends Activity {
         if (gamePreview == null) {
             throw new IllegalStateException("IT-030 runtime activation requires the preview");
         }
-        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
+        GamePreviewView.AcceptanceFrameSubmission submission =
+                gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
                 gamePreview.touchY(), gamePreview.touchActive(),
                 Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
                 nativeFrameValues);
+        int status = submission.status();
         if (status != 0) {
             throw new IllegalStateException("IT-030 runtime activation failed: "
                     + nativeLastFrameError());
+        }
+        if (!gamePreview.awaitPresentedFrame(submission, 5_000L)) {
+            throw new IllegalStateException("IT-030 GLES token timeout");
         }
         JSONObject runtime = acceptanceRuntimeState(projectRoot);
         if (runtime.optBoolean("pending_candidate", true)) {
@@ -5454,11 +5465,16 @@ public final class MainActivity extends Activity {
 
     String runIt031Frame(String projectRoot) {
         if (gamePreview == null) return "";
-        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
+        GamePreviewView.AcceptanceFrameSubmission submission =
+                gamePreview.runNativeAcceptanceFrame(projectRoot, gamePreview.touchX(),
                 gamePreview.touchY(), gamePreview.touchActive(),
                 Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
                 nativeFrameValues);
+        int status = submission.status();
         if (status != 0) return "RunError: " + nativeLastFrameError();
+        if (!gamePreview.awaitPresentedFrame(submission, 5_000L)) {
+            return "RunError: GLES token timeout";
+        }
         return "passed";
     }
 
@@ -5466,13 +5482,15 @@ public final class MainActivity extends Activity {
         if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || gamePreview == null) {
             throw new IllegalStateException("IT-032 preview unavailable");
         }
-        int status = gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
+        GamePreviewView.AcceptanceFrameSubmission submission =
+                gamePreview.runNativeAcceptanceFrame(projectRoot, 0, 0, 0,
                 Math.max(1, gamePreview.getWidth()), Math.max(1, gamePreview.getHeight()),
                 nativeFrameValues);
+        int status = submission.status();
         if (status != 0) throw new IllegalStateException(nativeLastFrameError());
-        int token = gamePreview.frameToken();
-        long trace = Integer.toUnsignedLong(gamePreview.acceptanceTrace());
-        if (!gamePreview.awaitPresentedFrameToken(token, 5_000L)) {
+        int token = submission.frameToken();
+        long trace = Integer.toUnsignedLong(submission.trace());
+        if (!gamePreview.awaitPresentedFrame(submission, 5_000L)) {
             throw new IllegalStateException("IT-032 GLES token timeout at frame " + sequence);
         }
         JSONObject guest = new JSONObject();
@@ -12443,6 +12461,37 @@ public final class MainActivity extends Activity {
                     StasisPreviewRenderer.LogicalFrameSnapshot capturedFrame);
         }
 
+        static final class AcceptanceFrameSubmission {
+            private final int status;
+            private final long baselinePresentationSerial;
+            private final int frameToken;
+            private final int trace;
+
+            AcceptanceFrameSubmission(int status, long baselinePresentationSerial,
+                    int frameToken, int trace) {
+                this.status = status;
+                this.baselinePresentationSerial = baselinePresentationSerial;
+                this.frameToken = frameToken;
+                this.trace = trace;
+            }
+
+            int status() {
+                return status;
+            }
+
+            long baselinePresentationSerial() {
+                return baselinePresentationSerial;
+            }
+
+            int frameToken() {
+                return frameToken;
+            }
+
+            int trace() {
+                return trace;
+            }
+        }
+
         private final MainActivity activity;
         private final StasisPreviewRenderer renderer;
         private final Runnable performanceRenderPump;
@@ -12590,6 +12639,34 @@ public final class MainActivity extends Activity {
             }
         }
 
+        boolean awaitPresentedFrame(AcceptanceFrameSubmission submission, long timeoutMillis) {
+            return awaitPresentedFrame(submission.frameToken(), submission.trace(),
+                    submission.baselinePresentationSerial(), timeoutMillis);
+        }
+
+        private boolean awaitPresentedFrame(int token, int trace, long afterPresentationSerial,
+                long timeoutMillis) {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || timeoutMillis <= 0L) {
+                return renderer.awaitPresentedFrame(token, trace, afterPresentationSerial,
+                        timeoutMillis);
+            }
+            long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
+            while (true) {
+                long remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0L) return false;
+                requestRender();
+                remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0L) return false;
+                long remainingMillis = (remainingNanos + 999_999L) / 1_000_000L;
+                long waitMillis = Math.min(remainingMillis,
+                        ACCEPTANCE_RENDER_PUMP_SLICE_MILLIS);
+                if (renderer.awaitPresentedFrame(token, trace, afterPresentationSerial,
+                        waitMillis)) {
+                    return System.nanoTime() <= deadline;
+                }
+            }
+        }
+
         boolean awaitPresentedFrameToken(int token, long timeoutMillis) {
             if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || timeoutMillis <= 0L) {
                 return renderer.awaitPresentedFrameToken(token, timeoutMillis);
@@ -12628,23 +12705,29 @@ public final class MainActivity extends Activity {
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
                 int screenWidth, int screenHeight, int[] header) {
             return runNativeFrameInternal(projectRoot, inputX, inputY, inputActive,
-                    screenWidth, screenHeight, header, false);
+                    screenWidth, screenHeight, header, false).status();
         }
 
-        int runNativeAcceptanceFrame(String projectRoot, int inputX, int inputY, int inputActive,
+        AcceptanceFrameSubmission runNativeAcceptanceFrame(String projectRoot, int inputX,
+                int inputY, int inputActive,
                 int screenWidth, int screenHeight, int[] header) {
             return runNativeFrameInternal(projectRoot, inputX, inputY, inputActive,
                     screenWidth, screenHeight, header, true);
         }
 
-        private int runNativeFrameInternal(String projectRoot, int inputX, int inputY,
+        private AcceptanceFrameSubmission runNativeFrameInternal(String projectRoot, int inputX,
+                int inputY,
                 int inputActive, int screenWidth, int screenHeight, int[] header,
                 boolean acceptance) {
             int status;
+            long baselinePresentationSerial = -1L;
+            int submittedFrameToken = -1;
+            int submittedTrace = -1;
             boolean releaseBatchEnqueued = false;
             boolean releaseCancellationApplied = false;
             long requested = System.nanoTime();
             synchronized (renderer) {
+                if (acceptance) baselinePresentationSerial = renderer.presentationSerial();
                 long started = System.nanoTime();
                 lastRendererSyncWaitNanos = started - requested;
                 boolean drainReleases = !renderer.hasPendingSpriteReleases();
@@ -12664,13 +12747,17 @@ public final class MainActivity extends Activity {
                 lastNativeFrameDurationNanos = System.nanoTime() - started;
                 renderer.copyFrameHeaderInto(header);
                 if (acceptance && status == 0) {
-                    renderer.setAcceptanceTrace(renderer.frameToken(),
-                            MainActivity.nativeFrameTrace(renderer.frameI32Bytes(),
-                                    renderer.frameF32Bytes(), renderer.frameU8Bytes()));
+                    submittedFrameToken = renderer.frameToken();
+                    submittedTrace = MainActivity.nativeFrameTrace(renderer.frameI32Bytes(),
+                            renderer.frameF32Bytes(), renderer.frameU8Bytes());
+                    renderer.setAcceptanceTrace(submittedFrameToken, submittedTrace);
+                } else {
+                    renderer.clearAcceptanceTrace();
                 }
             }
             if (status == 0 || releaseBatchEnqueued || releaseCancellationApplied) requestRender();
-            return status;
+            return new AcceptanceFrameSubmission(status, baselinePresentationSerial,
+                    submittedFrameToken, submittedTrace);
         }
 
         long lastNativeFrameDurationNanos() {
