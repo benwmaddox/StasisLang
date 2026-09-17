@@ -25,6 +25,16 @@ the status is `Loaded`. A rejected load settles as `Failed` and clears pending
 run dimensions. A release removes the handle and late browser completion cannot
 publish metrics or prepared resources.
 
+On Web, `Loaded` means that the `FontFace` and its logical Canvas metrics are
+ready. Glyph preparation is a separate synchronous step: the prepared Canvas
+and atlas entry use the active physical density tier, while the cached metrics,
+baseline, and submitted quad remain in logical units. A density-tier change
+evicts matching prepared resources so the next draw rerasterizes at the new
+tier; a raw scale change within the same tier reuses the prepared entry.
+Context restoration reuploads the retained physical surface. If the browser or
+WebGL device rejects a physical extent, the frame reports the failure and a
+later draw can retry without publishing a logical-size bitmap as a fallback.
+
 ## Bounds and lifetime
 
 - Native SDL (desktop and the SDL-backed macOS/iOS-supported paths) supports 16 active replaceable

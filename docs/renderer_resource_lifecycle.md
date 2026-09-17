@@ -18,8 +18,11 @@ Every renderer moves through the same states:
 Surface resize, orientation, and display-scale changes advance the display metrics
 `display_generation` and mark the host frame as resized. A preparation-scale change
 also advances `density_generation` and marks sprite and font resources for
-re-rasterization; these changes retain logical handles and source data. Renderer or
-context creation, `SDL_RENDER_TARGETS_RESET`, and `SDL_RENDER_DEVICE_RESET` advance
+re-rasterization; these changes retain logical handles and source data. On Web, a
+density-tier transition evicts prepared Canvas and GPU text resources; the next
+draw rebuilds their physical surfaces and atlas entries while retaining logical
+metrics and quads. Scale changes within one tier reuse those prepared text entries.
+Renderer or context creation, `SDL_RENDER_TARGETS_RESET`, and `SDL_RENDER_DEVICE_RESET` advance
 the lifecycle `surface_generation` and `renderer_generation`. Generations skip zero.
 Sprite atlas entries validate their lifecycle generations before submission. Font
 atlases and cached text are rebuilt by the restore transaction, and the font-use
@@ -43,8 +46,13 @@ when acquired after `main`. `font_status(handle)` becomes `Loaded` only after th
 face resolves and Canvas metrics have been calibrated. A rejected load settles as
 `Failed` and clears pending text-run metrics; a release removes the handle and
 ignores any later `FontFace` completion. Prepared Canvas and GPU text resources
-are created only for loaded fonts and are evicted when calibration changes the
-font generation, so a compatibility fallback cannot remain the drawable cache.
+for acquired fonts are created only after they are loaded and are evicted when
+calibration or the active density tier changes, so a compatibility fallback
+cannot remain the drawable cache. Legacy direct text keeps its existing
+fallback-font path. Prepared surfaces and atlas dimensions are physical; text
+metrics and draw quads remain logical. A device extent failure is reported as a
+renderer error and does not silently substitute a lower-resolution logical
+bitmap.
 The dynload bridge reports `Failed` for a positive handle when it is paired with
 an older native library that lacks the optional status export; this is terminal
 for readiness consumers while legacy synchronous font loading remains usable.

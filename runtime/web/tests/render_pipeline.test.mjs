@@ -49,7 +49,7 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false,
     viewport(_x, _y, width, height) { stats.viewports.push([width, height]); }, clearColor() {}, clear() {}, useProgram() {}, uniform2f(_location, width, height) {
       stats.uniforms.push([width, height]);
     }, uniform1i() {},
-    texParameteri() {}, pixelStorei() {}, texImage2D() { stats.texImageCalls += 1; if (textureThrow || (textureFailureAt && stats.texImageCalls === textureFailureAt)) throw new Error("fake texture failure"); }, texSubImage2D() { stats.texSubImageCalls += 1; if (textureThrow) throw new Error("fake texture failure"); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError: () => { stats.getErrorCalls += 1; return glErrorAt && stats.getErrorCalls === glErrorAt ? 1280 : 0; },
+    texParameteri() {}, pixelStorei() {}, texImage2D() { stats.texImageCalls += 1; if (textureThrow || (textureFailureAt && stats.texImageCalls === textureFailureAt)) throw new Error("fake texture failure"); }, texSubImage2D(...args) { stats.texSubImageCalls += 1; const source = args[args.length - 1]; stats.textureUploads.push({ width: Number(source?.width) || 0, height: Number(source?.height) || 0 }); if (textureThrow) throw new Error("fake texture failure"); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError: () => { stats.getErrorCalls += 1; return glErrorAt && stats.getErrorCalls === glErrorAt ? 1280 : 0; },
     isContextLost: () => stats.contextLost, getParameter: () => maxTextureSize,
     enable() {}, disable() {}, scissor(x, y, width, height) { stats.scissors.push([x, y, width, height]); }, blendFunc() {}, blendFuncSeparate() {}, drawArraysInstanced(_mode, _first, _vertices, count) {
       stats.instanced += 1;
@@ -63,7 +63,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, I32_COUNT);
   const f32 = new Float32Array(memory.buffer, F32_OFFSET, F32_COUNT);
-  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], viewports: [], scissors: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], createdTextures: 0, texImageCalls: 0, texSubImageCalls: 0, getErrorCalls: 0, deletedTextures: 0 };
+  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], viewports: [], scissors: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], createdTextures: 0, texImageCalls: 0, texSubImageCalls: 0, textureUploads: [], getErrorCalls: 0, deletedTextures: 0 };
   let now = 0;
   const context2d = {
     globalAlpha: 1,
@@ -75,12 +75,15 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     clip() { stats.clipCalls += 1; },
     stroke() { stats.events.push("stroke"); }, translate() {}, rotate() {}, scale() {}
   };
-  const rasterStats = { draws: 0, images: [], clears: [] };
+  const rasterStats = { draws: 0, images: [], clears: [], textFills: [], transforms: [], saves: 0, restores: 0, canvases: 0 };
+  let activeOffscreen;
   const rasterContext = {
     imageSmoothingEnabled: true, imageSmoothingQuality: "high", fillRect() {},
     clearRect(...args) { rasterStats.clears.push(args); }, drawImage(...args) { rasterStats.draws += 1; rasterStats.images.push(args); },
     measureText(text) { return { width: String(text).length * 8, actualBoundingBoxDescent: 4 }; },
-    fillText() {}, save() {}, restore() {}
+    fillText(...args) { rasterStats.textFills.push({ canvas: activeOffscreen, width: activeOffscreen?.width || 0, height: activeOffscreen?.height || 0, args }); },
+    setTransform(...args) { rasterStats.transforms.push(args); },
+    save() { rasterStats.saves += 1; }, restore() { rasterStats.restores += 1; }
   };
   const gl = fakeGl(stats, true, throwing, textureThrow, maxTextureSize, textureFailureAt, glErrorAt);
   const canvasListeners = new Map();
@@ -95,11 +98,17 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
   const body = { dataset: {} };
   const errorBox = { textContent: "" };
   const offscreenListeners = new Map();
-  const offscreen = {
-    width: 0, height: 0,
-    getContext: kind => kind === "2d" ? rasterContext : gl,
-    addEventListener(type, callback) { offscreenListeners.set(type, callback); }
+  const makeOffscreen = () => {
+    rasterStats.canvases += 1;
+    const surface = {
+      width: 0, height: 0,
+      getContext: kind => kind === "2d" ? rasterContext : gl,
+      addEventListener(type, callback) { offscreenListeners.set(type, callback); }
+    };
+    activeOffscreen = surface;
+    return surface;
   };
+  const offscreen = makeOffscreen();
   const document = {
     body, hidden: false, fullscreenElement: null,
     fonts: { ready: Promise.resolve(), add() {} }, hasFocus: () => true,
@@ -110,7 +119,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       if (id === "stasis-audio") return { addEventListener() {}, disabled: false, textContent: "" };
       return null;
     },
-    createElement: () => offscreen,
+    createElement: () => makeOffscreen(),
     addEventListener() {}
   };
   let env;
@@ -1534,6 +1543,133 @@ test("failed context restore disposes pages rebuilt before the failing resource"
   runtime.frame();
   assert.equal(runtime.stats.images, 0);
   assert.equal(runtime.body.dataset.atlasPages, "2");
+});
+
+test("prepared text rasterizes at the physical tier while submitting logical metrics", async () => {
+  const runtime = await loadRuntime({ dpr: 4 });
+  const font = runtime.env.load_font(0, 18);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.env.font_status(font), 3);
+  runtime.setTextFixture(font, "density");
+  runtime.frame();
+
+  const logicalWidth = "density".length * 8;
+  const logicalHeight = 18 + 4;
+  const tier = 4;
+  const fill = runtime.rasterStats.textFills.at(-1);
+  assert.deepEqual([fill.width, fill.height], [logicalWidth * tier, logicalHeight * tier]);
+  assert.deepEqual(fill.args, ["density", 0, 18]);
+  assert.deepEqual(runtime.rasterStats.transforms.at(-1), [tier, 0, 0, tier, 0, 0]);
+  assert.equal(runtime.rasterStats.saves, runtime.rasterStats.restores);
+
+  const upload = runtime.stats.textureUploads.find(({ width, height }) => width === logicalWidth * tier + 4
+    && height === logicalHeight * tier + 4);
+  assert.deepEqual([upload.width, upload.height], [logicalWidth * tier + 4, logicalHeight * tier + 4]);
+  const quad = runtime.stats.uploads.at(-1);
+  assert.deepEqual(quad.slice(2, 4), [logicalWidth, logicalHeight]);
+  const uvWidth = (quad[6] - quad[4]) * 512;
+  const uvHeight = (quad[7] - quad[5]) * 512;
+  assert.equal(uvWidth, logicalWidth * tier);
+  assert.equal(uvHeight, logicalHeight * tier);
+  assert.equal(runtime.body.dataset.preparedTextBytes, String(logicalWidth * tier * logicalHeight * tier * 4));
+});
+
+test("same density tier reuses text while a tier transition rebuilds its physical resource", async () => {
+  const runtime = await loadRuntime({ dpr: 1.1 });
+  const font = runtime.env.load_font(0, 18);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.env.font_status(font), 3);
+  runtime.setTextFixture(font, "reuse");
+  runtime.frame();
+  const fillsAfterFirst = runtime.rasterStats.textFills.length;
+  const textUpload = (tier, logicalWidth = 40, logicalHeight = 22) =>
+    runtime.stats.textureUploads.filter(({ width, height }) =>
+      width === Math.ceil(logicalWidth * tier) + 4
+      && height === Math.ceil(logicalHeight * tier) + 4).length;
+  const uploadsAfterFirst = textUpload(1.25);
+  assert.equal(uploadsAfterFirst, 1);
+  const bytesAtTier125 = runtime.body.dataset.preparedTextBytes;
+  assert.equal(runtime.body.dataset.densityTier, "1.25");
+
+  runtime.setPresentation(640, 360, 1.2);
+  runtime.frame();
+  assert.equal(runtime.body.dataset.densityTier, "1.25");
+  assert.equal(runtime.rasterStats.textFills.length, fillsAfterFirst);
+  assert.equal(textUpload(1.25), uploadsAfterFirst);
+  assert.equal(runtime.body.dataset.preparedTextBytes, bytesAtTier125);
+
+  runtime.setPresentation(640, 360, 2);
+  runtime.frame();
+  assert.equal(runtime.body.dataset.densityTier, "2");
+  assert.equal(runtime.rasterStats.textFills.length, fillsAfterFirst + 1);
+  assert.equal(textUpload(2), 1);
+  assert.equal(runtime.body.dataset.preparedTextBytes, String(40 * 2 * 22 * 2 * 4));
+  assert.deepEqual(runtime.stats.uploads.at(-1).slice(2, 4), [40, 22]);
+});
+
+test("context restoration reuploads physical text without changing its logical quad", async () => {
+  const runtime = await loadRuntime({ dpr: 2 });
+  const font = runtime.env.load_font(0, 18);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.env.font_status(font), 3);
+  runtime.setTextFixture(font, "restore");
+  runtime.frame();
+  const textUpload = ({ width, height }) => width === 116 && height === 48;
+  const uploadsBeforeRestore = runtime.stats.textureUploads.filter(textUpload);
+  assert.equal(uploadsBeforeRestore.length, 1);
+  const firstUpload = uploadsBeforeRestore[0];
+  runtime.loseContext();
+  runtime.restoreContext();
+  const uploadsAfterRestore = runtime.stats.textureUploads.filter(textUpload);
+  assert.equal(uploadsAfterRestore.length, 2);
+  assert.deepEqual(uploadsAfterRestore[1], firstUpload);
+  runtime.frame();
+  assert.deepEqual(runtime.stats.uploads.at(-1).slice(2, 4), [56, 22]);
+});
+
+test("legacy direct text follows the physical density tier without changing its logical size", async () => {
+  const runtime = await loadRuntime({ dpr: 1.1 });
+  const drawScore = () => {
+    runtime.env.web_begin_frame(0, 0, 0);
+    runtime.env.web_draw_text(4, 8, "x");
+    runtime.frame();
+  };
+  drawScore();
+  assert.equal(runtime.body.dataset.densityTier, "1.25");
+  const firstFill = runtime.rasterStats.textFills.at(-1);
+  assert.deepEqual([firstFill.width, firstFill.height], [70, 28]);
+  assert.deepEqual(firstFill.args, ["score x", 0, 18]);
+  assert.ok(runtime.stats.textureUploads.some(({ width, height }) => width === 74 && height === 32));
+  assert.equal(runtime.body.dataset.preparedTextBytes, String(70 * 28 * 4));
+
+  runtime.setPresentation(640, 360, 2);
+  drawScore();
+  assert.equal(runtime.body.dataset.densityTier, "2");
+  assert.equal(runtime.rasterStats.textFills.length, 2);
+  assert.ok(runtime.stats.textureUploads.some(({ width, height }) => width === 116 && height === 48));
+  assert.equal(runtime.body.dataset.preparedTextBytes, String(112 * 44 * 4));
+  assert.deepEqual(runtime.stats.uploads.at(-1).slice(2, 4), [56, 22]);
+});
+
+test("text over the WebGL texture extent fails before Canvas allocation without a logical fallback", async () => {
+  const runtime = await loadRuntime({ dpr: 4, maxTextureSize: 64 });
+  const font = runtime.env.load_font(0, 18);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.env.font_status(font), 3);
+  const canvasesBefore = runtime.rasterStats.canvases;
+  const textureUploadsBefore = runtime.stats.textureUploads.length;
+  const textFillsBefore = runtime.rasterStats.textFills.length;
+  const createdTexturesBefore = runtime.stats.createdTextures;
+  runtime.setTextFixture(font, "x");
+  runtime.frame();
+  assert.match(runtime.body.dataset.gpuError, /available texture extent/);
+  assert.equal(runtime.stats.instanced, 0);
+  assert.equal(runtime.rasterStats.canvases, canvasesBefore);
+  assert.equal(runtime.stats.createdTextures, createdTexturesBefore);
+  assert.equal(runtime.stats.textureUploads.length, textureUploadsBefore);
+  assert.equal(runtime.rasterStats.textFills.length, textFillsBefore);
+  assert.equal(runtime.body.dataset.preparedTextEntries ?? "0", "0");
+  assert.equal(runtime.body.dataset.preparedTextBytes ?? "0", "0");
 });
 
 test("prepared text LRU remains bounded and releases evicted atlas entries", async () => {

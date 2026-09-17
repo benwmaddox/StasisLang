@@ -1722,7 +1722,11 @@
       font.densityTier = display.densityTier;
       font.densityGeneration = display.densityGeneration;
       font.cacheKey = [font.source, font.size, display.densityTier, RASTER_OPTIONS].join(":");
+      invalidatePreparedTextForFont(font.handle);
     }
+    // Legacy direct text uses the implicit fallback font handle zero. Its
+    // prepared canvas must follow the same tier lifetime as owned fonts.
+    invalidatePreparedTextForFont(0);
     if (document.body?.dataset) {
       document.body.dataset.assetDensityInvalidations = String(invalidated);
       document.body.dataset.assetDensityGeneration = String(display.densityGeneration);
@@ -1880,7 +1884,7 @@
     const source = assetValue(pathId);
     const font = new FontFace(family, `url(${source})`);
     const fontInfo = {
-      face: font, family, size, renderSize: size, baseline: size, ready: false,
+      handle, face: font, family, size, renderSize: size, baseline: size, ready: false,
       status: ASSET_STATE_PENDING, error: null, released: false, registered: false,
       calibrationGeneration: 0,
       pendingRuns: [], source, metadata: assetMetadata(pathId),
@@ -3033,6 +3037,7 @@
       };
       return (gpuBatcher = {
         target,
+        maxTextureSize,
         flush: () => {},
         resetFrameMetrics: () => {
           frameTextureBinds = 0;
@@ -3137,9 +3142,11 @@
     if (loadedFont && loadedFont.status !== ASSET_STATE_LOADED) return null;
     const font = loadedFont || {
       family: "ui-monospace, Consolas, monospace", size: 18, renderSize: 18, baseline: 18,
-      densityGeneration: display.densityGeneration, calibrationGeneration: 0
+      densityTier: display.densityTier, calibrationGeneration: 0
     };
-    const key = `${fontHandle}|${font.densityGeneration || 0}|${font.calibrationGeneration || 0}|${text}`;
+    const rasterTier = Number.isFinite(font.densityTier) && font.densityTier > 0
+      ? font.densityTier : display.densityTier;
+    const key = `${fontHandle}|${rasterTier}|${font.calibrationGeneration || 0}|${text}`;
     const existing = preparedText.get(key);
     if (existing) {
       // Map iteration order is the LRU order used by the bounded cache.
@@ -3147,24 +3154,56 @@
       preparedText.set(key, existing);
       return existing;
     }
+    const { context: measurement } = resourcePreparationContext();
+    let metrics;
+    measurement.save();
+    try {
+      setPreparationFont(measurement, font);
+      metrics = measurement.measureText(text);
+    } finally {
+      measurement.restore();
+    }
+    const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
+      ? Math.max(0, metrics.actualBoundingBoxDescent) : Math.max(0, font.size - font.baseline);
+    const logicalWidth = Math.max(1, Math.ceil(metrics.width));
+    const logicalHeight = Math.max(1, Math.ceil(font.baseline + descent));
+    // Keep layout and the submitted quad in logical units, while the Canvas
+    // surface and atlas entry carry pixels at the active physical density.
+    const width = Math.max(1, Math.ceil(logicalWidth * rasterTier));
+    const height = Math.max(1, Math.ceil(logicalHeight * rasterTier));
+    const byteLength = width * height * 4;
+    const rendererMaxTextureSize = Number(gpuBatcher?.maxTextureSize);
+    // Check the renderer extent before assigning the physical Canvas size.
+    // The cache byte limit below is residency policy; oversized resources may
+    // still be prepared transiently when the device can represent them.
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)
+      || !Number.isSafeInteger(byteLength) || byteLength <= 0
+      || (Number.isSafeInteger(rendererMaxTextureSize)
+        && (width > rendererMaxTextureSize - ATLAS_PADDING * 2
+          || height > rendererMaxTextureSize - ATLAS_PADDING * 2))) {
+      throw gpuFailure("WebGL2 text raster dimensions exceed the available texture extent");
+    }
     const surface = document.createElement?.("canvas");
     const preparation = surface?.getContext?.("2d", { alpha: true });
     if (!surface || !preparation) throw new Error("Canvas2D text resource preparation unavailable");
-    setPreparationFont(preparation, font);
-    const metrics = preparation.measureText(text);
-    const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
-      ? Math.max(0, metrics.actualBoundingBoxDescent) : Math.max(0, font.size - font.baseline);
-    const width = Math.max(1, Math.ceil(metrics.width));
-    const height = Math.max(1, Math.ceil(font.baseline + descent));
     surface.width = width;
     surface.height = height;
-    setPreparationFont(preparation, font);
-    preparation.clearRect(0, 0, width, height);
-    preparation.fillStyle = "white";
-    preparation.fillText(text, 0, font.baseline);
+    preparation.save();
+    try {
+      if (typeof preparation.setTransform !== "function") {
+        throw new Error("Canvas2D text raster scaling unavailable");
+      }
+      preparation.setTransform(rasterTier, 0, 0, rasterTier, 0, 0);
+      setPreparationFont(preparation, font);
+      preparation.clearRect(0, 0, logicalWidth, logicalHeight);
+      preparation.fillStyle = "white";
+      preparation.fillText(text, 0, font.baseline);
+    } finally {
+      preparation.restore();
+    }
     const resource = {
-      ready: true, drawable: surface, width, height, generation: 1,
-      baseline: font.baseline, text, fontHandle, byteLength: width * height * 4,
+      ready: true, drawable: surface, width, height, logicalWidth, logicalHeight,
+      rasterTier, generation: 1, baseline: font.baseline, text, fontHandle, byteLength,
       transient: false
     };
     if (resource.byteLength > PREPARED_TEXT_MAX_BYTES) {
@@ -3193,7 +3232,7 @@
     try {
       const entry = renderer.atlasFor(resource, null);
       if (!entry) throw gpuFailure("WebGL2 text atlas allocation failed");
-      writeQuad(0, x, y, resource.width, resource.height, {
+      writeQuad(0, x, y, resource.logicalWidth, resource.logicalHeight, {
         u0: entry.x / entry.page.size, v0: entry.y / entry.page.size,
         u1: (entry.x + entry.width) / entry.page.size,
         v1: (entry.y + entry.height) / entry.page.size
