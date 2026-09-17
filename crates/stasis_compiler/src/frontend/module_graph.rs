@@ -349,13 +349,15 @@ pub(crate) fn is_privileged_graphics_extern(name: &str, symbol: &str) -> bool {
     symbol.starts_with("stasis_gfx_")
         || symbol.starts_with("stasis_jit_gfx_")
         || name.starts_with("gfx_")
-        || matches!(name, "load_font" | "measure_text")
+        || matches!(name, "load_font" | "measure_text" | "font_status")
         || matches!(
             symbol,
             "stasis_jit_sprite_load_from"
                 | "stasis_jit_text_run_load_from"
                 | "stasis_jit_text_run_replace_from"
                 | "stasis_jit_asset_request_sprite"
+                | "stasis_font_status"
+                | "stasis_jit_font_status"
         )
 }
 

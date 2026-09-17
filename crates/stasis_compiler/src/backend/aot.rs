@@ -2455,6 +2455,7 @@ mod tests {
                 "stasis.asset_extern.v1\tload_font\t{}\t19\t202",
                 text_hex("fonts/Ångström.ttf")
             ),
+            "stasis.asset_extern.v1\tfont_status\t202\t3".to_string(),
             format!(
                 "stasis.asset_extern.v1\tmeasure_text\t202\t{}\t{}",
                 text_hex("héllo 世界"),
@@ -2625,6 +2626,7 @@ mod tests {
             ("gfx_dump_bmp", "stasis_jit_gfx_dump_bmp"),
             ("gfx_dump_png", "stasis_jit_gfx_dump_png"),
             ("load_font", "stasis_jit_load_font"),
+            ("gfx_font_status", "stasis_jit_font_status"),
             ("measure_text", "stasis_jit_measure_text"),
             ("load_sprite_from", "stasis_jit_sprite_load_from"),
             ("load_text_from", "stasis_jit_text_run_load_from"),
@@ -4063,6 +4065,35 @@ function end_frame(): void { return; }
         assert_eq!(
             resolved.get("clipboard_save_ascii").copied(),
             Some("stasis_jit_clipboard_save_ascii")
+        );
+    }
+
+    #[test]
+    fn aot_process_resolves_font_status_runtime_shim() {
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut process = AotProcess::new();
+        process
+            .set_project_root(project_root.to_string_lossy())
+            .expect("set asset extern AOT project root");
+        process.upsert_file(
+            "tests/stasis/seams/asset_extern_abi_probe.stasis",
+            ASSET_EXTERN_FIXTURE,
+        );
+        process.compile().expect("compile asset extern AOT fixture");
+
+        let analysis = &process
+            .program_snapshot
+            .as_ref()
+            .expect("program snapshot")
+            .analysis;
+        let resolved: BTreeMap<_, _> = analysis
+            .resolved_extern_signatures
+            .iter()
+            .map(|signature| (signature.name.as_str(), signature.symbol.as_str()))
+            .collect();
+        assert_eq!(
+            resolved.get("gfx_font_status").copied(),
+            Some("stasis_jit_font_status")
         );
     }
 

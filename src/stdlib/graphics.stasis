@@ -22,8 +22,13 @@ extern function @effects(graphics, storage) gfx_dump_png(path: string): i32;
 extern function @effects(graphics)@asset_path(path) load_font(path: string, size: i32): i32;
 
 function @internal @effects(graphics)@extern("stasis_jit_gfx_release_font") gfx_release_font(font: i32): void;
+function @internal @effects(graphics)@extern("stasis_jit_font_status") gfx_font_status(font: i32): AssetState;
 
 extern function @effects(graphics) measure_text(font: i32, text: string): f32;
+
+function font_status(font: i32): AssetState {
+    return gfx_font_status(font);
+}
 
 function release_font(font: i32): void {
     if (font > 0) {

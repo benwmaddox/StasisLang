@@ -3143,6 +3143,9 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "measure_text" | "stasis_measure_text" => {
             function_address(stasis_dynload::stasis_jit_measure_text as *const ())
         }
+        "font_status" | "stasis_font_status" | "stasis_jit_font_status" => {
+            function_address(stasis_dynload::stasis_jit_font_status as *const ())
+        }
         "gfx_cache_text" | "stasis_gfx_cache_text" | "stasis_jit_gfx_cache_text" => {
             function_address(stasis_dynload::stasis_jit_gfx_cache_text as *const ())
         }
@@ -3751,6 +3754,9 @@ mod tests {
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_take_handle").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_asset_task_cancel").is_some());
         assert!(builtin_host_symbol_address("stasis_jit_gfx_release_font").is_some());
+        assert!(builtin_host_symbol_address("font_status").is_some());
+        assert!(builtin_host_symbol_address("stasis_font_status").is_some());
+        assert!(builtin_host_symbol_address("stasis_jit_font_status").is_some());
     }
 
     #[test]

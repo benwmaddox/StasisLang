@@ -84,6 +84,13 @@
   const fontLoads = new Map();
   const cachedText = new Map();
   const immutableTextHandles = new Map();
+  // Keep these values aligned with the public AssetState enum in asset_tasks.stasis.
+  const ASSET_STATE_NONE = 0;
+  const ASSET_STATE_PENDING = 1;
+  const ASSET_STATE_LOADING = 2;
+  const ASSET_STATE_LOADED = 3;
+  const ASSET_STATE_FAILED = 4;
+  const ASSET_STATE_CANCELLED = 5;
   const TEXT_RUN_MAX_ENTRIES = 4096;
   const TEXT_RUN_MAX_BYTES = 262144;
   const DYNAMIC_TEXT_MAX_BYTES = 4096;
@@ -1729,18 +1736,44 @@
   };
   const measureTextRun = (font, text) => {
     const { context } = resourcePreparationContext();
+    let metrics;
     context.save();
-    setPreparationFont(context, font);
-    const metrics = context.measureText(text);
-    context.restore();
+    try {
+      setPreparationFont(context, font);
+      metrics = context.measureText(text);
+    } finally {
+      context.restore();
+    }
     const descent = Number.isFinite(metrics.actualBoundingBoxDescent)
       ? Math.max(0, metrics.actualBoundingBoxDescent)
       : Math.max(0, font.size - font.baseline);
     return { width: metrics.width, height: font.baseline + descent };
   };
+  const invalidatePreparedTextForFont = fontHandle => {
+    for (const [key, resource] of preparedText) {
+      if (resource.fontHandle !== fontHandle) continue;
+      preparedText.delete(key);
+      preparedTextBytes = Math.max(0, preparedTextBytes - resource.byteLength);
+      clearGpuError(resource);
+      gpuBatcher?.releaseResource(resource);
+    }
+  };
+  const clearPendingTextRuns = font => {
+    for (const run of font.pendingRuns) {
+      const entry = cachedText.get(run.handle);
+      if (!entry || entry.generation !== run.generation) continue;
+      if (getViewField(run.base, run.index, "font") !== run.font
+        || getViewField(run.base, run.index, "handle") !== run.handle) continue;
+      entry.width = 0;
+      entry.height = 0;
+      setViewField(run.base, run.index, "width", 0);
+      setViewField(run.base, run.index, "height", 0);
+    }
+    font.pendingRuns.length = 0;
+  };
   const refreshTextRun = run => {
     const font = fonts.get(run.font);
-    if (!font?.ready) return;
+    if (font?.status !== ASSET_STATE_LOADED || !font.ready) return;
     const entry = cachedText.get(run.handle);
     if (!entry || entry.generation !== run.generation) return;
     if (getViewField(run.base, run.index, "font") !== run.font
@@ -1748,6 +1781,7 @@
     const metrics = measureTextRun(font, run.text);
     entry.width = metrics.width;
     entry.height = metrics.height;
+    entry.calibrationGeneration = font.calibrationGeneration;
     setViewField(run.base, run.index, "width", metrics.width);
     setViewField(run.base, run.index, "height", metrics.height);
   };
@@ -1758,12 +1792,36 @@
     if (prior >= 0) font.pendingRuns[prior] = run;
     else font.pendingRuns.push(run);
   };
+  const settleTextRun = (font, run) => {
+    if (font.status === ASSET_STATE_LOADED && font.ready) {
+      refreshTextRun(run);
+      return;
+    }
+    if (font.status === ASSET_STATE_PENDING || font.status === ASSET_STATE_LOADING) {
+      queuePendingTextRun(font, run);
+      return;
+    }
+    if (font.status !== ASSET_STATE_FAILED) return;
+    const entry = cachedText.get(run.handle);
+    if (!entry || entry.generation !== run.generation) return;
+    if (getViewField(run.base, run.index, "font") !== run.font
+      || getViewField(run.base, run.index, "handle") !== run.handle) return;
+    entry.width = 0;
+    entry.height = 0;
+    setViewField(run.base, run.index, "width", 0);
+    setViewField(run.base, run.index, "height", 0);
+  };
   const calibrateFont = font => {
+    if (font.status === ASSET_STATE_LOADED && font.ready) return true;
     const { context } = resourcePreparationContext();
+    let metrics;
     context.save();
-    setPreparationFont(context, font, 1000);
-    const metrics = context.measureText("Mg");
-    context.restore();
+    try {
+      setPreparationFont(context, font, 1000);
+      metrics = context.measureText("Mg");
+    } finally {
+      context.restore();
+    }
     const ascent = Number.isFinite(metrics.fontBoundingBoxAscent)
       ? metrics.fontBoundingBoxAscent
       : 1000;
@@ -1774,39 +1832,96 @@
     const scale = nativeHeight > 0 ? font.size / nativeHeight : font.size / 1000;
     font.renderSize = 1000 * scale;
     font.baseline = ascent * scale;
+    font.calibrationGeneration += 1;
     font.ready = true;
-    font.pendingRuns.forEach(refreshTextRun);
-    font.pendingRuns.length = 0;
+    font.status = ASSET_STATE_LOADED;
+    invalidatePreparedTextForFont(font.handle);
+    const pendingRuns = font.pendingRuns.splice(0);
+    try {
+      pendingRuns.forEach(refreshTextRun);
+    } catch (error) {
+      font.pendingRuns.push(...pendingRuns);
+      throw error;
+    }
+    return true;
+  };
+  const failFont = (font, error) => {
+    font.ready = false;
+    font.status = ASSET_STATE_FAILED;
+    font.error = error;
+    if (font.registered && font.face && document.fonts?.delete) {
+      document.fonts.delete(font.face);
+      font.registered = false;
+    }
+    clearPendingTextRuns(font);
+    invalidatePreparedTextForFont(font.handle);
+    if (document.body?.dataset) {
+      document.body.dataset.fontStatus = "failed";
+      document.body.dataset.fontError = String(error?.message || error);
+    }
+  };
+  const fontStatus = handle => fonts.get(handle)?.status ?? ASSET_STATE_NONE;
+  const publishLoadedFont = (handle, fontInfo, loaded) => {
+    if (!loaded || fonts.get(handle) !== fontInfo || fontInfo.released) return loaded;
+    document.fonts.add(loaded);
+    fontInfo.registered = true;
+    calibrateFont(fontInfo);
+    if (document.body?.dataset) {
+      document.body.dataset.fontSource = fontInfo.source;
+      document.body.dataset.fontRasterTier = displayNumber(fontInfo.densityTier);
+      document.body.dataset.fontDensityGeneration = String(fontInfo.densityGeneration);
+      document.body.dataset.fontStatus = "loaded";
+    }
+    return loaded;
   };
   const loadFont = (pathId, size) => {
     const handle = nextHandle++;
     const family = `stasis-font-${handle}`;
-    const font = new FontFace(family, `url(${assetValue(pathId)})`);
+    const source = assetValue(pathId);
+    const font = new FontFace(family, `url(${source})`);
     const fontInfo = {
-      face: font, family, size, renderSize: size, baseline: size, ready: false, pendingRuns: [],
-      source: assetValue(pathId), metadata: assetMetadata(pathId),
+      face: font, family, size, renderSize: size, baseline: size, ready: false,
+      status: ASSET_STATE_PENDING, error: null, released: false, registered: false,
+      calibrationGeneration: 0,
+      pendingRuns: [], source, metadata: assetMetadata(pathId),
       densityTier: display.densityTier, densityGeneration: display.densityGeneration,
-      cacheKey: [assetValue(pathId), size, display.densityTier, RASTER_OPTIONS].join(":")
+      cacheKey: [source, size, display.densityTier, RASTER_OPTIONS].join(":")
     };
     fonts.set(handle, fontInfo);
-    const load = Promise.resolve()
-      .then(() => font.load())
+    let loadResult;
+    if (fonts.get(handle) !== fontInfo || fontInfo.released) {
+      loadResult = Promise.resolve(null);
+    } else {
+      fontInfo.status = ASSET_STATE_LOADING;
+      try {
+        loadResult = Promise.resolve(font.load());
+      } catch (error) {
+        loadResult = Promise.reject(error);
+      }
+    }
+    const load = loadResult
       .then(loaded => {
-        if (fonts.get(handle) !== fontInfo) return loaded;
-        document.fonts.add(loaded);
-        if (document.body?.dataset) {
-          document.body.dataset.fontSource = fontInfo.source;
-          document.body.dataset.fontRasterTier = displayNumber(fontInfo.densityTier);
-          document.body.dataset.fontDensityGeneration = String(fontInfo.densityGeneration);
+        if (!loaded) {
+          if (fonts.get(handle) !== fontInfo || fontInfo.released) return null;
+          throw new Error("FontFace.load returned no face");
         }
-        return loaded;
+        return publishLoadedFont(handle, fontInfo, loaded);
+      })
+      .catch(error => {
+        if (fonts.get(handle) === fontInfo && !fontInfo.released) failFont(fontInfo, error);
+        throw error;
       });
+    // Startup still observes the rejection through fontLoads, while this handler
+    // prevents a post-bootstrap rejected load from becoming an unhandled promise.
+    void load.catch(() => {});
     fontLoads.set(handle, load);
     return handle;
   };
   const releaseFont = handle => {
     const font = fonts.get(handle);
     if (!font) return;
+    font.released = true;
+    font.status = ASSET_STATE_CANCELLED;
     for (const [runHandle, run] of cachedText) {
       if (run.font !== handle) continue;
       cachedText.delete(runHandle);
@@ -1815,16 +1930,10 @@
         if (immutableHandle === runHandle) immutableTextHandles.delete(key);
       }
     }
-    for (const [key, resource] of preparedText) {
-      if (resource.fontHandle !== handle) continue;
-      preparedText.delete(key);
-      preparedTextBytes = Math.max(0, preparedTextBytes - resource.byteLength);
-      clearGpuError(resource);
-      gpuBatcher?.releaseResource(resource);
-    }
+    invalidatePreparedTextForFont(handle);
     font.pendingRuns.length = 0;
     fontLoads.delete(handle);
-    if (font.face && document.fonts?.delete) document.fonts.delete(font.face);
+    if (font.registered && font.face && document.fonts?.delete) document.fonts.delete(font.face);
     fonts.delete(handle);
   };
   const measureText = (fontHandle, textId) => {
@@ -2281,6 +2390,9 @@
     gfx_release_font: handle => releaseFont(handle),
     stasis_gfx_release_font: handle => releaseFont(handle),
     stasis_jit_gfx_release_font: handle => releaseFont(handle),
+    font_status: handle => fontStatus(handle),
+    stasis_font_status: handle => fontStatus(handle),
+    stasis_jit_font_status: handle => fontStatus(handle),
     stasis_jit_asset_request_sprite: (pathId, width, height) => requestSprite(pathId, width, height),
     // @stasis-feature audio begin
     stasis_jit_asset_request_audio: pathId => requestAudio(pathId),
@@ -2341,8 +2453,7 @@
         && setViewField(base, index, "handle", handle)
         && setViewField(base, index, "width", text.length * fontInfo.size * 0.6)
         && setViewField(base, index, "height", fontInfo.size);
-      if (loaded && fontInfo.ready) refreshTextRun(run);
-      else if (loaded && fontInfo.pendingRuns) queuePendingTextRun(fontInfo, run);
+      if (loaded) settleTextRun(fontInfo, run);
       return loaded ? 1 : 0;
     },
     stasis_jit_text_run_replace_from: (base, index, _len, font, textId) => {
@@ -2376,8 +2487,7 @@
         return 0;
       }
       const run = { base, index, font, text, handle, generation };
-      if (fontInfo.ready) refreshTextRun(run);
-      else if (fontInfo.pendingRuns) queuePendingTextRun(fontInfo, run);
+      settleTextRun(fontInfo, run);
       return 1;
     },
     storage_load_i32: (scope, key, fallback) => {
@@ -3024,11 +3134,12 @@
   const preparedTextResource = (fontHandle, text) => {
     const loadedFont = fonts.get(fontHandle);
     if (!loadedFont && fontHandle !== 0) return null;
+    if (loadedFont && loadedFont.status !== ASSET_STATE_LOADED) return null;
     const font = loadedFont || {
       family: "ui-monospace, Consolas, monospace", size: 18, renderSize: 18, baseline: 18,
-      densityGeneration: display.densityGeneration
+      densityGeneration: display.densityGeneration, calibrationGeneration: 0
     };
-    const key = `${fontHandle}|${font.densityGeneration || 0}|${text}`;
+    const key = `${fontHandle}|${font.densityGeneration || 0}|${font.calibrationGeneration || 0}|${text}`;
     const existing = preparedText.get(key);
     if (existing) {
       // Map iteration order is the LRU order used by the bounded cache.

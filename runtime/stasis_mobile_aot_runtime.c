@@ -60,6 +60,7 @@ int stasis_gfx_poll_reload(int handle);
 float stasis_gfx_measure_text_cached(int handle);
 float stasis_gfx_measure_text_cached_height(int handle);
 int stasis_load_font(const char *path, int size);
+int stasis_font_status(int handle);
 float stasis_measure_text(int font, const char *text);
 void stasis_sleep_ms(int ms);
 int stasis_storage_load_i32(const char *scope, const char *key, int fallback);
@@ -961,6 +962,7 @@ int stasis_jit_load_font(int32_t path, int32_t size) {
     free(value);
     return result;
 }
+int stasis_jit_font_status(int32_t handle) { return stasis_font_status(handle); }
 float stasis_jit_measure_text(int32_t font, int32_t text) {
     char *value = resolve_text(text);
     float result = value == NULL ? 0.0f : stasis_measure_text(font, value);

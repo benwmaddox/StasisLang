@@ -171,6 +171,7 @@ int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
 float stasis_gfx_measure_text_cached_height(int handle) { return (float)handle; }
 int stasis_load_font(const char *path, int size) { return path == NULL ? 0 : size; }
+int stasis_font_status(int handle) { return handle > 0 ? 3 : 0; }
 float stasis_measure_text(int font, const char *text) { return text == NULL ? 0.0f : (float)font; }
 void stasis_sleep_ms(int ms) { (void)ms; }
 int stasis_storage_load_i32(const char *scope, const char *key, int fallback) {

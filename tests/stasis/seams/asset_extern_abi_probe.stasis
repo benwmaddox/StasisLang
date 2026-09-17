@@ -37,6 +37,9 @@ function main(): i32 {
     if (font != 202) {
         return 3;
     }
+    if (font_status(font) != AssetState.Loaded) {
+        return 18;
+    }
     let width: f32 = measure_text(font, "héllo 世界");
     if (width != 18.75) {
         return 4;
