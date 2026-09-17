@@ -479,13 +479,15 @@ to eight pointers with valid logical coordinates. Captures occur after drawing
 and post-effects but before presentation, matching the existing screenshot
 acceptance path. Ordinary rendering allocates no capture framebuffer.
 
-Repeated validation reinitialization is resource-safe. Runtime asset loaders
-used by `main()` must be idempotent for an unchanged asset identity; in
-particular, repeated `load_font(path, size)` calls reuse the existing handle
-instead of consuming another fixed font slot. If that font file changes in
-place, the runtime refreshes the same handle and invalidates cached text. This
-lets an unattended run reinitialize and evaluate many candidates without
-silently losing HUD text to renderer resource exhaustion.
+Repeated validation reinitialization is resource-safe when `main()` reuses an
+unchanged owned font or balances every successful acquisition with a matching
+`release_font`, including acquisitions that return the same handle. Repeated
+`load_font(path, size)` calls may share the existing handle; sharing does not make
+an acquisition idempotent. If the font source bytes change
+in place, native runtime loading prepares a replacement in a new handle and
+leaves the prior handle and its cached text usable until the caller explicitly
+releases it. This lets an unattended run reinitialize and evaluate many
+candidates without silently losing HUD text to renderer resource exhaustion.
 
 ### Agent roles and context separation
 
