@@ -54,11 +54,21 @@ viewport or resolution-cap effect.
 `SpriteRunWriter` remains the bounded streaming option. Reserve, write typed `SpriteRef` instances, and finalize or cancel it in the same frame. Its token is not a public command-buffer offset.
 
 `load_font(path, size)` returns an opaque, generation-safe font handle. Call
-`release_font(handle)` when that logical size is superseded. Releasing zero or an
-already-released handle is harmless. A released handle never aliases a later
-font, and a failed replacement load leaves the previous handle usable until the
-caller explicitly releases it. Graphics runtime ABI 4 makes the release symbol
-mandatory across JIT, AOT, desktop, Android, and Web hosts.
+`release_font(handle)` when that logical size is superseded. Each successful
+`load_font` acquires one ownership reference and must be balanced by one release.
+A host may return the same handle for repeated loads of the same font; balance
+the acquisitions even when their handle values match. Reuse an already-owned
+font when its required size has not changed instead of loading it again.
+
+Cached text does not acquire an additional font ownership reference. It remains
+usable while the font has an owner; the final release invalidates that font and
+its cached text runs. Rebuild those runs for the replacement font. Releasing zero
+or an invalidated handle is harmless, but releasing a live shared handle twice
+can consume another owner's reference. An invalidated handle never aliases a
+later font. Acquire a usable replacement before releasing the previous font; a
+failed replacement load does not release the previous ownership reference.
+Graphics runtime ABI 4 makes the release symbol mandatory across JIT, AOT,
+desktop, Android, and Web hosts.
 
 The command arrays, `GFX_*` layout constants, and `gfx_cmd_*` helpers belong to `stdlib/internal/gfx_cmd.stasis`. The compiler rejects their import, use, or redeclaration outside the canonical graphics implementation and explicit `tests/stasis` ABI seams. It also rejects aliases of privileged graphics extern symbols, so spelling a different Stasis function name cannot bypass the module boundary. Renderer fallback entry points such as the C `stasis_draw_lines_f32` symbol remain runtime implementation details.
 

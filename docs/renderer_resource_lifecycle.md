@@ -26,8 +26,13 @@ Live font handles retain their source bytes and logical size across density,
 surface, and renderer resets. Native font atlases rasterize at a bounded minimum
 2x backing scale (or the higher current density up to 8x), then draw down with
 linear filtering while all measurements and quads remain in logical units.
-Explicit `release_font` destroys the atlas and source bytes, generation-invalidates
-the handle, and removes only cached text owned by that font.
+Each successful `load_font` acquires an ownership reference, including duplicate
+loads that return a shared handle. Balance each acquisition with one
+`release_font`; cached text does not retain the font independently. The final
+release destroys the atlas and source bytes, generation-invalidates the handle,
+and removes only cached text owned by that font. Earlier releases leave the
+remaining owners and their cached text usable. A replacement should acquire and
+prepare its font and text before releasing the previous owned font.
 Android pause/resume is a visibility transition: the Workshop asks GLSurfaceView to
 preserve its EGL context and retains textures when that context survives. A later
 `onSurfaceCreated` callback is the authoritative signal that the context was lost.
