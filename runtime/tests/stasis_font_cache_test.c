@@ -242,6 +242,11 @@ int main(void) {
 #endif
     int replacement_handle = stasis_load_font(replacement_name, 22);
     CHECK(replacement_handle > 0);
+    int replacement_run = stasis_gfx_cache_text(replacement_handle, "retained after failed reload");
+    CHECK(replacement_run > 0);
+    float replacement_width = stasis_gfx_measure_text_cached(replacement_run);
+    float replacement_height = stasis_gfx_measure_text_cached_height(replacement_run);
+    CHECK(replacement_width > 0.0f && replacement_height > 0.0f);
 
     memset(replacement, 0, replacement_size);
     write_file(g_replacement_path, replacement, replacement_size);
@@ -253,6 +258,13 @@ int main(void) {
     CHECK(utime(g_replacement_path, &original_times) == 0);
 #endif
     CHECK(stasis_load_font(replacement_name, 22) == 0);
+    CHECK(stasis_gfx_cache_text(replacement_handle, "retained after failed reload") == replacement_run);
+    CHECK(stasis_gfx_measure_text_cached(replacement_run) == replacement_width);
+    CHECK(stasis_gfx_measure_text_cached_height(replacement_run) == replacement_height);
+    /* A failed acquisition must not retain the old font or consume its owner. */
+    stasis_gfx_release_font(replacement_handle);
+    CHECK(stasis_gfx_cache_text(replacement_handle, "released after failed reload") == 0);
+    CHECK(stasis_gfx_measure_text_cached(replacement_run) == 0.0f);
     free(replacement);
 
     stasis_shutdown();
