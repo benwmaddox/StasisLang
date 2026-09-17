@@ -420,6 +420,11 @@ try {
       throw "activated editor-info fingerprint does not match source revision $fingerprint"
     }
 
+    # Record inspects the selected snapshot; prepare refreshes the smoke
+    # workspace from this activated toolchain before it is compiled.
+    Invoke-Bounded -FilePath $installedExecutable -Arguments @(
+      "--workspace", (Join-Path $repoRoot "samples/windows_launch_smoke"), "prepare"
+    ) -WorkingDirectory $binRoot | Out-Null
     if (Test-Path -LiteralPath $smokeOutput) { Remove-Item -LiteralPath $smokeOutput -Recurse -Force }
     Invoke-Bounded -FilePath $installedExecutable -Arguments @(
       "--workspace", (Join-Path $repoRoot "samples/windows_launch_smoke"), "record",
