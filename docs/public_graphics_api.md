@@ -73,6 +73,12 @@ can still rebuild its atlas after a density or context transition, and the host
 withholds frames until that device-local work is ready.
 Consumers that publish text layout after `main` should wait for `Loaded`; pending
 text may carry compatibility fallback dimensions until calibration replaces them.
+On Web, `Loaded` covers the font source and logical metric calibration. The first
+draw then prepares a Canvas and atlas entry at the active physical density tier;
+the reported metrics and submitted text quad stay in logical units. A density-tier
+change evicts that prepared resource and rebuilds it on the next draw, while a
+same-tier scale change reuses it. Device or WebGL extent failures remain visible
+renderer failures and never lower the raster tier to preserve publication.
 
 Cached text does not acquire an additional font ownership reference. It remains
 usable while the font has an owner; the final release invalidates that font and

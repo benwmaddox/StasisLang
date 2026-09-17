@@ -128,6 +128,17 @@ class LocalToolchainInstallTests(unittest.TestCase):
         self.assertIn('Join-Path $binRoot "stasis.exe"', SCRIPT)
         self.assertIn('-WorkingDirectory $binRoot', SCRIPT)
 
+    def test_smoke_prepares_activated_toolchain_snapshot_before_record(self):
+        validation = SCRIPT[SCRIPT.index('$postActivationValidation = {'):]
+        identity_check = validation.index('$editorInfo.result.build_fingerprint')
+        prepare = validation.index('"samples/windows_launch_smoke"), "prepare"')
+        record = validation.index('"samples/windows_launch_smoke"), "record"')
+        self.assertLess(identity_check, prepare)
+        self.assertLess(prepare, record)
+        preparation = validation[identity_check:record]
+        self.assertIn('Invoke-Bounded -FilePath $installedExecutable', preparation)
+        self.assertIn('-WorkingDirectory $binRoot', preparation)
+
     def test_backup_lives_through_post_activation_validation(self):
         promotion_start = SCRIPT.index('function Promote-ToolchainDirectory')
         promotion_end = SCRIPT.index('\nfunction Copy-RuntimeSources', promotion_start)
