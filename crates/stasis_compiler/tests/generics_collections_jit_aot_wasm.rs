@@ -5,7 +5,6 @@ use stasis_compiler::compiler::Compiler;
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 #[cfg(windows)]
 use stasis_jit::{AotLinkConfig, AotTarget};
-#[cfg(windows)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,6 +32,85 @@ impl Drop for AotTree {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+struct VendorFixtureTree {
+    root: PathBuf,
+    temp_root: PathBuf,
+}
+
+impl Drop for VendorFixtureTree {
+    fn drop(&mut self) {
+        let parent_is_owned = self
+            .root
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .is_some_and(|parent| parent == self.temp_root);
+        let root_is_owned_directory =
+            fs::symlink_metadata(&self.root)
+                .ok()
+                .is_some_and(|metadata| {
+                    let file_type = metadata.file_type();
+                    file_type.is_dir() && !file_type.is_symlink()
+                });
+        let is_owned_fixture = parent_is_owned
+            && root_is_owned_directory
+            && self.root.file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .starts_with("stasis_generics_vendor_")
+            });
+        if is_owned_fixture {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create fixture destination");
+    for entry in fs::read_dir(source).expect("read fixture directory") {
+        let entry = entry.expect("read fixture entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().expect("read fixture file type");
+        assert!(!file_type.is_symlink(), "fixture symlinks are unsupported");
+        if file_type.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).expect("copy fixture file");
+        } else {
+            panic!(
+                "fixture contains unsupported special file {}",
+                source_path.display()
+            );
+        }
+    }
+}
+
+fn materialize_canonical_vendor_fixture() -> VendorFixtureTree {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let temp_root = fs::canonicalize(std::env::temp_dir()).expect("canonical temp directory");
+    let root = temp_root.join(format!(
+        "stasis_generics_vendor_{}-{stamp}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).expect("create unique vendor fixture root");
+    let tree = VendorFixtureTree { root, temp_root };
+    let repository = repository_root();
+    copy_tree(
+        &repository.join("samples/generics_collections/src"),
+        &tree.root.join("src"),
+    );
+    let vendor_stdlib = tree.root.join("vendor/stasis/stdlib");
+    copy_tree(&repository.join("src/stdlib"), &vendor_stdlib);
+    assert!(
+        vendor_stdlib.join("graphics.stasis").is_file()
+            && vendor_stdlib.join("internal/gfx_cmd.stasis").is_file(),
+        "canonical vendor fixture omitted graphics stdlib sources"
+    );
+    tree
 }
 
 fn repository_root() -> PathBuf {
@@ -945,9 +1023,9 @@ fn generic_collection_sample_tests_pass_in_the_production_jit_shape() {
 
 #[test]
 fn generic_collection_aot_accepts_vendor_graphics_after_expansion() {
-    let sample_root = repository_root().join("samples/generics_collections");
+    let fixture = materialize_canonical_vendor_fixture();
     let mut aot = AotProcess::new();
-    aot.set_import_base_dir(&sample_root);
+    aot.set_import_base_dir(&fixture.root);
     aot.set_required_emit_roots(&[
         "main".to_string(),
         "tick".to_string(),
