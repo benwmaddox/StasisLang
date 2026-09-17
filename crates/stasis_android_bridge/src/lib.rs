@@ -7528,8 +7528,13 @@ function on_code_swap(): void {}\n",
             u8_values.len(),
         );
         assert_eq!(status, 0);
-        assert!(i32_values.iter().all(|value| *value == -71));
-        assert!(f32_values.iter().all(|value| *value == -72.0));
+        // Host construction replaces stale guest storage and publishes a valid
+        // empty frame, copying only its active header spans.
+        assert_eq!(&i32_values[..5], &[1196967473, 8, 2, 0, 0]);
+        assert_eq!(&i32_values[22..26], &[0, 0, 0, 0]);
+        assert_eq!(&i32_values[27..31], &[0, 0, 0, 0]);
+        assert!(i32_values[32..].iter().all(|value| *value == -71));
+        assert!(f32_values[4..].iter().all(|value| *value == -72.0));
         assert!(u8_values.iter().all(|value| *value == 73));
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();

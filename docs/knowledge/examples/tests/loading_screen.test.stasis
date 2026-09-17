@@ -60,7 +60,7 @@ test `main and ticks before render perform no content requests`(): bool {
     if (hero.state != AssetState.None || music.state != AssetState.None) {
         return false;
     }
-    render();
+    gate.loading_frame_submitted(loading_tick);
     return gate.frame_submitted && !gate.begin_loading_batch(loading_tick) && gate.begin_loading_batch(loading_tick + 1);
 }
 
