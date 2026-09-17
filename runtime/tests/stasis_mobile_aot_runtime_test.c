@@ -218,6 +218,7 @@ int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
 float stasis_gfx_measure_text_cached_height(int handle) { return (float)handle + 1.0f; }
 int stasis_load_font(const char *path, int size) { return path != NULL ? size : 0; }
+int stasis_font_status(int handle) { return handle > 0 ? 3 : 0; }
 float stasis_measure_text(int font, const char *text) {
     return text != NULL ? (float)font : 0.0f;
 }
@@ -513,6 +514,8 @@ int main(void) {
         stasis_jit_upsert_string_literal(1000 + stress_index, stress_literals[stress_index]);
     }
     CHECK(stasis_jit_load_font(1000 + STRESS_LITERAL_COUNT - 1, 19) == 19);
+    CHECK(stasis_jit_font_status(19) == 3);
+    CHECK(stasis_jit_font_status(0) == 0);
     stasis_jit_clear_string_literal_table();
     CHECK(stasis_jit_load_font(1000 + STRESS_LITERAL_COUNT - 1, 19) == 0);
     stasis_jit_upsert_string_literal(2000, "asset/path/rebound.ttf");

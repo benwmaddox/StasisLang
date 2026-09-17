@@ -15,12 +15,15 @@ Every renderer moves through the same states:
 - `RestoreFailed`: the frame is withheld and the complete restore is retried on the
   next frame.
 
-Surface resize and orientation advance `surface_generation` without invalidating
-device-local resources. Renderer/context creation, `SDL_RENDER_TARGETS_RESET`, and
-`SDL_RENDER_DEVICE_RESET` advance both `surface_generation` and
-`renderer_generation`. Generations skip zero. A sprite atlas region, same-path
-missing-resource placeholder region, font atlas, or text texture can be submitted
-only when its renderer generation matches.
+Surface resize, orientation, and display-scale changes advance the display metrics
+`display_generation` and mark the host frame as resized. A preparation-scale change
+also advances `density_generation` and marks sprite and font resources for
+re-rasterization; these changes retain logical handles and source data. Renderer or
+context creation, `SDL_RENDER_TARGETS_RESET`, and `SDL_RENDER_DEVICE_RESET` advance
+the lifecycle `surface_generation` and `renderer_generation`. Generations skip zero.
+Sprite atlas entries validate their lifecycle generations before submission. Font
+atlases and cached text are rebuilt by the restore transaction, and the font-use
+path rerasterizes density-dirty fonts before it draws or measures them.
 
 Live font handles retain their source bytes and logical size across density,
 surface, and renderer resets. Native font atlases rasterize at a bounded minimum
@@ -35,6 +38,16 @@ the remaining owners and their cached text usable. If native cache compaction
 cannot allocate its bounded scratch buffer, or detects corrupt cache state, it
 fails closed by clearing the complete text cache. A replacement should acquire
 and prepare its font and text before releasing the previous owned font.
+On Web, each font handle owns its `FontFace` and starts in `Pending` or `Loading`
+when acquired after `main`. `font_status(handle)` becomes `Loaded` only after the
+face resolves and Canvas metrics have been calibrated. A rejected load settles as
+`Failed` and clears pending text-run metrics; a release removes the handle and
+ignores any later `FontFace` completion. Prepared Canvas and GPU text resources
+are created only for loaded fonts and are evicted when calibration changes the
+font generation, so a compatibility fallback cannot remain the drawable cache.
+The dynload bridge reports `Failed` for a positive handle when it is paired with
+an older native library that lacks the optional status export; this is terminal
+for readiness consumers while legacy synchronous font loading remains usable.
 Android pause/resume is a visibility transition: the Workshop asks GLSurfaceView to
 preserve its EGL context and retains textures when that context survives. A later
 `onSurfaceCreated` callback is the authoritative signal that the context was lost.
@@ -42,9 +55,10 @@ preserve its EGL context and retains textures when that context survives. A late
 The native SDL runtime retains sprite paths, logical raster requests, decoded font
 bytes, font metrics, and cached text bytes/quads. Android Workshop and release
 previews retain their project or packaged manifest, asset identities, content
-hashes, and font sources. Lost-context handles are discarded without calling a
-destructor in the invalid context. Resize-only invalidation deletes still-valid
-handles before rebuilding them.
+hashes, and font sources. Density changes rebuild device-local raster data under
+the same logical handles. A lost context discards only device-local pointers while
+retaining those handles and sources; restore recreates the resources in the new
+lifecycle generations.
 
 ## Restore transaction
 

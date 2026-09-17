@@ -1904,6 +1904,7 @@ struct StasisGraphicsAssetsApi {
     stasis_asset_task_cancel: Option<usize>,
     stasis_gfx_release_sprite: usize,
     stasis_gfx_release_font: usize,
+    stasis_font_status: Option<usize>,
     stasis_gfx_dump_bmp: usize,
     stasis_gfx_dump_png: Option<usize>,
     stasis_host_schedule_screenshot: Option<usize>,
@@ -1985,6 +1986,7 @@ impl StasisGraphicsAssetsApi {
             stasis_asset_task_cancel: lib.symbol_address("stasis_asset_task_cancel").ok(),
             stasis_gfx_release_sprite: lib.symbol_address("stasis_gfx_release_sprite")?,
             stasis_gfx_release_font: lib.symbol_address("stasis_gfx_release_font")?,
+            stasis_font_status: lib.symbol_address("stasis_font_status").ok(),
             stasis_gfx_dump_bmp: lib.symbol_address("stasis_gfx_dump_bmp")?,
             // PNG capture was added after the original asset ABI. Keep older runtimes usable for
             // all pre-existing calls and report PNG as unsupported.
@@ -5216,6 +5218,7 @@ pub struct EmbeddedGraphicsHost {
     pub load_sprite: fn(&[u8], i32, i32) -> i32,
     pub release_sprite: fn(i32),
     pub load_font: fn(&[u8], i32) -> i32,
+    pub font_status: fn(i32) -> i32,
     pub release_font: fn(i32),
     pub measure_text: fn(i32, &[u8]) -> f32,
     pub cache_text: fn(i32, &[u8]) -> i32,
@@ -5532,6 +5535,53 @@ pub extern "C" fn stasis_jit_gfx_release_font(handle: i32) {
     #[cfg(not(windows))]
     let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(api.stasis_gfx_release_font) };
     callback(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_font_status(handle: i32) -> i32 {
+    const ASSET_STATE_NONE: i32 = 0;
+    const ASSET_STATE_LOADED: i32 = 3;
+    if asset_extern_seam_evidence_path().is_some() {
+        let state = if handle > 0 {
+            ASSET_STATE_LOADED
+        } else {
+            ASSET_STATE_NONE
+        };
+        return if record_asset_extern_seam_call(
+            "font_status",
+            &[handle.to_string(), state.to_string()],
+        ) == Some(true)
+        {
+            state
+        } else {
+            ASSET_STATE_NONE
+        };
+    }
+    if let Some(host) = embedded_graphics_host() {
+        return (host.font_status)(handle);
+    }
+    let Ok(api) = stasis_graphics_assets_api() else {
+        return unavailable_font_status(handle);
+    };
+    let Some(address) = api.stasis_font_status else {
+        // The native load path is synchronous, but older runtime libraries do
+        // not expose the status symbol. Report an explicit terminal state so a
+        // consumer waiting for Loaded cannot stall forever on that ABI.
+        return unavailable_font_status(handle);
+    };
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+    callback(handle)
+}
+
+fn unavailable_font_status(handle: i32) -> i32 {
+    if handle > 0 {
+        4
+    } else {
+        0
+    }
 }
 
 fn configured_preference_storage_root() -> &'static Mutex<Option<PathBuf>> {
@@ -7937,6 +7987,14 @@ mod tests {
         1
     }
 
+    fn test_font_status(handle: i32) -> i32 {
+        if handle > 0 {
+            3
+        } else {
+            0
+        }
+    }
+
     fn test_font_release(_: i32) {}
 
     fn test_measure_text(_: i32, _: &[u8]) -> f32 {
@@ -8163,6 +8221,36 @@ mod tests {
     }
 
     #[test]
+    fn jit_font_status_dispatches_embedded_host_and_rejects_invalid_handles() {
+        let _guard = test_lock();
+        let _host_reset = EmbeddedHostReset;
+        set_embedded_graphics_host(Some(EmbeddedGraphicsHost {
+            load_sprite: test_sprite_load,
+            release_sprite: test_sprite_release,
+            load_font: test_font_load,
+            font_status: test_font_status,
+            release_font: test_font_release,
+            measure_text: test_measure_text,
+            cache_text: test_cache_text,
+            replace_text: test_replace_text,
+            measure_text_cached: test_measure_cached,
+            measure_text_cached_height: test_measure_cached,
+            poll_reload: test_poll_reload,
+        }));
+
+        assert_eq!(stasis_jit_font_status(19), 3);
+        assert_eq!(stasis_jit_font_status(0), 0);
+        assert_eq!(stasis_jit_font_status(-1), 0);
+    }
+
+    #[test]
+    fn missing_font_status_export_is_terminal_for_positive_handles() {
+        assert_eq!(unavailable_font_status(19), 4);
+        assert_eq!(unavailable_font_status(0), 0);
+        assert_eq!(unavailable_font_status(-1), 0);
+    }
+
+    #[test]
     fn jit_sprite_same_handle_replacement_releases_prior_acquisition() {
         let _guard = test_lock();
         clear_registered_global_memory();
@@ -8175,6 +8263,7 @@ mod tests {
             load_sprite: test_sprite_load,
             release_sprite: test_sprite_release,
             load_font: test_font_load,
+            font_status: test_font_status,
             release_font: test_font_release,
             measure_text: test_measure_text,
             cache_text: test_cache_text,
@@ -8215,6 +8304,7 @@ mod tests {
             load_sprite: test_sprite_load,
             release_sprite: test_sprite_release,
             load_font: test_font_load,
+            font_status: test_font_status,
             release_font: test_font_release,
             measure_text: test_measure_text,
             cache_text: test_cache_text,

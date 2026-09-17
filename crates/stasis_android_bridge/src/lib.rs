@@ -971,6 +971,8 @@ pub fn run_android_workshop_tick(
 const MAX_EMBEDDED_FONTS: usize = 64;
 const FONT_HANDLE_INDEX_BITS: u32 = 7;
 const FONT_HANDLE_GENERATION_MASK: u32 = 0x00ff_ffff;
+const ASSET_STATE_NONE: i32 = 0;
+const ASSET_STATE_LOADED: i32 = 3;
 const MAX_EMBEDDED_TEXT_RUNS: usize = 4096;
 const MAX_EMBEDDED_TEXT_BYTES: usize = 262_144;
 const MAX_EMBEDDED_DYNAMIC_TEXT_BYTES: usize = 4096;
@@ -1036,6 +1038,7 @@ fn install_embedded_resource_host(project_root: &Path) -> Result<(), String> {
         load_sprite: embedded_load_sprite,
         release_sprite: embedded_release_sprite,
         load_font: embedded_load_font,
+        font_status: embedded_font_status,
         release_font: embedded_release_font,
         measure_text: embedded_measure_text,
         cache_text: embedded_cache_text,
@@ -1462,6 +1465,24 @@ fn embedded_release_font(handle: i32) {
     catalog.fonts[index].path = PathBuf::new();
     catalog.fonts[index].size = 0;
     catalog.text_runs.retain(|run| run.font != handle);
+}
+
+fn embedded_font_status(handle: i32) -> i32 {
+    let Ok(slot) = embedded_resource_catalog().lock() else {
+        return ASSET_STATE_NONE;
+    };
+    let Some(catalog) = slot.as_ref() else {
+        return ASSET_STATE_NONE;
+    };
+    if catalog
+        .fonts
+        .iter()
+        .any(|font| font.active && font.handle == handle)
+    {
+        ASSET_STATE_LOADED
+    } else {
+        ASSET_STATE_NONE
+    }
 }
 
 fn embedded_measure_text(font: i32, text: &[u8]) -> f32 {
@@ -7874,9 +7895,14 @@ function on_code_swap(): void {}\n";
         let retained_run = embedded_cache_text(2, b"retained");
         assert_eq!(stale_run, 1);
         assert_eq!(retained_run, 2);
+        assert_eq!(embedded_font_status(1), ASSET_STATE_LOADED);
+        assert_eq!(embedded_font_status(0), ASSET_STATE_NONE);
+        assert_eq!(embedded_font_status(-1), ASSET_STATE_NONE);
         embedded_release_font(1);
+        assert_eq!(embedded_font_status(1), ASSET_STATE_LOADED);
         assert!(embedded_measure_text_cached(stale_run) > 0.0);
         embedded_release_font(1);
+        assert_eq!(embedded_font_status(1), ASSET_STATE_NONE);
         assert_eq!(embedded_measure_text_cached(stale_run), 0.0);
         assert!(embedded_measure_text_cached(retained_run) > 0.0);
         {

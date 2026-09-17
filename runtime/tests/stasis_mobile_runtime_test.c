@@ -309,6 +309,7 @@ int stasis_gfx_poll_reload(int handle) { return handle; }
 float stasis_gfx_measure_text_cached(int handle) { return (float)handle; }
 float stasis_gfx_measure_text_cached_height(int handle) { return (float)handle + 1.0f; }
 int stasis_load_font(const char *path, int size) { return path ? size : 0; }
+int stasis_font_status(int handle) { return handle > 0 ? 3 : 0; }
 float stasis_measure_text(int font, const char *text) { return text ? (float)font : 0.0f; }
 void stasis_sleep_ms(int ms) { (void)ms; }
 int stasis_storage_load_i32(const char *scope, const char *key, int fallback) {
@@ -343,6 +344,8 @@ static int32_t game_main(void) {
 #endif
     main_calls += 1;
     assert(stasis_jit_load_font(1639, 19) == 19);
+    assert(stasis_jit_font_status(19) == 3);
+    assert(stasis_jit_font_status(0) == 0);
     game_host_req_seq = 1;
     game_host_req_flags = 1;
     game_host_req_window_w_px = 960;

@@ -60,6 +60,20 @@ A host may return the same handle for repeated loads of the same font; balance
 the acquisitions even when their handle values match. Reuse an already-owned
 font when its required size has not changed instead of loading it again.
 
+`font_status(handle)` reports the existing `AssetState` values for a font. A valid
+status-capable native handle is `Loaded` as soon as `load_font` returns; a Web handle is `Pending`
+or `Loading` until its `FontFace` has loaded and Canvas metrics have been calibrated.
+Web failures settle as `Failed`. A released or invalid handle reports `None` on a
+status-capable host.
+When a legacy native runtime lacks the optional status export, a positive handle
+reports `Failed` so a consumer cannot wait forever; existing synchronous loading
+and release calls remain available.
+Native `Loaded` describes a live font owner and source data. Renderer restoration
+can still rebuild its atlas after a density or context transition, and the host
+withholds frames until that device-local work is ready.
+Consumers that publish text layout after `main` should wait for `Loaded`; pending
+text may carry compatibility fallback dimensions until calibration replaces them.
+
 Cached text does not acquire an additional font ownership reference. It remains
 usable while the font has an owner; the final release invalidates that font and
 its cached text runs. Rebuild those runs for the replacement font. Releasing zero

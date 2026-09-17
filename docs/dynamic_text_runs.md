@@ -16,6 +16,15 @@ an empty receiver or an immutable receiver creates a distinct replaceable entry;
 successful replacements reuse that entry's stable handle. This prevents one caller from changing
 another caller's immutable cached text.
 
+Web fonts acquired after `main` are asynchronous. `font_status(font)` exposes the
+same `AssetState` values as other asset APIs; it reaches `Loaded` only after the
+`FontFace` has resolved and the Canvas metrics have been calibrated. A text-run
+acquisition may expose compatibility fallback dimensions while the font is
+`Pending` or `Loading`, but the renderer does not prepare or draw that run until
+the status is `Loaded`. A rejected load settles as `Failed` and clears pending
+run dimensions. A release removes the handle and late browser completion cannot
+publish metrics or prepared resources.
+
 ## Bounds and lifetime
 
 - Native SDL (desktop and the SDL-backed macOS/iOS-supported paths) supports 16 active replaceable

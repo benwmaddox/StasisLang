@@ -17,11 +17,19 @@ int stasis_init_window(int width, int height, const char* title);
 void stasis_shutdown(void);
 int stasis_set_asset_root(const char* path);
 int stasis_load_font(const char* path, int font_size);
+int stasis_font_status(int handle);
 void stasis_gfx_release_font(int handle);
 int stasis_gfx_cache_text(int font, const char* text);
 int stasis_gfx_replace_text(int handle, int font, const char* text);
 float stasis_gfx_measure_text_cached(int handle);
 float stasis_gfx_measure_text_cached_height(int handle);
+void stasis_begin_frame(void);
+int stasis_test_push_display_event(
+    int kind, int logical_w, int logical_h, int native_w, int native_h,
+    int drawable_w, int drawable_h, int available_w, int available_h,
+    int safe_x, int safe_y, int safe_w, int safe_h);
+int SDL_setenv_unsafe(const char* name, const char* value, int overwrite);
+int SDL_unsetenv_unsafe(const char* name);
 
 static char g_temp_dir[512];
 static char g_identity_paths[10][768];
@@ -48,6 +56,105 @@ static void cleanup_font_cache_temp_files(void) {
         exit(1); \
     } \
 } while (0)
+
+static void set_environment_value(const char* name, const char* value) {
+    /* SDL_getenv reads SDL's synchronized cache after SDL_Init. The unsafe
+       SDL helper updates that cache and the process environment together. */
+    CHECK(SDL_setenv_unsafe(name, value, 1) == 0);
+}
+
+static void clear_environment_value(const char* name) {
+    CHECK(SDL_unsetenv_unsafe(name) == 0);
+}
+
+static void test_density_rebuild_failure_retries(void) {
+    stasis_shutdown();
+    CHECK(stasis_init_window(64, 64, "stasis_font_cache_test_density_retry"));
+    int font = stasis_load_font(STASIS_TEST_FONT_PATH, 18);
+    CHECK(font > 0);
+    int run = stasis_gfx_cache_text(font, "density retry");
+    CHECK(run > 0);
+    const float prior_width = stasis_gfx_measure_text_cached(run);
+    const float prior_height = stasis_gfx_measure_text_cached_height(run);
+    CHECK(prior_width > 0.0f && prior_height > 0.0f);
+
+    set_environment_value("STASIS_ENABLE_TEST_INPUT", "1");
+    CHECK(stasis_test_push_display_event(
+        1, 64, 64, 128, 128, 128, 128, 128, 128, 0, 0, 128, 128));
+    stasis_begin_frame();
+    set_environment_value("STASIS_TEST_FONT_REBUILD_FAILURES", "2");
+    CHECK(stasis_gfx_measure_text_cached(run) == 0.0f);
+    CHECK(stasis_gfx_measure_text_cached(run) == 0.0f);
+    clear_environment_value("STASIS_TEST_FONT_REBUILD_FAILURES");
+    const float recovered_width = stasis_gfx_measure_text_cached(run);
+    const float recovered_height = stasis_gfx_measure_text_cached_height(run);
+    CHECK(recovered_width > 0.0f && recovered_height > 0.0f);
+    CHECK(recovered_width >= prior_width - 1.0f && recovered_width <= prior_width + 1.0f);
+    CHECK(recovered_height >= prior_height - 1.0f && recovered_height <= prior_height + 1.0f);
+
+    /* A pending rebuild must not cross a full shutdown. The second lifecycle
+       leaves one retry pending so reset_text_cache is exercised while stale
+       handles remain invalid. */
+    stasis_shutdown();
+    CHECK(stasis_gfx_measure_text_cached(run) == 0.0f);
+    CHECK(stasis_init_window(64, 64, "stasis_font_cache_test_density_pending_reset"));
+    int pending_font = stasis_load_font(STASIS_TEST_FONT_PATH, 18);
+    CHECK(pending_font > 0);
+    int pending_run = stasis_gfx_cache_text(pending_font, "pending reset");
+    CHECK(pending_run > 0);
+    set_environment_value("STASIS_TEST_FONT_REBUILD_FAILURES", "2");
+    CHECK(stasis_test_push_display_event(
+        1, 64, 64, 256, 256, 256, 256, 256, 256, 0, 0, 256, 256));
+    stasis_begin_frame();
+    CHECK(stasis_gfx_measure_text_cached(pending_run) == 0.0f);
+    stasis_shutdown();
+    CHECK(stasis_gfx_measure_text_cached(pending_run) == 0.0f);
+    /* A fresh request would fail if the pending rebuild or the remaining
+       shutdown fault crossed the lifecycle boundary. */
+    set_environment_value("STASIS_TEST_FONT_REBUILD_FAILURES", "1");
+
+    CHECK(stasis_init_window(64, 64, "stasis_font_cache_test_density_reinit"));
+    int reset_font = stasis_load_font(STASIS_TEST_FONT_PATH, 18);
+    CHECK(reset_font > 0);
+    int reset_run = stasis_gfx_cache_text(reset_font, "fresh after reset");
+    CHECK(reset_run > 0);
+    clear_environment_value("STASIS_TEST_FONT_REBUILD_FAILURES");
+    CHECK(stasis_gfx_measure_text_cached(reset_run) > 0.0f);
+    CHECK(stasis_gfx_measure_text_cached_height(reset_run) > 0.0f);
+    stasis_gfx_release_font(reset_font);
+    stasis_shutdown();
+    clear_environment_value("STASIS_ENABLE_TEST_INPUT");
+}
+
+static void test_failed_immutable_cache_rolls_back_bytes(void) {
+    stasis_shutdown();
+    CHECK(stasis_init_window(64, 64, "stasis_font_cache_test_byte_rollback"));
+    int font = stasis_load_font(STASIS_TEST_FONT_PATH, 18);
+    CHECK(font > 0);
+
+    char filled[1001];
+    for (int index = 0; index < 60; index++) {
+        int prefix = snprintf(filled, sizeof(filled), "%02d", index);
+        CHECK(prefix > 0 && prefix < (int)sizeof(filled));
+        memset(filled + prefix, 'A', sizeof(filled) - (size_t)prefix - 1);
+        filled[sizeof(filled) - 1] = 0;
+        CHECK(stasis_gfx_cache_text(font, filled) > 0);
+    }
+
+    char newlines[8193];
+    memset(newlines, '\n', sizeof(newlines) - 1);
+    newlines[sizeof(newlines) - 1] = 0;
+    for (int attempt = 0; attempt < 24; attempt++) {
+        CHECK(stasis_gfx_cache_text(font, newlines) == 0);
+    }
+
+    char surviving[5521];
+    memset(surviving, 'A', sizeof(surviving) - 1);
+    surviving[sizeof(surviving) - 1] = 0;
+    CHECK(stasis_gfx_cache_text(font, surviving) > 0);
+
+    stasis_gfx_release_font(font);
+}
 
 static unsigned char* read_file(const char* path, size_t* size_out) {
     FILE* file = fopen(path, "rb");
@@ -96,6 +203,8 @@ int main(void) {
 
     int first = stasis_load_font(STASIS_TEST_FONT_PATH, 18);
     CHECK(first > 0);
+    CHECK(stasis_font_status(first) == 3);
+    CHECK(stasis_font_status(0) == 0);
     for (int i = 0; i < 16; i++) {
         CHECK(stasis_load_font(STASIS_TEST_FONT_PATH, 18) == first);
     }
@@ -150,6 +259,7 @@ int main(void) {
     CHECK(stasis_load_font(STASIS_TEST_FONT_PATH, 100) == large);
 
     stasis_gfx_release_font(first);
+    CHECK(stasis_font_status(first) == 0);
     CHECK(stasis_gfx_measure_text_cached(fixed_run) == 0.0f);
     CHECK(stasis_gfx_measure_text_cached(dynamic_run) == prior_width);
     CHECK(stasis_gfx_cache_text(first, "stale handle") == 0);
@@ -192,6 +302,9 @@ int main(void) {
     CHECK(reset_replacement > 0 && reset_replacement != stale_reset_font);
     CHECK(stasis_gfx_measure_text_cached(stale_reset_run) == 0.0f);
     stasis_gfx_release_font(reset_replacement);
+
+    test_density_rebuild_failure_retries();
+    test_failed_immutable_cache_rolls_back_bytes();
 
     size_t identity_size = 0;
     unsigned char* identity_bytes = read_file(STASIS_TEST_FONT_PATH, &identity_size);

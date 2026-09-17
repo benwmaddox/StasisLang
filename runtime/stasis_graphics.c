@@ -141,6 +141,7 @@ STASIS_EXPORT int stasis_host_get_monitor_usable_bounds(
     float* out_f32, int32_t float_capacity);
 STASIS_EXPORT int stasis_get_time_us(void);
 STASIS_EXPORT int stasis_load_font(const char* path, int font_size);
+STASIS_EXPORT int stasis_font_status(int font_handle);
 STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text);
 STASIS_EXPORT int stasis_gfx_replace_text(int run_handle, int font_handle, const char* text);
 STASIS_EXPORT void stasis_gfx_draw_text_cached(int run_handle, float x, float y, float r, float g, float b, float a);
@@ -320,6 +321,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen);
 STASIS_EXPORT void stasis_gfx_draw_sprite(int handle, float x, float y, float w, float h, int rot_degrees, int a);
 STASIS_EXPORT void stasis_gfx_release_sprite(int handle);
 STASIS_EXPORT void stasis_gfx_release_font(int handle);
+STASIS_EXPORT int stasis_font_status(int handle);
 STASIS_EXPORT void stasis_audio_release(int asset_handle);
 STASIS_EXPORT void stasis_gfx_submit_u8(int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8);
 STASIS_EXPORT int stasis_test_get_render_submission_state(int32_t* out_i32, int32_t capacity);
@@ -6801,6 +6803,44 @@ static StasisTextQuad g_dynamic_text_quads[STASIS_MAX_DYNAMIC_TEXT_RUNS][STASIS_
 static SDL_Vertex g_text_geometry_vertices[STASIS_TEXT_GEOMETRY_BATCH_QUADS * 4];
 static int g_text_geometry_indices[STASIS_TEXT_GEOMETRY_BATCH_QUADS * 6];
 static bool g_text_geometry_indices_ready = false;
+/* Retained runs are not drawable until an incomplete rebuild succeeds. */
+static int g_text_rebuild_pending = 0;
+static int g_test_text_rebuild_failures_remaining = 0;
+static int g_test_text_rebuild_failure_configured = 0;
+
+/*
+ * Native font-cache tests can force a bounded number of cached-run rebuild
+ * failures without adding a public graphics API. The input gate matches the
+ * existing native seam helpers. The request is consumed once per lifecycle so
+ * an unchanged environment value cannot re-arm the fault after recovery.
+ */
+static void stasis_test_reset_text_rebuild_failure(void) {
+    g_test_text_rebuild_failures_remaining = 0;
+    g_test_text_rebuild_failure_configured = 0;
+}
+
+static int stasis_test_consume_text_rebuild_failure(void) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!enabled || enabled[0] != '1' || enabled[1] != '\0') {
+        stasis_test_reset_text_rebuild_failure();
+        return 0;
+    }
+    if (!g_test_text_rebuild_failure_configured) {
+        const char* requested = SDL_getenv("STASIS_TEST_FONT_REBUILD_FAILURES");
+        if (requested && *requested) {
+            char* end = NULL;
+            errno = 0;
+            const long count = strtol(requested, &end, 10);
+            if (errno == 0 && end != requested && *end == '\0' && count > 0 && count <= 8) {
+                g_test_text_rebuild_failures_remaining = (int)count;
+            }
+            g_test_text_rebuild_failure_configured = 1;
+        }
+    }
+    if (g_test_text_rebuild_failures_remaining <= 0) return 0;
+    g_test_text_rebuild_failures_remaining--;
+    return 1;
+}
 
 static int stasis_text_is_valid_utf8(const unsigned char* text, int len) {
     int i = 0;
@@ -6868,6 +6908,8 @@ static void stasis_reset_text_cache(void) {
     }
     g_text_run_bytes_used = 0;
     g_text_run_quads_used = 0;
+    g_text_rebuild_pending = 0;
+    stasis_test_reset_text_rebuild_failure();
 }
 
 static uint32_t fnv1a_u32(const unsigned char* data, int len) {
@@ -7039,20 +7081,29 @@ static int stasis_build_text_run_quads(StasisTextRun* run, StasisFont* font) {
 }
 
 static int stasis_rebuild_text_runs(void) {
+    if (stasis_test_consume_text_rebuild_failure()) {
+        g_text_rebuild_pending = 1;
+        return 0;
+    }
     g_text_run_quads_used = 0;
     for (int i = 0; i < STASIS_MAX_TEXT_RUNS; i++) {
         StasisTextRun* run = &g_text_runs[i];
         if (!run->active) continue;
         StasisFont* font = stasis_font_get(run->font_handle);
-        if (!font) return 0;
+        if (!font) goto failed;
         if (run->replaceable) {
-            if (run->dynamic_slot < 0 || run->dynamic_slot >= STASIS_MAX_DYNAMIC_TEXT_RUNS) return 0;
+            if (run->dynamic_slot < 0 || run->dynamic_slot >= STASIS_MAX_DYNAMIC_TEXT_RUNS) goto failed;
             if (!stasis_build_text_run_quads_into(
                     run, font, (const char*)g_dynamic_text_bytes[run->dynamic_slot],
-                    g_dynamic_text_quads[run->dynamic_slot], STASIS_DYNAMIC_TEXT_MAX_QUADS)) return 0;
-        } else if (!stasis_build_text_run_quads(run, font)) return 0;
+                    g_dynamic_text_quads[run->dynamic_slot], STASIS_DYNAMIC_TEXT_MAX_QUADS)) goto failed;
+        } else if (!stasis_build_text_run_quads(run, font)) goto failed;
     }
+    g_text_rebuild_pending = 0;
     return 1;
+
+failed:
+    g_text_rebuild_pending = 1;
+    return 0;
 }
 
 static int stasis_release_text_runs_for_font(int font_handle) {
@@ -7100,7 +7151,10 @@ static int stasis_ensure_font_ready(int font_handle) {
         if (!stasis_build_font_atlas(candidate)) return 0;
         rebuilt_density_fonts = 1;
     }
-    return !rebuilt_density_fonts || stasis_rebuild_text_runs();
+    if (g_text_rebuild_pending || rebuilt_density_fonts) {
+        if (!stasis_rebuild_text_runs()) return 0;
+    }
+    return 1;
 }
 
 static int stasis_restore_renderer_resources(void) {
@@ -7320,6 +7374,7 @@ STASIS_EXPORT int stasis_gfx_cache_text(int font_handle, const char* text) {
     run->text_off = text_off;
     run->text_len = len;
     if (!stasis_build_text_run_quads(run, font)) {
+        g_text_run_bytes_used = text_off;
         memset(run, 0, sizeof(*run));
         run->generation = generation;
         run->retired = retired;
@@ -7557,6 +7612,10 @@ STASIS_EXPORT void stasis_gfx_release_font(int handle) {
     if (font->retired) {
         SDL_Log("stasis_gfx_release_font: retired slot=%d after generation wrap", slot);
     }
+}
+
+STASIS_EXPORT int stasis_font_status(int handle) {
+    return stasis_font_get(handle) ? STASIS_ASSET_TASK_LOADED : STASIS_ASSET_TASK_NONE;
 }
 
 /* Draw text string using loaded font */

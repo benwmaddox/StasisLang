@@ -1349,6 +1349,9 @@ test("configured solid and text residency returns bytes when the text resource i
   assert.equal(runtime.body.dataset.atlasPages, "1");
   assert.equal(runtime.body.dataset.assetAtlasBytes, String(pageBytes));
   const font = runtime.env.load_font(0, 18);
+  assert.equal(runtime.env.font_status(font), 2);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.env.font_status(font), 3);
   runtime.setTextFixture(font, "budget text");
   runtime.frame();
   assert.equal(runtime.body.dataset.gpuError, undefined);
@@ -1568,6 +1571,9 @@ test("prepared text LRU remains bounded and releases evicted atlas entries", asy
 test("oversized prepared text is transient and releases its atlas page after drawing", async () => {
   const runtime = await loadRuntime();
   const font = runtime.env.load_font(0, 1024);
+  assert.equal(runtime.env.font_status(font), 2);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.env.font_status(font), 3);
   for (let value = 0; value < 3; value += 1) {
     runtime.setTextFixture(font, `${String(value)}${"x".repeat(256)}`);
     runtime.frame();

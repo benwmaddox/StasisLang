@@ -48,6 +48,11 @@ int stasis_load_font(const char *path, int size) {
     return 0;
 }
 
+int stasis_font_status(int handle) {
+    (void)handle;
+    return 0;
+}
+
 float stasis_measure_text(int font, const char *text) {
     (void)font;
     (void)text;

@@ -11,14 +11,17 @@ export async function loadRuntime(game, options = {}) {
   const imageSources = [];
   const measurements = [];
   const animationFrames = [];
+  const frameCallbacks = [];
   const addedFonts = [];
   const fontSources = [];
+  const contextState = { saves: 0, restores: 0 };
   let env;
-  const memory = new WebAssembly.Memory({ initial: 1 });
+  const memory = new WebAssembly.Memory({ initial: options.memoryPages ?? 1 });
   const context2d = {
     fontKerning: "auto",
     textBaseline: "alphabetic",
-    fillRect() {}, fillText() {}, save() {}, restore() {}, beginPath() {}, moveTo() {},
+    fillRect() {}, fillText() {}, save() { contextState.saves += 1; },
+    restore() { contextState.restores += 1; }, beginPath() {}, moveTo() {},
     lineTo() {}, stroke() {}, drawImage() {}, translate() {}, rotate() {},
     measureText(value) {
       measurements.push({ font: this.font, value });
@@ -47,6 +50,11 @@ export async function loadRuntime(game, options = {}) {
     fonts: {
       ready: options.fontsReady || Promise.resolve(),
       add(font) { addedFonts.push(font); },
+      delete(font) {
+        const index = addedFonts.indexOf(font);
+        if (index >= 0) addedFonts.splice(index, 1);
+        return index >= 0;
+      },
     },
     hasFocus: () => true,
     getElementById(id) {
@@ -66,8 +74,8 @@ export async function loadRuntime(game, options = {}) {
       memory,
       __stasis_global_get_i32: hash => options.globalGetI32?.(hash) ?? 0,
       main: () => { options.main?.(env, memory); return 0; },
-      tick: () => 0,
-      render: () => 0,
+      tick: () => { options.tick?.(env, memory); return 0; },
+      render: () => { options.render?.(env, memory); return 0; },
     }
   };
   installCollectionViewAbi(game, instance.exports, {
@@ -91,8 +99,9 @@ export async function loadRuntime(game, options = {}) {
       },
     },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
-    requestAnimationFrame: () => {
+    requestAnimationFrame: callback => {
       animationFrames.push(true);
+      frameCallbacks.push(callback);
       options.onFrame?.();
       return 1;
     },
@@ -135,7 +144,11 @@ export async function loadRuntime(game, options = {}) {
   assert.equal(typeof env?.gfx_load_sprite, "function", errorBox.textContent);
   return {
     env, memory, imageSources, measurements, animationFrames, addedFonts, fontSources,
-    document, errorBox, runtimePromise,
+    document, errorBox, runtimePromise, contextState,
+    runFrame(timestamp = 0) {
+      const callback = frameCallbacks.shift();
+      if (callback) callback(timestamp);
+    },
   };
 }
 
