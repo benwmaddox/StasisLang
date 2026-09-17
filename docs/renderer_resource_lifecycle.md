@@ -30,9 +30,11 @@ Each successful `load_font` acquires an ownership reference, including duplicate
 loads that return a shared handle. Balance each acquisition with one
 `release_font`; cached text does not retain the font independently. The final
 release destroys the atlas and source bytes, generation-invalidates the handle,
-and removes only cached text owned by that font. Earlier releases leave the
-remaining owners and their cached text usable. A replacement should acquire and
-prepare its font and text before releasing the previous owned font.
+and normally removes only cached text owned by that font. Earlier releases leave
+the remaining owners and their cached text usable. If native cache compaction
+cannot allocate its bounded scratch buffer, or detects corrupt cache state, it
+fails closed by clearing the complete text cache. A replacement should acquire
+and prepare its font and text before releasing the previous owned font.
 Android pause/resume is a visibility transition: the Workshop asks GLSurfaceView to
 preserve its EGL context and retains textures when that context survives. A later
 `onSurfaceCreated` callback is the authoritative signal that the context was lost.
