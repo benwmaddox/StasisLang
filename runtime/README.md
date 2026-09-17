@@ -212,13 +212,18 @@ construction, not the native device or viewport lifecycle. For lifecycle 1,
 the non-monolithic generated bridge and the Windows monolithic generated AOT
 bindings, plus the shared Android/iOS generated AOT bindings, each call reset ->
 authored render -> finish exactly once. Lifecycle 1 requires a zero-argument
-authored `render()` entry; tick-only or render-less packages stay on lifecycle
-0/absent direct/manual construction. For
-lifecycle 0 or absent metadata, the generated entry calls the authored render
-directly and preserves the legacy explicit-builder behavior.
+authored `render()` entry; tick-only or render-less packages without an
+exported render entry stay on lifecycle 0/absent direct/manual construction.
+For generated bridges that support the legacy direct path, lifecycle 0 or
+absent metadata calls the authored render directly and preserves the legacy
+explicit-builder behavior. `stasis_runner` rejects lifecycle 0/absent metadata
+when an exported render entry is present; packaged renders must publish
+lifecycle 1.
 
 `stasis_runner` may parse and verify state/launch sidecar metadata for routing,
-but it never wraps an exported render entry or adds another reset/finish. The
+but it never wraps an exported render entry or adds another reset/finish. When
+an exported render entry is present, it requires lifecycle 1 and rejects the
+obsolete lifecycle-0/absent direct-render package before invocation. The
 native `stasis_begin_frame()` and `stasis_end_frame()` exports above are
 host-private backend preparation/submission operations; they are not guest
 command-builder reset/finish hooks. The public guest frame wrappers are removed
@@ -230,9 +235,11 @@ transforms, drawable resolution, or any resolution cap. After a new nightly is
 installed, regenerate the consumer's vendored stdlib, generated bindings, and
 package metadata together; verify the lifecycle-1 entry, then remove any
 temporary public frame-wrapper bridge from authored `render()` code.
-Lifecycle-0/absent packages remain direct-render until rebuilt, and consumers
-without such a bridge need only the coordinated vendor/metadata refresh. See
-the [full lifecycle owner matrix](../docs/begin_frame_design.md#exact-owner-matrix).
+Lifecycle-0/absent packages without an exported render entry may remain
+direct/manual; packaged render entries must be rebuilt with lifecycle 1 before
+use with `stasis_runner`. Consumers without such a bridge need only the
+coordinated vendor/metadata refresh. See the [full lifecycle owner
+matrix](../docs/begin_frame_design.md#exact-owner-matrix).
 
 ## SDL Scancodes
 

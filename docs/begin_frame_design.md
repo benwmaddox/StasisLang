@@ -177,7 +177,9 @@ capabilities on abort and hot-generation changes as well as reset.
 package metadata. It must not result in two wrappers around the same authored
 render entry. Lifecycle 1 is valid only when that package exposes a
 zero-argument authored `render()` export; a tick-only or render-less package
-uses lifecycle 0/absent direct/manual construction:
+without an exported render entry uses lifecycle 0/absent direct/manual
+construction. A packaged render entry must publish lifecycle 1 for
+`stasis_runner`:
 
 | Owner / package shape | Lifecycle 1 behavior | Lifecycle 0 or absent behavior |
 | --- | --- | --- |
@@ -185,8 +187,8 @@ uses lifecycle 0/absent direct/manual construction:
 | Windows monolithic generated bindings | Generated AOT binding calls reset -> authored render -> finish exactly once. | Binding calls authored render directly. |
 | Android generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
 | iOS generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
-| `stasis_runner` | Parses/verifies state/launch sidecar metadata when present, invokes the already-exported render entry, and never wraps it or adds reset/finish. | Invokes the legacy direct render entry. |
-| Authored guest render | Draws only; host finish validates and publishes the construction. | A legacy package remains under its negotiated compatibility contract until rebuilt. |
+| `stasis_runner` | Parses/verifies state/launch sidecar metadata when present, invokes the already-exported render entry, and never wraps it or adds reset/finish. | Rejects an exported render entry as obsolete; tick-only and render-less packages remain direct/manual. |
+| Authored guest render | Draws only; host finish validates and publishes the construction. | A package without an exported render entry remains under its negotiated compatibility contract. |
 
 The sidecar check in `stasis_runner` is routing/state verification, not engine
 bundle lifecycle ownership. The generated bridge or generated bindings have
@@ -208,10 +210,11 @@ For a consumer with a temporary compatibility bridge, first verify the new
 lifecycle-1 generated entry, then remove both public frame-wrapper calls from
 authored `render()` and retain its normal drawing. Run focused render/ABI checks
 and search the negotiated render path for any remaining guest frame wrappers. A
-lifecycle-0/absent package remains on direct render
-until rebuilt with lifecycle 1; consumers that never shipped a production
-bridge only need the coordinated vendor and metadata refresh. This migration
-does not change viewport or resolution limits.
+package with an exported render entry must publish lifecycle 1 before use with
+`stasis_runner`; a tick-only or render-less package may remain lifecycle
+0/absent direct/manual. Consumers that never shipped a production bridge only
+need the coordinated vendor and metadata refresh. This migration does not
+change viewport or resolution limits.
 
 Host finish is the publication gate. It is not a resource lifetime fence or
 physical-presentation acknowledgement; device submission remains host-owned.
@@ -238,10 +241,12 @@ C validation/trace fixtures; vendored stdlib copies; templates, snippets, loadin
 guidance and exact-string CI assertions listed in the inventory. The native C
 export is not the guest wrapper and must not be deleted as a side effect.
 
-Keep negotiated compatibility for packages already built against the old
-wrappers; do not reinterpret those packages as new host-owned packages. New
-source validation rejects the removed public calls. Migrate old tick-only hosts
-to a supported host construction wrapper, not reset-before-tick for all programs.
+Keep negotiated compatibility for tick-only and render-less packages that do
+not expose a render entry. Packages with an old direct render export must be
+rebuilt with lifecycle 1 before use with `stasis_runner`; do not reinterpret
+those packages as new host-owned packages or add a second wrapper. New source
+validation rejects the removed public calls. Migrate old tick-only hosts to a
+supported host construction wrapper, not reset-before-tick for all programs.
 Graphics outside the negotiated construction scope must fail deterministically.
 Update vendor packages through their normal generation flow, not independent
 edits to snapshots. Rollback consists of retaining old package/host contract
