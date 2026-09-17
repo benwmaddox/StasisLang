@@ -151,7 +151,9 @@ def read_capture(path: Path) -> tuple[int, int, bytes]:
 
 
 def _function_body(source: str, name: str) -> str:
-    declaration = re.search(rf"\bfunction\s+{re.escape(name)}\s*\(", source)
+    declaration = re.search(
+        rf"\bfunction\s+(?:@[A-Za-z_][A-Za-z0-9_]*\s+)*{re.escape(name)}\s*\(", source
+    )
     if declaration is None:
         raise ValueError(f"fixture is missing function {name}")
     opening = source.find("{", declaration.end())
@@ -212,7 +214,6 @@ def _parity_command_counts(frame_source: str) -> dict[str, int]:
         "sprites": count(r"\bparity_write_sprite\s*\("),
         "direct_text": count(r"\bdraw_text\s*\("),
         "cached_text": count(r"\bcached_label\s*\.\s*draw\s*\("),
-        "present": count(r"\bend_frame\s*\("),
     }
 
 
@@ -235,11 +236,21 @@ def validate_fixture(manifest_path: Path) -> dict:
         raise ValueError(f"render parity fixture is missing: {fixture}")
     source = fixture.read_text(encoding="utf-8")
     frame_source = (fixture.parent / "frame.stasis").read_text(encoding="utf-8")
+    if re.search(r"\b(?:begin_frame|end_frame)\s*\(", source + frame_source):
+        raise ValueError("render parity fixture must use host-owned frame publication")
     actual_commands = _parity_command_counts(frame_source)
     for command, actual in actual_commands.items():
         expected = int(manifest["required_commands"][command])
         if actual != expected:
             raise ValueError(f"fixture has {actual} {command} commands; expected {expected}")
+    # PRESENT is a host-published packet flag, not an authored drawing command.
+    graphics_commands = (ROOT / "src/stdlib/internal/gfx_cmd.stasis").read_text(
+        encoding="utf-8"
+    )
+    finish_body = _function_body(graphics_commands, "gfx_cmd_construction_finish")
+    host_publications = len(re.findall(r"\bgfx_cmd_submit\s*\(", finish_body))
+    if host_publications != 1 or int(manifest["required_commands"]["present"]) != 1:
+        raise ValueError("render parity requires one host finish publication")
     atlas_handles = _atlas_sprite_handles(frame_source)
     if atlas_handles != ATLAS_SPRITE_HANDLES:
         raise ValueError(

@@ -48,7 +48,6 @@ function render(): i32 {
     draw_sprite(fallback_ref, 264.0, 124.0, 112.0, 112.0, 0, 255);
     draw_text(font, "DIRECT AOT", 260.0, 68.0, 1.0, 1.0, 1.0, 1.0);
     label.draw(448.0, 156.0, 0.0666667, 0.9058824, 0.8627451, 1.0);
-    end_frame();
     return 0;
 }
 

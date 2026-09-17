@@ -58,16 +58,16 @@ to `main` or `tick` as a substitute for a render entry.
 
 The generated entry calls `gfx_cmd_construction_reset()` and
 `gfx_cmd_construction_finish(result)`; `stasis_begin_frame()` and
-`stasis_end_frame()` remain host-private device/submission operations. A guest
-`begin_frame()` nested inside lifecycle-1 authored render invalidates the active
-construction and causes finish to abort. Construction lifecycle negotiation has
-no implication for logical coordinates, viewport/safe viewport, drawable
+`stasis_end_frame()` remain host-private device/submission operations. The
+public guest frame wrappers are removed; authored calls are rejected before a
+host-owned construction can run. Construction lifecycle negotiation has no
+implication for logical coordinates, viewport/safe viewport, drawable
 resolution, or a resolution cap. See the [full owner matrix and migration
 rules](begin_frame_design.md#exact-owner-matrix).
 
 Once a new nightly is installed, consumers should regenerate vendor snapshots,
 generated bindings, and package metadata together, verify the lifecycle-1 entry,
-then remove any temporary manual-begin compatibility bridge from authored
+then remove any temporary public frame-wrapper compatibility bridge from authored
 `render()` code. Lifecycle-0/absent consumers remain direct-render packages
 until rebuilt; this migration does not alter display limits.
 

@@ -800,7 +800,6 @@ function render(): i32 {
     draw_line(320.0, 270.0, 640.0, 270.0, 0.18, 0.72, 0.92, 1.0);
     draw_line(480.0, 190.0, 480.0, 350.0, 0.18, 0.72, 0.92, 1.0);
     draw_text(gauntlet_ui_font, "STASIS GAUNTLET", 392.0, 390.0, 0.86, 0.92, 1.0, 1.0);
-    end_frame();
     return 0;
 }
 
@@ -1128,11 +1127,12 @@ mod tests {
             "function render(): i32",
             "function on_code_swap(): void",
             "init_window(960, 540, \"Stasis Gauntlet\")",
-            "end_frame()",
         ] {
             assert!(GAUNTLET_SEED_SOURCE.contains(required), "{required}");
         }
         assert_eq!(GAUNTLET_SEED_SOURCE.matches("import \"").count(), 3);
+        assert!(!GAUNTLET_SEED_SOURCE.contains("begin_frame()"));
+        assert!(!GAUNTLET_SEED_SOURCE.contains("end_frame()"));
         assert!(!GAUNTLET_SEED_SOURCE.contains("host_req_flags"));
         assert!(!GAUNTLET_SEED_SOURCE.contains("host_req_seq"));
         assert!(GAUNTLET_SEED_TEST.contains("return render() == 0"));

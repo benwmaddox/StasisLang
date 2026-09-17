@@ -100,7 +100,6 @@ function render(): i32 {
     clear(0.05, 0.05, 0.10, 1.0);
     draw_line(state.x, 60.0, state.x + 120.0, 60.0,
               1.0, 1.0, 1.0, 1.0);
-    end_frame();
     return 0;
 }
 

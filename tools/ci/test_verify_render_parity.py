@@ -79,7 +79,6 @@ function build_parity_frame(canvas_sprite: i32, cached_label: TextRun): void {
     draw_line(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
     draw_text(1, "brace } text", 0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
     cached_label.draw(0.0, 0.0, 1.0, 1.0, 1.0, 1.0);
-    end_frame();
 }
 function append_marker(missing_sprite: i32): void {
     fill_rect(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
@@ -95,7 +94,6 @@ function append_marker(missing_sprite: i32): void {
                 "sprites": 1,
                 "direct_text": 1,
                 "cached_text": 1,
-                "present": 1,
             },
         )
         self.assertEqual(_atlas_sprite_handles(source), ("canvas_sprite",))

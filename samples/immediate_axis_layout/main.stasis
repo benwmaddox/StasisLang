@@ -79,7 +79,6 @@ function render(): i32 {
     state.title.draw(menu_title_x, menu_title_y, 1.0, 0.9, 0.7, 1.0);
     state.button.draw(menu_button_x, menu_button_y, 255, 0);
     state.play.draw(menu_label_x, menu_label_y, 1.0, 1.0, 1.0, 1.0);
-    end_frame();
     return 0;
 }
 

@@ -221,15 +221,15 @@ directly and preserves the legacy explicit-builder behavior.
 but it never wraps an exported render entry or adds another reset/finish. The
 native `stasis_begin_frame()` and `stasis_end_frame()` exports above are
 host-private backend preparation/submission operations; they are not guest
-command-builder reset/finish hooks. If lifecycle-1 guest code calls
-`begin_frame()` during host-owned render, the nested `gfx_cmd_begin()` marks the
-construction invalid and finish aborts it.
+command-builder reset/finish hooks. The public guest frame wrappers are removed
+from the host-owned source contract and frontend validation rejects authored
+calls before rendering.
 
 This boundary does not change logical coordinates, viewport or safe-viewport
 transforms, drawable resolution, or any resolution cap. After a new nightly is
 installed, regenerate the consumer's vendored stdlib, generated bindings, and
 package metadata together; verify the lifecycle-1 entry, then remove any
-temporary manual-begin compatibility bridge from authored `render()` code.
+temporary public frame-wrapper bridge from authored `render()` code.
 Lifecycle-0/absent packages remain direct-render until rebuilt, and consumers
 without such a bridge need only the coordinated vendor/metadata refresh. See
 the [full lifecycle owner matrix](../docs/begin_frame_design.md#exact-owner-matrix).

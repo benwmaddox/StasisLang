@@ -241,9 +241,7 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     assert!(
         stdout.contains("IT-014 order=123 marker=77 request=41:5:640:360 render_score=15 frames=1")
     );
-    assert!(
-        stdout.contains("IT-015 generated_render_reset=1 nested_begin_rejected=1 abort_reset=1")
-    );
+    assert!(stdout.contains("IT-015 generated_render_reset=1 open_writer_rejected=1 abort_reset=1"));
 
     let evidence = json!({
         "schema": "stasis.seam_test.v1",
@@ -326,7 +324,7 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         "status": "passed",
         "target": "windows-native-aot+generated-monolithic-bindings",
         "generated_render_reset_count": 1,
-        "nested_begin_rejected": true,
+        "open_writer_rejected": true,
         "abort_reset_count": 1,
         "submitted_frames_after_rejection": 0
     });

@@ -48,37 +48,28 @@ STASIS_TEST_EXPORT int main(void)
 
 STASIS_TEST_EXPORT int tick(void)
 {
-    /* The second render exits through finish after proving nested begin rejection. */
+    /* The second render exits through finish after proving failed-render abort. */
     return 0;
 }
 
 STASIS_TEST_EXPORT void gfx_cmd_construction_reset(void)
 {
     reset_calls++;
-    construction_active = 1;
-    construction_invalid = 0;
-    working_rects = 0;
-}
-
-STASIS_TEST_EXPORT void gfx_cmd_manual_begin(void)
-{
     if (construction_active)
     {
         construction_invalid = 1;
         return;
     }
+    construction_active = 1;
+    construction_invalid = 0;
     working_rects = 0;
 }
 
-STASIS_TEST_EXPORT void aot_render(void)
+STASIS_TEST_EXPORT int aot_render(void)
 {
     render_calls++;
     working_rects = 1;
-    if (render_calls == 2)
-    {
-        /* Models authored begin_frame() inside a lifecycle-v1 render callback. */
-        gfx_cmd_manual_begin();
-    }
+    return render_calls == 2 ? 1 : 0;
 }
 
 STASIS_TEST_EXPORT int gfx_cmd_construction_finish(int result)
@@ -96,15 +87,15 @@ STASIS_TEST_EXPORT int gfx_cmd_construction_finish(int result)
         return 3;
     }
     construction_active = 0;
-    if (construction_invalid)
+    if (construction_invalid || result != 0)
     {
         working_rects = 0;
         if (render_calls != 2 || published_rects != 1)
         {
             return 4;
         }
-        puts("PACKAGED_RUNNER_LIFECYCLE_V1_NESTED_BEGIN_REJECTED");
-        return 1;
+        puts("PACKAGED_RUNNER_LIFECYCLE_V1_FAILED_RENDER_ABORTED");
+        return result != 0 ? result : 1;
     }
     if (render_calls != 1 || result != 0)
     {
@@ -119,11 +110,11 @@ STASIS_TEST_EXPORT int gfx_cmd_construction_finish(int result)
 STASIS_TEST_EXPORT int render(void)
 {
     gfx_cmd_construction_reset();
-    aot_render();
-    return gfx_cmd_construction_finish(0);
+    int result = aot_render();
+    return gfx_cmd_construction_finish(result);
 }
 
-/* Lifecycle-0 packages export their authored render directly. */
+/* Retain the obsolete direct export only to verify lifecycle-0 rejection. */
 STASIS_TEST_EXPORT int legacy_render(void)
 {
     if (reset_calls != 0 || finish_calls != 0 || render_calls != 0)

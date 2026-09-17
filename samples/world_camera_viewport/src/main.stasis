@@ -196,6 +196,5 @@ function render(): i32 {
     fill_rect(0.0, 0.0, 640.0, 40.0, 0.03, 0.05, 0.10, 1.0);
     fill_rect(12.0, 11.0, i32_to_f32(sample_simulation_ticks % 120) * 3.0, 8.0, 0.20, 0.80, 0.95, 1.0);
     fill_rect(12.0, 24.0, i32_to_f32(sample_control_transitions) * 24.0, 6.0, 0.98, 0.52, 0.22, 1.0);
-    end_frame();
     return 0;
 }

@@ -3260,6 +3260,37 @@ mod tests {
     }
 
     #[test]
+    fn aot_process_rejects_removed_public_graphics_frame_calls_in_frontend() {
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for removed_name in ["begin_frame", "end_frame"] {
+            let mut process = AotProcess::new();
+            process
+                .set_project_root(project_root.to_string_lossy())
+                .expect("set graphics API project root");
+            process.upsert_file(
+                format!("removed_{removed_name}.stasis"),
+                format!(
+                    "import \"src/stdlib/graphics.stasis\";\nfunction main(): i32 {{ {removed_name}(); return 0; }}\n"
+                ),
+            );
+            let error = process
+                .compile()
+                .expect_err("removed public frame API must fail in the frontend");
+            match error {
+                crate::compiler::CompileError::Frontend(message) => assert!(
+                    message.contains(&format!("cannot resolve call '{removed_name}'")),
+                    "unexpected diagnostic for {removed_name}: {message}"
+                ),
+                other => panic!("removed public frame API must be a frontend error, got {other:?}"),
+            }
+            assert!(
+                process.artifacts().is_empty(),
+                "frontend rejection for {removed_name} must emit no artifacts"
+            );
+        }
+    }
+
+    #[test]
     fn aot_process_incremental_compile_emits_only_changed_function() {
         let mut process = AotProcess::new();
         process.upsert_file(
@@ -3531,9 +3562,7 @@ mod tests {
         .replace("import \"graphics.stasis\";", "");
         let declarations = r#"
 function init_window(width: i32, height: i32, title: string): bool { return true; }
-function begin_frame(): void { return; }
 function clear(r: f32, g: f32, b: f32, a: f32): void { return; }
-function end_frame(): void { return; }
 "#;
         let mut process = AotProcess::new();
         process.upsert_file(

@@ -89,7 +89,6 @@ function render(): i32 {
     seam_sprite.draw(52.0, 116.0, 255, 0);
     draw_text(seam_font_handle, "DIRECT ASSET", 238.0, 92.0, 0.98, 0.82, 0.25, 1.0);
     seam_cached_text.draw(238.0, 164.0, 0.18, 0.92, 0.82, 1.0);
-    end_frame();
     return 0;
 }
 

@@ -1,4 +1,5 @@
 import "../../../src/stdlib/graphics.stasis";
+import "../../../src/stdlib/internal/gfx_cmd.stasis";
 
 // Test-only semantic ids supplied as enum constants; production projects are
 // forbidden from extending or redefining SpriteRef.
@@ -16,7 +17,7 @@ global drawable_sprite: Sprite;
 global drawable_text: TextRun;
 
 function line_batch_public_probe(): i32 {
-    begin_frame();
+    gfx_cmd_construction_reset();
     line_batch.reset_lines();
     for (let i: i32 = 0; i < 512; i += 1) {
         if (!line_batch.append_line(i32_to_f32(i), 1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.4)) {
@@ -34,12 +35,12 @@ function line_batch_public_probe(): i32 {
         return 23;
     }
     line_batch.count = 513;
-    begin_frame();
+    gfx_cmd_construction_reset();
     line_batch.draw();
     if (gfx_cmd_line_count() != 512 || gfx_cmd_dropped_lines() != 0) {
         return 24;
     }
-    begin_frame();
+    gfx_cmd_construction_reset();
     for (let i: i32 = 0; i < 9500; i += 1) {
         fill_rect(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
     }
@@ -59,7 +60,7 @@ function line_batch_public_probe(): i32 {
 }
 
 function probe_writer_lifecycle(): i32 {
-    begin_frame();
+    gfx_cmd_construction_reset();
     if (probe_writer.reserve(0, -1, 0, 0, 0, 0, 0)) {
         return 1;
     }
@@ -105,7 +106,7 @@ function sprite_run_writer_public_probe(): i32 {
     if (lifecycle != 0) {
         return lifecycle;
     }
-    begin_frame();
+    gfx_cmd_construction_reset();
     if (!probe_writer.reserve(2, -1, 0, 0, 0, 0, 0)) {
         return 12;
     }
@@ -133,7 +134,10 @@ function sprite_run_writer_public_probe(): i32 {
     drawable_text.font = 5;
     drawable_text.handle = 6;
     drawable_text.draw(30.0, 31.0, 0.5, 0.4, 0.3, 0.2);
-    end_frame();
+    gfx_cmd_mark_present();
+    if (gfx_cmd_construction_finish(0) != 0) {
+        return 30;
+    }
     if (gfx_cmd_sprite_count() != 4 || gfx_cmd_sprite_run_count() != 3 || gfx_cmd_text_count() != 2 || gfx_cmd_order_count() != 6) {
         return 27;
     }

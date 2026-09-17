@@ -12,6 +12,7 @@ global forwarded_byte_length: i32;
 global forwarded_char_length: i32;
 global fixed_walls: WallRun[2];
 global generic_walls: WallCache<2>;
+global lifecycle_writer: SpriteRunWriter;
 
 function emit_text_leaf(text: utf8[]): void {
     forwarded_byte_length = length_bytes(text);
@@ -58,11 +59,11 @@ function render(): i32 {
     render_score = score;
     clear(0.05, 0.10, 0.15, 1.0);
     if (lifecycle_mode == 4) {
-        begin_frame();
+        // Leave a public writer unfinished to verify host aborts publication.
+        lifecycle_writer.reserve(2, -1, 0, 0, 0, 0, 0);
     }
     fill_rect(12.0, 14.0, 30.0, 18.0, 0.8, 0.2, 0.1, 1.0);
     emit_text_outer("Café");
-    end_frame();
     if (lifecycle_mode == 3) {
         return 33;
     }

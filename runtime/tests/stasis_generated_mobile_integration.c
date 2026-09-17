@@ -410,16 +410,16 @@ int main(void) {
     next_bind_mode = 4;
     reset_frame_observations();
     CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
-    const int32_t generation_before_nested_begin =
+    const int32_t generation_before_open_writer =
         stasis_jit_global_i32_load(hash_path("gfx_sprite_writer_frame_generation"));
     CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_OK);
     CHECK(
         stasis_jit_global_i32_load(hash_path("gfx_sprite_writer_frame_generation")) ==
-        generation_before_nested_begin + 2);
+        generation_before_open_writer + 2);
     CHECK(submitted_frames == 0);
     CHECK(rejected_frames == 1);
     stasis_mobile_runtime_shutdown();
-    printf("stasis.seam_test.v1 IT-015 generated_render_reset=1 nested_begin_rejected=1 abort_reset=1\n");
+    printf("stasis.seam_test.v1 IT-015 generated_render_reset=1 open_writer_rejected=1 abort_reset=1\n");
 
     next_bind_mode = 1;
     reset_frame_observations();

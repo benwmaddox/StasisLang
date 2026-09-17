@@ -139,12 +139,28 @@ execute_process(
     OUTPUT_VARIABLE LEGACY_STDOUT
     ERROR_VARIABLE LEGACY_STDERR
 )
-if(NOT "${LEGACY_RESULT}" EQUAL 0 OR
-   NOT "${LEGACY_STDOUT}" MATCHES "PACKAGED_RUNNER_LIFECYCLE_V0_DIRECT" OR
-   NOT "${LEGACY_STDERR}" MATCHES "render_construction_lifecycle_version=0")
+if(NOT "${LEGACY_RESULT}" EQUAL 1 OR
+   NOT "${LEGACY_STDERR}" MATCHES "lifecycle-0 graphics render entry.*obsolete")
     message(FATAL_ERROR
-        "packaged runner lifecycle v0 fixture failed (${LEGACY_RESULT})\n"
+        "packaged runner did not reject obsolete lifecycle v0 render (${LEGACY_RESULT})\n"
         "stdout=${LEGACY_STDOUT}\nstderr=${LEGACY_STDERR}")
+endif()
+
+file(WRITE "${TEST_ROOT}/lifecycle-package/game.launch"
+    "dll=${LIFECYCLE_GAME_NAME}\nentry=main\nfps=60\nrender=missing_render\nrender_construction_lifecycle_version=1\n")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env STASIS_RUNNER_DIAG=1 "../lifecycle-package/game"
+    WORKING_DIRECTORY "${TEST_ROOT}/lifecycle-caller"
+    TIMEOUT 30
+    RESULT_VARIABLE MISSING_EXPORT_RESULT
+    OUTPUT_VARIABLE MISSING_EXPORT_STDOUT
+    ERROR_VARIABLE MISSING_EXPORT_STDERR
+)
+if(NOT "${MISSING_EXPORT_RESULT}" EQUAL 1 OR
+   NOT "${MISSING_EXPORT_STDERR}" MATCHES "requires exported render entry.*missing_render")
+    message(FATAL_ERROR
+        "packaged runner did not reject lifecycle v1 missing render export (${MISSING_EXPORT_RESULT})\n"
+        "stdout=${MISSING_EXPORT_STDOUT}\nstderr=${MISSING_EXPORT_STDERR}")
 endif()
 
 file(WRITE "${TEST_ROOT}/lifecycle-package/game.launch"
@@ -159,7 +175,7 @@ execute_process(
 )
 if(NOT "${BRIDGE_RESULT}" EQUAL 0 OR
    NOT "${BRIDGE_STDOUT}" MATCHES "PACKAGED_RUNNER_LIFECYCLE_V1_PUBLISHED" OR
-   NOT "${BRIDGE_STDOUT}" MATCHES "PACKAGED_RUNNER_LIFECYCLE_V1_NESTED_BEGIN_REJECTED" OR
+   NOT "${BRIDGE_STDOUT}" MATCHES "PACKAGED_RUNNER_LIFECYCLE_V1_FAILED_RENDER_ABORTED" OR
    NOT "${BRIDGE_STDERR}" MATCHES "render_construction_lifecycle_version=1")
     message(FATAL_ERROR
         "packaged runner lifecycle v1 fixture failed (${BRIDGE_RESULT})\n"

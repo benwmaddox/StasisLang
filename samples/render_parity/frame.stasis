@@ -62,7 +62,6 @@ function build_parity_frame(canvas_sprite: SpriteRef, opaque_sprite: SpriteRef, 
     }
     draw_text(font, "direct parity", 64.0, 252.0, 0.95, 0.95, 1.0, 1.0);
     cached_label.draw(344.0, 252.0, 1.0, 0.85, 0.25, 1.0);
-    end_frame();
 }
 
 function append_parity_touch_marker(marker_active: i32, marker_x_i32: i32, marker_y_i32: i32): void {

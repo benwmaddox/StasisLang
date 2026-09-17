@@ -847,13 +847,23 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             not re.search(pattern, fixture_text)
             for pattern in (
                 r"\bclear\(",
-                r"\bend_frame\(\)\s*;",
             )
         ):
             failures.append(Mismatch(
                 label(RENDER_HEADER), label(fixture),
                 "hot_swap.public_graphics_path",
-                "rooted graphics import and clear/end calls", "missing",
+                "rooted graphics import and clear calls", "missing",
+            ))
+        checks += 1
+        public_lifecycle_call = re.search(
+            r"\b(?:begin_frame|end_frame)\s*\(\s*\)\s*;", fixture_text
+        )
+        if public_lifecycle_call:
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture),
+                "public_graphics_lifecycle",
+                "no authored begin_frame/end_frame calls",
+                public_lifecycle_call.group(0),
             ))
         checks += 1
         if re.search(r"\b(?:gfx_cmd_|gfx_sprite_writer_|GFX_)", fixture_text):
@@ -864,7 +874,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             ))
 
     public_render_fixtures = {
-        VSCODE_RENDER_FIXTURE: ("draw_line(", "end_frame();"),
+        VSCODE_RENDER_FIXTURE: ("draw_line(",),
         WINDOWS_LAUNCH_FIXTURE: (
             "windows_smoke_host_frame.pointer_count > 0 && windows_smoke_host_frame.pointers[0].is_down",
             "smoke_writer.reserve(2,",
@@ -874,14 +884,12 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         WORKSHOP_PREVIEW_ADAPTER: (
             "PongHost.writer.reserve(4,",
             "PongHost.writer.finalize(4);",
-            "end_frame();",
         ),
         GENERATED_MOBILE_AOT_FIXTURE: (
             'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
             "clear(",
             "fill_rect(",
             "draw_text(",
-            "end_frame();",
         ),
         MOBILE_PACKAGED_ASSETS_FIXTURE: (
             'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
@@ -892,7 +900,6 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             "seam_sprite.draw(",
             "draw_text(",
             "seam_cached_text.draw(",
-            "end_frame();",
         ),
     }
     for fixture, required_calls in public_render_fixtures.items():
@@ -902,6 +909,17 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             failures.append(Mismatch(
                 label(RENDER_HEADER), label(fixture), "public_graphics_path",
                 "graphics import and canonical public calls", "missing",
+            ))
+        checks += 1
+        public_lifecycle_call = re.search(
+            r"\b(?:begin_frame|end_frame)\s*\(\s*\)\s*;", text
+        )
+        if public_lifecycle_call:
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(fixture),
+                "public_graphics_lifecycle",
+                "no authored begin_frame/end_frame calls",
+                public_lifecycle_call.group(0),
             ))
         checks += 1
         if re.search(r"\b(?:gfx_cmd_|gfx_sprite_writer_|GFX_)", text):

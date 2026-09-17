@@ -7,11 +7,11 @@ normative implementation design.
 
 ## Recommendation
 
-Make guest frame reset internal and host-triggered at entry to each actual render
-invocation. Keep `clear(r, g, b, a)` as optional background intent. Retain an
-explicit publication request (`end_frame()` during migration); it is useful for
-discarding an incomplete render and is not a synchronous GPU fence. Do not replace
-`begin_frame()` with `clear()`, and do not introduce render passes in this change.
+Make frame reset and publication internal and host-triggered at each actual
+render invocation. Keep `clear(r, g, b, a)` as optional background intent. The
+host-owned finish validates and publishes a successful construction; it is not a
+synchronous GPU fence. Remove the public guest frame wrappers and do not
+introduce render passes in this change.
 
 The necessary operation is **reset the command builder**, not start the graphics
 device. The host knows when it invokes rendering; the shared guest helper knows
@@ -72,10 +72,10 @@ helpers rather than relying only on public spelling.
 
 | Operation / source | Current responsibilities and limits |
 | --- | --- |
-| Guest `gfx_cmd_begin` | Increment positive writer frame generation; invalidate active token; write magic/version; zero flags, line/rectangle/sprite/run/text/clip/order counts, dropped counters and text bytes used. Does not zero payload arenas, clear background floats, reset next-token identity, or overwrite host display slots 10..21. Old payload becomes unreachable through zero counts. |
-| Guest transient memory | Fixed arrays are reused by resetting published counts/text-byte cursor. No heap, GPU allocation, atlas eviction, synchronization or resource release happens at begin. Writer generation/token checks protect unfinished reservations; see `gfx_cmd_sprite_run_*` helpers and [writer probe](../tests/stasis/seams/sprite_run_writer_public_probe.stasis). |
+| Internal `gfx_cmd_begin` | Increment positive writer frame generation; invalidate active token; write magic/version; zero flags, line/rectangle/sprite/run/text/clip/order counts, dropped counters and text bytes used. Does not zero payload arenas, clear background floats, reset next-token identity, or overwrite host display slots 10..21. Old payload becomes unreachable through zero counts. |
+| Construction transient memory | Fixed arrays are reused by resetting published counts/text-byte cursor. No heap, GPU allocation, atlas eviction, synchronization or resource release happens at reset. Writer generation/token checks protect unfinished reservations; see `gfx_cmd_sprite_run_*` helpers and [writer probe](../tests/stasis/seams/sprite_run_writer_public_probe.stasis). |
 | Guest `gfx_cmd_clear` | Assign flags to `CLEAR` (1), store four floats. Does not reset any count, writer, clip descriptor, header identity or text cursor. Assignment also removes a previous `PRESENT` request. |
-| Guest `end_frame` / internal `gfx_cmd_submit` | Add 2 to flags; neither freezes nor submits arrays. Repeated calls are not idempotent: e.g. 3 becomes 5, losing the present bit. Later drawing still mutates the buffer. |
+| Host finish / internal `gfx_cmd_submit` | Validate the host-owned construction and publish it when the render result and writer state are valid. The removed guest wrappers no longer add lifecycle flags or submit arrays. |
 | Native `stasis_begin_frame` | Reset debug hash, apply asset-watch changes, pump events if needed, attempt resource restore, reset queued line count and clip state, set SDL blend/clip defaults. Called by submission independently of guest begin. |
 | Native `stasis_end_frame` | Gate on resource readiness, flush queued lines, capture before present, call SDL present, finish timing, advance debug frame counter and reset event-pump bookkeeping. No guest array reset. |
 | Web batcher `beginFrame` | Check context, disable scissor, set viewport, clear color buffer. Called only for clear intent; misleadingly named backend clear operation. Metrics reset separately in `frame`. |
@@ -138,24 +138,24 @@ store intent; repeated BeginFrame would erase commands rather than model it.
 
 | Model | Benefit | Why accept/reject |
 | --- | --- | --- |
-| Keep explicit begin + clear | Current reset is cheap and allows manual fixture builders. | Safe only with a precise builder contract; repeated/missing begin can erase/append work, unrelated to actual backend frame start. Not preferred for normal render lifecycle. |
+| Keep guest frame wrappers | Familiar reset and publication spellings. | Reject: host invocation already defines the construction boundary, and public wrappers let authored code erase or append work at the wrong epoch. |
 | Clear alone | One fewer visible call for common samples. | Reject: stale geometry/text/counts and writer token survive. Reset-on-clear would break multiple clears and no-clear rendering. |
 | Lazy start on first graphics operation | Omits explicit begin. | Reject: reserve, clear, draw, replay and empty publication all need guards; a host epoch is still needed to distinguish invocations. Empty/failed frames become harder to reason about. |
-| Host-owned builder reset | One authoritative invocation boundary, independent of background choice. | Recommend, using a shared generated wrapper; explicit publication still distinguishes finished work from abandonment. |
-| Rename public begin to reset commands | Truthful and small change. | Useful internal/manual-builder name, but keeps normal application bookkeeping and stale-state hazards. Transitional option, not endpoint. |
+| Host-owned builder reset | One authoritative invocation boundary, independent of background choice. | Recommend, using a shared generated wrapper; host finish distinguishes a successful construction from abandonment. |
+| Rename public begin to reset commands | Truthful and small change. | Keep reset internal to the host wrapper; exposing another guest spelling preserves the same bookkeeping and stale-state hazards. |
 | New frame/pass object | Can model targets and multiple submissions. | Defer until a real non-default-pass requirement exists; v7 explicitly rejects that state. |
 
 | Case | Current result / dependency | Proposed result |
 | --- | --- | --- |
-| Begin + clear + draws + end | Fresh counts and background, then present request. | Same picture with reset at entry and explicit end request. |
-| Clear alone on reused globals | Old geometry remains; first use may lack magic/version. | Entry reset makes it a fresh clear-only builder; publish explicitly. |
-| No clear | Begin still required for fresh geometry. Backend prep differs on Web. | Reset and backend prep always run; no previous-pixel guarantee. |
-| Multiple clears / begin calls | Last clear wins; second begin discards earlier commands. | Clear still last-wins. Migrated applications have one host reset; no public mid-render reset. |
-| Empty render with end | Fresh empty valid command frame; display depends on clear. | Publish empty frame explicitly; no clear is not an erase-screen request. |
-| Early return before begin | Previous flags/counts can be submitted again if host considers invocation successful. | Fresh unpublished builder is discarded; old accepted frame remains eligible for host replay. |
-| Early return after begin, before end | Native may replay without swap; Web may display; Workshop skips drawing. | No new publication on every backend. Explicit end followed by normal return requests adoption; error/nonzero host failure aborts even after end. |
+| Host reset + clear + draws | Fresh counts and background, then host finish validates and publishes. | Same picture without authored lifecycle calls. |
+| Clear alone on reused globals | Old geometry remains; first use may lack magic/version. | Entry reset makes it a fresh clear-only builder; host finish publishes it. |
+| No clear | A fresh construction still needs a host reset. Backend prep differs on Web. | Reset and backend prep always run; no previous-pixel guarantee. |
+| Multiple clears / host resets | Last clear wins; a host reset starts a new construction. | Clear still last-wins. Authored code has no public mid-render reset. |
+| Empty render | Fresh empty construction; display depends on clear. | Host finish may publish an empty successful frame; no clear is not an erase-screen request. |
+| Early return before host finish | Previous flags/counts could be submitted again if the host reused the builder. | Fresh unpublished builder is discarded; old accepted frame remains eligible for host replay. |
+| Error or nonzero result after drawing | A partially built construction must not replace the accepted snapshot. | Host finish aborts the construction even when drawing already populated it. |
 | Clean/skipped render | Current Web and listed native loops invoke render; they do not establish a general dirty-frame scheduler contract. | If scheduling later skips invocation, do not reset/rebuild accepted commands. Re-present only an explicit host-owned accepted snapshot. |
-| Retained/replayed list | `PresentationList.replay` appends into current builder; the JIT test calls begin for each replay. | Replay into a fresh invocation builder; keep logical lists independent of canonical lanes. |
+| Retained/replayed list | `PresentationList.replay` appends into the current host-owned builder. | Replay into a fresh invocation builder; keep logical lists independent of canonical lanes. |
 | Surface recreation | Resource restore and viewport generations are host-owned, not repaired by guest reset. | Re-prepare resources and replay accepted logical commands or show host loading state; never publish the discarded working builder. |
 | Error during replay | Validation is backend-specific; source does not prove rollback of every GPU-side error. | Validate before adoption; never replace accepted snapshot on guest/schema failure. Resource/GPU failure withholds presentation and retries; do not promise restoration of already-modified pixels without an offscreen transaction. |
 
@@ -186,7 +186,7 @@ uses lifecycle 0/absent direct/manual construction:
 | Android generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
 | iOS generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
 | `stasis_runner` | Parses/verifies state/launch sidecar metadata when present, invokes the already-exported render entry, and never wraps it or adds reset/finish. | Invokes the legacy direct render entry. |
-| Authored guest render | Draws and requests publication with `end_frame()`; it must not manually call `begin_frame()` inside host-owned rendering. | Explicit `begin_frame()` remains available for legacy/manual/tick-only builders. |
+| Authored guest render | Draws only; host finish validates and publishes the construction. | A legacy package remains under its negotiated compatibility contract until rebuilt. |
 
 The sidecar check in `stasis_runner` is routing/state verification, not engine
 bundle lifecycle ownership. The generated bridge or generated bindings have
@@ -194,10 +194,10 @@ already completed the construction transaction before the runner submits it.
 
 ### Boundary rules and consumer migration
 
-In lifecycle 1, a nested guest `begin_frame()` reaches `gfx_cmd_begin()` while
-the host-owned construction is active. That nested begin marks the construction
-invalid; `finish` then aborts it, so it cannot silently restart or append a
-second pass. Lifecycle negotiation also has no viewport/resolution-cap
+In lifecycle 1, frontend validation rejects authored uses of the removed public
+frame wrappers before the host-owned construction runs. This prevents guest code
+from silently restarting or appending a second pass. Lifecycle negotiation has
+no viewport/resolution-cap
 implication: logical coordinates, viewport and safe-viewport transforms,
 drawable resolution, and any maximum-resolution policy remain host-owned and
 unchanged.
@@ -205,19 +205,17 @@ unchanged.
 After installing a new nightly, a consumer should regenerate its vendored
 stdlib, generated bridge or bindings, and package sidecar/manifest as one unit.
 For a consumer with a temporary compatibility bridge, first verify the new
-lifecycle-1 generated entry, then remove the conditional/manual begin from the
-authored `render()` and retain its normal drawing plus `end_frame()` request.
-Run focused render/ABI checks and search the negotiated render path for any
-remaining manual begin. A lifecycle-0/absent package remains on direct render
+lifecycle-1 generated entry, then remove both public frame-wrapper calls from
+authored `render()` and retain its normal drawing. Run focused render/ABI checks
+and search the negotiated render path for any remaining guest frame wrappers. A
+lifecycle-0/absent package remains on direct render
 until rebuilt with lifecycle 1; consumers that never shipped a production
 bridge only need the coordinated vendor and metadata refresh. This migration
 does not change viewport or resolution limits.
 
-`end_frame()` remains the compatible spelling for request-publication, set
-idempotently rather than arithmetically added. It is not a resource lifetime
-fence or physical-presentation acknowledgement. Keeping it avoids silently
-publishing half-built work on normal early returns. Source checks may later
-rename it to `publish_frame`, but that rename is not required to remove begin.
+Host finish is the publication gate. It is not a resource lifetime fence or
+physical-presentation acknowledgement; device submission remains host-owned.
+An authored source package must not provide or call a second publication hook.
 See [loading screens](knowledge/loading-screens.md): callers must still return
 to a host that presents before starting blocking IO on a later tick.
 
@@ -240,22 +238,22 @@ C validation/trace fixtures; vendored stdlib copies; templates, snippets, loadin
 guidance and exact-string CI assertions listed in the inventory. The native C
 export is not the guest wrapper and must not be deleted as a side effect.
 
-Keep legacy explicit behavior for old packages. Do not make old begin silently
-no-op: some fixtures and applications use it to restart a list or build outside
-render. Migrate these to a supported manual builder in tests or into a render
-entry; tick-only hosts require their own explicit construction wrapper, not
-reset-before-tick for all programs. Graphics outside the negotiated construction
-scope must fail deterministically. Update vendor packages through their normal
-generation flow, not independent edits to snapshots. Rollback consists of
-retaining old package/host contract support and rebuilding with explicit calls;
-never downgrade the interpretation of already-negotiated new packages.
+Keep negotiated compatibility for packages already built against the old
+wrappers; do not reinterpret those packages as new host-owned packages. New
+source validation rejects the removed public calls. Migrate old tick-only hosts
+to a supported host construction wrapper, not reset-before-tick for all programs.
+Graphics outside the negotiated construction scope must fail deterministically.
+Update vendor packages through their normal generation flow, not independent
+edits to snapshots. Rollback consists of retaining old package/host contract
+support and rebuilding with the matching contract; never downgrade the
+interpretation of an already-negotiated new package.
 
 ## Implementation sequence and focused validation
 
 The implementation follows these bounded work packages and gates.
 
 1. Characterize reset/clear/publication: add a shared fixture covering stale
-   geometry/text, repeated clears/end, unfinished writer and early returns;
+   geometry/text, repeated clears/finish, unfinished writer and early returns;
    assert exact flags, counts, order and writer rejection in JIT, Wasm execution
    and a fresh AOT executable. Freeze old-package compatibility oracles.
 2. Introduce negotiated construction wrappers and abort/finalize behavior in
@@ -267,8 +265,8 @@ The implementation follows these bounded work packages and gates.
    loss, malformed frames, early returns and replay. Do not advertise the new
    package contract on any backend until it passes the shared fixture.
 4. Migrate samples, templates, vendor snapshots and documentation; replace
-   exact-string begin assertions with lifecycle behavior checks; deprecate/remove
-   guest begin only for the negotiated contract. Preserve native export adapters.
+   exact-string guest-wrapper assertions with lifecycle behavior checks; remove
+   authored guest frame wrappers. Preserve native export adapters.
 
 Each command must stay within 900 seconds. The focused validation commands are:
 
@@ -294,11 +292,13 @@ An actual multipass feature would need separate target/load/store tests.
 - `node --test runtime/web/tests/render_pipeline.test.mjs`: 42 passed, including
   ordered clipping/batching, reserved-state rejection, context loss, resource
   lifetime and timing. These are mocked WebGL tests, not device evidence.
-- `python tools/ci/check_runtime_abi_contract.py`: 797 comparisons passed;
-  generated evidence at `target/seam-tests/it-001-runtime-abi.json`.
-- Inventory: 168 matching occurrences in 88 tracked files. All 114 local links
-  across this note and its inventory resolve; both files are ASCII. Whitespace
-  checks pass, and the post-test process check found no lingering test binaries.
+- The pre-migration `python tools/ci/check_runtime_abi_contract.py` run reported
+  797 comparisons passed and generated evidence at
+  `target/seam-tests/it-001-runtime-abi.json`. The current checker also audits
+  that authored fixtures contain no public frame-wrapper calls; rerun it after
+  all fixture migrations land.
+- The source audit recorded 168 matching occurrences in 88 tracked files. Link,
+  ASCII, whitespace, and process checks were clean for that audit snapshot.
 - No renderer implementation changed; native/device visual capture and new
   lifecycle executable tests are migration gates, not completed experiments.
 

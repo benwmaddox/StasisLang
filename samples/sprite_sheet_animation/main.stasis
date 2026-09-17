@@ -24,7 +24,6 @@ function render(): i32 {
     state.sheet.draw_frame(1, 136.0, 56.0, 255, 0);
     state.sheet.draw_frame(2, 56.0, 136.0, 255, 0);
     state.sheet.draw_frame(3, 136.0, 136.0, 255, 0);
-    end_frame();
     return 0;
 }
 

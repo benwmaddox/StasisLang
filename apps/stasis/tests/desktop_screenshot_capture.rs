@@ -64,7 +64,7 @@ fn live_game_capture_completes_with_decodable_pixels_while_paused() {
         "function tick(): i32 { return 0; }\n",
         "function on_code_swap(): void { return; }\n",
         "function render(): i32 { clear(0.03, 0.06, 0.12, 1.0); ",
-        "fill_rect(80.0, 45.0, 160.0, 90.0, 0.9, 0.15, 0.08, 1.0); end_frame(); return 0; }\n",
+        "fill_rect(80.0, 45.0, 160.0, 90.0, 0.9, 0.15, 0.08, 1.0); return 0; }\n",
     ),
     )
     .unwrap();

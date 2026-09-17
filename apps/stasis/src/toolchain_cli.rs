@@ -196,7 +196,6 @@ function @effects(state) tick(): i32 {
 
 function @effects(graphics) render(): i32 {
     clear(0.05, 0.07, 0.10, 1.0);
-    end_frame();
     return 0;
 }
 "#;

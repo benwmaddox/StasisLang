@@ -558,16 +558,6 @@ function set_maximized_canvas(width: i32, height: i32): i32 {
     return 0;
 }
 
-// Legacy/manual builder reset. Negotiated render entries are reset by the host
-// wrapper and must not call this function themselves.
-function begin_frame(): void {
-    gfx_cmd_manual_begin();
-}
-
-function end_frame(): void {
-    gfx_cmd_mark_present();
-}
-
 function clear(r: f32, g: f32, b: f32, a: f32): void {
     gfx_cmd_clear(r, g, b, a);
 }
