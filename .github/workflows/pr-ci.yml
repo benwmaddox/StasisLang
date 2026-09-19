@@ -468,9 +468,6 @@ jobs:
     env:
       STASIS_RELEASE_ID: ci-${{ github.sha }}
       STASIS_SOURCE_COMMIT: ${{ github.sha }}
-      STASIS_SIGNING_CERTIFICATE: ${{ runner.temp }}\stasis-ci-signing\stasis-ci-signing.pfx
-      STASIS_SIGNING_EPHEMERAL_PFX: "1"
-      STASIS_SIGNING_TIMEOUT_SECONDS: "120"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -491,6 +488,9 @@ jobs:
       - name: Provision ephemeral CI signing certificate
         shell: pwsh
         env:
+          STASIS_SIGNING_CERTIFICATE: ${{ runner.temp }}\stasis-ci-signing\stasis-ci-signing.pfx
+          STASIS_SIGNING_EPHEMERAL_PFX: "1"
+          STASIS_SIGNING_TIMEOUT_SECONDS: "120"
           STASIS_SIGNING_LOCAL_RECORD: ${{ runner.temp }}\stasis-ci-signing-thumbprint.txt
           STASIS_REQUIRE_SIGNED_EXECUTION: "1"
           STASIS_SIGNING_MODE: required
