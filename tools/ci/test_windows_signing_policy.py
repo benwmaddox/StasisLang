@@ -55,6 +55,12 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("stasis-signing.ps1", source)
         self.assertIn("SHA256", (ROOT / "tools/windows/stasis-signing.ps1").read_text(encoding="utf-8"))
 
+    def test_policy_pins_security_module_to_the_active_host(self):
+        source = (ROOT / "tools/windows/stasis-signing.ps1").read_text(encoding="utf-8")
+        self.assertIn("Join-Path $PSHOME", source)
+        self.assertIn("Microsoft.PowerShell.Security.psd1", source)
+        self.assertIn("Import-Module $securityModule -ErrorAction Stop", source)
+
     @unittest.skipUnless(os.name == "nt", "PowerShell signing entrypoint test")
     def test_powershell_mock_certificate_receives_policy_arguments(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -138,8 +144,8 @@ class WindowsSigningPolicyTests(unittest.TestCase):
                         f"""
                         function Get-AuthenticodeSignature {{
                             [pscustomobject]@{{
-                                Status = [System.Management.Automation.SignatureStatus]::Unknown
-                                StatusMessage = 'untrusted test signature'
+                                Status = [System.Management.Automation.SignatureStatus]::UnknownError
+                                StatusMessage = 'A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider.'
                                 SignerCertificate = $null
                             }}
                         }}

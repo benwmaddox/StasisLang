@@ -14,6 +14,16 @@ $ErrorActionPreference = 'Stop'
 $developmentSubject = 'CN=StasisLang Development Signing'
 $codeSigningOid = '1.3.6.1.5.5.7.3.3'
 
+# Pin the security module to the active host's installation. A pwsh parent can
+# put its PowerShell 7 module directory ahead of Windows PowerShell 5.1 in
+# PSModulePath; a nested powershell.exe process then discovers an incompatible
+# module and cannot load Get-AuthenticodeSignature.
+$securityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+if (-not (Test-Path -LiteralPath $securityModule -PathType Leaf)) {
+    throw "Microsoft.PowerShell.Security module was not found for the active PowerShell host: $securityModule"
+}
+Import-Module $securityModule -ErrorAction Stop
+
 function Test-ProductionMode {
     return ($env:STASIS_SIGNING_MODE -eq 'production' -or $env:STASIS_SIGNING_PROFILE -eq 'production')
 }
@@ -167,8 +177,15 @@ function Get-ConfiguredCertificate {
 
 function Assert-AuthenticodeIdentity([string] $Path, [string] $ExpectedThumbprint, [switch] $AllowUntrusted) {
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -and
-        -not ($AllowUntrusted -and $signature.Status -eq [System.Management.Automation.SignatureStatus]::Unknown)) {
+    $isPinnedUntrustedRoot = (
+        $AllowUntrusted -and
+        $signature.Status -in @(
+            [System.Management.Automation.SignatureStatus]::Unknown,
+            [System.Management.Automation.SignatureStatus]::UnknownError
+        ) -and
+        [string]$signature.StatusMessage -match '(?i)terminated in a root certificate which is not trusted by the trust provider'
+    )
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -and -not $isPinnedUntrustedRoot) {
         throw "Authenticode verification failed for $Path with status $($signature.Status): $($signature.StatusMessage)"
     }
     $actual = if ($signature.SignerCertificate) { Normalize-Thumbprint $signature.SignerCertificate.Thumbprint } else { $null }
@@ -193,8 +210,21 @@ function Get-VerificationThumbprint {
     return (Get-RecordedDevelopmentThumbprint)
 }
 
+function Test-AllowPinnedSelfSignedVerification {
+    if (Test-ProductionMode) {
+        return ($env:STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY -eq '1')
+    }
+    return (
+        $env:STASIS_SIGNING_EPHEMERAL_PFX -eq '1' -and
+        $env:GITHUB_ACTIONS -eq 'true' -and
+        $env:STASIS_SIGNING_MODE -eq 'required' -and
+        [bool]($Certificate -or $env:STASIS_SIGNING_CERTIFICATE) -and
+        [bool]$env:STASIS_SIGNING_PFX_PASSWORD
+    )
+}
+
 function Test-PinnedSelfSignedVerificationFailure([int] $ExitCode, [string] $Output) {
-    if (-not (Test-ProductionMode) -or $env:STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY -ne '1') { return $false }
+    if (-not (Test-AllowPinnedSelfSignedVerification)) { return $false }
     if ($ExitCode -ne 1) { return $false }
     if ($Output -match '(?i)No signature found|TRUST_E_BAD_DIGEST|0x80096010|digital signature[^\r\n]*not valid') { return $false }
     if ($Output -notmatch '(?i)0x800B0109|terminated in a root\s+certificate which is not trusted by the trust provider') { return $false }
@@ -228,9 +258,16 @@ function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments, [sw
         $startInfo.RedirectStandardError = $true
     }
     if ($null -eq $startInfo.ArgumentList) {
-        throw 'bounded signing requires PowerShell 7 or newer'
+        # Windows PowerShell 5.1 does not expose ArgumentList.  SignTool's
+        # arguments are simple switches and paths, so quote the legacy command
+        # line form rather than dropping the timeout on the CI path.
+        $startInfo.Arguments = (@($Arguments | ForEach-Object {
+            $value = [string]$_
+            if ($value -match '[\s"]') { '"' + $value.Replace('"', '\\"') + '"' } else { $value }
+        }) -join ' ')
+    } else {
+        foreach ($argument in $Arguments) { $startInfo.ArgumentList.Add($argument) }
     }
-    foreach ($argument in $Arguments) { $startInfo.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     try {
@@ -298,7 +335,11 @@ function Invoke-SignArtifact([string] $Path) {
         if ($timestamp) { $arguments += @('/tr', $timestamp, '/td', 'SHA256') }
         try {
             Invoke-BoundedSignTool $signer.Path ($arguments + $Path)
-            Assert-AuthenticodeIdentity $Path $configured.Thumbprint
+            if (Test-AllowPinnedSelfSignedVerification) {
+                Assert-AuthenticodeIdentity $Path $configured.Thumbprint -AllowUntrusted
+            } else {
+                Assert-AuthenticodeIdentity $Path $configured.Thumbprint
+            }
             return
         } catch {
             $errors += if ($timestamp) {
