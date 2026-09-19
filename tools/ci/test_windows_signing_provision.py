@@ -184,6 +184,7 @@ class WindowsSigningProvisionPolicyTests(unittest.TestCase):
             "-Type CodeSigningCert",
             "-KeyExportPolicy Exportable",
             "-KeySpec Signature",
+            "-Provider 'Microsoft Enhanced RSA and AES Cryptographic Provider'",
             "Export-PfxCertificate",
             'Remove-Item -LiteralPath "Cert:\\CurrentUser\\My\\$($certificate.Thumbprint)"',
             "[Guid]::NewGuid()",

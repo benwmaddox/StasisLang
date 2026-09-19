@@ -47,6 +47,7 @@ try {
         -CertStoreLocation 'Cert:\CurrentUser\My' `
         -KeyExportPolicy Exportable `
         -KeySpec Signature `
+        -Provider 'Microsoft Enhanced RSA and AES Cryptographic Provider' `
         -KeyLength 2048 `
         -HashAlgorithm SHA256 `
         -NotAfter (Get-Date).AddHours(24)
