@@ -178,7 +178,7 @@ package output, and validation receipts while keeping `vendor/stasis` checked in
 
 The PR workflow runs for every pull request without path filters and also supports
 `workflow_dispatch`. It checks out the exact contributor head, emits a required relevant-change
-sentinel, and keeps unrelated changes cheap. Relevant changes validate the checked-in immutable
+sentinel in one Ubuntu job, and keeps unrelated changes to that single billed job. Relevant changes validate the checked-in immutable
 `stasis.json` release and lowercase vendor SHA-256 pin, restore that exact release, verify the
 vendored snapshot, and run only `stasis fmt --check` and `stasis check`. The broad local
 `tools/validate-before-pr.ps1` pass accepts an explicit restored Stasis executable, proves its

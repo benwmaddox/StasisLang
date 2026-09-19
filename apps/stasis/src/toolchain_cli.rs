@@ -14465,7 +14465,9 @@ mod tests {
         assert!(pr.contains("github.event.pull_request.head.repo.full_name || github.repository"));
         assert!(pr.contains("git fetch --no-tags --depth=1 stasis-base \"$BASE_SHA\""));
         assert!(pr.contains("STASIS_PR_GATE_SENTINEL|relevant_change="));
-        assert!(pr.contains("relevant-change:"));
+        assert!(pr.contains("name: Stasis PR gate"));
+        assert_eq!(pr.matches("runs-on: ubuntu-latest").count(), 1);
+        assert!(!pr.contains("needs: relevant-change"));
         assert!(pr.contains("$pin.release_id"));
         assert!(pr.contains("$pin.sha256"));
         assert!(pr.contains("nightly-[0-9]{8}-[0-9]+"));

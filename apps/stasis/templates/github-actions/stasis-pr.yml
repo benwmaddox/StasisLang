@@ -24,11 +24,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  relevant-change:
-    name: Stasis PR relevant-change sentinel
+  gate:
+    name: Stasis PR gate
     runs-on: ubuntu-latest
-    outputs:
-      relevant: ${{ steps.sentinel.outputs.relevant }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -70,39 +68,12 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
           echo "STASIS_PR_GATE_SENTINEL|relevant_change=$relevant" >> "$GITHUB_STEP_SUMMARY"
-
-  gate:
-    name: Stasis PR gate
-    needs: relevant-change
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Required Stasis gate sentinel
-        env:
-          RELEVANT: ${{ needs.relevant-change.outputs.relevant }}
-          CHANGE_RESULT: ${{ needs.relevant-change.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$CHANGE_RESULT" != "success" ]]; then
-            echo "relevant-change sentinel failed: $CHANGE_RESULT" >&2
-            exit 1
+          if [[ "$relevant" != "true" ]]; then
+            echo "No relevant Stasis project change; the one-job cheap gate is satisfied." >> "$GITHUB_STEP_SUMMARY"
           fi
-          echo "STASIS_PR_GATE_SENTINEL|relevant_change=${RELEVANT:-false}"
-          if [[ "${RELEVANT:-false}" != "true" ]]; then
-            echo "No relevant Stasis project change; cheap gate satisfied." >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Checkout exact current head
-        if: needs.relevant-change.outputs.relevant == 'true'
-        uses: actions/checkout@v7
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 1
 
       - name: Read checked-in Stasis pin
-        if: needs.relevant-change.outputs.relevant == 'true'
+        if: steps.sentinel.outputs.relevant == 'true'
         id: pin
         shell: pwsh
         run: |
@@ -120,14 +91,14 @@ jobs:
           "vendor_sha256=$($pin.sha256)" >> $env:GITHUB_OUTPUT
 
       - name: Restore immutable Stasis release
-        if: needs.relevant-change.outputs.relevant == 'true'
+        if: steps.sentinel.outputs.relevant == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./tools/restore-stasis-release.ps1 -ReleaseId '${{ steps.pin.outputs.release_id }}' -AssetName stasis-nightly-linux-x64.tar.gz
 
       - name: Verify checked-in vendor snapshot
-        if: needs.relevant-change.outputs.relevant == 'true'
+        if: steps.sentinel.outputs.relevant == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -140,9 +111,9 @@ jobs:
           }
 
       - name: Check formatting
-        if: needs.relevant-change.outputs.relevant == 'true'
+        if: steps.sentinel.outputs.relevant == 'true'
         run: stasis fmt --check
 
       - name: Check Stasis project
-        if: needs.relevant-change.outputs.relevant == 'true'
+        if: steps.sentinel.outputs.relevant == 'true'
         run: stasis check
