@@ -233,6 +233,30 @@ function Test-PinnedSelfSignedVerificationFailure([int] $ExitCode, [string] $Out
     return $true
 }
 
+function ConvertTo-WindowsCommandLineArgument([AllowEmptyString()][string] $Value) {
+    if ($null -eq $Value) { $Value = '' }
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
+    $quoted = [Text.StringBuilder]::new()
+    [void]$quoted.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes += 1
+        } elseif ($character -eq '"') {
+            [void]$quoted.Append(('\' * (2 * $backslashes + 1)))
+            [void]$quoted.Append('"')
+            $backslashes = 0
+        } else {
+            if ($backslashes) { [void]$quoted.Append(('\' * $backslashes)) }
+            [void]$quoted.Append($character)
+            $backslashes = 0
+        }
+    }
+    if ($backslashes) { [void]$quoted.Append(('\' * (2 * $backslashes))) }
+    [void]$quoted.Append('"')
+    return $quoted.ToString()
+}
+
 function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments, [switch] $AllowPinnedSelfSigned) {
     $timeoutText = $env:STASIS_SIGNING_TIMEOUT_SECONDS
     if (-not $timeoutText) {
@@ -258,12 +282,11 @@ function Invoke-BoundedSignTool([string] $Executable, [string[]] $Arguments, [sw
         $startInfo.RedirectStandardError = $true
     }
     if ($null -eq $startInfo.ArgumentList) {
-        # Windows PowerShell 5.1 does not expose ArgumentList.  SignTool's
-        # arguments are simple switches and paths, so quote the legacy command
-        # line form rather than dropping the timeout on the CI path.
+        # Windows PowerShell 5.1 does not expose ArgumentList. Apply the
+        # CommandLineToArgvW escaping rules, including doubled trailing
+        # backslashes, so PFX passwords and paths remain one exact argument.
         $startInfo.Arguments = (@($Arguments | ForEach-Object {
-            $value = [string]$_
-            if ($value -match '[\s"]') { '"' + $value.Replace('"', '\\"') + '"' } else { $value }
+            ConvertTo-WindowsCommandLineArgument ([string]$_)
         }) -join ' ')
     } else {
         foreach ($argument in $Arguments) { $startInfo.ArgumentList.Add($argument) }

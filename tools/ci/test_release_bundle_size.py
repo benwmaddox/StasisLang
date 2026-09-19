@@ -45,8 +45,8 @@ class ReleaseBundleSizeTests(unittest.TestCase):
 
     def test_workflow_runs_the_audit_with_a_regression_budget(self):
         workflow = (ROOT / ".github/workflows/nightly-release.yml").read_text(encoding="utf-8")
-        self.assertEqual(workflow.count("tools/audit_release_bundle.py"), 2)
-        self.assertEqual(workflow.count("--max-archive-bytes 125829120"), 2)
+        self.assertEqual(workflow.count("tools/audit_release_bundle.py"), 3)
+        self.assertEqual(workflow.count("--max-archive-bytes 125829120"), 3)
         self.assertIn("bundle-audit", workflow)
 
 
