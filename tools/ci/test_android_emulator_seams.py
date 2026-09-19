@@ -68,7 +68,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", self.workflow)
         self.assertIn("uses: ./.github/workflows/android-device-seams.yml", self.nightly_workflow)
         self.assertIn(
-            "needs: [detect, build, vscode_extension, integration_seams, android_device_seams]",
+            "needs: [detect, build, windows_signing, vscode_extension, integration_seams, android_device_seams]",
             self.nightly_workflow,
         )
         self.assertIn(
