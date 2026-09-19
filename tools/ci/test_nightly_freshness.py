@@ -59,11 +59,14 @@ class NightlyFreshnessContractTests(unittest.TestCase):
             "stasis_dynload.dll",
             "src/stdlib",
             "stasis_release_provenance.json",
+            "stasis_windows_signing.json",
         ):
             self.assertIn(f'$validationRoot/{relative}', self.release)
         self.assertIn("extracted editor fingerprint mismatch", self.release)
-        self.assertIn("Nightly Windows artifacts are intentionally unsigned", self.release)
-        self.assertNotIn("extracted Authenticode verification failed", self.release)
+        self.assertIn("Restore pinned Windows release signing identity", self.release)
+        self.assertIn("Windows signing receipt generation failed", self.release)
+        self.assertIn("tools/windows/stasis-signing.ps1 verify", self.release)
+        self.assertIn("Extracted Windows signature verification failed", self.release)
         self.assertIn("tools/ci/test_editor_windows.ps1", self.release)
         smoke = (ROOT / "tools/ci/test_editor_windows.ps1").read_text(
             encoding="utf-8"

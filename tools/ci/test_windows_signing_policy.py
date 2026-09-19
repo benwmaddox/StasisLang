@@ -27,27 +27,26 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             source = (ROOT / workflow).read_text(encoding="utf-8")
             self.assertIn("tools/windows/stasis-signing.ps1", source)
 
-    def test_nightly_publication_allows_unsigned_windows_artifacts(self):
+    def test_nightly_publication_requires_pinned_windows_release_signing(self):
         source = (ROOT / ".github/workflows/nightly-release.yml").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("release_preconditions:", source)
         self.assertIn("needs: [detect, mobile_network_support]", source)
-        self.assertIn("Nightly Windows artifacts are intentionally unsigned", source)
-        self.assertNotIn("STASIS_SIGNING_PFX_BASE64", source)
-        self.assertNotIn("STASIS_SIGNING_PROFILE", source)
-        self.assertNotIn("Authenticode sign Stasis Windows binaries", source)
-        self.assertNotIn("Invoke-BoundedSigningCommand", source)
-        self.assertNotIn("stasis-signing-identity.ps1", source)
+        self.assertIn("STASIS_SIGNING_PFX_BASE64", source)
+        self.assertIn("STASIS_SIGNING_PFX_PASSWORD", source)
+        self.assertIn("STASIS_SIGNING_PROFILE=production", source)
+        self.assertIn("STASIS_SIGNING_TIMESTAMP_URLS", source)
+        self.assertIn("Restore pinned Windows release signing identity", source)
+        self.assertIn("stasis-signing-identity.ps1", source)
+        self.assertIn("67132CE8553062F2145A1EBD7A88166910CDA7A6", source)
+        self.assertIn("stasis_windows_signing.json", source)
+        self.assertIn("Remove temporary Windows signing material", source)
         self.assertIn("tools/windows/stasis-signing.ps1", source)
-        signing_region = source.split(
-            "- name: Build stasis_graphics runtime (unix)", 1
-        )[1].split("- name: Assemble bundle (unix)", 1)[0]
-        self.assertNotIn("stasis-signing.ps1", signing_region)
         extracted_verification_step = source.split(
             "- name: Verify extracted Windows editor toolchain", 1
         )[1].split("- name: Smoke test bundled graphics runtime (windows)", 1)[0]
-        self.assertNotIn("stasis-signing.ps1 verify", extracted_verification_step)
+        self.assertIn("stasis-signing.ps1 verify", extracted_verification_step)
         self.assertIn("test_network_supervision.ps1", extracted_verification_step)
 
     def test_cargo_runner_routes_signtool_through_policy_entrypoint(self):
@@ -60,6 +59,15 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("Join-Path $PSHOME", source)
         self.assertIn("Microsoft.PowerShell.Security.psd1", source)
         self.assertIn("Import-Module $securityModule -ErrorAction Stop", source)
+
+    def test_release_identity_validation_is_ephemeral_and_has_no_openssl_dependency(self):
+        source = (ROOT / "tools/windows/stasis-signing-identity.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("X509KeyStorageFlags]::EphemeralKeySet", source)
+        self.assertIn("HasPrivateKey", source)
+        self.assertIn("1.3.6.1.5.5.7.3.3", source)
+        self.assertNotIn("openssl", source.casefold())
 
     @unittest.skipUnless(os.name == "nt", "PowerShell signing entrypoint test")
     def test_powershell_mock_certificate_receives_policy_arguments(self):

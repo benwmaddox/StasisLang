@@ -175,8 +175,32 @@ jobs:
       STASIS_RELEASE_ID: ${{ needs.detect.outputs.nightly_tag }}
       STASIS_SOURCE_COMMIT: ${{ github.sha }}
       STASIS_BUILD_TARGET: ${{ matrix.rust_target }}
+      STASIS_SIGNING_PFX_PASSWORD: ${{ matrix.os == 'windows-latest' && secrets.STASIS_SIGNING_PFX_PASSWORD || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restore pinned Windows release signing identity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          STASIS_SIGNING_PFX_BASE64: ${{ secrets.STASIS_SIGNING_PFX_BASE64 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:STASIS_SIGNING_PFX_BASE64) { throw "STASIS_SIGNING_PFX_BASE64 is not configured" }
+          if (-not $env:STASIS_SIGNING_PFX_PASSWORD) { throw "STASIS_SIGNING_PFX_PASSWORD is not configured" }
+          $signingRoot = Join-Path $env:RUNNER_TEMP "stasis-production-signing"
+          $certificate = Join-Path $signingRoot "stasis-release.pfx"
+          New-Item -ItemType Directory -Force -Path $signingRoot | Out-Null
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:STASIS_SIGNING_PFX_BASE64))
+          & pwsh -NoProfile -NonInteractive -File tools/windows/stasis-signing-identity.ps1 `
+            -Certificate $certificate `
+            -ExpectedThumbprint "67132CE8553062F2145A1EBD7A88166910CDA7A6" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Pinned Windows signing identity validation failed" }
+          "STASIS_SIGNING_CERTIFICATE=$certificate" >> $env:GITHUB_ENV
+          "STASIS_SIGNING_PROFILE=production" >> $env:GITHUB_ENV
+          "STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY=1" >> $env:GITHUB_ENV
+          "STASIS_SIGNING_TIMEOUT_SECONDS=60" >> $env:GITHUB_ENV
+          "STASIS_SIGNING_TIMESTAMP_URLS=http://timestamp.digicert.com;http://timestamp.acs.microsoft.com" >> $env:GITHUB_ENV
 
       - name: Compute shared toolchain fingerprint
         shell: bash
@@ -272,7 +296,6 @@ jobs:
             test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
           fi
 
-      # Nightly Windows artifacts are intentionally unsigned until a trusted production certificate is available.
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -379,6 +402,22 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
           Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md,docs/network_supervision.md "$out/docs/" -Force
           Copy-Item docs/knowledge "$out/docs/knowledge" -Recurse -Force
+          $signingArtifacts = @(
+            "$out/stasis.exe",
+            "$out/stasis_runner.exe",
+            "$out/stasis-network-supervise.exe"
+          ) + @(Get-ChildItem -LiteralPath $out -File -Filter "*.dll" | Select-Object -ExpandProperty FullName)
+          $signingArtifacts = @($signingArtifacts | Sort-Object -Unique)
+          foreach ($artifact in $signingArtifacts) {
+            if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) { throw "Windows release signing input missing: $artifact" }
+            & pwsh -NoProfile -NonInteractive -File tools/windows/stasis-signing.ps1 sign -Artifact $artifact
+            if ($LASTEXITCODE -ne 0) { throw "Windows release signing failed: $artifact" }
+          }
+          $signingReceipt = & pwsh -NoProfile -NonInteractive -File tools/windows/stasis-signing-identity.ps1 `
+            -Certificate $env:STASIS_SIGNING_CERTIFICATE `
+            -ExpectedThumbprint "67132CE8553062F2145A1EBD7A88166910CDA7A6"
+          if ($LASTEXITCODE -ne 0) { throw "Windows signing receipt generation failed" }
+          $signingReceipt | Set-Content -LiteralPath "$out/stasis_windows_signing.json" -Encoding utf8
           python tools/generate_release_provenance.py `
             --archive-root "$out" `
             --release-tag "${{ needs.detect.outputs.nightly_tag }}" `
@@ -406,9 +445,19 @@ jobs:
             "$validationRoot/stasis_graphics.dll",
             "$validationRoot/stasis_dynload.dll",
             "$validationRoot/src/stdlib",
-            "$validationRoot/stasis_release_provenance.json"
+            "$validationRoot/stasis_release_provenance.json",
+            "$validationRoot/stasis_windows_signing.json"
           ) | ForEach-Object {
             if (-not (Test-Path $_)) { throw "extracted Windows editor toolchain is missing $_" }
+          }
+          $signedArtifacts = @(
+            "$validationRoot/stasis.exe",
+            "$validationRoot/stasis_runner.exe",
+            "$validationRoot/stasis-network-supervise.exe"
+          ) + @(Get-ChildItem -LiteralPath $validationRoot -File -Filter "*.dll" | Select-Object -ExpandProperty FullName)
+          foreach ($artifact in @($signedArtifacts | Sort-Object -Unique)) {
+            & pwsh -NoProfile -NonInteractive -File tools/windows/stasis-signing.ps1 verify -Artifact $artifact
+            if ($LASTEXITCODE -ne 0) { throw "Extracted Windows signature verification failed: $artifact" }
           }
           $editorInfo = & "$validationRoot/stasis.exe" --json editor-info | ConvertFrom-Json
           if (-not $editorInfo.ok) { throw "extracted editor-info probe failed" }
@@ -636,6 +685,11 @@ jobs:
           name: ${{ matrix.archive }}
           path: dist/${{ matrix.archive }}.${{ matrix.ext }}
           if-no-files-found: error
+
+      - name: Remove temporary Windows signing material
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "stasis-production-signing") -Recurse -Force -ErrorAction SilentlyContinue
 
   vscode_extension:
     needs: [detect, build]
