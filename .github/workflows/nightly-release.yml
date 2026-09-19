@@ -4,7 +4,7 @@ env:
   CARGO_INCREMENTAL: "0"
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: read
   actions: read
 
@@ -272,7 +272,6 @@ jobs:
             test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
           fi
 
-      # Nightly Windows artifacts are intentionally unsigned until a trusted production certificate is available.
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -379,6 +378,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
           Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md,docs/network_supervision.md "$out/docs/" -Force
           Copy-Item docs/knowledge "$out/docs/knowledge" -Recurse -Force
+          python tools/ci/windows_signing_manifest.py create `
+            --root "$out" `
+            --receipt "$out/stasis_windows_signing.json" `
+            --source-commit "${{ github.sha }}"
           python tools/generate_release_provenance.py `
             --archive-root "$out" `
             --release-tag "${{ needs.detect.outputs.nightly_tag }}" `
@@ -406,7 +409,8 @@ jobs:
             "$validationRoot/stasis_graphics.dll",
             "$validationRoot/stasis_dynload.dll",
             "$validationRoot/src/stdlib",
-            "$validationRoot/stasis_release_provenance.json"
+            "$validationRoot/stasis_release_provenance.json",
+            "$validationRoot/stasis_windows_signing.json"
           ) | ForEach-Object {
             if (-not (Test-Path $_)) { throw "extracted Windows editor toolchain is missing $_" }
           }
@@ -633,12 +637,164 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           archive: true
-          name: ${{ matrix.archive }}
+          name: ${{ matrix.os == 'windows-latest' && 'stasis-nightly-win-x64-unsigned' || matrix.archive }}
           path: dist/${{ matrix.archive }}.${{ matrix.ext }}
           if-no-files-found: error
 
-  vscode_extension:
+  windows_signing:
     needs: [detect, build]
+    if: needs.detect.outputs.should_release == 'true' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: windows-release-signing
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Require the trusted current main commit
+        id: trusted_main
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -ne "refs/heads/main") {
+            throw "Windows release signing is restricted to refs/heads/main"
+          }
+          $remoteMain = ((git ls-remote origin refs/heads/main) -split "\s+")[0]
+          if ($remoteMain -notmatch "^[0-9a-f]{40}$") {
+            throw "Could not resolve the current origin/main commit"
+          }
+          if ($env:GITHUB_SHA -ne $remoteMain) {
+            throw "Windows release signing requires the exact current origin/main commit"
+          }
+          "source_commit=$remoteMain" >> $env:GITHUB_OUTPUT
+
+      - name: Download unsigned Windows toolchain
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stasis-nightly-win-x64-unsigned
+          path: unsigned
+
+      - name: Validate unsigned signing manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = "dist/stasis-nightly-win-x64"
+          Expand-Archive -LiteralPath "unsigned/stasis-nightly-win-x64.zip" -DestinationPath $out -Force
+          python tools/ci/windows_signing_manifest.py list `
+            --root $out `
+            --receipt "$out/stasis_windows_signing.json"
+          if ($LASTEXITCODE -ne 0) { throw "Unsigned Windows signing manifest validation failed" }
+
+      - name: Reconfirm trusted current main immediately before signing
+        id: trusted_main_final
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -ne "refs/heads/main") {
+            throw "Windows release signing is restricted to refs/heads/main"
+          }
+          $remoteMain = ((git ls-remote origin refs/heads/main) -split "\s+")[0]
+          if ($remoteMain -notmatch "^[0-9a-f]{40}$") {
+            throw "Could not resolve the current origin/main commit immediately before signing"
+          }
+          if ($env:GITHUB_SHA -ne $remoteMain) {
+            throw "Windows release signing requires the exact current origin/main commit immediately before signing"
+          }
+          "source_commit=$remoteMain" >> $env:GITHUB_OUTPUT
+
+      - name: Sign trusted Windows release files
+        shell: pwsh
+        env:
+          STASIS_SIGNING_PFX_BASE64: ${{ secrets.STASIS_SIGNING_PFX_BASE64 }}
+          STASIS_SIGNING_PFX_PASSWORD: ${{ secrets.STASIS_SIGNING_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:STASIS_SIGNING_PFX_BASE64) { throw "STASIS_SIGNING_PFX_BASE64 is not configured" }
+          if (-not $env:STASIS_SIGNING_PFX_PASSWORD) { throw "STASIS_SIGNING_PFX_PASSWORD is not configured" }
+          $out = "dist/stasis-nightly-win-x64"
+          $receipt = "$out/stasis_windows_signing.json"
+          $signingRoot = Join-Path $env:RUNNER_TEMP "stasis-production-signing"
+          $certificate = Join-Path $signingRoot "stasis-release.pfx"
+          $identity = Join-Path $signingRoot "identity.json"
+          try {
+            New-Item -ItemType Directory -Force -Path $signingRoot | Out-Null
+            [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:STASIS_SIGNING_PFX_BASE64))
+            & pwsh -NoProfile -NonInteractive -File tools/windows/stasis-signing-identity.ps1 `
+              -Certificate $certificate `
+              -ExpectedThumbprint "67132CE8553062F2145A1EBD7A88166910CDA7A6" | Set-Content -LiteralPath $identity -Encoding utf8
+            if ($LASTEXITCODE -ne 0) { throw "Pinned Windows signing identity validation failed" }
+            $env:STASIS_SIGNING_CERTIFICATE = $certificate
+            $env:STASIS_SIGNING_PROFILE = "production"
+            $env:STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY = "1"
+            $env:STASIS_SIGNING_TIMEOUT_SECONDS = "60"
+            $env:STASIS_SIGNING_TIMESTAMP_URLS = "http://timestamp.digicert.com;http://timestamp.acs.microsoft.com"
+            $signingArtifacts = @(python tools/ci/windows_signing_manifest.py list --root $out --receipt $receipt)
+            if ($LASTEXITCODE -ne 0 -or $signingArtifacts.Count -eq 0) { throw "Windows signing manifest produced no inputs" }
+            foreach ($artifact in $signingArtifacts) {
+              & pwsh -NoProfile -NonInteractive -File tools/windows/stasis-signing.ps1 sign -Artifact $artifact
+              if ($LASTEXITCODE -ne 0) { throw "Windows release signing failed: $artifact" }
+            }
+            python tools/ci/windows_signing_manifest.py finalize `
+              --root $out `
+              --receipt $receipt `
+              --identity $identity `
+              --source-commit "${{ steps.trusted_main_final.outputs.source_commit }}"
+            if ($LASTEXITCODE -ne 0) { throw "Windows signing receipt generation failed" }
+            python tools/generate_release_provenance.py `
+              --archive-root $out `
+              --release-tag "${{ needs.detect.outputs.nightly_tag }}" `
+              --source-commit "${{ steps.trusted_main_final.outputs.source_commit }}" `
+              --compiler "stasis.exe" `
+              --dependency "sdl3=3.4.10-static" `
+              --dependency "sdl3_image=3.4.4-static"
+            Compress-Archive -Path "$out/*" -DestinationPath "dist/stasis-nightly-win-x64.zip" -Force
+          } finally {
+            Remove-Item -LiteralPath $signingRoot -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Verify extracted signed Windows toolchain
+        shell: pwsh
+        env:
+          STASIS_SIGNING_CERT_THUMBPRINT: 67132CE8553062F2145A1EBD7A88166910CDA7A6
+          STASIS_SIGNING_PROFILE: production
+          STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY: "1"
+          STASIS_SIGNING_TIMEOUT_SECONDS: "60"
+        run: |
+          $ErrorActionPreference = "Stop"
+          $validationRoot = "build/signed-windows-release"
+          Expand-Archive -LiteralPath "dist/stasis-nightly-win-x64.zip" -DestinationPath $validationRoot -Force
+          $receipt = "$validationRoot/stasis_windows_signing.json"
+          python tools/ci/windows_signing_manifest.py verify-files `
+            --root $validationRoot `
+            --receipt $receipt `
+            --source-commit "${{ steps.trusted_main_final.outputs.source_commit }}" `
+            --thumbprint $env:STASIS_SIGNING_CERT_THUMBPRINT
+          if ($LASTEXITCODE -ne 0) { throw "Extracted Windows signing receipt validation failed" }
+          python tools/audit_release_bundle.py `
+            --root $validationRoot `
+            --platform windows `
+            --archive "dist/stasis-nightly-win-x64.zip" `
+            --output "bundle-audit/stasis-nightly-win-x64-signed.json" `
+            --max-archive-bytes 125829120
+          if ($LASTEXITCODE -ne 0) { throw "Signed Windows release bundle audit failed" }
+          $signedArtifacts = @(python tools/ci/windows_signing_manifest.py list --root $validationRoot --receipt $receipt)
+          foreach ($artifact in $signedArtifacts) {
+            & pwsh -NoProfile -NonInteractive -File tools/windows/stasis-signing.ps1 verify -Artifact $artifact
+            if ($LASTEXITCODE -ne 0) { throw "Extracted Windows signature verification failed: $artifact" }
+          }
+
+      - name: Upload signed Windows toolchain
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: stasis-nightly-win-x64
+          path: dist/stasis-nightly-win-x64.zip
+          if-no-files-found: error
+
+  vscode_extension:
+    needs: [detect, build, windows_signing]
     if: needs.detect.outputs.should_release == 'true'
     strategy:
       fail-fast: false
@@ -756,16 +912,39 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [detect, build, vscode_extension, integration_seams, android_device_seams]
-    if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}
+    needs: [detect, build, windows_signing, vscode_extension, integration_seams, android_device_seams]
+    if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download Linux toolchain release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          name: stasis-nightly-linux-x64
+          path: dist
+
+      - name: Download signed Windows toolchain release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stasis-nightly-win-x64
+          path: dist
+
+      - name: Download macOS toolchain release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stasis-nightly-osx-arm64
+          path: dist
+
+      - name: Download editor releases
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: stasis-editor-release-*
           path: dist
           merge-multiple: true
 
@@ -777,6 +956,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Release publication is restricted to refs/heads/main" >&2
+            exit 1
+          fi
+          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          if [[ ! "${remote_main}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Could not resolve the current origin/main commit before publication" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_SHA}" != "${remote_main}" ]]; then
+            echo "Release publication requires the exact current origin/main commit" >&2
+            exit 1
+          fi
           notes="$(printf 'Automated nightly build.')"
           if [ -n "${LAST_TAG}" ]; then
             notes="$(printf 'Automated nightly build.\n\nChanges since %s: https://github.com/%s/compare/%s...%s' "${LAST_TAG}" "${GITHUB_REPOSITORY}" "${LAST_TAG}" "${GITHUB_SHA}")"

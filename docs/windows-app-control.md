@@ -71,12 +71,19 @@ install a certificate or authorize it under Application Control.
 Stasis-controlled Authenticode signing always requests a SHA-256 file digest and page hashes.
 Production credentials are supplied externally with `STASIS_SIGNING_CERT_THUMBPRINT` or
 `STASIS_SIGNING_CERTIFICATE`; Stasis never generates, exports, prints, or logs private keys.
-Nightly Windows artifacts are currently intentionally unsigned while the production certificate
-trust issue is deferred. The Windows release job still performs the build, packaging, provenance,
-editor, and network supervision checks, and ships the standalone signing entrypoint for an
-explicitly signed deployment. This means nightly Windows downloads do not satisfy an App Control
-policy that requires a trusted Authenticode publisher; use the required-signing settings and a
-trusted production certificate for that deployment path.
+Nightly Windows artifacts are signed with the pinned stable StasisLang release identity. The
+encrypted GitHub Actions secrets are deployment copies derived from the private KeyStores source
+of truth. The workflow is read-only by default, compilation and tests run without signing
+credentials, and only the publication job receives `contents: write`. A separate least-privilege
+job uses the reviewer-gated `windows-release-signing` environment and requires the workflow SHA to
+equal the current `main` SHA both before artifact inspection and immediately before the secret-bearing
+signing step. The job validates its pinned public thumbprint, signs every Stasis-owned EXE and DLL
+named by the bounded recursively generated native-file receipt, records
+the signed hashes and public identity in `stasis_windows_signing.json`, verifies the extracted
+archive against that same receipt, and deletes the temporary PFX before verification. The current
+identity is self-signed: it provides stable Authenticode identity and integrity but not public CA
+trust or SmartScreen reputation. Deployments whose App Control policy requires a publicly trusted
+publisher still need a trusted production certificate accepted by that policy.
 
 ## Canonical validation and executable boundaries
 

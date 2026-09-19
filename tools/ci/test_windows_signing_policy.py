@@ -27,28 +27,57 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             source = (ROOT / workflow).read_text(encoding="utf-8")
             self.assertIn("tools/windows/stasis-signing.ps1", source)
 
-    def test_nightly_publication_allows_unsigned_windows_artifacts(self):
+    def test_nightly_publication_requires_pinned_windows_release_signing(self):
         source = (ROOT / ".github/workflows/nightly-release.yml").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("release_preconditions:", source)
+        workflow_header = source.split("jobs:", 1)[0]
+        self.assertIn("permissions:\n  contents: read", workflow_header)
+        self.assertNotIn("contents: write", workflow_header)
         self.assertIn("needs: [detect, mobile_network_support]", source)
-        self.assertIn("Nightly Windows artifacts are intentionally unsigned", source)
-        self.assertNotIn("STASIS_SIGNING_PFX_BASE64", source)
-        self.assertNotIn("STASIS_SIGNING_PROFILE", source)
-        self.assertNotIn("Authenticode sign Stasis Windows binaries", source)
-        self.assertNotIn("Invoke-BoundedSigningCommand", source)
-        self.assertNotIn("stasis-signing-identity.ps1", source)
+        build_job = source.split("  build:", 1)[1].split("  windows_signing:", 1)[0]
+        signing_job = source.split("  windows_signing:", 1)[1].split("  vscode_extension:", 1)[0]
+        self.assertNotIn("secrets.STASIS_SIGNING", build_job)
+        self.assertIn("STASIS_SIGNING_PFX_BASE64", source)
+        self.assertIn("STASIS_SIGNING_PFX_PASSWORD", source)
+        self.assertIn('$env:STASIS_SIGNING_PROFILE = "production"', signing_job)
+        self.assertIn("STASIS_SIGNING_TIMESTAMP_URLS", source)
+        self.assertIn(
+            'http://timestamp.digicert.com;http://timestamp.acs.microsoft.com',
+            signing_job,
+        )
+        self.assertIn("Sign trusted Windows release files", signing_job)
+        self.assertIn("if: needs.detect.outputs.should_release == 'true' && github.ref == 'refs/heads/main'", signing_job)
+        self.assertIn("environment: windows-release-signing", signing_job)
+        self.assertIn("timeout-minutes: 30", signing_job)
+        self.assertIn("Require the trusted current main commit", signing_job)
+        self.assertIn("Reconfirm trusted current main immediately before signing", signing_job)
+        self.assertIn('$env:GITHUB_REF -ne "refs/heads/main"', signing_job)
+        self.assertEqual(signing_job.count("git ls-remote origin refs/heads/main"), 2)
+        self.assertIn("stasis-signing-identity.ps1", source)
+        self.assertIn("67132CE8553062F2145A1EBD7A88166910CDA7A6", source)
+        self.assertIn("stasis_windows_signing.json", source)
+        self.assertIn("windows_signing_manifest.py finalize", source)
+        self.assertIn("windows_signing_manifest.py verify-files", source)
+        self.assertIn("Remove-Item -LiteralPath $signingRoot", signing_job)
+        self.assertLess(
+            signing_job.index("Reconfirm trusted current main immediately before signing"),
+            signing_job.index("secrets.STASIS_SIGNING_PFX_BASE64"),
+        )
         self.assertIn("tools/windows/stasis-signing.ps1", source)
-        signing_region = source.split(
-            "- name: Build stasis_graphics runtime (unix)", 1
-        )[1].split("- name: Assemble bundle (unix)", 1)[0]
-        self.assertNotIn("stasis-signing.ps1", signing_region)
-        extracted_verification_step = source.split(
-            "- name: Verify extracted Windows editor toolchain", 1
-        )[1].split("- name: Smoke test bundled graphics runtime (windows)", 1)[0]
-        self.assertNotIn("stasis-signing.ps1 verify", extracted_verification_step)
-        self.assertIn("test_network_supervision.ps1", extracted_verification_step)
+        extracted_verification_step = signing_job.split(
+            "- name: Verify extracted signed Windows toolchain", 1
+        )[1].split("- name: Upload signed Windows toolchain", 1)[0]
+        self.assertIn("stasis-signing.ps1 verify", extracted_verification_step)
+        release_job = source.split("  release:", 1)[1].split("  no_changes:", 1)[0]
+        self.assertIn("permissions:\n      actions: read\n      contents: write", release_job)
+        self.assertIn("name: stasis-nightly-win-x64", release_job)
+        self.assertNotIn("stasis-nightly-win-x64-unsigned", release_job)
+        self.assertLess(
+            release_job.index("git ls-remote origin refs/heads/main"),
+            release_job.index('gh release create "${NIGHTLY_TAG}"'),
+        )
 
     def test_cargo_runner_routes_signtool_through_policy_entrypoint(self):
         source = (ROOT / ".cargo/stasis-sign-and-run.cmd").read_text(encoding="utf-8")
@@ -60,6 +89,15 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("Join-Path $PSHOME", source)
         self.assertIn("Microsoft.PowerShell.Security.psd1", source)
         self.assertIn("Import-Module $securityModule -ErrorAction Stop", source)
+
+    def test_release_identity_validation_is_ephemeral_and_has_no_openssl_dependency(self):
+        source = (ROOT / "tools/windows/stasis-signing-identity.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("X509KeyStorageFlags]::EphemeralKeySet", source)
+        self.assertIn("HasPrivateKey", source)
+        self.assertIn("1.3.6.1.5.5.7.3.3", source)
+        self.assertNotIn("openssl", source.casefold())
 
     @unittest.skipUnless(os.name == "nt", "PowerShell signing entrypoint test")
     def test_powershell_mock_certificate_receives_policy_arguments(self):
@@ -111,6 +149,25 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             "Invoke-BoundedSignTool $signer.Path @('verify', '/pa', '/all', '/tw', '/v', $path) -AllowPinnedSelfSigned",
             source,
         )
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell 5 command-line escaping test")
+    def test_powershell5_fallback_quotes_passwords_and_trailing_backslashes(self):
+        source = textwrap.dedent(
+            f"""
+            . '{ROOT / "tools/windows/stasis-signing.ps1"}' status -Tool "$env:ComSpec"
+            $encoded = ConvertTo-WindowsCommandLineArgument 'pa ss"tail\\'
+            Write-Output "ENCODED=$encoded"
+            """
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            wrapper = pathlib.Path(directory) / "wrapper.ps1"
+            wrapper.write_text(source, encoding="utf-8")
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+                capture_output=True, text=True, timeout=30,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(r'ENCODED="pa ss\"tail\\"', result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "PowerShell pinned verification bridge test")
     def test_pinned_self_signed_bridge_accepts_only_the_expected_trust_failure(self):
