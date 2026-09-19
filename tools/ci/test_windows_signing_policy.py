@@ -138,8 +138,8 @@ class WindowsSigningPolicyTests(unittest.TestCase):
                         f"""
                         function Get-AuthenticodeSignature {{
                             [pscustomobject]@{{
-                                Status = [System.Management.Automation.SignatureStatus]::Unknown
-                                StatusMessage = 'untrusted test signature'
+                                Status = [System.Management.Automation.SignatureStatus]::UnknownError
+                                StatusMessage = 'A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider.'
                                 SignerCertificate = $null
                             }}
                         }}

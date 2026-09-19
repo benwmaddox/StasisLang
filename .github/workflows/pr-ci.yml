@@ -106,6 +106,7 @@ jobs:
           python -m unittest tools.ci.test_sdl3_migration
           python -m unittest tools.ci.test_windows_vs_generator
           python -m unittest tools.ci.test_windows_signing_policy
+          python -m unittest tools.ci.test_windows_signing_provision
           python -m unittest tools.ci.test_nightly_network_support
           python -m unittest tools.ci.test_nightly_freshness
           python -m unittest tools.ci.test_pr_ci_seam_placement
@@ -463,9 +464,13 @@ jobs:
   bootstrap-smoke-windows:
     if: ${{ inputs.run_slow_seams }}
     runs-on: windows-latest
+    timeout-minutes: 60
     env:
       STASIS_RELEASE_ID: ci-${{ github.sha }}
       STASIS_SOURCE_COMMIT: ${{ github.sha }}
+      STASIS_SIGNING_CERTIFICATE: ${{ runner.temp }}\stasis-ci-signing\stasis-ci-signing.pfx
+      STASIS_SIGNING_EPHEMERAL_PFX: "1"
+      STASIS_SIGNING_TIMEOUT_SECONDS: "120"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -491,17 +496,52 @@ jobs:
           STASIS_SIGNING_MODE: required
         run: |
           $ErrorActionPreference = "Stop"
-          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tools/windows/stasis-signing.ps1 provision
+          $boundedPowerShell = (Resolve-Path -LiteralPath ./tools/windows/invoke-bounded-powershell.ps1).Path
+          $signingScript = (Resolve-Path -LiteralPath ./tools/windows/stasis-signing.ps1).Path
+          $pfxScript = (Resolve-Path -LiteralPath ./tools/windows/provision-ci-signing-pfx.ps1).Path
+          $pfxJson = @(& $boundedPowerShell -ScriptPath $pfxScript -Command provision -TimeoutSeconds 120)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "STASIS_SIGNING_LOCAL_RECORD=$env:STASIS_SIGNING_LOCAL_RECORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_REQUIRE_SIGNED_EXECUTION=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_SIGNING_MODE=required" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $statusJson = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tools/windows/stasis-signing.ps1 status
+          $pfx = ($pfxJson -join "`n") | ConvertFrom-Json
+          $expectedCertificate = [IO.Path]::GetFullPath($env:STASIS_SIGNING_CERTIFICATE)
+          $actualCertificate = [IO.Path]::GetFullPath([string]$pfx.certificate)
+          if ($actualCertificate -ne $expectedCertificate -or
+              [string]::IsNullOrWhiteSpace([string]$pfx.password) -or
+              [string]$pfx.thumbprint -notmatch '^[0-9A-Fa-f]{40}$') {
+            throw "ephemeral CI signing PFX output was invalid"
+          }
+          $pfxPassword = [string]$pfx.password
+          "::add-mask::$pfxPassword"
+          $env:STASIS_SIGNING_PFX_PASSWORD = $pfxPassword
+          $statusJson = @(& $boundedPowerShell -ScriptPath $signingScript -Command status -TimeoutSeconds 120)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $status = ($statusJson -join "`n") | ConvertFrom-Json
           if (-not $status.certificate_configured -or -not $status.required -or [string]::IsNullOrWhiteSpace([string]$status.signer)) {
             throw "ephemeral CI signing certificate was not configured for required signing"
           }
+          $smokeDirectory = Split-Path -Parent $env:STASIS_SIGNING_CERTIFICATE
+          $smokeSource = Join-Path $smokeDirectory 'ephemeral-signing-smoke.c'
+          $smokeObject = Join-Path $smokeDirectory 'ephemeral-signing-smoke.obj'
+          $smokeArtifact = Join-Path $smokeDirectory 'ephemeral-signing-smoke.exe'
+          Set-Content -LiteralPath $smokeSource -Value 'int main(void) { return 0; }' -Encoding ascii
+          try {
+            & cl.exe /nologo /W4 /WX "/Fo$smokeObject" "/Fe$smokeArtifact" $smokeSource
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $boundedPowerShell -ScriptPath $signingScript -Command sign -ScriptArguments @('-Artifact', $smokeArtifact) -TimeoutSeconds 120
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $boundedPowerShell -ScriptPath $signingScript -Command verify -ScriptArguments @('-Artifact', $smokeArtifact) -TimeoutSeconds 120
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Remove-Item -LiteralPath $smokeArtifact -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $smokeObject -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $smokeSource -Force -ErrorAction SilentlyContinue
+          }
+          "STASIS_SIGNING_LOCAL_RECORD=$env:STASIS_SIGNING_LOCAL_RECORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_SIGNING_CERTIFICATE=$env:STASIS_SIGNING_CERTIFICATE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_SIGNING_PFX_PASSWORD=$pfxPassword" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_SIGNING_EPHEMERAL_PFX=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_SIGNING_TIMEOUT_SECONDS=120" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_REQUIRE_SIGNED_EXECUTION=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_SIGNING_MODE=required" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Capture the real Windows SDL parity fixture
         shell: pwsh
@@ -567,6 +607,22 @@ jobs:
             target/render-parity-ci/evidence.json
             target/windows-platform-seams/**/*.log
             build/codex-cargo-target/seam-tests/
+
+      - name: Cleanup ephemeral CI signing certificate
+        if: always()
+        shell: pwsh
+        run: |
+          $certificate = $env:STASIS_SIGNING_CERTIFICATE
+          if ($certificate -and (Test-Path -LiteralPath $certificate -PathType Leaf)) {
+            Remove-Item -LiteralPath $certificate -Force -ErrorAction SilentlyContinue
+          }
+          $directory = if ($certificate) { Split-Path -Parent $certificate } else { $null }
+          if ($directory -and (Split-Path -Leaf $directory) -eq 'stasis-ci-signing' -and (Test-Path -LiteralPath $directory -PathType Container)) {
+            Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          if ($env:STASIS_SIGNING_LOCAL_RECORD -and (Test-Path -LiteralPath $env:STASIS_SIGNING_LOCAL_RECORD -PathType Leaf)) {
+            Remove-Item -LiteralPath $env:STASIS_SIGNING_LOCAL_RECORD -Force -ErrorAction SilentlyContinue
+          }
 
   vscode-extension-e2e:
     if: ${{ inputs.run_slow_seams }}

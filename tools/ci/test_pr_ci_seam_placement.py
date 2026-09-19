@@ -153,10 +153,15 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         self.assertLess(provision, compiler)
         for marker in (
             "STASIS_SIGNING_LOCAL_RECORD: ${{ runner.temp }}\\stasis-ci-signing-thumbprint.txt",
+            "STASIS_SIGNING_CERTIFICATE: ${{ runner.temp }}\\stasis-ci-signing\\stasis-ci-signing.pfx",
+            "STASIS_SIGNING_EPHEMERAL_PFX: \"1\"",
+            "STASIS_SIGNING_TIMEOUT_SECONDS: \"120\"",
             'STASIS_REQUIRE_SIGNED_EXECUTION: "1"',
             "STASIS_SIGNING_MODE: required",
-            "stasis-signing.ps1 provision",
-            "stasis-signing.ps1 status",
+            "provision-ci-signing-pfx.ps1",
+            "-Command status -TimeoutSeconds 120",
+            "-Command sign -ScriptArguments",
+            "-Command verify -ScriptArguments",
             "certificate_configured",
             "required",
         ):
