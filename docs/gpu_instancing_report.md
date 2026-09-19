@@ -343,12 +343,15 @@ profiles are intentionally not committed. The focused render pipeline test
 remains the deterministic regression check for 64-instance uploads, fallback,
 and interleaved source order.
 
-## Appendix: disposable benchmark reproduction
+## Appendix: disposable benchmark reconstruction
 
-The following listings are supported-public-API equivalents of the two measured
-fixtures, not byte-for-byte archives of their retired v5 lifecycle calls. They
-preserve the command counts, source order, alpha and rotation variation, and two
-UV rectangles used by the measurements. Start from a copy of
+The first listing is a supported-public-API equivalent of the measured sprite
+fixture, not a byte-for-byte archive of its retired v5 lifecycle calls. The
+mixed listing is only a modern left-half/right-half UV surrogate: it preserves
+the command counts, source order, and alpha and rotation variation, but the
+historical measurement alternated the left half with the full texture. The
+surrogate therefore must not be used for pixel-parity claims or to revalidate
+the recorded mixed-fixture numbers. Start from a copy of
 `samples/swarm_field`, update its Stasis vendor snapshot, replace the manifest
 entry with one of the two files below, and remove the copied sample's original
 `src/main.stasis`. The manifest essentials are:
