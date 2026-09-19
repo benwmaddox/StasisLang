@@ -44,6 +44,22 @@ class WindowsSigningManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(manifest.ReceiptError, "complete native file set"):
                 manifest.list_paths(root, receipt)
 
+    def test_unsigned_receipt_rejects_same_size_mutation(self):
+        cases = (
+            ("nested/stasis_helper.dll", "unsigned file hash mismatch"),
+            ("SDL3.dll", "excluded third-party file hash mismatch"),
+        )
+        for relative, message in cases:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                self._fixture(root)
+                receipt = root / "stasis_windows_signing.json"
+                manifest.create(root, receipt, "d" * 40)
+                target = root / relative
+                target.write_bytes(b"x" * target.stat().st_size)
+                with self.assertRaisesRegex(manifest.ReceiptError, message):
+                    manifest.list_paths(root, receipt)
+
     def test_final_receipt_binds_signed_and_excluded_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

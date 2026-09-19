@@ -129,6 +129,17 @@ def _assert_exact_paths(
         )
         if receipt.get(bytes_field) != sum(path.stat().st_size for path in native):
             raise ReceiptError("native file byte total differs from the receipt")
+        if receipt.get("status") == "unsigned":
+            signed_by_path = {_relative(root, path): path for path in signed}
+            for entry in receipt.get("files", []):
+                if _sha256(signed_by_path[entry["path"]]) != entry.get("unsigned_sha256"):
+                    raise ReceiptError(f"unsigned file hash mismatch: {entry['path']}")
+            excluded_by_path = {_relative(root, path): path for path, _ in excluded}
+            for entry in receipt.get("excluded_files", []):
+                if _sha256(excluded_by_path[entry["path"]]) != entry.get("sha256"):
+                    raise ReceiptError(
+                        f"excluded third-party file hash mismatch: {entry['path']}"
+                    )
     return signed, excluded
 
 
