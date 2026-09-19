@@ -75,7 +75,6 @@ function exploration_host_draw(): void {
     let moon_bar: i32 = 12 + Render.command7_w;
     exploration_host_line(12, 20, sun_bar, 20, 1.0, 0.78, 0.22);
     exploration_host_line(12, 40, moon_bar, 40, 0.52, 0.64, 1.0);
-    exploration_host_present();
 }
 
 function exploration_host_start(): void {

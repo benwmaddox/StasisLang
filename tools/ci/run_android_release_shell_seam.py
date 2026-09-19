@@ -1007,7 +1007,7 @@ def validate_resource_lifecycle_markers(
         if marker.get("restore_failures", 0) != 0:
             raise SeamError(f"Android resource lifecycle stage {name} reported restore failures: {marker.get('restore_failures')}")
         # These counters prove render progress; the compositor capture below is
-        # the presentation oracle because end_frame may suppress presentation.
+        # the pixel presentation oracle after host finish validates publication.
         if marker.get("accepted", 0) <= 0 or marker.get("presented", 0) <= 0:
             raise SeamError(f"Android resource lifecycle stage {name} has no accepted presented frame")
         if marker.get("rejected", 0) != 0 or marker.get("validation", 0) != 0:

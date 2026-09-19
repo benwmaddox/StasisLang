@@ -27,20 +27,18 @@ function bounds_probe(): i32 {
     }
     if (presentation.append_solid_rect(1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 0.4)) { return 11; }
     presentation.count = 300;
-    begin_frame();
+    gfx_cmd_begin();
     presentation.replay();
-    end_frame();
     return 0;
 }
 function main(): i32 {
-    begin_frame();
+    gfx_cmd_begin();
     presentation.reset_presentation();
     if (!presentation.append_solid_rect(1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 0.4)) { return 1; }
     if (!presentation.append_sprite(SpriteRef.Probe, 5.0, 6.0, 7.0, 8.0, 9, 128)) { return 2; }
     if (!presentation.append_solid_rect(10.0, 11.0, 12.0, 13.0, 0.5, 0.6, 0.7, 0.8)) { return 3; }
     if (!presentation.patch_sprite(1, SpriteRef.Probe, 15.0, 16.0, 17.0, 18.0, 19, 64)) { return 4; }
     presentation.replay();
-    end_frame();
     return 0;
 }
 function set_render_mode(value: i32): i32 {
@@ -51,18 +49,10 @@ function tick(): i32 { return 0; }
 function on_code_swap(): void {}
 function render(): i32 {
     if (render_mode == 5) {
-        end_frame();
         return 0;
     }
     if (render_mode == 6) {
         fill_rect(2.0, 3.0, 4.0, 5.0, 0.4, 0.5, 0.6, 1.0);
-        end_frame();
-        return 0;
-    }
-    if (render_mode == 7) {
-        begin_frame();
-        fill_rect(2.0, 3.0, 4.0, 5.0, 0.4, 0.5, 0.6, 1.0);
-        end_frame();
         return 0;
     }
     clear(0.1, 0.2, 0.3, 1.0);
@@ -70,22 +60,14 @@ function render(): i32 {
     draw_text(0, "x", 1.0, 2.0, 1.0, 1.0, 1.0, 1.0);
     if (render_mode == 1) {
         render_writer.reserve(2, -1, 0, 0, 0, 0, 0);
-        end_frame();
         return 0;
     }
     if (render_mode == 2) {
         return 0;
     }
-    if (render_mode == 3) {
-        end_frame();
-        return 0;
-    }
     if (render_mode == 4) {
-        end_frame();
         return 9;
     }
-    end_frame();
-    end_frame();
     clear(0.7, 0.8, 0.9, 1.0);
     return 0;
 }
@@ -173,7 +155,7 @@ fn typed_presentation_list_preserves_order_in_jit_and_compiles_for_wasm() {
 }
 
 #[test]
-fn negotiated_render_entry_resets_once_and_requires_finished_publication() {
+fn negotiated_render_entry_owns_publication_and_rejects_invalid_construction() {
     let _runtime_globals = RUNTIME_GLOBALS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -213,6 +195,21 @@ fn negotiated_render_entry_resets_once_and_requires_finished_publication() {
     )
     .expect("publish host targets");
 
+    let reset_ptr = package
+        .render_construction_reset_code_ptr
+        .expect("reset pointer") as usize;
+    let finish_ptr = package
+        .render_construction_finish_code_ptr
+        .expect("finish pointer") as usize;
+    stasis_dynload::invoke_noarg_void(reset_ptr).expect("start private construction");
+    stasis_dynload::invoke_noarg_void(reset_ptr).expect("nested private reset");
+    assert_eq!(
+        stasis_dynload::invoke_i32_to_i32(finish_ptr, 0),
+        Ok(0),
+        "invalid nested reset still returns the guest result"
+    );
+    assert_eq!(i32s[2], 0, "nested private reset aborts publication");
+
     i32s[10] = 321;
     assert_eq!(
         stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr()),
@@ -237,28 +234,16 @@ fn negotiated_render_entry_resets_once_and_requires_finished_publication() {
     assert_eq!(i32s[7], 0, "aborted text becomes unreachable");
 
     jit.execute_i32_onearg_by_name("set_render_mode", 2)
-        .expect("select early return");
+        .expect("select host-published early return");
     assert_eq!(
         stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr()),
         Ok(0)
     );
-    assert_eq!(i32s[2], 0, "unpublished construction is discarded");
-    assert_eq!(i32s[24], 0, "unpublished geometry is discarded");
-
-    jit.execute_i32_onearg_by_name("set_render_mode", 3)
-        .expect("select published early return");
-    assert_eq!(
-        stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr()),
-        Ok(0)
-    );
-    assert_eq!(
-        i32s[2], 3,
-        "publication before a successful return is retained"
-    );
+    assert_eq!(i32s[2], 3, "host finish publishes a successful render");
     assert_eq!(i32s[24], 1);
 
     jit.execute_i32_onearg_by_name("set_render_mode", 4)
-        .expect("select failed published return");
+        .expect("select failed render result");
     assert_eq!(
         stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr()),
         Ok(9)
@@ -272,7 +257,7 @@ fn negotiated_render_entry_resets_once_and_requires_finished_publication() {
         stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr()),
         Ok(0)
     );
-    assert_eq!(i32s[2], 2, "empty no-clear frame publishes explicitly");
+    assert_eq!(i32s[2], 2, "host finish publishes an empty no-clear frame");
     assert_eq!(i32s[24], 0);
 
     jit.execute_i32_onearg_by_name("set_render_mode", 6)
@@ -283,15 +268,6 @@ fn negotiated_render_entry_resets_once_and_requires_finished_publication() {
     );
     assert_eq!(i32s[2], 2, "no-clear does not imply background replacement");
     assert_eq!(i32s[24], 1);
-
-    jit.execute_i32_onearg_by_name("set_render_mode", 7)
-        .expect("select nested manual begin");
-    assert_eq!(
-        stasis_dynload::invoke_noarg_i32(stasis_dynload::jit_host_render_trampoline_ptr()),
-        Ok(0)
-    );
-    assert_eq!(i32s[2], 0, "nested manual begin aborts publication");
-    assert_eq!(i32s[24], 0, "nested manual begin discards geometry");
 
     let mut wasm = configured_wasm(FIXTURE_PATH, FIXTURE);
     wasm.compile()
@@ -325,7 +301,7 @@ WebAssembly.instantiate(module, {env}).then(instance => {
     return [result, i32[2], i32[24], i32[10]];
   };
   i32[10] = 321;
-  process.stdout.write([run(0), run(1), run(2), run(3), run(4), run(5), run(6), run(7)].flat().join(','));
+  process.stdout.write([run(0), run(1), run(2), run(4), run(5), run(6)].flat().join(','));
 }).catch(error => { console.error(error); process.exit(1); });
 "#;
     let output = Command::new("node")
@@ -343,7 +319,7 @@ WebAssembly.instantiate(module, {env}).then(instance => {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "0,3,1,321,0,0,0,321,0,0,0,321,0,3,1,321,9,0,0,321,0,2,0,321,0,2,1,321,0,0,0,321"
+        "0,3,1,321,0,0,0,321,0,3,1,321,9,0,0,321,0,2,0,321,0,2,1,321"
     );
 }
 

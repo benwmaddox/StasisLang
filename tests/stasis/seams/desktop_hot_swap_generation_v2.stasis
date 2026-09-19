@@ -18,7 +18,6 @@ function render(): i32 {
     } else {
         clear(0.92, 0.02, 0.62, 1.0);
     }
-    end_frame();
     return 0;
 }
 

@@ -4743,9 +4743,7 @@ function main(): void {
 }
 
 function tick(): void {
-    begin_frame();
     state.sprite.draw(4.0, 5.0, 200, 7);
-    end_frame();
     if (state.phase == 0) {
         state.sprite.release();
         state.phase = 1;
@@ -4863,7 +4861,6 @@ function main(): void {
 }
 
 function tick(): void {
-    begin_frame();
     if (state.phase == 0) {
         state.sprite.release();
         if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
@@ -4878,7 +4875,6 @@ function tick(): void {
         state.sprite.release();
         state.phase = 2;
     }
-    end_frame();
 }
 "#;
         let (root, handle) = write_typed_sprite_project("typed_reacquire", source);
@@ -7532,8 +7528,13 @@ function on_code_swap(): void {}\n",
             u8_values.len(),
         );
         assert_eq!(status, 0);
-        assert!(i32_values.iter().all(|value| *value == -71));
-        assert!(f32_values.iter().all(|value| *value == -72.0));
+        // Host construction replaces stale guest storage and publishes a valid
+        // empty frame, copying only its active header spans.
+        assert_eq!(&i32_values[..5], &[1196967473, 8, 2, 0, 0]);
+        assert_eq!(&i32_values[22..26], &[0, 0, 0, 0]);
+        assert_eq!(&i32_values[27..31], &[0, 0, 0, 0]);
+        assert!(i32_values[32..].iter().all(|value| *value == -71));
+        assert!(f32_values[4..].iter().all(|value| *value == -72.0));
         assert!(u8_values.iter().all(|value| *value == 73));
         fs::remove_dir_all(root).ok();
         clear_runtime_session_for_test();
@@ -7559,7 +7560,6 @@ function render(): void {
   draw_line(host_f32[0], host_f32[1], 30.0, 40.0, 1.0, 0.0, 0.0, 1.0);
   draw_text(5, \"A\", 12.0, 13.0, 1.0, 1.0, 1.0, 1.0);
   fill_rect(10.25, 20.5, 30.75, 40.125, 0.0, 0.0, 0.0, 1.0);
-  end_frame();
 }
 ",
         )

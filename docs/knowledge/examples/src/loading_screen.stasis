@@ -137,7 +137,6 @@ function render(): i32 {
             segment_x += 200.0;
         }
     }
-    end_frame();
     gate.loading_frame_submitted(loading_tick);
     return 0;
 }

@@ -789,7 +789,14 @@ fn validate_expression_access(
             if known {
                 Ok(())
             } else {
-                Err(format!("cannot resolve call '{target}'"))
+                let diagnostic = format!("cannot resolve call '{target}'");
+                if matches!(bare_target, "begin_frame" | "end_frame") {
+                    Err(format!(
+                        "{diagnostic}; the host owns the entire frame lifecycle: remove this call; the host resets construction, invokes the render callback, then validates and publishes or aborts the frame; keep only public graphics drawing API calls in the render callback"
+                    ))
+                } else {
+                    Err(diagnostic)
+                }
             }
         }
         SimpleExpr::Binary { lhs, rhs, .. } => {

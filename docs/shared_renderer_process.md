@@ -49,27 +49,30 @@ add a second one:
 | Windows monolithic generated bindings | Generated AOT binding performs reset -> authored render -> finish exactly once. | Direct authored render. |
 | Android generated AOT bindings | Shared mobile AOT entry performs `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
 | iOS generated AOT bindings | Shared mobile AOT entry performs `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
-| `stasis_runner` | Verifies state/launch sidecar metadata when present and invokes the exported render entry; it never wraps again. | Invokes the legacy direct render entry. |
+| `stasis_runner` | Verifies state/launch sidecar metadata when present and invokes the exported render entry; it never wraps again. | Rejects an exported render entry as obsolete; tick-only and render-less packages remain direct/manual. |
 
 Lifecycle 1 is a render-entry contract and therefore requires a zero-argument
-authored `render()` export. A tick-only or render-less package must stay on
-lifecycle 0/absent direct/manual construction; lifecycle 1 must not be attached
-to `main` or `tick` as a substitute for a render entry.
+authored `render()` export. A tick-only or render-less package without an
+exported render entry may stay on lifecycle 0/absent direct/manual construction;
+`stasis_runner` rejects lifecycle 0/absent metadata when an exported render entry
+is present, so a packaged render must publish lifecycle 1. Lifecycle 1 must not
+be attached to `main` or `tick` as a substitute for a render entry.
 
 The generated entry calls `gfx_cmd_construction_reset()` and
 `gfx_cmd_construction_finish(result)`; `stasis_begin_frame()` and
-`stasis_end_frame()` remain host-private device/submission operations. A guest
-`begin_frame()` nested inside lifecycle-1 authored render invalidates the active
-construction and causes finish to abort. Construction lifecycle negotiation has
-no implication for logical coordinates, viewport/safe viewport, drawable
+`stasis_end_frame()` remain host-private device/submission operations. The
+public guest frame wrappers are removed; authored calls are rejected before a
+host-owned construction can run. Construction lifecycle negotiation has no
+implication for logical coordinates, viewport/safe viewport, drawable
 resolution, or a resolution cap. See the [full owner matrix and migration
 rules](begin_frame_design.md#exact-owner-matrix).
 
 Once a new nightly is installed, consumers should regenerate vendor snapshots,
 generated bindings, and package metadata together, verify the lifecycle-1 entry,
-then remove any temporary manual-begin compatibility bridge from authored
-`render()` code. Lifecycle-0/absent consumers remain direct-render packages
-until rebuilt; this migration does not alter display limits.
+then remove any temporary public frame-wrapper compatibility bridge from authored
+`render()` code. Lifecycle-0/absent consumers without an exported render entry
+may remain direct/manual; a packaged render must be rebuilt with lifecycle 1
+before use with `stasis_runner`. This migration does not alter display limits.
 
 Coordinates are logical top-left pixels. Clip rectangles use the same logical
 top-origin coordinates; native GL/GLES converts them to drawable bottom-origin

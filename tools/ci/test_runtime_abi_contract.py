@@ -14,10 +14,10 @@ class RuntimeAbiContractTests(unittest.TestCase):
             for path in contract.REQUIRED
         }
 
-    def run_with(self, path, old, new):
+    def run_with(self, path, old, new, count=1):
         overlays = copy.deepcopy(self.sources)
         self.assertIn(old, overlays[path])
-        overlays[path] = overlays[path].replace(old, new, 1)
+        overlays[path] = overlays[path].replace(old, new, count)
         return contract.check(overlays=overlays)
 
     def test_source_discovery_ignores_generated_copies(self):
@@ -109,7 +109,10 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 contract.WINDOWS_LAUNCH_FIXTURE, "smoke_writer.reserve(2,", "legacy_sprite(", "public_graphics_path",
             ),
             (
-                contract.WORKSHOP_PREVIEW_ADAPTER, "end_frame();", "legacy_end();", "public_graphics_path",
+                contract.WORKSHOP_PREVIEW_ADAPTER,
+                "PongHost.writer.finalize(4);",
+                "legacy_finalize(4);",
+                "public_graphics_path",
             ),
             (
                 contract.GENERATED_MOBILE_AOT_FIXTURE,
@@ -142,6 +145,32 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 failure = next(failure for failure in failures if failure.field == field)
                 self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                 self.assertEqual(path.as_posix(), failure.consumer)
+
+    def test_public_render_fixtures_reject_guest_lifecycle_wrappers(self):
+        paths = (
+            contract.VSCODE_RENDER_FIXTURE,
+            contract.WINDOWS_LAUNCH_FIXTURE,
+            contract.WORKSHOP_PREVIEW_ADAPTER,
+            contract.GENERATED_MOBILE_AOT_FIXTURE,
+            contract.MOBILE_PACKAGED_ASSETS_FIXTURE,
+            *contract.HOT_SWAP_FIXTURES,
+        )
+        for path in paths:
+            for wrapper in ("begin_frame();", "end_frame();"):
+                with self.subTest(path=path, wrapper=wrapper):
+                    failures, _ = self.run_with(
+                        path,
+                        self.sources[path],
+                        self.sources[path]
+                        + f"\nfunction obsolete_frame_probe(): void {{ {wrapper} }}\n",
+                    )
+                    failure = next(
+                        failure
+                        for failure in failures
+                        if failure.field == "public_graphics_lifecycle"
+                    )
+                    self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
+                    self.assertEqual(path.as_posix(), failure.consumer)
 
     def test_it012_public_fixture_rejects_private_graphics_storage(self):
         failures, _ = self.run_with(
@@ -231,13 +260,13 @@ class RuntimeAbiContractTests(unittest.TestCase):
                 'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
                 '// import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
             ),
-            (contract.HOT_SWAP_V2_FIXTURE, "end_frame();", "legacy_end();"),
-            (contract.HOT_SWAP_INVALID_FIXTURE, "end_frame();", "legacy_end();"),
-            (contract.HOT_SWAP_REJECT_FIXTURE, "end_frame();", "legacy_end();"),
+            (contract.HOT_SWAP_V2_FIXTURE, "clear(", "legacy_clear("),
+            (contract.HOT_SWAP_INVALID_FIXTURE, "clear(", "legacy_clear("),
+            (contract.HOT_SWAP_REJECT_FIXTURE, "clear(", "legacy_clear("),
         )
         for path, current, stale in mutations:
             with self.subTest(path=path):
-                failures, _ = self.run_with(path, current, stale)
+                failures, _ = self.run_with(path, current, stale, count=-1)
                 failure = next(
                     failure for failure in failures
                     if failure.field == "hot_swap.public_graphics_path"

@@ -423,7 +423,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             self.assertIn(f"return {code};", fixture)
         render = read("samples/android_lifecycle_failure_seam/render/main.stasis")
         self.assertNotIn("begin_frame();", render)
-        self.assertIn("end_frame();", render)
+        self.assertNotIn("end_frame();", render)
         self.assertIn('Output = "android_entry_failures/', self.emulator_script)
         self.assertIn("path: artifacts/android_entry_failures/*/e", self.workflow)
         for token in (

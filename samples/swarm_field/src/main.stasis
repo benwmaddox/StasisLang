@@ -200,7 +200,6 @@ function render(): i32 {
     }
     fill_rect(field_x - 8.0, field_y - 1.0, 16.0, 2.0, field_red, 0.92, field_blue, 1.0);
     fill_rect(field_x - 1.0, field_y - 8.0, 2.0, 16.0, field_red, 0.92, field_blue, 1.0);
-    end_frame();
     return 0;
 }
 

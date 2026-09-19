@@ -25,6 +25,7 @@ extern int32_t stasis_state_array__generic_walls__runs__length[];
 
 static int32_t submitted_frames;
 static int32_t rejected_frames;
+static int32_t nonpublication_frames;
 static uint32_t submitted_trace;
 static int32_t submitted_rects;
 static int32_t submitted_text_count;
@@ -46,6 +47,9 @@ static int32_t applied_width;
 static int32_t applied_height;
 static int32_t submit_tick_marker;
 static int32_t submit_render_score;
+static int32_t published_i32[STASIS_RENDER_I32_COUNT];
+static float published_f32[STASIS_RENDER_F32_COUNT];
+static uint8_t published_u8[STASIS_RENDER_U8_COUNT];
 
 static int32_t hash_path(const char *text) {
     uint32_t hash = 2166136261u;
@@ -86,12 +90,18 @@ void stasis_host_bulk_apply_requests(
 }
 void stasis_gfx_submit_u8(int32_t *i32s, const float *f32s, const uint8_t *u8s) {
     if (record_step_order) step_order = step_order * 10 + 3;
-    if (stasis_render_validate(i32s, f32s) != STASIS_RENDER_VALID ||
-        (i32s[STASIS_RENDER_I_FLAGS] & STASIS_RENDER_FLAG_PRESENT) == 0) {
+    if (stasis_render_validate(i32s, f32s) != STASIS_RENDER_VALID) {
         rejected_frames += 1;
         return;
     }
+    if ((i32s[STASIS_RENDER_I_FLAGS] & STASIS_RENDER_FLAG_PRESENT) == 0) {
+        nonpublication_frames += 1;
+        return;
+    }
     submitted_frames += 1;
+    memcpy(published_i32, i32s, sizeof(published_i32));
+    memcpy(published_f32, f32s, sizeof(published_f32));
+    memcpy(published_u8, u8s, sizeof(published_u8));
     submitted_trace = stasis_render_trace(i32s, f32s, u8s);
     submitted_rects = i32s[STASIS_RENDER_I_RECT_COUNT];
     submitted_text_count = i32s[STASIS_RENDER_I_TEXT_COUNT];
@@ -199,6 +209,7 @@ static void bind_runtime_with_mode(void) {
 static void reset_frame_observations(void) {
     submitted_frames = 0;
     rejected_frames = 0;
+    nonpublication_frames = 0;
     submitted_trace = 0;
     submitted_rects = 0;
     submitted_text_count = 0;
@@ -207,6 +218,9 @@ static void reset_frame_observations(void) {
     submitted_text_offset = 0;
     submitted_text_length = 0;
     memset(submitted_text_bytes, 0, sizeof(submitted_text_bytes));
+    memset(published_i32, 0, sizeof(published_i32));
+    memset(published_f32, 0, sizeof(published_f32));
+    memset(published_u8, 0, sizeof(published_u8));
 }
 
 static uint32_t it012_expected_frame_trace(void) {
@@ -407,19 +421,47 @@ int main(void) {
     CHECK(submitted_frames == 0);
     stasis_mobile_runtime_shutdown();
 
-    next_bind_mode = 4;
+    /* Seed a real accepted frame, then switch the bound fixture to mode 4
+     * without clearing the host-owned publication observation. The unfinished
+     * writer must produce a valid non-PRESENT packet and leave that accepted
+     * payload and count untouched. */
+    next_bind_mode = 0;
     reset_frame_observations();
     CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
-    const int32_t generation_before_nested_begin =
+    CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_OK);
+    CHECK(submitted_frames == 1);
+    CHECK(rejected_frames == 0);
+    CHECK(nonpublication_frames == 0);
+    const int32_t accepted_frames_before_abort = submitted_frames;
+    const uint32_t accepted_trace_before_abort = submitted_trace;
+    const int32_t accepted_rects_before_abort = submitted_rects;
+    const int32_t accepted_text_count_before_abort = submitted_text_count;
+    const int32_t accepted_text_bytes_used_before_abort = submitted_text_bytes_used;
+    int32_t accepted_i32[STASIS_RENDER_I32_COUNT];
+    float accepted_f32[STASIS_RENDER_F32_COUNT];
+    uint8_t accepted_u8[STASIS_RENDER_U8_COUNT];
+    memcpy(accepted_i32, published_i32, sizeof(accepted_i32));
+    memcpy(accepted_f32, published_f32, sizeof(accepted_f32));
+    memcpy(accepted_u8, published_u8, sizeof(accepted_u8));
+    stasis_jit_global_i32_store(hash_path("lifecycle_mode"), 4);
+    const int32_t generation_before_open_writer =
         stasis_jit_global_i32_load(hash_path("gfx_sprite_writer_frame_generation"));
     CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_OK);
     CHECK(
         stasis_jit_global_i32_load(hash_path("gfx_sprite_writer_frame_generation")) ==
-        generation_before_nested_begin + 2);
-    CHECK(submitted_frames == 0);
-    CHECK(rejected_frames == 1);
+        generation_before_open_writer + 2);
+    CHECK(submitted_frames == accepted_frames_before_abort);
+    CHECK(nonpublication_frames == 1);
+    CHECK(rejected_frames == 0);
+    CHECK(submitted_trace == accepted_trace_before_abort);
+    CHECK(submitted_rects == accepted_rects_before_abort);
+    CHECK(submitted_text_count == accepted_text_count_before_abort);
+    CHECK(submitted_text_bytes_used == accepted_text_bytes_used_before_abort);
+    CHECK(memcmp(published_i32, accepted_i32, sizeof(accepted_i32)) == 0);
+    CHECK(memcmp(published_f32, accepted_f32, sizeof(accepted_f32)) == 0);
+    CHECK(memcmp(published_u8, accepted_u8, sizeof(accepted_u8)) == 0);
     stasis_mobile_runtime_shutdown();
-    printf("stasis.seam_test.v1 IT-015 generated_render_reset=1 nested_begin_rejected=1 abort_reset=1\n");
+    printf("stasis.seam_test.v1 IT-015 generated_render_reset=1 accepted_frames_before_abort=%d nonpublication=1 malformed_rejections=0 published_frames_after_abort=%d abort_reset=1 previous_frame_unchanged=1\n", accepted_frames_before_abort, submitted_frames);
 
     next_bind_mode = 1;
     reset_frame_observations();

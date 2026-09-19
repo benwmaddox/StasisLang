@@ -6766,7 +6766,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn aot_packaged_render_bridge_executes_one_generation_and_aborts_nested_begin() {
+    fn aot_packaged_render_bridge_executes_host_owned_generations() {
         let _global_guard = crate::jit_test_support::lock();
         let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -6789,15 +6789,8 @@ function main(): i32 { return 0; }
 function tick(): i32 { return 0; }
 function render(): i32 {
     render_calls = render_calls + 1;
-    if (render_calls > 1) {
-        begin_frame();
-        fill_rect(2.0, 3.0, 4.0, 5.0, 0.4, 0.5, 0.6, 1.0);
-        end_frame();
-        return 0;
-    }
     clear(0.1, 0.2, 0.3, 1.0);
     fill_rect(2.0, 3.0, 4.0, 5.0, 0.4, 0.5, 0.6, 1.0);
-    end_frame();
     return 0;
 }
 "#,
@@ -6970,11 +6963,15 @@ function render(): i32 {
         assert_eq!(read_scalar(render_calls_hash), 2);
         assert_eq!(
             read_scalar(generation_hash),
-            3,
-            "nested begin is rejected and finish performs one abort reset"
+            2,
+            "each host-owned render invocation starts one construction generation"
         );
-        assert_eq!(read_gfx(2), 0, "aborted frame has no publication flags");
-        assert_eq!(read_gfx(24), 0, "aborted frame has no reachable rectangles");
+        assert_eq!(
+            read_gfx(2),
+            3,
+            "host finish publishes clear and present flags"
+        );
+        assert_eq!(read_gfx(24), 1, "published frame contains one rectangle");
 
         drop(library);
         fs::remove_dir_all(&temp_root).ok();

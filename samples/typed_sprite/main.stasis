@@ -53,6 +53,5 @@ function main(): i32 {
     state.text.height = 24.0;
     state.text.draw(31.0, 42.0, 0.9, 0.8, 0.7, 0.6);
 
-    end_frame();
     return 0;
 }

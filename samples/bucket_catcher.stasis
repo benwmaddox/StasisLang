@@ -352,8 +352,6 @@ function render(): i32 {
     draw_balls();
     draw_bucket();
     draw_ui();
-    end_frame();
-
     return 0;
 }
 

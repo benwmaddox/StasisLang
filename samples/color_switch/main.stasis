@@ -40,6 +40,5 @@ function render(): i32 {
     }
     fill_rect(64.0, 176.0, SCREEN_W - 128.0, SCREEN_H - 352.0, 0.04, 0.05, 0.08, 0.86);
     fill_rect(116.0, 228.0, SCREEN_W - 232.0, SCREEN_H - 456.0, 0.98, 0.98, 0.92, 1.0);
-    end_frame();
     return 0;
 }

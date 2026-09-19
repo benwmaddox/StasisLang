@@ -83,7 +83,6 @@ function render(): i32 {
         }
     }
     smoke_label.draw(55.0, 126.0, 0.95, 0.82, 0.25, 1.0);
-    end_frame();
     return 0;
 }
 

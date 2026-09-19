@@ -311,6 +311,31 @@ static int stasis_parse_render_construction_lifecycle_version(
     return 0;
 }
 
+static int stasis_validate_render_construction_lifecycle(
+    int lifecycle_version,
+    const char *render_name,
+    int render_symbol_found)
+{
+    const char *name = render_name && render_name[0] ? render_name : "(none)";
+    if (lifecycle_version == 1 && !render_symbol_found)
+    {
+        fprintf(
+            stderr,
+            "error: render_construction_lifecycle_version=1 requires exported render entry '%s'\n",
+            name);
+        return 0;
+    }
+    if (lifecycle_version == 0 && render_symbol_found)
+    {
+        fprintf(
+            stderr,
+            "error: lifecycle-0 graphics render entry '%s' is obsolete; rebuild with the lifecycle-1 generated render bridge\n",
+            name);
+        return 0;
+    }
+    return 1;
+}
+
 static int stasis_try_get_self_path(const char *argv0, char *out, size_t out_cap)
 {
     if (!out || out_cap == 0)
@@ -2236,6 +2261,14 @@ int main(int argc, char **argv)
     {
         render_sym = GetProcAddress(lib, render_name);
     }
+    if (!stasis_validate_render_construction_lifecycle(
+            render_construction_lifecycle_version,
+            render_name,
+            render_sym != NULL))
+    {
+        FreeLibrary(lib);
+        return 1;
+    }
 
     /* Host window request globals are used by bulk mode (defined in src/runtime/host_window_request.stasis). */
     int32_t *host_req_seq = (int32_t *)GetProcAddress(lib, "host_req_seq");
@@ -2978,6 +3011,14 @@ int main(int argc, char **argv)
     if (render_name[0] != '\0')
     {
         render_sym = dlsym(lib, render_name);
+    }
+    if (!stasis_validate_render_construction_lifecycle(
+            render_construction_lifecycle_version,
+            render_name,
+            render_sym != NULL))
+    {
+        dlclose(lib);
+        return 1;
     }
     if (runner_diag)
     {
