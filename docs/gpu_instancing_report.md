@@ -345,11 +345,13 @@ and interleaved source order.
 
 ## Appendix: disposable benchmark reproduction
 
-The following is the exact compact source pattern used for the two measured
-fixtures. Start from a copy of `samples/swarm_field` so its vendored
-`stdlib/graphics.stasis` and `stdlib/internal/gfx_cmd.stasis` are unchanged;
-replace the manifest entry with one of the two files below and remove the
-copied sample's original `src/main.stasis`. The manifest essentials are:
+The following listings are supported-public-API equivalents of the two measured
+fixtures, not byte-for-byte archives of their retired v5 lifecycle calls. They
+preserve the command counts, source order, alpha and rotation variation, and two
+UV rectangles used by the measurements. Start from a copy of
+`samples/swarm_field`, update its Stasis vendor snapshot, replace the manifest
+entry with one of the two files below, and remove the copied sample's original
+`src/main.stasis`. The manifest essentials are:
 
 ```json
 {
@@ -405,10 +407,13 @@ function render(): i32 {
         y = i32_to_f32(row) * 5.0;
         sprite.draw(x, y, 180, i % 360);
     }
-    end_frame();
     return 0;
 }
 ```
+
+Returning from `render()` hands the emitted commands back to the packaged host,
+which owns reset, completion, and publication. Authored benchmark code must not
+call the removed, compiler-rejected `begin_frame` or `end_frame` wrappers.
 
 From the copied project directory, package and serve each entry. The recorded
 sprite run used the default output and port 8766 (the published executable path
@@ -455,10 +460,10 @@ upload, driver traffic, or memory traffic.
 ```text
 import "/vendor/stasis/stdlib/graphics.stasis";
 const SPRITE_COUNT: i32 = 2048;
-global sprite: Sprite;
+global sprite_sheet: SpriteSheet;
 function main(): i32 {
     init_window(640, 360, "GPU mixed-order benchmark");
-    if (!sprite.load_sprite_from("assets/smoke.svg", 4, 4)) {
+    if (!sprite_sheet.load_sprite_sheet_from("assets/smoke.svg", 2, 1, 2, 4)) {
         return 1;
     }
     return 0;
@@ -477,13 +482,11 @@ function render(): i32 {
         y = i32_to_f32(row) * 10.0;
         let alpha: i32 = 96;
         if (i % 2 == 0) { alpha = 220; }
-        sprite.draw(x, y, alpha, (i * 17) % 360);
-        if (i % 2 == 0) {
-            gfx_cmd_set_last_sprite_uv(0.0, 0.0, 0.5, 1.0);
-        }
+        sprite_sheet.draw_frame_scaled(
+            i % 2, x, y, 4.0, 4.0, alpha, (i * 17) % 360
+        );
         fill_rect(x + 2.0, y + 2.0, 5.0, 5.0, 0.2, 0.8, 0.9, 0.35);
     }
-    end_frame();
     return 0;
 }
 ```
