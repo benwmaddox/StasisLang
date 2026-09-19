@@ -483,6 +483,26 @@ jobs:
       - name: Setup MSVC dev environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
+      - name: Provision ephemeral CI signing certificate
+        shell: pwsh
+        env:
+          STASIS_SIGNING_LOCAL_RECORD: ${{ runner.temp }}\stasis-ci-signing-thumbprint.txt
+          STASIS_REQUIRE_SIGNED_EXECUTION: "1"
+          STASIS_SIGNING_MODE: required
+        run: |
+          $ErrorActionPreference = "Stop"
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tools/windows/stasis-signing.ps1 provision
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "STASIS_SIGNING_LOCAL_RECORD=$env:STASIS_SIGNING_LOCAL_RECORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_REQUIRE_SIGNED_EXECUTION=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_SIGNING_MODE=required" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $statusJson = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tools/windows/stasis-signing.ps1 status
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $status = ($statusJson -join "`n") | ConvertFrom-Json
+          if (-not $status.certificate_configured -or -not $status.required -or [string]::IsNullOrWhiteSpace([string]$status.signer)) {
+            throw "ephemeral CI signing certificate was not configured for required signing"
+          }
+
       - name: Capture the real Windows SDL parity fixture
         shell: pwsh
         run: |

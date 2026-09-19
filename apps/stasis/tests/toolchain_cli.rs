@@ -851,7 +851,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     );
     assert_eq!(
         fs::read(project.join(".gitignore")).expect("read generated Git ignore"),
-        b"# Track vendor/stasis/stdlib and vendor/stasis/docs together.\n"
+        b"# Track vendor/stasis/stdlib and vendor/stasis/docs together.\n.stasis/\n.stasis_cache/\nartifacts/\nbuild/\ndist/\n"
     );
     assert_eq!(
         git(
@@ -880,6 +880,29 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     )
     .status
     .success());
+    for generated_output in [
+        ".stasis/toolchain/bin/stasis",
+        ".stasis_cache/toolchain/src/stdlib.stasis",
+        "artifacts/validation/pre-pr.json",
+        "build/dev-build.json",
+        "dist/demo-desktop/stasis.json",
+    ] {
+        assert!(
+            git(
+                &[
+                    "check-ignore",
+                    "--quiet",
+                    "--no-index",
+                    "--",
+                    generated_output
+                ],
+                &project,
+            )
+            .status
+            .success(),
+            "generated output is not ignored: {generated_output}"
+        );
+    }
     for path in [
         "assets/example.svg",
         "assets/example.SVG",

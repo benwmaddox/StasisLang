@@ -170,21 +170,41 @@ loading-state guidance without network access.
 ### Generated GitHub Actions
 
 `stasis new NAME` adds `.github/workflows/stasis-pr.yml`,
-`.github/workflows/stasis-weekly.yml`, and two PowerShell restore/resolution helpers under `tools/`.
+`.github/workflows/stasis-weekly.yml`, `.github/workflows/stasis-quarterly.yml`, and the
+PowerShell restore, resolution, pin-update, and pre-PR validation helpers under `tools/`.
 `stasis init` does not add them. Conflicting or linked workflow/tool directories fail preflight
-without a partial scaffold.
+without a partial scaffold. Generated `.gitignore` entries exclude restored toolchains, build and
+package output, and validation receipts while keeping `vendor/stasis` checked in.
 
-The PR workflow runs for every pull request without path filters. It resolves the newest complete
-published nightly at CI runtime and reports the selected release in the step summary. The job
-verifies GitHub's published SHA-256 asset digest and installed toolchain identity,
-checks `vendor/stasis`, and runs `stasis check`. The scheduled Friday and manually dispatched weekly
-workflow selects the newest non-draft nightly containing Linux x64, Windows x64, and macOS arm64
-assets. Its three-host matrix runs vendor update, format check, check, test, and desktop package, then
-uploads short-lived per-platform artifacts. It never creates a tag or release, publishes or signs a
-package, or builds Android, iOS, or web targets.
+The PR workflow runs for every pull request without path filters and also supports
+`workflow_dispatch`. It checks out the exact contributor head, emits a required relevant-change
+sentinel in one Ubuntu job, and keeps unrelated changes to that single billed job. Relevant changes validate the checked-in immutable
+`stasis.json` release and lowercase vendor SHA-256 pin, restore that exact release, verify the
+vendored snapshot, and run only `stasis fmt --check` and `stasis check`. The broad local
+`tools/validate-before-pr.ps1` pass accepts an explicit restored Stasis executable, proves its
+release/checksum identity matches the checked-in pin, runs vendor status, format, check, test, and
+desktop package once, and writes both a machine-readable JSON receipt and a Markdown PR summary.
 
-`stasis.json` continues to record the release identity and hash of the checked-in `vendor/stasis`
-snapshot. That identity does not pin either generated CI workflow's toolchain.
+The scheduled Friday and manually dispatched weekly workflow consumes only the checked-in
+immutable Stasis pin. It compares that pin to the last published game release's
+`BUILD-MANIFEST.json` and compares game changes since that release, ignoring only the
+`vendor.stasis` portion of `stasis.json`; true no-ops skip all matrices. Actual releases run the
+full Linux, Windows, and macOS desktop matrix, archive the packages, and publish a prerelease with
+an immutable build manifest and checksums. A quarterly pin PR is therefore the only path that
+advances the Stasis release used by this matrix.
+
+The quarterly workflow runs on the exact first day of January, April, July, or October. Every
+eligible run resolves the newest complete release once, restores it, and mechanically updates the
+pin and vendor snapshot; an unchanged pin simply skips the update PR. A stale pin is committed as
+`stasis.json` and `vendor/stasis` on a dedicated automation branch, opened as a PR, and merged
+without a game compatibility gate. A dispatched pin-only sentinel supplies the stable required
+status for repositories with branch protection, but deliberately runs no game commands. The normal
+weekly workflow then sees the changed pin and owns
+the authoritative all-target release matrix, including surfacing any incompatibility with the new
+Stasis release. The quarterly workflow never pushes the default branch directly.
+
+`stasis.json` records the immutable release identity and hash of the checked-in `vendor/stasis`
+snapshot; generated automation treats that pair as one release contract.
 
 All templates are embedded in `stasis`, so project creation itself remains offline. Only the
 generated Actions jobs access the public `benwmaddox/StasisLang` GitHub releases to resolve and

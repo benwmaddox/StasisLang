@@ -2,50 +2,118 @@ name: Stasis PR
 
 on:
   pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      pin_only:
+        description: Satisfy the required status for an automation-only Stasis pin bump
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: stasis-pr-${{ github.event.pull_request.number }}
+  group: stasis-pr-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  check:
+  gate:
+    name: Stasis PR gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A pull_request checkout is normally the synthetic merge commit.
+          # Validate the contributor's exact current head instead.
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
 
-      - name: Select Stasis release
-        id: stasis
-        shell: pwsh
+      - name: Determine relevant change
+        id: sentinel
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PIN_ONLY: ${{ inputs.pin_only }}
+          BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          $releaseId = ./tools/resolve-stasis-nightly.ps1
-          $message = "Using newest complete published Stasis nightly: $releaseId"
-          Write-Host $message
-          if ($env:GITHUB_STEP_SUMMARY) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "### Stasis toolchain`n$message" }
-          "release_id=$releaseId" >> $env:GITHUB_OUTPUT
+          set -euo pipefail
+          relevant=false
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "${PIN_ONLY:-false}" != "true" ]]; then
+            relevant=true
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            relevant=false
+          else
+            if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+              git remote add stasis-base "https://github.com/$BASE_REPOSITORY.git"
+              git fetch --no-tags --depth=1 stasis-base "$BASE_SHA"
+            fi
+            while IFS= read -r path; do
+              case "$path" in
+                .github/workflows/*|stasis.json|src/*|tests/*|assets/*|tools/*|vendor/stasis/*|AGENTS.md|CLAUDE.md|PROJECT_ARCHITECTURE.md)
+                  relevant=true
+                  break
+                  ;;
+              esac
+            done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          fi
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          echo "STASIS_PR_GATE_SENTINEL|relevant_change=$relevant" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$relevant" != "true" ]]; then
+            echo "No relevant Stasis project change; the one-job cheap gate is satisfied." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-      - name: Restore verified Stasis toolchain
+      - name: Read checked-in Stasis pin
+        if: steps.sentinel.outputs.relevant == 'true'
+        id: pin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content -LiteralPath stasis.json -Raw | ConvertFrom-Json
+          $pin = $manifest.vendor.stasis
+          if ($null -eq $pin) { throw 'stasis.json is missing vendor.stasis.' }
+          if ([string]$pin.release_id -notmatch '^nightly-[0-9]{8}-[0-9]+$') {
+            throw "Invalid checked-in Stasis release: $($pin.release_id)"
+          }
+          if ([string]$pin.sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw 'stasis.json vendor.stasis.sha256 must be a lowercase SHA-256 digest.'
+          }
+          "release_id=$($pin.release_id)" >> $env:GITHUB_OUTPUT
+          "vendor_sha256=$($pin.sha256)" >> $env:GITHUB_OUTPUT
+
+      - name: Restore immutable Stasis release
+        if: steps.sentinel.outputs.relevant == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./tools/restore-stasis-release.ps1 -ReleaseId '${{ steps.stasis.outputs.release_id }}' -AssetName stasis-nightly-linux-x64.tar.gz
+        run: ./tools/restore-stasis-release.ps1 -ReleaseId '${{ steps.pin.outputs.release_id }}' -AssetName stasis-nightly-linux-x64.tar.gz
 
       - name: Verify checked-in vendor snapshot
+        if: steps.sentinel.outputs.relevant == 'true'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $statusJson = @(& stasis --json vendor status --workspace .)
           if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect the checked-in Stasis vendor snapshot.' }
-          try {
-            $status = ($statusJson -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop
-          } catch {
-            throw 'Stasis vendor status returned invalid JSON.'
+          try { $status = ($statusJson -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop }
+          catch { throw 'Stasis vendor status returned invalid JSON.' }
+          if ($status.ok -ne $true -or $status.result.current -ne $true) {
+            throw 'Checked-in Stasis vendor snapshot is not current for the immutable pin.'
           }
-          if ($status.ok -ne $true) { throw 'Stasis vendor status did not report success.' }
-          if ($status.result.current -ne $true) { throw 'Checked-in Stasis vendor snapshot is not current.' }
 
-      - name: Check
+      - name: Check formatting
+        if: steps.sentinel.outputs.relevant == 'true'
+        run: stasis fmt --check
+
+      - name: Check Stasis project
+        if: steps.sentinel.outputs.relevant == 'true'
         run: stasis check

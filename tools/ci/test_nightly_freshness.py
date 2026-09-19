@@ -39,6 +39,18 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         self.assertEqual(1, self.release.count(".\\stasis.exe editor --help"))
         self.assertEqual(1, self.release.count("./bin/stasis editor --help"))
 
+    def test_expensive_seams_wait_for_release_detection(self):
+        for job in ("integration_seams", "android_device_seams"):
+            with self.subTest(job=job):
+                self.assertRegex(
+                    self.release,
+                    rf"(?ms)^  {job}:\n    needs: detect\n    if: needs\.detect\.outputs\.should_release == 'true'",
+                )
+        self.assertIn(
+            "if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}",
+            self.release,
+        )
+
     def test_windows_archive_is_extracted_and_graphical_windows_are_required(self):
         self.assertIn("Verify extracted Windows editor toolchain", self.release)
         for relative in (

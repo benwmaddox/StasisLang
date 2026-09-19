@@ -19,11 +19,15 @@ concurrency:
 
 jobs:
   integration_seams:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
     uses: ./.github/workflows/pr-ci.yml
     with:
       run_slow_seams: true
 
   android_device_seams:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
     uses: ./.github/workflows/android-device-seams.yml
 
   detect:
@@ -753,7 +757,7 @@ jobs:
 
   release:
     needs: [detect, build, vscode_extension, integration_seams, android_device_seams]
-    if: needs.detect.outputs.should_release == 'true'
+    if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
