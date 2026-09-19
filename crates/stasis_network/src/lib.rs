@@ -5,6 +5,7 @@ pub mod lan;
 pub mod realtime;
 pub mod supervision;
 
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{ErrorKind, Read, Write};
@@ -1282,7 +1283,11 @@ fn connection_loop(mut stream: TcpStream, peer: SocketAddr, id: u32, shared: Arc
     finish(&shared);
 }
 fn static_file<'a>(bundle: &'a StaticBundle, path: &str) -> Option<&'a BundleFile> {
-    let key = if path == "/" {
+    let (path, query) = path
+        .split_once('?')
+        .map_or((path, None), |(path, query)| (path, Some(query)));
+    let root_request = path == "/";
+    let key = if root_request {
         "index.html"
     } else {
         path.strip_prefix('/')?
@@ -1294,7 +1299,40 @@ fn static_file<'a>(bundle: &'a StaticBundle, path: &str) -> Option<&'a BundleFil
     {
         return None;
     }
-    bundle.get(key)
+    let file = bundle.get(key)?;
+    let Some(query) = query else {
+        return Some(file);
+    };
+    let mut hash = None;
+    for parameter in query.split('&') {
+        if parameter.is_empty() {
+            return None;
+        }
+        let Some((name, value)) = parameter.split_once('=') else {
+            if root_request {
+                continue;
+            }
+            return None;
+        };
+        if name == "hash" {
+            if hash.is_some()
+                || value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return None;
+            }
+            hash = Some(value);
+        } else if !root_request {
+            return None;
+        }
+    }
+    let Some(hash) = hash else {
+        return root_request.then_some(file);
+    };
+    let actual = format!("{:x}", Sha256::digest(&file.bytes));
+    (actual == hash).then_some(file)
 }
 fn write_http(stream: &mut TcpStream, status: u16, mime: &str, body: &[u8]) {
     let reason = if status == 200 { "OK" } else { "Not Found" };
@@ -2416,6 +2454,11 @@ mod tests {
     fn host_bundle() -> StaticBundle {
         StaticBundle::new(vec![
             BundleFile {
+                path: "game.js".into(),
+                mime: "text/javascript".into(),
+                bytes: b"guest".to_vec(),
+            },
+            BundleFile {
                 path: "index.html".into(),
                 mime: "text/html; charset=utf-8".into(),
                 bytes: b"<html>guest</html>".to_vec(),
@@ -2432,6 +2475,64 @@ mod tests {
             },
         ])
         .expect("bundle")
+    }
+
+    #[test]
+    fn static_files_accept_content_hash_queries_and_reject_invalid_targets() {
+        let bundle = host_bundle();
+        let game_hash = format!("{:x}", Sha256::digest(b"guest"));
+        let wasm_hash = format!("{:x}", Sha256::digest(b"wasm"));
+        let font_hash = format!("{:x}", Sha256::digest(b"font-bytes"));
+        assert_eq!(static_file(&bundle, "/").expect("root").path, "index.html");
+        assert_eq!(
+            static_file(&bundle, "/?stasis-hud=1")
+                .expect("root query")
+                .path,
+            "index.html"
+        );
+        assert_eq!(
+            static_file(&bundle, &format!("/game.js?hash={game_hash}"))
+                .expect("hashed game.js")
+                .path,
+            "game.js"
+        );
+        assert_eq!(
+            static_file(&bundle, &format!("/game.wasm?hash={wasm_hash}"))
+                .expect("hashed Wasm")
+                .path,
+            "game.wasm"
+        );
+        assert_eq!(
+            static_file(
+                &bundle,
+                &format!("/assets/fonts/ui.ttf?hash={font_hash}&stasis-hud=1")
+            ),
+            None
+        );
+        assert_eq!(
+            static_file(&bundle, &format!("/assets/fonts/ui.ttf?hash={font_hash}"))
+                .expect("hashed asset")
+                .path,
+            "assets/fonts/ui.ttf"
+        );
+        for target in [
+            "/game.wasm?hash=bad",
+            &format!("/game.wasm?hash={wasm_hash}&hash={wasm_hash}"),
+            "/game.wasm?hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEf",
+            &format!("/game.wasm?hash={wasm_hash}#fragment"),
+            "/game.wasm?hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2e%2e",
+            "/game.wasm?cache=1",
+            "/../game.wasm",
+            "/assets/../game.wasm",
+            "/assets//fonts/ui.ttf",
+            "/assets/./fonts/ui.ttf",
+            "/assets/%2e%2e/game.wasm",
+        ] {
+            assert!(
+                static_file(&bundle, target).is_none(),
+                "accepted invalid static target {target}"
+            );
+        }
     }
 
     fn wait_event(host: &NetworkHost, kind: EventKind) -> NetworkEvent {

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use stasis_network::{BundleFile, EventKind, HostOptions, NetworkHost, StaticBundle};
 
 const TEST_SECRET: [u8; 32] = [
@@ -63,6 +64,10 @@ fn main() -> Result<(), String> {
             "      networkClient,",
             "      networkClient,\n      networkTestMemory: () => instance?.exports.memory || null,",
             1,
+        )
+        .replace(
+            "__STASIS_WASM_URL__",
+            &format!("game.wasm?hash={:x}", Sha256::digest(GAME_WASM)),
         )
         .into_bytes();
     if runtime == runtime_source.as_bytes() {
