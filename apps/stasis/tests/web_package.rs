@@ -725,6 +725,11 @@ fn network_web_package_embeds_retained_nested_assets_only() {
         workspace.join("assets/fonts/ui.ttf"),
     )
     .expect("copy retained font fixture");
+    fs::copy(
+        workspace.join("assets/smoke.ttf"),
+        workspace.join("assets/fonts/loading.ttf"),
+    )
+    .expect("copy configured loading font fixture");
     let source_path = workspace.join("main.stasis");
     let source_text = fs::read_to_string(&source_path)
         .expect("read network fixture source")
@@ -762,7 +767,10 @@ fn network_web_package_embeds_retained_nested_assets_only() {
     )
     .expect("parse fixture project manifest");
     project["capabilities"] = serde_json::json!({"network": true});
-    project["web"] = serde_json::json!({"entry": "main.stasis"});
+    project["web"] = serde_json::json!({
+        "entry": "main.stasis",
+        "loading_font": "/assets/fonts/loading.ttf"
+    });
     fs::write(
         workspace.join("stasis.json"),
         serde_json::to_vec_pretty(&project).expect("encode fixture project manifest"),
@@ -784,6 +792,14 @@ fn network_web_package_embeds_retained_nested_assets_only() {
         )
     );
     let runtime = fs::read_to_string(output.join("game.js")).expect("packaged Web runtime");
+    let loading_font = fs::read(output.join("assets/fonts/loading.ttf"))
+        .expect("read staged configured loading font");
+    let loading_font_url = format!(
+        "assets/fonts/loading.ttf?hash={:x}",
+        Sha256::digest(&loading_font)
+    );
+    let index = fs::read_to_string(output.join("index.html")).expect("packaged Web index");
+    assert!(index.contains(&loading_font_url));
     assert!(!runtime.contains("\"schema\":\"stasis.asset_package\""));
     assert!(!runtime.contains(&asset_identity.manifest_sha256));
     let bundle = StaticBundle::decode(
@@ -806,6 +822,13 @@ fn network_web_package_embeds_retained_nested_assets_only() {
         .expect("retained nested font");
     assert_eq!(font.mime, "font/ttf");
     assert_eq!(font.bytes, expected_font);
+    assert_eq!(
+        bundle
+            .get("assets/fonts/loading.ttf")
+            .expect("configured loading font")
+            .bytes,
+        loading_font
+    );
     assert!(bundle.get("assets/fonts/unused.ttf").is_none());
 
     fs::remove_dir_all(&workspace).expect("clean network fixture");
@@ -933,6 +956,21 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     assert!(!index.contains("Enable sound"));
     let config = runtime_config(&runtime);
     assert_eq!(config["assets"], serde_json::json!({}));
+    let asset_urls = config["asset_urls"]
+        .as_object()
+        .expect("hashed release asset URLs");
+    for path in ["assets/smoke.png", "assets/smoke.svg", "assets/smoke.ttf"] {
+        let bytes = fs::read(output.join(path)).expect("read staged smoke asset");
+        let expected = format!("{path}?hash={:x}", Sha256::digest(&bytes));
+        assert_eq!(asset_urls[path], expected);
+        assert!(runtime.contains(&expected));
+    }
+    let wasm_bytes = fs::read(output.join("game.wasm")).expect("read existing game Wasm");
+    let runtime_bytes = fs::read(output.join("game.js")).expect("read existing game runtime");
+    let wasm_url = format!("game.wasm?hash={:x}", Sha256::digest(&wasm_bytes));
+    let game_url = format!("game.js?hash={:x}", Sha256::digest(&runtime_bytes));
+    assert!(runtime.contains(&wasm_url));
+    assert!(index.contains(&format!(r#"<script src="{game_url}"></script>"#)));
     let smoke = config["asset_metadata"]["assets/smoke.png"]
         .as_object()
         .expect("release smoke metadata");
@@ -1065,11 +1103,27 @@ fn development_web_package_remains_readable_and_retains_asset_diagnostics() {
     let relative_output = PathBuf::from(format!("build/web-development-test-{}", stamp()));
     let output = package_development(&workspace, &relative_output);
     let runtime = fs::read_to_string(output.join("game.js")).expect("development game.js");
+    let runtime_bytes = fs::read(output.join("game.js")).expect("development game bytes");
+    let wasm_bytes = fs::read(output.join("game.wasm")).expect("development Wasm bytes");
+    let index = fs::read_to_string(output.join("index.html")).expect("development index");
+    let wasm_url = format!("game.wasm?hash={:x}", Sha256::digest(&wasm_bytes));
+    let game_url = format!("game.js?hash={:x}", Sha256::digest(&runtime_bytes));
+    assert!(runtime.contains(&wasm_url));
+    assert!(index.contains(&format!(r#"<script src="{game_url}"></script>"#)));
     assert!(runtime.contains("const canvas = document.getElementById"));
     assert!(runtime.contains("const rasterSprite = async request =>"));
     assert!(runtime.lines().count() > 1000);
 
     let config = runtime_config(&runtime);
+    let asset_urls = config["asset_urls"]
+        .as_object()
+        .expect("hashed development asset URLs");
+    for path in ["assets/smoke.png", "assets/smoke.svg", "assets/smoke.ttf"] {
+        let bytes = fs::read(output.join(path)).expect("read development asset");
+        let expected = format!("{path}?hash={:x}", Sha256::digest(&bytes));
+        assert_eq!(asset_urls[path], expected);
+        assert!(runtime.contains(&expected));
+    }
     let smoke = config["asset_metadata"]["assets/smoke.png"]
         .as_object()
         .expect("development smoke metadata");
@@ -1125,12 +1179,17 @@ fn configured_web_loading_font_is_staged_and_missing_font_fails_check() {
 
     let output = package(&workspace, Path::new("build/web-package"));
     let index = fs::read_to_string(output.join("index.html")).expect("read configured index");
-    assert!(index.contains(
-        r#"<link rel="preload" href="assets/smoke.ttf" as="font" type="font/ttf" crossorigin>"#
-    ));
-    assert!(index.contains(
-        r#"@font-face { font-family: "StasisLoadingFont"; src: url("assets/smoke.ttf") format("truetype");"#
-    ));
+    let font_bytes = fs::read(output.join("assets/smoke.ttf")).expect("read loading font");
+    let font_url = format!("assets/smoke.ttf?hash={:x}", Sha256::digest(&font_bytes));
+    let game_bytes = fs::read(output.join("game.js")).expect("read configured game runtime");
+    let game_url = format!("game.js?hash={:x}", Sha256::digest(&game_bytes));
+    assert!(index.contains(&format!(
+        r#"<link rel="preload" href="{font_url}" as="font" type="font/ttf" crossorigin>"#
+    )));
+    assert!(index.contains(&format!(
+        r#"@font-face {{ font-family: "StasisLoadingFont"; src: url("{font_url}") format("truetype");"#
+    )));
+    assert!(index.contains(&format!(r#"<script src="{game_url}"></script>"#)));
     assert!(output.join("assets/smoke.ttf").is_file());
     fs::remove_dir_all(&output).expect("clean configured package");
 
@@ -1143,9 +1202,15 @@ fn configured_web_loading_font_is_staged_and_missing_font_fails_check() {
     let relative_output = package(&workspace, Path::new("build/web-package-relative"));
     let relative_index =
         fs::read_to_string(relative_output.join("index.html")).expect("read relative index");
-    assert!(relative_index.contains(
-        r#"<link rel="preload" href="assets/smoke.ttf" as="font" type="font/ttf" crossorigin>"#
-    ));
+    let relative_font_bytes =
+        fs::read(relative_output.join("assets/smoke.ttf")).expect("read relative loading font");
+    let relative_font_url = format!(
+        "assets/smoke.ttf?hash={:x}",
+        Sha256::digest(&relative_font_bytes)
+    );
+    assert!(relative_index.contains(&format!(
+        r#"<link rel="preload" href="{relative_font_url}" as="font" type="font/ttf" crossorigin>"#
+    )));
     assert!(relative_output.join("assets/smoke.ttf").is_file());
     fs::remove_dir_all(&relative_output).expect("clean relative package");
 

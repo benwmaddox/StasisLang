@@ -5450,6 +5450,9 @@ fn package_web_workspace(
             .and_then(|web| web.loading_font.as_deref())
             .map(normalize_web_loading_font_path)
             .transpose()?;
+        let asset_paths =
+            staged_web_asset_paths(&staging_root, retained.as_ref(), loading_font.as_deref())?;
+        let asset_urls = staged_web_asset_urls(&staging_root, &asset_paths)?;
         let audit_asset_metadata = staged_web_asset_metadata(&staging_root)?;
         let runtime_asset_metadata = if development_build {
             audit_asset_metadata.clone()
@@ -5457,6 +5460,7 @@ fn package_web_workspace(
             release_web_asset_metadata(&audit_asset_metadata)
         };
         let mut runtime_config = web_runtime_config(workspace, &process, development_build);
+        runtime_config["asset_urls"] = asset_urls.clone();
         runtime_config["asset_metadata"] = runtime_asset_metadata.clone();
         let asset_identity_path = staging_root.join(ASSET_PACKAGE_IDENTITY_PATH);
         if development_build && asset_identity_path.is_file() {
@@ -5479,7 +5483,9 @@ fn package_web_workspace(
             .imported_symbols()
             .iter()
             .any(|symbol| symbol.starts_with("stasis_web_network_"));
-        let linked_runtime = link_web_runtime(&process, audio_enabled, network_enabled)?;
+        let wasm_url = web_content_hash_url("game.wasm", &wasm.bytes);
+        let linked_runtime = link_web_runtime(&process, audio_enabled, network_enabled)?
+            .replace("__STASIS_WASM_URL__", &wasm_url);
         let linked_bundle = format!("window.STASIS_GAME = {runtime_json};\n{linked_runtime}");
         let runtime_bundle = if development_build {
             linked_bundle.clone()
@@ -5517,13 +5523,23 @@ fn package_web_workspace(
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
         fs::write(staging_root.join("game.js"), &runtime_bundle)
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
+        let game_url = web_content_hash_url("game.js", runtime_bundle.as_bytes());
+        let loading_font_url = loading_font
+            .as_deref()
+            .map(|path| {
+                asset_urls.get(path).and_then(Value::as_str).ok_or_else(|| {
+                    format!("staged Web loading font is missing from hashed asset URLs: {path}")
+                })
+            })
+            .transpose()?;
         fs::write(
             staging_root.join("index.html"),
-            web_index_html(
+            web_index_html_with_script(
                 &workspace.manifest.name,
                 development_build,
-                loading_font.as_deref(),
+                loading_font_url.as_deref(),
                 workspace.manifest.web.as_ref().and_then(|web| web.viewport),
+                &game_url,
             ),
         )
         .map_err(|error| format!("failed to write web index: {error}"))?;
@@ -5552,23 +5568,19 @@ fn package_web_workspace(
                     bytes: wasm.bytes.clone(),
                 },
             ];
-            if let Some(retained) = retained.as_ref() {
-                let mut assets = retained.assets.iter().collect::<Vec<_>>();
-                assets.sort_by(|left, right| left.entry.path.cmp(&right.entry.path));
-                for asset in assets {
-                    let staged_path = staging_root.join(&asset.entry.path);
-                    let bytes = fs::read(&staged_path).map_err(|error| {
-                        format!(
-                            "failed to read staged network guest asset {}: {error}",
-                            staged_path.display()
-                        )
-                    })?;
-                    bundle_files.push(stasis_network::BundleFile {
-                        path: asset.entry.path.clone(),
-                        mime: network_guest_asset_mime(&asset.entry.format).to_string(),
-                        bytes,
-                    });
-                }
+            for path in &asset_paths {
+                let staged_path = staging_root.join(path);
+                let bytes = fs::read(&staged_path).map_err(|error| {
+                    format!(
+                        "failed to read staged network guest asset {}: {error}",
+                        staged_path.display()
+                    )
+                })?;
+                bundle_files.push(stasis_network::BundleFile {
+                    path: path.clone(),
+                    mime: network_guest_asset_mime_for_path(path, retained.as_ref()).to_string(),
+                    bytes,
+                });
             }
             let bundle = stasis_network::StaticBundle::new(bundle_files)
                 .map_err(|error| format!("failed to create network guest bundle: {error}"))?;
@@ -5710,11 +5722,22 @@ fn publish_package_output(staging_root: &Path, package_root: &Path) -> Result<()
     Ok(())
 }
 
+#[cfg(test)]
 fn web_index_html(
     title: &str,
     development_build: bool,
     loading_font: Option<&str>,
     viewport: Option<WebViewportManifest>,
+) -> String {
+    web_index_html_with_script(title, development_build, loading_font, viewport, "game.js")
+}
+
+fn web_index_html_with_script(
+    title: &str,
+    development_build: bool,
+    loading_font: Option<&str>,
+    viewport: Option<WebViewportManifest>,
+    game_script: &str,
 ) -> String {
     let viewport = viewport.unwrap_or(DEFAULT_WEB_VIEWPORT);
     let (hud_style, hud) = if development_build {
@@ -5727,7 +5750,8 @@ fn web_index_html(
     };
     let (loading_font_face, loading_font_family) = loading_font
         .map(|path| {
-            let (mime, format) = match Path::new(path)
+            let unhashed_path = path.split_once('?').map_or(path, |(path, _)| path);
+            let (mime, format) = match Path::new(unhashed_path)
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .map(str::to_ascii_lowercase)
@@ -5755,6 +5779,7 @@ fn web_index_html(
         .replace("__STASIS_LOADING_FONT_FAMILY__", &loading_font_family)
         .replace("__STASIS_LOGICAL_WIDTH__", &viewport.width.to_string())
         .replace("__STASIS_LOGICAL_HEIGHT__", &viewport.height.to_string())
+        .replace("__STASIS_GAME_SCRIPT__", game_script)
 }
 
 fn link_web_runtime(
@@ -6066,6 +6091,55 @@ fn stage_workspace_assets(
     Ok(())
 }
 
+fn web_content_hash_url(path: &str, bytes: &[u8]) -> String {
+    format!("{path}?hash={:x}", Sha256::digest(bytes))
+}
+
+fn staged_web_asset_paths(
+    staging_root: &Path,
+    retained: Option<&stasis_assets::ResolvedAssetManifest>,
+    loading_font: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let assets_root = staging_root.join("assets");
+    let mut paths = if let Some(retained) = retained {
+        retained
+            .assets
+            .iter()
+            .map(|asset| asset.entry.path.clone())
+            .collect::<Vec<_>>()
+    } else if assets_root.is_dir() {
+        content_hashes(&assets_root, "assets")?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if let Some(loading_font) = loading_font {
+        paths.push(loading_font.to_string());
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn staged_web_asset_urls(staging_root: &Path, asset_paths: &[String]) -> Result<Value, String> {
+    let mut urls = serde_json::Map::new();
+    for path in asset_paths {
+        let bytes = fs::read(staging_root.join(&path)).map_err(|error| {
+            format!(
+                "failed to read staged Web asset {} for cache key: {error}",
+                staging_root.join(&path).display()
+            )
+        })?;
+        urls.insert(
+            path.clone(),
+            Value::String(web_content_hash_url(path, &bytes)),
+        );
+    }
+    Ok(Value::Object(urls))
+}
+
 fn staged_web_asset_metadata(destination_root: &Path) -> Result<Value, String> {
     let manifest_path = destination_root.join(DEFAULT_ASSET_MANIFEST_PATH);
     if !manifest_path.is_file() {
@@ -6278,6 +6352,39 @@ fn network_guest_asset_mime(format: &AssetFormat) -> &'static str {
             FontEncoding::Ttf => "font/ttf",
             FontEncoding::Otf => "font/otf",
         },
+    }
+}
+
+fn network_guest_asset_mime_for_path(
+    path: &str,
+    retained: Option<&stasis_assets::ResolvedAssetManifest>,
+) -> &'static str {
+    if let Some(asset) = retained
+        .into_iter()
+        .flat_map(|manifest| manifest.assets.iter())
+        .find(|asset| asset.entry.path == path)
+    {
+        return network_guest_asset_mime(&asset.entry.format);
+    }
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("svg") => "image/svg+xml",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("wav") => "audio/wav",
+        Some("ogg") => "audio/ogg",
+        Some("mp3") => "audio/mpeg",
+        Some("m4a") => "audio/mp4",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
     }
 }
 
@@ -10624,12 +10731,13 @@ mod tests {
 
     #[test]
     fn configured_web_loading_font_is_preloaded_and_used_by_shell() {
-        let html = web_index_html("font-game", false, Some("assets/fonts/ui.ttf"), None);
+        let font_url = "assets/fonts/ui.ttf?hash=0123456789abcdef";
+        let html = web_index_html("font-game", false, Some(font_url), None);
         assert!(html.contains(
-            r#"<link rel="preload" href="assets/fonts/ui.ttf" as="font" type="font/ttf" crossorigin>"#
+            r#"<link rel="preload" href="assets/fonts/ui.ttf?hash=0123456789abcdef" as="font" type="font/ttf" crossorigin>"#
         ));
         assert!(html.contains(
-            r#"@font-face { font-family: "StasisLoadingFont"; src: url("assets/fonts/ui.ttf") format("truetype");"#
+            r#"@font-face { font-family: "StasisLoadingFont"; src: url("assets/fonts/ui.ttf?hash=0123456789abcdef") format("truetype");"#
         ));
         assert!(
             html.contains(r#"font-family: "StasisLoadingFont", Georgia, "Times New Roman", serif"#)

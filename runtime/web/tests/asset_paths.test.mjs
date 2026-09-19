@@ -166,17 +166,19 @@ test("web asset paths normalize fallback values and preserve explicit overrides"
 
   env.gfx_load_sprite(1);
   game.assets = {};
+  game.asset_urls = { "assets/empty-map.png": "assets/hashed/empty-map.png?hash=empty" };
   env.gfx_load_sprite(2);
   game.assets = {
     "assets/override.png": "assets/packed/override-123.png",
     "assets/explicit-empty.png": "",
   };
+  game.asset_urls["assets/override.png"] = "assets/hashed/override.png?hash=asset-url";
   env.gfx_load_sprite(3);
   env.gfx_load_sprite(4);
 
   assert.deepEqual(imageSources, [
     "assets/missing-map.png",
-    "assets/empty-map.png",
+    "assets/hashed/empty-map.png?hash=empty",
     "assets/packed/override-123.png",
     "",
   ]);

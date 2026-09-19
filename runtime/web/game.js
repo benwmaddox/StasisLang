@@ -480,9 +480,10 @@
   const assetValue = id => {
     const value = stringValue(id);
     const key = assetKey(value);
-    return Object.prototype.hasOwnProperty.call(game.assets || {}, key)
-      ? game.assets[key]
-      : key;
+    const overrides = game.assets || {};
+    if (Object.prototype.hasOwnProperty.call(overrides, key)) return overrides[key];
+    const urls = game.asset_urls || {};
+    return Object.prototype.hasOwnProperty.call(urls, key) ? urls[key] : key;
   };
   const assetMetadata = id => {
     const key = assetKey(stringValue(id));
@@ -4026,7 +4027,7 @@
   // @stasis-feature audio end
 
   async function wasmBytes() {
-    const response = await fetch("game.wasm");
+    const response = await fetch("__STASIS_WASM_URL__");
     if (!response.ok) throw new Error(`failed to load game.wasm: ${response.status}`);
     return response.arrayBuffer();
   }
