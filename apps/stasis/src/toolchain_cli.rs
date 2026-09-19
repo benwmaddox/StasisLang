@@ -134,7 +134,13 @@ const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
 const PROJECT_GIT_ATTRIBUTES: &str = "*.[sS][vV][gG] text eol=lf\n";
-const PROJECT_GIT_IGNORE: &str = "# Track vendor/stasis/stdlib and vendor/stasis/docs together.\n";
+const PROJECT_GIT_IGNORE: &str = r#"# Track vendor/stasis/stdlib and vendor/stasis/docs together.
+.stasis/
+.stasis_cache/
+artifacts/
+build/
+dist/
+"#;
 const KNOWLEDGE_FILES: &[&str] = &[
     "README.md",
     "a-little-stasis/01-three-entry-points.md",
@@ -1723,8 +1729,11 @@ fn create_project_with_options(
         reserved_paths.extend([
             root.join(".github/workflows/stasis-pr.yml"),
             root.join(".github/workflows/stasis-weekly.yml"),
+            root.join(".github/workflows/stasis-quarterly.yml"),
             root.join("tools/restore-stasis-release.ps1"),
             root.join("tools/resolve-stasis-nightly.ps1"),
+            root.join("tools/update-stasis-pin.ps1"),
+            root.join("tools/validate-before-pr.ps1"),
         ]);
         for directory in [
             root.join(".github"),
@@ -1794,12 +1803,24 @@ fn create_project_with_options(
             include_str!("../templates/github-actions/stasis-weekly.yml"),
         )?;
         write_new_file(
+            &root.join(".github/workflows/stasis-quarterly.yml"),
+            include_str!("../templates/github-actions/stasis-quarterly.yml"),
+        )?;
+        write_new_file(
             &root.join("tools/restore-stasis-release.ps1"),
             include_str!("../templates/github-actions/restore-stasis-release.ps1"),
         )?;
         write_new_file(
             &root.join("tools/resolve-stasis-nightly.ps1"),
             include_str!("../templates/github-actions/resolve-stasis-nightly.ps1"),
+        )?;
+        write_new_file(
+            &root.join("tools/update-stasis-pin.ps1"),
+            include_str!("../templates/github-actions/update-stasis-pin.ps1"),
+        )?;
+        write_new_file(
+            &root.join("tools/validate-before-pr.ps1"),
+            include_str!("../templates/github-actions/validate-before-pr.ps1"),
         )?;
     }
     write_new_file(&root.join("src/main.stasis"), DEFAULT_PROJECT_SOURCE)?;
@@ -14401,15 +14422,53 @@ mod tests {
             .expect("generate GitHub Actions scaffold");
         assert_eq!(result.data["github_actions"], true);
 
+        for path in [
+            ".github/workflows/stasis-pr.yml",
+            ".github/workflows/stasis-weekly.yml",
+            ".github/workflows/stasis-quarterly.yml",
+            "tools/restore-stasis-release.ps1",
+            "tools/resolve-stasis-nightly.ps1",
+            "tools/update-stasis-pin.ps1",
+            "tools/validate-before-pr.ps1",
+        ] {
+            assert!(root.join(path).is_file(), "missing generated {path}");
+        }
+
+        let manifest: ProjectManifest =
+            serde_json::from_slice(&fs::read(root.join(MANIFEST_NAME)).expect("read manifest"))
+                .expect("parse generated manifest");
+        let pin = manifest
+            .vendor
+            .as_ref()
+            .map(|vendor| &vendor.stasis)
+            .expect("generated manifest Stasis pin");
+        assert!(!pin.release_id.is_empty());
+        assert_eq!(pin.sha256.len(), 64);
+        assert!(pin
+            .sha256
+            .chars()
+            .all(|character: char| character.is_ascii_hexdigit()));
+        assert!(pin
+            .sha256
+            .chars()
+            .all(|character: char| !character.is_ascii_uppercase()));
+
         let pr = fs::read_to_string(root.join(".github/workflows/stasis-pr.yml"))
             .expect("read PR workflow");
         assert!(pr.contains("pull_request:"));
+        assert!(pr.contains("workflow_dispatch:"));
+        assert!(pr.contains("pin_only:"));
+        assert!(pr.contains("PIN_ONLY: ${{ inputs.pin_only }}"));
         assert!(!pr.contains("paths:"));
-        assert_eq!(pr.matches("./tools/resolve-stasis-nightly.ps1").count(), 1);
-        assert!(!pr.contains("stasis.json"));
-        assert!(!pr.contains("vendor.stasis.release_id"));
-        assert!(!pr.contains("pinnedReleaseId"));
-        assert!(pr.contains("Using newest complete published Stasis nightly"));
+        assert!(!pr.contains("./tools/resolve-stasis-nightly.ps1"));
+        assert!(pr.contains("github.event.pull_request.head.sha || github.sha"));
+        assert!(pr.contains("github.event.pull_request.head.repo.full_name || github.repository"));
+        assert!(pr.contains("git fetch --no-tags --depth=1 stasis-base \"$BASE_SHA\""));
+        assert!(pr.contains("STASIS_PR_GATE_SENTINEL|relevant_change="));
+        assert!(pr.contains("relevant-change:"));
+        assert!(pr.contains("$pin.release_id"));
+        assert!(pr.contains("$pin.sha256"));
+        assert!(pr.contains("nightly-[0-9]{8}-[0-9]+"));
         assert!(pr.contains("GITHUB_STEP_SUMMARY"));
         for expected in [
             "stasis --json vendor status --workspace .",
@@ -14421,13 +14480,9 @@ mod tests {
             assert!(pr.contains(expected), "PR workflow missing {expected}");
         }
         assert!(pr.contains("cancel-in-progress: true"));
+        assert!(pr.contains("run: stasis fmt --check"));
         assert!(pr.contains("run: stasis check"));
-        for forbidden in [
-            "stasis fmt",
-            "stasis test",
-            "stasis build",
-            "stasis package",
-        ] {
+        for forbidden in ["stasis test", "stasis build", "stasis package"] {
             assert!(!pr.contains(forbidden), "PR workflow contains {forbidden}");
         }
 
@@ -14436,30 +14491,107 @@ mod tests {
         for expected in [
             "cron: \"0 9 * * 5\"",
             "workflow_dispatch:",
+            "force_release",
+            "only Stasis release input",
+            "BUILD-MANIFEST.json",
+            "lastReleaseStasis",
+            ":(exclude)vendor/stasis/**",
+            "stasis-release-*",
+            "gameAdvanced",
+            "stasisAdvanced",
+            "True no-op",
             "ubuntu-latest",
             "windows-latest",
             "macos-15",
-            "stasis vendor update",
+            "stasis --json vendor status --workspace .",
             "stasis fmt --check",
             "run: stasis check",
             "run: stasis test",
             "stasis package --target desktop",
+            "Archive desktop release on Unix",
+            "Archive desktop release on Windows",
             "actions/upload-artifact@v4",
+            "gh release create",
         ] {
             assert!(
                 weekly.contains(expected),
                 "weekly workflow missing {expected}"
             );
         }
-        for forbidden in [
-            "release create",
-            "package-mobile",
-            "--target web",
-            "signing",
-        ] {
+        assert!(!weekly.contains("resolve-stasis-nightly.ps1"));
+        for forbidden in ["package-mobile", "--target web", "signing"] {
             assert!(
                 !weekly.contains(forbidden),
                 "weekly workflow contains {forbidden}"
+            );
+        }
+
+        let quarterly = fs::read_to_string(root.join(".github/workflows/stasis-quarterly.yml"))
+            .expect("read quarterly workflow");
+        for expected in [
+            "cron: \"0 9 1 1,4,7,10 *\"",
+            "workflow_dispatch:",
+            "Resolve newest complete Stasis release once",
+            "./tools/update-stasis-pin.ps1",
+            "branch=\"automation/stasis-pin-update\"",
+            "git branch -f \"$branch\" \"origin/$default_branch\"",
+            "git switch \"$branch\"",
+            "git add stasis.json vendor/stasis",
+            "git push --force-with-lease origin \"$BRANCH\"",
+            "gh pr list",
+            "gh pr edit",
+            "gh pr create",
+            "gh workflow run stasis-pr.yml",
+            "-f pin_only=true",
+            "gh run watch",
+            "gh pr merge \"$PR_URL\"",
+            "without a game compatibility gate",
+        ] {
+            assert!(
+                quarterly.contains(expected),
+                "quarterly workflow missing {expected}"
+            );
+        }
+        assert!(!quarterly.contains("compatibility:"));
+        assert!(!quarterly.contains("package-mobile"));
+        assert!(!quarterly.contains("validate-before-pr.ps1"));
+        assert!(!quarterly.contains("GITHUB_RUN_ID"));
+        assert_eq!(quarterly.matches("resolve-stasis-nightly.ps1").count(), 1);
+        assert!(!quarterly.contains("git push origin main"));
+
+        let pin_update = fs::read_to_string(root.join("tools/update-stasis-pin.ps1"))
+            .expect("read pin update helper");
+        for expected in [
+            "stasis vendor update",
+            "stasis --json vendor status --workspace .",
+            "changed_files = @('stasis.json', 'vendor/stasis')",
+            "vendor_sha256",
+        ] {
+            assert!(
+                pin_update.contains(expected),
+                "pin update helper missing {expected}"
+            );
+        }
+
+        let validation = fs::read_to_string(root.join("tools/validate-before-pr.ps1"))
+            .expect("read pre-PR validation helper");
+        for expected in [
+            "stasis-pre-pr-validation",
+            "StasisPath",
+            "installed.release_id",
+            "installed.sha256",
+            "@('fmt', '--check')",
+            "@('check')",
+            "@('test')",
+            "package-desktop",
+            "@('package', '--target', 'desktop')",
+            "output_tail",
+            "pre-pr.json",
+            "pre-pr.md",
+        ] {
+            assert!(
+                validation.contains(expected),
+                "pre-PR validation helper missing {expected}"
             );
         }
 
@@ -14538,16 +14670,12 @@ mod tests {
             .find("if ($LASTEXITCODE -ne 0)")
             .expect("vendor status command gate");
         let json_gate = pr
-            .find("if ($status.ok -ne $true)")
+            .find("if ($status.ok -ne $true -or $status.result.current -ne $true)")
             .expect("vendor status JSON success gate");
-        let current_gate = pr
-            .find("if ($status.result.current -ne $true)")
-            .expect("vendor current gate");
         let check = pr.find("run: stasis check").expect("Stasis check step");
         assert!(status_command < command_gate);
         assert!(command_gate < json_gate);
-        assert!(json_gate < current_gate);
-        assert!(current_gate < check);
+        assert!(json_gate < check);
         assert!(!pr.contains("run: stasis vendor status --workspace ."));
     }
 

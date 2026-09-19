@@ -1,0 +1,173 @@
+name: Stasis Quarterly Pin Update
+
+on:
+  # Exact first day of each quarter; no delayed-run date inference is needed.
+  schedule:
+    - cron: "0 9 1 1,4,7,10 *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: stasis-quarterly-pin
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve the quarterly pin candidate
+    runs-on: ubuntu-latest
+    outputs:
+      eligible: ${{ steps.schedule.outputs.eligible }}
+      changed: ${{ steps.compare.outputs.changed }}
+      release_id: ${{ steps.nightly.outputs.release_id }}
+      pinned_release: ${{ steps.compare.outputs.pinned_release }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Mark scheduled quarterly run eligible
+        id: schedule
+        shell: bash
+        run: |
+          echo 'eligible=true' >> "$GITHUB_OUTPUT"
+
+      - name: Resolve newest complete Stasis release once
+        id: nightly
+        if: steps.schedule.outputs.eligible == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseId = (./tools/resolve-stasis-nightly.ps1).Trim()
+          if ($releaseId -notmatch '^nightly-[0-9]{8}-[0-9]+$') { throw "Resolver returned an invalid Stasis release: $releaseId" }
+          "release_id=$releaseId" >> $env:GITHUB_OUTPUT
+
+      - name: Compare candidate with checked-in pin
+        id: compare
+        if: steps.schedule.outputs.eligible == 'true'
+        shell: pwsh
+        env:
+          RESOLVED_RELEASE: ${{ steps.nightly.outputs.release_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content -LiteralPath stasis.json -Raw | ConvertFrom-Json
+          $pinned = [string]$manifest.vendor.stasis.release_id
+          if ($pinned -notmatch '^nightly-[0-9]{8}-[0-9]+$') { throw "Invalid checked-in Stasis release: $pinned" }
+          $changed = $env:RESOLVED_RELEASE -ne $pinned
+          "changed=$($changed.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "pinned_release=$pinned" >> $env:GITHUB_OUTPUT
+          if (-not $changed) {
+            'Checked-in Stasis pin already names the newest complete release; no PR is needed.' >> $env:GITHUB_STEP_SUMMARY
+          }
+
+  update:
+    name: Update and merge the Stasis pin
+    needs: resolve
+    if: needs.resolve.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Prepare the dedicated pin-update branch
+        id: branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          default_branch="$(gh repo view "$GITHUB_REPOSITORY" --json defaultBranchRef --jq .defaultBranchRef.name)"
+          branch="automation/stasis-pin-update"
+          git fetch origin "$default_branch"
+          git fetch origin "$branch" || true
+          git branch -f "$branch" "origin/$default_branch"
+          git switch "$branch"
+          "branch=$branch" >> "$GITHUB_OUTPUT"
+          "default_branch=$default_branch" >> "$GITHUB_OUTPUT"
+
+      - name: Restore resolved Stasis toolchain
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tools/restore-stasis-release.ps1 -ReleaseId '${{ needs.resolve.outputs.release_id }}' -AssetName stasis-nightly-linux-x64.tar.gz
+
+      - name: Update the immutable pin and vendor snapshot
+        shell: pwsh
+        run: ./tools/update-stasis-pin.ps1 -StasisPath .stasis/toolchain/bin/stasis -ExpectedRelease '${{ needs.resolve.outputs.release_id }}'
+
+      - name: Commit and push the pin update
+        shell: bash
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stasis.json vendor/stasis
+          if git diff --cached --quiet; then
+            echo 'The resolved release produced no stasis.json or vendor/stasis changes.'
+            exit 1
+          fi
+          git commit -m "chore: update Stasis pin to ${RELEASE_ID}"
+          git push --force-with-lease origin "$BRANCH"
+
+      - name: Open the dedicated pin-update PR
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          DEFAULT_BRANCH: ${{ steps.branch.outputs.default_branch }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+          PINNED_RELEASE: ${{ needs.resolve.outputs.pinned_release }}
+        run: |
+          set -euo pipefail
+          body="This automation-only PR advances the checked-in Stasis pin and vendor snapshot from $PINNED_RELEASE to $RELEASE_ID.
+
+          It intentionally runs no game compatibility gate. After merge, the normal weekly release uses this exact pin and runs the all-target build matrix."
+          existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number,url --jq '.[0] | [.number, .url] | @tsv')"
+          if [[ -n "$existing_pr" ]]; then
+            IFS=$'\t' read -r existing_number url <<< "$existing_pr"
+            gh pr edit "$existing_number" --repo "$GITHUB_REPOSITORY" --title "chore: update Stasis pin to $RELEASE_ID" --body "$body"
+            echo "updated existing pin PR #$existing_number"
+          else
+            url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$DEFAULT_BRANCH" --head "$BRANCH" --title "chore: update Stasis pin to $RELEASE_ID" --body "$body")"
+          fi
+          echo "pin PR: $url"
+          echo "PR: $url" >> "$GITHUB_STEP_SUMMARY"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Satisfy the mechanical required status and merge
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          gh workflow run stasis-pr.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH" -f pin_only=true
+          run_id=""
+          for attempt in {1..12}; do
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow stasis-pr.yml --branch "$BRANCH" --event workflow_dispatch --commit "$commit" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            [[ -n "$run_id" ]] && break
+            sleep 5
+          done
+          [[ -n "$run_id" ]] || { echo 'Unable to find the dispatched pin-only status run.' >&2; exit 1; }
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
+          gh pr merge "$PR_URL" --repo "$GITHUB_REPOSITORY" --squash --delete-branch
+          echo "Merged the pin update without a game compatibility gate; the weekly release now owns all-target validation." >> "$GITHUB_STEP_SUMMARY"
+
+  no-op:
+    name: Skip unchanged pin update
+    needs: resolve
+    if: needs.resolve.outputs.changed != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Checked-in Stasis pin is current; no PR needed.'

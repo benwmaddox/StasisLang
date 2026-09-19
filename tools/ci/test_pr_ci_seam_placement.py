@@ -139,6 +139,31 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         )
         self.assertEqual(self.windows.count(compiler_suite), 1)
 
+    def test_windows_bootstrap_requires_ephemeral_signing_before_aot_seams(self):
+        provision = self.windows.index(
+            "- name: Provision ephemeral CI signing certificate"
+        )
+        capture = self.windows.index(
+            "- name: Capture the real Windows SDL parity fixture"
+        )
+        compiler = self.windows.index(
+            "- name: Bootstrap Compile Smoke (compiler .stasis)"
+        )
+        self.assertLess(provision, capture)
+        self.assertLess(provision, compiler)
+        for marker in (
+            "STASIS_SIGNING_LOCAL_RECORD: ${{ runner.temp }}\\stasis-ci-signing-thumbprint.txt",
+            'STASIS_REQUIRE_SIGNED_EXECUTION: "1"',
+            "STASIS_SIGNING_MODE: required",
+            "stasis-signing.ps1 provision",
+            "stasis-signing.ps1 status",
+            "certificate_configured",
+            "required",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.windows)
+        self.assertNotIn("STASIS_REQUIRE_SIGNED_EXECUTION", self.generics)
+
     def test_capture_and_boundary_jobs_remain_separate(self):
         self.assertEqual(self.windows.count("--test windows_game_launch"), 1)
         self.assertIn("Capture the real Windows SDL parity fixture", self.windows)
