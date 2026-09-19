@@ -14,6 +14,16 @@ $ErrorActionPreference = 'Stop'
 $developmentSubject = 'CN=StasisLang Development Signing'
 $codeSigningOid = '1.3.6.1.5.5.7.3.3'
 
+# Pin the security module to the active host's installation. A pwsh parent can
+# put its PowerShell 7 module directory ahead of Windows PowerShell 5.1 in
+# PSModulePath; a nested powershell.exe process then discovers an incompatible
+# module and cannot load Get-AuthenticodeSignature.
+$securityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+if (-not (Test-Path -LiteralPath $securityModule -PathType Leaf)) {
+    throw "Microsoft.PowerShell.Security module was not found for the active PowerShell host: $securityModule"
+}
+Import-Module $securityModule -ErrorAction Stop
+
 function Test-ProductionMode {
     return ($env:STASIS_SIGNING_MODE -eq 'production' -or $env:STASIS_SIGNING_PROFILE -eq 'production')
 }
