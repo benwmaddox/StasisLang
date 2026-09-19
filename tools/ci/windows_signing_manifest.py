@@ -10,6 +10,8 @@ from pathlib import Path, PurePosixPath
 
 
 SCHEMA = "stasis-windows-signing-v1"
+MAX_NATIVE_FILES = 64
+MAX_NATIVE_BYTES = 512 * 1024 * 1024
 REQUIRED_STASIS_FILES = {
     "stasis.exe",
     "stasis_runner.exe",
@@ -17,7 +19,7 @@ REQUIRED_STASIS_FILES = {
     "stasis_dynload.dll",
     "stasis_graphics.dll",
 }
-THIRD_PARTY_NATIVE_FILES = {
+THIRD_PARTY_NATIVE_PATHS = {
     "clang-cl.exe": "bundled LLVM toolchain",
     "lld-link.exe": "bundled LLVM toolchain",
     "sdl3.dll": "SDL runtime",
@@ -50,10 +52,19 @@ def _inventory(root: Path) -> tuple[list[Path], list[tuple[Path, str]]]:
         ),
         key=lambda path: _relative(root, path).casefold(),
     )
+    if len(native) > MAX_NATIVE_FILES:
+        raise ReceiptError(
+            f"native file count {len(native)} exceeds limit {MAX_NATIVE_FILES}"
+        )
+    native_bytes = sum(path.stat().st_size for path in native)
+    if native_bytes > MAX_NATIVE_BYTES:
+        raise ReceiptError(
+            f"native file bytes {native_bytes} exceed limit {MAX_NATIVE_BYTES}"
+        )
     signed: list[Path] = []
     excluded: list[tuple[Path, str]] = []
     for path in native:
-        reason = THIRD_PARTY_NATIVE_FILES.get(path.name.casefold())
+        reason = THIRD_PARTY_NATIVE_PATHS.get(_relative(root, path).casefold())
         if reason:
             excluded.append((path, reason))
         else:
@@ -83,7 +94,9 @@ def _load_receipt(path: Path) -> dict:
     return receipt
 
 
-def _assert_exact_paths(root: Path, receipt: dict) -> tuple[list[Path], list[tuple[Path, str]]]:
+def _assert_exact_paths(
+    root: Path, receipt: dict, *, validate_aggregate: bool = True
+) -> tuple[list[Path], list[tuple[Path, str]]]:
     signed, excluded = _inventory(root)
     actual_signed = {_relative(root, path) for path in signed}
     actual_excluded = {_relative(root, path) for path, _ in excluded}
@@ -105,6 +118,17 @@ def _assert_exact_paths(root: Path, receipt: dict) -> tuple[list[Path], list[tup
     for entry in receipt.get("excluded_files", []):
         if entry.get("reason") != excluded_reasons[entry["path"]]:
             raise ReceiptError(f"third-party native exclusion reason mismatch: {entry['path']}")
+    native = signed + [path for path, _ in excluded]
+    if receipt.get("native_file_count") != len(native):
+        raise ReceiptError("native file count differs from the receipt")
+    if validate_aggregate:
+        bytes_field = (
+            "signed_native_bytes"
+            if receipt.get("status") == "signed"
+            else "unsigned_native_bytes"
+        )
+        if receipt.get(bytes_field) != sum(path.stat().st_size for path in native):
+            raise ReceiptError("native file byte total differs from the receipt")
     return signed, excluded
 
 
@@ -114,6 +138,10 @@ def create(root: Path, receipt_path: Path, source_commit: str) -> None:
         "schema": SCHEMA,
         "status": "unsigned",
         "source_commit": source_commit,
+        "native_file_count": len(signed) + len(excluded),
+        "unsigned_native_bytes": sum(
+            path.stat().st_size for path in signed
+        ) + sum(path.stat().st_size for path, _ in excluded),
         "files": _file_records(root, signed, "unsigned_sha256"),
         "excluded_files": [
             {
@@ -136,7 +164,7 @@ def list_paths(root: Path, receipt_path: Path) -> None:
 
 def finalize(root: Path, receipt_path: Path, identity_path: Path, source_commit: str) -> None:
     receipt = _load_receipt(receipt_path)
-    signed, _ = _assert_exact_paths(root, receipt)
+    signed, excluded = _assert_exact_paths(root, receipt, validate_aggregate=False)
     if receipt.get("status") != "unsigned" or receipt.get("source_commit") != source_commit:
         raise ReceiptError("unsigned signing receipt does not match the trusted source commit")
     try:
@@ -150,6 +178,8 @@ def finalize(root: Path, receipt_path: Path, identity_path: Path, source_commit:
         entry["signed_sha256"] = signed_hashes[entry["path"]]
     receipt.update(
         status="signed",
+        signed_native_bytes=sum(path.stat().st_size for path in signed)
+        + sum(path.stat().st_size for path, _ in excluded),
         thumbprint=identity["thumbprint"],
         subject=identity["subject"],
         self_signed=bool(identity.get("self_signed")),

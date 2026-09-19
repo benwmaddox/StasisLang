@@ -73,10 +73,12 @@ Production credentials are supplied externally with `STASIS_SIGNING_CERT_THUMBPR
 `STASIS_SIGNING_CERTIFICATE`; Stasis never generates, exports, prints, or logs private keys.
 Nightly Windows artifacts are signed with the pinned stable StasisLang release identity. The
 encrypted GitHub Actions secrets are deployment copies derived from the private KeyStores source
-of truth. Compilation and tests run without signing credentials. A separate least-privilege job
-first requires the workflow SHA to equal the current `main` SHA, then materializes the PFX only for
-the signing step in the temporary runner directory. The job validates its pinned public thumbprint,
-signs every Stasis-owned EXE and DLL named by the recursively generated native-file receipt, records
+of truth. The workflow is read-only by default, compilation and tests run without signing
+credentials, and only the publication job receives `contents: write`. A separate least-privilege
+job uses the reviewer-gated `windows-release-signing` environment and requires the workflow SHA to
+equal the current `main` SHA both before artifact inspection and immediately before the secret-bearing
+signing step. The job validates its pinned public thumbprint, signs every Stasis-owned EXE and DLL
+named by the bounded recursively generated native-file receipt, records
 the signed hashes and public identity in `stasis_windows_signing.json`, verifies the extracted
 archive against that same receipt, and deletes the temporary PFX before verification. The current
 identity is self-signed: it provides stable Authenticode identity and integrity but not public CA

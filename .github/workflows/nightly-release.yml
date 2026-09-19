@@ -4,7 +4,7 @@ env:
   CARGO_INCREMENTAL: "0"
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: read
   actions: read
 
@@ -645,6 +645,8 @@ jobs:
     needs: [detect, build]
     if: needs.detect.outputs.should_release == 'true' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
+    timeout-minutes: 30
+    environment: windows-release-signing
     permissions:
       actions: read
       contents: read
@@ -685,6 +687,23 @@ jobs:
             --receipt "$out/stasis_windows_signing.json"
           if ($LASTEXITCODE -ne 0) { throw "Unsigned Windows signing manifest validation failed" }
 
+      - name: Reconfirm trusted current main immediately before signing
+        id: trusted_main_final
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -ne "refs/heads/main") {
+            throw "Windows release signing is restricted to refs/heads/main"
+          }
+          $remoteMain = ((git ls-remote origin refs/heads/main) -split "\s+")[0]
+          if ($remoteMain -notmatch "^[0-9a-f]{40}$") {
+            throw "Could not resolve the current origin/main commit immediately before signing"
+          }
+          if ($env:GITHUB_SHA -ne $remoteMain) {
+            throw "Windows release signing requires the exact current origin/main commit immediately before signing"
+          }
+          "source_commit=$remoteMain" >> $env:GITHUB_OUTPUT
+
       - name: Sign trusted Windows release files
         shell: pwsh
         env:
@@ -721,12 +740,12 @@ jobs:
               --root $out `
               --receipt $receipt `
               --identity $identity `
-              --source-commit "${{ steps.trusted_main.outputs.source_commit }}"
+              --source-commit "${{ steps.trusted_main_final.outputs.source_commit }}"
             if ($LASTEXITCODE -ne 0) { throw "Windows signing receipt generation failed" }
             python tools/generate_release_provenance.py `
               --archive-root $out `
               --release-tag "${{ needs.detect.outputs.nightly_tag }}" `
-              --source-commit "${{ steps.trusted_main.outputs.source_commit }}" `
+              --source-commit "${{ steps.trusted_main_final.outputs.source_commit }}" `
               --compiler "stasis.exe" `
               --dependency "sdl3=3.4.10-static" `
               --dependency "sdl3_image=3.4.4-static"
@@ -750,7 +769,7 @@ jobs:
           python tools/ci/windows_signing_manifest.py verify-files `
             --root $validationRoot `
             --receipt $receipt `
-            --source-commit "${{ steps.trusted_main.outputs.source_commit }}" `
+            --source-commit "${{ steps.trusted_main_final.outputs.source_commit }}" `
             --thumbprint $env:STASIS_SIGNING_CERT_THUMBPRINT
           if ($LASTEXITCODE -ne 0) { throw "Extracted Windows signing receipt validation failed" }
           python tools/audit_release_bundle.py `
@@ -896,6 +915,9 @@ jobs:
     needs: [detect, build, windows_signing, vscode_extension, integration_seams, android_device_seams]
     if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -934,6 +956,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Release publication is restricted to refs/heads/main" >&2
+            exit 1
+          fi
+          remote_main="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          if [[ ! "${remote_main}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Could not resolve the current origin/main commit before publication" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_SHA}" != "${remote_main}" ]]; then
+            echo "Release publication requires the exact current origin/main commit" >&2
+            exit 1
+          fi
           notes="$(printf 'Automated nightly build.')"
           if [ -n "${LAST_TAG}" ]; then
             notes="$(printf 'Automated nightly build.\n\nChanges since %s: https://github.com/%s/compare/%s...%s' "${LAST_TAG}" "${GITHUB_REPOSITORY}" "${LAST_TAG}" "${GITHUB_SHA}")"

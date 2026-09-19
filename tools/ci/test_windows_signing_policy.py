@@ -32,6 +32,9 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotIn("release_preconditions:", source)
+        workflow_header = source.split("jobs:", 1)[0]
+        self.assertIn("permissions:\n  contents: read", workflow_header)
+        self.assertNotIn("contents: write", workflow_header)
         self.assertIn("needs: [detect, mobile_network_support]", source)
         build_job = source.split("  build:", 1)[1].split("  windows_signing:", 1)[0]
         signing_job = source.split("  windows_signing:", 1)[1].split("  vscode_extension:", 1)[0]
@@ -46,9 +49,12 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         )
         self.assertIn("Sign trusted Windows release files", signing_job)
         self.assertIn("if: needs.detect.outputs.should_release == 'true' && github.ref == 'refs/heads/main'", signing_job)
+        self.assertIn("environment: windows-release-signing", signing_job)
+        self.assertIn("timeout-minutes: 30", signing_job)
         self.assertIn("Require the trusted current main commit", signing_job)
+        self.assertIn("Reconfirm trusted current main immediately before signing", signing_job)
         self.assertIn('$env:GITHUB_REF -ne "refs/heads/main"', signing_job)
-        self.assertIn("git ls-remote origin refs/heads/main", signing_job)
+        self.assertEqual(signing_job.count("git ls-remote origin refs/heads/main"), 2)
         self.assertIn("stasis-signing-identity.ps1", source)
         self.assertIn("67132CE8553062F2145A1EBD7A88166910CDA7A6", source)
         self.assertIn("stasis_windows_signing.json", source)
@@ -56,7 +62,7 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         self.assertIn("windows_signing_manifest.py verify-files", source)
         self.assertIn("Remove-Item -LiteralPath $signingRoot", signing_job)
         self.assertLess(
-            signing_job.index("Require the trusted current main commit"),
+            signing_job.index("Reconfirm trusted current main immediately before signing"),
             signing_job.index("secrets.STASIS_SIGNING_PFX_BASE64"),
         )
         self.assertIn("tools/windows/stasis-signing.ps1", source)
@@ -65,8 +71,13 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         )[1].split("- name: Upload signed Windows toolchain", 1)[0]
         self.assertIn("stasis-signing.ps1 verify", extracted_verification_step)
         release_job = source.split("  release:", 1)[1].split("  no_changes:", 1)[0]
+        self.assertIn("permissions:\n      actions: read\n      contents: write", release_job)
         self.assertIn("name: stasis-nightly-win-x64", release_job)
         self.assertNotIn("stasis-nightly-win-x64-unsigned", release_job)
+        self.assertLess(
+            release_job.index("git ls-remote origin refs/heads/main"),
+            release_job.index('gh release create "${NIGHTLY_TAG}"'),
+        )
 
     def test_cargo_runner_routes_signtool_through_policy_entrypoint(self):
         source = (ROOT / ".cargo/stasis-sign-and-run.cmd").read_text(encoding="utf-8")

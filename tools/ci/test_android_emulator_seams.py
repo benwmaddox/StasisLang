@@ -202,9 +202,15 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         )
 
     def test_nightly_grants_reusable_ci_read_permissions(self):
-        self.assertIn("  contents: write", self.nightly_workflow)
+        workflow_permissions = self.nightly_workflow.split("jobs:", 1)[0]
+        self.assertIn("  contents: read", workflow_permissions)
+        self.assertNotIn("  contents: write", workflow_permissions)
         self.assertIn("  pull-requests: read", self.nightly_workflow)
         self.assertIn("  actions: read", self.nightly_workflow)
+        release_job = self.nightly_workflow.split("  release:", 1)[1].split(
+            "  no_changes:", 1
+        )[0]
+        self.assertIn("      contents: write", release_job)
 
     def test_workflow_supplies_build_inputs_and_uploads_each_seam(self):
         job_names = ("release-shell-seams", "workshop-seams")

@@ -2,6 +2,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 from tools.ci import windows_signing_manifest as manifest
 
@@ -17,6 +18,7 @@ class WindowsSigningManifestTests(unittest.TestCase):
         nested.write_bytes(b"nested")
         (root / "SDL3.dll").write_bytes(b"third-party")
         (root / "clang-cl.exe").write_bytes(b"toolchain")
+        (root / "nested" / "SDL3.dll").write_bytes(b"owned-name-collision")
 
     def test_nested_native_files_are_included_and_exclusions_are_explicit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -26,6 +28,7 @@ class WindowsSigningManifestTests(unittest.TestCase):
             manifest.create(root, receipt, "a" * 40)
             record = json.loads(receipt.read_text(encoding="utf-8"))
             self.assertIn("nested/stasis_helper.dll", {item["path"] for item in record["files"]})
+            self.assertIn("nested/SDL3.dll", {item["path"] for item in record["files"]})
             self.assertEqual(
                 {"SDL3.dll", "clang-cl.exe"},
                 {item["path"] for item in record["excluded_files"]},
@@ -59,9 +62,26 @@ class WindowsSigningManifestTests(unittest.TestCase):
             )
             manifest.finalize(root, receipt, identity, source_commit)
             manifest.verify_files(root, receipt, source_commit, thumbprint)
-            (root / "nested" / "stasis_helper.dll").write_bytes(b"tampered")
+            tampered = root / "nested" / "stasis_helper.dll"
+            tampered.write_bytes(b"x" * tampered.stat().st_size)
             with self.assertRaisesRegex(manifest.ReceiptError, "signed file hash mismatch"):
                 manifest.verify_files(root, receipt, source_commit, thumbprint)
+
+    def test_native_file_count_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self._fixture(root)
+            with mock.patch.object(manifest, "MAX_NATIVE_FILES", 1):
+                with self.assertRaisesRegex(manifest.ReceiptError, "native file count"):
+                    manifest.create(root, root / "receipt.json", "e" * 40)
+
+    def test_native_file_bytes_are_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self._fixture(root)
+            with mock.patch.object(manifest, "MAX_NATIVE_BYTES", 1):
+                with self.assertRaisesRegex(manifest.ReceiptError, "native file bytes"):
+                    manifest.create(root, root / "receipt.json", "f" * 40)
 
 
 if __name__ == "__main__":
